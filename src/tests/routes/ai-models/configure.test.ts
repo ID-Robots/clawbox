@@ -3417,6 +3417,24 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
     });
 
+    it("runs Flash for a Free pick, not the badge a previous account left behind", async () => {
+      // An unpaired box pre-selects Free, and Free runs DeepSeek V4 Flash. A
+      // refused token is cleared without its badge, so a box that once ran Max
+      // can be unpaired with "pro" still stored; read as "no pick", Free let
+      // that badge choose the frontier model for an account that has no Max.
+      mockGetAll.mockResolvedValue({ clawai_tier: "pro" });
+      vi.stubGlobal("fetch", deviceInfo({ tier: "free" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_free_account",
+        clawaiTier: "free",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
+    });
+
     it("reaches the primary model from the portal alone when the request omits clawaiTier", async () => {
       // CodeRabbit's catch on #430, and a fair one: every other case here
       // sends a picker value, so none of them proves the portal result can

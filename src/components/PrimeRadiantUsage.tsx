@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
+import { formatFreesUpAt } from "@/lib/clawai-allowance";
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import { API, errorText, formatCount, formatTokens, formatWhen, prJson, type CostSummary } from "./prime-radiant-ui";
@@ -39,6 +40,11 @@ export function useTokensByRun(key: unknown, everyMs = 0): ReadonlyMap<string, n
  * embeddings of the contradiction pass are named as not measured, because the
  * embedder reports no usage, so a total is never shown as complete when it
  * is not.
+ *
+ * Under the totals, the allowance meter (`GET costs?allowance=1`): Prime
+ * Radiant's tokens in the allowance's rolling week, which the ClawBox AI plan
+ * counts like chat, beside how much of the weekly pool is used. When the pool
+ * or the burst ceiling is spent it says what stops and when it frees up.
  */
 export default function PrimeRadiantUsage({ revision }: { revision: number }) {
   const { t, locale } = useT();
@@ -49,7 +55,7 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
 
   useEffect(() => {
     const ctl = new AbortController();
-    prJson<CostSummary>(`${API}/costs`, { signal: ctl.signal })
+    prJson<CostSummary>(`${API}/costs?allowance=1`, { signal: ctl.signal })
       .then((s) => { setSummary(s); setError(null); })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
@@ -61,6 +67,13 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
   const n = (v: number) => formatCount(v, locale);
   const tok = (v: number) => formatTokens(v, locale);
   const total = summary ? summary.totals.tokensIn + summary.totals.tokensOut : 0;
+  const meter = summary?.allowance ?? null;
+  const account = meter?.account ?? null;
+  const freesUp = (resetAt: string | null) => (account?.available ? formatFreesUpAt(resetAt, { locale, timeZone: account.timeZone }) : null);
+  /** The window that refuses calls now: the weekly pool first, else the burst ceiling over it. */
+  const spent = account?.available ? (account.weekly.isOverLimit ? account.weekly : account.burst?.isOverLimit ? account.burst : null) : null;
+  const spentAt = spent ? freesUp(spent.resetAt) : null;
+  const weeklyAt = account?.available && !spent ? freesUp(account.weekly.resetAt) : null;
 
   return (
     <section className={`${CARD_SURFACE} p-4 space-y-2`} data-testid="prime-radiant-usage">
@@ -71,6 +84,34 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
           <p className="text-xs text-[var(--text-secondary)] tabular-nums" data-testid="prime-radiant-usage-total">
             {t("primeRadiant.usage.total", { tokens: tok(total), sent: tok(summary.totals.tokensIn), received: tok(summary.totals.tokensOut), calls: n(summary.totals.calls) })}
           </p>
+          {meter && (
+            <div className="space-y-0.5" data-testid="prime-radiant-usage-allowance">
+              <p className="text-[11px] text-[var(--text-secondary)] tabular-nums">
+                <span className="uppercase tracking-wider text-[var(--text-muted)]">{t("primeRadiant.usage.allowance.title")}</span>{" "}
+                {t("primeRadiant.usage.allowance.share", {
+                  days: n(meter.windowDays),
+                  tokens: tok(meter.primeRadiant.tokensIn + meter.primeRadiant.tokensOut),
+                  calls: n(meter.primeRadiant.calls),
+                })}
+              </p>
+              {account?.available && (
+                <p className="text-[11px] text-[var(--text-muted)] tabular-nums" data-testid="prime-radiant-usage-allowance-weekly">
+                  {t("primeRadiant.usage.allowance.weekly", { percent: n(account.weekly.percentUsed) })}
+                  {weeklyAt ? ` · ${t("primeRadiant.usage.allowance.freesUp", { at: weeklyAt })}` : ""}
+                </p>
+              )}
+              {spent && (
+                <p role="status" className="text-[11px] text-amber-200" data-testid="prime-radiant-usage-allowance-spent">
+                  {spentAt ? t("primeRadiant.usage.allowance.spentAt", { at: spentAt }) : t("primeRadiant.usage.allowance.spent")}
+                </p>
+              )}
+              {account && !account.available && (
+                <p className="text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-usage-allowance-unread">
+                  {account.reason === "not_connected" ? t("primeRadiant.usage.allowance.notConnected") : t("primeRadiant.usage.allowance.unread")}
+                </p>
+              )}
+            </div>
+          )}
           {summary.byOperation.length > 0 && (
             <p className="text-[11px] text-[var(--text-muted)] tabular-nums" data-testid="prime-radiant-usage-by-task">
               <span className="uppercase tracking-wider">{t("primeRadiant.costs.byOperation")}</span>{" "}

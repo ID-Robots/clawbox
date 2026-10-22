@@ -296,6 +296,30 @@ describe("run or team, and what each role cost", () => {
     expect(await ok("coding_team_status", { team_id: TEAM.id })).toMatch(/Advice: the plan has one task — a single coding_agent_run would have been cheaper/);
   });
 
+  it("answers the team's tokens by kind in coding_team_status, and nothing of it from an older server", async () => {
+    const metrics = { plannerRuns: 1, workerRuns: 1, reviewerRuns: 1, leadRuns: 0, tasksPlanned: 1, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 1, tasksRejected: 0, tokensUsed: 174_500, wallMs: 60000 };
+    const tokenBreakdown = { input: 9700, output: 1800, cacheCreation: 2000, cacheRead: 161000 };
+    apiGet.mockResolvedValue({ team: { ...TEAM, status: "done", metrics: { ...metrics, tokenBreakdown } } });
+    expect(await ok("coding_team_status", { team_id: TEAM.id })).toContain("tokens 174500 — input 9700, output 1800, cache write 2000, cache read 161000; wall 60 s.");
+
+    apiGet.mockResolvedValue({ team: { ...TEAM, status: "done", metrics } });
+    const older = await ok("coding_team_status", { team_id: TEAM.id });
+    expect(older).toContain("tokens 174500; wall 60 s.");
+    expect(older).not.toContain("cache read");
+  });
+
+  it("never answers a split that does not add up: none for a board from before it, the remainder named on a mixed one", async () => {
+    const metrics = { plannerRuns: 1, workerRuns: 1, reviewerRuns: 1, leadRuns: 0, tasksPlanned: 1, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 1, tasksRejected: 0, tokensUsed: 174_500, wallMs: 60000 };
+    apiGet.mockResolvedValue({ team: { ...TEAM, status: "done", metrics: { ...metrics, tokenBreakdown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 } } } });
+    const before = await ok("coding_team_status", { team_id: TEAM.id });
+    expect(before).toContain("tokens 174500; wall 60 s.");
+    expect(before).not.toContain("cache read");
+
+    apiGet.mockResolvedValue({ team: { ...TEAM, status: "done", metrics: { ...metrics, tokenBreakdown: { input: 9700, output: 1800, cacheCreation: 2000, cacheRead: 61000 } } } });
+    expect(await ok("coding_team_status", { team_id: TEAM.id }))
+      .toContain("tokens 174500 — input 9700, output 1800, cache write 2000, cache read 61000 (100000 from runs saved before the split); wall 60 s.");
+  });
+
   it("marks a single run and the advice in the list of teams", async () => {
     apiGet.mockResolvedValue({ teams: [
       { ...TEAM, id: "team-aaaaaaaa", singleRun: true },

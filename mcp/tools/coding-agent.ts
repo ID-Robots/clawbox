@@ -1638,6 +1638,8 @@ interface TeamMetricsPayload {
   tokensUsed: number;
   /** The tokens by the role that spent them. Absent from an older server. */
   tokensByRole?: { planner: number; worker: number; reviewer: number; lead: number };
+  /** The tokens by the four ways a provider bills them. Absent from an older server. */
+  tokenBreakdown?: { input: number; output: number; cacheCreation: number; cacheRead: number };
   wallMs: number;
   /** Absent from an older server. */
   messagesSent?: number;
@@ -1765,10 +1767,19 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   if (team.dynamic) parts.push("Lead: on — the team's lead may add or retire tasks while it runs.");
   if (team.metrics) {
     const m = team.metrics;
+    // The split counts only the runs that recorded one: none on a board from
+    // before it (no split at all), part of the total on a mixed board (the rest named).
+    const split = m.tokenBreakdown;
+    const splitSum = split ? split.input + split.output + split.cacheCreation + split.cacheRead : 0;
+    const splitText = split && splitSum > 0
+      ? ` — input ${split.input}, output ${split.output}, cache write ${split.cacheCreation}, cache read ${split.cacheRead}`
+        + (splitSum < m.tokensUsed ? ` (${m.tokensUsed - splitSum} from runs saved before the split)` : "")
+      : "";
     parts.push(
       `Metrics: runs planner ${m.plannerRuns}, worker ${m.workerRuns}, reviewer ${m.reviewerRuns}, lead ${m.leadRuns}; `
       + `tasks planned ${m.tasksPlanned}, added ${m.tasksAdded}, retired ${m.tasksRetired}, accepted first try ${m.tasksAcceptedFirstTry}, rejected ${m.tasksRejected}; `
-      + `tokens ${m.tokensUsed}${m.tokensByRole ? ` (planner ${m.tokensByRole.planner}, workers ${m.tokensByRole.worker}, reviewers ${m.tokensByRole.reviewer}, lead ${m.tokensByRole.lead})` : ""}; wall ${Math.round(m.wallMs / 1000)} s.`
+      + `tokens ${m.tokensUsed}${m.tokensByRole ? ` (planner ${m.tokensByRole.planner}, workers ${m.tokensByRole.worker}, reviewers ${m.tokensByRole.reviewer}, lead ${m.tokensByRole.lead})` : ""}`
+      + `${splitText}; wall ${Math.round(m.wallMs / 1000)} s.`
       + (typeof m.messagesSent === "number"
         ? ` Messages: ${m.messagesSent} sent — ${m.messagesToLead ?? 0} to the lead, ${m.messagesToSibling ?? 0} to a sibling, ${m.messagesUndelivered ?? 0} not delivered.`
         : ""),

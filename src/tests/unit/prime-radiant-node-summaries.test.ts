@@ -641,6 +641,27 @@ describe("the pass", () => {
     }
   });
 
+  it("stops the model at a spent ClawBox AI allowance with that reason, after one call, the rest to their facts", async () => {
+    const state = tmpState();
+    try {
+      let calls = 0;
+      const spent: FlashClient = {
+        model: "deepseek-v4-flash",
+        complete: async () => {
+          calls++;
+          throw new FlashCallError("allowance", "ClawBox AI's 5-hour burst limit is reached.", 429, null, { kind: "burst", resetAt: "2026-05-20T08:00:00.000Z", message: null });
+        },
+      };
+      const r = await runSummaries(vault(), fakeRun({ current: vault() }).run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: spent, online: true, now: () => NOW });
+      expect(calls).toBe(1);
+      expect(r.model).toMatchObject({ skipped: "allowance_spent", allowance: { kind: "burst", resetAt: "2026-05-20T08:00:00.000Z" }, calls: 0 });
+      expect(r.byModel).toBe(0);
+      expect(r.byFacts).toBe(r.planned);
+    } finally {
+      dropState(state);
+    }
+  });
+
   it("a dry run asks no model, writes nothing, and answers what it would write with the merge suggestions and domain mismatches", async () => {
     const state = tmpState();
     try {

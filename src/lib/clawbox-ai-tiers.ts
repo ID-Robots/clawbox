@@ -114,9 +114,12 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     pricePeriod: "/month",
     pricePeriodKey: "ai.planPeriodMonth",
     hasTrial: true,
+    // Max is served by the same DeepSeek V4 Flash as Free and Pro: the proxy
+    // answers its `deepseek-v4-pro` id with Flash, so the card says Flash. The
+    // key stays ai.planFeatureProModel; only its words changed.
     features: [
       "Maximum usage",
-      "DeepSeek V4 Pro (frontier)",
+      "DeepSeek V4 Flash",
       "50 GB ClawKeep cloud backups",
       "Remote Desktop access",
       "Highest priority",
@@ -156,9 +159,10 @@ export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
 }
 
 /**
- * UI tier → *device* tier (which model gets configured). Free and Pro both run
- * DeepSeek V4 Flash (see CLAWAI_TIER_INFO.free.features); only Max gets the
- * frontier weights. `ClawboxAiTier` has no "free" member because the device has
+ * UI tier → *device* tier (which model id gets configured). Free and Pro are
+ * configured with `deepseek-v4-flash`, Max with `deepseek-v4-pro`; the proxy
+ * serves both ids with DeepSeek V4 Flash, so the id is a plan gate, not a
+ * bigger model. `ClawboxAiTier` has no "free" member because the device has
  * nothing different to configure for it.
  */
 export function uiTierToDeviceTier(tier: ClawaiTier): ClawboxAiTier {
@@ -175,19 +179,34 @@ export function deviceTierToUiTier(stored: string | null | undefined): ClawaiTie
 }
 
 /**
- * The UI tier the customer last chose, or the safe default.
+ * The plan the connect flow pre-selects for a box with no ClawBox AI account and
+ * no stored choice. Free, because nobody has chosen a paid plan yet: Connect
+ * sends this tier to the portal, and a paid default asked first-boot customers
+ * for a subscription they had not picked. Paid plans stay one tap away.
+ */
+export const UNPAIRED_DEFAULT_UI_TIER: ClawaiTier = "free";
+
+/** The UI tier the customer last chose in this browser, or null if none. */
+export function readStoredUiTierChoice(): ClawaiTier | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The UI tier the customer last chose, or "flash" ("Pro plan").
  *
- * "flash" ("Pro plan") is the default only because it is what the connect flow
- * pre-selects for someone who has not paired anything yet. It must never be
- * used as the answer for a box that IS paired — see `resolveUiTier`.
+ * The "flash" fallback is for the two callers that must not fall back to Free:
+ * the paired branch of `resolveUiTier`, where the device's "flash" means Free
+ * OR Pro and only a stored "free" may narrow it, and PaidFeatureGate, which
+ * connects someone to a feature only a paid plan unlocks. An unpaired box
+ * pre-selects `UNPAIRED_DEFAULT_UI_TIER` instead — see `resolveUiTier`.
  */
 export function readStoredUiTier(): ClawaiTier {
-  if (typeof window === "undefined") return "flash";
-  try {
-    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
-  } catch {
-    return "flash";
-  }
+  return readStoredUiTierChoice() ?? "flash";
 }
 
 /**
@@ -202,14 +221,15 @@ export function readStoredUiTier(): ClawaiTier {
  *
  * `hasToken` is what makes this safe for the wizard: an UNPAIRED box has no
  * account to reconcile against, and the picker there is the customer choosing a
- * plan they do not have yet, so their stored intent must survive untouched.
+ * plan they do not have yet, so their stored intent must survive untouched —
+ * and with no stored intent it is Free (`UNPAIRED_DEFAULT_UI_TIER`).
  *
  * Shared by both provider panels on purpose. The OpenClaw panel read only local
  * storage for months while the Hermes panel had this rule, which is exactly the
  * drift this module exists to prevent.
  */
 export function resolveUiTier(hasToken: boolean, tierStored: string | null | undefined): ClawaiTier {
-  if (!hasToken) return readStoredUiTier();
+  if (!hasToken) return readStoredUiTierChoice() ?? UNPAIRED_DEFAULT_UI_TIER;
   const device = deviceTierToUiTier(tierStored);
   if (device !== "flash") return device;
   return readStoredUiTier() === "free" ? "free" : "flash";

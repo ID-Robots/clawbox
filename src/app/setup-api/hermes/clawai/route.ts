@@ -110,7 +110,7 @@ export async function POST(request: Request) {
   if (requested !== undefined) {
     // A present-but-unrecognised tier is a 400, NOT a silent fall back to the
     // stored value: falling back meant a user who picked Free stayed on the €49
-    // frontier model. Matches /setup-api/ai-models/clawai/start's strictness.
+    // Max model id. Matches /setup-api/ai-models/clawai/start's strictness.
     const uiTier = normalizeClawaiUiTier(requested);
     if (!uiTier) {
       return NextResponse.json(

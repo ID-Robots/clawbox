@@ -573,6 +573,14 @@ describe("teamMetrics", () => {
       tokensByRole: { planner: 1_200, worker: 9_000, reviewer: 1_500, lead: 300 },
       // Its runs name no account (a board from before the field): on none.
       tokensByProvider: { "clawbox-ai": 0, anthropic: 0 },
+      // …and no breakdown either: in tokensUsed, in no kind.
+      tokenBreakdown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      tokenBreakdownByRole: {
+        planner: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+        worker: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+        reviewer: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+        lead: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      },
       wallMs: 60_000,
       messagesSent: 5,
       messagesToLead: 1,

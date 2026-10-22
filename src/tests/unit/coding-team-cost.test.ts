@@ -4,7 +4,8 @@
  *
  *  - the planner's REPO MAP, bounded, posted once by the planner alone, on the
  *    bus like every other change, and kept across a reload;
- *  - TOKENS PER ROLE, from the cast list;
+ *  - TOKENS PER ROLE, from the cast list, and BY KIND (fresh input, output,
+ *    cache written, cache read) from each run's own record;
  *  - the RUN-OR-TEAM advice: one task, or tasks whose files mostly overlap,
  *    say a single run would have been cheaper.
  */
@@ -202,6 +203,82 @@ describe("tokens per provider", () => {
     ]);
     expect(back.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 7_000 });
     expect(back.metrics.tokensUsed).toBe(17_000);
+  });
+});
+
+describe("tokens by kind", () => {
+  const ZERO = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+  const WORKER = { input: 9_000, output: 1_500, cacheCreation: 2_000, cacheRead: 150_000 };
+  const REVIEWER = { input: 700, output: 300, cacheCreation: 0, cacheRead: 11_000 };
+
+  it("adds each run's own breakdown up, in total and by role, and keeps it across a reload", () => {
+    const b = fresh();
+    b.runs.push(
+      { id: "run-00000001", role: "worker", taskId: "t1", tokens: 162_500, tokenBreakdown: { ...WORKER } },
+      { id: "run-00000002", role: "reviewer", taskId: "t1", tokens: 12_000, tokenBreakdown: { ...REVIEWER } },
+      // From before the field: in the total, in no kind.
+      { id: "run-00000003", role: "worker", taskId: "t2", tokens: 5_000 },
+      // Still working: nothing yet.
+      { id: "run-00000004", role: "reviewer", taskId: "t2" },
+    );
+    const m = board.teamMetrics(b);
+    expect(m.tokenBreakdown).toEqual({ input: 9_700, output: 1_800, cacheCreation: 2_000, cacheRead: 161_000 });
+    expect(m.tokenBreakdownByRole.worker).toEqual(WORKER);
+    expect(m.tokenBreakdownByRole.reviewer).toEqual(REVIEWER);
+    expect(m.tokenBreakdownByRole.planner).toEqual(ZERO);
+    expect(m.tokenBreakdownByRole.lead).toEqual(ZERO);
+    expect(m.tokensUsed).toBe(179_500);
+    board.saveBoard(b);
+    const back = board.loadBoard(b.id)!;
+    expect(back.runs).toEqual(b.runs);
+    expect(back.runs[2]).not.toHaveProperty("tokenBreakdown");
+    expect(back.metrics.tokenBreakdown).toEqual(m.tokenBreakdown);
+    expect(back.metrics.tokenBreakdownByRole).toEqual(m.tokenBreakdownByRole);
+  });
+
+  it("counts only finite, non-negative figures", () => {
+    const b = fresh();
+    b.runs.push({ id: "run-00000001", role: "worker", taskId: "t1", tokens: 40, tokenBreakdown: { input: -5, output: Infinity, cacheCreation: NaN, cacheRead: 40 } });
+    expect(board.teamMetrics(b).tokenBreakdown).toEqual({ ...ZERO, cacheRead: 40 });
+  });
+
+  it("is all zeros on a new board", () => {
+    const m = fresh().metrics;
+    expect(m.tokenBreakdown).toEqual(ZERO);
+    expect(m.tokenBreakdownByRole).toEqual({ planner: ZERO, worker: ZERO, reviewer: ZERO, lead: ZERO });
+  });
+
+  it("loads a board saved before the field with zeros and the same tokensUsed — and reads a hand-edited one leniently", () => {
+    const b = fresh();
+    board.saveBoard(b);
+    const file = path.join(root, "data", "coding-team", `${b.id}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+    delete (raw.metrics as Record<string, unknown>).tokenBreakdown;
+    delete (raw.metrics as Record<string, unknown>).tokenBreakdownByRole;
+    raw.runs = [
+      { id: "run-00000001", role: "planner", taskId: null, tokens: 4_000 },
+      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000 },
+    ];
+    fs.writeFileSync(file, JSON.stringify(raw));
+    const old = board.loadBoard(b.id)!;
+    expect(old.runs).toEqual(raw.runs);
+    expect(old.metrics.tokensUsed).toBe(10_000);
+    expect(old.metrics.tokensByRole).toEqual({ planner: 4_000, worker: 6_000, reviewer: 0, lead: 0 });
+    expect(old.metrics.tokenBreakdown).toEqual(ZERO);
+    expect(old.metrics.tokenBreakdownByRole).toEqual({ planner: ZERO, worker: ZERO, reviewer: ZERO, lead: ZERO });
+
+    raw.runs = [
+      { id: "run-00000001", role: "worker", taskId: "t1", tokens: 50, tokenBreakdown: { input: "7", output: -1, cacheCreation: null, cacheRead: 50, extra: 9 } },
+      { id: "run-00000002", role: "worker", taskId: "t2", tokens: 6, tokenBreakdown: "lots" },
+    ];
+    fs.writeFileSync(file, JSON.stringify(raw));
+    const edited = board.loadBoard(b.id)!;
+    expect(edited.runs).toEqual([
+      { id: "run-00000001", role: "worker", taskId: "t1", tokens: 50, tokenBreakdown: { ...ZERO, cacheRead: 50 } },
+      { id: "run-00000002", role: "worker", taskId: "t2", tokens: 6 },
+    ]);
+    expect(edited.metrics.tokenBreakdown).toEqual({ ...ZERO, cacheRead: 50 });
+    expect(edited.metrics.tokensUsed).toBe(56);
   });
 });
 

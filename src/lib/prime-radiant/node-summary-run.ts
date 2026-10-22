@@ -37,7 +37,7 @@
 
 import { estimateUsd, type CostRates } from "./cost-rates";
 import { mergeClaimIndex, previewMerge } from "./edit";
-import { completeWithRetry, flashClient, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, allowanceStopOf, completeWithRetry, flashClient, type AllowanceStop, type FlashClient } from "./flash-client";
 import { recordCost } from "./ingest-store";
 import {
   buildSummaryPrompt,
@@ -108,7 +108,12 @@ export interface SummariesRunResult extends SummaryPlanStats {
   rejectedPages: number;
   /** Pages whose new summary the vault's lint refused: each left as it was, with why (e.g. `secret-pattern (CARD)`). */
   refused: Array<{ path: string; reason: string }>;
-  model: { asked: number; calls: number; usdEstimate: number; capUsd: number; maxPages: number; skipped?: string };
+  /**
+   * `skipped` says why the model stopped short (`allowance_spent`: a spent
+   * ClawBox AI allowance, named in `allowance`; the pages it did not reach
+   * keep or get their facts' summary and are planned for the model again).
+   */
+  model: { asked: number; calls: number; usdEstimate: number; capUsd: number; maxPages: number; skipped?: string; allowance?: AllowanceStop };
   /** Duplicate entity groups found (each a merge suggestion). */
   mergeGroups: number;
   /** Each group as the merge tool's dry run plans it — only when `mergePreviews` is asked for (the maintenance action; a nightly pass counts them). */
@@ -243,7 +248,11 @@ export async function runSummaries(
       }
       answer = parseSummaryResponse(response.text, batch.length);
     } catch (err) {
-      result.model.skipped = err instanceof Error ? `failed: ${err.message.slice(0, 120)}` : "failed";
+      const spent = allowanceStopOf(err);
+      if (spent) {
+        result.model.skipped = ALLOWANCE_SPENT;
+        result.model.allowance = spent;
+      } else result.model.skipped = err instanceof Error ? `failed: ${err.message.slice(0, 120)}` : "failed";
       stopped = true;
       batch.forEach(fromFacts);
       continue;

@@ -60,6 +60,7 @@ function pass(config: unknown, opts: { v2?: boolean; core2026_10?: boolean } = {
     input: CONFIG_PASS,
     encoding: "utf-8",
     env: {
+      NODE_ENV: "test",
       PATH: "/usr/bin:/bin",
       HOME: dir,
       CLAWBOX_OPENCLAW_V2: opts.v2 === false ? "0" : "1",
@@ -146,7 +147,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh memory index defaults", () =>
     const r = spawnSync("python3", ["-", cfgPath], {
       input: CONFIG_PASS,
       encoding: "utf-8",
-      env: { PATH: "/usr/bin:/bin", HOME: dir, CLAWBOX_OPENCLAW_V2: "1", CLAWBOX_OPENCLAW_2026_10: "1", CLAWBOX_MEMORY_REBUILD_RECORD: recordPath },
+      env: { NODE_ENV: "test", PATH: "/usr/bin:/bin", HOME: dir, CLAWBOX_OPENCLAW_V2: "1", CLAWBOX_OPENCLAW_2026_10: "1", CLAWBOX_MEMORY_REBUILD_RECORD: recordPath },
     });
     chmodSync(dir, 0o755);
     expect(r.status).toBe(0);
@@ -169,7 +170,7 @@ function runBlock(block: string, vars: Record<string, string>, env: Record<strin
     ...Object.entries(vars).map(([k, v]) => `${k}=${JSON.stringify(v)}`),
     block,
   ].join("\n");
-  return spawnSync("bash", ["-c", program], { encoding: "utf-8", env: { PATH: `${path.join(dir, "bin")}:/usr/bin:/bin`, ...env } });
+  return spawnSync("bash", ["-c", program], { encoding: "utf-8", env: { NODE_ENV: "test", PATH: `${path.join(dir, "bin")}:/usr/bin:/bin`, ...env } });
 }
 
 async function waitFor(file: string): Promise<boolean> {
@@ -312,7 +313,7 @@ describe("gateway-pre-start.sh 2026.10 gate", () => {
       `CLAWBOX_OPENCLAW_EFFECTIVE=${JSON.stringify(effective)}`,
       GATE,
       'printf "%s" "$CLAWBOX_OPENCLAW_2026_10"',
-    ].join("\n")], { encoding: "utf-8", env: { PATH: "/usr/bin:/bin", ...(explicit === undefined ? {} : { CLAWBOX_OPENCLAW_2026_10: explicit }) } });
+    ].join("\n")], { encoding: "utf-8", env: { NODE_ENV: "test", PATH: "/usr/bin:/bin", ...(explicit === undefined ? {} : { CLAWBOX_OPENCLAW_2026_10: explicit }) } });
     if (r.status !== 0) throw new Error(r.stderr);
     return r.stdout;
   }

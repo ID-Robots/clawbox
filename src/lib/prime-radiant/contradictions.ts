@@ -49,7 +49,19 @@
 import { processStore } from "@/lib/process-store";
 import { claimTextKey } from "./claims";
 import { estimateUsd, type CostRates } from "./cost-rates";
-import { completeWithRetry, FlashCallError, flashClient, stubEnabled, type FlashClient, type FlashResponse, type RetryOptions } from "./flash-client";
+import {
+  ALLOWANCE_SPENT,
+  allowanceSpentText,
+  allowanceStopOf,
+  completeWithRetry,
+  FlashCallError,
+  flashClient,
+  stubEnabled,
+  type AllowanceStop,
+  type FlashClient,
+  type FlashResponse,
+  type RetryOptions,
+} from "./flash-client";
 import { recordCost } from "./ingest-store";
 import { buildJudgePrompt, JudgeParseError, JUDGE_VERDICTS, parseJudgeResponse, type JudgeVerdict } from "./judge";
 import { redactText } from "./redact";
@@ -394,8 +406,10 @@ export interface ContradictionPassResult {
   reviewItems: ReviewItem[];
   /** Findings against an owner-verified claim: the verified claim wins, the other became a stale note (no review item). */
   staleNotes: number;
-  /** Why the pass did nothing or stopped short, when it did. */
+  /** Why the pass did nothing or stopped short, when it did (`allowance_spent`: a spent ClawBox AI allowance, see `allowance`). */
   skipped: string | null;
+  /** The spent allowance the judge or the embedder stopped on; what it did not reach is deferred to the next pass. */
+  allowance: AllowanceStop | null;
   notes: string[];
 }
 
@@ -592,6 +606,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     reviewItems: [],
     staleNotes: 0,
     skipped: null,
+    allowance: null,
     notes: [],
   };
   const all = collectClaims(snapshot);
@@ -665,6 +680,14 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       result.notes.push("The claim vectors could not be cached; the next pass embeds them again.");
     }
   } catch (err) {
+    // A spent memory-indexing allowance is its own reason, not an embedder that is down: every claim waits for the next pass.
+    const spent = allowanceStopOf(err);
+    if (spent) {
+      result.skipped = ALLOWANCE_SPENT;
+      result.allowance = spent;
+      result.notes.push(`The claims could not be embedded: ${allowanceSpentText(spent, { now: now().getTime() })}. They are compared on the next pass.`);
+      return finish(new Set(queries), ALLOWANCE_SPENT);
+    }
     result.skipped = "embedder_unavailable";
     result.notes.push(`The embedder could not answer: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
     return finish(new Set(queries), "embedder_unavailable");
@@ -712,7 +735,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
 
   /**
    * One call: the pairs a readable answer left out, or why there was none.
-   * Only a refused credential, plan or abort throws.
+   * Only a refused credential or plan, a spent allowance or an abort throws.
    */
   async function judgeOnce(batch: readonly number[]): Promise<{ ok: true; missing: number[] } | { ok: false; kind: string }> {
     const { system, user } = buildJudgePrompt(batch.map((n) => ({ a: claims[pairs[n].a].text, b: claims[pairs[n].b].text })));
@@ -721,7 +744,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       ({ response } = await completeWithRetry(client, { system, user, maxTokens: judgeMaxTokens(batch.length), signal: options.signal }, retry));
     } catch (err) {
       const e = err instanceof FlashCallError ? err : null;
-      if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "aborted")) throw e;
+      if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "allowance" || e.kind === "aborted")) throw e;
       return { ok: false, kind: e?.kind ?? "error" };
     }
     const usd = estimateUsd(response.model, response.usage, rates);
@@ -781,8 +804,10 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
           if (!small.ok) batchFailed(small.kind);
         }
       } catch (err) {
-        // A refused credential or plan, or an abort, stops the pass.
-        stop = err instanceof FlashCallError ? err.kind : "error";
+        // A refused credential or plan, a spent allowance, or an abort, stops the pass.
+        const spent = allowanceStopOf(err);
+        if (spent && !result.allowance) result.allowance = spent;
+        if (!stop) stop = err instanceof FlashCallError ? err.kind : "error";
       }
     }),
     Math.max(1, options.parallel ?? JUDGE_PARALLEL),
@@ -797,7 +822,10 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
   if (result.capped > 0) {
     result.notes.push(`${result.capped} judge answer(s) reached the output cap; the pairs they left out were asked again in smaller calls.`);
   }
-  if (stop) {
+  if (stop === "allowance" && result.allowance) {
+    result.skipped = ALLOWANCE_SPENT;
+    result.notes.push(`The judge stopped: ${allowanceSpentText(result.allowance, { now: now().getTime() })}. The pairs it did not judge are judged next pass.`);
+  } else if (stop) {
     result.skipped = stop === "aborted" ? "aborted" : "judge_unavailable";
     result.notes.push(`The judge stopped: ${stop}.`);
   }
@@ -882,5 +910,5 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     }
   }
   result.usdEstimate = Math.round(result.usdEstimate * 1e6) / 1e6;
-  return finish(unjudged, stop ? "judge_stopped" : overflow.length > 0 ? "over_cap" : "judge_failed");
+  return finish(unjudged, result.skipped === ALLOWANCE_SPENT ? ALLOWANCE_SPENT : stop ? "judge_stopped" : overflow.length > 0 ? "over_cap" : "judge_failed");
 }

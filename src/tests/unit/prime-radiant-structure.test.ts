@@ -678,6 +678,21 @@ describe("the cheap-model fallback on a state database", () => {
       const failed = await classifyWithModel(snap, { ...opts, cap: 3, client: failing });
       expect(failed.assigned.size).toBe(0);
       expect(failed.skipped).toMatch(/^failed: /);
+
+      // A spent ClawBox AI allowance is said as such, after the one call; the pages not asked are asked another night.
+      let refusedCalls = 0;
+      const spent: FlashClient = {
+        model: "deepseek-v4-flash",
+        complete: async () => {
+          refusedCalls++;
+          throw new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429, null, { kind: "weekly", resetAt: "2026-05-23T00:00:00.000Z", message: null });
+        },
+      };
+      const waiting = (await classifyWithModel(snap, { ...opts, cap: 0, client: spent })).candidates;
+      const stopped = await classifyWithModel(snap, { ...opts, cap: 10, client: spent });
+      expect(stopped).toMatchObject({ candidates: waiting, skipped: "allowance_spent", allowance: { kind: "weekly", resetAt: "2026-05-23T00:00:00.000Z" }, asked: 0, calls: 0 });
+      expect(refusedCalls).toBe(1);
+      expect((await classifyWithModel(snap, { ...opts, cap: 0, client: spent })).candidates).toBe(waiting);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

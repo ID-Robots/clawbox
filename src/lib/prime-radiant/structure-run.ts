@@ -19,7 +19,7 @@
 
 import crypto from "crypto";
 import { estimateUsd, type CostRates } from "./cost-rates";
-import { completeWithRetry, flashClient, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, allowanceStopOf, completeWithRetry, flashClient, type AllowanceStop, type FlashClient } from "./flash-client";
 import { recordPage } from "./identifiers";
 import { recordCost } from "./ingest-store";
 import { classifyRecord, isRecordType, readRecordFrontmatter, recordDate, RECORD_TYPES, type RecordType } from "./records";
@@ -152,7 +152,9 @@ export interface ModelFallbackResult {
   asked: number;
   calls: number;
   usdEstimate: number;
+  /** Why the model was not asked or stopped short (`allowance_spent`: a spent ClawBox AI allowance, named in `allowance`). */
   skipped?: string;
+  allowance?: AllowanceStop;
 }
 
 /**
@@ -202,7 +204,12 @@ export async function classifyWithModel(
         else result.assigned.set(batch[i].path, type);
       }
     } catch (err) {
-      result.skipped = err instanceof Error ? `failed: ${err.message.slice(0, 120)}` : "failed";
+      // The pages not asked are not remembered: another night asks them (a spent allowance included).
+      const spent = allowanceStopOf(err);
+      if (spent) {
+        result.skipped = ALLOWANCE_SPENT;
+        result.allowance = spent;
+      } else result.skipped = err instanceof Error ? `failed: ${err.message.slice(0, 120)}` : "failed";
       break;
     }
   }

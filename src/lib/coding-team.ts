@@ -75,6 +75,7 @@ import {
   MAX_TEAM_WORKERS,
   noteTeamMessageSent,
   queueRunMessage,
+  readTokenBreakdown,
   resolveWorkingDirectory,
   SlotsFullError,
   startRun,
@@ -1741,9 +1742,10 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
 }
 
 /**
- * A settled run's tokens, account and model, from its own record, onto its
- * line in the board's cast list — what the team's metrics add up, by role and
- * by provider. The model is brought up to what ANSWERED (`answeredModel`).
+ * A settled run's tokens — the total and the same by kind — account and
+ * model, from its own record, onto its line in the board's cast list: what
+ * the team's metrics add up, by role and by provider. The model is brought up
+ * to what ANSWERED (`answeredModel`).
  */
 function noteTokens(board: TeamBoard, run: CodingRun | null): void {
   if (!run) return;
@@ -1752,9 +1754,13 @@ function noteTokens(board: TeamBoard, run: CodingRun | null): void {
   const paid = runModelFields(run, answeredModel(run));
   const tokens = run.tokensUsed;
   const counted = typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0;
-  if (!counted && !paid) return;
+  // Read as unknown: a record from before the field has none.
+  const kinds = (run as { tokenBreakdown?: unknown }).tokenBreakdown;
+  const breakdown = kinds && typeof kinds === "object" && !Array.isArray(kinds) ? readTokenBreakdown(kinds) : null;
+  if (!counted && !paid && !breakdown) return;
   if (paid) Object.assign(ref, paid);
   if (counted) ref.tokens = tokens;
+  if (breakdown) ref.tokenBreakdown = breakdown;
   saveBoard(board);
 }
 

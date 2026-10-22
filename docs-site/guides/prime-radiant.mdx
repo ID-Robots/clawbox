@@ -188,6 +188,18 @@ and per night. Each import in **Add** and each night in the nightly card shows i
 tokens too. Prime Radiant shows tokens, never money. Embedding facts to compare them is
 listed as **not measured**, because the embedding model reports no usage.
 
+Prime Radiant's model calls go through ClawBox AI on the box's own sign-in, so they count
+against your plan's weekly allowance, the same pool a chat turn draws on. There is no
+separate Prime Radiant limit. **Model usage** shows how many tokens Prime Radiant used in
+the last seven days, next to how much of the weekly allowance is used. The count is
+approximate: only calls that got an answer are recorded. When the weekly allowance or
+the 5-hour burst limit runs out, an import stops after the first refused call. Nothing
+is marked as failed: the documents it did not reach wait, and the next import of the
+same folders, the nightly pass, or **Retry** picks them up once the allowance frees up.
+Each model step of the nightly pass stops the same way, notes "ClawBox AI allowance
+spent" with the time it frees up, and leaves the rest for the next night.
+**Settings → Providers** shows when that is.
+
 ## How the assistant uses it
 
 On the OpenClaw edition the assistant reads the wiki through its own wiki tools, and

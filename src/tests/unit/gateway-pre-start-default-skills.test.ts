@@ -37,6 +37,7 @@ function run(extraEnv: Record<string, string> = {}) {
   return spawnSync("bash", ["-c", script], {
     encoding: "utf-8",
     env: {
+      NODE_ENV: "test",
       PATH: process.env.PATH ?? "",
       CLAWBOX_ROOT: root,
       CLAWBOX_WORKSPACE: ws,

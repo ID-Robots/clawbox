@@ -50,8 +50,9 @@ export default function ClawboxAiPlanPicker({
   // A plan is always selected (the picker has no empty value and nothing
   // validates it), so this can never be the hidden reason an action is
   // unavailable. What it must never hide is the price: the summary states the
-  // plan and what it costs, so a paid default is on screen before anyone
-  // presses Connect, and one tap opens the tiers and what each includes.
+  // plan and what it costs, so a paid plan is on screen before anyone presses
+  // Connect, and one tap opens the tiers and what each includes. An unpaired
+  // box with no stored choice starts on Free (UNPAIRED_DEFAULT_UI_TIER).
   const [open, setOpen] = useState(false);
   // "/month" is a suffix, "free forever" is a phrase — the two join the price
   // differently, and a free plan should not read "€0".
