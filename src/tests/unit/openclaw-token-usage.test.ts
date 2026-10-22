@@ -357,6 +357,24 @@ describe("gateway source: the core's sessions.usage", () => {
     expect(report.notes.join(" ")).toMatch(/1 session\(s\) still being computed/);
   });
 
+  it.each([
+    ["a clamped start", { startDate: "2026-10-18" }],
+    ["a shifted end", { endDate: "2026-10-21" }],
+  ])("calls an answer for another range incomplete (%s), and auto counts the databases", (_, range) => {
+    const report = reportFromGateway(gatewayAnswer(range), usageWindow(7, NOW));
+    expect(report.complete).toBe(false);
+    expect(report.notes.join(" ")).toMatch(/the gateway answered for .* not 2026-10-16 \.\. 2026-10-22/);
+
+    agentDb("main", { s1: [{ ts: IN, usage: anthropic(1, 1) }] });
+    const auto = buildReport({ ...parseArgs([]), stateDir }, { nowMs: NOW, gateway: () => gatewayAnswer(range) });
+    expect(auto.source).toBe("db");
+    expect(auto.notes[0]).toMatch(/gateway answer incomplete \(the gateway answered for/);
+  });
+
+  it("takes an answer for exactly the window asked as complete", () => {
+    expect(reportFromGateway(gatewayAnswer(), usageWindow(7, NOW)).complete).toBe(true);
+  });
+
   it("auto takes a complete gateway answer, and counts the databases when it is not", () => {
     agentDb("main", { s1: [{ ts: IN, usage: anthropic(1, 1) }] });
     const opts = { ...parseArgs([]), stateDir };

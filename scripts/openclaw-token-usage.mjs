@@ -405,10 +405,15 @@ export function reportFromGateway(result, window) {
   if (computing > 0) notes.push(`${computing} session(s) still being computed by the gateway`);
   const truncated = result.sessions.length >= GATEWAY_SESSION_LIMIT;
   if (truncated) notes.push(`more than ${GATEWAY_SESSION_LIMIT} sessions: the list was cut`);
-  if (result.startDate && result.startDate !== window.startDate) {
-    notes.push(`the gateway answered for ${result.startDate} .. ${result.endDate}`);
+  // Totals for another range than the one asked are not this window's: the
+  // header and the JSON `window` name the request, so a clamped or shifted
+  // answer is incomplete (and `auto` counts from the databases instead).
+  const otherRange = (result.startDate !== undefined && result.startDate !== window.startDate)
+    || (result.endDate !== undefined && result.endDate !== window.endDate);
+  if (otherRange) {
+    notes.push(`the gateway answered for ${result.startDate ?? "?"} .. ${result.endDate ?? "?"}, not ${window.startDate} .. ${window.endDate}`);
   }
-  return { ...acc.finish(), notes, complete: fresh && computing === 0 && !truncated };
+  return { ...acc.finish(), notes, complete: fresh && computing === 0 && !truncated && !otherRange };
 }
 
 /**
