@@ -122,6 +122,18 @@ describe("the inputs tree", () => {
     expect(deniedFor(rules, "Read", pathMod.join(root, "data", "config.json"))).toBe(true);
     expect(deniedFor(rules, "Read", pathMod.join(root, "data", "secrets", "x"))).toBe(true);
   });
+
+  it("denies the secret store and its audit trail by name, before either exists", async () => {
+    // Neither file is on disk in this fixture: the first save or the first
+    // copy creates them, after a run's rules may already have been computed.
+    const lib = await import("@/lib/coding-agent");
+    const rules = lib.fileDenyRules();
+    for (const file of ["secrets.json", "secrets-audit.log"]) {
+      for (const tool of ["Read", "Grep"]) {
+        expect(deniedFor(rules, tool, pathMod.join(root, "data", file)), `${tool} ${file}`).toBe(true);
+      }
+    }
+  });
 });
 
 describe("what the run is told", () => {

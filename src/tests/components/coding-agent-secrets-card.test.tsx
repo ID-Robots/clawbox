@@ -13,9 +13,12 @@
  *  3. A REFUSAL IS SAID IN THE OWNER'S LANGUAGE when the route sent a code this
  *     build knows, and in the box's own words when it did not.
  *  4. ONE WRITE AT A TIME: a control mid-write cannot be pressed twice.
+ *  5. "IMPORT FROM ASSISTANT" deals in NAMES: it is drawn only when the import
+ *     route answers this session with a source, posts a name and a scope and
+ *     nothing else, and no value is on screen at any point.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSecretsCard from "@/components/CodingAgentSecretsCard";
 import { BOX_SCOPE, MIN_SECRET_VALUE_CHARS } from "@/lib/project-secrets-shape";
@@ -39,6 +42,12 @@ let secrets: unknown[] = [];
 let injectSecrets = false;
 /** Set to make the next write fail with this status and body. */
 let refuse: { status: number; body: unknown } | null = null;
+/** The import route's answer to a GET; null answers 403, as for a non-owner. */
+let assistant: { names: { name: string; source: string }[]; sources: string[] } | null = null;
+/** Set to make every GET of the import route answer this status and body instead. */
+let assistantRefusal: { status: number; body: unknown } | null = null;
+/** Set to make every GET of the import route fail with no answer at all. */
+let assistantNetworkDown = false;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -56,6 +65,17 @@ function stubFetch(): void {
     if (method !== "GET") calls.push({ url, method, body });
     if (url.startsWith("/setup-api/coding-agent/projects")) {
       return json({ directory: "/home/clawbox/Projects", projects: [{ folder: "shop", name: "Corner Shop", kind: "folder" }] });
+    }
+    if (url.startsWith("/setup-api/coding-agent/secrets/import")) {
+      if (method === "GET") {
+        if (assistantNetworkDown) throw new TypeError("Failed to fetch");
+        if (assistantRefusal) return json(assistantRefusal.body, assistantRefusal.status);
+        return assistant ? json(assistant) : json({ error: "owner only", kind: "owner_only" }, 403);
+      }
+      if (refuse) { const r = refuse; refuse = null; return json(r.body, r.status); }
+      const expiry = body.expiresAt ? { expiresAt: body.expiresAt, expired: false } : {};
+      secrets = [...secrets, { name: body.name, scope: body.scope, inject: false, readable: true, createdAt: 1, updatedAt: 1, ...expiry }];
+      return json({ imported: { name: body.name, scope: body.scope, ...(body.expiresAt ? { expiresAt: body.expiresAt } : {}) }, ...payload() });
     }
     if (url.startsWith("/setup-api/coding-agent/secrets")) {
       if (method === "GET") return json(payload());
@@ -83,6 +103,9 @@ beforeEach(() => {
   secrets = [];
   injectSecrets = false;
   refuse = null;
+  assistant = null;
+  assistantRefusal = null;
+  assistantNetworkDown = false;
   stubFetch();
 });
 
@@ -344,5 +367,255 @@ describe("one write at a time", () => {
     expect(screen.getByTestId("coding-agent-secret-add")).toBeDisabled();
     held.release?.();
     await waitFor(() => expect(screen.getByTestId("coding-agent-secret-remove")).not.toBeDisabled());
+  });
+});
+
+describe("import from assistant", () => {
+  const offered = () => ({
+    names: [{ name: "GITHUB_TOKEN", source: "hermes" }, { name: "NOTION_API_KEY", source: "hermes" }],
+    sources: ["hermes"],
+  });
+
+  it("is not drawn when the import route refuses this session", async () => {
+    await mounted();
+    // The first read is back; the import route answered 403 (not the owner).
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secret-add")).not.toBeDisabled());
+    expect(screen.queryByTestId("coding-agent-secrets-import")).not.toBeInTheDocument();
+  });
+
+  it("is not drawn on a box with no source to copy from", async () => {
+    assistant = { names: [], sources: [] };
+    await mounted();
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secret-add")).not.toBeDisabled());
+    expect(screen.queryByTestId("coding-agent-secrets-import")).not.toBeInTheDocument();
+  });
+
+  it("posts a NAME and a scope, and the copy arrives un-ticked with no value on screen", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    const picker = await screen.findByTestId("coding-agent-secrets-import-picker");
+    // Names only: no field in the picker could hold a value.
+    expect(picker.querySelector("input")).toBeNull();
+    fireEvent.change(screen.getByTestId("coding-agent-secrets-import-name"), { target: { value: "NOTION_API_KEY" } });
+    fireEvent.change(screen.getByTestId("coding-agent-secrets-import-scope"), { target: { value: "shop" } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({
+      url: "/setup-api/coding-agent/secrets/import",
+      method: "POST",
+      body: { name: "NOTION_API_KEY", scope: "shop" },
+    });
+    expect(await screen.findByTestId("coding-agent-secrets-imported"))
+      .toHaveTextContent(t("codingAgent.secretsImported", { name: "NOTION_API_KEY" }));
+    // The picker closes, and the new row is there — switched off.
+    expect(screen.queryByTestId("coding-agent-secrets-import-picker")).not.toBeInTheDocument();
+    const row = await screen.findByTestId("coding-agent-secret-row");
+    expect(row).toHaveTextContent("NOTION_API_KEY");
+    expect(screen.getByTestId("coding-agent-secret-inject")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("sends no expiry unless the owner picks one, and limits the copy to one run when they do", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    expect(await screen.findByTestId("coding-agent-secrets-import-expiry")).toHaveValue("none");
+    fireEvent.change(screen.getByTestId("coding-agent-secrets-import-expiry"), { target: { value: "run" } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ name: "GITHUB_TOKEN", scope: BOX_SCOPE, expiresAt: "run" });
+    expect(await screen.findByTestId("coding-agent-secret-expiry")).toHaveTextContent(t("codingAgent.secretsExpiryRun"));
+    // Still un-ticked: the expiry narrows a grant, it never makes one.
+    expect(screen.getByTestId("coding-agent-secret-inject")).toHaveAttribute("aria-checked", "false");
+
+    // And the next copy starts from "none" again.
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-open"));
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-copy"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].body).toEqual({ name: "NOTION_API_KEY", scope: BOX_SCOPE });
+  });
+
+  it("sends the end of the chosen day, and refuses a day already over before anything is posted", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    fireEvent.change(await screen.findByTestId("coding-agent-secrets-import-expiry"), { target: { value: "date" } });
+    const until = await screen.findByTestId("coding-agent-secrets-import-until");
+
+    fireEvent.change(until, { target: { value: "2001-01-01" } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+    expect(await screen.findByTestId("coding-agent-secrets-error")).toHaveTextContent(t("codingAgent.secretsImportUntilInvalid"));
+    expect(calls).toEqual([]);
+
+    const day = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const input = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+    fireEvent.change(until, { target: { value: input } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    const end = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59, 59, 999).toISOString();
+    expect(calls[0].body).toEqual({ name: "GITHUB_TOKEN", scope: BOX_SCOPE, expiresAt: end });
+    expect(await screen.findByTestId("coding-agent-secret-expiry")).toHaveTextContent(
+      t("codingAgent.secretsExpiryUntil", { date: new Date(end).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) }),
+    );
+  });
+
+  it("starts every opening from no expiry, even after a Cancel left one picked", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    fireEvent.change(await screen.findByTestId("coding-agent-secrets-import-expiry"), { target: { value: "date" } });
+    fireEvent.change(await screen.findByTestId("coding-agent-secrets-import-until"), { target: { value: "2099-01-01" } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-cancel"));
+
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    expect(await screen.findByTestId("coding-agent-secrets-import-expiry")).toHaveValue("none");
+    expect(screen.queryByTestId("coding-agent-secrets-import-until")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ name: "GITHUB_TOKEN", scope: BOX_SCOPE });
+  });
+
+  it("re-reads the list on opening, so a copy that went with its run is offered again", async () => {
+    assistant = offered();
+    secrets = [{ name: "GITHUB_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1, expiresAt: "run", expired: true }];
+    await mounted();
+    await screen.findByTestId("coding-agent-secret-row");
+    // The run ended meanwhile, and the box removed its one-run copy.
+    secrets = [];
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    await waitFor(() => expect(screen.queryByTestId("coding-agent-secret-row")).not.toBeInTheDocument());
+    const option = within(screen.getByTestId("coding-agent-secrets-import-name")).getByRole("option", { name: "GITHUB_TOKEN" });
+    expect(option).not.toBeDisabled();
+  });
+
+  it("keeps offering the import when asking again gets no answer at all", async () => {
+    assistant = offered();
+    await mounted();
+    await screen.findByTestId("coding-agent-secrets-import-open");
+    assistantNetworkDown = true;
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-open"));
+    // Still the picker, with the names it last knew — not the whole import gone.
+    const picker = await screen.findByTestId("coding-agent-secrets-import-picker");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(picker).toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-secrets-import-name")).toHaveValue("GITHUB_TOKEN");
+  });
+
+  it("says Expired for a row the box marks so, even without an expiry it can read", async () => {
+    secrets = [{ name: "ODD_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1, expiresAt: "", expired: true }];
+    await mounted();
+    expect(await screen.findByTestId("coding-agent-secret-expiry")).toHaveTextContent(t("codingAgent.secretsExpired"));
+  });
+
+  it("says when a copy no longer reaches any run", async () => {
+    secrets = [
+      { name: "ONE_RUN_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1, expiresAt: "run", expired: true },
+      { name: "OLD_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1, expiresAt: "2001-01-01T00:00:00.000Z", expired: true },
+    ];
+    await mounted();
+    const lines = await screen.findAllByTestId("coding-agent-secret-expiry");
+    expect(lines.map((line) => line.textContent)).toEqual([t("codingAgent.secretsExpiryUsed"), t("codingAgent.secretsExpired")]);
+  });
+
+  it("will not offer a name already in the list for the chosen scope", async () => {
+    assistant = offered();
+    secrets = [{ name: "GITHUB_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    const select = await screen.findByTestId("coding-agent-secrets-import-name") as HTMLSelectElement;
+    const github = [...select.options].find((o) => o.value === "GITHUB_TOKEN")!;
+    expect(github.disabled).toBe(true);
+    expect(github.textContent).toBe(t("codingAgent.secretsImportHere", { name: "GITHUB_TOKEN" }));
+    // The choice moved to the one that can be copied.
+    expect(select.value).toBe("NOTION_API_KEY");
+    // In another scope the same name is fine again.
+    fireEvent.change(screen.getByTestId("coding-agent-secrets-import-scope"), { target: { value: "shop" } });
+    expect(github.disabled).toBe(false);
+  });
+
+  it("says so when the assistant holds nothing to copy, and offers no copy button", async () => {
+    assistant = { names: [], sources: ["hermes"] };
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    expect(await screen.findByTestId("coding-agent-secrets-import-empty")).toHaveTextContent(t("codingAgent.secretsImportEmpty"));
+    expect(screen.queryByTestId("coding-agent-secrets-import-copy")).not.toBeInTheDocument();
+  });
+
+  it("words a refusal in the owner's language", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    await screen.findByTestId("coding-agent-secrets-import-picker");
+    refuse = { status: 409, body: { error: "There is already a secret called GITHUB_TOKEN.", kind: "conflict", code: "exists" } };
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error"))
+      .toHaveTextContent(t("codingAgent.secretsRefusedExists")));
+    // Still open, so the owner can pick another.
+    expect(screen.getByTestId("coding-agent-secrets-import-picker")).toBeInTheDocument();
+  });
+
+  it("closes without a write on Cancel", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-cancel"));
+    expect(screen.queryByTestId("coding-agent-secrets-import-picker")).not.toBeInTheDocument();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("says so when the assistant's key file cannot be read, rather than hiding the import", async () => {
+    assistantRefusal = { status: 500, body: { error: "This ClawBox could not read the assistant's key file.", kind: "invalid", code: "source_unreadable" } };
+    await mounted();
+    expect(await screen.findByTestId("coding-agent-secrets-import-unreadable"))
+      .toHaveTextContent(t("codingAgent.secretsImportSourceFailed"));
+    expect(screen.queryByTestId("coding-agent-secrets-import-open")).not.toBeInTheDocument();
+  });
+
+  it("asks again what is on offer after a refused copy, and words a key the assistant no longer holds", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    await screen.findByTestId("coding-agent-secrets-import-picker");
+    // The assistant's file lost GITHUB_TOKEN while the picker was open.
+    refuse = { status: 404, body: { error: "The assistant holds no key called GITHUB_TOKEN.", kind: "not_found", code: "not_held" } };
+    assistant = { names: [{ name: "NOTION_API_KEY", source: "hermes" }], sources: ["hermes"] };
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error"))
+      .toHaveTextContent(t("codingAgent.secretsImportGone")));
+    await waitFor(() => {
+      const select = screen.getByTestId("coding-agent-secrets-import-name") as HTMLSelectElement;
+      expect([...select.options].map((o) => o.value)).toEqual(["NOTION_API_KEY"]);
+    });
+  });
+
+  it("says in the owner's language that the import was switched off, and stops offering it", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    await screen.findByTestId("coding-agent-secrets-import-picker");
+    const off = { error: "Importing keys from the assistant is switched off on this ClawBox.", kind: "disabled", code: "disabled" };
+    refuse = { status: 404, body: off };
+    assistantRefusal = { status: 404, body: off };
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error"))
+      .toHaveTextContent(t("codingAgent.secretsImportDisabled")));
+    await waitFor(() => expect(screen.queryByTestId("coding-agent-secrets-import")).not.toBeInTheDocument());
+  });
+
+  it("fills in the floor when a copy is refused as too short", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    await screen.findByTestId("coding-agent-secrets-import-picker");
+    refuse = { status: 400, body: { error: "too short", kind: "invalid", code: "value_too_short" } };
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+
+    const alert = await screen.findByTestId("coding-agent-secrets-error");
+    await waitFor(() => expect(alert).toHaveTextContent(t("codingAgent.secretsRefusedShort", { n: MIN_SECRET_VALUE_CHARS })));
+    expect(alert.textContent).not.toContain("{n}");
   });
 });
