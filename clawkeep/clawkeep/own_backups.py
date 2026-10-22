@@ -28,6 +28,22 @@ THE RULE (:func:`left_out_rule`)
   the name, so two runs over the same tree leave out the same files. The
   canonical state directory is the one the dry-run declares (`kind: state`).
 
+  ONE KIND OF DIRECTORY is left out too (:func:`tmp_tree_rule`): a temporary
+  tree a run did not finish with — a directory in the state directory, outside
+  every workspace, whose name holds `_tmp_` (the core's tool installer stages
+  in `<agent dir>/bin/install_tmp_<bin>_<pid>_<uuid>` and deletes it when the
+  install ends; a package manager names its staging `_tmp_<pid>_<hash>`) and
+  in which nothing has changed for :data:`TMP_TREE_IDLE_S`. One still being
+  written stays where it is. It is set aside whole, by the same one rename,
+  and counted in the log, not with the archive files the app names.
+
+  What the core can leave out by itself it does: the state directory's
+  `upgrades/` and `backups/` and the Codex caches under every agent's
+  `codex-home/` are `regenerable` resources the `clawbox-backup-scope` plugin
+  declares (scripts/openclaw-plugins/clawbox-backup-scope), so the archiver
+  never walks them and nothing has to move. Paths it cannot name — a pattern,
+  not a path — are this module's.
+
 HOW
   The way `backup_guard` omits a managed link: set aside for the length of the
   build, under the same `archive.lock`, and put back the moment the build
@@ -110,6 +126,11 @@ _OPENCLAW_ARCHIVE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}-\d{2})"
     r"-openclaw-backup\.tar\.gz(?:\.enc)?",
 )
+#: What a directory's name holds when a run stages in it and removes it after.
+TMP_TREE_MARK = "_tmp_"
+#: A temporary tree in which nothing changed for this long is not a run's any
+#: more: one that finishes or fails takes its staging away within minutes.
+TMP_TREE_IDLE_S = 3600
 #: An archive file this big that the snapshot carries is warned about.
 LARGE_ARCHIVE_BYTES = 256 * 1024 * 1024
 #: Carried snapshot-sized archives named one by one; the rest are counted.
@@ -123,6 +144,7 @@ _LOGGED = 20
 
 RULE_STATE_BACKUPS = "archive in the state directory's backups folder"
 RULE_OPENCLAW_ARCHIVE = "OpenClaw backup archive"
+RULE_TMP_TREE = "temporary tree an unfinished run left behind"
 
 
 def _inside(path: str, root: str) -> bool:
@@ -156,6 +178,58 @@ def left_out_rule(path: str, state_dir: str | None) -> str:
     return ""
 
 
+def tmp_tree_named(name: str) -> bool:
+    """Does this directory NAME say temporary staging?"""
+    return TMP_TREE_MARK in name
+
+
+def tmp_tree_rule(
+    path: str, state_dir: str | None, workspaces: list[str], newest_mtime: float, now: float,
+) -> str:
+    """The rule that leaves this temporary tree out — see the module
+    docstring — or "" when it stays: outside the state directory, inside a
+    workspace (the owner's files are the owner's, whatever their name), or
+    changed within the last :data:`TMP_TREE_IDLE_S`."""
+    if state_dir is None or path == state_dir or not _inside(path, state_dir):
+        return ""
+    if not tmp_tree_named(os.path.basename(path)):
+        return ""
+    if any(_inside(path, ws) for ws in workspaces):
+        return ""
+    if now - newest_mtime < TMP_TREE_IDLE_S:
+        return ""
+    return RULE_TMP_TREE
+
+
+def measure_tree(path: str) -> tuple[int, float]:
+    """The bytes of the regular files in a tree and the newest change in it
+    (its directories' and files' mtime, links not followed)."""
+    total = 0
+    try:
+        newest = os.lstat(path).st_mtime
+    except OSError:
+        return 0, float("inf")
+    stack = [path]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            newest = max(newest, st.st_mtime)
+            if stat.S_ISDIR(st.st_mode):
+                stack.append(entry.path)
+            elif stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total, newest
+
+
 def display_path(path: str) -> str:
     """`~/…` for a path in the home directory: how the app and the log say it."""
     home = os.path.expanduser("~").rstrip("/")
@@ -166,7 +240,8 @@ def display_path(path: str) -> str:
 
 @dataclass(frozen=True)
 class ArchiveFile:
-    """An archive-named regular file the archiver would carry."""
+    """An archive-named regular file the archiver would carry — or, with
+    `is_dir`, a temporary tree (:func:`tmp_tree_rule`)."""
 
     path: str
     size: int
@@ -174,6 +249,8 @@ class ArchiveFile:
     rule: str
     #: The planned asset it is in. A hold directory beside it is on its disk.
     asset_root: str
+    #: A whole directory, set aside and put back as one.
+    is_dir: bool = False
 
 
 # ── the journal ──────────────────────────────────────────────────────────────
@@ -212,6 +289,7 @@ def _journal_entries(journal: Path) -> list[dict[str, object]] | None:
                 "path": path,
                 "held": held,
                 "bytes": size if isinstance(size, int) and size >= 0 else 0,
+                **({"dir": True} if entry.get("dir") is True else {}),
             })
     return good
 
@@ -321,7 +399,12 @@ def set_aside(
     """Take every file the rule leaves out out of the tree for the archive
     build. Returns the files set aside, sized as they were moved; every other
     one stays where it is and goes into the snapshot."""
-    wanted = [archive for archive in found if archive.rule]
+    trees = [a.path for a in found if a.rule and a.is_dir]
+    # What is inside a tree that goes goes with it.
+    wanted = [
+        archive for archive in found
+        if archive.rule and not any(t != archive.path and _inside(archive.path, t) for t in trees)
+    ]
     if not wanted:
         return []
     pending = _journal_entries(journal)
@@ -355,7 +438,10 @@ def set_aside(
         )
 
     def entries(items: list[tuple[ArchiveFile, str]]) -> list[dict[str, object]]:
-        return pending + [{"path": a.path, "held": held, "bytes": a.size} for a, held in items]
+        return pending + [
+            {"path": a.path, "held": held, "bytes": a.size, **({"dir": True} if a.is_dir else {})}
+            for a, held in items
+        ]
 
     moved: list[tuple[ArchiveFile, str]] = []
     try:
@@ -364,9 +450,9 @@ def set_aside(
         for archive, held in planned:
             try:
                 now = os.lstat(archive.path)
-                # Still a regular file — never move a link or a directory
-                # that took the scanned file's name.
-                if not stat.S_ISREG(now.st_mode):
+                # Still what the walk found — a regular file, or a real
+                # directory for a tree — never a link that took its name.
+                if not (stat.S_ISDIR(now.st_mode) if archive.is_dir else stat.S_ISREG(now.st_mode)):
                     continue
                 os.rename(archive.path, held)
             except OSError as e:
@@ -376,15 +462,15 @@ def set_aside(
                     "could not set aside %s, it stays in this snapshot: %s", archive.path, e,
                 )
                 continue
-            moved.append((dataclasses.replace(archive, size=now.st_size), held))
+            moved.append((archive if archive.is_dir else dataclasses.replace(archive, size=now.st_size), held))
         if planned:
             _write_journal(journal, entries(moved))
     finally:
         holds.drop_empty()
     if moved:
         log.info(
-            "leaving %d backup archive(s), %d bytes, out of this snapshot; they are put back when "
-            "it is built: %s%s",
+            "leaving %d backup archive(s) and temporary tree(s), %d bytes, out of this snapshot; "
+            "they are put back when it is built: %s%s",
             len(moved), sum(a.size for a, _ in moved),
             ", ".join(f"{a.path} ({a.rule})" for a, _ in moved[:_LOGGED]),
             f" … and {len(moved) - _LOGGED} more" if len(moved) > _LOGGED else "",
@@ -446,9 +532,10 @@ def _link_or_rename(held: str, dest: str) -> None:
         log.warning("put back %s but could not drop its hold name %s: %s", dest, held, e)
 
 
-def _return_one(path: str, held: str) -> str | None:
-    """Put one file back. Returns where it went, "" when there was nothing to
-    put back, and `None` when it has to stay in the journal."""
+def _return_one(path: str, held: str, is_dir: bool = False) -> str | None:
+    """Put one file — or one temporary tree — back. Returns where it went, ""
+    when there was nothing to put back, and `None` when it has to stay in the
+    journal."""
     try:
         was = os.lstat(held)
     except FileNotFoundError:
@@ -461,8 +548,11 @@ def _return_one(path: str, held: str) -> str | None:
     except OSError as e:
         log.warning("cannot look at set-aside file %s (%s stays in the journal): %s", held, path, e)
         return None
-    if not stat.S_ISREG(was.st_mode):
-        log.warning("not putting back %s: its hold name %s is no longer a regular file", path, held)
+    if not (stat.S_ISDIR(was.st_mode) if is_dir else stat.S_ISREG(was.st_mode)):
+        log.warning(
+            "not putting back %s: its hold name %s is no longer a %s",
+            path, held, "directory" if is_dir else "regular file",
+        )
         return None
     try:
         here = os.lstat(path)
@@ -520,7 +610,7 @@ def put_back(journal: Path) -> list[str]:
     for entry in entries:
         path, held = str(entry["path"]), str(entry["held"])
         run_dirs.add(os.path.dirname(held))
-        where = _return_one(path, held)
+        where = _return_one(path, held, entry.get("dir") is True)
         if where is None:
             remaining.append(entry)
         elif where:
@@ -537,6 +627,9 @@ def put_back(journal: Path) -> list[str]:
 def report(found: list[ArchiveFile], set_aside: list[ArchiveFile]) -> dict[str, object]:
     """The archive's account of this: the extra fields of `openclaw.Archive`."""
     out = {archive.path for archive in set_aside}
+    # The app names these "backup archives"; the temporary trees are logged.
+    set_aside = [archive for archive in set_aside if not archive.is_dir]
+    found = [archive for archive in found if not archive.is_dir]
     carried = sorted(
         (a for a in found if a.path not in out and a.size >= LARGE_ARCHIVE_BYTES),
         key=lambda a: (-a.size, a.path),

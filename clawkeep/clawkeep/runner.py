@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import shutil
 import tempfile
 import threading
 import time
@@ -365,6 +366,76 @@ def _quota_refusal_message(needed: int, used: int, quota: int) -> str:
     )
 
 
+#: When one failure incident — from the first failed run to the next one that
+#: succeeds — is told to the portal, which emails the owner "ClawKeep backup
+#: needs attention" for an `error` heartbeat: at once, then these long after the
+#: report before (1 day, 3 days, 7 days, then every 7 days). A box that fails
+#: the same way every night costs its owner one email, then a reminder or three,
+#: not one a night. Between those points the failure is logged and kept in
+#: state.json, the app shows it as always, and the portal keeps showing the
+#: failure it was told; the run that succeeds closes the incident.
+ALERT_BACKOFF_MS = (1 * 86_400_000, 3 * 86_400_000, 7 * 86_400_000)
+
+
+def _incident_quiet(st: state.State, now: int) -> bool:
+    """Is a failure incident open whose next report to the portal is not due?"""
+    return bool(st.alert_incident_since_ms) and now < st.alert_next_report_at_ms
+
+
+def _report_error(server: str, token: str, st: state.State, **kwargs: object) -> bool:
+    """The `error` heartbeat of a failed run, when its incident is due one.
+
+    Returns what `_stamp_heartbeat` takes: False only when a heartbeat was
+    posted and failed. A failure inside the quiet period posts nothing and
+    returns True — the portal already holds this incident's error — and a
+    heartbeat that did not land is not counted, so the next run reports it."""
+    now = api.now_ms()
+    if not st.alert_incident_since_ms:
+        st.alert_incident_since_ms = now
+        st.alert_reports = 0
+        st.alert_next_report_at_ms = 0
+    if _incident_quiet(st, now):
+        log.warning(
+            "backup failed again (%s); not reporting it to the portal yet: this failure incident "
+            "began %d s ago and was reported %d time(s), the next report is due in %d s",
+            kwargs.get("error", "error"), (now - st.alert_incident_since_ms) // 1000,
+            st.alert_reports, (st.alert_next_report_at_ms - now) // 1000,
+        )
+        return True
+    ok = _heartbeat_safe(server, token, status="error", **kwargs)
+    if ok:
+        st.alert_reports += 1
+        step = ALERT_BACKOFF_MS[min(st.alert_reports, len(ALERT_BACKOFF_MS)) - 1]
+        st.alert_next_report_at_ms = now + step
+    return ok
+
+
+def _close_incident(st: state.State) -> None:
+    """A run succeeded: the next failure is a new incident, reported at once."""
+    st.alert_incident_since_ms = 0
+    st.alert_reports = 0
+    st.alert_next_report_at_ms = 0
+
+
+#: What the staging disk keeps free while the archive is encrypted beside itself.
+ENCRYPT_DISK_RESERVE_BYTES = 256 * 1024 * 1024
+#: openssl's salted header and padding, generously.
+_ENCRYPT_OVERHEAD_BYTES = 64 * 1024
+
+
+def _encryption_room(archive_path: Path, size_bytes: int) -> tuple[int, int] | None:
+    """None when the staging disk can take the ciphertext of an archive this
+    big and keep its reserve; else (bytes needed, bytes free). A disk that
+    cannot be measured is not refused for it."""
+    try:
+        free = shutil.disk_usage(archive_path.parent).free
+    except OSError as e:
+        log.warning("could not measure the free disk beside %s: %s", archive_path, e)
+        return None
+    needed = size_bytes + _ENCRYPT_OVERHEAD_BYTES + ENCRYPT_DISK_RESERVE_BYTES
+    return None if free >= needed else (needed, free)
+
+
 def _run_lock_path() -> Path:
     # A function of its own because `run_once` takes a `token` argument that
     # hides the `token` module there.
@@ -540,8 +611,8 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     # and prompts for a passphrase before retrying.
     if not passphrase.is_set():
         log.error("encryption passphrase not set — refusing to back up")
-        ok = _heartbeat_safe(
-            cfg.server, token, status="error",
+        ok = _report_error(
+            cfg.server, token, st,
             error="encryption passphrase not set on device",
         )
         # Use a distinct heartbeat status so the UI can distinguish
@@ -573,7 +644,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
         msg_prefix = {"quota_full": "quota full", "tier": "tier", "server": "server"}.get(e.kind)
         prefixed = f"{msg_prefix}: {e}" if msg_prefix else str(e)
         log.error("%s: %s", e.kind, e)
-        ok = _heartbeat_safe(cfg.server, token, status="error", error=prefixed)
+        ok = _report_error(cfg.server, token, st, error=prefixed)
         _stamp_heartbeat(st, ok, "error")
         _note_credentials(st, e.kind)
         state.save(st)
@@ -595,13 +666,19 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     # fail in openclaw, in openssl or in the upload, which is exactly the shape
     # of run a nearly-full account produces.
     opening = _recompute_usage(st, creds)
-    running_ok = _heartbeat_safe(
-        cfg.server,
-        token,
-        status="running",
-        cloud_bytes=opening.cloud_bytes if opening is not None else None,
-        snapshot_count=opening.snapshot_count if opening is not None else None,
-    )
+    if _incident_quiet(st, api.now_ms()):
+        # Not "running" either: were this run to fail too, its error would not
+        # be posted, and the portal would be left saying "running" for days.
+        # It hears from this run when the run succeeds, or when a report is due.
+        running_ok = True
+    else:
+        running_ok = _heartbeat_safe(
+            cfg.server,
+            token,
+            status="running",
+            cloud_bytes=opening.cloud_bytes if opening is not None else None,
+            snapshot_count=opening.snapshot_count if opening is not None else None,
+        )
     _stamp_heartbeat(st, running_ok, "running")
     _stamp_step(st, STEP_STARTING)
 
@@ -618,8 +695,8 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
         except agent.ARCHIVE_ERRORS as e:
             which = agent.device_agent()
             log.error("%s backup create failed: %s", which, e)
-            ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=f"{which}: {e}"[:500],
+            ok = _report_error(
+                cfg.server, token, st, error=f"{which}: {e}"[:500],
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
@@ -651,6 +728,23 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
         encrypted_path = archive.path.with_suffix(
             archive.path.suffix + crypto.ENCRYPTED_SUFFIX,
         )
+        # The ciphertext is written BESIDE the plaintext, so for a moment the
+        # staging disk holds the archive twice. That disk is the box's own —
+        # its databases and logs are on it — and an encryption that runs it to
+        # the last byte costs the gateway its writes before it fails. Measured
+        # first, with a reserve left over; a refusal says how much is missing.
+        room = _encryption_room(archive.path, archive.size_bytes)
+        if room is not None:
+            needed, free = room
+            message = (
+                f"encrypt: not enough free disk beside the archive to encrypt it: needs "
+                f"{_human_bytes(needed)}, {_human_bytes(free)} free"
+            )
+            log.error("%s (staging %s)", message, archive.path.parent)
+            ok = _report_error(cfg.server, token, st, error=message)
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_ENCRYPTION_FAILED
         try:
             crypto.encrypt_file(
                 plaintext_path=archive.path,
@@ -659,8 +753,8 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
             )
         except crypto.CryptoError as e:
             log.error("clawkeep encryption failed: %s", e)
-            ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=f"encrypt: {e}"[:500],
+            ok = _report_error(
+                cfg.server, token, st, error=f"encrypt: {e}"[:500],
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
@@ -685,8 +779,8 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
             # rather than raised, so the run still says so — an exception from
             # here left state.json reading "encrypting" with no heartbeat.
             log.error("could not stat the encrypted archive: %s", e)
-            ok = _heartbeat_safe(
-                cfg.server, token, status="error",
+            ok = _report_error(
+                cfg.server, token, st,
                 error="encrypt: the encrypted archive could not be read back",
             )
             _stamp_heartbeat(st, ok, "error")
@@ -715,7 +809,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
                 "Nothing was uploaded or removed. Check connectivity and retry."
             )
             log.error(message)
-            ok = _heartbeat_safe(cfg.server, token, status="error", error=message)
+            ok = _report_error(cfg.server, token, st, error=message)
             _stamp_heartbeat(st, ok, "error")
             _note_refusal(
                 st, state.REFUSAL_USAGE_UNVERIFIED,
@@ -731,8 +825,8 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
                 "%s (needs %d bytes; %d of %d bytes used)",
                 message, encrypted_size, admission.cloud_bytes, creds.quotaBytes,
             )
-            ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=message,
+            ok = _report_error(
+                cfg.server, token, st, error=message,
                 cloud_bytes=admission.cloud_bytes,
                 snapshot_count=admission.snapshot_count,
             )
@@ -804,7 +898,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
             st.upload_bytes_total = 0
             st.upload_bytes_done = 0
             st.upload_started_at_ms = 0
-            ok = _heartbeat_safe(cfg.server, token, status="error", error=f"upload: {e}"[:500])
+            ok = _report_error(cfg.server, token, st, error=f"upload: {e}"[:500])
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
             return EXIT_UPLOAD
@@ -863,6 +957,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
         # list-objects can't show "0 B" in the UI.
         _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
         st.last_backup_at_ms = now
+        _close_incident(st)
         state.save(st)
 
         log.info(
@@ -926,6 +1021,26 @@ def run_idle(cfg: Config, token: str) -> int:
     except Exception as e:  # noqa: BLE001 — best effort, logged
         log.warning("could not put back what an interrupted backup set aside: %s", e)
 
+    # Under the run's own lock, never beside a run: the tick reads state.json,
+    # spends up to minutes minting credentials and recounting, then writes it
+    # back — a run that ended in between had its error, its refusal and its
+    # incident record overwritten by the tick's stale copy. A run in progress
+    # heartbeats for itself, so the tick has nothing to add and leaves.
+    with contextlib.ExitStack() as held:
+        try:
+            acquired = held.enter_context(backup_guard.exclusive(_run_lock_path(), wait=False))
+        except OSError as e:
+            # A lock that cannot be taken at all starts no backup either; the
+            # heartbeat is still owed, as it always was.
+            log.warning("idle tick without the backup lock (%s): %s", _run_lock_path(), e)
+            acquired = True
+        if not acquired:
+            log.info("a backup is running; it reports for itself, skipping idle")
+            return EXIT_OK
+        return _run_idle_locked(cfg, token)
+
+
+def _run_idle_locked(cfg: Config, token: str) -> int:
     st = state.load()
     interval_ms = cfg.heartbeat.idle_interval_hours * 3600 * 1000
     now = api.now_ms()

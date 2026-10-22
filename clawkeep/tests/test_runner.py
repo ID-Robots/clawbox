@@ -1834,3 +1834,164 @@ def test_a_lock_that_cannot_be_taken_starts_nothing(isolate_state, tmp_path, cap
     heartbeat.assert_not_called()
     assert isolate_state.read_bytes() == before
     assert "could not take the backup lock" in caplog.text
+
+
+# ── One failure incident, few alerts ──────────────────────────────────────────
+#
+# The portal emails "ClawKeep backup needs attention" for an `error` heartbeat.
+# A box that fails every night must not mail its owner every night: one
+# incident reaches the portal at once, then 1, 3 and 7 days after the report
+# before, then weekly, until a run succeeds.
+
+DAY_MS = 86_400_000
+T0 = 1_800_000_000_000
+
+
+def _failing_run(cfg: Config, at: int, heartbeats: list[dict], *, heartbeat_error: bool = False) -> int:
+    def fake_hb(server: str, token: str, **kw: object) -> None:
+        if heartbeat_error:
+            raise ApiError("network", "portal unreachable", None)
+        heartbeats.append({**kw, "at": at})
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat", side_effect=fake_hb),
+        patch("clawkeep.runner.api.now_ms", return_value=at),
+        patch("clawkeep.runner.openclaw.create_archive", side_effect=OpenclawError("disk full")),
+    ):
+        return runner.run_once(cfg, "claw_x")
+
+
+def test_a_nightly_failure_reaches_the_portal_at_the_backoff_points_only(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    heartbeats: list[dict] = []
+    for night in range(26):
+        assert _failing_run(cfg, T0 + night * DAY_MS, heartbeats) == runner.EXIT_OPENCLAW
+
+    errors = [(hb["at"] - T0) // DAY_MS for hb in heartbeats if hb["status"] == "error"]
+    assert errors == [0, 1, 4, 11, 18, 25]
+    # No "running" from a run whose failure is not reported: the portal keeps
+    # the error it was told instead of a run that never ends.
+    running = [(hb["at"] - T0) // DAY_MS for hb in heartbeats if hb["status"] == "running"]
+    assert running == errors
+    # The box itself shows every failure as it always did.
+    final = state.load(isolate_state)
+    assert final.last_heartbeat_status == "error"
+    assert final.last_heartbeat_at_ms == T0 + 25 * DAY_MS
+    assert final.alert_incident_since_ms == T0
+    assert final.alert_reports == 6
+
+
+def test_a_successful_run_ends_the_incident_and_the_next_failure_is_reported_at_once(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    heartbeats: list[dict] = []
+    _failing_run(cfg, T0, heartbeats)
+    _failing_run(cfg, T0 + DAY_MS // 2, heartbeats)
+    assert [hb["status"] for hb in heartbeats] == ["running", "error"]
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat", side_effect=lambda s, t, **kw: heartbeats.append({**kw, "at": 0})),
+        patch("clawkeep.runner.api.now_ms", return_value=T0 + DAY_MS * 2 // 3),
+        patch("clawkeep.runner.openclaw.create_archive", return_value=_archive(tmp_path)),
+        patch("clawkeep.runner.s3.upload", return_value="users/u_x/repo/snap.tar.gz"),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
+    # A run inside the quiet period that SUCCEEDS still says so.
+    assert [hb["status"] for hb in heartbeats][-1] == "ok"
+    assert state.load(isolate_state).alert_incident_since_ms == 0
+
+    _failing_run(cfg, T0 + DAY_MS * 3 // 4, heartbeats)
+    assert [hb["status"] for hb in heartbeats][-2:] == ["running", "error"]
+
+
+def test_an_error_heartbeat_that_did_not_land_is_sent_by_the_next_run(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    heartbeats: list[dict] = []
+    _failing_run(cfg, T0, heartbeats, heartbeat_error=True)
+    assert state.load(isolate_state).alert_reports == 0
+    _failing_run(cfg, T0 + 3_600_000, heartbeats)
+    assert [hb["status"] for hb in heartbeats] == ["running", "error"]
+
+
+def test_every_refusal_is_one_incident_too(isolate_state: Path, tmp_path: Path) -> None:
+    """The credential refusals post their own error heartbeat: same backoff."""
+    cfg = _cfg(tmp_path)
+    refused = ApiError("quota_full", "quota full", 402)
+    posted: list[str] = []
+    for night in range(3):
+        with (
+            patch("clawkeep.runner.api.mint_credentials", side_effect=refused),
+            patch("clawkeep.runner.api.heartbeat", side_effect=lambda s, t, **kw: posted.append(kw["status"])),
+            patch("clawkeep.runner.api.now_ms", return_value=T0 + night * DAY_MS // 2),
+        ):
+            assert runner.run_once(cfg, "claw_x") == runner.EXIT_QUOTA_FULL
+    assert posted == ["error", "error"]  # at 0 and at 1 day; not at 12 h
+
+
+def test_the_idle_tick_never_runs_beside_a_backup(isolate_state: Path, tmp_path: Path) -> None:
+    """The tick saved a state.json it had read before a run ended, over the
+    run's error and incident record. Under the run lock it leaves instead."""
+    from clawkeep import backup_guard
+
+    cfg = _cfg(tmp_path)
+    with (
+        backup_guard.exclusive(runner._run_lock_path(), wait=False) as ours,
+        patch("clawkeep.runner.api.heartbeat") as hb,
+        patch("clawkeep.runner.api.mint_credentials") as mint,
+    ):
+        assert ours
+        assert runner.run_idle(cfg, "claw_x") == runner.EXIT_OK
+    hb.assert_not_called()
+    mint.assert_not_called()
+
+
+def test_an_archive_the_staging_disk_cannot_encrypt_is_refused_before_it_fills_the_disk(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """The ciphertext goes beside the plaintext: the disk must hold the archive
+    twice, and keep a reserve for the box's own databases."""
+    import shutil as shutil_mod
+    from collections import namedtuple
+
+    cfg = _cfg(tmp_path)
+    archive = _archive(tmp_path)
+    heartbeats: list[dict] = []
+    usage = namedtuple("usage", "total used free")
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat", side_effect=lambda s, t, **kw: heartbeats.append(kw)),
+        patch("clawkeep.runner.openclaw.create_archive", return_value=archive),
+        patch.object(shutil_mod, "disk_usage", return_value=usage(10**12, 10**12, 100 * 1024 * 1024)),
+        patch("clawkeep.runner.crypto.encrypt_file") as encrypt,
+        patch("clawkeep.runner.s3.upload") as upload,
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+
+    assert rc == runner.EXIT_ENCRYPTION_FAILED
+    encrypt.assert_not_called()
+    upload.assert_not_called()
+    assert heartbeats[-1]["status"] == "error"
+    assert "not enough free disk" in heartbeats[-1]["error"]
+    assert not archive.path.exists()  # the plaintext still goes
+
+
+def test_room_for_the_ciphertext_is_room_for_the_archive_plus_the_reserve(tmp_path: Path) -> None:
+    import shutil as shutil_mod
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    size = 300 * 1024 * 1024
+    enough = size + runner.ENCRYPT_DISK_RESERVE_BYTES + 64 * 1024
+    with patch.object(shutil_mod, "disk_usage", return_value=usage(0, 0, enough)):
+        assert runner._encryption_room(tmp_path / "a.tar.gz", size) is None
+    with patch.object(shutil_mod, "disk_usage", return_value=usage(0, 0, enough - 1)):
+        assert runner._encryption_room(tmp_path / "a.tar.gz", size) == (enough, enough - 1)
+    with patch.object(shutil_mod, "disk_usage", side_effect=OSError("gone")):
+        assert runner._encryption_room(tmp_path / "a.tar.gz", size) is None
