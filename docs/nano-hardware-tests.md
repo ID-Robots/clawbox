@@ -1,8 +1,8 @@
 # Nano hardware tests
 
 The on-device test suite: a handful of checks that only mean something on a real
-Jetson, run automatically on **one** freshly reflashed board from the nano lab
-for every pull request, after which the board is recycled — handed to the lab
+Jetson, run on **one** freshly reflashed board from the nano lab for the events
+in [When it runs](#when-it-runs), after which the board is recycled — handed to the lab
 host's reflash queue for a clean golden restore — whether the tests passed,
 failed or were cancelled (see [How recycling works](#how-recycling-works)).
 
