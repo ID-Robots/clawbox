@@ -225,6 +225,7 @@ describe("db source: the agent databases, read-only", () => {
     expect(report.agentModels).toHaveLength(3);
     expect(report.totals).toMatchObject({ sessions: 3, calls: 4, totalTokens: 1742 });
     expect(report.notes).toEqual([]);
+    expect(report.complete).toBe(true);
   });
 
   it.skipIf(!zstdCompress)("decodes compressed rows and reads cold archives archived inside the window", () => {
@@ -285,6 +286,25 @@ describe("db source: the agent databases, read-only", () => {
     ro.db.close();
     // the writer still writes
     db.prepare("INSERT INTO session_windows VALUES ('s2', 'k', 0, 0, NULL)").run();
+  });
+
+  it("never reads a database a writer holds without its lock: it waits, then refuses", () => {
+    const { db, dbPath } = agentDb("main", { s1: [{ ts: IN, usage: anthropic(3, 3) }] });
+    db.exec("BEGIN EXCLUSIVE");
+    db.prepare("INSERT INTO session_windows VALUES ('s2', 'k', 0, 0, NULL)").run();
+
+    // Before: no busy timeout on the first read, and an immutable read of a
+    // main file mid-transaction.
+    expect(() => openReadOnly(dbPath, { busyTimeoutMs: 50 })).toThrow(/locked|busy/i);
+    // …and the report says it is short of that agent instead of claiming a full count.
+    const held = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null, busyTimeoutMs: 50 });
+    expect(held.complete).toBe(false);
+    expect(held.notes.join(" ")).toMatch(/agent main: could not open its database read-only: .*locked/i);
+
+    db.exec("COMMIT");
+    const ro = openReadOnly(dbPath, { busyTimeoutMs: 50 });
+    expect(ro.immutable).toBe(false);
+    ro.db.close();
   });
 
   it("says so when there is nothing to read", () => {

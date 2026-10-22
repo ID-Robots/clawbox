@@ -484,15 +484,22 @@ export function listAgentDatabases(stateDir, agent = null) {
  * the WAL the gateway writes and takes only a reader's slot; `query_only`
  * refuses any write this script could ever issue. When even that cannot open
  * (no access to the WAL index), `immutable=1` reads the main file alone — it
- * may miss the newest, uncheckpointed rows, and the report says so.
+ * may miss the newest, uncheckpointed rows, and the report says so. A BUSY or
+ * LOCKED database is never read that way: it is one a writer holds, and
+ * reading its main file without the lock could read a half-written
+ * transaction — it is waited for (`busyTimeoutMs`), then refused.
+ * @param {string} dbPath
+ * @param {{ busyTimeoutMs?: number }} [options]
  */
-export function openReadOnly(dbPath) {
+export function openReadOnly(dbPath, { busyTimeoutMs = 2000 } = {}) {
   const { DatabaseSync } = nodeSqlite();
   const url = pathToFileURL(dbPath).href;
   let db;
   let immutable = false;
   try {
     db = new DatabaseSync(`${url}?mode=ro`, { readOnly: true });
+    // Before the first read, so the probe below waits out a writer too.
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(busyTimeoutMs))}`);
     db.prepare("SELECT count(*) FROM sqlite_master").get();
   } catch (err) {
     try {
@@ -500,14 +507,20 @@ export function openReadOnly(dbPath) {
     } catch {
       /* already unusable */
     }
+    if (isBusy(err)) throw err;
     db = new DatabaseSync(`${url}?immutable=1`, { readOnly: true });
     immutable = true;
     db.prepare("SELECT count(*) FROM sqlite_master").get();
-    void err;
   }
   db.exec("PRAGMA query_only = 1");
-  db.exec("PRAGMA busy_timeout = 2000");
   return { db, immutable };
+}
+
+/** SQLITE_BUSY (5) or SQLITE_LOCKED (6), extended codes included. */
+function isBusy(err) {
+  const code = Number(/** @type {{ errcode?: unknown }} */ (err)?.errcode);
+  if (Number.isFinite(code) && [5, 6].includes(code & 0xff)) return true;
+  return /database (table )?is locked|database is busy/i.test(String(/** @type {Error} */ (err)?.message ?? ""));
 }
 
 const hasZstd = () => typeof zlib.zstdDecompressSync === "function";
@@ -650,10 +663,16 @@ export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
   return stats;
 }
 
-/** The whole `db` source: every agent database, read-only. */
-export function reportFromDatabases({ stateDir, window, agent }) {
+/**
+ * The whole `db` source: every agent database, read-only. `complete` is false
+ * when any of it went unread — a database that would not open or scan, rows or
+ * archives that could not be decoded, a read without the WAL.
+ * @param {{ stateDir: string, window: ReturnType<typeof usageWindow>, agent: string | null, busyTimeoutMs?: number }} params
+ */
+export function reportFromDatabases({ stateDir, window, agent, busyTimeoutMs }) {
   const acc = createAccumulator();
   const notes = [];
+  let complete = true;
   const dbs = listAgentDatabases(stateDir, agent);
   if (dbs.length === 0) {
     notes.push(`no OpenClaw agent database under ${path.join(stateDir, "agents")}${agent ? ` for agent ${agent}` : ""}`);
@@ -665,9 +684,10 @@ export function reportFromDatabases({ stateDir, window, agent }) {
   for (const { agentId, dbPath } of dbs) {
     let handle;
     try {
-      handle = openReadOnly(dbPath);
+      handle = openReadOnly(dbPath, { busyTimeoutMs });
     } catch (err) {
       notes.push(`agent ${agentId}: could not open its database read-only: ${err.message}`);
+      complete = false;
       continue;
     }
     try {
@@ -677,8 +697,10 @@ export function reportFromDatabases({ stateDir, window, agent }) {
       if (stats.undecodable) notes.push(`agent ${agentId}: ${stats.undecodable} compressed row(s) could not be decoded`);
       if (stats.coldSkipped.length) notes.push(`agent ${agentId}: ${stats.coldSkipped.length} cold archive(s) not read: ${stats.coldSkipped.slice(0, 3).join(", ")}`);
       scanned.push({ agentId, ...stats, coldSkipped: stats.coldSkipped.length });
+      if (handle.immutable || stats.undecodable || stats.coldSkipped.length) complete = false;
     } catch (err) {
       notes.push(`agent ${agentId}: ${err.message}`);
+      complete = false;
     } finally {
       try {
         handle.db.close();
@@ -687,7 +709,7 @@ export function reportFromDatabases({ stateDir, window, agent }) {
       }
     }
   }
-  return { ...acc.finish(), notes, scanned };
+  return { ...acc.finish(), notes, scanned, complete };
 }
 
 // ── The report ──────────────────────────────────────────────────────────────
@@ -740,7 +762,6 @@ export function buildReport(opts, { env = process.env, nowMs = Date.now(), gatew
     source: "db",
     ...report,
     notes: [...fallbackNotes, ...report.notes],
-    complete: true,
     elapsedMs: Date.now() - started,
   };
 }
