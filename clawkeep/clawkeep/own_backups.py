@@ -38,11 +38,13 @@ THE RULE (:func:`left_out_rule`)
   and counted in the log, not with the archive files the app names.
 
   What the core can leave out by itself it does: the state directory's
-  `upgrades/` and `backups/` and the Codex caches under every agent's
-  `codex-home/` are `regenerable` resources the `clawbox-backup-scope` plugin
+  `backups/` is a `regenerable` resource the `clawbox-backup-scope` plugin
   declares (scripts/openclaw-plugins/clawbox-backup-scope), so the archiver
-  never walks them and nothing has to move. Paths it cannot name — a pattern,
-  not a path — are this module's.
+  never walks it and nothing has to move — except the two folders `openclaw
+  doctor` moves the owner's originals into (`backups/tools-md-migration/`,
+  `backups/heartbeat-migration/`), which the same plugin declares `include`;
+  their `.md` files carry no archive suffix, so the rule below keeps them
+  too. Paths it cannot name — a pattern, not a path — are this module's.
 
 HOW
   The way `backup_guard` omits a managed link: set aside for the length of the

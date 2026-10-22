@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { createRequire } from "module";
 import os from "os";
@@ -147,6 +148,61 @@ function agentDb(agentId: string, sessions: Record<string, Array<Call | "user" |
 
 const anthropic = (input: number, output: number, cacheRead = 0, cacheWrite = 0) => ({ input, output, cacheRead, cacheWrite });
 
+/**
+ * Move a window to cold storage the way the pinned core's cold-storage worker
+ * does (prepareSessionColdArchiveInWorker, OpenClaw 2026.10.3): its transcript
+ * becomes zstd of JSON lines — a version-1 `header`, one `event` record per
+ * row with the event as a JSON STRING, then the `identity`, `active`, `index`
+ * and `fts` records — published as `<sha256>.jsonl.zst` under
+ * `agents/<id>/sessions/cold/` (`storage: "file"`) or embedded in the row
+ * (`"sqlite"`, as a database snapshot carries it), and the window's
+ * `transcript_events` rows are gone.
+ */
+function coldArchive(
+  target: ReturnType<typeof agentDb>,
+  sessionId: string,
+  events: Array<Call | "user">,
+  { archivedAt, storage }: { archivedAt: number; storage: "file" | "sqlite" },
+) {
+  const rows = events.map((e, i) => {
+    const event = e === "user"
+      ? { type: "message", id: `e${++ids}`, parentId: null, message: { role: "user", content: "ask the assistant" } }
+      : assistantEvent(e);
+    return { seq: i + 1, event_json: JSON.stringify(event), created_at: e === "user" ? IN : e.createdAt ?? e.ts };
+  });
+  const last = rows[rows.length - 1];
+  const generation = `generation-${sessionId}`;
+  const records = [
+    { kind: "header", version: 1, sessionId, generation },
+    ...rows.map((row) => ({ kind: "event", row })),
+    ...rows.map((row) => ({
+      kind: "identity",
+      row: { event_id: JSON.parse(row.event_json).id, seq: row.seq, event_type: "message", parent_id: null, message_idempotency_key: null, created_at: row.created_at },
+    })),
+    ...rows.map((row, i) => ({ kind: "active", row: { active_position: i, event_seq: row.seq, message_position: i, context_eligible: 1 } })),
+    {
+      kind: "index",
+      row: { indexed_seq: last.seq, leaf_event_id: JSON.parse(last.event_json).id, needs_rebuild: 0, active_event_count: rows.length, active_message_count: rows.length, updated_at: last.created_at },
+    },
+    // The search index's own copy: role "assistant" in the clear, not a call.
+    { kind: "fts", row: { text: "x", message_id: JSON.parse(last.event_json).id, role: "assistant", timestamp: last.created_at } },
+  ];
+  const bytes = zstdCompress!(Buffer.from(records.map((r) => `${JSON.stringify(r)}\n`).join("")));
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const name = `${sha256}.jsonl.zst`;
+  if (storage === "file") {
+    const cold = path.join(path.dirname(path.dirname(target.dbPath)), "sessions", "cold");
+    mkdirSync(cold, { recursive: true });
+    writeFileSync(path.join(cold, name), bytes);
+  }
+  const rawBytes = rows.reduce((sum, row) => sum + Buffer.byteLength(row.event_json), 0) + rows.length - 1;
+  target.db.prepare("INSERT INTO session_transcript_cold_archives VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(sessionId, generation, name, sha256, rows.length, rawBytes, bytes.length, last.seq, archivedAt, storage, storage === "sqlite" ? bytes : null);
+  target.db.prepare("INSERT INTO session_windows VALUES (?, ?, ?, ?, ?)")
+    .run(sessionId, `agent:main:${sessionId}`, rows[0].created_at, last.created_at, last.created_at);
+  return name;
+}
+
 describe("arguments and window", () => {
   it("defaults to every agent over the last 7 days from the best source", () => {
     expect(parseArgs([])).toMatchObject({ days: 7, agent: null, json: false, source: "auto" });
@@ -229,16 +285,63 @@ describe("db source: the agent databases, read-only", () => {
   });
 
   it.skipIf(!zstdCompress)("decodes compressed rows and reads cold archives archived inside the window", () => {
-    const { db } = agentDb("main", { s1: [{ ts: IN, usage: anthropic(40, 4), packed: true }] });
-    const cold = [JSON.stringify({ type: "session", id: "s9" }), JSON.stringify(assistantEvent({ ts: IN, usage: anthropic(1, 1), model: "m-cold" }))].join("\n");
-    db.prepare("INSERT INTO session_windows VALUES ('s9', 'agent:main:s9', 0, ?, NULL)").run(IN + 10);
-    db.prepare("INSERT INTO session_transcript_cold_archives VALUES ('s9', 'g', 'a.jsonl.zst', ?, 1, ?, 1, 2, ?, 'sqlite', ?)")
-      .run("0".repeat(64), Buffer.byteLength(cold), IN + 10, zstdCompress!(Buffer.from(cold)));
+    const main = agentDb("main", { s1: [{ ts: IN, usage: anthropic(40, 4), packed: true }] });
+    coldArchive(main, "s9", ["user", { ts: IN, usage: anthropic(1, 1), model: "m-cold" }], { archivedAt: IN + 10, storage: "sqlite" });
 
     const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
 
     expect(report.totals).toMatchObject({ sessions: 2, calls: 2, input: 41, output: 5 });
-    expect(report.scanned[0]).toMatchObject({ decoded: 1, coldRead: 1, undecodable: 0 });
+    expect(report.scanned[0]).toMatchObject({ decoded: 1, coldRead: 1, coldSkipped: 0, undecodable: 0 });
+    expect(report.notes).toEqual([]);
+    expect(report.complete).toBe(true);
+  });
+
+  it.skipIf(!zstdCompress)("counts the calls of a window the core moved to cold storage inside the window", () => {
+    const main = agentDb("main", {
+      live: [{ ts: IN + 1, usage: anthropic(100, 10), responseId: "r-forked" }],
+    });
+    // Archived the day after its last call: its rows left transcript_events.
+    coldArchive(main, "archived", [
+      "user",
+      { ts: BEFORE, usage: anthropic(9999, 9999), responseId: "r-old" },
+      { ts: IN, usage: anthropic(30, 3, 300, 7), responseId: "r-cold" },
+      "user",
+      { ts: IN + 1, usage: anthropic(100, 10), responseId: "r-forked" },
+      { ts: IN + 2, provider: "deepseek", model: "deepseek-chat", usage: { prompt_tokens: 50, completion_tokens: 5 } },
+    ], { archivedAt: IN + 24 * 60 * 60 * 1000, storage: "file" });
+    // Archived before the window began: nothing in it can be inside the window.
+    coldArchive(main, "long-gone", [{ ts: BEFORE, usage: anthropic(7, 7) }], { archivedAt: BEFORE + 1, storage: "file" });
+
+    const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
+
+    expect(report.models.map((m: { provider: string; model: string; sessions: number; calls: number }) => [`${m.provider}/${m.model}`, m.sessions, m.calls])).toEqual([
+      ["anthropic/claude-sonnet-4-6", 2, 2],
+      ["deepseek/deepseek-chat", 1, 1],
+    ]);
+    // r-cold, r-forked once (the live fork copied it), the deepseek call.
+    expect(report.totals).toMatchObject({ sessions: 2, calls: 3, input: 180, output: 18, cacheRead: 300, cacheWrite: 7 });
+    expect(report.scanned[0]).toMatchObject({ coldRead: 1, coldSkipped: 0 });
+    expect(report.notes).toEqual([]);
+    expect(report.complete).toBe(true);
+  });
+
+  it.skipIf(!zstdCompress)("names a cold archive it cannot read instead of counting none of it in silence", () => {
+    const main = agentDb("main", {});
+    // Plain transcript events, not the core's records: not an archive it writes.
+    const plain = [JSON.stringify({ type: "session", id: "s9" }), JSON.stringify(assistantEvent({ ts: IN, usage: anthropic(1, 1) }))].join("\n");
+    const bytes = zstdCompress!(Buffer.from(plain));
+    main.db.prepare("INSERT INTO session_transcript_cold_archives VALUES ('s9', 'g', ?, ?, 1, ?, ?, 2, ?, 'sqlite', ?)")
+      .run(`${"0".repeat(64)}.jsonl.zst`, "0".repeat(64), Buffer.byteLength(plain), bytes.length, IN + 10, bytes);
+    // A file archive whose file is missing.
+    const name = coldArchive(main, "s10", [{ ts: IN, usage: anthropic(2, 2) }], { archivedAt: IN + 10, storage: "file" });
+    rmSync(path.join(stateDir, "agents", "main", "sessions", "cold", name));
+
+    const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
+
+    expect(report.totals).toMatchObject({ calls: 0 });
+    expect(report.scanned[0]).toMatchObject({ coldRead: 0, coldSkipped: 2 });
+    expect(report.notes).toEqual([expect.stringMatching(/^agent main: 2 cold archive\(s\) not read: /)]);
+    expect(report.complete).toBe(false);
   });
 
   it("stops each session's newest-first walk soon after the window instead of reading its history", () => {
