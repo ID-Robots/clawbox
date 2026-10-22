@@ -135,6 +135,13 @@ describe("names and leaves", () => {
     const counted = candidateNames("We moved 200 Google Drive files to Northwind Depot.");
     expect(counted.has("Google Drive")).toBe(true);
     expect(counted.has("Northwind Depot")).toBe(true);
+    // A company after the street is no city: it stays a name, and the street still goes.
+    const shipTo = candidateNames("Ship to 12 Maple Grove Drive, Contoso Pharmacy Ltd.");
+    expect(shipTo.has("Contoso Pharmacy Ltd")).toBe(true);
+    expect([...shipTo].filter((x) => x.includes("Maple"))).toEqual([]);
+    const afterCity = candidateNames("Ship to 12 Maple Grove Drive, Springfield, Initech GmbH, by Friday.");
+    expect(afterCity.has("Initech GmbH")).toBe(true);
+    expect([...afterCity].filter((x) => x.includes("Maple") || x.includes("Springfield"))).toEqual([]);
   });
 
   it("creates no entity page for the street or city of an address many pages carry", async () => {

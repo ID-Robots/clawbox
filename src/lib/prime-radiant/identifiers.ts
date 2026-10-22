@@ -180,11 +180,19 @@ const POSTCODE = "(?:[A-Z]\\d[A-Z][ \\t]?\\d[A-Z]\\d|\\d{5}(?:-\\d{4})?)(?![\\p{
 /** A province's or state's two-letter code ("AB", "NY"). */
 const REGION = "[A-Z]{2}(?![\\p{L}\\p{N}])";
 /**
+ * A company's name up to its legal suffix ("Contoso Pharmacy Ltd"): after a
+ * street's comma it is a company, never a city. A two-letter Latin suffix
+ * ("AB", "SA") is left out: there it reads as a region code.
+ */
+const COMPANY =
+  "(?:\\p{Lu}[\\p{L}\\p{N}&'’-]*[ \\t]+){0,4}(?:Ltd|Limited|GmbH|Inc|LLC|OOD|EOOD|EAD|Corp|PLC|SRL|Oy|ApS|ООД|ЕООД|АД|ЕАД)(?![\\p{L}\\p{N}])";
+/**
  * A postal address: a house number, the street's capitalised words and its
  * type word ("12 Maple Grove Drive"), then its city and region parts and a
  * postcode — by commas ("…, Springfield, AB T4N 1A1"), or by spaces when they
  * end in a region code or a postcode ("… Springfield AB T4N 1A1"), so the
- * capitalised words of a next sentence are never taken for a city. A full
+ * capitalised words of a next sentence are never taken for a city, nor a
+ * company's name with its legal suffix ("… Drive, Contoso Pharmacy Ltd."). A full
  * stop ends it. A street with no city after it is one only where a punctuation
  * mark or the text's end follows ("ships to 12 Maple Grove Drive.", "… Drive
  * (rear door)"): a count or an amount before a name ("200 Google Drive files",
@@ -196,7 +204,7 @@ const REGION = "[A-Z]{2}(?![\\p{L}\\p{N}])";
 const POSTAL_ADDRESS = new RegExp(
   `(?<![\\p{L}\\p{N}])\\d{1,6}[A-Za-z]?[ \\t]+(?:${STREET_WORD}[ \\t]+){1,4}${STREET_TYPE}(?![\\p{L}\\p{N}])` +
     `(?:[ \\t]+(?:NE|NW|SE|SW|N|S|E|W)(?![\\p{L}\\p{N}]))?` +
-    `(?:(?:,[ \\t]*${PLACE}){1,3}(?:,?[ \\t]+${POSTCODE})?` +
+    `(?:(?:,[ \\t]*(?!${COMPANY})${PLACE}){1,3}(?:,?[ \\t]+${POSTCODE})?` +
     `|(?:,?[ \\t]+${PLACE_WORD}){0,3},?[ \\t]+(?:${REGION}(?:,?[ \\t]+${POSTCODE})?|${POSTCODE})` +
     `|(?=[ \\t]*(?:[.,;:!?()\\[\\]{}"“”«»–—\\r\\n]|$)))`,
   "gu",
