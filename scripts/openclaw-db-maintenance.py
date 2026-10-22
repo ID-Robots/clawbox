@@ -993,6 +993,10 @@ AGENT_REF_RES = (
     re.compile(r"agentId\\?[\"']?\s*[:=]\s*\\?[\"']?" + _ID),
     re.compile(r"agent database\s+[\"'`(]?" + _ID, re.IGNORECASE),
     re.compile(r"\bagent\s+[\"'`]" + _ID + r"[\"'`]", re.IGNORECASE),
+    # A session key, `agent:<id>:<rest>`: how 2026.10.6 names the agent when it
+    # refuses a row ("invalid persisted session row requires repair for
+    # agent:main:<key>"), with no database path or agent id beside it.
+    re.compile(r"(?<![A-Za-z0-9_.-])agent:" + _ID + r":"),
 )
 SQLITE_PATH_RE = re.compile(r"(/[^\s'\"\\,;()]+?\.sqlite)(?![A-Za-z0-9_.])")
 STATE_REF_RE = re.compile(r"shared[ -]state database", re.IGNORECASE)

@@ -129,7 +129,11 @@ if cmd[:1] == ["gateway"]:
         rows = bad_rows(db)
         if rows:
             agent = db.split(os.sep)[-3]
-            msg = "agent-database:%s refused admission: session row %s failed validation (%s)" % (agent, rows[0], db)
+            if os.environ.get("OC_CORE_WORDING") == "2026.10.6":
+                # Word for word what 2026.10.6 says on a box: the agent only in the session key.
+                msg = "invalid persisted session row requires repair for agent:%s:%s; stop the Gateway and run openclaw doctor --fix" % (agent, rows[0])
+            else:
+                msg = "agent-database:%s refused admission: session row %s failed validation (%s)" % (agent, rows[0], db)
             log("error", msg)
             print("Gateway failed to start: " + msg, file=sys.stderr)
             sys.exit(1)
@@ -299,6 +303,25 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     } finally {
       process.env.CLAWBOX_ROOT = saved;
     }
+  });
+
+  it("knows the refused database from the session key 2026.10.6 names, and puts back its copy", () => {
+    // The core's own words name no database and no agent id, only the key of
+    // the row: "... requires repair for agent:main:s-bad".
+    const bak = `${agentDb("main")}.pre-startup-migration-20261020T101010Z-abc.bak`;
+    makeDb(bak, [good("s1"), good("s2")]);
+    const opsBefore = readFileSync(agentDb("ops"));
+
+    const run = bootLoop({ OC_DOCTOR_REPAIRS: "0", OC_CORE_WORDING: "2026.10.6" });
+
+    expect(run.said).toMatch(/restarted itself 3 times over a database it refused: .*agent:main:s-bad/);
+    expect(run.up).toBe(true);
+    expect(run.starts).toBe(5);
+    expect(sessionIds(agentDb("main"))).toEqual(["s1", "s2"]);
+    expect(readFileSync(agentDb("ops")).equals(opsBefore)).toBe(true);
+    const g = guardFile();
+    expect(g.notice).toMatchObject({ outcome: "restored", reason: null, databases: ["agent main"] });
+    expect(g.restoredFrom).toEqual([bak]);
   });
 
   it("gives up after the repair when there is no pre-update copy, says so once, and deletes nothing", () => {
