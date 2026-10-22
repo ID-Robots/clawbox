@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
- * install.sh's `harness_downgrade_guard`, which `sync_repo_to_update_target`
- * asks after its fetch and before anything moves the tree: would the branch
+ * install.sh's `harness_downgrade_guard`, which the bootstrap block and
+ * `sync_repo_to_update_target` each ask after their fetch and before anything
+ * moves the tree: would the branch
  * install an older harness than the one that wrote this box's data? The
  * in-app updater asks first (src/lib/updater.ts); this is the same question
  * for every other way into the sync — install.sh over SSH, an update whose
@@ -52,14 +53,14 @@ function release(openclawPin: string, hermesPin: string): void {
   const upstream = path.join(dir, "upstream");
   writeFileSync(path.join(upstream, "config", "openclaw-target.txt"), `${openclawPin}\n`);
   writeFileSync(path.join(upstream, "install.sh"),
-    `#!/bin/bash\n# Current pin: upstream tag v0.21.1 == "Hermes Agent v0.21.1".\nHERMES_PIN_COMMIT="\${HERMES_PIN_COMMIT:-${hermesPin}}"\n`);
+    `#!/bin/bash\n# Current pin: upstream tag v0.21.1 == "Hermes Agent v0.21.1".\nHERMES_PIN_COMMIT="\${HERMES_PIN_COMMIT:-${hermesPin}}"\necho "the target's install.sh ran"\n`);
   git(upstream, "add", "-A");
   git(upstream, "commit", "-qm", `pins ${openclawPin}`);
   git(checkout, "fetch", "-q", "origin");
 }
 
 function installed(version: string | null): void {
-  const pkg = path.join(dir, "npm", "lib", "node_modules", "openclaw");
+  const pkg = path.join(dir, "home", ".npm-global", "lib", "node_modules", "openclaw");
   rmSync(pkg, { recursive: true, force: true });
   if (!version) return;
   mkdirSync(pkg, { recursive: true });
@@ -76,17 +77,10 @@ function authorize(over: Record<string, unknown> = {}): void {
 function guard(edition: "openclaw" | "hermes" | "dual" = "openclaw") {
   const program = [
     "set -euo pipefail",
-    `PROJECT_DIR=${JSON.stringify(checkout)}`,
-    `NPM_PREFIX=${JSON.stringify(path.join(dir, "npm"))}`,
-    `CLAWBOX_HOME=${JSON.stringify(path.join(dir, "home"))}`,
-    `CLAWBOX_EDITION=${edition}`,
     "GIT_RUNNER=()",
-    // install.sh's own one-liners, as shipped.
-    /^has_hermes_harness\(\) .*$/m.exec(INSTALL_SH)?.[0] ?? "",
-    /^has_openclaw_harness\(\) .*$/m.exec(INSTALL_SH)?.[0] ?? "",
-    'as_clawbox() { "$@"; }',
     shellFunction("harness_downgrade_guard"),
-    "harness_downgrade_guard origin/main",
+    // <upstream> <checkout> <clawbox home> <edition>, as both call sites pass them.
+    `harness_downgrade_guard origin/main ${JSON.stringify(checkout)} ${JSON.stringify(path.join(dir, "home"))} ${edition}`,
   ].join("\n");
   const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", env: { ...process.env, ...GIT_ENV } });
   return { status: r.status, stderr: r.stderr, stdout: r.stdout };
@@ -208,5 +202,85 @@ describe("sync_repo_to_update_target asks it", () => {
     expect(guardAt).toBeGreaterThan(fetchAt);
     expect(guardAt).toBeLessThan(sync.indexOf("preserve_local_edits"));
     expect(guardAt).toBeLessThan(sync.indexOf("reset --hard"));
+  });
+});
+
+/**
+ * The block at the top of install.sh, run for real in the dispatched shape: it
+ * fetches, resets the checkout to origin/<branch> and re-execs. Its reset is the
+ * FIRST thing an update or a bare `sudo CLAWBOX_BRANCH=main bash install.sh`
+ * does to the tree, and what it re-execs is the target's own install.sh — an
+ * older branch's has no guard — so asking only in sync_repo_to_update_target
+ * came too late. Retargeted onto the fixture by replacing the literal paths it
+ * names, as install-local-edits.test.ts does.
+ */
+function bootstrap(branch: string) {
+  const home = path.join(dir, "home");
+  const start = INSTALL_SH.indexOf('_self="$(cd "$(dirname "${BASH_SOURCE[0]}")"');
+  const end = INSTALL_SH.indexOf("# ── Constants");
+  if (start < 0 || end < start) throw new Error("bootstrap block not found in install.sh");
+  // The checkout where the box keeps it, and the root-owned copy root runs.
+  const project = path.join(home, "clawbox");
+  rmSync(project, { recursive: true, force: true });
+  git(dir, "clone", "-q", checkout, project);
+  git(project, "remote", "set-url", "origin", path.join(dir, "upstream"));
+  git(project, "fetch", "-q", "origin");
+  mkdirSync(path.join(project, "data"), { recursive: true });
+  const mirror = path.join(dir, "mirror");
+  mkdirSync(path.join(mirror, "scripts"), { recursive: true });
+  writeFileSync(path.join(mirror, "scripts", "preserve-local-edits.sh"),
+    readFileSync(path.join(REPO, "scripts", "preserve-local-edits.sh"), "utf-8"));
+  const block = INSTALL_SH.slice(start, end)
+    .split("/var/lib/clawbox/root-exec-mirror").join(mirror)
+    .split("/home/clawbox").join(home)
+    // Never the real manifest helper: this runner may BE a ClawBox.
+    .split("/usr/local/libexec/clawbox/clawbox-root-manifest.sh").join(path.join(dir, "no-such-helper"));
+  writeFileSync(path.join(mirror, "install.sh"), [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    ...["git_retryable_failure", "git_with_retry", "use_tree_owner_for_git", "preserve_local_edits",
+      "_clawbox_may_self_update", "harness_downgrade_guard"].map(shellFunction),
+    block,
+    'echo "after-bootstrap bootstrapped=${CLAWBOX_INSTALL_BOOTSTRAPPED:-no}"',
+  ].join("\n"));
+  const before = git(project, "rev-parse", "HEAD");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env, ...GIT_ENV, CLAWBOX_BRANCH: branch, CLAWBOX_EDITION: "openclaw",
+    CLAWBOX_GIT_RETRIES: "1", CLAWBOX_LOCAL_EDITS_DIR: path.join(dir, "saves"),
+  };
+  delete env.CLAWBOX_INSTALL_BOOTSTRAPPED;
+  delete env.CLAWBOX_ALLOW_SELF_UPDATE;
+  const r = spawnSync("bash", [path.join(mirror, "install.sh")], { encoding: "utf-8", env });
+  return { status: r.status, out: `${r.stdout}${r.stderr}`, before, after: git(project, "rev-parse", "HEAD") };
+}
+
+describe.skipIf(!hasTools)("the bootstrap block asks it before ITS reset, the first one an update performs", () => {
+  it("refuses a branch older than the data and leaves the checkout where it was", () => {
+    release("2026.10.3", hermesCommits[1]);
+    installed("2026.10.6");
+    const r = bootstrap("main");
+    expect(r.out).toContain('Error: OpenClaw 2026.10.6 is installed, and branch "main" pins the older OpenClaw 2026.10.3.');
+    expect(r.status).toBe(1);
+    expect(r.after).toBe(r.before);
+    expect(r.out).not.toContain("Re-executing");
+    expect(r.out).not.toContain("after-bootstrap");
+  });
+
+  it("lets the same harness through: resets and re-execs as before", () => {
+    release("2026.10.6", hermesCommits[1]);
+    installed("2026.10.6");
+    const r = bootstrap("main");
+    expect(r.status).toBe(0);
+    expect(r.after).not.toBe(r.before);
+    expect(r.out).toContain("after-bootstrap bootstrapped=1");
+  });
+
+  it("asks after the fetch, before the saved edits and the reset", () => {
+    const start = INSTALL_SH.indexOf('echo "[bootstrap] Refreshing install.sh from origin/');
+    const block = INSTALL_SH.slice(start, INSTALL_SH.indexOf("# ── Constants"));
+    const guardAt = block.indexOf("harness_downgrade_guard");
+    expect(guardAt).toBeGreaterThan(block.indexOf("fetch origin"));
+    expect(guardAt).toBeLessThan(block.indexOf("preserve_local_edits"));
+    expect(guardAt).toBeLessThan(block.indexOf("reset --hard"));
   });
 });

@@ -236,6 +236,116 @@ preserve_local_edits() {
 # already registers. Pulling and re-exec'ing up-front (before constants are
 # parsed) breaks the race. CLAWBOX_INSTALL_BOOTSTRAPPED prevents recursion.
 
+# Would syncing to $1 (`origin/<branch>`, fetched) move a harness on this box
+# BACKWARDS? A harness migrates its data forward and never back: a box that ran
+# OpenClaw 2026.10.6 has agent databases 2026.10.3 refuses outright, and an
+# older Hermes cannot run on a state.db a newer gateway runtime wrote. The
+# in-app updater asks before step 1 (src/lib/updater.ts, which also reads the
+# on-disk schemas); this asks the same of every way into the sync — install.sh
+# over SSH, an update whose pre-flight could not reach origin — BEFORE the
+# reset, so a refusal leaves the checkout where it was.
+#
+# Asked twice, and defined up here for the first: the bootstrap block below
+# resets the checkout to the target and re-execs ITS install.sh before
+# sync_repo_to_update_target is ever reached, and an older branch's install.sh
+# has no guard at all — so a bare `sudo CLAWBOX_BRANCH=main bash install.sh`
+# moved the tree and installed the older core regardless. It runs before the
+# constants are parsed, so everything comes in as arguments:
+#
+#   harness_downgrade_guard <upstream> <checkout> <clawbox home> <edition>
+#
+# Proof only: an OpenClaw pin numerically older than the core installed now (a
+# dist-tag or prerelease is no proof), or a Hermes pin that is an ancestor of
+# the commit checked out now — each only while that harness has a database on
+# disk for an older version to fail on, and only for the harnesses <edition>
+# runs. Whatever cannot be read stands down. The owner's
+# override is the authorisation the updater writes once it has backed the data
+# up (data/harness-downgrade.json), honoured for exactly the versions it names
+# and only within its twelve hours; it is read as data, never sourced. git in
+# the Hermes checkout runs as clawbox, never root (see use_tree_owner_for_git).
+harness_downgrade_guard() {
+  local upstream="$1" project="$2" home="$3" edition="$4"
+  local run_git=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$project" -C "$project")
+  local target_oc="" t_commit="" h_head="" h_rc="" out rc=0
+  local hermes_dir="$home/.hermes/hermes-agent"
+  local hermes_git=(git -C "$hermes_dir")
+  [ "$(id -u)" = "0" ] && hermes_git=(runuser -u clawbox -- git -C "$hermes_dir")
+  if [ "$edition" = "openclaw" ] || [ "$edition" = "dual" ]; then
+    target_oc="$("${run_git[@]}" show "$upstream:config/openclaw-target.txt" 2>/dev/null | head -1 | awk '{print $1}' || true)"
+  fi
+  if { [ "$edition" = "hermes" ] || [ "$edition" = "dual" ]; } && [ -d "$hermes_dir/.git" ]; then
+    t_commit="$("${run_git[@]}" show "$upstream:install.sh" 2>/dev/null \
+      | sed -n 's/^HERMES_PIN_COMMIT="\${HERMES_PIN_COMMIT:-\([0-9a-fA-F]\{40\}\)}".*/\1/p' | head -1 || true)"
+    if [ -n "$t_commit" ]; then
+      h_head="$("${hermes_git[@]}" rev-parse HEAD 2>/dev/null || true)"
+      if [ -n "$h_head" ] && [ "$h_head" != "$(printf '%s' "$t_commit" | tr 'A-F' 'a-f')" ]; then
+        h_rc=0
+        "${hermes_git[@]}" merge-base --is-ancestor "$t_commit" HEAD >/dev/null 2>&1 || h_rc=$?
+      fi
+    fi
+  fi
+  [ -n "$target_oc" ] || [ "$h_rc" = "0" ] || return 0
+  # $home/.npm-global is NPM_PREFIX, which is not parsed yet on the first ask.
+  out="$(python3 -I - "$target_oc" "$home/.npm-global/lib/node_modules/openclaw/package.json" "$t_commit" "$h_head" "$h_rc" \
+      "$project/data/harness-downgrade.json" "${upstream#origin/}" "$home/.openclaw" "$home/.hermes" <<'PY'
+import glob, json, os, re, sys, time
+target_oc, pkg, t_commit, h_head, h_rc, auth_path, branch, oc_home, hermes_home = sys.argv[1:10]
+
+# Only data the installed harness wrote can be refused by an older one: with
+# no database on disk (a fresh box, a state dir moved aside) there is none.
+oc_data = os.path.isfile(os.path.join(oc_home, "state", "openclaw.sqlite")) or bool(
+    glob.glob(os.path.join(oc_home, "agents", "*", "agent", "openclaw-agent.sqlite")))
+hermes_data = os.path.isfile(os.path.join(hermes_home, "state.db")) or bool(
+    glob.glob(os.path.join(hermes_home, "profiles", "*", "state.db")))
+
+def parts(v):
+    m = re.match(r"^v?(\d+(?:\.\d+)*)(?:-(\d+))?$", (v or "").strip())
+    return ([int(x) for x in m.group(1).split(".")], int(m.group(2) or 0)) if m else None
+
+def older(a, b):
+    pa, pb = parts(a), parts(b)
+    if not pa or not pb:
+        return False
+    n = max(len(pa[0]), len(pb[0]))
+    return (pa[0] + [0] * (n - len(pa[0])), pa[1]) < (pb[0] + [0] * (n - len(pb[0])), pb[1])
+
+try:
+    installed = json.load(open(pkg)).get("version")
+except Exception:
+    installed = None
+try:
+    auth = json.load(open(auth_path))
+    fresh = auth.get("version") == 1 and 0 <= time.time() - float(auth.get("authorizedAtEpoch")) <= 12 * 3600
+except Exception:
+    auth, fresh = {}, False
+
+found = []
+if oc_data and target_oc and installed and older(target_oc, installed) and not (fresh and auth.get("openclaw") == target_oc):
+    found.append("OpenClaw %s is installed, and branch \"%s\" pins the older OpenClaw %s" % (installed, branch, target_oc))
+if hermes_data and t_commit and h_head and h_rc == "0" and not (fresh and str(auth.get("hermesCommit") or "").lower() == t_commit.lower()):
+    found.append("Hermes Agent is checked out at %s, and branch \"%s\" pins the older commit %s" % (h_head[:12], branch, t_commit[:12]))
+if found:
+    print(
+        "%s. An older version cannot open data a newer one has written, so the update stopped before it changed anything. "
+        "Stay on an update branch that installs these versions or newer, or choose \"Back up and update anyway\" "
+        "in Settings > System Update, which backs the data up first." % "; ".join(found)
+    )
+    sys.exit(3)
+PY
+  )" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      echo "Error: $(printf '%s\n' "$out" | tail -n 1)" >&2
+      return 1
+      ;;
+    *)
+      echo "  WARN: the harness downgrade check could not run (exit $rc); continuing without it" >&2
+      return 0
+      ;;
+  esac
+}
+
 # Only the update family may self-update. The root-owned dispatcher
 # (/usr/local/libexec/clawbox/clawbox-root-step.sh) sets CLAWBOX_ALLOW_SELF_UPDATE
 # for those steps and pins every other one with CLAWBOX_INSTALL_BOOTSTRAPPED=1.
@@ -342,6 +452,28 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       printf '%s\n' "$_fetchout" | tail -n 3
     fi
     unset _fetchout
+    # Nothing older than the harness that wrote this box's data: asked of the
+    # fetched target BEFORE the reset below, which is the first thing to move
+    # the tree, and before anything else this run would do (packages, network,
+    # the recorded branch). Past it the run is the target's own install.sh, and
+    # an older branch's has no such question. The edition is read the way the
+    # constants block reads it (_read_edition_from_file, not parsed yet): the
+    # environment, the recorded edition, the checkout's default, openclaw.
+    _ed="${CLAWBOX_EDITION:-}"
+    for _ef in /etc/clawbox/edition.env /etc/systemd/system/clawbox-setup.service.d/edition.conf; do
+      [ -z "$_ed" ] && [ -f "$_ef" ] || continue
+      _ed="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\(Environment=\)\{0,1\}"\{0,1\}CLAWBOX_EDITION[[:space:]]*=[[:space:]]*//p' "$_ef" 2>/dev/null \
+        | tail -n 1 | tr -d "[:space:]\"'" || true)"
+    done
+    if [ -z "$_ed" ] && [ -f "$_self/config/edition.txt" ]; then
+      _ed="$(tr -d '[:space:]' < "$_self/config/edition.txt" 2>/dev/null || true)"
+    fi
+    _ed="$(printf '%s' "$_ed" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$_ed" in openclaw|hermes|dual|unselected) ;; *) _ed=openclaw ;; esac
+    if ! harness_downgrade_guard "origin/${_br}" "$_b" /home/clawbox "$_ed"; then
+      exit 1
+    fi
+    unset _ed _ef
     # The FIRST reset of an update, so the owner's edits are saved here or not
     # at all: by the time step_bootstrap_updater's sync asks, this has already
     # discarded them. Unsaveable edits keep the tree as it is — the step that
@@ -4002,103 +4134,6 @@ persist_update_branch_pin() {
   chmod 644 "$pin_file"
 }
 
-# Would syncing to $1 (`origin/<branch>`, fetched) move a harness on this box
-# BACKWARDS? A harness migrates its data forward and never back: a box that ran
-# OpenClaw 2026.10.6 has agent databases 2026.10.3 refuses outright, and an
-# older Hermes cannot run on a state.db a newer gateway runtime wrote. The
-# in-app updater asks before step 1 (src/lib/updater.ts, which also reads the
-# on-disk schemas); this asks the same of every way into the sync — install.sh
-# over SSH, an update whose pre-flight could not reach origin — BEFORE the
-# reset, so a refusal leaves the checkout where it was.
-#
-# Proof only: an OpenClaw pin numerically older than the core installed now (a
-# dist-tag or prerelease is no proof), or a Hermes pin that is an ancestor of
-# the commit checked out now — each only while that harness has a database on
-# disk for an older version to fail on. Whatever cannot be read stands down. The owner's
-# override is the authorisation the updater writes once it has backed the data
-# up (data/harness-downgrade.json), honoured for exactly the versions it names
-# and only within its twelve hours; it is read as data, never sourced. git in
-# the Hermes checkout runs as its owner, never root (see use_tree_owner_for_git).
-harness_downgrade_guard() {
-  local upstream="$1"
-  local run_git=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
-  local target_oc="" t_commit="" h_head="" h_rc="" out rc=0
-  local hermes_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
-  if has_openclaw_harness; then
-    target_oc="$("${run_git[@]}" show "$upstream:config/openclaw-target.txt" 2>/dev/null | head -1 | awk '{print $1}' || true)"
-  fi
-  if has_hermes_harness && [ -d "$hermes_dir/.git" ]; then
-    t_commit="$("${run_git[@]}" show "$upstream:install.sh" 2>/dev/null \
-      | sed -n 's/^HERMES_PIN_COMMIT="\${HERMES_PIN_COMMIT:-\([0-9a-fA-F]\{40\}\)}".*/\1/p' | head -1 || true)"
-    if [ -n "$t_commit" ]; then
-      h_head="$(as_clawbox git -C "$hermes_dir" rev-parse HEAD 2>/dev/null || true)"
-      if [ -n "$h_head" ] && [ "$h_head" != "$(printf '%s' "$t_commit" | tr 'A-F' 'a-f')" ]; then
-        h_rc=0
-        as_clawbox git -C "$hermes_dir" merge-base --is-ancestor "$t_commit" HEAD >/dev/null 2>&1 || h_rc=$?
-      fi
-    fi
-  fi
-  [ -n "$target_oc" ] || [ "$h_rc" = "0" ] || return 0
-  out="$(python3 -I - "$target_oc" "$NPM_PREFIX/lib/node_modules/openclaw/package.json" "$t_commit" "$h_head" "$h_rc" \
-      "$PROJECT_DIR/data/harness-downgrade.json" "${upstream#origin/}" "$CLAWBOX_HOME/.openclaw" "$CLAWBOX_HOME/.hermes" <<'PY'
-import glob, json, os, re, sys, time
-target_oc, pkg, t_commit, h_head, h_rc, auth_path, branch, oc_home, hermes_home = sys.argv[1:10]
-
-# Only data the installed harness wrote can be refused by an older one: with
-# no database on disk (a fresh box, a state dir moved aside) there is none.
-oc_data = os.path.isfile(os.path.join(oc_home, "state", "openclaw.sqlite")) or bool(
-    glob.glob(os.path.join(oc_home, "agents", "*", "agent", "openclaw-agent.sqlite")))
-hermes_data = os.path.isfile(os.path.join(hermes_home, "state.db")) or bool(
-    glob.glob(os.path.join(hermes_home, "profiles", "*", "state.db")))
-
-def parts(v):
-    m = re.match(r"^v?(\d+(?:\.\d+)*)(?:-(\d+))?$", (v or "").strip())
-    return ([int(x) for x in m.group(1).split(".")], int(m.group(2) or 0)) if m else None
-
-def older(a, b):
-    pa, pb = parts(a), parts(b)
-    if not pa or not pb:
-        return False
-    n = max(len(pa[0]), len(pb[0]))
-    return (pa[0] + [0] * (n - len(pa[0])), pa[1]) < (pb[0] + [0] * (n - len(pb[0])), pb[1])
-
-try:
-    installed = json.load(open(pkg)).get("version")
-except Exception:
-    installed = None
-try:
-    auth = json.load(open(auth_path))
-    fresh = auth.get("version") == 1 and 0 <= time.time() - float(auth.get("authorizedAtEpoch")) <= 12 * 3600
-except Exception:
-    auth, fresh = {}, False
-
-found = []
-if oc_data and target_oc and installed and older(target_oc, installed) and not (fresh and auth.get("openclaw") == target_oc):
-    found.append("OpenClaw %s is installed, and branch \"%s\" pins the older OpenClaw %s" % (installed, branch, target_oc))
-if hermes_data and t_commit and h_head and h_rc == "0" and not (fresh and str(auth.get("hermesCommit") or "").lower() == t_commit.lower()):
-    found.append("Hermes Agent is checked out at %s, and branch \"%s\" pins the older commit %s" % (h_head[:12], branch, t_commit[:12]))
-if found:
-    print(
-        "%s. An older version cannot open data a newer one has written, so the update stopped before it changed anything. "
-        "Stay on an update branch that installs these versions or newer, or choose \"Back up and update anyway\" "
-        "in Settings > System Update, which backs the data up first." % "; ".join(found)
-    )
-    sys.exit(3)
-PY
-  )" || rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    3)
-      echo "Error: $(printf '%s\n' "$out" | tail -n 1)" >&2
-      return 1
-      ;;
-    *)
-      echo "  WARN: the harness downgrade check could not run (exit $rc); continuing without it" >&2
-      return 0
-      ;;
-  esac
-}
-
 sync_repo_to_update_target() {
   local target_branch="$1"
   local upstream_branch="$2"
@@ -4119,8 +4154,9 @@ sync_repo_to_update_target() {
   git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
   # Nothing older than the harness that wrote this box's data, unless the owner
   # chose it and the data was backed up first: asked of the fetched target,
-  # before anything below moves the tree.
-  if ! harness_downgrade_guard "$upstream_branch"; then
+  # before anything below moves the tree. The bootstrap block asked first; this
+  # covers the runs it does not refresh (a `--step` by hand, a failed reset).
+  if ! harness_downgrade_guard "$upstream_branch" "$PROJECT_DIR" "$CLAWBOX_HOME" "$CLAWBOX_EDITION"; then
     GIT_RUNNER=()
     exit 1
   fi

@@ -153,6 +153,9 @@ function runStep1(extra: Record<string, string> = {}, srcDir: string = REPO): { 
     // install.sh reads scripts/ out of $SRC_DIR — the root-owned mirror on a box.
     `SRC_DIR=${JSON.stringify(srcDir)}`,
     "CLAWBOX_USER=clawbox",
+    // What sync_repo_to_update_target hands the (stubbed) downgrade guard.
+    `CLAWBOX_HOME=${JSON.stringify(tmp)}`,
+    "CLAWBOX_EDITION=openclaw",
     "ROOT_EXEC_TREE_RESYNCED=0",
     "chown() { :; }",
     "step_fix_git_perms() { :; }",
@@ -365,6 +368,8 @@ d("the bootstrap block saves before ITS reset, the first one an update performs"
       fn("use_tree_owner_for_git"),
       fn("preserve_local_edits"),
       fn("_clawbox_may_self_update"),
+      // Asked before this reset too; it has its own suite (install-harness-downgrade-guard.test.ts).
+      "harness_downgrade_guard() { :; }",
       block,
       'echo "after-bootstrap bootstrapped=${CLAWBOX_INSTALL_BOOTSTRAPPED:-no}"',
     ].join("\n");
