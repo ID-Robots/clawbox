@@ -12,10 +12,12 @@ import {
   renameAccount,
   reorderAccounts,
   replaceCredential,
+  setPickMode,
   setReturnToPrimary,
   type AnthropicAccount,
   type OAuthTokens,
 } from "@/lib/anthropic-accounts";
+import { PICK_MODES, type PickMode } from "@/lib/anthropic-limit";
 import { syncGatewayNow, putChatOnPool } from "@/lib/anthropic-gateway";
 import { getActiveHarness } from "@/lib/harness";
 import { startAnthropicSwap } from "@/lib/anthropic-swap";
@@ -71,6 +73,11 @@ export const dynamic = "force-dynamic";
  *  - `set_return_to_primary` `{ on }` — the owner's preference: back to the
  *    first account the moment it can answer again, instead of staying on the
  *    account the box moved to (the default).
+ *  - `set_pick_mode` `{ mode }` — how the next account is picked when the
+ *    active one has to move: `order`, the owner's order (the default), or
+ *    `most-room`, the subscription with the most room left in its fullest
+ *    usage window, an API key never ahead of a subscription. Moves nothing by
+ *    itself. GET says it as `pickMode`.
  *  - `use_for_chat` — "Use these accounts for the chat too": every Claude
  *    account of the pool goes into the OpenClaw gateway as an auth profile of
  *    its own (src/lib/anthropic-gateway.ts), and then the chat's model is set
@@ -313,6 +320,13 @@ export async function POST(request: Request) {
         if (typeof body.on !== "boolean") return refusal("`on` must be true or false.", "invalid", 400);
         await setReturnToPrimary(body.on);
         console.error(`[anthropic-accounts] the owner turned "return to the first account" ${body.on ? "on" : "off"}`);
+        break;
+      case "set_pick_mode":
+        if (typeof body.mode !== "string" || !(PICK_MODES as readonly string[]).includes(body.mode)) {
+          return refusal(`\`mode\` must be one of: ${PICK_MODES.join(", ")}.`, "invalid", 400);
+        }
+        await setPickMode(body.mode as PickMode);
+        console.error(`[anthropic-accounts] the owner set the account pick to "${body.mode}"`);
         break;
       case "use_for_chat": {
         if (!(await chatRunsOnOpenclaw())) {

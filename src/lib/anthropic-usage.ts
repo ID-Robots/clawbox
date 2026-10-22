@@ -14,7 +14,9 @@
  * (`fetchClaudeUsage`, `provider-usage.fetch.claude`). Core asks it only for
  * the provider's FIRST profile, for display (`models.authStatus` → `usage`),
  * so it cannot answer for each account of a pool; that is the one gap this
- * fills, once per limit core records, never on a timer.
+ * fills, once per limit core records — and, when the owner chose the "most
+ * room" pick, at a move or a spawn, at most every ten minutes per account
+ * (src/lib/anthropic-accounts.ts) — never on a timer.
  *
  * Never throws. Null is "Anthropic could not be asked" — a caller must not read
  * it as "not limited".
@@ -30,6 +32,12 @@ export interface AnthropicUsageReading {
   resetsAt: number | null;
   /** `weekly` when a weekly window is among the spent ones, else `session`. */
   kind: "session" | "weekly";
+  /**
+   * How full the five-hour and the seven-day window are, in Anthropic's own
+   * percent; null where the answer had no such window. What the pool's
+   * "most room" pick ranks accounts by (src/lib/anthropic-limit.ts).
+   */
+  utilization: { fiveHour: number | null; sevenDay: number | null };
 }
 
 type Json = Record<string, unknown>;
@@ -79,10 +87,12 @@ export function parseAnthropicUsage(body: unknown): AnthropicUsageReading {
   const full = windows.filter((w) => w.percent >= FULL_PERCENT);
   const spent = full.length > 0 ? full : windows.filter((w) => !w.weekly && w.percent >= SESSION_REFUSES_PERCENT);
   const resets = spent.map((w) => w.resetsAt).filter((at): at is number => at !== null);
+  const percentOf = (window: unknown) => (isRecord(window) && typeof window.utilization === "number" && Number.isFinite(window.utilization) ? window.utilization : null);
   return {
     exhausted: spent.length > 0,
     resetsAt: resets.length > 0 ? Math.max(...resets) : null,
     kind: spent.some((w) => w.weekly) ? "weekly" : "session",
+    utilization: { fiveHour: percentOf(usage.five_hour), sevenDay: percentOf(usage.seven_day) },
   };
 }
 

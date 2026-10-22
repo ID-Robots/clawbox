@@ -30,6 +30,7 @@ const pool = vi.hoisted(() => ({
   markLimited: vi.fn(),
   readAccounts: vi.fn(),
   setReturnToPrimary: vi.fn(),
+  setPickMode: vi.fn(),
 }));
 vi.mock("@/lib/anthropic-accounts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/anthropic-accounts")>()),
@@ -115,6 +116,7 @@ beforeEach(async () => {
   ]);
   pool.markLimited.mockResolvedValue({ newlyLimited: true, becameAllLimited: false, health: VIEW.health, account: {} });
   pool.setReturnToPrimary.mockResolvedValue(undefined);
+  pool.setPickMode.mockResolvedValue(undefined);
   simulateAnthropicLimit.mockReturnValue([]);
   handoff.readHandoffTokens.mockResolvedValue({
     ok: true,
@@ -331,6 +333,17 @@ describe("the owner's preference (TASK-1260)", () => {
     expect((await post({ action: "set_return_to_primary", on: "yes" })).status).toBe(400);
     expect((await post({ action: "set_return_to_primary", on: false }, { auth: "bearer" })).status).toBe(403);
     expect(pool.setReturnToPrimary).toHaveBeenCalledTimes(1);
+  });
+
+  it("sets how the next account is picked — the owner's order or the most room — owner-only, and nothing else", async () => {
+    expect((await post({ action: "set_pick_mode", mode: "most-room" })).status).toBe(200);
+    expect(pool.setPickMode).toHaveBeenCalledWith("most-room");
+    expect((await post({ action: "set_pick_mode", mode: "order" })).status).toBe(200);
+    expect(pool.setPickMode).toHaveBeenLastCalledWith("order");
+    expect((await post({ action: "set_pick_mode", mode: "round-robin" })).status).toBe(400);
+    expect((await post({ action: "set_pick_mode" })).status).toBe(400);
+    expect((await post({ action: "set_pick_mode", mode: "most-room" }, { auth: "bearer" })).status).toBe(403);
+    expect(pool.setPickMode).toHaveBeenCalledTimes(2);
   });
 
   it("refuses an account that is not there", async () => {

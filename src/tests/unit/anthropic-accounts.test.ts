@@ -680,3 +680,89 @@ describe("a refused Terminal sign-in with no time on record", () => {
     expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 });
+
+describe("the owner's \"most room\" pick", () => {
+  const H = 3_600_000;
+  const tokens = (access: string) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + 8 * H });
+
+  /** Anthropic's usage endpoint, by the account's access token: every ask is recorded, and nothing else may be fetched. */
+  function usage(byToken: Record<string, { fiveHour: number; sevenDay: number }>): string[] {
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith("/api/oauth/usage")) throw new Error(`unexpected fetch of ${url}`);
+      const access = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      asked.push(access);
+      const u = byToken[access];
+      return u
+        ? new Response(JSON.stringify({ five_hour: { utilization: u.fiveHour }, seven_day: { utilization: u.sevenDay } }), { status: 200 })
+        : new Response("{}", { status: 403 });
+    }));
+    return asked;
+  }
+
+  async function threeAccounts() {
+    const a = await pool.addOAuthAccount({ label: "A", email: "a@example.com", tokens: tokens("sk-ant-oat01-a") });
+    const b = await pool.addOAuthAccount({ label: "B", email: "b@example.com", tokens: tokens("sk-ant-oat01-b") });
+    const c = await pool.addOAuthAccount({ label: "C", email: "c@example.com", tokens: tokens("sk-ant-oat01-c") });
+    return { a, b, c };
+  }
+
+  const ROOM = {
+    "sk-ant-oat01-a": { fiveHour: 10, sevenDay: 20 },
+    "sk-ant-oat01-b": { fiveHour: 70, sevenDay: 30 },
+    "sk-ant-oat01-c": { fiveHour: 20, sevenDay: 40 },
+  };
+
+  it("is off by default: the owner's order, and Anthropic is never asked", async () => {
+    const asked = usage(ROOM);
+    const { a, b, c } = await threeAccounts();
+    expect((await pool.describePool()).pickMode).toBe("order");
+    await pool.markLimited(a.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(b.id);
+    expect((await pool.prepareAccount({ exclude: new Set([b.id]) })).prepared?.account.id).toBe(c.id);
+    expect(asked).toEqual([]);
+  });
+
+  it("moves to the account whose fullest window has the most room, asking only at the move, at most every ten minutes per account", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 9, 21, 12, 0));
+    const asked = usage(ROOM);
+    const { a, b, c } = await threeAccounts();
+    await pool.setPickMode("most-room");
+    expect((await pool.describePool()).pickMode).toBe("most-room");
+    // Sticky: choosing the pick moves nothing, and a spawn on the active account asks nothing.
+    expect((await pool.readPoolState()).activeId).toBe(a.id);
+    expect((await pool.prepareAccount()).prepared?.account.id).toBe(a.id);
+    expect(asked).toEqual([]);
+
+    // B's five-hour window is the fuller one (70 %), C's week (40 %): C has the more room.
+    await pool.markLimited(a.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(c.id);
+    expect([...asked].sort()).toEqual(["sk-ant-oat01-b", "sk-ant-oat01-c"]);
+
+    // Within ten minutes B's reading stands; A, back, has none yet and is asked.
+    await pool.clearLimit(a.id);
+    expect((await pool.readPoolState()).activeId).toBe(c.id);
+    await pool.markLimited(c.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(a.id);
+    expect(asked.filter((t) => t === "sk-ant-oat01-b")).toHaveLength(1);
+    expect(asked.at(-1)).toBe("sk-ant-oat01-a");
+
+    // A spawn that sees A refuse, past the ten minutes: B is asked again.
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    expect((await pool.prepareAccount({ exclude: new Set([a.id]) })).prepared?.account.id).toBe(b.id);
+    expect(asked.filter((t) => t === "sk-ant-oat01-b")).toHaveLength(2);
+  });
+
+  it("never puts the pool's API key ahead of a subscription, even one Anthropic would not say the room of", async () => {
+    // No readings at all: the owner's order, with the key after the subscriptions.
+    const asked = usage({});
+    const { a, b, c } = await threeAccounts();
+    const key = await pool.addApiKeyAccount({ label: "Key", key: SECOND_KEY });
+    await pool.reorderAccounts([a.id, key.id, c.id, b.id]);
+    await pool.setPickMode("most-room");
+    await pool.markLimited(a.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(c.id);
+    expect(asked).toHaveLength(2);
+  });
+});
