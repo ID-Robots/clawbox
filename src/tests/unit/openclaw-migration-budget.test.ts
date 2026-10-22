@@ -66,7 +66,8 @@ describe("the updater wiring", () => {
   it("bounds the verify's doctor --fix by the databases it reads, from the old 90 s up", () => {
     expect(UPDATER).toContain("const DOCTOR_FIX_TIMEOUT_MS = 90_000;");
     expect(UPDATER).toContain("return doctorFixBudgetMs(databaseBytes, DOCTOR_FIX_TIMEOUT_MS);");
-    expect(UPDATER).toMatch(/const timeoutMs = doctorFixTimeoutFor\(\n\s+await openclawDatabaseBytes\(openclawTreePaths\(\)\.openclawHome\)\.catch\(\(\) => 0\),\n\s+\);/);
+    expect(UPDATER).toContain("const databaseBytes = await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0);");
+    expect(UPDATER).toContain("const timeoutMs = doctorFixTimeoutFor(databaseBytes);");
   });
 
   it("says so on the update's result when the gateway answers over degraded agents", () => {
