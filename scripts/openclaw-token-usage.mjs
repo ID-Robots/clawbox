@@ -34,7 +34,10 @@
  *   (a plain row without `"assistant"` in it, a compressed row whose
  *   navigation facts say it is not a message). Compressed rows (agent schema
  *   23+: `event_zstd`) are decoded with node:zlib's zstd; cold-archived
- *   windows archived inside the window are read from their archive.
+ *   windows archived inside the window are read from their archive. A session
+ *   the core reset or deleted is gone from the database but still counted, as
+ *   the core's own report counts it: from its transcript archive beside the
+ *   database (`sessions/<id>.jsonl.reset.<stamp>`, `.deleted.`, `.zst`).
  *
  * `auto` (the default) asks the gateway and takes its answer when it is
  * complete; when the gateway is down, or still computing, it counts from the
@@ -73,6 +76,21 @@ const DEFAULT_TIMEOUT_S = 120;
  * session-cold-storage worker), which it neither writes nor decodes past.
  */
 const COLD_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * A reset or deleted session's transcript archive bigger than this is not
+ * read (it is named in the notes): the whole archive is held in memory while
+ * it is counted, and a long-lived chat's can be hundreds of MB.
+ */
+const TRANSCRIPT_ARCHIVE_MAX_BYTES = 256 * 1024 * 1024;
+/**
+ * The transcript files the pinned core's usage report counts
+ * (parseUsageCountedSessionIdFromFileName, its transcript-file-names module):
+ * a file-era `<id>.jsonl` that is not a trajectory or compaction checkpoint,
+ * and the archive a reset or delete leaves, `<id>.jsonl.<reason>.<stamp>`
+ * with an optional `.<32 hex>` and `.zst`.
+ */
+const ARCHIVE_STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d{3})?Z(?:\.[0-9a-f]{32})?$/;
+const CHECKPOINT_TRANSCRIPT_RE = /^(.+)\.checkpoint\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.jsonl$/i;
 
 const USAGE = `Usage: clawbox tokens [--days N] [--agent ID] [--json] [--source auto|gateway|db]
                       [--state-dir DIR] [--timeout SECONDS]
@@ -568,6 +586,60 @@ function coldArchiveEvents(blob, sessionId) {
   return events;
 }
 
+const isPrimaryTranscriptName = (name) =>
+  name.endsWith(".jsonl") && !name.endsWith(".trajectory.jsonl") && !CHECKPOINT_TRANSCRIPT_RE.test(name);
+
+/** The session id of a transcript file the core counts in usage, else null. */
+export function usageCountedSessionId(name) {
+  if (isPrimaryTranscriptName(name)) return name.slice(0, -".jsonl".length);
+  const bare = name.endsWith(".zst") ? name.slice(0, -".zst".length) : name;
+  for (const reason of ["reset", "deleted"]) {
+    const marker = `.jsonl.${reason}.`;
+    const at = bare.lastIndexOf(marker);
+    if (at > 0 && ARCHIVE_STAMP_RE.test(bare.slice(at + marker.length))) {
+      const sessionId = bare.slice(0, at);
+      return isPrimaryTranscriptName(`${sessionId}.jsonl`) ? sessionId : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The counted transcript files in an agent's sessions directory that were
+ * written since `sinceMs` — the core skips older ones too: a file is written
+ * after its last event. One that vanished meanwhile is skipped, as the core
+ * skips it; one that cannot be looked at (or the directory itself) is
+ * `unreadable`, so the count is not called complete.
+ */
+function usageCountedTranscriptFiles(sessionsDir, sinceMs) {
+  const files = [];
+  const unreadable = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code !== "ENOENT") unreadable.push(path.basename(sessionsDir));
+    return { files, unreadable };
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const sessionId = usageCountedSessionId(entry.name);
+    if (!sessionId) continue;
+    const file = path.join(sessionsDir, entry.name);
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch (err) {
+      if (err?.code !== "ENOENT") unreadable.push(entry.name);
+      continue;
+    }
+    if (st.mtimeMs < sinceMs) continue;
+    files.push({ name: entry.name, file, sessionId, size: st.size, packed: entry.name.endsWith(".zst") });
+  }
+  files.sort((a, b) => a.name.localeCompare(b.name));
+  return { files, unreadable };
+}
+
 function tableColumns(db, table) {
   return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
 }
@@ -578,18 +650,72 @@ function tableColumns(db, table) {
  */
 export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
   const seen = new Set();
-  const stats = { windows: 0, sessions: 0, rowsRead: 0, decoded: 0, undecodable: 0, calls: 0, coldRead: 0, coldSkipped: [] };
+  const stats = {
+    windows: 0, sessions: 0, rowsRead: 0, decoded: 0, undecodable: 0, calls: 0,
+    coldRead: 0, coldSkipped: [], archivesRead: 0, archivesSkipped: [],
+  };
+  const canDecode = hasZstd();
+  const count1 = (sessionId, event, fallbackTs) => {
+    const call = assistantCall(event);
+    if (!call) return;
+    const ts = call.ts ?? fallbackTs;
+    if (ts === undefined || ts < window.startMs || ts > window.endMs) return;
+    if (call.key) {
+      const key = `${call.provider}/${call.model}\u0000${call.key}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    acc.add({ agentId, sessionId, provider: call.provider, model: call.model, usage: call.usage });
+    stats.calls += 1;
+  };
+  // A reset or deleted session has left the database; its transcript lives on
+  // as an archive file beside it, plain transcript lines (zstd with `.zst`).
+  // The core's usage report counts those files, and a file-era transcript,
+  // unless the session is still a live SQLite transcript it reads instead
+  // (listUsageCountedTranscriptSources finds the files apart from SQLite):
+  // without them this source read less than the gateway on any box where a
+  // chat was reset, or whose database predates the SQLite transcript store.
+  const countTranscriptFiles = (live) => {
+    const sessionsDir = path.join(path.dirname(path.dirname(dbPath)), "sessions");
+    const { files: archives, unreadable } = usageCountedTranscriptFiles(sessionsDir, window.startMs);
+    stats.archivesSkipped.push(...unreadable);
+    for (const archive of archives) {
+      if (live.has(archive.sessionId)) continue;
+      if ((archive.packed && !canDecode) || archive.size > TRANSCRIPT_ARCHIVE_MAX_BYTES) {
+        stats.archivesSkipped.push(archive.name);
+        continue;
+      }
+      try {
+        const bytes = fs.readFileSync(archive.file);
+        const text = archive.packed ? decodeZstd(bytes, TRANSCRIPT_ARCHIVE_MAX_BYTES) : bytes.toString("utf8");
+        stats.archivesRead += 1;
+        for (const line of text.split("\n")) {
+          if (!line.includes('"assistant"')) continue;
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          count1(archive.sessionId, event, undefined);
+        }
+      } catch {
+        stats.archivesSkipped.push(archive.name);
+      }
+    }
+  };
   const tables = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name),
   );
   if (!tables.has("transcript_events") || !tables.has("session_windows")) {
+    // No SQLite transcripts at all: every counted transcript file is the record.
     stats.missingTables = true;
+    countTranscriptFiles(new Set());
     return stats;
   }
   const cols = tableColumns(db, "transcript_events");
   const zstdCol = cols.has("event_zstd");
   const navCol = cols.has("navigation_json");
-  const canDecode = hasZstd();
   // Only rows that can hold an assistant message reach JavaScript: a plain row
   // must mention "assistant"; a compressed row must be a message (its
   // navigation facts say so without decoding the body).
@@ -605,19 +731,6 @@ export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
       ${cols.has("event_utf8_bytes") ? "event_utf8_bytes" : "NULL"} AS rawBytes
     FROM transcript_events WHERE session_id = ? ORDER BY seq DESC`;
   const rows = db.prepare(rowSql);
-  const count1 = (sessionId, event, fallbackTs) => {
-    const call = assistantCall(event);
-    if (!call) return;
-    const ts = call.ts ?? fallbackTs;
-    if (ts === undefined || ts < window.startMs || ts > window.endMs) return;
-    if (call.key) {
-      const key = `${call.provider}/${call.model}\u0000${call.key}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-    }
-    acc.add({ agentId, sessionId, provider: call.provider, model: call.model, usage: call.usage });
-    stats.calls += 1;
-  };
   // A window the core has not written to since the window began has nothing
   // in it; its watermarks say so without reading a single transcript row.
   const winCols = tableColumns(db, "session_windows");
@@ -690,6 +803,7 @@ export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
       }
     }
   }
+  countTranscriptFiles(new Set(sessionIds.map(({ sessionId }) => sessionId)));
   return stats;
 }
 
@@ -726,8 +840,11 @@ export function reportFromDatabases({ stateDir, window, agent, busyTimeoutMs }) 
       if (stats.missingTables) notes.push(`agent ${agentId}: no transcript tables (database not migrated to the SQLite session store)`);
       if (stats.undecodable) notes.push(`agent ${agentId}: ${stats.undecodable} compressed row(s) could not be decoded`);
       if (stats.coldSkipped.length) notes.push(`agent ${agentId}: ${stats.coldSkipped.length} cold archive(s) not read: ${stats.coldSkipped.slice(0, 3).join(", ")}`);
-      scanned.push({ agentId, ...stats, coldSkipped: stats.coldSkipped.length });
-      if (handle.immutable || stats.undecodable || stats.coldSkipped.length) complete = false;
+      if (stats.archivesSkipped.length) {
+        notes.push(`agent ${agentId}: ${stats.archivesSkipped.length} reset/deleted transcript archive(s) not read: ${stats.archivesSkipped.slice(0, 3).join(", ")}`);
+      }
+      scanned.push({ agentId, ...stats, coldSkipped: stats.coldSkipped.length, archivesSkipped: stats.archivesSkipped.length });
+      if (handle.immutable || stats.undecodable || stats.coldSkipped.length || stats.archivesSkipped.length) complete = false;
     } catch (err) {
       notes.push(`agent ${agentId}: ${err.message}`);
       complete = false;
