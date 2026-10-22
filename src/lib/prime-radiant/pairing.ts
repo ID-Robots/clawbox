@@ -22,9 +22,11 @@
  *     invoice by its number, against that invoice's page, each claim with one
  *     date and no amount, the declaration's 1 to {@link EXPORT_DATE_MAX_DAYS}
  *     days after the invoice's: the goods leave after they are invoiced, and
- *     the declaration's date is its own, not the invoice's. A date before the
- *     invoice's or further after it, an amount, VAT, a payment, a receipt or a
- *     waybill stays a question.
+ *     the declaration's date is its own, not the invoice's. Its wording must
+ *     date the declaration ("The declaration dated 20.03.2026 cites invoice
+ *     …"); a day on the invoice's number ("cites invoice … dated 20.03.2026")
+ *     is the invoice's. A date before the invoice's or further after it, an
+ *     amount, VAT, a payment, a receipt or a waybill stays a question.
  *  3. SUPERSEDED (validity.ts): one claim sits on a deprecated page, or is
  *     historical, and the other is current; or their periods do not overlap
  *     (as of 12.10 against as of 14.10, the 2023 accounts against the 2025
@@ -40,7 +42,7 @@
  * Pure.
  */
 
-import { DIFFERENT_RECORDS, differentSubjects, invoiceCitations, sharedReference, textDates, type Identifiers } from "./identifiers";
+import { DIFFERENT_RECORDS, differentSubjects, invoiceCitations, sharedReference, textDates, withoutDates, type Identifiers } from "./identifiers";
 import { amountsIn, type RecordType } from "./records";
 import { sameSubject, type ClaimSubject } from "./subject";
 import { describeValidity, laterOf, periodsDisjoint, type Validity } from "./validity";
@@ -151,6 +153,38 @@ function onlyDay(text: string): string | null {
   return date.size === 1 && month.size === 0 ? [...date][0] : null;
 }
 
+/** Where a text's first date begins, or -1: the dates are all that {@link withoutDates} changes. */
+function firstDateAt(text: string): number {
+  const blanked = withoutDates(text);
+  for (let i = 0; i < text.length; i++) if (text[i] !== blanked[i]) return i;
+  return -1;
+}
+
+/** Words that end in the declaration and its own date's word, before the invoice it cites: "The declaration dated", "Declaration MRN 26XX… of". */
+const DECLARATION_DATED_BEFORE =
+  /(?:declaration|декларация\p{L}*)(?:\s+(?:mrn\s*)?[\p{L}\p{N}-]*\d[\p{L}\p{N}-]*)?[\s,]*(?:dated|date:?|of|from|(?:filed|lodged|submitted)\s+on|от|с\s+дата)?\s*$/iu;
+/** Words after the invoice it cites that date the declaration: "… is dated", "… and was lodged on". "…, which is dated" dates the invoice. */
+const DECLARATION_DATED_AFTER =
+  /^\s*,?\s*(?:and\s+|и\s+)?(?:(?:is|was|has\s+been)\s+(?:dated|filed|lodged|submitted|accepted|released|cleared|registered)(?:\s+(?:on|as\s+of))?|е\s+(?:от|с\s+дата|подадена\s+на))\s*$/iu;
+
+/**
+ * The one day a declaration's claim gives the declaration itself, or null. The
+ * wording must date the declaration: before the invoice it cites ("The
+ * declaration dated 20.03.2026 cites invoice INV-2026-0031") or after it as the
+ * declaration's own ("… cites invoice INV-2026-0031 and is dated 20.03.2026").
+ * A day on the invoice's number ("cites invoice INV-2026-0031 dated
+ * 20.03.2026") is the invoice's date, and against the invoice's own one it
+ * stays a question.
+ */
+function declarationDay(text: string, cited: string): string | null {
+  const day = onlyDay(text);
+  const at = text.indexOf(cited);
+  const date = firstDateAt(text);
+  if (!day || at < 0 || date < 0) return null;
+  if (date < at) return DECLARATION_DATED_BEFORE.test(text.slice(0, date)) ? day : null;
+  return DECLARATION_DATED_AFTER.test(text.slice(at + cited.length, date)) ? day : null;
+}
+
 function daysAfter(from: string, to: string): number {
   return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 }
@@ -166,7 +200,7 @@ function exportDate(a: PairClaim, b: PairClaim): string | null {
   const invoiceRefs = invoice.ids.ref;
   const cited = invoiceCitations(declaration.text).find((c) => sharedReference(new Set([c.ref]), invoiceRefs));
   if (!cited) return null;
-  const declared = onlyDay(declaration.text);
+  const declared = declarationDay(declaration.text, cited.written);
   const invoiced = onlyDay(invoice.text);
   if (!declared || !invoiced) return null;
   if (amountsIn(declaration.text).length > 0 || amountsIn(invoice.text).length > 0) return null;
