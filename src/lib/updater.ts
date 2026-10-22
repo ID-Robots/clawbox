@@ -23,6 +23,7 @@ import {
 } from "./openclaw-doctor-ownership";
 import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
 import { runHermesCli } from "./hermes-cli";
+import { hermesHome } from "./hermes-env";
 import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
@@ -107,7 +108,24 @@ import {
 } from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
-import { readStateSchemaVersion, statePath } from "./openclaw-state-store";
+import { readAgentSchemaVersions, readStateSchemaVersion, statePath } from "./openclaw-state-store";
+import {
+  assessHarnessDowngrade,
+  HARNESS_DOWNGRADE_BACKUP_FAILED_CODE,
+  HARNESS_DOWNGRADE_CODE,
+  harnessDowngradeMessage,
+  parseHermesPin,
+  type DowngradeMoment,
+  type HarnessDowngradeDetail,
+  type HarnessDowngradeErrorCode,
+  type SchemaOnDisk,
+} from "./harness-downgrade";
+import {
+  backUpBeforeDowngrade,
+  clearDowngradeAuthorization,
+  downgradeAuthorizedFor,
+  writeDowngradeAuthorization,
+} from "./harness-downgrade-backup";
 import { describeOpenclawMigration, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -180,10 +198,36 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.6": 20,
 };
 
+/**
+ * The AGENT-database schema each pinned core supports
+ * (`openclaw.schemaVersions.agent`, from the same published package.json), for
+ * the same reason as the state table above: an older core refuses an agent
+ * database a newer one has migrated, and `doctor --fix` cannot repair a newer
+ * schema. The two move separately — 2026.10.6 took the agent databases to 25
+ * and left the state database on 20 — so a guard that read the state schema
+ * alone let a box that had run 2026.10.6 switch to a branch pinning 2026.10.3,
+ * whose repair step then refused every agent database and left the gateway
+ * stopped. Exact-match only, and checked by the same `harness-contract` job.
+ */
+const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
+  "2026.8.1": 19,
+  "2026.9.3": 19,
+  "2026.9.4": 19,
+  "2026.10.2": 24,
+  "2026.10.3": 24,
+  "2026.10.6": 25,
+};
+
 /** The state schema `version` supports, or null when this pin is not in the table. */
 export function openclawStateSchemaFor(version: string | null | undefined): number | null {
   if (!version) return null;
   return OPENCLAW_STATE_SCHEMA_BY_VERSION[version.trim()] ?? null;
+}
+
+/** The agent-database schema `version` supports, or null when this pin is not in the table. */
+export function openclawAgentSchemaFor(version: string | null | undefined): number | null {
+  if (!version) return null;
+  return OPENCLAW_AGENT_SCHEMA_BY_VERSION[version.trim()] ?? null;
 }
 
 /**
@@ -710,6 +754,15 @@ export interface UpdateState {
    * client reading one — keeps compiling and behaving exactly as before.
    */
   warnings?: UpdateWarning[];
+  /**
+   * What `error` is, for a refusal the screen says in the owner's language:
+   * the run would install an older harness than the one that wrote the box's
+   * data, or the backup the override takes first could not be taken. Absent
+   * for every other failure, whose `error` is shown as it is.
+   */
+  errorCode?: HarnessDowngradeErrorCode;
+  /** The harnesses and versions behind a `harness_downgrade` refusal. */
+  downgrade?: HarnessDowngradeDetail;
 }
 
 export { RESTART_STEP_ID } from "./update-constants";
@@ -4796,6 +4849,12 @@ interface RunOptions {
    * the post-reboot continuation and the OpenClaw-only flow pass their own start.
    */
   resumeFromInterruption?: boolean;
+  /**
+   * The owner's explicit "Back up and update anyway": a run that would install
+   * an older harness than the one that wrote the box's data backs that data up
+   * and goes ahead instead of being refused (see harnessDowngradePreflight).
+   */
+  allowHarnessDowngrade?: boolean;
 }
 
 /**
@@ -5087,7 +5146,9 @@ async function resumeContinuation(): Promise<boolean> {
   return true;
 }
 
-export function startUpdate(): { started: boolean; error?: string } {
+export function startUpdate(
+  opts: { allowHarnessDowngrade?: boolean } = {},
+): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
   }
@@ -5100,7 +5161,11 @@ export function startUpdate(): { started: boolean; error?: string } {
 
   // A fresh run — which continues an interrupted one from the step it died on
   // when the disk says there was one (runUpdate).
-  launchUpdate(steps, 0, { markCompleted: true, resumeFromInterruption: true });
+  launchUpdate(steps, 0, {
+    markCompleted: true,
+    resumeFromInterruption: true,
+    allowHarnessDowngrade: opts.allowHarnessDowngrade === true,
+  });
   return { started: true };
 }
 
@@ -5208,49 +5273,228 @@ async function checkInternet(): Promise<boolean> {
  * runUpdate). It must not make an offline box wait through retries for the
  * "No internet connection" it is about to be told.
  */
-async function readUpdateTargetOpenclawPin(): Promise<string | null> {
-  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
-  if (envPin) return envPin;
-  let upstream: string;
+interface HarnessPins {
+  /** The branch the pins were read off (`origin/<branch>`), when they were. */
+  branch: string | null;
+  openclaw: string | null;
+  /** Asked for only on a box that runs Hermes. */
+  hermes: { commit: string; version: string | null } | null;
+}
+
+/** `<ref>:<file>` from the checkout's object store, or null when it is not there. */
+async function showAtRef(ref: string, file: string): Promise<string | null> {
   try {
-    ({ upstream } = await resolveUpdateBranch(PROJECT_DIR));
-  } catch {
-    // Unresolvable: step 0 refuses the run with its own sentence.
-    return null;
-  }
-  if (!upstream.startsWith("origin/")) return null;
-  const branch = upstream.slice("origin/".length);
-  if (!isSafeBranch(branch)) return null;
-  const remote = await reachOrigin(PROJECT_DIR, ["fetch", "--quiet", "origin", branch], {
-    timeout: 20_000,
-    attempts: 1,
-  });
-  if (!remote.reachable) return null;
-  try {
-    const { stdout } = await execGit(PROJECT_DIR, ["show", `${upstream}:config/openclaw-target.txt`], {
+    const { stdout } = await execGit(PROJECT_DIR, ["show", `${ref}:${file}`], {
       timeout: 10_000,
+      // install.sh is several hundred kilobytes.
+      maxBuffer: 16 * 1024 * 1024,
     });
-    // The same first-token read as readPinnedOpenclawVersion and install.sh.
-    return String(stdout ?? "").trim().split(/\s+/)[0] || null;
+    return String(stdout ?? "");
   } catch {
     return null;
   }
 }
 
 /**
- * When the pre-flight is asked, which decides what a refusal can truthfully
- * say about the box.
+ * The harness pins `origin/<branch>` carries, read with ONE fetch and
+ * `git show` — nothing is checked out, so a refusal leaves the box exactly as
+ * it was. Shared by the update's pre-flight and the Settings update-branch
+ * route, so both judge a branch by the same two files install.sh installs
+ * from: `config/openclaw-target.txt` (first token, as readPinnedOpenclawVersion
+ * and install.sh read it) and install.sh's `HERMES_PIN_COMMIT` (parseHermesPin).
+ * `OPENCLAW_PIN_VERSION` overrides the OpenClaw pin here as it does in install.sh.
  *
- * `before-update`: ahead of step 1, and nothing has changed. `before-install`:
- * at the `openclaw_install` boundary, after the repo sync and the package steps
- * ahead of it have run — but before the core is touched, so the assistant still
- * has the one it had.
+ * ONE attempt, and every failure is a null pin rather than a throw: this is a
+ * pre-flight, and the install step asks again on the synced tree.
  */
-type SchemaCheckMoment = "before-update" | "before-install";
+async function readPinsAtBranch(branch: string, wantHermes: boolean): Promise<HarnessPins> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim() || null;
+  const pins: HarnessPins = { branch, openclaw: envPin, hermes: null };
+  if (envPin && !wantHermes) return pins;
+  if (!isSafeBranch(branch)) return { ...pins, branch: null };
+  const remote = await reachOrigin(PROJECT_DIR, ["fetch", "--quiet", "origin", branch], {
+    timeout: 20_000,
+    attempts: 1,
+  });
+  if (!remote.reachable) return pins;
+  const upstream = `origin/${branch}`;
+  if (!envPin) {
+    pins.openclaw = (await showAtRef(upstream, "config/openclaw-target.txt"))?.trim().split(/\s+/)[0] || null;
+  }
+  if (wantHermes) {
+    const installer = await showAtRef(upstream, "install.sh");
+    pins.hermes = installer ? parseHermesPin(installer) : null;
+  }
+  return pins;
+}
 
 /**
- * "This box's data is newer than the core this update would install" — asked
- * BEFORE the core is touched, answered in one sentence or not at all.
+ * The pins this update will INSTALL: the release it is about to sync to.
+ * Null pins whenever that cannot be done without guessing — no branch, a
+ * remote that is not `origin`, a fetch that did not land, a release with no
+ * pin file.
+ */
+async function readUpdateTargetPins(wantHermes: boolean): Promise<HarnessPins> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim() || null;
+  const unknown: HarnessPins = { branch: null, openclaw: envPin, hermes: null };
+  if (envPin && !wantHermes) return unknown;
+  let upstream: string;
+  try {
+    ({ upstream } = await resolveUpdateBranch(PROJECT_DIR));
+  } catch {
+    // Unresolvable: step 0 refuses the run with its own sentence.
+    return unknown;
+  }
+  if (!upstream.startsWith("origin/")) return unknown;
+  return readPinsAtBranch(upstream.slice("origin/".length), wantHermes);
+}
+
+/** The pins in the checkout on disk — the target once the sync is behind the run. */
+async function readCheckoutPins(wantHermes: boolean): Promise<HarnessPins> {
+  let hermes: HarnessPins["hermes"] = null;
+  if (wantHermes) {
+    const installer = await readFile(path.join(PROJECT_DIR, "install.sh"), "utf-8").catch(() => null);
+    hermes = installer ? parseHermesPin(installer) : null;
+  }
+  return { branch: null, openclaw: await readPinnedOpenclawVersion(), hermes };
+}
+
+/** `git` in the Hermes checkout the box runs, as its owner (this server's user). */
+async function hermesGit(args: string[]): Promise<{ code: number; stdout: string }> {
+  const dir = process.env.HERMES_AGENT_DIR || path.join(hermesHome(), "hermes-agent");
+  try {
+    const { stdout } = await execFile("git", ["-c", `safe.directory=${dir}`, "-C", dir, ...args], { timeout: 10_000 });
+    return { code: 0, stdout: String(stdout ?? "").trim() };
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    return { code: typeof code === "number" ? code : -1, stdout: "" };
+  }
+}
+
+/**
+ * What the Hermes checkout is on, and whether `targetCommit` is behind it.
+ * `merge-base --is-ancestor` answers 0 (behind), 1 (not behind) or something
+ * else (a commit this clone does not have — a shallow checkout); only the
+ * first two are an answer.
+ */
+async function readInstalledHermes(targetCommit: string | null): Promise<{
+  installed: { commit: string | null; version: string | null } | null;
+  targetIsAncestor: boolean | null;
+}> {
+  const head = await hermesGit(["rev-parse", "HEAD"]);
+  const commit = head.code === 0 && /^[0-9a-f]{40}$/i.test(head.stdout) ? head.stdout.toLowerCase() : null;
+  if (commit && targetCommit && commit === targetCommit.toLowerCase()) {
+    return { installed: { commit, version: null }, targetIsAncestor: false };
+  }
+  const version = await readHermesVersion();
+  if (!commit && !version) return { installed: null, targetIsAncestor: null };
+  let targetIsAncestor: boolean | null = null;
+  if (commit && targetCommit) {
+    const ancestry = await hermesGit(["merge-base", "--is-ancestor", targetCommit, "HEAD"]);
+    targetIsAncestor = ancestry.code === 0 ? true : ancestry.code === 1 ? false : null;
+  }
+  return { installed: { commit, version: version ? version.replace(/^v/, "") : null }, targetIsAncestor };
+}
+
+/**
+ * The newest agent database on disk, by schema. A store that could not be
+ * asked is no evidence: null, like readStateSchemaVersion's null.
+ */
+function newestAgentSchema(): SchemaOnDisk | null {
+  try {
+    let newest: SchemaOnDisk | null = null;
+    for (const db of readAgentSchemaVersions()) {
+      if (!newest || db.version > newest.version) newest = { label: db.path, version: db.version };
+    }
+    return newest;
+  } catch (err) {
+    console.warn("[Updater] could not read the OpenClaw agent databases' schema:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * "Would installing `pins` move a harness on this box backwards?" — the
+ * versions installed now and the schemas on disk against the target's, judged
+ * by assessHarnessDowngrade. Null when nothing would; never throws, because a
+ * guard may not be the thing that fails an update.
+ *
+ * `openclaw` / `hermes` say which harnesses this run installs. The warnings for
+ * an OpenClaw pin that could not be read, or one whose schemas the tables do
+ * not know, are how the guard's own blind spots are found.
+ */
+async function harnessDowngradeFor(
+  pins: HarnessPins,
+  scope: { openclaw: boolean; hermes: boolean },
+): Promise<HarnessDowngradeDetail | null> {
+  try {
+    let openclaw = null;
+    if (scope.openclaw) {
+      if (!pins.openclaw) {
+        console.warn(
+          "[Updater] could not read which OpenClaw this update installs; the state-DB pre-flight stood down"
+          + " until the install step, which asks again on the synced tree",
+        );
+      } else {
+        const supported = {
+          state: openclawStateSchemaFor(pins.openclaw),
+          agent: openclawAgentSchemaFor(pins.openclaw),
+        };
+        if (supported.state === null || supported.agent === null) {
+          console.warn(
+            `[Updater] no state schema recorded for the pinned OpenClaw ${pins.openclaw}; the state-DB pre-flight stood down`,
+          );
+        }
+        const dbPath = statePath();
+        const state = dbPath ? readStateSchemaVersion() : null;
+        openclaw = {
+          target: pins.openclaw,
+          installed: await readPkgVersion(OPENCLAW_PKG),
+          onDisk: {
+            state: dbPath && state !== null ? { label: dbPath, version: state } : null,
+            agent: newestAgentSchema(),
+          },
+          supported,
+        };
+      }
+    }
+    let hermes = null;
+    if (scope.hermes && pins.hermes) {
+      hermes = { target: pins.hermes, ...(await readInstalledHermes(pins.hermes.commit)) };
+    }
+    const downgrades = assessHarnessDowngrade({ openclaw, hermes });
+    return downgrades.length > 0 ? { branch: pins.branch, downgrades } : null;
+  } catch (err) {
+    console.warn(
+      "[Updater] could not compare the harnesses before the update:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+/**
+ * For the Settings update-branch route: would updates that follow `branch`
+ * install an older harness than the one that wrote this box's data? Read off
+ * `origin/<branch>` without checking anything out; null when not, or when it
+ * could not be told (an unreachable origin, a branch origin does not carry —
+ * the update then refuses with its own sentence).
+ */
+export async function checkBranchHarnessDowngrade(branch: string): Promise<HarnessDowngradeDetail | null> {
+  const scope = { openclaw: !openclawIsAbsent(), hermes: hasHermesHarness() };
+  if (!scope.openclaw && !scope.hermes) return null;
+  return harnessDowngradeFor(await readPinsAtBranch(branch, scope.hermes), scope);
+}
+
+/**
+ * "This box's data is newer than the harness this update would install" —
+ * asked BEFORE anything is touched, answered with the sentence and the detail
+ * the screen localises, or not at all.
+ *
+ * `moment` (see DowngradeMoment): `before-update` is ahead of step 1, and
+ * nothing has changed; `before-install` is the `openclaw_install` boundary,
+ * after the repo sync and the package steps ahead of it have run — but before
+ * the core is touched, so the assistant still has the one it had.
  *
  * WHY IT IS A PRE-FLIGHT AND NOT A FAILURE MESSAGE. OpenClaw migrates
  * `~/.openclaw/state/openclaw.sqlite` forward and NEVER back. A box whose store
@@ -5264,55 +5508,75 @@ type SchemaCheckMoment = "before-update" | "before-install";
  * could only retry into the same wall. The numbers are knowable before anything
  * is touched, so they are read before anything is touched.
  *
- * IT REFUSES ONLY ON PROOF. Four separate unknowns each return null — a target
- * pin that could not be read, a pin whose schema is not in the table, a device
- * with no state store, a store that could not be read — because none of them is
- * evidence of a newer schema, and an update refused over an unknown strands
- * exactly the box an update repairs. Standing down costs what the box has
- * today: the mid-run failure.
+ * IT REFUSES ONLY ON PROOF (assessHarnessDowngrade): a database on a newer
+ * schema than the target declares, or a target older than what is installed.
+ * Every unknown — a target pin that could not be read, a pin whose schemas are
+ * not in the tables, a device with no store, a store that could not be read, a
+ * version that cannot be ordered — returns null, because none of them is
+ * evidence, and an update refused over an unknown strands exactly the box an
+ * update repairs. Standing down costs what the box has today: the mid-run
+ * failure, which the installer's own pre-check now stops before the core is
+ * swapped.
  *
- * `target` is the pin the update will install — see readUpdateTargetOpenclawPin
- * for why that is not simply the pin file on disk.
+ * `pins` are what the update will install — see readUpdateTargetPins for why
+ * that is not simply the pin file on disk.
  */
-async function newerStateSchemaRefusal(target: string | null, moment: SchemaCheckMoment): Promise<string | null> {
-  try {
-    if (!target) {
-      console.warn(
-        "[Updater] could not read which OpenClaw this update installs; the state-DB pre-flight stood down"
-        + " until the install step, which asks again on the synced tree",
-      );
-      return null;
-    }
-    const supported = openclawStateSchemaFor(target);
-    if (supported === null) {
-      console.warn(
-        `[Updater] no state schema recorded for the pinned OpenClaw ${target}; the state-DB pre-flight stood down`,
-      );
-      return null;
-    }
-    const dbPath = statePath();
-    if (!dbPath) return null;
-    const onDisk = readStateSchemaVersion();
-    if (onDisk === null || onDisk <= supported) return null;
-    return (
-      `This device's OpenClaw data is newer than the version this update installs. `
-      + `${dbPath} is on state schema ${onDisk}, and the pinned OpenClaw ${target} supports schema ${supported}. `
-      + `OpenClaw never downgrades a state schema, so installing it would leave the assistant unable to open its own data — `
-      + (moment === "before-update"
-        ? `the update was refused before it changed anything. `
-        : `the update stopped before it touched OpenClaw, and the assistant keeps the core it has. `)
-      + `Update ClawBox to a build whose pinned OpenClaw supports state schema ${onDisk} or newer, `
-      + `or restore the backup taken before the core that migrated this device.`
-    );
-  } catch (err) {
-    // A guard may not be the thing that fails an update. Whatever went wrong
-    // here, the box is no worse off than it was before this check existed.
-    console.warn(
-      "[Updater] could not read the OpenClaw state schema before the update:",
-      err instanceof Error ? err.message : err,
-    );
-    return null;
+async function harnessDowngradeRefusal(
+  pins: HarnessPins,
+  scope: { openclaw: boolean; hermes: boolean },
+  moment: DowngradeMoment,
+): Promise<{ message: string; detail: HarnessDowngradeDetail } | null> {
+  const detail = await harnessDowngradeFor(pins, scope);
+  return detail ? { detail, message: harnessDowngradeMessage(detail, moment) } : null;
+}
+
+/** Settle the run as refused before step 1: the box is as it was. */
+async function refuseBeforeStepOne(error: string, errorCode: HarnessDowngradeErrorCode, detail?: HarnessDowngradeDetail) {
+  runtime.state.phase = "failed";
+  runtime.state.error = error;
+  runtime.state.errorCode = errorCode;
+  if (detail) runtime.state.downgrade = detail;
+  runtime.state.currentStepIndex = -1;
+  await clearUpdateLock();
+}
+
+/**
+ * The override's first half: back the data up, then tell the installer which
+ * core it may set the newer databases aside for (harness-downgrade-backup.ts).
+ * Both happen or the run is refused with the reason — never a downgrade
+ * without a backup behind it.
+ */
+async function backUpForDowngrade(
+  detail: HarnessDowngradeDetail,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  console.warn(
+    `[Updater] installing an older harness at the owner's request; backing its data up first: ${
+      detail.downgrades.map((d) => `${d.harness} ${d.installed ?? "?"} -> ${d.target}`).join(", ")}`,
+  );
+  const backup = await backUpBeforeDowngrade(detail.downgrades);
+  if (!backup.ok) {
+    return {
+      ok: false,
+      message: "The assistant's data could not be backed up, so the older version was not installed and "
+        + `nothing was changed: ${backup.reason}`,
+    };
   }
+  try {
+    await writeDowngradeAuthorization({
+      openclaw: detail.downgrades.find((d) => d.harness === "openclaw")?.target ?? null,
+      hermes: detail.downgrades.find((d) => d.harness === "hermes")?.target ?? null,
+      hermesCommit: detail.downgrades.find((d) => d.harness === "hermes")?.targetCommit ?? null,
+      backupDir: backup.dir,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      message: `The assistant's data was backed up to ${backup.dir}, but the installer could not be told to use it, `
+        + `so the older version was not installed and nothing was changed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  warnUpdate("harness-downgrade-backup", backup.summary);
+  return { ok: true };
 }
 
 /** Execute or resume update steps, recording failure and respecting host maintenance ownership. */
@@ -5441,20 +5705,42 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // target could not be read, the `openclaw_install` boundary below asks again
   // on the synced tree — `schemaCheckedPin` is what it compares against, so a
   // pin already cleared here is not asked twice.
+  //
+  // AND OF EVERY HARNESS IT MOVES. A run that syncs the checkout installs the
+  // target branch's Hermes too, so on a box that runs Hermes that pin is read
+  // off the same fetch; a run that is past the sync, or never has one, installs
+  // the Hermes the box already has.
+  //
+  // THE OVERRIDE. `allowHarnessDowngrade` is the owner's "Back up and update
+  // anyway": instead of the refusal, the data is backed up (ClawKeep, else the
+  // harness's own backup command) and the installer is told which core it may
+  // set the newer databases aside for. No backup, no downgrade. A run without
+  // the override first withdraws any such authorisation an earlier one left,
+  // so a later run can never set data aside on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
   let schemaCheckedPin: string | null = null;
-  if (remainingSteps.some((s) => s.id === "openclaw_install")) {
-    const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
-    const target = syncAhead ? await readUpdateTargetOpenclawPin() : await readPinnedOpenclawVersion();
-    const refusal = await newerStateSchemaRefusal(target, "before-update");
-    schemaCheckedPin = target;
-    if (refusal) {
-      console.error(`[Updater] refusing the update before step 1: ${refusal}`);
-      runtime.state.phase = "failed";
-      runtime.state.error = refusal;
-      runtime.state.currentStepIndex = -1;
-      await clearUpdateLock();
+  const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
+  const downgradeScope = {
+    openclaw: remainingSteps.some((s) => s.id === "openclaw_install"),
+    hermes: syncAhead && hasHermesHarness(),
+  };
+  if (downgradeScope.openclaw || downgradeScope.hermes) {
+    if (!options.allowHarnessDowngrade) await clearDowngradeAuthorization();
+    const pins = syncAhead ? await readUpdateTargetPins(downgradeScope.hermes) : await readCheckoutPins(false);
+    const refusal = await harnessDowngradeRefusal(pins, downgradeScope, "before-update");
+    schemaCheckedPin = pins.openclaw;
+    if (refusal && !options.allowHarnessDowngrade) {
+      console.error(`[Updater] refusing the update before step 1: ${refusal.message}`);
+      await refuseBeforeStepOne(refusal.message, HARNESS_DOWNGRADE_CODE, refusal.detail);
       return;
+    }
+    if (refusal) {
+      const backup = await backUpForDowngrade(refusal.detail);
+      if (!backup.ok) {
+        console.error(`[Updater] refusing the update before step 1: ${backup.message}`);
+        await refuseBeforeStepOne(backup.message, HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, refusal.detail);
+        return;
+      }
     }
   }
 
@@ -5520,16 +5806,32 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // the sentence and the run stops: the steps before it changed packages and
     // the checkout, never OpenClaw, so the assistant keeps the core it has
     // instead of the retired one the install would have left.
+    //
+    // An override run backs up here instead, for a pin the first ask could not
+    // read; one whose authorisation already names this pin goes ahead.
     if (step.id === "openclaw_install") {
       const installing = await readPinnedOpenclawVersion();
       const refusal = installing === schemaCheckedPin
         ? null
-        : await newerStateSchemaRefusal(installing, "before-install");
-      if (refusal) {
-        console.error(`[Updater] refusing to install OpenClaw ${installing}: ${refusal}`);
+        : await harnessDowngradeRefusal(
+          { branch: null, openclaw: installing, hermes: null },
+          { openclaw: true, hermes: false },
+          "before-install",
+        );
+      let stop: { message: string; code: HarnessDowngradeErrorCode } | null = null;
+      if (refusal && !options.allowHarnessDowngrade) {
+        stop = { message: refusal.message, code: HARNESS_DOWNGRADE_CODE };
+      } else if (refusal && !(await downgradeAuthorizedFor(installing))) {
+        const backup = await backUpForDowngrade(refusal.detail);
+        if (!backup.ok) stop = { message: backup.message, code: HARNESS_DOWNGRADE_BACKUP_FAILED_CODE };
+      }
+      if (refusal && stop) {
+        console.error(`[Updater] refusing to install OpenClaw ${installing}: ${stop.message}`);
         runtime.state.steps[i].status = "failed";
-        runtime.state.steps[i].error = refusal;
-        runtime.state.error = refusal;
+        runtime.state.steps[i].error = stop.message;
+        runtime.state.error = stop.message;
+        runtime.state.errorCode = stop.code;
+        runtime.state.downgrade = refusal.detail;
         failed = true;
         break;
       }

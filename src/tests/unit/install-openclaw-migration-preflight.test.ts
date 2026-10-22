@@ -234,3 +234,112 @@ describe.skipIf(!hasPython3)("step_openclaw_install: free disk before the schema
     expect(liveVersion()).toContain("2026.10.3");
   });
 });
+
+/**
+ * The other direction: a box that ran OpenClaw 2026.10.6 (agent schema 25)
+ * asked to install 2026.10.3 (agent schema 24) — a switch back to a branch that
+ * still pins it, or any rollback. 2026.10.3's repair step refuses a newer
+ * database outright, and the step used to promote it anyway and stop there with
+ * the gateway left stopped. The staged core (the npm stub) is 2026.10.3.
+ */
+describe.skipIf(!hasPython3)("step_openclaw_install: a core older than the databases on disk", () => {
+  const agentDb = () => path.join(home, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite");
+  const backupDir = () => path.join(dir, "backup");
+
+  function newerBox(): void {
+    writeCore(prefix, "2026.10.6", 25, 20);
+    makeDb(agentDb(), 25);
+    rmSync(path.join(home, ".openclaw", "state", "openclaw.sqlite"));
+    makeDb(path.join(home, ".openclaw", "state", "openclaw.sqlite"), 20);
+  }
+
+  function authorize(over: Record<string, unknown> = {}): void {
+    mkdirSync(backupDir(), { recursive: true });
+    writeFileSync(path.join(project, "data", "harness-downgrade.json"), JSON.stringify({
+      version: 1,
+      openclaw: "2026.10.3",
+      hermes: null,
+      hermesCommit: null,
+      backupDir: backupDir(),
+      authorizedAt: new Date().toISOString(),
+      authorizedAtEpoch: Math.floor(Date.now() / 1000),
+      ...over,
+    }));
+  }
+
+  it("refuses it before the promotion, keeps the newer core, and brings the gateway back", () => {
+    rmSync(agentDb());
+    newerBox();
+    const r = runStep({ freeBytes: 1024 ** 4 });
+    expect(r.status).not.toBe(0);
+    const errorLines = r.stderr.split("\n").filter((l) => l.startsWith("Error:"));
+    expect(errorLines.pop()).toBe(
+      `Error: This box's OpenClaw data is newer than OpenClaw 2026.10.3: ${agentDb()} is on agent schema 25, `
+      + "and OpenClaw 2026.10.3 supports schema 24. An older OpenClaw cannot open data a newer one has written, "
+      + "so it was not installed and nothing was changed. Stay on an update branch whose OpenClaw supports agent "
+      + "schema 25 or newer, or choose \"Back up and update anyway\" in Settings > System Update, which backs the data up first.",
+    );
+    expect(liveVersion()).toContain("2026.10.6");
+    expect(existsSync(path.join(prefix, ".openclaw-stage"))).toBe(false);
+    expect(calls().some((c) => c.startsWith("doctor"))).toBe(false);
+    // NOT left stopped: the box keeps its assistant.
+    expect(calls()).toContain("systemctl start clawbox-gateway.service");
+    expect(existsSync(agentDb())).toBe(true);
+  });
+
+  it("with the owner's override for this core, sets the newer databases aside beside the backup and installs it", () => {
+    rmSync(agentDb());
+    newerBox();
+    authorize();
+    const r = runStep({ freeBytes: 1024 ** 4 });
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(liveVersion()).toContain("2026.10.3");
+    const moved = path.join(backupDir(), "openclaw-newer-schema", "agents", "main", "agent", "openclaw-agent.sqlite");
+    expect(existsSync(moved)).toBe(true);
+    expect(existsSync(agentDb())).toBe(false);
+    // Only the database the older core cannot open: the state database (20) stays.
+    expect(existsSync(path.join(home, ".openclaw", "state", "openclaw.sqlite"))).toBe(true);
+    expect(r.stdout).toMatch(/^CLAWBOX-WARN\[harness-downgrade-set-aside\]: OpenClaw 2026\.10\.3 cannot open 1 database/m);
+    expect(calls()).toContain("doctor doctor --fix --non-interactive");
+  });
+
+  it("is no override when it names another core, has expired, or its backup is gone", () => {
+    for (const over of [
+      { openclaw: "2026.9.4" },
+      { authorizedAtEpoch: Math.floor(Date.now() / 1000) - 13 * 3600 },
+      { backupDir: path.join(dir, "no-such-backup") },
+    ]) {
+      rmSync(agentDb(), { force: true });
+      newerBox();
+      authorize(over);
+      const r = runStep({ freeBytes: 1024 ** 4 });
+      expect(r.status, JSON.stringify(over)).not.toBe(0);
+      expect(r.stderr).toMatch(/This box's OpenClaw data is newer than OpenClaw 2026\.10\.3/);
+      expect(liveVersion()).toContain("2026.10.6");
+      expect(existsSync(agentDb())).toBe(true);
+    }
+  });
+
+  it("refuses before doctor when an older core is already the live one", () => {
+    rmSync(agentDb());
+    newerBox();
+    writeCore(prefix, "2026.10.3", 24, 20);
+    const r = runStep({ freeBytes: 1024 ** 4 });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/^Error: This box's OpenClaw data is newer than OpenClaw 2026\.10\.3: .*; leaving the gateway stopped$/m);
+    expect(calls().some((c) => c.startsWith("doctor"))).toBe(false);
+    expect(calls().some((c) => c.startsWith("npm "))).toBe(false);
+  });
+
+  it("installs as before over databases on the core's own schema", () => {
+    writeCore(prefix, "2026.10.3", 24, 20);
+    rmSync(agentDb());
+    makeDb(agentDb(), 24);
+    rmSync(path.join(home, ".openclaw", "state", "openclaw.sqlite"));
+    makeDb(path.join(home, ".openclaw", "state", "openclaw.sqlite"), 20);
+    const r = runStep({ freeBytes: 1024 ** 4 });
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(calls()).toContain("doctor doctor --fix --non-interactive");
+    expect(existsSync(agentDb())).toBe(true);
+  });
+});

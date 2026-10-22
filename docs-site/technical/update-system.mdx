@@ -76,6 +76,24 @@ Switch in **System Update → Advanced options** (Beta toggle / branch override)
 
 With no pin recorded (file absent or empty) the box follows the branch it is checked out on, and `main` otherwise, so it still sees new releases. **Advanced options** shows the branch updates actually follow and whether it was recorded. The one exception is a detached checkout that nothing on the box ties to a branch. The update check still compares it against `main`, but the update itself refuses to guess a channel and asks for a branch to be entered first.
 
+## Going back to an older release
+
+OpenClaw and Hermes Agent move their data forward and never back. Once a box has run a newer version, an older one cannot open what it wrote. For example, OpenClaw 2026.10.6 moves the agent databases to schema 25, and 2026.10.3 reads up to schema 24. So a switch that would install an **older** harness than the one installed now is refused, and nothing on the box changes. This covers switching from `beta` to a `main` that still pins the older release, or any rollback. The check runs:
+
+- **when you set the update branch** (Beta toggle or branch override): the branch on record stays as it was;
+- **when you press Update now**: the update stops before its first step;
+- **in `install.sh`**, before it resets the checkout to the branch and again before it replaces the OpenClaw core. An older core is never put in place over newer databases, and the gateway keeps running on the core the box had.
+
+The check reads the target branch's pins (`config/openclaw-target.txt` and `HERMES_PIN_COMMIT` in `install.sh`) without checking anything out. It compares them with the versions installed now and with the schema of every OpenClaw database on disk (the state database and each agent database). It refuses only on proof. If a pin or a database cannot be read, the check stands down.
+
+**The override.** The refusal offers **Back up and switch anyway** (update branch) and **Back up and update anyway** (Update now). Choosing it on the update branch records the branch, and the update then asks for the same choice. When the update runs with the override, it:
+
+1. backs up the assistant's data **first**: a ClawKeep backup when the box is paired with ClawKeep, otherwise the harnesses' own `openclaw backup create --verify --no-include-workspace` and `hermes backup`, written to `~/clawbox-harness-backups/<UTC time>/`. If the backup fails, nothing is installed;
+2. records `data/harness-downgrade.json`, which lets the installer go ahead with exactly that older OpenClaw for twelve hours;
+3. installs the older version. The OpenClaw databases it cannot open are moved, unedited, into `~/clawbox-harness-backups/<UTC time>/openclaw-newer-schema/`, and it starts with fresh ones. Their conversations stay in the backup and come back when you return to the newer release and restore it.
+
+Over the API the override is `"allowHarnessDowngrade": true` in the body of `POST /setup-api/system/update-branch` or `POST /setup-api/update/run`. Only a literal `true` counts.
+
 ## Ways to update
 
 | Method | What it runs | When to use |
@@ -104,8 +122,8 @@ On the **beta channel** (and the next stable release), this state is detected ex
 | Endpoint | Purpose |
 |---|---|
 | `GET /setup-api/update/versions` | Installed/target versions (add `?force=1` to bypass the 60 s cache) |
-| `POST /setup-api/update/run` | Start the full update |
+| `POST /setup-api/update/run` | Start the full update. `{ "allowHarnessDowngrade": true }` is the [override](#going-back-to-an-older-release) for an update that installs an older harness |
 | `GET /setup-api/update/status` | Live step progress (polled by the UI) |
 | `POST /setup-api/update/reset` | Reset-to-channel & update *(beta)* |
-| `GET/POST /setup-api/system/update-branch` | Read/set the channel pin; both also answer `effective: { branch, source }`, the branch updates follow |
+| `GET/POST /setup-api/system/update-branch` | Read/set the channel pin; both also answer `effective: { branch, source }`, the branch updates follow. A branch that would install an older harness answers `409` with `code: "harness_downgrade"` unless the body carries the override |
 | `GET /setup-api/system/build-identity` | Deployed build vs checkout vs pin, with the drift verdict (add `?force=1` to bypass the 30 s cache) |

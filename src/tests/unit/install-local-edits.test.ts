@@ -156,6 +156,8 @@ function runStep1(extra: Record<string, string> = {}, srcDir: string = REPO): { 
     "ROOT_EXEC_TREE_RESYNCED=0",
     "chown() { :; }",
     "step_fix_git_perms() { :; }",
+    // The harness-downgrade guard has its own suite (install-harness-downgrade-guard.test.ts).
+    "harness_downgrade_guard() { :; }",
     "handover_legacy_updater() { :; }",
     "refresh_root_exec_manifest() { echo manifest-refreshed; }",
     'record_provision_failure() { echo "recorded $1"; }',

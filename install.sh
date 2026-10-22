@@ -4002,6 +4002,95 @@ persist_update_branch_pin() {
   chmod 644 "$pin_file"
 }
 
+# Would syncing to $1 (`origin/<branch>`, fetched) move a harness on this box
+# BACKWARDS? A harness migrates its data forward and never back: a box that ran
+# OpenClaw 2026.10.6 has agent databases 2026.10.3 refuses outright, and an
+# older Hermes cannot run on a state.db a newer gateway runtime wrote. The
+# in-app updater asks before step 1 (src/lib/updater.ts, which also reads the
+# on-disk schemas); this asks the same of every way into the sync — install.sh
+# over SSH, an update whose pre-flight could not reach origin — BEFORE the
+# reset, so a refusal leaves the checkout where it was.
+#
+# Proof only: an OpenClaw pin numerically older than the core installed now (a
+# dist-tag or prerelease is no proof), or a Hermes pin that is an ancestor of
+# the commit checked out now. Whatever cannot be read stands down. The owner's
+# override is the authorisation the updater writes once it has backed the data
+# up (data/harness-downgrade.json), honoured for exactly the versions it names
+# and only within its twelve hours; it is read as data, never sourced. git in
+# the Hermes checkout runs as its owner, never root (see use_tree_owner_for_git).
+harness_downgrade_guard() {
+  local upstream="$1"
+  local run_git=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  local target_oc="" t_commit="" h_head="" h_rc="" out rc=0
+  local hermes_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
+  if has_openclaw_harness; then
+    target_oc="$("${run_git[@]}" show "$upstream:config/openclaw-target.txt" 2>/dev/null | head -1 | awk '{print $1}' || true)"
+  fi
+  if has_hermes_harness && [ -d "$hermes_dir/.git" ]; then
+    t_commit="$("${run_git[@]}" show "$upstream:install.sh" 2>/dev/null \
+      | sed -n 's/^HERMES_PIN_COMMIT="\${HERMES_PIN_COMMIT:-\([0-9a-fA-F]\{40\}\)}".*/\1/p' | head -1 || true)"
+    if [ -n "$t_commit" ]; then
+      h_head="$(as_clawbox git -C "$hermes_dir" rev-parse HEAD 2>/dev/null || true)"
+      if [ -n "$h_head" ] && [ "$h_head" != "$(printf '%s' "$t_commit" | tr 'A-F' 'a-f')" ]; then
+        h_rc=0
+        as_clawbox git -C "$hermes_dir" merge-base --is-ancestor "$t_commit" HEAD >/dev/null 2>&1 || h_rc=$?
+      fi
+    fi
+  fi
+  [ -n "$target_oc" ] || [ "$h_rc" = "0" ] || return 0
+  out="$(python3 -I - "$target_oc" "$NPM_PREFIX/lib/node_modules/openclaw/package.json" "$t_commit" "$h_head" "$h_rc" \
+      "$PROJECT_DIR/data/harness-downgrade.json" "${upstream#origin/}" <<'PY'
+import json, re, sys, time
+target_oc, pkg, t_commit, h_head, h_rc, auth_path, branch = sys.argv[1:8]
+
+def parts(v):
+    m = re.match(r"^v?(\d+(?:\.\d+)*)(?:-(\d+))?$", (v or "").strip())
+    return ([int(x) for x in m.group(1).split(".")], int(m.group(2) or 0)) if m else None
+
+def older(a, b):
+    pa, pb = parts(a), parts(b)
+    if not pa or not pb:
+        return False
+    n = max(len(pa[0]), len(pb[0]))
+    return (pa[0] + [0] * (n - len(pa[0])), pa[1]) < (pb[0] + [0] * (n - len(pb[0])), pb[1])
+
+try:
+    installed = json.load(open(pkg)).get("version")
+except Exception:
+    installed = None
+try:
+    auth = json.load(open(auth_path))
+    fresh = auth.get("version") == 1 and 0 <= time.time() - float(auth.get("authorizedAtEpoch")) <= 12 * 3600
+except Exception:
+    auth, fresh = {}, False
+
+found = []
+if target_oc and installed and older(target_oc, installed) and not (fresh and auth.get("openclaw") == target_oc):
+    found.append("OpenClaw %s is installed, and branch \"%s\" pins the older OpenClaw %s" % (installed, branch, target_oc))
+if t_commit and h_head and h_rc == "0" and not (fresh and str(auth.get("hermesCommit") or "").lower() == t_commit.lower()):
+    found.append("Hermes Agent is checked out at %s, and branch \"%s\" pins the older commit %s" % (h_head[:12], branch, t_commit[:12]))
+if found:
+    print(
+        "%s. An older version cannot open data a newer one has written, so the update stopped before it changed anything. "
+        "Stay on an update branch that installs these versions or newer, or choose \"Back up and update anyway\" "
+        "in Settings > System Update, which backs the data up first." % "; ".join(found)
+    )
+    sys.exit(3)
+PY
+  )" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      echo "Error: $(printf '%s\n' "$out" | tail -n 1)" >&2
+      return 1
+      ;;
+    *)
+      echo "  WARN: the harness downgrade check could not run (exit $rc); continuing without it" >&2
+      return 0
+      ;;
+  esac
+}
+
 sync_repo_to_update_target() {
   local target_branch="$1"
   local upstream_branch="$2"
@@ -4020,6 +4109,13 @@ sync_repo_to_update_target() {
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
 
   git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  # Nothing older than the harness that wrote this box's data, unless the owner
+  # chose it and the data was backed up first: asked of the fetched target,
+  # before anything below moves the tree.
+  if ! harness_downgrade_guard "$upstream_branch"; then
+    GIT_RUNNER=()
+    exit 1
+  fi
   # SAVE, then discard. The resets below align the device with upstream, which
   # is the updater's whole purpose — but "discard" used to mean "lose": an
   # owner's edited file went with no trace and no word. It is copied out of the
@@ -6126,6 +6222,16 @@ openclaw_db_maintenance() {
 # proof (the helper's exit 3, its last line the owner-facing sentence, also
 # recorded for the web server in data/openclaw-migration-status.json); a check
 # that cannot run stands down, as the updater's schema pre-flight does.
+#
+# The same ask refuses a core OLDER than the databases on disk: one a newer core
+# has migrated is refused outright by every older core, and its `doctor --fix`
+# cannot repair a newer schema, so installing it (a switch from beta back to a
+# branch that still pins the older core, any rollback) used to end at the repair
+# step with the gateway left stopped. Refused here, the staged core is dropped
+# and the gateway starts again on the core it had. The owner's override (System
+# Update's "Back up and update anyway", which backs the data up first and
+# writes data/harness-downgrade.json for this core) has the helper move exactly
+# those databases beside that backup instead, and the older core starts fresh.
 openclaw_migration_disk_preflight() {
   local out rc=0
   out="$(openclaw_db_maintenance preflight --core-pkg "$1" 2>&1)" || rc=$?
@@ -6578,17 +6684,18 @@ step_openclaw_install() {
         fi
         ;;
     esac
-    # …and the disk can hold the migration it brings. Asked of the STAGED
-    # core's own schema declaration, before anything is swapped: refused here,
-    # the box keeps the core and the databases it had, and gets its gateway
-    # back, which the composite step's own restore would not reach after this
-    # return.
+    # …and it can open the databases on disk, and the disk can hold the
+    # migration it brings. Asked of the STAGED core's own schema declaration,
+    # before anything is swapped: refused here — a core older than the data,
+    # or a disk too small — the box keeps the core and the databases it had,
+    # and gets its gateway back, which the composite step's own restore would
+    # not reach after this return.
     if ! openclaw_migration_disk_preflight "$_oc_stage/lib/node_modules/openclaw/package.json"; then
       rm -rf "$_oc_stage"
       if has_openclaw_harness && [ "$_oc_gateway_stopped" -eq 1 ]; then
         systemctl start clawbox-gateway.service 2>/dev/null || true
       fi
-      echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-there is not enough free disk for the OpenClaw database migration; the core on the box is untouched}" >&2
+      echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-OpenClaw $TARGET cannot take over the databases on this box (too old for them, or not enough free disk for their migration); the core on the box is untouched}" >&2
       return 1
     fi
     promote_staged_openclaw_core "$_oc_stage" || return 1
@@ -6614,10 +6721,11 @@ step_openclaw_install() {
     stop_openclaw_gateways_for_migration || return 1
     _oc_gateway_stopped=1
     local _oc_live_pkg="$NPM_PREFIX/lib/node_modules/openclaw/package.json"
-    # A core already at the pin (a Retry after a migration that did not finish)
-    # was not checked above: ask now, before doctor starts copying.
+    # A core already at the pin (a Retry after a migration that did not finish,
+    # or an older core put there by hand) was not checked above: ask now, before
+    # doctor starts copying or meets a database newer than itself.
     if [ "$CORE_NEEDS_INSTALL" -eq 0 ] && ! openclaw_migration_disk_preflight "$_oc_live_pkg"; then
-      echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-there is not enough free disk for the OpenClaw database migration}; leaving the gateway stopped" >&2
+      echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-OpenClaw $TARGET cannot take over the databases on this box (too old for them, or not enough free disk for their migration)}; leaving the gateway stopped" >&2
       return 1
     fi
     local _oc_doctor_out

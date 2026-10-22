@@ -88,6 +88,17 @@ describe("POST /setup-api/update/run", () => {
     expect(mockStartUpdate).toHaveBeenCalled();
   });
 
+  it("passes the owner's explicit downgrade override, and nothing short of a literal true", async () => {
+    // "Back up and update anyway" (src/lib/harness-downgrade.ts): without it the
+    // updater refuses a run that would install an older harness.
+    await updateRunPost(jsonRequest({ force: true }));
+    expect(mockStartUpdate).toHaveBeenLastCalledWith({ allowHarnessDowngrade: false });
+    await updateRunPost(jsonRequest({ force: true, allowHarnessDowngrade: "true" }));
+    expect(mockStartUpdate).toHaveBeenLastCalledWith({ allowHarnessDowngrade: false });
+    await updateRunPost(jsonRequest({ force: true, allowHarnessDowngrade: true }));
+    expect(mockStartUpdate).toHaveBeenLastCalledWith({ allowHarnessDowngrade: true });
+  });
+
   it("handles invalid JSON body gracefully", async () => {
     const req = new Request("http://localhost/test", {
       method: "POST",

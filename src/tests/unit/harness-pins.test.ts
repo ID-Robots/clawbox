@@ -73,6 +73,18 @@ describe("the OpenClaw pin", () => {
     );
   });
 
+  it("records which agent-database schema the pinned core supports", () => {
+    // The same guard for the agent databases, which move on their own: the
+    // 2026.10.6 pin took them to 25 with the state database still on 20, and a
+    // pre-flight that read only the state table let a box that had run it
+    // install 2026.10.3, whose repair step then refused every agent database.
+    const table = /OPENCLAW_AGENT_SCHEMA_BY_VERSION[^{]*\{([^}]*)\}/.exec(read("src/lib/updater.ts"))?.[1];
+    expect(table, "OPENCLAW_AGENT_SCHEMA_BY_VERSION in src/lib/updater.ts").toBeTypeOf("string");
+    expect(table, `no agent schema recorded for the pinned ${OPENCLAW_PIN}`).toMatch(
+      new RegExp(`"${String(OPENCLAW_PIN).replaceAll(".", "\\.")}"\\s*:\\s*\\d+`),
+    );
+  });
+
   it("is not copied into the e2e image", () => {
     // The image models a box BEFORE the update and installs no core of its own,
     // so a version there could only be a comment — and a comment that names

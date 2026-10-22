@@ -392,7 +392,7 @@ describe("the checker", () => {
   const PIN = "2026.10.3";
   type Unchecked = { harness: string; kind: string; site: string; why: string };
   const run = (opts: {
-    usages: Usage[]; allow?: unknown[]; stateRow?: number; unchecked?: Unchecked[];
+    usages: Usage[]; allow?: unknown[]; stateRow?: number; agentRow?: number; unchecked?: Unchecked[];
     recorded?: Record<string, Record<string, number>>; event?: string;
     hermesConfig?: Record<string, unknown>; routes?: [string, string][];
     hermesCli?: unknown[]; chatRules?: unknown; openrpc?: Record<string, string[]>;
@@ -400,7 +400,8 @@ describe("the checker", () => {
     const dir = tree({
       "config/harness-contract-allowlist.json": JSON.stringify({ entries: opts.allow ?? [] }),
       "config/harness-contract-unchecked.json": JSON.stringify(opts.recorded ?? {}),
-      "src/lib/updater.ts": `const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {\n  "${PIN}": ${opts.stateRow ?? 20},\n};\n`,
+      "src/lib/updater.ts": `const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {\n  "${PIN}": ${opts.stateRow ?? 20},\n};\n`
+        + `const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {\n  "${PIN}": ${opts.agentRow ?? 24},\n};\n`,
       "install.sh": 'OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"\nHERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-' + "a".repeat(40) + '}"\n',
       "usage.json": JSON.stringify({ usages: opts.usages, unchecked: opts.unchecked ?? [] }),
       "openclaw.json": JSON.stringify({
@@ -526,6 +527,14 @@ describe("the checker", () => {
     const r = run({ usages: [], stateRow: 19 });
     expect(r.code).toBe(1);
     expect(r.out).toContain('OPENCLAW_STATE_SCHEMA_BY_VERSION["2026.10.3"] — is 19; the pinned package.json says openclaw.schemaVersions.state = 20');
+  });
+
+  it("fails when the updater's agent-schema row disagrees with the pinned package", () => {
+    // The row the downgrade pre-flight compares agent databases against: wrong,
+    // it lets an older core through or refuses a box the pin can open.
+    const r = run({ usages: [], agentRow: 25 });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('OPENCLAW_AGENT_SCHEMA_BY_VERSION["2026.10.3"] — is 25; the pinned package.json says openclaw.schemaVersions.agent = 24');
   });
 });
 
