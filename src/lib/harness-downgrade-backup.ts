@@ -75,14 +75,20 @@ async function clawkeepBackup(): Promise<{ ok: boolean; reason: string } | null>
   }
 }
 
-async function openclawLocalBackup(dir: string): Promise<string | null> {
+/**
+ * `env` is the updater's `openclawChildEnv()`: the child must archive the tree
+ * ClawBox runs (HOME, OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH pinned, no
+ * inherited OPENCLAW_HOME), or a verified archive of some other, empty tree
+ * would pass for this box's backup.
+ */
+async function openclawLocalBackup(dir: string, env: NodeJS.ProcessEnv): Promise<string | null> {
   const out = path.join(dir, "openclaw");
   await mkdir(out, { recursive: true, mode: 0o700 });
   try {
     await execFile(
       findOpenclawBin(),
       ["backup", "create", "--verify", "--no-include-workspace", "--output", out, "--json"],
-      { timeout: LOCAL_BACKUP_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      { timeout: LOCAL_BACKUP_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env },
     );
     return null;
   } catch (err) {
@@ -109,16 +115,17 @@ async function hermesLocalBackup(dir: string): Promise<string | null> {
  */
 export async function backUpBeforeDowngrade(
   downgrades: HarnessDowngrade[],
+  openclawEnv: NodeJS.ProcessEnv,
   now: Date = new Date(),
 ): Promise<DowngradeBackupResult> {
   try {
-    return await backUp(downgrades, now);
+    return await backUp(downgrades, openclawEnv, now);
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }
 
-async function backUp(downgrades: HarnessDowngrade[], now: Date): Promise<DowngradeBackupResult> {
+async function backUp(downgrades: HarnessDowngrade[], openclawEnv: NodeJS.ProcessEnv, now: Date): Promise<DowngradeBackupResult> {
   const dir = path.join(downgradeBackupRoot(), stampOf(now));
   const moving = downgrades.map((d) => `${HARNESS_LABEL[d.harness]} ${d.installed ?? "?"} -> ${d.target}`).join(", ");
   try {
@@ -140,7 +147,7 @@ async function backUp(downgrades: HarnessDowngrade[], now: Date): Promise<Downgr
     };
   }
   for (const d of downgrades) {
-    const failure = d.harness === "openclaw" ? await openclawLocalBackup(dir) : await hermesLocalBackup(dir);
+    const failure = d.harness === "openclaw" ? await openclawLocalBackup(dir, openclawEnv) : await hermesLocalBackup(dir);
     if (failure) {
       return { ok: false, reason: clawkeep && !clawkeep.ok ? `${clawkeep.reason}; then ${failure}` : failure };
     }

@@ -320,6 +320,25 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a core older than the datab
     }
   });
 
+  it("puts a database's sidecars back when the database itself cannot follow them", () => {
+    // The WAL moves first; if the database then cannot be moved, a database
+    // left behind without its WAL would lose what was committed only there.
+    rmSync(agentDb());
+    newerBox();
+    authorize();
+    writeFileSync(`${agentDb()}-wal`, "committed-only-here");
+    // Something already at the database's place in the backup: the move fails.
+    const blocked = path.join(backupDir(), "openclaw-newer-schema", "agents", "main", "agent", "openclaw-agent.sqlite");
+    mkdirSync(path.join(blocked, "openclaw-agent.sqlite"), { recursive: true });
+    const r = runStep({ freeBytes: 1024 ** 4 });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/could not all be set aside .*so it was not installed; 0 of 1 were moved/);
+    expect(readFileSync(`${agentDb()}-wal`, "utf-8")).toBe("committed-only-here");
+    expect(existsSync(`${blocked}-wal`)).toBe(false);
+    expect(liveVersion()).toContain("2026.10.6");
+    expect(calls().some((c) => c.startsWith("doctor"))).toBe(false);
+  });
+
   it("refuses before doctor when an older core is already the live one", () => {
     rmSync(agentDb());
     newerBox();

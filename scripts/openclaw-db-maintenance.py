@@ -946,14 +946,23 @@ def set_aside(dbs, state_dir, dest):
         else:
             rel = os.path.join("elsewhere", db.get("agentId") or "state", os.path.basename(src))
         target = os.path.join(dest, SET_ASIDE_DIR, rel)
+        done = []
         try:
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            # The database last: a stray sidecar is harmless, a moved database
-            # with its WAL left behind is not.
+            # The database last, and its sidecars put back if it cannot follow
+            # them: a database left in place without its WAL loses whatever was
+            # committed only there the next time a core opens it.
             for suffix in ("-wal", "-shm", "-journal", ""):
                 if os.path.lexists(src + suffix):
                     shutil.move(src + suffix, target + suffix)
+                    done.append(suffix)
         except Exception as exc:
+            for suffix in reversed(done):
+                try:
+                    shutil.move(target + suffix, src + suffix)
+                except Exception as back:
+                    warn("could not put %s back beside %s (%s: %s); it is at %s"
+                         % (os.path.basename(src + suffix), src, type(back).__name__, back, target + suffix))
             return moved, "%s: %s" % (type(exc).__name__, exc)
         moved.append((src, target))
     return moved, None

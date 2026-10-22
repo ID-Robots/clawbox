@@ -201,6 +201,15 @@ describe("the pin format the guard reads", () => {
     const pin = /^HERMES_PIN_COMMIT="\$\{HERMES_PIN_COMMIT:-[0-9a-fA-F]{40}\}"$/;
     expect(INSTALL_SH.split("\n").filter((line) => pin.test(line))).toHaveLength(1);
   });
+
+  it("is what the guard's own extraction reads out of the shipped file", () => {
+    // The regex above restates the shape; this runs the guard's very sed
+    // expression over the real install.sh, so the two cannot drift apart.
+    const sedExpr = /sed -n '([^']*HERMES_PIN_COMMIT[^']*)'/.exec(shellFunction("harness_downgrade_guard"))?.[1];
+    expect(sedExpr, "the guard's sed expression").toBeTypeOf("string");
+    const r = spawnSync("sed", ["-n", sedExpr as string, path.join(REPO, "install.sh")], { encoding: "utf-8" });
+    expect(r.stdout.trim()).toMatch(/^[0-9a-f]{40}$/i);
+  });
 });
 
 describe("sync_repo_to_update_target asks it", () => {

@@ -5570,7 +5570,9 @@ async function backUpForDowngrade(
     `[Updater] installing an older harness at the owner's request; backing its data up first: ${
       detail.downgrades.map((d) => `${d.harness} ${d.installed ?? "?"} -> ${d.target}`).join(", ")}`,
   );
-  const backup = await backUpBeforeDowngrade(detail.downgrades);
+  // The OpenClaw backup child is pinned to this device's tree, like every
+  // other `openclaw` the updater starts.
+  const backup = await backUpBeforeDowngrade(detail.downgrades, openclawChildEnv());
   if (!backup.ok) {
     return {
       ok: false,

@@ -329,12 +329,26 @@ describe("Update now: the same or a newer target goes ahead", () => {
 describe("the override: back up first, then go ahead", () => {
   it("backs the data up, authorises the installer for that core, and only then starts", async () => {
     box({ targetPin: "2026.10.3", installed: "2026.10.6", agentSchema: 25 });
+    // A web server environment that names the OpenClaw tree the ClawBox way.
+    const inherited = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = "/srv/box/.openclaw";
 
-    const state = await runToVerdict(() => updater.startUpdate({ allowHarnessDowngrade: true }));
+    const state = await runToVerdict(() => updater.startUpdate({ allowHarnessDowngrade: true }))
+      .finally(() => {
+        if (inherited === undefined) delete process.env.OPENCLAW_HOME;
+        else process.env.OPENCLAW_HOME = inherited;
+      });
 
-    expect(backUpBeforeDowngrade).toHaveBeenCalledWith([
-      expect.objectContaining({ harness: "openclaw", target: "2026.10.3", installed: "2026.10.6" }),
-    ]);
+    expect(backUpBeforeDowngrade).toHaveBeenCalledWith(
+      [expect.objectContaining({ harness: "openclaw", target: "2026.10.3", installed: "2026.10.6" })],
+      expect.objectContaining({ OPENCLAW_STATE_DIR: expect.any(String), OPENCLAW_CONFIG_PATH: expect.any(String) }),
+    );
+    // The backup child archives the tree the box runs, like every other
+    // `openclaw` the updater starts: an inherited OPENCLAW_HOME is dropped.
+    const env = vi.mocked(backUpBeforeDowngrade).mock.calls[0][1];
+    expect(env.OPENCLAW_STATE_DIR).toBe("/srv/box/.openclaw");
+    expect(env.OPENCLAW_CONFIG_PATH).toBe("/srv/box/.openclaw/openclaw.json");
+    expect(env).not.toHaveProperty("OPENCLAW_HOME");
     expect(writeDowngradeAuthorization).toHaveBeenCalledWith({
       openclaw: "2026.10.3",
       hermes: null,
