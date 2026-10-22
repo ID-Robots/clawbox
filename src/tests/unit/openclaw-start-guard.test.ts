@@ -152,6 +152,9 @@ if cmd[:2] == ["doctor", "--fix"]:
                 c.commit()
                 c.close()
     log("info", "doctor: checking agent database main failed validation earlier; repairs applied")
+    if os.environ.get("OC_DOCTOR_EXIT", "0") != "0":
+        print("doctor: some repairs could not be applied", file=sys.stderr)
+        sys.exit(int(os.environ["OC_DOCTOR_EXIT"]))
     print("Doctor complete.")
     sys.exit(0)
 if cmd[:3] == ["doctor", "--session-sqlite", "recover"]:
@@ -303,6 +306,17 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     } finally {
       process.env.CLAWBOX_ROOT = saved;
     }
+  });
+
+  it("does not call a repair complete when doctor exited non-zero", () => {
+    // Doctor fixed the row on its way, but said it could not finish.
+    const run = bootLoop({ OC_DOCTOR_REPAIRS: "1", OC_DOCTOR_EXIT: "1" });
+
+    expect(run.up).toBe(true);
+    const g = guardFile();
+    expect(g.episode).toMatchObject({ stage: "repairing", repairAttempts: 1 });
+    expect(g.episode.steps[0]).toMatchObject({ command: "doctor --fix", exit: 1 });
+    expect(g.notice).toMatchObject({ outcome: "repaired", reason: "repair-incomplete" });
   });
 
   it("knows the refused database from the session key 2026.10.6 names, and puts back its copy", () => {

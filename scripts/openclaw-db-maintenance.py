@@ -1225,7 +1225,9 @@ def repair_leg(args, dbs, deadline):
     if isinstance(report, dict) and isinstance(report.get("recoveryIssues"), list):
         step["recoveryIssues"] = len(report["recoveryIssues"])
     steps.append(step)
-    return all(s["exit"] is not None for s in steps), steps
+    # Complete only when both commands said so: a doctor that exited non-zero
+    # did not finish its repair, whatever it changed on the way.
+    return all(s["exit"] == 0 for s in steps), steps
 
 
 def _fsync_dir(directory):
