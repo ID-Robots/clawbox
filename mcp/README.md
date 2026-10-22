@@ -1473,7 +1473,7 @@ a 4-8B model. So since TASK-1080:
 ```
 mcp/clawbox-mcp.ts     entry: resolve app harness (one probe) → resolve edition → probe capabilities → register → connect
 mcp/check-tools.ts     surface check; run after any change here
-mcp/clawbox-cli.ts     shell-callable wrapper (clawbox webapp/app/notify/system/code/edition)
+mcp/clawbox-cli.ts     shell-callable wrapper (clawbox webapp/app/notify/system/code/edition/tokens)
 mcp/lib/edition.ts     edition resolution (imports readEdition, never re-implements it)
 mcp/lib/register.ts    the tool() wrapper: gating, annotations, caps, error envelope, description ceilings
 mcp/lib/tool-notes.ts  the field guide's tool notes: what the short tool descriptions leave out

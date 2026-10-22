@@ -105,6 +105,9 @@ bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts update   # asks for sudo itself
 sudo bash install.sh --step gateway_setup     # fixes 'gateway token mismatch'
 sudo bash install.sh --step openclaw_install  # fixes stale core / 'Unrecognized key' / plugin skew
 
+# Token usage per OpenClaw agent and model, read-only (--days N, --agent ID, --json)
+bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts tokens
+
 # Password
 sudo passwd clawbox            # new password, effective everywhere immediately
 
