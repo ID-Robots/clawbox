@@ -193,6 +193,16 @@ describe.skipIf(!hasTools)("harness_downgrade_guard: the same or a newer target,
   });
 });
 
+describe("the pin format the guard reads", () => {
+  it("is the one install.sh ships, exactly once", () => {
+    // The guard's sed takes the Hermes commit only from this shape; the fixture
+    // above writes it, so a changed line here would leave every case passing
+    // while the shipped guard stopped seeing the pin.
+    const pin = /^HERMES_PIN_COMMIT="\$\{HERMES_PIN_COMMIT:-[0-9a-fA-F]{40}\}"$/;
+    expect(INSTALL_SH.split("\n").filter((line) => pin.test(line))).toHaveLength(1);
+  });
+});
+
 describe("sync_repo_to_update_target asks it", () => {
   it("after the fetch and before anything moves the tree", () => {
     const sync = shellFunction("sync_repo_to_update_target");
