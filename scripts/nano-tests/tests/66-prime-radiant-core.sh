@@ -241,7 +241,9 @@ async function diagnose(key, model) {
 
 // ---- put back whatever happens ------------------------------------------------
 const MADE = [];
-let PRIOR = null, PROVIDERS = false, cleaned = false;
+/** The test providers actually added: `config unset` of one that is not there exits 1. */
+const ADDED = [];
+let PRIOR = null, cleaned = false;
 async function cleanup() {
   if (cleaned) return;
   cleaned = true;
@@ -252,11 +254,9 @@ async function cleanup() {
   let gone = 0;
   for (const p of MADE) if ((await call("DELETE", "/setup-api/prime-radiant/pages/" + p)).status === 200) gone++;
   if (MADE.length) note(`removed ${gone} of the ${MADE.length} pages this test made`);
-  if (PROVIDERS) {
-    for (const id of ["nanoci-core", "llamacpp-nanoci-core"]) {
-      const r = await run(OPENCLAW, ["config", "unset", "models.providers." + id], 90e3);
-      if (r.code !== 0) notOk(`the test provider ${id} could not be removed: ` + failed(r));
-    }
+  for (const id of ADDED) {
+    const r = await run(OPENCLAW, ["config", "unset", "models.providers." + id], 90e3);
+    if (r.code !== 0) notOk(`the test provider ${id} could not be removed: ` + failed(r));
   }
 }
 for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(sig, () => { cleanup().finally(() => process.exit(1)); });
@@ -328,10 +328,10 @@ async function main() {
 
   // The capture model, as two providers of the gateway.
   await startCapture();
-  PROVIDERS = true;
   for (const [id, model] of [["nanoci-core", "capture"], ["llamacpp-nanoci-core", "capture-local"]]) {
     const r = await run(OPENCLAW, ["config", "set", "models.providers." + id, providerJson(model), "--strict-json"], 90e3);
     if (r.code !== 0) return notOk(`adding the capture model as provider ${id} failed: ` + failed(r));
+    ADDED.push(id);
   }
   await sleep(5000);
 
@@ -453,7 +453,8 @@ async function main() {
         }
         const id1 = await gatewayIdentity();
         if (!id0.pid || id0.pid === "0" || id1.pid !== id0.pid || id1.started !== id0.started) notOk(`the gateway process changed across the night (MainPID ${id0.pid} -> ${id1.pid})`);
-        else if (id0.starts !== null && id1.starts !== id0.starts) notOk(`the gateway started again in its process across the night (${id1.starts - id0.starts} new startup(s) in its log)`);
+        // Only a NEW startup line is a restart: the core prunes day-old logs and old archives, so the count may drop.
+        else if (id0.starts !== null && id1.starts !== null && id1.starts > id0.starts) notOk(`the gateway started again in its process across the night (${id1.starts - id0.starts} new startup(s) in its log)`);
         else ok(`with no gateway restart: the same MainPID ${id1.pid} and start time` + (id1.starts !== null ? ", and no new startup in the gateway log" : " (its log was not readable)"));
       } else if (movedAt) {
         notOk(`main moved (${pre.slice(0, 8)}..${head.slice(0, 8)}) but the block on disk did not follow within 60 s`);
