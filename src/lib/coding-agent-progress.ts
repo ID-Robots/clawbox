@@ -115,6 +115,10 @@ export type ProgressLabelKey =
   // secrets this run was handed, and which one the box could not open.
   | "secretsInjected"
   | "secretsUnreadable"
+  // The project's MCP allowlist (src/lib/project-mcp-servers.ts): which servers
+  // this run starts with, and which ticked ones it could not be given.
+  | "mcpServers"
+  | "mcpServersMissing"
   | "anthropicAccount"
   | "accountRefused"
   | "accountMoved"
@@ -193,8 +197,13 @@ const FILE_TOOLS: Record<string, { labelKey: ProgressLabelKey; label: string; ic
  */
 const PLAN_RE = /^Plan: (\d+) tasks?, (\d+) done$/;
 
-/** A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. */
-const MCP_TOOL_RE = /^mcp__[A-Za-z0-9-]+__([A-Za-z0-9_]+)$/;
+/**
+ * A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. The
+ * server is any name a project's allowlist admits (src/lib/project-mcp-servers.ts):
+ * a single `_` or a `-` in it, never a double underscore — the first `__` after
+ * the server ends it — and the tool may hold a `-` too.
+ */
+const MCP_TOOL_RE = /^mcp__(?:[A-Za-z0-9-]|_(?!_))+__([A-Za-z0-9_-]+)$/;
 const BARE_TOOL_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 
 /** Where every run's folder lives on the box; a command echoing it is all noise. */
@@ -384,6 +393,18 @@ export const RUNNER_STEP = {
    */
   secretsUnreadable: (names: readonly string[]) => `Could not read these secrets: ${names.join(", ")}`,
   /**
+   * The MCP servers this run's project opted into, by name — never a value.
+   * What makes "the run can read the board" visible in the run's own feed.
+   */
+  mcpServers: (names: readonly string[]) => `MCP servers in this run: ${names.join(", ")}`,
+  /**
+   * A ticked server this run could not be given: no longer configured in the
+   * harness, configured in a way a run cannot reproduce, or the ClawBox MCP
+   * switch is off. Said here, because the run's failure without it would read
+   * like any other.
+   */
+  mcpServersMissing: (names: readonly string[]) => `Not available to this run: ${names.join(", ")}`,
+  /**
    * Which of the owner's Anthropic accounts this spawn is on (TASK-902). Said
    * only when it CHANGES, so a run that stays on one account says it once.
    * The owner's own label, never an email and never a credential.
@@ -503,6 +524,8 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
   { re: /^Secrets in this run's environment: (.+)$/, labelKey: "secretsInjected", icon: "key", params: (m) => ({ names: m[1] }) },
   { re: /^Could not read these secrets: (.+)$/, labelKey: "secretsUnreadable", icon: "key_off", params: (m) => ({ names: m[1] }) },
+  { re: /^MCP servers in this run: (.+)$/, labelKey: "mcpServers", icon: "hub", params: (m) => ({ names: m[1] }) },
+  { re: /^Not available to this run: (.+)$/, labelKey: "mcpServersMissing", icon: "link_off", params: (m) => ({ names: m[1] }) },
   { re: /^On Anthropic account "(.*)"$/, labelKey: "anthropicAccount", icon: "account_circle", params: (m) => ({ label: m[1] }) },
   {
     re: /^Anthropic account "(.*)" hit its usage limit \(back at (\d{1,2}:\d{2})\); carrying on with "(.*)" in the same session$/,
@@ -576,7 +599,7 @@ export function describeProgressLine(raw: string): ProgressDescription {
     if (known) return { kind: "tool", ...known };
     // Not one of ours — still never the raw mcp__ name; the tool's own words
     // with the underscores taken out is the most honest label left.
-    return { kind: "tool", label: toolName.replace(/_/g, " "), icon: "extension" };
+    return { kind: "tool", label: toolName.replace(/[_-]+/g, " ").trim(), icon: "extension" };
   }
 
   // The runner's own vocabulary, last: a sentence the agent happens to write
