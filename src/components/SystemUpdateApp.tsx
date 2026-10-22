@@ -1305,6 +1305,18 @@ function UpdateProgressCard({
         )}
       </div>
 
+      {/* First, above the step list: a run refused before step 1 leaves every
+          step pending, and below ten of them the explanation and the override
+          were out of sight on a laptop-sized window. */}
+      {downgrade && state && (
+        <HarnessDowngradeNotice
+          detail={downgrade}
+          kind="update"
+          backupFailure={state.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE ? downgrade.backupFailure ?? "" : undefined}
+          onOverride={onOverrideDowngrade}
+        />
+      )}
+
       {!state && (
         <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-muted)]">
           <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
@@ -1379,14 +1391,6 @@ function UpdateProgressCard({
 
       {error && (
         <p className="mt-4 text-sm text-red-300">{error}</p>
-      )}
-      {downgrade && state && (
-        <HarnessDowngradeNotice
-          detail={downgrade}
-          kind="update"
-          backupFailure={state.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE ? state.error ?? "" : undefined}
-          onOverride={onOverrideDowngrade}
-        />
       )}
       {failedSteps.length > 0 && (
         <ul className="mt-3 space-y-2">

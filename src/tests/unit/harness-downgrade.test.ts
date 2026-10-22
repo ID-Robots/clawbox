@@ -197,6 +197,7 @@ describe("harnessDowngradeMessage", () => {
     expect(text).toContain("/s/agents/main/agent/openclaw-agent.sqlite is on agent schema 25");
     expect(text).toContain("the pinned OpenClaw 2026.10.3 supports schema 24");
     expect(text).toContain("the update was refused before it changed anything");
+    expect(text).toContain("OpenClaw never downgrades an agent schema");
     expect(text).toContain("agent schema 25 or newer");
     expect(text).toContain('"Back up and update anyway"');
   });
@@ -221,6 +222,8 @@ describe("readHarnessDowngradeDetail", () => {
   it("keeps a well-formed detail and drops anything else", () => {
     const detail = { branch: "main", downgrades: [{ harness: "openclaw", installed: "2026.10.6", target: "2026.10.3" }] };
     expect(readHarnessDowngradeDetail(detail)).toEqual(detail);
+    expect(readHarnessDowngradeDetail({ ...detail, backupFailure: "hermes backup exited 1" })?.backupFailure)
+      .toBe("hermes backup exited 1");
     expect(readHarnessDowngradeDetail({ downgrades: [{ harness: "other", target: "1" }] })).toBeNull();
     expect(readHarnessDowngradeDetail(null)).toBeNull();
   });

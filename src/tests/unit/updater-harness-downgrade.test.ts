@@ -359,6 +359,8 @@ describe("the override: back up first, then go ahead", () => {
     expect(state.errorCode).toBe("harness_downgrade_backup_failed");
     expect(state.error).toContain("could not be backed up");
     expect(state.error).toContain("disk full");
+    // The command's own reason, apart from the prose the screen translates.
+    expect(state.downgrade?.backupFailure).toBe("openclaw backup create failed: disk full");
     expect(writeDowngradeAuthorization).not.toHaveBeenCalled();
     expect(dispatched("bootstrap_updater")).toBe(false);
     expect(gitCalls("reset")).toEqual([]);

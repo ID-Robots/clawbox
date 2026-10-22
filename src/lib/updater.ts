@@ -5565,7 +5565,7 @@ async function refuseBeforeStepOne(error: string, errorCode: HarnessDowngradeErr
  */
 async function backUpForDowngrade(
   detail: HarnessDowngradeDetail,
-): Promise<{ ok: true } | { ok: false; message: string }> {
+): Promise<{ ok: true } | { ok: false; message: string; reason: string }> {
   console.warn(
     `[Updater] installing an older harness at the owner's request; backing its data up first: ${
       detail.downgrades.map((d) => `${d.harness} ${d.installed ?? "?"} -> ${d.target}`).join(", ")}`,
@@ -5576,6 +5576,8 @@ async function backUpForDowngrade(
       ok: false,
       message: "The assistant's data could not be backed up, so the older version was not installed and "
         + `nothing was changed: ${backup.reason}`,
+      // The screen says the sentence in the owner's language and this as given.
+      reason: backup.reason,
     };
   }
   try {
@@ -5586,11 +5588,11 @@ async function backUpForDowngrade(
       backupDir: backup.dir,
     });
   } catch (err) {
-    return {
-      ok: false,
-      message: `The assistant's data was backed up to ${backup.dir}, but the installer could not be told to use it, `
-        + `so the older version was not installed and nothing was changed: ${err instanceof Error ? err.message : String(err)}`,
-    };
+    const message = `The assistant's data was backed up to ${backup.dir}, but the installer could not be told to use it, `
+      + `so the older version was not installed and nothing was changed: ${err instanceof Error ? err.message : String(err)}`;
+    // The whole sentence, not just the error: here the backup DID happen, and
+    // where it went is what the owner needs from this rare failure.
+    return { ok: false, message, reason: message };
   }
   warnUpdate("harness-downgrade-backup", backup.summary);
   return { ok: true };
@@ -5756,7 +5758,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       const backup = await backUpForDowngrade(refusal.detail);
       if (!backup.ok) {
         console.error(`[Updater] refusing the update before step 1: ${backup.message}`);
-        await refuseBeforeStepOne(backup.message, HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, refusal.detail);
+        await refuseBeforeStepOne(backup.message, HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, {
+          ...refusal.detail,
+          backupFailure: backup.reason,
+        });
         return;
       }
     }
@@ -5836,12 +5841,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           { openclaw: true, hermes: false },
           "before-install",
         );
-      let stop: { message: string; code: HarnessDowngradeErrorCode } | null = null;
+      let stop: { message: string; code: HarnessDowngradeErrorCode; backupFailure?: string } | null = null;
       if (refusal && !options.allowHarnessDowngrade) {
         stop = { message: refusal.message, code: HARNESS_DOWNGRADE_CODE };
       } else if (refusal && !(await downgradeAuthorizedFor(installing))) {
         const backup = await backUpForDowngrade(refusal.detail);
-        if (!backup.ok) stop = { message: backup.message, code: HARNESS_DOWNGRADE_BACKUP_FAILED_CODE };
+        if (!backup.ok) {
+          stop = { message: backup.message, code: HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, backupFailure: backup.reason };
+        }
       }
       if (refusal && stop) {
         console.error(`[Updater] refusing to install OpenClaw ${installing}: ${stop.message}`);
@@ -5849,7 +5856,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         runtime.state.steps[i].error = stop.message;
         runtime.state.error = stop.message;
         runtime.state.errorCode = stop.code;
-        runtime.state.downgrade = refusal.detail;
+        runtime.state.downgrade = stop.backupFailure === undefined
+          ? refusal.detail
+          : { ...refusal.detail, backupFailure: stop.backupFailure };
         failed = true;
         break;
       }

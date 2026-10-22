@@ -70,6 +70,12 @@ export interface HarnessDowngradeDetail {
   /** The branch the switch goes to, when known. */
   branch: string | null;
   downgrades: HarnessDowngrade[];
+  /**
+   * Why the override's backup failed: the backup command's (or ClawKeep's) own
+   * output, shown as given under the screen's translated sentence — never the
+   * English prose around it, which the screen already says in the owner's language.
+   */
+  backupFailure?: string;
 }
 
 export interface OpenclawDowngradeInput {
@@ -228,7 +234,8 @@ function proofSentence(d: HarnessDowngrade, moment: DowngradeMoment): string {
     return `This device's ${name} data is newer than the version ${switching} installs. `
       + `${d.schema.label} is on ${d.schema.database} schema ${d.schema.onDisk}, `
       + `and the pinned ${name} ${d.target} supports schema ${d.schema.supported}. `
-      + `${name} never downgrades a ${d.schema.database} schema, so installing it would leave the assistant unable to open its own data`;
+      + `${name} never downgrades ${d.schema.database === "agent" ? "an" : "a"} ${d.schema.database} schema, `
+      + "so installing it would leave the assistant unable to open its own data";
   }
   return `This device runs ${name} ${d.installed ?? "(a newer release)"}, and ${switching} would install the older ${name} ${d.target}. `
     + `An older ${name} cannot open data a newer one has written`;
@@ -265,5 +272,9 @@ export function readHarnessDowngradeDetail(value: unknown): HarnessDowngradeDeta
   const downgrades = v.downgrades.filter((d): d is HarnessDowngrade =>
     !!d && (d.harness === "openclaw" || d.harness === "hermes") && typeof d.target === "string");
   if (downgrades.length === 0) return null;
-  return { branch: typeof v.branch === "string" ? v.branch : null, downgrades };
+  return {
+    branch: typeof v.branch === "string" ? v.branch : null,
+    downgrades,
+    ...(typeof v.backupFailure === "string" ? { backupFailure: v.backupFailure } : {}),
+  };
 }

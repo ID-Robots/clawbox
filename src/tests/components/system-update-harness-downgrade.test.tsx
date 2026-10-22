@@ -110,19 +110,40 @@ describe("Update now refused for installing an older harness", () => {
     expect(posts.find((p) => p.url.includes("/setup-api/update/run"))?.body).toEqual({ force: true, allowHarnessDowngrade: true });
   });
 
-  it("says a failed backup, with the reason, and offers the override again", async () => {
+  it("says a failed backup in the owner's language with only the command's own reason, and offers the override again", async () => {
     status = {
       phase: "failed", currentStepIndex: -1, steps: [],
-      error: "The assistant's data could not be backed up, so the older version was not installed and nothing was changed: disk full",
+      error: "The assistant's data could not be backed up, so the older version was not installed and nothing was changed: "
+        + "openclaw backup create failed: disk full",
       errorCode: "harness_downgrade_backup_failed",
-      downgrade: DETAIL,
+      downgrade: { ...DETAIL, backupFailure: "openclaw backup create failed: disk full" },
     };
     render(<SystemUpdateApp />);
 
     const notice = await screen.findByTestId("update-harness-downgrade");
     expect(notice.textContent).toContain(de["update.harnessDowngrade.backupFailed"]);
-    expect(notice.textContent).toContain("disk full");
+    expect(notice.textContent).toContain("openclaw backup create failed: disk full");
+    // Not the English sentence the translated line already says.
+    expect(document.body.textContent).not.toContain("could not be backed up");
     expect(screen.getByRole("button", { name: de["update.harnessDowngrade.updateAnyway"] })).toBeTruthy();
+  });
+
+  it("puts the explanation and the override above the run's untouched step list", async () => {
+    // Refused before step 1, every step is pending; below ten of them the
+    // notice was out of sight on a laptop-sized window.
+    status = {
+      phase: "failed",
+      currentStepIndex: -1,
+      steps: Array.from({ length: 10 }, (_, n) => ({ id: `step_${n}`, label: `Step ${n}`, status: "pending" })),
+      error: ENGLISH_REFUSAL,
+      errorCode: "harness_downgrade",
+      downgrade: DETAIL,
+    };
+    render(<SystemUpdateApp />);
+
+    const notice = await screen.findByTestId("update-harness-downgrade");
+    const firstStep = screen.getByText("Step 0");
+    expect(notice.compareDocumentPosition(firstStep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 
