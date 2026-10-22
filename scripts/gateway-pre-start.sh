@@ -8287,10 +8287,13 @@ fi
 # ── What a backup can leave out ─────────────────────────────────────────────
 #
 # `clawbox-backup-scope`, a manifest-only plugin whose `backupResources` mark
-# the state dir's `upgrades/` and `backups/` and each agent's Codex caches
-# (`codex-home/.cache`, `cache`, `log`) `regenerable`: `openclaw backup
-# create` — ClawKeep's snapshot, the pre-update archive — leaves them out by
-# itself. HARNESS FIRST: the core has no exclude flag or config key; this
+# the state dir's `backups/` `regenerable` — the box's own archives — and the
+# two folders `openclaw doctor` moves the owner's originals into
+# (`backups/tools-md-migration`, `backups/heartbeat-migration`) `include`:
+# `openclaw backup create` — ClawKeep's snapshot, the pre-update archive —
+# leaves the archives out by itself and keeps those. Nothing else is named:
+# only paths the pinned core writes. HARNESS FIRST: the core has no exclude
+# flag or config key; this
 # manifest field is its own way to say it (scripts/openclaw-plugins/
 # clawbox-backup-scope/index.mjs has the measurement). 2026.10 cores only: the
 # field arrived with them, and an older core is not handed a manifest it may
@@ -8300,7 +8303,7 @@ CLAWBOX_BACKUP_SCOPE_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_BACKUP
 CLAWBOX_BACKUP_SCOPE_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_BACKUP_SCOPE_ID"
 if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ]; then
   install_clawbox_hook_plugin "$CLAWBOX_BACKUP_SCOPE_ID" "$CLAWBOX_BACKUP_SCOPE_DST" \
-    "backups carry the core's update downloads, the box's own archives and the Codex caches" \
+    "backups carry the box's own archives in backups/" \
     "$CLAWBOX_BACKUP_SCOPE_SRC/openclaw.plugin.json" \
     "$CLAWBOX_BACKUP_SCOPE_SRC/package.json" \
     "$CLAWBOX_BACKUP_SCOPE_SRC/index.mjs"

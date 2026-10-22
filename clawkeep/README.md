@@ -34,8 +34,7 @@ exclude flag or config key. What a snapshot leaves out, and who leaves it out:
 
 | Left out | How |
 |---|---|
-| `~/.openclaw/upgrades/`, `~/.openclaw/backups/` | the core itself: `regenerable` `backupResources` of the `clawbox-backup-scope` plugin (`scripts/openclaw-plugins/clawbox-backup-scope`), installed and enabled by the gateway pre-start on a 2026.10+ core |
-| Codex caches: `codex-home/.cache`, `codex-home/cache`, `codex-home/log` of every agent | the same plugin, `agent` scope (`codex-home/sessions/` and the rest of `codex-home/` stay in) |
+| `~/.openclaw/backups/`, except `backups/tools-md-migration/` and `backups/heartbeat-migration/` (the owner's TOOLS.md and heartbeat scratch, which `openclaw doctor` moves there and deletes at the source: they stay in) | the core itself: `backupResources` of the `clawbox-backup-scope` plugin (`scripts/openclaw-plugins/clawbox-backup-scope`) — `backups` `regenerable`, the two doctor folders `include` — installed and enabled by the gateway pre-start on a 2026.10+ core |
 | `tmp/`, `npm/`, `tools/`, agent `tmp`/`.tmp`, plugin `node_modules` | the core, by default |
 | archive files in `~/.openclaw/backups/` (any depth) and OpenClaw's own `…-openclaw-backup.tar.gz[.enc]` anywhere | ClawKeep (`own_backups.py`): set aside by a same-filesystem rename |
 | `*_tmp_*` trees in the state dir, outside every workspace, unchanged for an hour (an install the core or a package manager did not finish) | ClawKeep (`own_backups.py`): set aside whole, by one rename |

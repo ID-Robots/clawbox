@@ -10,12 +10,14 @@ import { testEnv } from "@/tests/helpers/env";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // `clawbox-backup-scope`: a manifest-only OpenClaw plugin whose
-// `backupResources` tell `openclaw backup create` which state and agent
-// folders it may leave out and rebuild — ClawKeep's snapshot is that command.
-// The manifest is checked against the core's documented contract for the field
-// (docs/plugins/manifest/surfaces.md, the same in 2026.10.3 and the pinned
-// 2026.10.6 core), and the SHIPPED boot step is run to see it installed and
-// enabled on a 2026.10 core and left alone on an older one.
+// `backupResources` tell `openclaw backup create` what it may leave out (the
+// box's own archives in `<state>/backups/`) and what it must keep (the folders
+// there that `openclaw doctor` moves the owner's originals into) — ClawKeep's
+// snapshot is that command. The manifest is checked against the core's
+// documented contract for the field (docs/plugins/manifest/surfaces.md, the
+// same in 2026.10.3 and the pinned 2026.10.6 core), and the SHIPPED boot step
+// is run to see it installed and enabled on a 2026.10 core and left alone on an
+// older one.
 
 const REPO = path.resolve(process.cwd());
 const SCRIPT = path.join(REPO, "scripts/gateway-pre-start.sh");
@@ -48,20 +50,27 @@ describe("the clawbox-backup-scope manifest", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  it("leaves out update downloads, the box's own archives and the Codex caches — and nothing a restore needs", () => {
-    const regenerable = (manifest().backupResources as BackupResource[])
-      .filter((r) => r.disposition === "regenerable")
+  it("leaves out the box's own archives in backups/ and keeps the originals `openclaw doctor` moved there", () => {
+    const resources: BackupResource[] = manifest().backupResources;
+    const named = (disposition: string) => resources
+      .filter((r) => r.disposition === disposition)
       .map((r) => `${r.scope}:${r.relativePath}`);
-    expect(regenerable).toEqual(expect.arrayContaining([
-      "state:upgrades",
-      "state:backups",
-      "agent:codex-home/.cache",
-      "agent:codex-home/cache",
-      "agent:codex-home/log",
-    ]));
+    // Only a path the pinned core writes: no `upgrades/`, no Codex cache
+    // folders — neither the 2026.10.3 nor the 2026.10.6 package creates them.
+    expect(named("regenerable")).toEqual(["state:backups"]);
+    // Its doctor MOVES each agent's TOOLS.md (doctor-tools-md-migration) and
+    // heartbeat scratch (doctor-heartbeat-scratch-migration) into these and
+    // deletes the originals; a nested `include` is the core's one way to keep
+    // a descendant of a regenerable folder in the archive.
+    expect(named("include").sort()).toEqual(["state:backups/heartbeat-migration", "state:backups/tools-md-migration"]);
+    for (const r of resources.filter((r) => r.disposition === "include")) {
+      expect(resources.some((p) => p.disposition === "regenerable" && p.scope === r.scope
+        && r.relativePath.startsWith(`${p.relativePath}/`))).toBe(true);
+    }
     for (const kept of ["state:agents", "state:workspace", "state:credentials", "state:state", "state:extensions",
-      "agent:codex-home", "agent:codex-home/sessions", "agent:codex-home/auth.json", "agent:openclaw-agent.sqlite"]) {
-      expect(regenerable).not.toContain(kept);
+      "state:upgrades", "agent:codex-home", "agent:codex-home/sessions", "agent:codex-home/auth.json",
+      "agent:openclaw-agent.sqlite"]) {
+      expect(named("regenerable")).not.toContain(kept);
     }
   });
 
