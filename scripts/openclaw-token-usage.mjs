@@ -607,16 +607,20 @@ export function usageCountedSessionId(name) {
 /**
  * The counted transcript files in an agent's sessions directory that were
  * written since `sinceMs` — the core skips older ones too: a file is written
- * after its last event.
+ * after its last event. One that vanished meanwhile is skipped, as the core
+ * skips it; one that cannot be looked at (or the directory itself) is
+ * `unreadable`, so the count is not called complete.
  */
 function usageCountedTranscriptFiles(sessionsDir, sinceMs) {
+  const files = [];
+  const unreadable = [];
   let entries;
   try {
     entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (err) {
+    if (err?.code !== "ENOENT") unreadable.push(path.basename(sessionsDir));
+    return { files, unreadable };
   }
-  const files = [];
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const sessionId = usageCountedSessionId(entry.name);
@@ -625,13 +629,15 @@ function usageCountedTranscriptFiles(sessionsDir, sinceMs) {
     let st;
     try {
       st = fs.statSync(file);
-    } catch {
+    } catch (err) {
+      if (err?.code !== "ENOENT") unreadable.push(entry.name);
       continue;
     }
     if (st.mtimeMs < sinceMs) continue;
     files.push({ name: entry.name, file, sessionId, size: st.size, packed: entry.name.endsWith(".zst") });
   }
-  return files.sort((a, b) => a.name.localeCompare(b.name));
+  files.sort((a, b) => a.name.localeCompare(b.name));
+  return { files, unreadable };
 }
 
 function tableColumns(db, table) {
@@ -767,7 +773,9 @@ export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
   // than the gateway on any box where a chat was reset.
   const live = new Set(sessionIds.map(({ sessionId }) => sessionId));
   const sessionsDir = path.join(path.dirname(path.dirname(dbPath)), "sessions");
-  for (const archive of usageCountedTranscriptFiles(sessionsDir, window.startMs)) {
+  const { files: archives, unreadable } = usageCountedTranscriptFiles(sessionsDir, window.startMs);
+  stats.archivesSkipped.push(...unreadable);
+  for (const archive of archives) {
     if (live.has(archive.sessionId)) continue;
     if ((archive.packed && !canDecode) || archive.size > TRANSCRIPT_ARCHIVE_MAX_BYTES) {
       stats.archivesSkipped.push(archive.name);

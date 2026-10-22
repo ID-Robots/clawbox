@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { createRequire } from "module";
 import os from "os";
 import path from "path";
@@ -417,6 +417,21 @@ describe("db source: the agent databases, read-only", () => {
     expect(report.scanned[0]).toMatchObject({ archivesRead: 0, archivesSkipped: 1 });
     expect(report.notes).toEqual(["agent main: 1 reset/deleted transcript archive(s) not read: bad.jsonl.deleted.2026-10-21T08-00-00.000Z.zst"]);
     expect(report.complete).toBe(false);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("calls the count short when it cannot look into the sessions directory", () => {
+    agentDb("main", { live: [{ ts: IN, usage: anthropic(1, 1) }] });
+    transcriptArchive("main", "gone.jsonl.deleted.2026-10-21T08-00-00Z", [{ ts: IN, usage: anthropic(2, 2) }]);
+    const dir = path.join(stateDir, "agents", "main", "sessions");
+    chmodSync(dir, 0o000);
+    try {
+      const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
+      expect(report.totals).toMatchObject({ calls: 1 });
+      expect(report.scanned[0]).toMatchObject({ archivesRead: 0, archivesSkipped: 1 });
+      expect(report.complete).toBe(false);
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 
   it("knows the transcript file names the core counts in usage", () => {
