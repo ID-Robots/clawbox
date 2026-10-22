@@ -12,12 +12,14 @@
  *   clawbox notify <message>
  *   clawbox system stats
  *   clawbox system info
+ *   clawbox tokens [--days N] [--agent ID] [--json]
  *   clawbox update
  */
 
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
 import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
 import { liveBuiltInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
@@ -458,6 +460,17 @@ async function main() {
     await apiPost("/setup-api/code", { action: "delete-project", projectId });
     console.log(`✅ Deleted project "${projectId}".`);
 
+  } else if (cmd === "tokens") {
+    // Token usage per OpenClaw agent and model, read-only. Node, not bun: the
+    // report needs node:sqlite and node:zlib's zstd (scripts/openclaw-token-usage.mjs).
+    const script = fileURLToPath(new URL("../scripts/openclaw-token-usage.mjs", import.meta.url));
+    const res = spawnSync("node", ["--disable-warning=ExperimentalWarning", script, ...args.slice(1)], { stdio: "inherit" });
+    if (res.error) {
+      console.error(`clawbox tokens needs node on PATH: ${res.error.message}`);
+      process.exit(1);
+    }
+    process.exit(res.status ?? 1);
+
   } else if (cmd === "update") {
     // Re-running install.sh on a Hermes device risks unmasking the OpenClaw
     // gateway and breaking the edition lock, which is a support call, not an
@@ -503,6 +516,8 @@ Usage:
   clawbox system stats
   clawbox system info
   clawbox edition                      Print this device's edition (openclaw | hermes | dual)
+  clawbox tokens [--days N] [--agent ID] [--json]
+                                       Tokens per OpenClaw agent and model (read-only; default: last 7 days)
   clawbox update                       Update ClawBox + OpenClaw in place (OpenClaw edition only; runs the installer, needs sudo)
 
 Code Projects:

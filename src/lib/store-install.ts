@@ -34,7 +34,7 @@ import { readTarGz, TarError, type TarEntry } from "./tar-gz";
 import { storePortalBase } from "./store-publish";
 import { CLAWBOX_APP_SOURCE } from "./store-categories";
 import { readStoreMarker, STORE_MARKER, type StoreMarker } from "./store-install-receipt";
-import { isPng, placeIcon, safeAppId, webappIconPath } from "./webapp-icon";
+import { isPng, placeIcon, readIconBytes, safeAppId, webappIconPath } from "./webapp-icon";
 import { getDefaultDirectory } from "./coding-agent";
 import { ensureRepository, freeBytes, IMPORT_FREE_RESERVE_BYTES } from "./project-import";
 import { registerOrStartServerApp } from "./app-server-start";
@@ -49,7 +49,6 @@ export const INSTALL_MAX_PACKAGE_BYTES = 50 * 1024 * 1024;
 const INSTALL_MAX_UNPACKED_BYTES = 256 * 1024 * 1024;
 const INSTALL_MAX_FILES = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
-const ICON_MAX_BYTES = 1024 * 1024;
 
 /** A ClawBox app as the Store lists it — only what installing it needs. */
 export interface ClawboxStoreApp {
@@ -333,8 +332,8 @@ async function saveListingIcon(appId: string, iconUrl: string | null): Promise<v
   try {
     const res = await fetch(iconUrl, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return;
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (bytes.length > ICON_MAX_BYTES || !isPng(bytes)) return;
+    const bytes = await readIconBytes(res);
+    if (!bytes || !isPng(bytes)) return;
     await placeIcon(webappIconPath(appId), bytes);
   } catch (err) {
     console.warn(`[store-install] icon for ${appId} not saved:`, err instanceof Error ? err.message : err);

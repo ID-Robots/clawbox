@@ -16,22 +16,24 @@ name: Nano hardware tests
 # `nano-full` or `nano-long`. The board runs on every beta → main promotion PR
 # (mandatory), on a dispatch, and every second night on beta's head through
 # nano-hardware-tests-schedule.yml. Pushes to beta or main no longer start it.
-# The rules below still apply to the PRs that do run.
+# That night run starts only once the schedule file is on main, the default
+# branch: GitHub reads `schedule:` from there alone (docs/nano-hardware-tests.md,
+# "The night run"). The rules below still apply to the PRs that do run.
 #
-# Part of the suite of EVERY pull request of ours (TASK-1362), no label needed:
-#   - every pull request into beta or main whose branch is in this repository,
-#     DRAFTS INCLUDED (the coding agent opens most PRs as drafts), when it is
-#     opened or reopened and on every push to it. Marking a draft ready starts
-#     no second run: its head commit has already been tested;
+# A pull request that takes a board (into main, or into beta with `nano-full`
+# or `nano-long`):
+#   - its branch is in this repository, DRAFTS INCLUDED (the coding agent opens
+#     most PRs as drafts); it runs when the PR is opened or reopened and on
+#     every push to it. Marking a draft ready starts no second run: its head
+#     commit has already been tested;
 #   - never while the PR carries the label `skip-nano`, the only opt-out;
 #   - not when the PR changes nothing but documentation (docs/**, docs-site/**,
 #     **/*.md; config/** never counts as documentation): the cheap `plan` job
 #     reads the changed files (scripts/nano-tests/needs-board.sh), and the board
 #     job is then skipped with the reason in plan's job summary and in the PR
 #     comment.
-#   - on every push to beta or main (a merge), the same docs-only rule applied
-#     to the push's own changes: the FULL suite, which is what keeps change-based
-#     selection (below) from costing coverage.
+# The FULL suite on a dispatch (the night run is one) is what keeps
+# change-based selection (below) from costing coverage.
 # `workflow_dispatch` runs it on a BRANCH of this repository. A tag or a commit
 # SHA is taken only when a branch here has exactly that commit as its head (that
 # branch is then used); anything else is refused.
@@ -40,8 +42,8 @@ name: Nano hardware tests
 # (`# covers:` in scripts/nano-tests/tests/) reaches the PR's changed files,
 # plus the core smoke set (build identity, services, a chat turn) — `plan`
 # decides with scripts/nano-tests/select-tests.sh, and every test left out is
-# reported as a skip that says why. The FULL suite runs on a push to beta or
-# main, on a dispatch, on a PR labelled `nano-full` (or `nano-long`; the labels
+# reported as a skip that says why. The FULL suite runs on a dispatch (the
+# night run included), on a PR labelled `nano-full` (or `nano-long`; the labels
 # are read when `plan` runs, so add one and re-run the job), and whenever the
 # map is unsure about a changed file, the runner itself changed, or the list
 # of changed files is incomplete.
@@ -116,12 +118,15 @@ jobs:
   # does this commit need a board? — from the files the PR changes.
   plan:
     name: Needs a board?
-    # The gate. A pull_request runs when BOTH of these hold — a draft is no
+    # The gate. A pull_request runs when ALL of these hold — a draft is no
     # exception:
     #   - its head is in this repository (the workflow's own fork fence; the
     #     runner hook on the lab host is the other layer);
-    #   - it does not carry `skip-nano`, the only opt-out.
-    # A push is to beta or main of this repository (the trigger), never a fork's.
+    #   - it does not carry `skip-nano`, the only opt-out;
+    #   - it goes into main, or carries `nano-full` or `nano-long` (batched:
+    #     a PR into beta takes no board otherwise).
+    # The `push` clause is kept for a push trigger, which this workflow no
+    # longer has.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.repository == 'ID-Robots/clawbox') ||

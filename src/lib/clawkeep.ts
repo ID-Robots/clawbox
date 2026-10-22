@@ -1742,7 +1742,7 @@ interface RestoreOk {
    *  them in the restored tree. Optional: older daemons omit both. */
   skippedLinks?: SkippedLink[];
   skippedLinkCount?: number;
-  assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+  assets: { kind: string; targetPath: string; backupPath: string | null; bytesRestored: number }[];
 }
 
 interface RestoreErr {

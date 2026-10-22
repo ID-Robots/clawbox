@@ -545,6 +545,59 @@ describe("safeAppId", () => {
   });
 });
 
+describe("readIconBytes", () => {
+  /** A body of `chunks` pieces of `size` bytes, counting how many were pulled. */
+  function chunked(chunks: number, size: number) {
+    const seen = { pulled: 0, cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (seen.pulled >= chunks) return controller.close();
+        seen.pulled += 1;
+        controller.enqueue(new Uint8Array(size));
+      },
+      cancel() { seen.cancelled = true; },
+    });
+    return { res: new Response(body), seen };
+  }
+
+  it("hands back a body within the cap, byte for byte", async () => {
+    const bytes = Buffer.from("89504e470d0a1a0a0000", "hex");
+    const read = await mod.readIconBytes(new Response(bytes));
+    expect(read && read.equals(bytes)).toBe(true);
+    expect(read && mod.isPng(read)).toBe(true);
+
+    // Exactly at the cap is still an icon.
+    const { res } = chunked(4, 256);
+    expect((await mod.readIconBytes(res, 1024))?.length).toBe(1024);
+  });
+
+  it("refuses a declared Content-Length over the cap without reading the body", async () => {
+    const { res, seen } = chunked(1, 8);
+    const declared = new Response(res.body, { headers: { "Content-Length": "1025" } });
+    expect(await mod.readIconBytes(declared, 1024)).toBeNull();
+    expect(seen.pulled).toBeLessThanOrEqual(1);
+    expect(seen.cancelled).toBe(true);
+  });
+
+  it("stops at the cap when nothing was declared, instead of buffering the whole body", async () => {
+    const { res, seen } = chunked(1000, 256);
+    expect(await mod.readIconBytes(res, 1024)).toBeNull();
+    expect(seen.pulled).toBeLessThan(10);
+    expect(seen.cancelled).toBe(true);
+  });
+
+  it("caps at ICON_MAX_BYTES by default", async () => {
+    expect(mod.ICON_MAX_BYTES).toBe(1024 * 1024);
+    const { res } = chunked(5, 256 * 1024);
+    expect(await mod.readIconBytes(res)).toBeNull();
+  });
+
+  it("lets a body that breaks off fail the caller, as arrayBuffer() did", async () => {
+    const res = new Response(new ReadableStream({ pull(controller) { controller.error(new Error("socket hang up")); } }));
+    await expect(mod.readIconBytes(res)).rejects.toThrow("socket hang up");
+  });
+});
+
 describe("htmlHint", () => {
   it("prefers the title, then the first h1, then nothing", () => {
     expect(mod.htmlHint("<html><head><title> Pomodoro &amp; Breaks </title></head><body><h1>Other</h1></body></html>"))

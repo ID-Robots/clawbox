@@ -196,7 +196,7 @@ interface RestoreResponse {
   ok: true;
   archive: string;
   archiveBytes: number;
-  assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+  assets: { kind: string; targetPath: string; backupPath: string | null; bytesRestored: number }[];
   /** Restarts that could NOT be taken — the owner has to act. */
   restartErrors: string[];
   /**
@@ -1889,9 +1889,13 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
           <li key={a.targetPath} className="text-gray-300">
             <span className="font-mono">{a.targetPath}</span>{" "}
             <span className="text-[var(--text-muted)]">
-              ({formatBytes(a.bytesRestored)} —{" "}
-              {t("clawkeep.result.previousAt")}{" "}
-              <span className="font-mono">{a.backupPath}</span>)
+              ({formatBytes(a.bytesRestored)}
+              {a.backupPath && (
+                <>
+                  {" "}—{" "}{t("clawkeep.result.previousAt")}{" "}
+                  <span className="font-mono">{a.backupPath}</span>
+                </>
+              )})
             </span>
           </li>
         ))}

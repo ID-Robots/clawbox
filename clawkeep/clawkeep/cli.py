@@ -208,7 +208,7 @@ def _restore_main(argv: list[str]) -> int:
             {
                 "kind": a.kind,
                 "targetPath": str(a.target_path),
-                "backupPath": str(a.backup_path),
+                "backupPath": str(a.backup_path) if a.backup_path is not None else None,
                 "bytesRestored": a.bytes_restored,
             }
             for a in result.assets

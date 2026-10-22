@@ -112,6 +112,9 @@ export function safeAppId(appId: unknown, maxChars: number = MAX_APP_ID_CHARS): 
 /** The 8-byte PNG signature; the icon route serves `image/png` and nothing else. */
 const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
 
+/** The largest icon fetched from a store: a desktop tile, never a body of any size. */
+export const ICON_MAX_BYTES = 1024 * 1024;
+
 /** The desktop's own default tile colour (see webapp-registry.ts). */
 const DEFAULT_COLOR = "#f97316";
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -676,6 +679,38 @@ async function nudgeDesktop(appId: string, hints: WebappIconHints): Promise<void
 
 export function isPng(bytes: Buffer): boolean {
   return bytes.length >= PNG_SIGNATURE.length && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+}
+
+/**
+ * The body of a fetched icon, or null when it is larger than `max`.
+ *
+ * Counted as it arrives rather than buffered whole and measured after: the far
+ * side decides how long a body is, and `arrayBuffer()` would hold all of it in
+ * memory before any cap could refuse it. A declared Content-Length over the
+ * cap is refused before a byte is read. A body that breaks off throws, so the
+ * caller's own failure path runs, as it did for `arrayBuffer()`.
+ */
+export async function readIconBytes(res: Response, max: number = ICON_MAX_BYTES): Promise<Buffer<ArrayBuffer> | null> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = res.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
 }
 
 /**
