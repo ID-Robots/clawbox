@@ -13,9 +13,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 // `backupResources` tell `openclaw backup create` which state and agent
 // folders it may leave out and rebuild — ClawKeep's snapshot is that command.
 // The manifest is checked against the core's documented contract for the field
-// (docs/plugins/manifest/surfaces.md in the pinned 2026.10.3 core), and the
-// SHIPPED boot step is run to see it installed and enabled on a 2026.10 core
-// and left alone on an older one.
+// (docs/plugins/manifest/surfaces.md, the same in 2026.10.3 and the pinned
+// 2026.10.6 core), and the SHIPPED boot step is run to see it installed and
+// enabled on a 2026.10 core and left alone on an older one.
 
 const REPO = path.resolve(process.cwd());
 const SCRIPT = path.join(REPO, "scripts/gateway-pre-start.sh");

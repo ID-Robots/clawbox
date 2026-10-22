@@ -11,10 +11,11 @@
 // create`, but its plugin manifest has `backupResources`: a `regenerable`
 // entry, scoped to the state directory or to every agent directory, is left
 // out of the archive and reported in the dry-run's `skipped` with reason
-// `regenerable` (docs/plugins/manifest/surfaces.md; the planner in the pinned
-// 2026.10.3 core). Measured on that core: a real archive of a state dir with
-// this plugin enabled carries `codex-home/sessions/` and none of the paths in
-// openclaw.plugin.json. The list is the manifest — this file only has to load.
+// `regenerable` (docs/plugins/manifest/surfaces.md; the backup planner, the
+// same in 2026.10.3 and the pinned 2026.10.6). Measured on 2026.10.3: a real
+// archive of a state dir with this plugin enabled carries
+// `codex-home/sessions/` and none of the paths in openclaw.plugin.json. The
+// list is the manifest — this file only has to load.
 //
 // Deployed like ClawBox's other plugins: copied out of the checkout by
 // gateway-pre-start.sh on every boot and enabled in `plugins.entries`, on a
