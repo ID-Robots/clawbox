@@ -16,7 +16,9 @@
 #
 #   * The main agent's store must hold no ChatGPT sign-in of its own — the
 #     card's case, and the guard that keeps the fixture rotation below from
-#     ever reaching a real login. A board that has one is skipped.
+#     ever reaching a real login. A board that has one is skipped, and so is
+#     one that files any other profile under `openai:chatgpt` (it would
+#     shadow the fixture login below).
 #   * The rest of the login is a fixture in a throwaway folder: a shared
 #     `state-db` store holding `openai:chatgpt` (reached through
 #     OPENCLAW_STATE_DIR, the override core and the script both honour) and an
@@ -441,6 +443,12 @@ case "$before" in
   *"\"chatgpt\":0,"*) ;;
   *) echo "SKIP the main agent holds a ChatGPT sign-in of its own; the fixture rotation must never reach a real login"; exit 0 ;;
 esac
+# Any other profile under the fixture id shadows the fixture login (the
+# profiles of the agent itself sit on top of the shared store), so no pass
+# would reach the write-back: not the case this test is about.
+case "$before" in
+  *"\"holdsProfile\":true"*) echo "SKIP the main agent already files a profile under openai:chatgpt, which shadows the fixture login"; exit 0 ;;
+esac
 setup_err=$(obs setup "$live" "$work" 2>&1) || { echo "FAIL could not build the fixture login: $(printf "%s" "$setup_err" | tail -n 1)"; exit 0; }
 
 "$node_bin" --no-warnings "$work/observe.js" run "$live" "$script" "$node_bin" "$work" "$unit_path" \
@@ -534,7 +542,7 @@ if [ "$(jq -r '.sha' <<<"$before")" = "$(jq -r '.sha // empty' <<<"$after" 2>/de
   && [ "$(jq -r '.mirror' <<<"$result")" = core ] && [ "$(jq -r '.rotatedIntact' <<<"$result")" = true ]; then
   ok "the live store's auth_profile_store row is unchanged, nothing was adopted, and the app-server's rotation was left alone"
 else
-  not_ok "something was written: row before $(jq -r '.sha' <<<"$before") after $(jq -r '.sha // "unreadable"' <<<"$after" 2>/dev/null), mirror carries the $(jq -r '.mirror' <<<"$result") token, rotation intact $(jq -r '.rotatedIntact' <<<"$result")"
+  not_ok "the store or the mirrors are not as the pass should leave them: row before $(jq -r '.sha' <<<"$before") after $(jq -r '.sha // "unreadable"' <<<"$after" 2>/dev/null), mirror carries the $(jq -r '.mirror' <<<"$result") token, rotation intact $(jq -r '.rotatedIntact' <<<"$result")"
 fi
 
 recorded=$(jq '.sql.passes // 0' <<<"$result")
