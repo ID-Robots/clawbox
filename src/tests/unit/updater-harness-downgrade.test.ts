@@ -20,7 +20,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
  * file) and a git whose every call is written down.
  */
 
-const { root, originalRoot, HERMES_DIR } = vi.hoisted(() => {
+const { root, originalRoot, HERMES_DIR, HERMES_HOME } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const nodeFs = require("node:fs") as typeof import("node:fs");
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -33,7 +33,8 @@ const { root, originalRoot, HERMES_DIR } = vi.hoisted(() => {
   // Read at import: the edition comes from the environment, never this machine.
   process.env.CLAWBOX_EDITION_FILE = nodePath.join(root, "no-edition.env");
   const HERMES_DIR = nodePath.join(root, "hermes-agent");
-  return { root, originalRoot, HERMES_DIR };
+  const HERMES_HOME = nodePath.join(root, "hermes-home");
+  return { root, originalRoot, HERMES_DIR, HERMES_HOME };
 });
 
 vi.mock("@/lib/config-store", () => {
@@ -139,6 +140,9 @@ function box({ checkoutPin = "2026.10.6", targetPin, installed, agentSchema, sta
   vi.mocked(downgradeAuthorizedFor).mockResolvedValue(false);
   if (hermes) {
     process.env.CLAWBOX_EDITION = "dual";
+    // The session store an older release cannot run on, once a newer one wrote it.
+    mkdirSync(HERMES_HOME, { recursive: true });
+    writeFileSync(path.join(HERMES_HOME, "state.db"), "");
     vi.mocked(runHermesCli).mockResolvedValue({ code: 0, stdout: `Hermes Agent v${hermes.installedVersion} (2026.10.20)\n`, stderr: "" });
   }
   calls = [];
@@ -180,6 +184,7 @@ beforeEach(() => {
   updater.resetUpdateState();
   process.env.CLAWBOX_EDITION = "openclaw";
   process.env.HERMES_AGENT_DIR = HERMES_DIR;
+  process.env.HERMES_HOME = HERMES_HOME;
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
@@ -204,6 +209,8 @@ afterEach(() => {
   vi.mocked(writeDowngradeAuthorization).mockReset();
   vi.mocked(clearDowngradeAuthorization).mockReset();
   delete process.env.HERMES_AGENT_DIR;
+  delete process.env.HERMES_HOME;
+  rmSync(HERMES_HOME, { recursive: true, force: true });
   delete process.env.GATEWAY_HEALTH_WAIT_MS;
   delete process.env.GATEWAY_RECOVERY_WAIT_MS;
   delete process.env.GATEWAY_WAIT_INTERVAL_MS;
@@ -244,15 +251,14 @@ describe("Update now: a target older than the data is refused before anything ch
     expect(backUpBeforeDowngrade).not.toHaveBeenCalled();
   });
 
-  it("refuses on the installed version when no database says so", async () => {
-    box({ targetPin: "2026.10.3", installed: "2026.10.6", agentSchema: null });
-    vi.mocked(statePath).mockReturnValue(null);
+  it("refuses on the installed version for a pin whose schemas no table records", async () => {
+    box({ targetPin: "2026.7.1", installed: "2026.10.6", agentSchema: 25 });
 
     const state = await runToVerdict(() => updater.startUpdate());
 
     expect(state.errorCode).toBe("harness_downgrade");
-    expect(state.downgrade?.downgrades).toEqual([{ harness: "openclaw", installed: "2026.10.6", target: "2026.10.3" }]);
-    expect(state.error).toContain("This device runs OpenClaw 2026.10.6, and this update would install the older OpenClaw 2026.10.3");
+    expect(state.downgrade?.downgrades).toEqual([{ harness: "openclaw", installed: "2026.10.6", target: "2026.7.1" }]);
+    expect(state.error).toContain("This device runs OpenClaw 2026.10.6, and this update would install the older OpenClaw 2026.7.1");
   });
 
   it("refuses an older Hermes on a box that runs it", async () => {
@@ -286,6 +292,24 @@ describe("Update now: the same or a newer target goes ahead", () => {
     expect(state.error).toMatch(OFFLINE);
   });
 
+  it("lets an older core through when no OpenClaw database is on disk for it to fail on", async () => {
+    // A state dir moved aside (how the upgrade e2e builds its main baseline).
+    box({ targetPin: "2026.9.4", installed: "2026.10.6", agentSchema: null });
+    vi.mocked(statePath).mockReturnValue(null);
+    const state = await runToVerdict(() => updater.startUpdate());
+    expect(state.error).toMatch(OFFLINE);
+  });
+
+  it("lets an older Hermes through on a box with no state.db", async () => {
+    box({
+      targetPin: "2026.10.6", installed: "2026.10.6", agentSchema: 25,
+      hermes: { targetCommit: HERMES_OLD, targetName: "0.21.1", head: HERMES_NEW, installedVersion: "0.22.4", ancestor: true },
+    });
+    rmSync(path.join(HERMES_HOME, "state.db"));
+    const state = await runToVerdict(() => updater.startUpdate());
+    expect(state.error).toMatch(OFFLINE);
+  });
+
   it("lets the pinned Hermes commit through", async () => {
     box({
       targetPin: "2026.10.6", installed: "2026.10.6", agentSchema: 25,
@@ -295,7 +319,7 @@ describe("Update now: the same or a newer target goes ahead", () => {
     expect(state.error).toMatch(OFFLINE);
   });
 
-  it("withdraws an earlier run's override authorisation", async () => {
+  it("withdraws an earlier run's authorisation before it judges anything", async () => {
     box({ targetPin: "2026.10.6", installed: "2026.10.6", agentSchema: 25 });
     await runToVerdict(() => updater.startUpdate());
     expect(clearDowngradeAuthorization).toHaveBeenCalled();
@@ -317,7 +341,9 @@ describe("the override: back up first, then go ahead", () => {
       hermesCommit: null,
       backupDir: "/home/clawbox/clawbox-harness-backups/20261023T000000Z",
     });
-    expect(clearDowngradeAuthorization).not.toHaveBeenCalled();
+    // The earlier run's authorisation is withdrawn BEFORE this run writes its own.
+    expect(vi.mocked(clearDowngradeAuthorization).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(writeDowngradeAuthorization).mock.invocationCallOrder[0]);
     // Let through to the network probe, with the backup said on the result.
     expect(state.error).toMatch(OFFLINE);
     expect(state.errorCode).toBeUndefined();

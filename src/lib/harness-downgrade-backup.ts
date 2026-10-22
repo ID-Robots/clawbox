@@ -111,6 +111,14 @@ export async function backUpBeforeDowngrade(
   downgrades: HarnessDowngrade[],
   now: Date = new Date(),
 ): Promise<DowngradeBackupResult> {
+  try {
+    return await backUp(downgrades, now);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function backUp(downgrades: HarnessDowngrade[], now: Date): Promise<DowngradeBackupResult> {
   const dir = path.join(downgradeBackupRoot(), stampOf(now));
   const moving = downgrades.map((d) => `${HARNESS_LABEL[d.harness]} ${d.installed ?? "?"} -> ${d.target}`).join(", ");
   try {
@@ -179,11 +187,17 @@ export async function writeDowngradeAuthorization(
   await rename(`${file}.tmp`, file);
 }
 
-/** Withdraw an authorisation, if any. Never throws: an absent file is the goal. */
+/**
+ * Withdraw an authorisation, if any. Never throws — not even synchronously —
+ * because every update asks it: an absent file is the goal, and a guard may
+ * not be the thing that fails an update.
+ */
 export async function clearDowngradeAuthorization(): Promise<void> {
-  await rm(downgradeAuthorizationFile(), { force: true }).catch((err) => {
+  try {
+    await rm(downgradeAuthorizationFile(), { force: true });
+  } catch (err) {
     console.warn("[Updater] could not withdraw an earlier downgrade authorisation:", err instanceof Error ? err.message : err);
-  });
+  }
 }
 
 /** Whether a standing authorisation already names this OpenClaw core. */

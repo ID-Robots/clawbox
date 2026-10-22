@@ -4013,7 +4013,8 @@ persist_update_branch_pin() {
 #
 # Proof only: an OpenClaw pin numerically older than the core installed now (a
 # dist-tag or prerelease is no proof), or a Hermes pin that is an ancestor of
-# the commit checked out now. Whatever cannot be read stands down. The owner's
+# the commit checked out now — each only while that harness has a database on
+# disk for an older version to fail on. Whatever cannot be read stands down. The owner's
 # override is the authorisation the updater writes once it has backed the data
 # up (data/harness-downgrade.json), honoured for exactly the versions it names
 # and only within its twelve hours; it is read as data, never sourced. git in
@@ -4039,9 +4040,16 @@ harness_downgrade_guard() {
   fi
   [ -n "$target_oc" ] || [ "$h_rc" = "0" ] || return 0
   out="$(python3 -I - "$target_oc" "$NPM_PREFIX/lib/node_modules/openclaw/package.json" "$t_commit" "$h_head" "$h_rc" \
-      "$PROJECT_DIR/data/harness-downgrade.json" "${upstream#origin/}" <<'PY'
-import json, re, sys, time
-target_oc, pkg, t_commit, h_head, h_rc, auth_path, branch = sys.argv[1:8]
+      "$PROJECT_DIR/data/harness-downgrade.json" "${upstream#origin/}" "$CLAWBOX_HOME/.openclaw" "$CLAWBOX_HOME/.hermes" <<'PY'
+import glob, json, os, re, sys, time
+target_oc, pkg, t_commit, h_head, h_rc, auth_path, branch, oc_home, hermes_home = sys.argv[1:10]
+
+# Only data the installed harness wrote can be refused by an older one: with
+# no database on disk (a fresh box, a state dir moved aside) there is none.
+oc_data = os.path.isfile(os.path.join(oc_home, "state", "openclaw.sqlite")) or bool(
+    glob.glob(os.path.join(oc_home, "agents", "*", "agent", "openclaw-agent.sqlite")))
+hermes_data = os.path.isfile(os.path.join(hermes_home, "state.db")) or bool(
+    glob.glob(os.path.join(hermes_home, "profiles", "*", "state.db")))
 
 def parts(v):
     m = re.match(r"^v?(\d+(?:\.\d+)*)(?:-(\d+))?$", (v or "").strip())
@@ -4065,9 +4073,9 @@ except Exception:
     auth, fresh = {}, False
 
 found = []
-if target_oc and installed and older(target_oc, installed) and not (fresh and auth.get("openclaw") == target_oc):
+if oc_data and target_oc and installed and older(target_oc, installed) and not (fresh and auth.get("openclaw") == target_oc):
     found.append("OpenClaw %s is installed, and branch \"%s\" pins the older OpenClaw %s" % (installed, branch, target_oc))
-if t_commit and h_head and h_rc == "0" and not (fresh and str(auth.get("hermesCommit") or "").lower() == t_commit.lower()):
+if hermes_data and t_commit and h_head and h_rc == "0" and not (fresh and str(auth.get("hermesCommit") or "").lower() == t_commit.lower()):
     found.append("Hermes Agent is checked out at %s, and branch \"%s\" pins the older commit %s" % (h_head[:12], branch, t_commit[:12]))
 if found:
     print(

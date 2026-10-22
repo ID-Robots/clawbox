@@ -103,6 +103,11 @@ beforeEach(() => {
   checkout = path.join(dir, "checkout");
   git(dir, "clone", "-q", upstream, checkout);
   mkdirSync(path.join(checkout, "data"), { recursive: true });
+  // The data each harness wrote: what an older version would fail to open.
+  mkdirSync(path.join(dir, "home", ".openclaw", "state"), { recursive: true });
+  writeFileSync(path.join(dir, "home", ".openclaw", "state", "openclaw.sqlite"), "");
+  mkdirSync(path.join(dir, "home", ".hermes"), { recursive: true });
+  writeFileSync(path.join(dir, "home", ".hermes", "state.db"), "");
   // A Hermes checkout with history: the older release, then the one checked out.
   hermes = path.join(dir, "home", ".hermes", "hermes-agent");
   mkdirSync(hermes, { recursive: true });
@@ -178,6 +183,19 @@ describe.skipIf(!hasTools)("harness_downgrade_guard: the same or a newer target,
     // An OpenClaw-only box never asks about the Hermes pin.
     release("2026.10.6", hermesCommits[0]);
     expect(guard("openclaw").status).toBe(0);
+  });
+
+  it("lets an older harness through when it has no database on disk to fail on", () => {
+    // The data moved aside (how the upgrade e2e builds its main baseline).
+    release("2026.9.4", hermesCommits[0]);
+    installed("2026.10.6");
+    rmSync(path.join(dir, "home", ".openclaw", "state", "openclaw.sqlite"));
+    rmSync(path.join(dir, "home", ".hermes", "state.db"));
+    expect(guard("dual").status).toBe(0);
+    // An agent database alone is data.
+    mkdirSync(path.join(dir, "home", ".openclaw", "agents", "main", "agent"), { recursive: true });
+    writeFileSync(path.join(dir, "home", ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite"), "");
+    expect(guard("openclaw").status).toBe(1);
   });
 });
 

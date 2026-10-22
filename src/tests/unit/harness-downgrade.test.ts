@@ -104,11 +104,13 @@ describe("assessHarnessDowngrade — a newer database is refused", () => {
     expect(d?.schema).toMatchObject({ database: "state", onDisk: 17, supported: 16 });
   });
 
-  it("refuses a target older than the core installed now, on the version alone", () => {
+  it("refuses a target older than the core that wrote the databases, on the version alone", () => {
+    // A pin whose schemas no table records (an older release than the tables go
+    // back to): the installed version is the proof.
     const [d] = assessHarnessDowngrade({
-      openclaw: openclaw({ onDisk: { state: null, agent: null }, supported: { state: null, agent: null } }),
+      openclaw: openclaw({ target: "2026.7.1", supported: { state: null, agent: null } }),
     });
-    expect(d).toEqual({ harness: "openclaw", installed: "2026.10.6", target: "2026.10.3" });
+    expect(d).toEqual({ harness: "openclaw", installed: "2026.10.6", target: "2026.7.1" });
   });
 });
 
@@ -130,6 +132,13 @@ describe("assessHarnessDowngrade — the same or an older database is allowed", 
     })).toEqual([]);
   });
 
+  it("lets an older core through when no database is on disk for it to fail on", () => {
+    // A fresh box, or a state dir moved aside: the version alone breaks nothing.
+    expect(assessHarnessDowngrade({
+      openclaw: openclaw({ onDisk: { state: null, agent: null } }),
+    })).toEqual([]);
+  });
+
   it("stands down on every unknown: no target, an unknown pin, a dist-tag", () => {
     expect(assessHarnessDowngrade({ openclaw: openclaw({ target: null }) })).toEqual([]);
     expect(assessHarnessDowngrade({
@@ -146,28 +155,37 @@ describe("assessHarnessDowngrade — Hermes", () => {
 
   it("refuses an older release than the one checked out", () => {
     expect(assessHarnessDowngrade({
-      hermes: { target, installed: { commit: COMMIT_NEW, version: "0.22.4" }, targetIsAncestor: null },
+      hermes: { target, installed: { commit: COMMIT_NEW, version: "0.22.4" }, hasData: true, targetIsAncestor: null },
     })).toEqual([{ harness: "hermes", installed: "0.22.4", target: "0.21.1", targetCommit: COMMIT_OLD }]);
   });
 
   it("refuses an older commit by ancestry when the versions cannot tell", () => {
     const [d] = assessHarnessDowngrade({
-      hermes: { target: { commit: COMMIT_OLD, version: null }, installed: { commit: COMMIT_NEW, version: null }, targetIsAncestor: true },
+      hermes: {
+        target: { commit: COMMIT_OLD, version: null }, installed: { commit: COMMIT_NEW, version: null }, hasData: true, targetIsAncestor: true,
+      },
     });
     expect(d).toMatchObject({ harness: "hermes", target: COMMIT_OLD.slice(0, 12) });
   });
 
-  it("lets the pinned commit, a newer release and an unknown through", () => {
+  it("lets the pinned commit, a newer release, a box with no state.db and an unknown through", () => {
     expect(assessHarnessDowngrade({
-      hermes: { target, installed: { commit: COMMIT_OLD, version: "0.21.1" }, targetIsAncestor: null },
+      hermes: { target, installed: { commit: COMMIT_OLD, version: "0.21.1" }, hasData: true, targetIsAncestor: null },
     })).toEqual([]);
     expect(assessHarnessDowngrade({
-      hermes: { target: { commit: COMMIT_NEW, version: "0.22.4" }, installed: { commit: COMMIT_OLD, version: "0.21.1" }, targetIsAncestor: false },
+      hermes: {
+        target: { commit: COMMIT_NEW, version: "0.22.4" }, installed: { commit: COMMIT_OLD, version: "0.21.1" }, hasData: true, targetIsAncestor: false,
+      },
     })).toEqual([]);
     expect(assessHarnessDowngrade({
-      hermes: { target: { commit: COMMIT_OLD, version: null }, installed: { commit: COMMIT_NEW, version: null }, targetIsAncestor: null },
+      hermes: { target, installed: { commit: COMMIT_NEW, version: "0.22.4" }, hasData: false, targetIsAncestor: true },
     })).toEqual([]);
-    expect(assessHarnessDowngrade({ hermes: { target, installed: null, targetIsAncestor: null } })).toEqual([]);
+    expect(assessHarnessDowngrade({
+      hermes: {
+        target: { commit: COMMIT_OLD, version: null }, installed: { commit: COMMIT_NEW, version: null }, hasData: true, targetIsAncestor: null,
+      },
+    })).toEqual([]);
+    expect(assessHarnessDowngrade({ hermes: { target, installed: null, hasData: true, targetIsAncestor: null } })).toEqual([]);
   });
 });
 

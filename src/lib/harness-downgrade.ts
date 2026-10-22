@@ -19,8 +19,8 @@
  *     declares (`openclaw.schemaVersions` of the published package, kept per pin
  *     in src/lib/updater.ts). Exact: it is the refusal the older core would give.
  *   - version — the target pin is older than the harness installed now, the one
- *     that wrote the data. A version this cannot order (a dist-tag, a prerelease)
- *     is not proof, and nothing is refused over it.
+ *     that wrote the data, and that data is on disk. A version this cannot order
+ *     (a dist-tag, a prerelease) is not proof, and nothing is refused over it.
  * Everything unknown stands down: a refusal over an unknown strands exactly the
  * box an update repairs.
  *
@@ -88,6 +88,8 @@ export interface HermesDowngradeInput {
   target: { commit: string; version: string | null } | null;
   /** What is checked out now; null when Hermes is not installed. */
   installed: { commit: string | null; version: string | null } | null;
+  /** Whether a Hermes `state.db` is on disk — the data an older release cannot run on. */
+  hasData: boolean;
   /**
    * `git merge-base --is-ancestor <target> HEAD` in the installed checkout:
    * true when the target commit is behind what is installed, false when it is
@@ -169,6 +171,10 @@ function openclawDowngrade(input: OpenclawDowngradeInput): HarnessDowngrade | nu
       };
     }
   }
+  // The version is proof only about data the installed core wrote: with no
+  // database on disk (a fresh box, a state dir moved aside) an older core has
+  // nothing it could fail to open.
+  if (!input.onDisk.state && !input.onDisk.agent) return null;
   const order = compareHarnessVersions(target, input.installed);
   if (order !== null && order < 0) return { harness: "openclaw", installed: input.installed, target };
   return null;
@@ -178,7 +184,7 @@ const shortCommit = (commit: string) => commit.slice(0, 12);
 
 function hermesDowngrade(input: HermesDowngradeInput): HarnessDowngrade | null {
   const { target, installed } = input;
-  if (!target || !installed) return null;
+  if (!target || !installed || !input.hasData) return null;
   if (installed.commit && installed.commit.toLowerCase() === target.commit.toLowerCase()) return null;
   const order = compareHarnessVersions(target.version, installed.version);
   const older = order !== null && order !== 0 ? order < 0 : input.targetIsAncestor === true;

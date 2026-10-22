@@ -1,7 +1,7 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import path from "./runtime-path";
 import { get, getKnown, set, setMany } from "./config-store";
 import {
@@ -5397,6 +5397,23 @@ async function readInstalledHermes(targetCommit: string | null): Promise<{
 }
 
 /**
+ * Whether Hermes keeps a session store on disk (`state.db`, the default
+ * profile's or any named profile's) — the data an older release cannot run on
+ * once a newer gateway runtime has written it. Without one there is nothing a
+ * Hermes downgrade could break.
+ */
+function hermesHasData(): boolean {
+  try {
+    const home = hermesHome();
+    if (existsSync(path.join(home, "state.db"))) return true;
+    const profiles = path.join(home, "profiles");
+    return readdirSync(profiles).some((name) => existsSync(path.join(profiles, name, "state.db")));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The newest agent database on disk, by schema. A store that could not be
  * asked is no evidence: null, like readStateSchemaVersion's null.
  */
@@ -5459,8 +5476,8 @@ async function harnessDowngradeFor(
       }
     }
     let hermes = null;
-    if (scope.hermes && pins.hermes) {
-      hermes = { target: pins.hermes, ...(await readInstalledHermes(pins.hermes.commit)) };
+    if (scope.hermes && pins.hermes && hermesHasData()) {
+      hermes = { target: pins.hermes, hasData: true, ...(await readInstalledHermes(pins.hermes.commit)) };
     }
     const downgrades = assessHarnessDowngrade({ openclaw, hermes });
     return downgrades.length > 0 ? { branch: pins.branch, downgrades } : null;
@@ -5714,9 +5731,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // THE OVERRIDE. `allowHarnessDowngrade` is the owner's "Back up and update
   // anyway": instead of the refusal, the data is backed up (ClawKeep, else the
   // harness's own backup command) and the installer is told which core it may
-  // set the newer databases aside for. No backup, no downgrade. A run without
-  // the override first withdraws any such authorisation an earlier one left,
-  // so a later run can never set data aside on an override it was not given.
+  // set the newer databases aside for. No backup, no downgrade. Every run
+  // first withdraws any such authorisation an earlier one left — an override
+  // run writes its own after its backup — so no run can ever set data aside
+  // on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
   let schemaCheckedPin: string | null = null;
   const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
@@ -5725,7 +5743,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     hermes: syncAhead && hasHermesHarness(),
   };
   if (downgradeScope.openclaw || downgradeScope.hermes) {
-    if (!options.allowHarnessDowngrade) await clearDowngradeAuthorization();
+    await clearDowngradeAuthorization();
     const pins = syncAhead ? await readUpdateTargetPins(downgradeScope.hermes) : await readCheckoutPins(false);
     const refusal = await harnessDowngradeRefusal(pins, downgradeScope, "before-update");
     schemaCheckedPin = pins.openclaw;
