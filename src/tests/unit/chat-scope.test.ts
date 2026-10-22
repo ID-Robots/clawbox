@@ -11,6 +11,10 @@ import {
   userTabKeyFor,
 } from "@/lib/chat-scope";
 import { isChatTabKey, isOwnerChatTabKey } from "@/lib/chat-tabs";
+import {
+  agentIdOfKey as coreBlockAgentId,
+  isUserChatKey as coreBlockUserKey,
+} from "../../../scripts/openclaw-plugins/clawbox-prime-radiant-core/prime-radiant-core.mjs";
 
 // Every ClawBox user's chat is a set of session keys only they may use: their
 // own main conversation and tabs, never the owner's, never each other's. The
@@ -139,5 +143,17 @@ describe("who may use a key", () => {
     expect(cjs.openclawUserMainKey("agent:roboclaw:main", "alice")).toBe(openclawUserMainKey("agent:roboclaw:main", "alice"));
     expect(cjs.agentIdOfKey("agent:Roboclaw:main")).toBe("roboclaw");
     expect(() => cjs.openclawUserMainKey("agent:main:main", "a:b")).toThrow();
+  });
+
+  it("is never looser in the Prime Radiant core plugin: every user key is one, no owner key is", () => {
+    // The plugin matches the prefix alone, so a malformed user-shaped key is a user's too there (no block).
+    for (const [key, user] of table) {
+      if (key.startsWith("desktop")) continue; // the plugin runs inside the OpenClaw gateway only
+      if (user !== null) expect(coreBlockUserKey(key), key).toBe(true);
+      else if (!key.includes(":clawbox-user-")) expect(coreBlockUserKey(key), key).toBe(false);
+    }
+    expect(coreBlockUserKey(userTabKeyFor(openclawUserMainKey("agent:roboclaw:main", "bob-0123456789ab"), "0123456789ab")!)).toBe(true);
+    expect(coreBlockAgentId("agent:Roboclaw:main")).toBe("roboclaw");
+    expect(coreBlockAgentId("main")).toBe("main");
   });
 });
