@@ -18,6 +18,15 @@
  *     structure.ts), and nothing above parted them: they are alike because
  *     the documents are, and a company's VAT number on both is a shared
  *     reference but no shared document.
+ *  2c. EXPORT DATE: a customs, export or import declaration that cites an
+ *     invoice by its number, against that invoice's page, each claim with one
+ *     date and no amount, the declaration's 1 to {@link EXPORT_DATE_MAX_DAYS}
+ *     days after the invoice's: the goods leave after they are invoiced, and
+ *     the declaration's date is its own, not the invoice's. Its wording must
+ *     date the declaration ("The declaration dated 20.03.2026 cites invoice
+ *     …"); a day on the invoice's number ("cites invoice … dated 20.03.2026")
+ *     is the invoice's. A date before the invoice's or further after it, an
+ *     amount, VAT, a payment, a receipt or a waybill stays a question.
  *  3. SUPERSEDED (validity.ts): one claim sits on a deprecated page, or is
  *     historical, and the other is current; or their periods do not overlap
  *     (as of 12.10 against as of 14.10, the 2023 accounts against the 2025
@@ -33,7 +42,8 @@
  * Pure.
  */
 
-import { DIFFERENT_RECORDS, differentSubjects, sharedReference, type Identifiers } from "./identifiers";
+import { DIFFERENT_RECORDS, differentSubjects, invoiceCitations, sharedReference, textDates, withoutDates, type Identifiers } from "./identifiers";
+import { amountsIn, type RecordType } from "./records";
 import { sameSubject, type ClaimSubject } from "./subject";
 import { describeValidity, laterOf, periodsDisjoint, type Validity } from "./validity";
 
@@ -54,12 +64,18 @@ export interface PairClaim {
   deprecated?: boolean;
   /** Its page's record hub (`<type>/<month>`, records.ts `recordHubKey`) when the page is a record leaf. */
   hub?: string | null;
+  /** Its page's record type (records.ts `sideRecordType`): an invoice, a customs declaration …; absent or null: no record. */
+  recordType?: RecordType | null;
 }
+
+/** The most days a declaration may be dated after the invoice it cites for the two dates to be two documents' ({@link noPairReason} 2c). */
+export const EXPORT_DATE_MAX_DAYS = 7;
 
 /** Why a pair is no pair, as a code the re-judge counts by. */
 export type NoPairCode =
   | "same-document"
   | "same-hub"
+  | "export-date"
   | "different-identifiers"
   | "different-dates"
   | "different-months"
@@ -93,6 +109,8 @@ export function noPairReason(a: PairClaim, b: PairClaim): NoPair | null {
     if (why) return { code: IDENTIFIER_CODES[why] ?? "different-identifiers", detail: why };
   }
   if (a.hub && a.hub === b.hub) return { code: "same-hub", detail: `two records of one monthly hub (${a.hub})` };
+  const exported = shared ? exportDate(a, b) : null;
+  if (exported) return { code: "export-date", detail: exported };
   if (!!a.deprecated !== !!b.deprecated) {
     return { code: "superseded-deprecated", detail: "a claim on a deprecated page against a current one", current: a.deprecated ? "b" : "a" };
   }
@@ -120,8 +138,76 @@ export function pairable(a: PairClaim, b: PairClaim): boolean {
   const shared = !!a.ids && !!b.ids && sharedReference(a.ids.ref, b.ids.ref);
   if (!shared && !sameSubject(a.subject, b.subject)) return false;
   if (!shared && a.ids && b.ids && differentSubjects(a.ids, b.ids)) return false;
+  if (shared && exportDate(a, b) !== null) return false;
   if (!!a.deprecated !== !!b.deprecated || !!a.historical !== !!b.historical) return false;
   return !(a.validity && b.validity && periodsDisjoint(a.validity, b.validity));
+}
+
+/** Words of another fact than a document's date: a payment, a tax, a receipt, a delivery. */
+const OTHER_FACT_WORDS =
+  /(?<![\p{L}\p{N}])(?:paid|pays?|payments?|vat|tax(?:es)?|receipts?|deliver(?:y|ed)|shipped|waybills?|ддс|данъ[кц]\p{L}*|плат\p{L}*|плащ\p{L}*|разписк\p{L}*|доставк\p{L}*|товарителниц\p{L}*)(?![\p{L}\p{N}])/iu;
+
+/** The one day a claim text names, or null when it names none, several, or a month. */
+function onlyDay(text: string): string | null {
+  const { date, month } = textDates(text);
+  return date.size === 1 && month.size === 0 ? [...date][0] : null;
+}
+
+/** Where a text's first date begins, or -1: the dates are all that {@link withoutDates} changes. */
+function firstDateAt(text: string): number {
+  const blanked = withoutDates(text);
+  for (let i = 0; i < text.length; i++) if (text[i] !== blanked[i]) return i;
+  return -1;
+}
+
+/** Words that end in the declaration and its own date's word, before the invoice it cites: "The declaration dated", "Declaration MRN 26XX… of". */
+const DECLARATION_DATED_BEFORE =
+  /(?:declaration|декларация\p{L}*)(?:\s+(?:mrn\s*)?[\p{L}\p{N}-]*\d[\p{L}\p{N}-]*)?[\s,]*(?:dated|date:?|of|from|(?:filed|lodged|submitted)\s+on|от|с\s+дата)?\s*$/iu;
+/** Words after the invoice it cites that date the declaration: "… is dated", "… and was lodged on". "…, which is dated" dates the invoice. */
+const DECLARATION_DATED_AFTER =
+  /^\s*,?\s*(?:and\s+|и\s+)?(?:(?:is|was|has\s+been)\s+(?:dated|filed|lodged|submitted|accepted|released|cleared|registered)(?:\s+(?:on|as\s+of))?|е\s+(?:от|с\s+дата|подадена\s+на))\s*$/iu;
+
+/**
+ * The one day a declaration's claim gives the declaration itself, or null. The
+ * wording must date the declaration: before the invoice it cites ("The
+ * declaration dated 20.03.2026 cites invoice INV-2026-0031") or after it as the
+ * declaration's own ("… cites invoice INV-2026-0031 and is dated 20.03.2026").
+ * A day on the invoice's number ("cites invoice INV-2026-0031 dated
+ * 20.03.2026") is the invoice's date, and against the invoice's own one it
+ * stays a question.
+ */
+function declarationDay(text: string, cited: string): string | null {
+  const day = onlyDay(text);
+  const at = text.indexOf(cited);
+  const date = firstDateAt(text);
+  if (!day || at < 0 || date < 0) return null;
+  if (date < at) return DECLARATION_DATED_BEFORE.test(text.slice(0, date)) ? day : null;
+  return DECLARATION_DATED_AFTER.test(text.slice(at + cited.length, date)) ? day : null;
+}
+
+function daysAfter(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+}
+
+/**
+ * Rule 2c, for two sides that share a reference: why a declaration's claim and
+ * the claim of the invoice it cites are two documents' dates, or null. The
+ * reason names the invoice, both dates and the days between them.
+ */
+function exportDate(a: PairClaim, b: PairClaim): string | null {
+  const [declaration, invoice] = a.recordType === "customs" && b.recordType === "invoice" ? [a, b] : b.recordType === "customs" && a.recordType === "invoice" ? [b, a] : [];
+  if (!declaration || !invoice?.ids) return null;
+  const invoiceRefs = invoice.ids.ref;
+  const cited = invoiceCitations(declaration.text).find((c) => sharedReference(new Set([c.ref]), invoiceRefs));
+  if (!cited) return null;
+  const declared = declarationDay(declaration.text, cited.written);
+  const invoiced = onlyDay(invoice.text);
+  if (!declared || !invoiced) return null;
+  if (amountsIn(declaration.text).length > 0 || amountsIn(invoice.text).length > 0) return null;
+  if (OTHER_FACT_WORDS.test(declaration.text) || OTHER_FACT_WORDS.test(invoice.text)) return null;
+  const gap = daysAfter(invoiced, declared);
+  if (gap < 1 || gap > EXPORT_DATE_MAX_DAYS) return null;
+  return `invoice ${cited.written} dated ${invoiced}, the declaration citing it dated ${declared}: ${gap} day${gap === 1 ? "" : "s"} later`;
 }
 
 /** A subject as a short label: its words, at most six. */

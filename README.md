@@ -41,7 +41,7 @@
 
 ## What is ClawBox?
 
-**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd. that runs the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription.
+**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd. that runs the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano Super (8 GB) running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription.
 
 This repository contains **OpenClaw OS**, the operating system that ships on every ClawBox. Local-first: with local models nothing leaves the box — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
 
@@ -179,7 +179,7 @@ Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
 
 | Component | Spec |
 |-----------|------|
-| **Processor** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **Processor** | NVIDIA Jetson Orin Nano Super (8 GB) |
 | **AI Performance** | 67 TOPS |
 | **Storage** | 512GB NVMe SSD |
 | **Power** | 7–15 W typical, USB-C |
@@ -214,7 +214,7 @@ Full documentation lives at **[docs.clawbox.com](https://docs.clawbox.com)**:
 
 | | Supported |
 |---|---|
-| **Device** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **Device** | NVIDIA Jetson Orin Nano Super (8 GB), or an Orin Nano 8 GB Developer Kit flashed with JetPack 6.2 (which enables Super mode) |
 | **OS image** | **JetPack 6.2** (Ubuntu 22.04 / L4T R36.x) — [download](https://developer.nvidia.com/embedded/jetpack-sdk-62) |
 
 > ⚠️ **JetPack 7.x (Ubuntu 24.04) is not supported yet.** NVIDIA's newest images
@@ -561,7 +561,7 @@ Turn on **Settings → Remote Control**. A provisioned box gets a persistent `<b
 Only from **[clawbox.com](https://clawbox.com)**. ID Robots ships to 108 countries via DHL Express. Products sold elsewhere under a similar name are not ClawBox and are not covered by our warranty or support.
 
 **Can I run OpenClaw OS on my own Jetson?**
-Yes — this repository is source-available and installs on an NVIDIA Jetson Orin Nano 8GB running JetPack 6.2. See [Quick Start](#-quick-start). Buying a ClawBox gets you the assembled, tested device with case, NVMe storage, warranty and support.
+Yes — this repository is source-available and installs on an NVIDIA Jetson Orin Nano Super 8GB (or an Orin Nano 8GB developer kit on JetPack 6.2). See [Quick Start](#-quick-start). Buying a ClawBox gets you the assembled, tested device with case, NVMe storage, warranty and support.
 
 ---
 

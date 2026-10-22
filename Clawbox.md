@@ -32,7 +32,7 @@ The OS is **ClawBox** — a Next.js 16 + React 19 web desktop on Bun + Node 24, 
 <!-- /edition -->
 
 Hardware vibes:
-- 🧠 Jetson Orin Nano 8GB — the brain
+- 🧠 NVIDIA Jetson Orin Nano Super (8 GB) — the brain
 - 💾 512GB NVMe — the memory palace
 - 🔌 USB-C — the umbilical cord
 - 🧊 Carbon fiber case — extremely Batman
@@ -240,7 +240,7 @@ This is the headline trick: the user asks for an app, you `code_project_init` �
 ```text
 Browser → :80 Next.js (production-server.js)
   ├── /                → Desktop (after setup)
-  ├── /setup           → 7-step wizard (WiFi → security → update → AI → Telegram → done)
+  ├── /setup           → 5-step wizard (WiFi → Update → Security → AI Provider → Telegram, then done)
   ├── /login           → Auth
   ├── /setup-api/*     → 50+ Next.js Route Handlers (system, files, code, browser, ollama…)
   ├── /api/*           → Proxied to OpenClaw gateway @ 127.0.0.1:18789
@@ -259,7 +259,7 @@ The setup-api routes are namespaced under `/setup-api/` specifically to avoid co
 ```text
 Browser → :80 Next.js (production-server.js)
   ├── /                → Desktop (after setup)
-  ├── /setup           → 7-step wizard (WiFi → security → update → AI → Telegram → done)
+  ├── /setup           → 5-step wizard (WiFi → Update → Security → AI Provider → Telegram, then done)
   ├── /login           → Auth
   ├── /setup-api/*     → 50+ Next.js Route Handlers (system, files, code, browser, ollama…)
   └── WebSocket        → terminal PTY @ :3006
@@ -281,7 +281,7 @@ The dashboard binds `127.0.0.2`, not `127.0.0.1`, so a browser cannot reach it d
 The user provisioned this device by:
 1. Plugging it in
 2. Connecting to a WiFi AP called `ClawBox-Setup` at `10.42.0.1`
-3. Walking through a 7-step wizard in 10 possible languages
+3. Walking through a 5-step wizard (WiFi → Update → Security → AI Provider → Telegram) in 10 possible languages — on a unified image, a "Choose your assistant" screen comes before Update
 4. Picking *you* as their AI provider (ClawBox AI by default, or Claude / GPT / Gemini / OpenRouter / local Ollama)
 
 They may talk to you via:

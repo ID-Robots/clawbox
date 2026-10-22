@@ -88,6 +88,18 @@ const PAGES: Record<string, string> = {
   "concepts/support-faq.md": page("Support FAQ", [c("ops/support-faq/hours", "The Northwind support line is open from 8 to 16.")]),
 };
 
+/** An export declaration that cites an invoice, dated two days after it, and the invoice's own page: two documents, two dates. */
+const DECLARATION = "concepts/export-declaration-mrn-26xx000222a0000002.md";
+const INVOICE = "concepts/invoice-inv-2026-0031-fabrikam.md";
+const DECLARATION_ID = "customs/export-declaration-mrn-26xx000222a0000002/invoice";
+const INVOICE_ID = "finance/invoice-inv-2026-0031-fabrikam/date";
+const declarationPage = (text: string, title = "Export declaration MRN 26XX000222A0000002 for Fabrikam") => page(title, [c(DECLARATION_ID, text)]);
+const invoicePage = (text: string) => page("Invoice INV-2026-0031 Fabrikam", [c(INVOICE_ID, text)]);
+const EXPORT_PAGES: Record<string, string> = {
+  [DECLARATION]: declarationPage("The declaration dated 20.03.2026 cites invoice INV-2026-0031."),
+  [INVOICE]: invoicePage("Invoice INV-2026-0031 is dated 18.03.2026."),
+};
+
 function claimsById(pages: Record<string, string> = PAGES): Map<string, PassClaim> {
   return new Map(collectClaims(snapshot(pages)).map((x) => [x.id, x]));
 }
@@ -364,9 +376,101 @@ describe("rule 3: a draft and its final are one document", () => {
   });
 });
 
+describe("rule 4: a declaration dated after the invoice it cites is another document's date", () => {
+  /** The declaration's claim and the invoice's, as the pass reads them; a page title may stand in for the declaration's. */
+  function sides(declaration: string, invoice: string, title?: string): [PassClaim, PassClaim] {
+    const all = claimsById({ [DECLARATION]: declarationPage(declaration, title), [INVOICE]: invoicePage(invoice) });
+    return [all.get(DECLARATION_ID)!, all.get(INVOICE_ID)!];
+  }
+  const kept = (a: PassClaim, b: PassClaim) => {
+    expect(noPairReason(a, b)).toBeNull();
+    expect(noPairReason(b, a)).toBeNull();
+    expect(pairable(a, b)).toBe(true);
+    expect(pairable(b, a)).toBe(true);
+  };
+
+  it("parts a declaration dated 1 to 7 days after the invoice it cites, each claim one date and no amount", () => {
+    const all = claimsById(EXPORT_PAGES);
+    const declaration = all.get(DECLARATION_ID)!;
+    const invoice = all.get(INVOICE_ID)!;
+    expect(noPairReason(declaration, invoice)).toMatchObject({ code: "export-date" });
+    expect(noPairReason(invoice, declaration)).toMatchObject({ code: "export-date" });
+    expect(noPairReason(declaration, invoice)?.detail).toBe("invoice INV-2026-0031 dated 2026-03-18, the declaration citing it dated 2026-03-20: 2 days later");
+    expect(pairable(declaration, invoice)).toBe(false);
+    expect(pairable(invoice, declaration)).toBe(false);
+    // One day and seven days after; an import declaration, a customs declaration, a Bulgarian one.
+    for (const [day, title] of [
+      ["19.03.2026", undefined],
+      ["25.03.2026", undefined],
+      ["2026-03-21", "Import declaration MRN 26XX000222A0000002 for Fabrikam"],
+      ["21 March 2026", "Customs declaration 26XX000222A0000002 Fabrikam"],
+      ["22.03.2026", "Износна декларация 26XX000222A0000002 Fabrikam"],
+    ] as const) {
+      const [a, b] = sides(`The declaration dated ${day} cites invoice INV-2026-0031.`, "Invoice INV-2026-0031 is dated 18.03.2026.", title);
+      expect(noPairReason(a, b), `${day} ${title ?? ""}`).toMatchObject({ code: "export-date" });
+      expect(pairable(a, b)).toBe(false);
+    }
+    // Other wordings that date the declaration itself, before or after the invoice it cites.
+    for (const text of [
+      "The declaration of 20.03.2026 cites invoice INV-2026-0031.",
+      "The declaration, dated 20.03.2026, cites invoice INV-2026-0031.",
+      "Export declaration MRN 26XX000222A0000002 dated 20.03.2026 cites invoice INV-2026-0031.",
+      "The declaration citing invoice INV-2026-0031 is dated 20.03.2026.",
+      "The declaration cites invoice INV-2026-0031 and was lodged on 20.03.2026.",
+    ]) {
+      const [a, b] = sides(text, "Invoice INV-2026-0031 is dated 18.03.2026.");
+      expect(noPairReason(a, b), text).toMatchObject({ code: "export-date" });
+      expect(pairable(b, a)).toBe(false);
+    }
+  });
+
+  it("keeps a declaration dated before the invoice, or long after it, the same day, or with an amount, VAT or a payment", () => {
+    const invoiceDate = "Invoice INV-2026-0031 is dated 18.03.2026.";
+    kept(...sides("The declaration dated 17.03.2026 cites invoice INV-2026-0031.", invoiceDate));
+    kept(...sides("The declaration dated 18.03.2026 cites invoice INV-2026-0031.", invoiceDate));
+    kept(...sides("The declaration dated 26.03.2026 cites invoice INV-2026-0031.", invoiceDate));
+    kept(...sides("The declaration dated 27.04.2026 cites invoice INV-2026-0031.", invoiceDate));
+    // A declaration amount against the invoice total, and an amount beside the dates.
+    kept(...sides("The declaration states invoice INV-2026-0031 totals €1,250.00.", "The total of invoice INV-2026-0031 is €1,200.00."));
+    kept(...sides("The declaration dated 20.03.2026 cites invoice INV-2026-0031 for EUR 1,250.00.", invoiceDate));
+    kept(...sides("The declaration dated 20.03.2026 cites invoice INV-2026-0031.", "Invoice INV-2026-0031 for €1,200.00 is dated 18.03.2026."));
+    // VAT and a payment date are other facts than the documents' dates.
+    kept(...sides("The declaration dated 20.03.2026 cites invoice INV-2026-0031 with VAT number XX999000333.", invoiceDate));
+    kept(...sides("The declaration says invoice INV-2026-0031 was paid on 20.03.2026.", "Invoice INV-2026-0031 was paid on 18.03.2026."));
+    // Two dates on a side; a reference the declaration does not cite as the invoice's.
+    kept(...sides("The declaration of 20.03.2026 cites invoice INV-2026-0031 dated 18.03.2026.", invoiceDate));
+    kept(...sides("The declaration names exporter TIN XX999000444 and is dated 20.03.2026.", "Invoice INV-2026-0031 to TIN XX999000444 is dated 18.03.2026."));
+  });
+
+  it("keeps a day the declaration gives the invoice it cites: that is the invoice's date, a question against the invoice's own", () => {
+    const invoiceDate = "Invoice INV-2026-0031 is dated 18.03.2026.";
+    kept(...sides("The declaration cites invoice INV-2026-0031 dated 20.03.2026.", invoiceDate));
+    kept(...sides("The declaration cites invoice INV-2026-0031, dated 20.03.2026.", invoiceDate));
+    kept(...sides("The declaration cites invoice INV-2026-0031 of 20 March 2026.", invoiceDate));
+    kept(...sides("The declaration cites invoice INV-2026-0031, which is dated 20.03.2026.", invoiceDate));
+    kept(...sides("On 20.03.2026 invoice INV-2026-0031 was cited in the declaration.", invoiceDate));
+  });
+
+  it("keeps a receipt dated after the invoice, VAT that differs, and the reminder's total against the invoice's", () => {
+    const pages = {
+      ...EXPORT_PAGES,
+      "concepts/receipt-rc-2026-0077-fabrikam.md": page("Receipt RC-2026-0077 Fabrikam", [c("finance/receipt-rc-2026-0077-fabrikam/invoice", "The receipt cites invoice INV-2026-0031 dated 20.03.2026.")]),
+      "concepts/export-declaration-mrn-26xx000333a0000003.md": page("Export declaration MRN 26XX000333A0000003 for Fabrikam", [
+        c("customs/export-declaration-mrn-26xx000333a0000003/vat", "The declaration states VAT of €42.00 on invoice INV-2026-0031, dated 20.03.2026."),
+      ]),
+      "concepts/invoice-inv-2026-0031-vat.md": page("Invoice INV-2026-0031 VAT", [c("finance/invoice-inv-2026-0031-vat/vat", "The VAT on invoice INV-2026-0031, dated 18.03.2026, is €40.00.")]),
+    };
+    const all = claimsById({ ...PAGES, ...pages });
+    const get = (id: string) => all.get(id)!;
+    kept(get("finance/receipt-rc-2026-0077-fabrikam/invoice"), get(INVOICE_ID));
+    kept(get("customs/export-declaration-mrn-26xx000333a0000003/vat"), get("finance/invoice-inv-2026-0031-vat/vat"));
+    kept(get("finance/invoice-inv-2026-0042-fabrikam/total"), get("finance/payment-reminder-fabrikam/total"));
+  });
+});
+
 describe("one rule set", () => {
   it("answers the pass's yes/no exactly as the re-judge's reasons, for every pair", () => {
-    const claims = collectClaims(snapshot(PAGES));
+    const claims = collectClaims(snapshot({ ...PAGES, ...EXPORT_PAGES }));
     let parted = 0;
     for (const a of claims) {
       for (const b of claims) {
@@ -653,5 +757,27 @@ describe("re-judging the open queue", () => {
       ],
     };
     expect(rejudgeVerdict(item, new Map())).toMatchObject({ code: "same-document" });
+  });
+
+  it("closes a declaration dated after the invoice it cites with a note naming the reference, both dates and the gap", () => {
+    const declaration = side(DECLARATION_ID, DECLARATION, "The declaration dated 20.03.2026 cites invoice INV-2026-0031.");
+    const invoice = side(INVOICE_ID, INVOICE, "Invoice INV-2026-0031 is dated 18.03.2026.");
+    const item = raise(declaration, invoice);
+    const dry = rejudgeOpenContradictions(vault, snapshot({ ...PAGES, ...EXPORT_PAGES }), { dryRun: true, now: () => new Date(WRITTEN) });
+    expect(dry).toMatchObject({ checked: 1, closed: 1, byReason: { "export-date": 1 }, byFamily: { "different subjects": 1 } });
+    expect(getReviewItem(vault, item.id)?.status).toBe("open");
+    const done = rejudgeOpenContradictions(vault, snapshot({ ...PAGES, ...EXPORT_PAGES }), { now: () => new Date(WRITTEN) });
+    expect(done).toMatchObject({ checked: 1, closed: 1, stillOpen: 0, byReason: { "export-date": 1 } });
+    expect(getReviewItem(vault, item.id)).toMatchObject({ status: "resolved", resolution: { action: "dismiss", by: "auto", note: expect.stringMatching(/INV-2026-0031/) } });
+    expect(getReviewItem(vault, item.id)?.resolution?.note).toBe(
+      "auto: different subjects: invoice INV-2026-0031 dated 2026-03-18, the declaration citing it dated 2026-03-20: 2 days later",
+    );
+    // Its pages gone from the vault: read by their paths alone.
+    expect(rejudgeVerdict({ kind: "contradiction", createdAt: WRITTEN, candidates: [invoice, declaration] }, new Map())).toMatchObject({ code: "export-date" });
+    // Forty days after is still the owner's question.
+    const late = raise(side(DECLARATION_ID, DECLARATION, "The declaration dated 27.04.2026 cites invoice INV-2026-0031."), invoice);
+    const pages = { ...PAGES, ...EXPORT_PAGES, [DECLARATION]: declarationPage("The declaration dated 27.04.2026 cites invoice INV-2026-0031.") };
+    expect(rejudgeOpenContradictions(vault, snapshot(pages))).toMatchObject({ checked: 1, closed: 0, stillOpen: 1 });
+    expect(getReviewItem(vault, late.id)?.status).toBe("open");
   });
 });

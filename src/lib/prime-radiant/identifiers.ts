@@ -153,6 +153,72 @@ export function withoutDates(text: string): string {
   return readDates(text, empty());
 }
 
+/**
+ * The days and months a claim's text names (YYYY-MM-DD, YYYY-MM).
+ * {@link claimIdentifiers} leaves them out on purpose; a rule that compares
+ * two claims' dates reads them here.
+ */
+export function textDates(text: string): Pick<Identifiers, "date" | "month"> {
+  const out = empty();
+  readDates(text, out);
+  return { date: out.date, month: out.month };
+}
+
+// ── postal addresses ──────────────────────────────────────────────────────
+
+/** The words that end a street's name, with their abbreviations ("St.", "Rd"). */
+const STREET_TYPE =
+  "(?:Drive|Street|Road|Avenue|Boulevard|Lane|Way|Court|Place|Crescent|Close|Terrace|Highway|Parkway|Trail|Square|Circle|Grove|Gardens|Mews|Row|Alley|" +
+  "(?:Dr|St|Rd|Ave|Av|Blvd|Ln|Ct|Pl|Cres|Terr|Hwy|Pkwy|Sq|Cir)\\.?)";
+/** A word of a street's name: capitalised, or a numbered street ("5th"). */
+const STREET_WORD = "(?:\\p{Lu}[\\p{L}'’-]*|\\d{1,3}(?:st|nd|rd|th))";
+/** A word of a city's or region's name ("Springfield", "AB", "St. Albert"). */
+const PLACE_WORD = "(?:(?:St|Ste|Mt|Ft)\\.?[ \\t]+)?\\p{Lu}[\\p{L}'’-]*(?![\\p{L}\\p{N}])";
+const PLACE = `${PLACE_WORD}(?:[ \\t]+${PLACE_WORD}){0,2}`;
+/** A Canadian postcode ("T4N 1A1") or a US ZIP ("95999", "95999-1234"). */
+const POSTCODE = "(?:[A-Z]\\d[A-Z][ \\t]?\\d[A-Z]\\d|\\d{5}(?:-\\d{4})?)(?![\\p{L}\\p{N}])";
+/** A province's or state's two-letter code ("AB", "NY"). */
+const REGION = "[A-Z]{2}(?![\\p{L}\\p{N}])";
+/**
+ * A company's name up to its legal suffix ("Contoso Pharmacy Ltd"): after a
+ * street's comma it is a company, never a city. A two-letter Latin suffix
+ * ("AB", "SA") is left out: there it reads as a region code.
+ */
+const COMPANY =
+  "(?:\\p{Lu}[\\p{L}\\p{N}&'’-]*[ \\t]+){0,4}(?:Ltd|Limited|GmbH|Inc|LLC|OOD|EOOD|EAD|Corp|PLC|SRL|Oy|ApS|ООД|ЕООД|АД|ЕАД)(?![\\p{L}\\p{N}])";
+/**
+ * A postal address: a house number, the street's capitalised words and its
+ * type word ("12 Maple Grove Drive"), then its city and region parts and a
+ * postcode — by commas ("…, Springfield, AB T4N 1A1"), or by spaces when they
+ * end in a region code or a postcode ("… Springfield AB T4N 1A1"), so the
+ * capitalised words of a next sentence are never taken for a city, nor a
+ * company's name with its legal suffix ("… Drive, Contoso Pharmacy Ltd."). A full
+ * stop ends it. A street with no city after it is one only where a punctuation
+ * mark or the text's end follows ("ships to 12 Maple Grove Drive.", "… Drive
+ * (rear door)"): a count or an amount before a name ("200 Google Drive files",
+ * "1200 Acme Way Ltd") is no house number. A hyphen, an apostrophe or an
+ * ampersand goes on with a name ("Drive-in", "Acme Way & Sons") and ends no
+ * street. Read by its shape, never from a list of places: a name with no house
+ * number before it ("Google Drive") is no address.
+ */
+const POSTAL_ADDRESS = new RegExp(
+  `(?<![\\p{L}\\p{N}])\\d{1,6}[A-Za-z]?[ \\t]+(?:${STREET_WORD}[ \\t]+){1,4}${STREET_TYPE}(?![\\p{L}\\p{N}])` +
+    `(?:[ \\t]+(?:NE|NW|SE|SW|N|S|E|W)(?![\\p{L}\\p{N}]))?` +
+    `(?:(?:,[ \\t]*(?!${COMPANY})${PLACE}){1,3}(?:,?[ \\t]+${POSTCODE})?` +
+    `|(?:,?[ \\t]+${PLACE_WORD}){0,3},?[ \\t]+(?:${REGION}(?:,?[ \\t]+${POSTCODE})?|${POSTCODE})` +
+    `|(?=[ \\t]*(?:[.,;:!?()\\[\\]{}"“”«»–—\\r\\n]|$)))`,
+  "gu",
+);
+
+/**
+ * A text with its postal addresses blanked: a street or a city is no name of
+ * a company, a person or a product, however capitalised. The blank breaks the
+ * words on either side apart, so no name is made across it.
+ */
+export function withoutAddresses(text: string): string {
+  return text.replace(POSTAL_ADDRESS, " ; ");
+}
+
 /** The identifiers a page title carries. */
 export function titleIdentifiers(title: string | null | undefined): Identifiers {
   const out = empty();
@@ -249,6 +315,26 @@ export function claimIdentifiers(text: string): Identifiers {
       const tok = m[1].replace(/[-/]+$/, "");
       if (!codeShaped(tok)) continue;
       out.ref.add(normRef(tok));
+    }
+  }
+  return out;
+}
+
+/** An invoice's number after the word ("cites invoice INV-2026-0031", "фактура № 0000123456"), or one that is written as an invoice's ("INV-2026-0031"). */
+const INVOICE_REFS = [
+  new RegExp(`(?:^|[^\\p{L}])(?:invoice|e-?invoice|proforma|фактура|фактурата|фактури)\\s*[:#№]?\\s*([A-Za-z]{0,6}[-/]?\\d[\\dA-Za-z/-]{2,})`, "giu"),
+  /(?<![\p{L}\p{N}])(inv[-/]?\d[\dA-Za-z/-]{2,})/giu,
+];
+
+/** The invoices a claim text cites by number: each as a reference ({@link sharedReference} reads it) and as written. */
+export function invoiceCitations(text: string): Array<{ ref: string; written: string }> {
+  const rest = readDates(text, empty());
+  const out: Array<{ ref: string; written: string }> = [];
+  for (const re of INVOICE_REFS) {
+    for (const m of rest.matchAll(re)) {
+      const tok = m[1].replace(/[-/]+$/, "");
+      const ref = normRef(tok);
+      if (codeShaped(tok) && !out.some((x) => x.ref === ref)) out.push({ ref, written: tok });
     }
   }
   return out;

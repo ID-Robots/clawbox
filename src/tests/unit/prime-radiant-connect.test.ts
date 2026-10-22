@@ -112,6 +112,51 @@ describe("names and leaves", () => {
     expect(leafInfo("Invoice process")).toBeNull();
     expect(leafInfo("Daily standup notes")).toBeNull();
   });
+
+  it("takes no street or city of a postal address for a name, and still finds the names around it", () => {
+    const n = candidateNames("The order ships to 12 Maple Grove Drive, Springfield, AB T4N 1A1, Canada.");
+    expect(n.has("Maple Grove Drive")).toBe(false);
+    expect(n.has("Springfield")).toBe(false);
+    // With no commas, the region code reads like a legal suffix ("… Springfield AB").
+    const bare = candidateNames("Deliver to 12 Maple Grove Drive Springfield AB T4N 1A1 by Friday.");
+    expect([...bare].filter((x) => x.includes("Springfield") || x.includes("Maple"))).toEqual([]);
+    // A two-word city, a US ZIP.
+    const us = candidateNames("Returns go to 500 Old Mill Road, Elm Ridge, CA 95999. Stock is at 7 Harbour St, Port Wells, NY.");
+    expect([...us].filter((x) => /Mill|Elm|Harbour|Port Wells/.test(x))).toEqual([]);
+    // Names that end in a street word, or are near an address, are still names.
+    const kept = candidateNames("Acme Widgets Ltd keeps files in Google Drive. The Northwind Depot ships to 12 Maple Grove Drive, Springfield, AB T4N 1A1.");
+    expect(kept.has("Google Drive")).toBe(true);
+    expect(kept.has("Northwind Depot")).toBe(true);
+    expect(kept.has("Acme Widgets Ltd")).toBe(true);
+    // A street with no city is one where a punctuation mark ends it; a count before a name is no house number.
+    expect(candidateNames("Deliver to 77 Lakeview Road. Ask for Contoso Labs.").has("Lakeview Road")).toBe(false);
+    expect(candidateNames("Ship to 12 Maple Grove Drive (rear door).").has("Maple Grove Drive")).toBe(false);
+    expect(candidateNames("Ship to 12 Maple Grove Drive – rear door").has("Maple Grove Drive")).toBe(false);
+    const counted = candidateNames("We moved 200 Google Drive files to Northwind Depot.");
+    expect(counted.has("Google Drive")).toBe(true);
+    expect(counted.has("Northwind Depot")).toBe(true);
+    // A company after the street is no city: it stays a name, and the street still goes.
+    const shipTo = candidateNames("Ship to 12 Maple Grove Drive, Contoso Pharmacy Ltd.");
+    expect(shipTo.has("Contoso Pharmacy Ltd")).toBe(true);
+    expect([...shipTo].filter((x) => x.includes("Maple"))).toEqual([]);
+    const afterCity = candidateNames("Ship to 12 Maple Grove Drive, Springfield, Initech GmbH, by Friday.");
+    expect(afterCity.has("Initech GmbH")).toBe(true);
+    expect([...afterCity].filter((x) => x.includes("Maple") || x.includes("Springfield"))).toEqual([]);
+  });
+
+  it("creates no entity page for the street or city of an address many pages carry", async () => {
+    const pages: Record<string, string> = {};
+    for (let i = 1; i <= 6; i++) {
+      pages[`concepts/order-4410${i}-contoso.md`] = page(`Order 4410${i} for Contoso Pharmacy`, {
+        claims: [`Order 4410${i} for Contoso Pharmacy ships to 12 Maple Grove Drive, Springfield, AB T4N 1A1, Canada.`],
+        body: `Order 4410${i} goes to 12 Maple Grove Drive Springfield AB T4N 1A1.\n`,
+      });
+    }
+    const plan = await planConnections(snapshot(pages, "# Index\n"), { now: NOW, vectors: new Map() });
+    const created = plan.writes.map((w) => w.path).filter((p) => p.startsWith("entities/"));
+    expect(created).toContain("entities/contoso-pharmacy.md");
+    expect(created.filter((p) => /maple|grove|springfield/.test(p))).toEqual([]);
+  });
 });
 
 describe("planConnections", () => {
