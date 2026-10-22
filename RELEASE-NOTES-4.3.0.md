@@ -1,6 +1,6 @@
 # ClawBox 4.3.0
 
-Previous release: v4.2.0, 5 October 2026. 426 commits.
+Previous release: v4.2.0, 5 October 2026. 424 commits.
 
 4.3 adds a Screenshot app and gives you and your assistant one shared browser.
 An app the Coding Agent built can now be shared through a public link. xAI Grok
