@@ -383,7 +383,7 @@ describe("what the harness's config offers", () => {
       shortenv: { command: "node", args: ["x.js"], env: { API_TOKEN: "abc123" } },
       shortbearer: { url: "https://mcp.example.com/mcp", transport: "streamable-http", headers: { Authorization: "Bearer abc" } },
       shortheader: { url: "https://mcp.example.com/mcp", transport: "streamable-http", headers: { "X-Api-Key": "k1" } },
-      plain: { command: "node", args: ["x.js"], env: { PORT: "80", DEBUG: "1" } },
+      plain: { command: "node", args: ["x.js"], env: { PORT: "80", DEBUG: "1", AUTH_MODE: "none", TOKEN_TTL: "60" } },
       plainheader: { url: "https://mcp.example.com/mcp", transport: "streamable-http", headers: { Accept: "json", Authorization: "Bearer a-long-enough-token" } },
     });
     const servers = await byName();

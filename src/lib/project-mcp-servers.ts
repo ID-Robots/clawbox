@@ -127,8 +127,12 @@ function stringMap(raw: unknown): Record<string, string> | null | undefined {
   return out;
 }
 
-/** An env or header NAME that holds a credential, whatever its value looks like. */
-const CREDENTIAL_NAME_RE = /(token|secret|passw|pwd|api[_-]?key|access[_-]?key|private[_-]?key|auth|credential|cookie|session)/i;
+/**
+ * An env or header NAME that holds a credential, whatever its value looks
+ * like: the credential word ENDS the name (`GITHUB_TOKEN`, `X-Api-Key`), so a
+ * setting about auth (`AUTH_MODE=none`, `TOKEN_TTL=60`) is not one.
+ */
+const CREDENTIAL_NAME_RE = /(?:^|[_-])(?:token|secret|password|passwd|pwd|pat|api[_-]?key|access[_-]?key|private[_-]?key|credentials?|cookie|authorization)$/i;
 /** A header VALUE in an auth scheme's syntax: `Bearer <token>`, `Basic <b64>`, `Token <t>`. */
 const AUTH_SCHEME_RE = /^\s*(bearer|basic|token|apikey)\s+(\S+)\s*$/i;
 

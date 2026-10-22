@@ -286,7 +286,7 @@ grep -rqF -- "$TOKEN" "$REPO/data/coding-agent-runs.json" 2>/dev/null && LEAKS="
 if [ -d "$REPO/data/coding-agent-artifacts/$RUN_ID" ]; then
   grep -rqF -- "$TOKEN" "$REPO/data/coding-agent-artifacts/$RUN_ID" 2>/dev/null && LEAKS="$LEAKS artifacts"
 else
-  say "not ok - the run has no evidence folder to scan for the token"
+  LEAKS="$LEAKS no-evidence-folder-to-scan"
 fi
 for d in coding-agent-history coding-agent-archive; do grep -rqF -- "$TOKEN" "$REPO/data/$d" 2>/dev/null && LEAKS="$LEAKS $d"; done
 [ -z "$LEAKS" ] && say "ok - the token is in no run record, history or evidence file" || say "not ok - the token is in:$LEAKS"
