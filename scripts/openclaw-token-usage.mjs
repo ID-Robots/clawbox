@@ -84,7 +84,7 @@ const COLD_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024;
 const TRANSCRIPT_ARCHIVE_MAX_BYTES = 256 * 1024 * 1024;
 /**
  * The transcript files the pinned core's usage report counts
- * (isUsageCountedSessionTranscriptFileName in its session artifacts module):
+ * (parseUsageCountedSessionIdFromFileName, its transcript-file-names module):
  * a file-era `<id>.jsonl` that is not a trajectory or compaction checkpoint,
  * and the archive a reset or delete leaves, `<id>.jsonl.<reason>.<stamp>`
  * with an optional `.<32 hex>` and `.zst`.

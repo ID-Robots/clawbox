@@ -206,9 +206,9 @@ function coldArchive(
 
 /**
  * The transcript a reset or delete leaves beside the database the way the
- * pinned core writes it (its session artifacts module, OpenClaw 2026.10.3 and
- * 2026.10.6): the session's plain transcript lines, zstd-compressed when the
- * name ends in `.zst`, at `agents/<id>/sessions/<name>`.
+ * pinned core writes it (OpenClaw 2026.10.6, as 2026.10.3 did): the
+ * session's plain transcript lines, zstd-compressed when the name ends in
+ * `.zst`, at `agents/<id>/sessions/<name>`.
  */
 function transcriptArchive(agentId: string, name: string, events: Array<Call | "user">, { mtimeMs }: { mtimeMs?: number } = {}) {
   const dir = path.join(stateDir, "agents", agentId, "sessions");
