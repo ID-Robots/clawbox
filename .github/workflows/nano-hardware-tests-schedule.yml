@@ -3,6 +3,11 @@ name: Nano hardware tests (every 2nd night)
 # Starts the full on-device suite on beta's head every second night, so beta
 # stays covered while pull requests into beta no longer take a board each.
 # It only dispatches nano-hardware-tests.yml; that workflow does the work.
+#
+# GitHub starts a `schedule:` (and lists a workflow to dispatch) only from the
+# DEFAULT branch, main: this file does nothing until a beta → main promotion
+# carries it there. Until then no night run happens — dispatch beta by hand
+# (docs/nano-hardware-tests.md, "The night run").
 on:
   schedule:
     - cron: "0 1 */2 * *"
