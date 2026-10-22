@@ -405,6 +405,23 @@ describe("db source: the agent databases, read-only", () => {
     expect(report.complete).toBe(true);
   });
 
+  it.skipIf(!zstdCompress)("counts file transcripts of a database that predates the SQLite transcript store", () => {
+    const dir = path.join(stateDir, "agents", "main", "agent");
+    mkdirSync(dir, { recursive: true });
+    const db = new DatabaseSync(path.join(dir, "openclaw-agent.sqlite"));
+    open.push(db);
+    db.exec("CREATE TABLE schema_meta (meta_key TEXT PRIMARY KEY) STRICT");
+    transcriptArchive("main", "legacy.jsonl", [{ ts: IN, usage: anthropic(12, 3), responseId: "r-file-era" }]);
+    transcriptArchive("main", "reset2.jsonl.reset.2026-10-21T08-00-00Z.zst", [{ ts: IN + 1, usage: anthropic(4, 1), responseId: "r-file-reset" }]);
+
+    const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
+
+    expect(report.totals).toMatchObject({ sessions: 2, calls: 2, input: 16, output: 4 });
+    expect(report.scanned[0]).toMatchObject({ missingTables: true, archivesRead: 2, archivesSkipped: 0 });
+    expect(report.notes).toEqual(["agent main: no transcript tables (database not migrated to the SQLite session store)"]);
+    expect(report.complete).toBe(true);
+  });
+
   it.skipIf(!zstdCompress)("names a transcript archive it cannot read and calls the count short", () => {
     agentDb("main", {});
     const dir = path.join(stateDir, "agents", "main", "sessions");
