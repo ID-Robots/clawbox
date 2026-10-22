@@ -14,8 +14,11 @@
  * the wiki actually points at. Ties by inbound links, then path.
  *
  * WHAT A LINE SAYS. The page's frontmatter `summary` (node-summary.ts writes
- * it, a person may have), else its first verified claim, else the title
- * alone — one line of at most {@link CORE_CONTEXT_LINE_MAX_CHARS} characters,
+ * it, a person may have), else its own first paragraph of prose (what the
+ * box's new-page form writes, and what the page list shows; never the connect
+ * pass's "is named on N pages" stub, nor one that only repeats the title), else
+ * its first verified claim, else the
+ * title alone — one line of at most {@link CORE_CONTEXT_LINE_MAX_CHARS} characters,
  * never a model call. The block stops at the last whole line that fits
  * `maxChars`; a line is never cut to fit.
  *
@@ -31,7 +34,8 @@
 import { isContentPage } from "./links";
 import type { ParsedPage } from "./frontmatter";
 import type { VaultGraph } from "./graph";
-import { summaryTier } from "./node-summary";
+import { CONNECT_STUB_RE, summaryTier } from "./node-summary";
+import { firstProse } from "./page-blurb";
 import type { PageFrontmatter } from "./schema";
 
 /** One page's line, at most: title, a dash and a sentence or two. */
@@ -103,10 +107,20 @@ function capLine(line: string): string {
   return `${cut.trimEnd()}…`;
 }
 
-function pageLine(title: string, fm: PageFrontmatter): string {
+/** Text as compared with a title: case and closing punctuation aside. */
+function bare(text: string): string {
+  return text.toLowerCase().replace(/[\s.!?…:;,]+$/u, "");
+}
+
+function pageLine(title: string, fm: PageFrontmatter, body: string): string {
   const summary = typeof fm.summary === "string" ? plain(fm.summary) : "";
-  const claim = summary ? "" : plain(fm.claims.find((c) => c.status === "verified" && !c.historical)?.text ?? "");
-  const about = summary || claim;
+  // No summary field (the box's own new-page form writes the summary as the body's first paragraph):
+  // that paragraph, as the page list and the Map's card read it — never the connect pass's stub, nor
+  // a paragraph that only repeats the title.
+  const prose = summary ? "" : plain(firstProse(body) ?? "");
+  const lead = summary || (CONNECT_STUB_RE.test(prose) || bare(prose) === bare(title) ? "" : prose);
+  const claim = lead ? "" : plain(fm.claims.find((c) => c.status === "verified" && !c.historical)?.text ?? "");
+  const about = lead || claim;
   return capLine(about ? `- ${title} — ${about}` : `- ${title}`);
 }
 
@@ -131,7 +145,12 @@ export function buildCoreContext(
   options: CoreContextOptions,
 ): CoreContext {
   const frontmatter = new Map<string, PageFrontmatter>();
-  for (const p of pages) if (p.parsed.ok) frontmatter.set(p.path, p.parsed.frontmatter);
+  const bodies = new Map<string, string>();
+  for (const p of pages) {
+    if (!p.parsed.ok) continue;
+    frontmatter.set(p.path, p.parsed.frontmatter);
+    bodies.set(p.path, p.parsed.body);
+  }
 
   const ranked = graph.nodes
     .filter((node) => {
@@ -146,7 +165,7 @@ export function buildCoreContext(
   for (const node of ranked) {
     if (entries.length >= n) break;
     const title = plain(node.title) || node.id;
-    const line = pageLine(title, frontmatter.get(node.id)!);
+    const line = pageLine(title, frontmatter.get(node.id)!, bodies.get(node.id) ?? "");
     const next = `${body}${line}\n`;
     if (header(entries.length + 1, graph.revision).length + next.length + FOOTER.length > options.maxChars) break;
     body = next;
