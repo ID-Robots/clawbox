@@ -1118,6 +1118,48 @@ else
   log "could not disable the built-in browser toolset (exit $BROWSER_DISABLE_RC) — continuing"
 fi
 
+# The owner's computer_use switch (src/lib/computer-use-switch.ts), applied with
+# the same native command, lock, bound, brace group and non-fatal refusal as the
+# browser step above. `clawbox_computer_use` in the device store is TRI-STATE:
+# only a boolean is a decision, and ABSENT MEANS UNMANAGED — no call at all, so
+# a box whose owner never touched the switch keeps the toolset Hermes ships
+# with, exactly as before the switch existed. A store that is missing or cannot
+# be read is unmanaged too: this step only ever repeats a choice someone made.
+# Reconciled every boot for the same reason as the browser step: the state lives
+# in Hermes' store, and a reinstalled ~/.hermes must not silently undo the
+# owner's off. The verbs are spelled out, not computed, so the harness-contract
+# scan checks each against the pinned CLI.
+computer_use_switch() {
+  python3 - <<'PY' 2>/dev/null || true
+import json, os
+try:
+    with open(os.environ.get("CLAWBOX_DEVICE_STORE") or "", encoding="utf-8") as fh:
+        store = json.load(fh)
+except Exception:
+    store = None
+value = store.get("clawbox_computer_use") if isinstance(store, dict) else None
+print("on" if value is True else "off" if value is False else "")
+PY
+}
+hermes_computer_use() {
+  if [ "$1" = on ]; then
+    timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools enable computer_use >/dev/null 2>&1
+  else
+    timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable computer_use >/dev/null 2>&1
+  fi
+}
+COMPUTER_USE_SWITCH="$(computer_use_switch)"
+case "$COMPUTER_USE_SWITCH" in
+  on|off)
+    if { hermes_computer_use "$COMPUTER_USE_SWITCH"; } 2>/dev/null; then
+      log "computer_use toolset $COMPUTER_USE_SWITCH (Settings switch)"
+    else
+      COMPUTER_USE_RC=$?
+      log "could not switch the computer_use toolset $COMPUTER_USE_SWITCH (exit $COMPUTER_USE_RC) — continuing"
+    fi
+    ;;
+esac
+
 # ── 4a. The ClawBox AI cloud voice: armed AND withdrawn, every boot. ────────
 # BEFORE §4b, deliberately. §4b's read-back is written to be "the last word on
 # what the boot leaves behind", and every `hermes config set` below is a full
