@@ -84,6 +84,16 @@ class State:
     last_refusal_needed_bytes: int = 0
     last_refusal_used_bytes: int = 0
     last_refusal_quota_bytes: int = 0
+    # The failure incident the portal was last told about — from the first
+    # failed run to the next one that succeeds — so that one incident costs the
+    # owner a "backup needs attention" email at most at the backoff points of
+    # `runner.ALERT_BACKOFF_MS`, not one a night. 0 when the last run was fine.
+    alert_incident_since_ms: int = 0
+    # How many "error" heartbeats of this incident the portal has received …
+    alert_reports: int = 0
+    # … and when the next one may go: a failure before then is logged and
+    # recorded here, and the portal keeps showing the one it was told.
+    alert_next_report_at_ms: int = 0
 
 
 #: The values `last_refusal` may hold; anything else in the file reads as "".
@@ -172,6 +182,9 @@ def load(path: Path | str | None = None) -> State:
         last_refusal_needed_bytes=_safe_int(raw.get("last_refusal_needed_bytes", 0)),
         last_refusal_used_bytes=_safe_int(raw.get("last_refusal_used_bytes", 0)),
         last_refusal_quota_bytes=_safe_int(raw.get("last_refusal_quota_bytes", 0)),
+        alert_incident_since_ms=_safe_int(raw.get("alert_incident_since_ms", 0)),
+        alert_reports=_safe_int(raw.get("alert_reports", 0)),
+        alert_next_report_at_ms=_safe_int(raw.get("alert_next_report_at_ms", 0)),
     )
 
 

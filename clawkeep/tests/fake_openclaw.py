@@ -61,6 +61,10 @@ def main() -> None:
     assets += json.loads(os.environ.get("FAKE_OPENCLAW_EXTRA_ASSETS", "[]"))
     regenerable = os.path.join(state, "npm")
     skipped = [{"kind": "managed state", "sourcePath": regenerable, "reason": "regenerable"}]
+    # The real core lists a workspace inside the state dir as covered by it.
+    workspace = os.path.join(state, "workspace")
+    if os.path.isdir(workspace):
+        skipped.append({"kind": "workspace", "sourcePath": workspace, "reason": "covered", "coveredBy": state})
 
     if args[:2] != ["backup", "create"]:
         fail(f"unexpected command {args!r}")

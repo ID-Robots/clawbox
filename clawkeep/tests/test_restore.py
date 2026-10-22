@@ -900,3 +900,65 @@ def test_restore_snapshot_propagates_verify_failure(tmp_path: Path) -> None:
     # Live state untouched.
     assert (target / "live.txt").read_text() == "live"
     assert not any(target.parent.glob("state.bak-restore-*"))
+
+
+def test_swap_into_place_has_no_backup_when_nothing_was_there(tmp_path: Path) -> None:
+    """A path that was never made is not a backup: returning one sent the
+    rollback looking for it, and the app showing it."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "new.txt").write_text("new")
+    target = tmp_path / "credentials"
+
+    assert restore._swap_into_place(staging, target, ts=7) is None
+    assert (target / "new.txt").read_text() == "new"
+    assert not (tmp_path / "credentials.bak-restore-7").exists()
+
+
+def test_rolling_back_an_asset_that_had_no_previous_content_is_not_an_error(tmp_path: Path) -> None:
+    """Asset 1's target did not exist; asset 2 fails. The rollback takes the
+    new content aside — the box is back as it was — and reports no error."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "c.json").write_text("{}")
+    target = tmp_path / "credentials"
+    backup = restore._swap_into_place(staging, target, ts=8)
+    done = [restore.RestoredAsset(kind="credentials", target_path=target, backup_path=backup, bytes_restored=2)]
+
+    assert restore._rollback_swaps(done, ts=8) == []
+    assert not target.exists()
+    assert (tmp_path / "credentials.failed-rollback-8" / "c.json").exists()
+
+
+def test_a_restore_never_runs_beside_a_backup(tmp_path: Path) -> None:
+    """A backup during a restore archived a half-swapped tree and put what it
+    had set aside back into the restored one. The restore takes the backup's
+    run lock; while a backup holds it, the restore is refused untouched."""
+    from clawkeep import backup_guard, runner, token
+
+    target = tmp_path / "state"
+    target.mkdir()
+    (target / "live.txt").write_text("live-data")
+    with (
+        backup_guard.exclusive(token.data_dir() / runner.RUN_LOCK_NAME, wait=False) as ours,
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS) as mint,
+        patch("clawkeep.restore.s3.download") as download,
+    ):
+        assert ours
+        with pytest.raises(restore.RestoreError, match="a backup is running"):
+            restore.restore_snapshot(_cfg(), "claw_x", "snap-root.tar.gz")
+    mint.assert_not_called()
+    download.assert_not_called()
+    assert (target / "live.txt").read_text() == "live-data"
+
+    # …and a backup that starts during a restore finds the lock held.
+    def download_while_backup_starts(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        assert runner.run_once(_cfg(), "claw_x") == runner.EXIT_ALREADY_RUNNING
+        raise restore.RestoreError("stop here")
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=download_while_backup_starts),
+        pytest.raises(restore.RestoreError, match="stop here"),
+    ):
+        restore.restore_snapshot(_cfg(), "claw_x", "snap-root.tar.gz")

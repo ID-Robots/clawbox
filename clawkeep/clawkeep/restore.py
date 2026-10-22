@@ -25,6 +25,7 @@ successful restore so user-facing services pick up the swapped state.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -35,8 +36,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import agent, api, backup_guard, crypto, passphrase, s3, state
+from . import agent, api, backup_guard, crypto, passphrase, runner, s3, state
 from .config import Config
+from .token import data_dir as _data_dir
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +47,8 @@ log = logging.getLogger(__name__)
 class RestoredAsset:
     kind: str           # "state" / "credentials" / etc — straight from the manifest
     target_path: Path   # where the asset was placed on disk
-    backup_path: Path   # where the previous content was moved aside
+    # Where the previous content was moved aside; None when there was none.
+    backup_path: Path | None
     bytes_restored: int
 
 
@@ -542,9 +545,11 @@ def _staging_beside(target: Path, *, kind: str, ts: int) -> Path:
     return target.with_name(f".clawkeep-restore-{kind}-{ts}-{target.name}")
 
 
-def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
+def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path | None:
     """Move `target` aside to `<target>.bak-restore-<ts>`, then move
-    `staging` to `target`. Returns the path of the moved-aside backup.
+    `staging` to `target`. Returns the path of the moved-aside backup, or
+    None when there was nothing at `target` to move aside — a path that was
+    never made is not a backup, and a rollback must not try to move it back.
 
     Atomic-rename semantics on Linux mean processes that hold file handles
     inside the old `target` keep seeing those bytes (their handles still
@@ -579,7 +584,7 @@ def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
             f"could not move {staging} into place at {target}: {e}{rollback_err}",
         ) from e
 
-    return backup
+    return backup if target_existed else None
 
 
 def _retire_sqlite_sidecars(target: Path, *, ts: int) -> None:
@@ -628,7 +633,10 @@ def _rollback_swaps(done: list[RestoredAsset], *, ts: int) -> list[str]:
                 f"{asset.target_path.name}.failed-rollback-{ts}",
             )
             asset.target_path.rename(new_aside)
-            asset.backup_path.rename(asset.target_path)
+            # Nothing was there before this restore: with the new content
+            # aside, the path is back to what it was.
+            if asset.backup_path is not None:
+                asset.backup_path.rename(asset.target_path)
         except OSError as e:
             errors.append(f"{asset.kind}: {e}")
     return errors
@@ -745,6 +753,37 @@ def _skipped_links_of(
 
 
 def restore_snapshot(
+    cfg: Config,
+    token: str,
+    snapshot_name: str,
+    *,
+    passphrase_file: Path | None = None,
+) -> RestoreResult:
+    """`_restore_snapshot`, never beside a backup run on this box.
+
+    A backup that ran during a restore archived a tree half swapped, and the
+    links and files it had set aside for its build were put back INTO the
+    restored tree when it ended. Both take the backup run's lock, which a
+    scheduled run that starts mid-restore then finds held and leaves; a restore
+    asked for while a backup runs is refused, with nothing touched. A lock
+    that cannot be taken at all does not stand between the owner and a
+    restore: it is logged, and the restore goes on as it always did.
+    """
+    lock_path = _data_dir() / runner.RUN_LOCK_NAME
+    with contextlib.ExitStack() as held:
+        try:
+            acquired = held.enter_context(backup_guard.exclusive(lock_path, wait=False))
+        except OSError as e:
+            log.warning("restoring without the backup lock %s: %s", lock_path, e)
+            acquired = True
+        if not acquired:
+            raise RestoreError(
+                "a backup is running on this box right now; restore once it has finished",
+            )
+        return _restore_snapshot(cfg, token, snapshot_name, passphrase_file=passphrase_file)
+
+
+def _restore_snapshot(
     cfg: Config,
     token: str,
     snapshot_name: str,

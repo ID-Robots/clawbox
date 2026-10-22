@@ -30,14 +30,26 @@ out. `clawkeep/hermes.py`'s module docstring is the authoritative list, with the
 reasoning for each inclusion and exclusion.
 
 On OpenClaw the core takes the whole state directory as one asset and has no
-exclude option, so a snapshot would carry every older backup kept inside
-`~/.openclaw`. ClawKeep leaves out archive files in `~/.openclaw/backups/` (any
-depth) and OpenClaw's own `…-openclaw-backup.tar.gz[.enc]` files anywhere in
-the backup: each is set aside for the build by a same-filesystem rename into
-`set-aside/` and put back as the same file the moment the build ends
-(`clawkeep/own_backups.py` has the rule and every crash case). The run records
-what it left out (count and bytes), and any archive file of 256 MiB or more the
-snapshot still carries, in `state.json` before the upload.
+exclude flag or config key. What a snapshot leaves out, and who leaves it out:
+
+| Left out | How |
+|---|---|
+| `~/.openclaw/upgrades/`, `~/.openclaw/backups/` | the core itself: `regenerable` `backupResources` of the `clawbox-backup-scope` plugin (`scripts/openclaw-plugins/clawbox-backup-scope`), installed and enabled by the gateway pre-start on a 2026.10+ core |
+| Codex caches: `codex-home/.cache`, `codex-home/cache`, `codex-home/log` of every agent | the same plugin, `agent` scope (`codex-home/sessions/` and the rest of `codex-home/` stay in) |
+| `tmp/`, `npm/`, `tools/`, agent `tmp`/`.tmp`, plugin `node_modules` | the core, by default |
+| archive files in `~/.openclaw/backups/` (any depth) and OpenClaw's own `…-openclaw-backup.tar.gz[.enc]` anywhere | ClawKeep (`own_backups.py`): set aside by a same-filesystem rename |
+| `*_tmp_*` trees in the state dir, outside every workspace, unchanged for an hour (an install the core or a package manager did not finish) | ClawKeep (`own_backups.py`): set aside whole, by one rename |
+
+What ClawKeep sets aside goes into `set-aside/` for the build and is put back as
+the same file or tree the moment the build ends (`clawkeep/own_backups.py` has
+the rules and every crash case). The run records the archive files it left out
+(count and bytes), and any archive file of 256 MiB or more the snapshot still
+carries, in `state.json` before the upload; temporary trees are logged.
+
+The archive is encrypted beside itself in the staging directory, so that disk
+briefly holds it twice: the run measures first and refuses
+(`EXIT_ENCRYPTION_FAILED`, with the sizes) when the ciphertext would not fit
+with 256 MiB to spare, instead of filling the disk the box's databases live on.
 
 > **A snapshot is a credential.** Both editions' archives include the device's
 > provider keys (`~/.hermes/.env`, OpenClaw's `credentials`), because a restore
@@ -201,6 +213,26 @@ crashes or is killed releases it as it dies, the file left behind holds
 nothing, and the archiver and `openssl` child processes are never handed it. If
 the lock file cannot be opened at all (a read-only data directory, a file owned
 by another user) no backup starts and the log says why.
+
+The idle tick and `clawkeep restore` take the same lock. The tick leaves when a
+run holds it (the run heartbeats for itself; a tick beside it used to write
+back a `state.json` it had read before the run ended). A restore is refused
+while a backup runs, and a backup that starts during a restore exits 14: a
+backup beside a restore archived a half-swapped tree and put what it had set
+aside back into the restored one.
+
+### Alerts: one per incident, with backoff
+
+The portal emails the owner "ClawKeep backup needs attention" for an `error`
+heartbeat. A failure incident — from the first failed run to the next one that
+succeeds — reaches the portal at once, then 1, 3 and 7 days after the report
+before, then every 7 days (`runner.ALERT_BACKOFF_MS`); a box that fails every
+night no longer mails its owner every night. In between, a failed run posts
+neither its `running` nor its `error` heartbeat (the portal keeps showing the
+failure it was told), logs why, and records the failure in `state.json` as
+always; `alert_incident_since_ms`, `alert_reports` and
+`alert_next_report_at_ms` keep the incident. A heartbeat that did not land is
+not counted, and a successful run closes the incident.
 
 ### What this does not do
 
