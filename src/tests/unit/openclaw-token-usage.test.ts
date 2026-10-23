@@ -6,6 +6,7 @@ import os from "os";
 import path from "path";
 import zlib from "zlib";
 import {
+  DEFAULT_DAYS,
   STOP_AFTER_OLD_ROWS,
   assistantCall,
   buildReport,
@@ -626,7 +627,11 @@ describe("gateway source: the core's sessions.usage", () => {
     agentDb("main", {});
     const bin = path.join(tmp, "openclaw");
     const argsFile = path.join(tmp, "args.json");
-    writeFileSync(bin, `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify({argv: process.argv.slice(2), state: process.env.OPENCLAW_STATE_DIR}));\nprocess.stdout.write(${JSON.stringify(JSON.stringify(gatewayAnswer()))});\n`, { mode: 0o755 });
+    // `main` asks for the window ending today on the real clock, not NOW: the
+    // stub answers for that window, or its answer reads as incomplete.
+    const today = usageWindow(DEFAULT_DAYS);
+    const answer = gatewayAnswer({ startDate: today.startDate, endDate: today.endDate });
+    writeFileSync(bin, `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify({argv: process.argv.slice(2), state: process.env.OPENCLAW_STATE_DIR}));\nprocess.stdout.write(${JSON.stringify(JSON.stringify(answer))});\n`, { mode: 0o755 });
     const out: string[] = [];
     const code = main(["--json", "--state-dir", stateDir], {
       out: { write: (s: string) => out.push(s) },
