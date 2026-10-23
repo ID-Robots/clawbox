@@ -30,7 +30,10 @@ const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 // would not start over a database the core refused, and the pre-start repaired
 // it or put back its pre-update copy (src/lib/openclaw-start-recovery.ts). The
 // owner's data changed, so it is said. Outcome, reason and time only, for the
-// same reason as above.
+// same reason as above — and `channelsSuppressed`, whether the core's
+// restart-loop breaker still holds channel auto-start back after that recovery
+// (a gateway that is up, with Telegram and Discord silent). A yes or no, naming
+// no channel.
 export async function GET() {
   const restarting = gatewayRestartInFlight();
   const [available, migration, startRecovery] = await Promise.all([
@@ -53,7 +56,14 @@ export async function GET() {
         }
       : {}),
     ...(startRecovery
-      ? { startRecovery: { outcome: startRecovery.outcome, reason: startRecovery.reason, at: startRecovery.at } }
+      ? {
+          startRecovery: {
+            outcome: startRecovery.outcome,
+            reason: startRecovery.reason,
+            at: startRecovery.at,
+            channelsSuppressed: startRecovery.channelsSuppressed,
+          },
+        }
       : {}),
   });
 }

@@ -48,7 +48,23 @@ describe("readOpenclawStartRecovery", () => {
 
   it.each(["repaired", "restored", "failed"] as const)("answers a %s start loop with its outcome and time", async (outcome) => {
     write(record({ outcome, reason: null, at: "2026-10-23T11:00:00Z" }));
-    expect(await readOpenclawStartRecovery(NOW)).toEqual({ outcome, reason: null, at: "2026-10-23T11:00:00Z" });
+    expect(await readOpenclawStartRecovery(NOW)).toEqual({ outcome, reason: null, at: "2026-10-23T11:00:00Z", channelsSuppressed: false });
+  });
+
+  it("says when the core's restart-loop breaker still holds channels back after the recovery, and only then", async () => {
+    // What `breaker-watch` records beside the notice.
+    const channels = (state: string) => ({
+      ...record({ outcome: "repaired", reason: null, at: "2026-10-23T11:00:00Z" }),
+      channels: { watch: state === "suppressed" || state === "watching", state, since: NOW / 1000 - 3600, held: [{ channel: "telegram" }] },
+    });
+    write(channels("suppressed"));
+    expect(await readOpenclawStartRecovery(NOW)).toMatchObject({ outcome: "repaired", channelsSuppressed: true });
+    for (const state of ["watching", "restored", "started", "clear", "unknown", "expired"]) {
+      write(channels(state));
+      expect(await readOpenclawStartRecovery(NOW)).toMatchObject({ outcome: "repaired", channelsSuppressed: false });
+    }
+    write({ ...record({ outcome: "repaired", reason: null, at: "2026-10-23T11:00:00Z" }), channels: ["suppressed"] });
+    expect(await readOpenclawStartRecovery(NOW)).toMatchObject({ channelsSuppressed: false });
   });
 
   it("carries a reason the page can word, and drops one it cannot", async () => {

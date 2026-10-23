@@ -55,18 +55,25 @@ function MigrationNotice({ migration }: { migration: GatewayMigration }) {
  * What `/setup-api/gateway/health` says the gateway pre-start did about a
  * gateway that would not start over one of OpenClaw's databases (see
  * src/lib/openclaw-start-recovery.ts). It changed the owner's data — repaired
- * it, or put back a copy from before the last update — so it is said.
+ * it, or put back a copy from before the last update — so it is said. And,
+ * while it lasts, that OpenClaw's restart-loop breaker still holds the chat
+ * channels back after it: the gateway is up, Telegram and Discord are not.
  */
 interface GatewayStartRecovery {
   outcome: "repaired" | "restored" | "failed";
   reason: string | null;
+  channelsSuppressed: boolean;
 }
 
 function readStartRecovery(value: unknown): GatewayStartRecovery | null {
   if (!value || typeof value !== "object") return null;
   const r = value as Record<string, unknown>;
   if (r.outcome !== "repaired" && r.outcome !== "restored" && r.outcome !== "failed") return null;
-  return { outcome: r.outcome, reason: typeof r.reason === "string" ? r.reason : null };
+  return {
+    outcome: r.outcome,
+    reason: typeof r.reason === "string" ? r.reason : null,
+    channelsSuppressed: r.channelsSuppressed === true,
+  };
 }
 
 function StartRecoveryNotice({ recovery }: { recovery: GatewayStartRecovery }) {
@@ -86,6 +93,11 @@ function StartRecoveryNotice({ recovery }: { recovery: GatewayStartRecovery }) {
     >
       <p className="font-semibold">{t("openclaw.startRecoveryTitle")}</p>
       <p className="mt-1 text-amber-100/80">{body}</p>
+      {recovery.channelsSuppressed && (
+        <p className="mt-1 text-amber-100/80" data-testid="openclaw-start-recovery-channels">
+          {t("openclaw.startRecoveryChannelsPaused")}
+        </p>
+      )}
     </div>
   );
 }

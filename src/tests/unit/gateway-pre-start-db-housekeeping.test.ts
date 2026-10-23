@@ -226,6 +226,58 @@ describe("gateway-pre-start.sh memory rebuild launch", () => {
   });
 });
 
+describe("gateway-pre-start.sh restart-loop breaker watch launch", () => {
+  const LAUNCH = between("# After a start-loop recovery (the start-guard at the top of this script)", "# The one memory-index rebuild the defaults block");
+
+  function launch(record: string | null, core2026_10 = "1") {
+    stubPython(path.join(dir, "bin"));
+    if (record !== null) writeFileSync(path.join(dir, "data", "openclaw-start-guard.json"), record);
+    const args = path.join(dir, "py-args");
+    const r = runBlock(LAUNCH, {
+      SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
+      CLAWBOX_ROOT: dir,
+      CLAWBOX_OPENCLAW_2026_10: core2026_10,
+      OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
+      OPENCLAW_BIN: "/opt/openclaw/bin/openclaw",
+    }, { PY_ARGS: args });
+    return { r, args };
+  }
+
+  // What the start-guard writes (indent 2, sorted keys) after a recovery.
+  const asked = (watch: boolean) => JSON.stringify({ channels: { since: 1, state: "watching", watch }, notice: { outcome: "repaired" } }, null, 2);
+
+  it("starts the watch detached, after the gateway, when a recovery asked for it", async () => {
+    const { r, args } = launch(asked(true));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Restart-loop breaker watch running in the background once the gateway is up/);
+    expect(await waitFor(args)).toBe(true);
+    const argv = readFileSync(args, "utf-8").trim().split("\n");
+    expect(argv.slice(0, 3)).toEqual(["-I", path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py"), "breaker-watch"]);
+    const opt = (name: string) => argv[argv.indexOf(name) + 1];
+    expect(opt("--data-dir")).toBe(path.join(dir, "data"));
+    expect(opt("--config")).toBe(path.join(dir, ".openclaw", "openclaw.json"));
+    expect(opt("--openclaw-bin")).toBe("/opt/openclaw/bin/openclaw");
+    expect(opt("--unit")).toBe("clawbox-gateway.service");
+    expect(opt("--gateway-port")).toBe("18789");
+  });
+
+  it.each([
+    ["the watch is over", asked(false)],
+    ["no recovery ever ran", null],
+  ])("starts nothing when %s", async (_why, record) => {
+    const { r, args } = launch(record);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(await waitFor(args)).toBe(false);
+  });
+
+  it("starts nothing on a core older than 2026.10", async () => {
+    const { r, args } = launch(asked(true), "0");
+    expect(r.status).toBe(0);
+    expect(await waitFor(args)).toBe(false);
+  });
+});
+
 describe("gateway-pre-start.sh agent database housekeeping block", () => {
   const BLOCK = between("# ── Agent databases: migration status, compaction, migration copies", "# ── End of pre-start");
 

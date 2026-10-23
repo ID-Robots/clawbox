@@ -6828,6 +6828,33 @@ else
   echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"
 fi
 
+# After a start-loop recovery (the start-guard at the top of this script) the
+# core's restart-loop breaker holds channel auto-start back on the recovered
+# start — the failed starts before it were unclean boots — so Telegram, Discord
+# and the rest stay silent while chat in the app works. The core lifts it itself
+# once the gateway has run through the breaker's window. `breaker-watch` follows
+# that in the gateway's own output after this start, records in
+# data/openclaw-start-guard.json whether channels are still held back (the
+# owner's notice says so), and only if the core has not lifted it in time starts
+# them with the core's own manual override (`openclaw gateway call
+# channels.start`). Detached for the same reason as the rebuild below, so it dies
+# with this unit's cgroup when the gateway is stopped; the next start looks
+# again for as long as the record asks (`"watch": true`).
+CLAWBOX_START_GUARD_RECORD="$CLAWBOX_ROOT/data/openclaw-start-guard.json"
+BREAKER_WATCH_LOG="$CLAWBOX_ROOT/data/openclaw-breaker-watch.log"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_START_GUARD_RECORD" ] \
+   && grep -Eq '"watch"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_START_GUARD_RECORD" \
+   && [ -f "$SCRIPT_DIR/openclaw-db-maintenance.py" ]; then
+  mkdir -p "$(dirname "$BREAKER_WATCH_LOG")" 2>/dev/null || true
+  setsid nohup python3 -I "$SCRIPT_DIR/openclaw-db-maintenance.py" breaker-watch \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --config "$OPENCLAW_CONFIG" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --unit "${CLAWBOX_GATEWAY_UNIT:-clawbox-gateway.service}" \
+    --gateway-port "${GATEWAY_PORT:-18789}" >>"$BREAKER_WATCH_LOG" 2>&1 &
+  echo "  Restart-loop breaker watch running in the background once the gateway is up (see $BREAKER_WATCH_LOG)"
+fi
+
 # The one memory-index rebuild the defaults block in the config pass above asked
 # for (CLAWBOX_MEMORY_REBUILD_RECORD): `openclaw memory reset --yes`, then
 # `openclaw memory index --force`, once, after this gateway has started. Detached

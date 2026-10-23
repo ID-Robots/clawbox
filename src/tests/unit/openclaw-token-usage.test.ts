@@ -626,7 +626,17 @@ describe("gateway source: the core's sessions.usage", () => {
     agentDb("main", {});
     const bin = path.join(tmp, "openclaw");
     const argsFile = path.join(tmp, "args.json");
-    writeFileSync(bin, `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify({argv: process.argv.slice(2), state: process.env.OPENCLAW_STATE_DIR}));\nprocess.stdout.write(${JSON.stringify(JSON.stringify(gatewayAnswer()))});\n`, { mode: 0o755 });
+    // `main` asks for the window ending today on the real clock, not NOW. Like
+    // the core, the stub answers for the range it is asked about — read from
+    // its own --params, so no second clock can land on the other side of a
+    // UTC midnight from the one `main` read.
+    writeFileSync(bin, [
+      "#!/usr/bin/env node",
+      `require("fs").writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify({argv: process.argv.slice(2), state: process.env.OPENCLAW_STATE_DIR}));`,
+      `const asked = JSON.parse(process.argv[process.argv.indexOf("--params") + 1]);`,
+      `process.stdout.write(JSON.stringify({ ...${JSON.stringify(gatewayAnswer())}, startDate: asked.startDate, endDate: asked.endDate }));`,
+      "",
+    ].join("\n"), { mode: 0o755 });
     const out: string[] = [];
     const code = main(["--json", "--state-dir", stateDir], {
       out: { write: (s: string) => out.push(s) },

@@ -63,6 +63,16 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
     preceded by ``openclaw memory reset --yes`` only when the MODEL changed;
     bounded, niced, never twice at once, at most three attempts.
 
+``breaker-watch`` (detached from the pre-start after a ``start-guard`` recovery)
+    The failed starts before a recovery trip the core's restart-loop breaker,
+    and the recovered start then holds channel auto-start back (Telegram,
+    Discord, ...). The core lifts that itself once the gateway has run through
+    the breaker's window; this follows the gateway's own log until it says so,
+    records in ``data/openclaw-start-guard.json`` (``channels``) whether
+    channels are still held back, for the owner, and only when the core has not
+    lifted it in time starts the held channels with the core's documented
+    manual override (``openclaw gateway call channels.start``).
+
 Nothing here writes an OpenClaw database: measurements open them READ-ONLY,
 every change is the core's own command. The one thing deleted by hand is the
 migration's rollback copies, and only under the verification above — the core's
@@ -166,6 +176,19 @@ LOG_TAIL_BYTES = 4 * 1024 * 1024
 DOCTOR_FIX_BASE_S = 90
 DOCTOR_FIX_PER_GIB_S = 120
 DOCTOR_FIX_CAP_S = 1200
+# The core's restart-loop breaker (the "crash-loop breaker" of gateway/
+# restart-recovery in the pinned docs; src/infra/gateway-boot-lifecycle in the
+# 2026.10.6 package): three unclean boots within five minutes, and the next
+# boot holds channel/provider account auto-start back. The same process lifts
+# it itself at its channel health monitor's first check after the window has
+# drained (a check every five minutes, the first a minute after the monitor
+# starts), or the next boot does; the margin is for a slow Jetson.
+BREAKER_WINDOW_S = 300
+HEALTH_CHECK_S = 300
+HEALTH_GRACE_S = 60
+BREAKER_MARGIN_S = 120
+# Past this a watch is over, whatever it saw: the next recovery starts another.
+BREAKER_WATCH_MAX_AGE_S = 86400
 
 
 def log(msg):
@@ -1356,6 +1379,13 @@ def notice_of(outcome, reason, databases, kept, now):
     }
 
 
+def watch_channels(guard, now):
+    """The starts this recovery follows were unclean boots, so the next one
+    trips the core's restart-loop breaker: `breaker-watch`, detached from this
+    pre-start once the gateway is up, follows it from here."""
+    guard["channels"] = {"watch": True, "state": "watching", "since": now}
+
+
 def cmd_start_guard(args):
     now = time.time()
     deadline = time.monotonic() + max(0, args.budget_seconds)
@@ -1465,6 +1495,7 @@ def cmd_start_guard(args):
             "steps": steps,
         }
         guard["notice"] = notice_of("repaired", None if complete else "repair-incomplete", episode["databases"], [], now)
+        watch_channels(guard, now)
     elif stage in ("repaired", "repairing"):
         ok, reason, done = restore_leg(guard, named, now, deadline)
         episode["stage"] = "restored" if ok else "failed"
@@ -1473,12 +1504,16 @@ def cmd_start_guard(args):
         if not ok:
             episode["reason"] = reason
             warn("could not put back a pre-update copy (%s); the gateway is left as it is" % reason)
+            guard.pop("channels", None)
+        else:
+            watch_channels(guard, now)
         kept = [os.path.basename(p) for d in done for p in d["setAside"][:1]]
         guard["notice"] = notice_of("restored" if ok else "failed", reason, [d["database"] for d in done] or [label(db) for db in named], kept, now)
     else:  # restored, and it still fails over a database
         episode["stage"] = "failed"
         episode["reason"] = "restore-did-not-help"
         episode["restarts"] = restarts
+        guard.pop("channels", None)
         warn("the gateway still refuses a database after its pre-update copy was put back; nothing more is tried")
         notice = guard.get("notice") if isinstance(guard.get("notice"), dict) else {}
         guard["notice"] = notice_of("failed", "restore-did-not-help", notice.get("databases") or [label(db) for db in named], notice.get("keptCopies") or [], now)
@@ -1760,6 +1795,247 @@ def cmd_memory_rebuild(args):
     return 0
 
 
+# ── breaker-watch (after a start-guard recovery, once the gateway has started) ──
+#
+# The starts a recovery follows were unclean boots, and three of them within
+# five minutes trip the core's restart-loop breaker: the recovered start comes
+# up with channel auto-start held back ("gateway restart-loop breaker tripped:
+# 3 unclean boot(s) within 300000ms; suppressing channel/provider account
+# auto-start"), so the box's Telegram or Discord stays silent while chat in the
+# app works. The pinned core has no command that clears the breaker, and its
+# history is the core's own state database, which ClawBox does not write. The
+# core lifts it itself: the same process, at its channel health monitor's first
+# check after the window has drained, logs "gateway restart-loop breaker
+# recovered; channel auto-start restored" and starts the channels it held back.
+#
+# This waits for that line in the gateway's own output (the start-guard's
+# readers), and meanwhile records which channels the core held back (its
+# "channel autostart suppressed by crash-loop breaker; refusing automatic start
+# for <id>" lines), so the owner is told. Should the core not have lifted it by
+# the window plus one health-monitor check plus a margin, each held channel is
+# started with the override the core itself names for an operator, `openclaw
+# gateway call channels.start`, and whether that worked is recorded too.
+
+BREAKER_TRIPPED_RE = re.compile(r"restart-loop breaker tripped: \d+ unclean boot\(s\) within (\d+)ms")
+BREAKER_RECOVERED_RE = re.compile(r"restart-loop breaker recovered")
+BREAKER_HELD_RE = re.compile(r"channel autostart suppressed by crash-loop breaker; refusing automatic start for ")
+# The manual-start hint the core puts on a held-back line names the channel
+# (and the account, when it held back one account) exactly.
+BREAKER_HINT_RE = re.compile(r"channels\.start --params '(\{[^']*\})'")
+# The journal and the log file carry the same line: two copies this close are
+# one trip, not a second boot.
+SAME_TRIP_S = 10
+# States after which nothing is left to watch.
+BREAKER_FINAL = ("restored", "clear", "started", "unknown", "expired")
+
+
+def held_target(text):
+    """{channel, accountId?} from a held-back line's manual-start hint, or None."""
+    m = BREAKER_HINT_RE.search(text)
+    if not m:
+        return None
+    try:
+        params = json.loads(m.group(1))
+    except ValueError:
+        return None
+    if not isinstance(params, dict) or not isinstance(params.get("channel"), str) or not AGENT_ID.match(params["channel"]):
+        return None
+    target = {"channel": params["channel"]}
+    if isinstance(params.get("accountId"), str) and params["accountId"]:
+        target["accountId"] = params["accountId"]
+    return target
+
+
+def breaker_state(lines):
+    """What the gateway's own lines say about its restart-loop breaker, as of
+    the latest of them: when it last tripped and over which window, the
+    channels held back since, when it was lifted after, and when the gateway
+    said `gateway ready`."""
+    tripped = recovered = ready = None
+    window = BREAKER_WINDOW_S
+    held = {}
+    for at, raw in sorted(lines, key=lambda line: line[0]):
+        # A log-file line is JSON: the hint's quotes are escaped in it.
+        text = raw.replace('\\"', '"')
+        m = BREAKER_TRIPPED_RE.search(text)
+        if m:
+            if tripped is None or recovered is not None or at - tripped > SAME_TRIP_S:
+                held = {}
+            tripped, recovered = at, None
+            window = int(m.group(1)) / 1000.0
+            continue
+        if BREAKER_RECOVERED_RE.search(text):
+            recovered = at
+            continue
+        if tripped is not None and recovered is None and BREAKER_HELD_RE.search(text):
+            target = held_target(text)
+            if target:
+                held[(target["channel"], target.get("accountId", ""))] = target
+            continue
+        if READY_RE.search(raw):
+            ready = at
+    return {
+        "trippedAt": tripped,
+        "windowS": window,
+        "recoveredAt": recovered,
+        "held": [held[k] for k in sorted(held)],
+        "readyAt": ready,
+    }
+
+
+def save_channels(path, channels):
+    """Only the `channels` entry, over the record as it is on disk now: the
+    start-guard owns the rest of it."""
+    guard = read_json(path)
+    if guard is None:
+        warn("%s is unreadable; the restart-loop breaker watch is not recorded" % path)
+        return False
+    guard["channels"] = channels
+    return write_json(path, guard)
+
+
+def target_name(target):
+    return target["channel"] + (" (%s)" % target["accountId"] if target.get("accountId") else "")
+
+
+def held_accounts(binary, timeout):
+    """The channel accounts the gateway itself reports held back by its
+    breaker (stopped, its trip message as their last error), or None when it
+    could not be asked. The log names only the channel; this names each
+    account."""
+    rc, out, _err = _run(binary, ["channels", "status", "--json", "--timeout", "10000"], timeout)
+    payload = last_json_object(out) if rc == 0 else None
+    if not isinstance(payload, dict) or payload.get("gatewayReachable") is False or payload.get("configOnly") is True:
+        return None
+    accounts = payload.get("channelAccounts")
+    if not isinstance(accounts, dict):
+        return None
+    found = []
+    for channel in sorted(accounts):
+        rows = accounts[channel] if isinstance(accounts[channel], list) else []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("running") is True or not AGENT_ID.match(str(channel)):
+                continue
+            error = row.get("lastError")
+            message = error.get("message") if isinstance(error, dict) else error
+            if isinstance(message, str) and BREAKER_TRIPPED_RE.search(message):
+                target = {"channel": channel}
+                if isinstance(row.get("accountId"), str) and row["accountId"]:
+                    target["accountId"] = row["accountId"]
+                found.append(target)
+    return found
+
+
+def start_held(binary, held, timeout):
+    """The core's manual override, once for each held-back account: [(target, ok, exit)]."""
+    targets = held_accounts(binary, timeout)
+    if targets is None:
+        targets = held
+    results = []
+    for target in targets:
+        params = json.dumps(target, sort_keys=True)
+        rc, out, _err = _run(binary, ["gateway", "call", "channels.start", "--params", params, "--json", "--timeout", "30000"], timeout)
+        reply = last_json_object(out) if rc == 0 else None
+        outcome = reply.get("outcome") if isinstance(reply, dict) else None
+        # Handed to the channel's own task is started: it connects on its own.
+        ok = isinstance(reply, dict) and (reply.get("started") is True
+                                          or (isinstance(outcome, dict) and outcome.get("status") == "handed-off"))
+        results.append(dict(target, ok=ok, exit=rc))
+    return results
+
+
+def cmd_breaker_watch(args):
+    path = os.path.join(args.data_dir, GUARD_FILE)
+    guard = read_json(path)
+    rec = guard.get("channels") if isinstance(guard, dict) else None
+    if not isinstance(rec, dict) or rec.get("watch") is not True:
+        return 0
+    rec = dict(rec)
+    begun = time.time()
+
+    def record(state, **facts):
+        rec.update(facts)
+        rec["state"] = state
+        rec["checkedAt"] = time.time()
+        if state in BREAKER_FINAL:
+            rec["watch"] = False
+        save_channels(path, rec)
+
+    since = rec.get("since")
+    if not isinstance(since, (int, float)) or isinstance(since, bool) or begun - since > BREAKER_WATCH_MAX_AGE_S:
+        record("expired")
+        return 0
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    deadline = time.monotonic() + args.wait_seconds
+    while not gateway_started(args.gateway_port):
+        if time.monotonic() > deadline:
+            log("restart-loop breaker watch waits for the next gateway start: the gateway did not start in %d s" % args.wait_seconds)
+            return 0
+        time.sleep(args.poll_seconds)
+    started = time.time()
+    # This start's lines only. The gateway decides about its breaker as it
+    # boots, which is after this pre-start launched the watch.
+    since_lines = begun - 5
+    end = time.monotonic() + args.max_seconds
+    shown = None
+    while True:
+        lines = journal_lines(args.unit, since_lines) + file_log_lines(openclaw_log_files(args.config, args.log_dir), since_lines)
+        st = breaker_state(lines)
+        now = time.time()
+        if st["recoveredAt"] is not None:
+            log("the core lifted its restart-loop breaker; channel auto-start is back")
+            record("restored", recoveredAt=st["recoveredAt"])
+            return 0
+        if st["trippedAt"] is None:
+            if st["readyAt"] is not None:
+                log("this gateway start did not trip the core's restart-loop breaker; channels start as usual")
+                record("clear")
+                return 0
+            if now - started > args.read_grace_seconds:
+                # Neither a trip nor `gateway ready` can be read: nothing is
+                # claimed either way.
+                warn("the gateway's own output cannot be read, so whether its restart-loop breaker holds channels back is not known")
+                record("unknown")
+                return 0
+        else:
+            held = st["held"]
+            # The core's own last chance: its first health-monitor check after
+            # the window, or the monitor's first check if it started later.
+            settle = max(started + args.health_grace_seconds,
+                         st["trippedAt"] + st["windowS"] + args.health_check_seconds) + args.margin_seconds
+            if held and held != shown:
+                log("the core's restart-loop breaker holds back %s; it lifts it itself, at the latest by %s"
+                    % (", ".join(target_name(t) for t in held), iso(settle)))
+                record("suppressed", trippedAt=st["trippedAt"], held=held)
+                shown = held
+            if now >= settle:
+                if not held:
+                    log("the core's restart-loop breaker tripped, and held no channel back")
+                    record("clear", trippedAt=st["trippedAt"])
+                    return 0
+                # Not lifted in time: the override the core names for an operator.
+                results = start_held(args.openclaw_bin, held, args.call_timeout)
+                if not results:
+                    log("the gateway no longer reports a channel account held back by its restart-loop breaker")
+                    record("clear", trippedAt=st["trippedAt"])
+                elif all(r["ok"] for r in results):
+                    log("the core had not lifted its restart-loop breaker; started %s by hand (openclaw gateway call channels.start)"
+                        % ", ".join(target_name(r) for r in results))
+                    record("started", manualStarts=results)
+                else:
+                    warn("the core had not lifted its restart-loop breaker, and channels.start did not start %s; the owner is told"
+                         % ", ".join(target_name(r) for r in results if not r["ok"]))
+                    record("suppressed", manualStarts=results)
+                return 0
+        if time.monotonic() > end:
+            log("restart-loop breaker watch stopped after %d s; the next gateway start looks again" % args.max_seconds)
+            return 0
+        time.sleep(args.poll_seconds)
+
+
 # ── entry ─────────────────────────────────────────────────────────────────
 
 
@@ -1816,6 +2092,24 @@ def main(argv=None):
     p.add_argument("--index-timeout", type=int, default=1800)
     p.add_argument("--max-attempts", type=int, default=3)
 
+    p = sub.add_parser("breaker-watch")
+    p.add_argument("--data-dir", required=True)
+    p.add_argument("--config", default=None)
+    p.add_argument("--openclaw-bin", required=True)
+    p.add_argument("--unit", default=GATEWAY_UNIT)
+    p.add_argument("--log-dir", action="append", default=[])
+    p.add_argument("--gateway-port", type=int, default=18789)
+    # The rest of a pre-start (up to its 600 s ceiling), then a cold start.
+    p.add_argument("--wait-seconds", type=int, default=1800)
+    p.add_argument("--poll-seconds", type=float, default=20)
+    p.add_argument("--read-grace-seconds", type=int, default=300)
+    p.add_argument("--max-seconds", type=int, default=3600)
+    p.add_argument("--call-timeout", type=int, default=90)
+    # The core's health-monitor timing and the margin after it, for the tests.
+    p.add_argument("--health-check-seconds", type=float, default=HEALTH_CHECK_S, help=argparse.SUPPRESS)
+    p.add_argument("--health-grace-seconds", type=float, default=HEALTH_GRACE_S, help=argparse.SUPPRESS)
+    p.add_argument("--margin-seconds", type=float, default=BREAKER_MARGIN_S, help=argparse.SUPPRESS)
+
     args = parser.parse_args(argv)
     if not args.cmd:
         parser.print_usage(sys.stderr)
@@ -1828,6 +2122,7 @@ def main(argv=None):
         "preflight": cmd_preflight,
         "record-doctor": cmd_record_doctor,
         "memory-rebuild": cmd_memory_rebuild,
+        "breaker-watch": cmd_breaker_watch,
     }[args.cmd]
     try:
         return handler(args)
