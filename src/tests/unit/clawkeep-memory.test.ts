@@ -1411,3 +1411,179 @@ describe("an openai-compatible embedder is on device only at the loopback proxy"
     expect(status.location).toBe("local");
   });
 });
+
+/**
+ * An index the core built KEYWORD-ONLY: text chunks, no vectors beside them.
+ *
+ * Captured on a lab board (`openclaw memory status --agent main --deep --json`,
+ * OpenClaw 2026.10.6): the first-boot rebuild ran `memory index --force` while
+ * `memory.search` named no embedder yet, the core's creation-time fallback
+ * indexed text only (its documented behaviour for an unset provider), and the
+ * ClawBox AI embedder was wired twelve minutes later. From then on the core
+ * reported the configured model, a `mismatched` identity and a vector index in
+ * state `empty` — and the card said "the index does not match the configured
+ * embedding model" and counted all 11 chunks as vectors, while every search
+ * matched words only.
+ */
+const KEYWORD_ONLY_STATUS = JSON.parse(
+  await fs.readFile(new URL("../fixtures/openclaw-memory-status-keyword-only.json", import.meta.url), "utf8"),
+) as unknown;
+
+describe("an index the core built keyword-only", () => {
+  type Row = { status: Record<string, unknown> & { vector: Record<string, unknown>; custom: Record<string, unknown> } };
+  const copy = (raw: unknown) => JSON.parse(JSON.stringify(raw)) as Row[];
+
+  it("says keyword-only, counts no vectors, and calls the index degraded", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.provider).toBe("openai-compatible");
+    expect(status.model).toBe("text-embedding-3-small");
+    expect(status.chunks).toBe(11);
+    expect(status.vectors).toBe(0);
+    expect(status.health).toBe("degraded");
+    expect(status.errorCode).toBe("index_keyword_only");
+    expect(status.error).toContain("keyword-only");
+    expect(status.error).toContain("full reindex");
+  });
+
+  it("is the same verdict over an index the core still calls its own", async () => {
+    // The identity alone is not the signal: a vector index with nothing in it
+    // under a named embedder is keyword-only whatever the fingerprint says.
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(KEYWORD_ONLY_STATUS);
+    rows[0].status.custom.indexIdentity = { status: "valid" };
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.errorCode).toBe("index_keyword_only");
+    expect(status.health).toBe("degraded");
+    expect(status.vectors).toBe(0);
+  });
+
+  it("leaves an index with its vectors alone", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(KEYWORD_ONLY_STATUS);
+    rows[0].status.vector.index = { state: "complete" };
+    rows[0].status.custom.indexIdentity = { status: "valid" };
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("healthy");
+    expect(status.vectors).toBe(11);
+  });
+
+  it("never calls an index with nothing in it keyword-only", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(KEYWORD_ONLY_STATUS);
+    rows[0].status.chunks = 0;
+    rows[0].status.files = 0;
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.errorCode).not.toBe("index_keyword_only");
+  });
+
+  it("puts a fallback embedder first: a full reindex under it would rebuild with the wrong model", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(KEYWORD_ONLY_STATUS);
+    rows[0].status.provider = "ollama";
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.errorCode).toBe("provider_mismatch");
+    expect(status.vectors).toBe(0);
+  });
+
+  it("lets the schedule embed it: a keyword-only index has no embedding a full pass could lose", async () => {
+    // A disowned index is held back for the owner (TASK-1197) because a full
+    // pass throws its embeddings away; this one has none, like an empty one.
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(KEYWORD_ONLY_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    try {
+      const { resolveIndexMode } = await lib();
+      expect(await resolveIndexMode("incremental", "schedule")).toBe("full");
+      expect(await resolveIndexMode("incremental", "manual")).toBe("full");
+    } finally {
+      delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    }
+  });
+
+  it("still holds a disowned index WITH embeddings back for the owner", async () => {
+    const rows = copy(KEYWORD_ONLY_STATUS);
+    rows[0].status.vector.index = { state: "complete" };
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(rows)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    try {
+      const { resolveIndexMode } = await lib();
+      expect(await resolveIndexMode("incremental", "schedule")).toBeNull();
+    } finally {
+      delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    }
+  });
+
+  it("says so in the device log, once per verdict", async () => {
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(KEYWORD_ONLY_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { getMemoryStatus, invalidateMemoryStatusCache, warmMemoryStatusCache } = await lib();
+      expect((await getMemoryStatus()).errorCode).toBe("index_keyword_only");
+      invalidateMemoryStatusCache();
+      await warmMemoryStatusCache();
+      const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("keyword-only"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("11 chunks");
+      expect(lines[0]).toContain("openai-compatible");
+      expect(lines[0]).not.toContain("/home/");
+    } finally {
+      warn.mockRestore();
+      delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    }
+  });
+});
+
+describe("a rebuild for an embedder the box itself just wrote", () => {
+  /**
+   * The cloud defaults point `memory.search` at ClawBox AI on every linked box
+   * and ask for the rebuild in the same breath. With Memory Shard off — every
+   * new box — that rebuild declined `disabled`, on the premise that there was
+   * no index to rebuild. On the OpenClaw arm there always is one: the core
+   * indexes the agent's own memory files whatever the switch says, and after
+   * the move it pauses vector search over it until a forced rebuild. So the
+   * agent's memory stayed keyword-only until somebody switched Memory Shard on.
+   */
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+    delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+  });
+
+  async function withIndexer(): Promise<string> {
+    const argv = path.join(tmpDir, "indexer-argv");
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${argv}\nexit 0\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
+    vi.resetModules();
+    return argv;
+  }
+
+  it("runs the core's forced rebuild on the OpenClaw arm while Memory Shard is off", async () => {
+    shard.enabled = false;
+    const argv = await withIndexer();
+    const { startMemoryIndex } = await lib();
+    const started = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    expect(started.accepted).toBe(true);
+    const run = await settledMemoryRun(tmpDir);
+    expect(run.status).toBe("succeeded");
+    // The status read after the pass is the module's own refresh; the pass is the one index run.
+    const runs = (await fs.readFile(argv, "utf8")).trim().split("\n").filter((line) => line.startsWith("memory index"));
+    expect(runs).toEqual(["memory index --agent main --force"]);
+  });
+
+  it("still declines every other pass while Memory Shard is off", async () => {
+    shard.enabled = false;
+    const argv = await withIndexer();
+    const { startMemoryIndex } = await lib();
+    const started = await startMemoryIndex("full", "manual");
+    expect(started).toMatchObject({ accepted: false, declined: "disabled" });
+    await expect(fs.access(argv)).rejects.toThrow();
+  });
+});

@@ -327,6 +327,18 @@ describe("which arm runs the pass", () => {
     expect(spawned).toEqual([]);
   });
 
+  it("refuses an embedder-change rebuild too: this index holds only the folders the owner chose", async () => {
+    // On the OpenClaw arm the core's own index of the agent's memory files is
+    // rebuilt for an embedder the box wrote whatever the switch says; here
+    // there is no such index, and with the switch off nothing is read at all.
+    shard.enabled = false;
+    const { startMemoryIndex } = await lib();
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    expect(result.accepted).toBe(false);
+    expect(result.declined).toBe("disabled");
+    expect(spawned).toEqual([]);
+  });
+
   it("still drives the OpenClaw CLI, argv for argv, where there IS an OpenClaw", async () => {
     // The regression guard for "additive": the other arm must be untouched.
     // Pinned WITHOUT a terminal host, which is the argv it has always had.

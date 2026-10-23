@@ -18,6 +18,7 @@ export interface MemoryReindexReason {
   /** Stable, for a caller to branch on. */
   code:
     | "no_index"
+    | "keyword_only"
     | "embedder_changed"
     | "index_format_changed"
     | "identity_missing"
@@ -79,6 +80,16 @@ export function memoryReindexAdvice(s: MemoryStatusFacts, arm: MemoryIndexArm): 
       code: "no_index",
       mode: "full",
       detail: "Nothing is indexed yet: the first pass reads and embeds every file in the folders.",
+    });
+  } else if (s.errorCode === "index_keyword_only") {
+    // Before the mismatch it usually comes with: the core calls an index it
+    // built with no embedder "built for model fts-only" once one is set, and
+    // "built for a different model" would have the assistant explain a model
+    // change nobody made.
+    reasons.push({
+      code: "keyword_only",
+      mode: "full",
+      detail: "The index holds text but no embeddings — it was built while no embedding model answered — so search matches words only. A full pass embeds every file.",
     });
   } else if (s.indexIdentity === "mismatched" && code.startsWith("chunking")) {
     reasons.push({

@@ -118,7 +118,7 @@ describe("applyClawaiCloudDefaults", () => {
     expect(writeProvider).toHaveBeenCalledWith(expect.anything(), expect.anything(), "openai");
     expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
     // Moving the index invalidates its fingerprint, so the rebuild goes with it.
-    expect(startIndex).toHaveBeenCalledWith("full", "manual");
+    expect(startIndex).toHaveBeenCalledWith("full", "manual", { embedderChanged: true });
   });
 
   it("touches nothing on a box with no subscription", async () => {
@@ -215,10 +215,24 @@ describe("applyClawaiCloudDefaults", () => {
   });
 
   /**
-   * And the rebuild declining BECAUSE the switch is off is the ordinary case on
-   * such a box: there is no index to rebuild. The switch itself has landed, so
-   * the first pass the owner ever runs builds under the cloud identity instead
-   * of building under the local one and being invalidated at the next boot.
+   * The rebuild is asked for as the EMBEDDER's, not as a Memory Shard pass: on
+   * an OpenClaw box the core indexes the agent's own memory files whatever the
+   * switch says, the first-boot rebuild built that index before any embedder
+   * was set (keyword-only), and with the switch off the rebuild used to decline
+   * — leaving the agent's memory search matching words only until somebody
+   * turned Memory Shard on.
+   */
+  it("asks for the rebuild as the embedder's, so the switch being off does not stop it", async () => {
+    shardEnabled.mockResolvedValue(false);
+    await applyClawaiCloudDefaults();
+    expect(startIndex).toHaveBeenCalledWith("full", "manual", { embedderChanged: true });
+  });
+
+  /**
+   * Where ClawBox is the indexer the rebuild still declines with the switch
+   * off — that index holds only the owner's folders — and that is no failure:
+   * the switch itself has landed, so the first pass the owner ever runs builds
+   * under the cloud identity.
    */
   it("treats a rebuild declined for the switch being off as a completed move", async () => {
     shardEnabled.mockResolvedValue(false);
@@ -356,7 +370,7 @@ describe("readCloudDefaultsStatus", () => {
     const applied = await applyClawaiCloudDefaults();
     expect(applied.moved).toContain("embeddings");
     expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
-    expect(startIndex).toHaveBeenCalledWith("full", "manual");
+    expect(startIndex).toHaveBeenCalledWith("full", "manual", { embedderChanged: true });
   });
 
   it("promotes a Hermes box carrying the LEGACY owner mark, pin and rebuild and all", async () => {
@@ -380,7 +394,7 @@ describe("readCloudDefaultsStatus", () => {
     const applied = await applyClawaiCloudDefaults();
     expect(applied.moved).toContain("embeddings");
     expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
-    expect(startIndex).toHaveBeenCalledWith("full", "manual");
+    expect(startIndex).toHaveBeenCalledWith("full", "manual", { embedderChanged: true });
     // …and the stale mark is handed back to the applier, so the card stops
     // reporting an owner choice for a move the owner never made.
     expect(store.get("memory_embeddings_choice_source")).toBe("auto");

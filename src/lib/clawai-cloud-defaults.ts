@@ -428,11 +428,17 @@ async function promoteTts({ harness, status }: VoiceSnapshot): Promise<boolean> 
  * move it — voice and transcription flipped, memory did not (measured on three
  * rig boxes, 2026-09-15).
  *
- * With the switch off the rebuild below simply declines `disabled`, which is
- * already handled as the non-failure it is: there is no index to rebuild, and
- * the first pass the owner ever runs then builds under the cloud identity
- * instead of building under the local one and being invalidated at the next
- * boot.
+ * NOR IS THE REBUILD, ON OPENCLAW. There is always an index to rebuild there:
+ * the core's own, of the agent's memory files, which it keeps whatever the
+ * switch says — and on a new box the first-boot rebuild built it BEFORE any
+ * embedder was set, so it held text only. Declined `disabled`, that index
+ * stayed keyword-only (the core pauses vector search over it once an embedder
+ * is named, and re-embeds nothing by itself) until somebody switched Memory
+ * Shard on. So the rebuild is asked for as the embedder's (`embedderChanged`),
+ * which the switch does not govern on that arm. Where ClawBox is the indexer it
+ * still declines `disabled` with the switch off, which is handled as the
+ * non-failure it is: that index holds only the owner's folders, and the first
+ * pass the owner ever runs builds under the cloud identity.
  */
 async function promoteEmbeddings(): Promise<boolean> {
   // Already pointed off the box AND WRITTEN DOWN: nothing to write, and writing
@@ -464,10 +470,11 @@ async function promoteEmbeddings(): Promise<boolean> {
   // switch flipped underneath) is not a failed switch — the next scheduled pass
   // rebuilds, and the panel shows the mismatched fingerprint meanwhile.
   try {
-    const started = await startMemoryIndex("full", "manual");
-    // `disabled` is not worth a warning line: it is the expected answer on a box
-    // whose owner has not switched Memory Shard on, where there is no index to
-    // rebuild in the first place. `running` is the one worth saying out loud.
+    const started = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    // `disabled` is not worth a warning line: only the edition where ClawBox
+    // indexes answers it, on a box whose owner has not switched Memory Shard
+    // on, where there is no index to rebuild in the first place. `running` is
+    // the one worth saying out loud.
     if (!started.accepted && started.declined !== "disabled") {
       console.warn(`[clawai-cloud-defaults] memory reindex declined after the switch: ${started.declined}`);
     }

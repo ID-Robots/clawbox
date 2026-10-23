@@ -55,6 +55,16 @@ describe("memoryReindexAdvice", () => {
     expect(codes({ ...HEALTHY, indexIdentity: "missing" })).toEqual(["identity_missing"]);
   });
 
+  it("names a keyword-only index for what it is, not as another model's", () => {
+    // The core calls an index it built with no embedder `mismatched` once one
+    // is set ("built for model fts-only"), and "built for a different model"
+    // sent the agent to explain a model change nobody made.
+    const advice = memoryReindexAdvice({ ...HEALTHY, location: "cloud", indexIdentity: "mismatched", indexIdentityCode: "model", errorCode: "index_keyword_only" }, "openclaw");
+    expect(advice).toMatchObject({ needed: true, mode: "full", reasons: [{ code: "keyword_only", mode: "full" }] });
+    expect(advice.reasons[0].detail).toMatch(/no embeddings/);
+    expect(codes({ ...HEALTHY, indexIdentity: "valid", errorCode: "index_keyword_only" }, "openclaw")).toEqual(["keyword_only"]);
+  });
+
   it("sends new files, changed files and a stopped pass to an incremental pass", () => {
     const waiting = memoryReindexAdvice({ ...HEALTHY, pendingFiles: 7 }, "local");
     expect(waiting).toMatchObject({ needed: true, mode: "incremental", reasons: [{ code: "files_waiting", mode: "incremental" }] });

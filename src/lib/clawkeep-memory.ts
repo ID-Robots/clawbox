@@ -69,6 +69,7 @@ export type MemoryRunStatus = "idle" | "running" | "succeeded" | "failed";
  */
 export type MemoryStatusErrorCode =
   | "index_rebuild_required"
+  | "index_keyword_only"
   | "index_identity_mismatched"
   | "index_identity_missing"
   | "provider_mismatch"
@@ -812,12 +813,23 @@ function statusVerdict(facts: {
   indexIdentity: ClawKeepMemoryStatus["indexIdentity"];
   indexIdentityCode: string;
   fellBack: boolean;
+  keywordOnly: boolean;
   health: ClawKeepMemoryStatus["health"];
 }): { error: string; errorCode: MemoryStatusErrorCode | "" } {
   if (facts.fellBack) {
     return {
       error: "Memory search is not using the embedding model you configured. Re-run Memory Shard setup.",
       errorCode: "provider_mismatch",
+    };
+  }
+  // Above the mismatch it usually arrives with: the core calls an index it
+  // built with no embedder "built for model fts-only" once one is set, and
+  // "does not match the configured embedding model" sent the owner to a model
+  // panel where everything was fine — while every search matched words only.
+  if (facts.keywordOnly) {
+    return {
+      error: "Memory search is keyword-only: the index holds no embeddings. Run a full reindex.",
+      errorCode: "index_keyword_only",
     };
   }
   if (facts.indexIdentity === "mismatched") {
@@ -902,6 +914,17 @@ export async function parseMemoryStatus(
     && !PROVIDER_UNSPECIFIED.has(requestedProvider.toLowerCase())
     && requestedProvider.toLowerCase() !== provider.toLowerCase(),
   );
+  // KEYWORD-ONLY: text chunks in the index and not one vector beside them, under
+  // a configuration that names an embedder. `vector.index.state` is the core's
+  // typed answer (`empty` | `complete` | `incomplete` | `unverified` in the
+  // pinned SDK's MemoryProviderStatus), so this reads no English. It is how an
+  // index built while no embedder answered stays after one is set: the core
+  // pauses vector search over it and re-embeds nothing by itself, and every
+  // search is answered by keywords alone. `provider: "none"` is keyword-only
+  // search chosen on purpose, which `health` already reports, not a fault.
+  const keywordOnly = chunks > 0
+    && Boolean(provider) && provider !== "none"
+    && cleanString(asRecord(vector.index).state) === "empty";
   const sources = Array.isArray(status.sources) ? status.sources.filter((v) => typeof v === "string") as string[] : [];
   const sourceCounts = Array.isArray(status.sourceCounts) ? status.sourceCounts : [];
   const sourceCount = sourceCounts.length || sources.length;
@@ -937,6 +960,9 @@ export async function parseMemoryStatus(
   // results, they are just not the ones the owner's configuration would give,
   // which is the quietest way this can go wrong and so the one worth a chip.
   else if (fellBack) health = "degraded";
+  // Search answers, so nothing above catches this either: it just never uses
+  // the embedder the card names.
+  else if (keywordOnly) health = "degraded";
   else if (providerMode === "active" && indexIdentity === "valid") health = "healthy";
   // An index built by a different model — or one with no fingerprint at all —
   // is a KNOWN state, not an unknown one: search is degraded until it is
@@ -966,12 +992,15 @@ export async function parseMemoryStatus(
     sourceCount,
     files,
     chunks,
-    vectors: semanticAvailable ? chunks : 0,
+    // `semanticAvailable` says vector search COULD run; over a keyword-only
+    // index there is nothing for it to search, and counting every chunk as a
+    // vector was the card vouching for embeddings the index does not have.
+    vectors: semanticAvailable && !keywordOnly ? chunks : 0,
     pendingFiles,
     failedItems,
     dirty: status.dirty === true,
     indexBytes,
-    ...statusVerdict({ indexIdentity, indexIdentityCode, fellBack, health }),
+    ...statusVerdict({ indexIdentity, indexIdentityCode, fellBack, keywordOnly, health }),
     run,
     schedule,
     nextRunAtMs: computeNextMemoryRunMs(schedule, now),
@@ -1046,6 +1075,7 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   try {
     const status = await parseMemoryStatus(probe.raw, run, schedule, new Date(), remoteBaseUrl);
     noteProviderFallback(status);
+    noteKeywordOnly(status);
     return status;
   } catch {
     return unavailableStatus(run, schedule);
@@ -1075,6 +1105,25 @@ function noteProviderFallback(status: ClawKeepMemoryStatus): void {
     `[clawkeep-memory] the core was configured for "${status.requestedProvider}" and is embedding with `
     + `"${status.provider}" (${status.model || "no model named"}); memory search will not match openclaw.json `
     + "until Memory Shard setup is run again",
+  );
+}
+
+/**
+ * A keyword-only index, in the device log, once per verdict like the line
+ * above. Nothing else on the box said it: the core logs the fallback only
+ * while it builds, and on the board this was found on that was nine hours
+ * earlier, under a configuration that named no embedder at all.
+ */
+let loggedKeywordOnly = "";
+function noteKeywordOnly(status: ClawKeepMemoryStatus): void {
+  const verdict = status.errorCode === "index_keyword_only" ? `${status.provider}/${status.model}` : "";
+  if (verdict === loggedKeywordOnly) return;
+  loggedKeywordOnly = verdict;
+  if (!verdict) return;
+  console.warn(
+    `[clawkeep-memory] the memory index is keyword-only: ${status.chunks} chunks and no embeddings, while memory `
+    + `search is set to "${status.provider}" (${status.model || "no model named"}); every search matches words only `
+    + "until a full reindex embeds them",
   );
 }
 
@@ -1364,6 +1413,11 @@ async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTri
     const fellBack = providerFellBack(status);
     // Nothing indexed: the first build IS the full one, on every trigger.
     if (status.chunks === 0) return { mode: "full", fellBack, heldBack: false };
+    // Nothing EMBEDDED is the same case for the vectors, and the schedule's too:
+    // a keyword-only index holds no embedding a full pass could throw away, so
+    // holding the slot back for the owner (TASK-1197's reason) protects nothing
+    // and leaves search matching words only until somebody clicks.
+    if (status.errorCode === "index_keyword_only") return { mode: "full", fellBack, heldBack: false };
     if (staleIndexIdentity(status)) {
       // Disowned: the owner's request is upgraded (TASK-1024), the schedule's
       // is held back (TASK-1197) — see resolveIndexMode.
@@ -1761,10 +1815,22 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * index the core has disowned, which only the owner rebuilds (see
  * resolveIndexMode). It starts nothing, so it takes no lock and writes no run
  * record — the status banner already says what the owner has to do.
+ *
+ * `embedderChanged` is the one pass the switch does not govern, and only on
+ * the OpenClaw arm: the rebuild the box owes the CORE'S OWN index after it
+ * wrote a new embedder into `memory.search` itself. That index exists whether
+ * or not Memory Shard is on — it is the agent's MEMORY.md, USER.md and
+ * memory/*.md, which the core indexes for its own memory search — and after
+ * the write the core pauses vector search over it until a forced rebuild.
+ * `ensure-local-embeddings.sh` runs that same rebuild for the other direction
+ * with no regard for the switch, and so does the gateway pre-start's for a
+ * change of the index's settings. Where ClawBox is the indexer its index holds
+ * only the folders the owner chose, so there the switch still decides.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
+  options: { embedderChanged?: boolean } = {},
 ): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" | "full_reindex_required" }> {
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
@@ -1774,7 +1840,8 @@ export async function startMemoryIndex(
   if (!await acquireRunLock()) {
     return { accepted: false, declined: "running", run: await readMemoryRunState() };
   }
-  if (!(await getMemoryShardEnabled())) {
+  const coreIndexRebuild = options.embedderChanged === true && !openclawIsAbsent();
+  if (!coreIndexRebuild && !(await getMemoryShardEnabled())) {
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
     return { accepted: false, declined: "disabled", run: await readMemoryRunState() };
   }

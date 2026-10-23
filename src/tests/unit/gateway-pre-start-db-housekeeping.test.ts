@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -67,6 +67,7 @@ function pass(config: unknown, opts: { v2?: boolean; core2026_10?: boolean } = {
       CLAWBOX_OPENCLAW_2026_10: opts.v2 === false || opts.core2026_10 === false ? "0" : "1",
       CLAWBOX_MEMORY_REBUILD_RECORD: recordPath,
       CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"),
+      CLAWBOX_DB_MAINTENANCE_PY: path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py"),
     },
   });
   if (r.status !== 0) throw new Error(`config pass exited ${r.status}: ${r.stderr}`);
@@ -156,6 +157,157 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh memory index defaults", () =>
   });
 });
 
+/**
+ * The agent database's own record of what its memory index was built with —
+ * the row OpenClaw 2026.10 writes (`memory_index_meta`, key
+ * `memory_index_meta_v1`). `null` leaves the table out, as on a core that has
+ * never indexed.
+ */
+function agentIndexMeta(meta: Record<string, unknown> | null, agent = "main", agentDir?: string): void {
+  const db = path.join(agentDir ?? path.join(dir, "agents", agent, "agent"), "openclaw-agent.sqlite");
+  mkdirSync(path.dirname(db), { recursive: true });
+  const r = spawnSync("python3", ["-c", [
+    "import sqlite3, sys",
+    "c = sqlite3.connect(sys.argv[1])",
+    "c.execute('PRAGMA journal_mode=WAL')",
+    "c.execute('CREATE TABLE IF NOT EXISTS sessions (id TEXT)')",
+    "if sys.argv[2] != 'null':",
+    "    c.execute('CREATE TABLE memory_index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')",
+    "    c.execute(\"INSERT INTO memory_index_meta VALUES ('memory_vector_rebuild_v1', 'clean')\")",
+    "    c.execute(\"INSERT INTO memory_index_meta VALUES ('memory_index_meta_v1', ?)\", (sys.argv[2],))",
+    "c.commit()",
+    "c.close()",
+  ].join("\n"), db, meta === null ? "null" : JSON.stringify(meta)], { encoding: "utf-8" });
+  if (r.status !== 0) throw new Error(`fixture failed: ${r.stderr}`);
+}
+
+/** What the first-boot rebuild left on the lab board: text chunks, no embedder. */
+const KEYWORD_ONLY_META = { model: "fts-only", provider: "none", sources: ["memory"], chunkTokens: 400, chunkingVersion: 5 };
+const EMBEDDED_META = { model: "text-embedding-3-small", provider: "openai-compatible", sources: ["memory"], vectorDims: 1536 };
+const CLOUD_SMALL = {
+  rememberAcrossConversations: false,
+  sources: ["memory"],
+  provider: "openai-compatible",
+  model: "text-embedding-3-small",
+  remote: { baseUrl: "https://clawbox.com/api/ai", apiKey: "claw_box_token" },
+};
+
+describe.skipIf(!hasPython3)("gateway-pre-start.sh: a memory index built keyword-only", () => {
+  /**
+   * The first-boot rebuild runs `memory index --force` before the box has set
+   * any embedder, and the core's documented fallback for an unset provider
+   * indexes text only. Once `memory.search` names an embedder the core pauses
+   * vector search over that index and re-embeds nothing by itself, so the
+   * agent's memory search matched words only until somebody forced a rebuild.
+   */
+  it("asks for one rebuild once memory.search names an embedder, with nothing in the config to change", () => {
+    // A config this pass has already settled, so the request is proved to
+    // need no write: it changes nothing in openclaw.json.
+    const settled = pass({ memory: { search: { ...CLOUD_SMALL } } }).cfg;
+    expect(existsSync(recordPath)).toBe(false);
+    agentIndexMeta(KEYWORD_ONLY_META);
+    const { out, cfg } = pass(settled);
+    expect(cfg.memory.search).toEqual(CLOUD_SMALL);
+    expect(out).toMatch(/Gateway config already correct, skipping write/);
+    expect(rebuildRecord()).toMatchObject({ pending: true, attempts: 0, reasons: ["keyword_only"] });
+    expect(out).toMatch(/Memory index: built keyword-only \(no embeddings\); openai-compatible\/text-embedding-3-small is set now, so one rebuild runs after the gateway starts/);
+  });
+
+  it("asks once per embedder setting, not at every gateway start", () => {
+    agentIndexMeta(KEYWORD_ONLY_META);
+    pass({ memory: { search: { ...CLOUD_SMALL } } });
+    // The rebuild ran and the core still built text only (an embedder that
+    // falls back rather than failing): the same setting is not asked again.
+    writeFileSync(recordPath, JSON.stringify({ ...rebuildRecord(), pending: false, attempts: 1, doneAt: "2026-10-23T09:00:00Z", keywordOnly: true }));
+    const before = readFileSync(recordPath, "utf-8");
+    const { out } = pass({ memory: { search: { ...CLOUD_SMALL } } });
+    expect(out).not.toMatch(/built keyword-only/);
+    expect(readFileSync(recordPath, "utf-8")).toBe(before);
+    // A different embedder is worth one more rebuild.
+    const local = { ...CLOUD_SMALL, model: "qwen3-embedding-0.6b", remote: { baseUrl: "http://127.0.0.1/setup-api/local-ai/embed/v1", apiKey: "local" } };
+    pass({ memory: { search: local } });
+    expect(rebuildRecord()).toMatchObject({ pending: true, attempts: 0, reasons: ["keyword_only"] });
+  });
+
+  it("rides along with a settings change landing in the same pass", () => {
+    agentIndexMeta(KEYWORD_ONLY_META);
+    pass({ memory: { search: { provider: "openai-compatible", model: "qwen3-embedding-0.6b" } } });
+    expect(rebuildRecord()).toMatchObject({ pending: true, reasons: ["keyword_only", "rememberAcrossConversations", "sources"] });
+  });
+
+  it.each([
+    ["memory.search names no embedder yet", { rememberAcrossConversations: false, sources: ["memory"] }, KEYWORD_ONLY_META],
+    ["the owner chose keyword-only search", { ...CLOUD_SMALL, provider: "none" }, KEYWORD_ONLY_META],
+    ["the index has its embeddings", CLOUD_SMALL, EMBEDDED_META],
+    ["the core has never indexed", CLOUD_SMALL, null],
+  ])("asks for nothing when %s", (_why, search, meta) => {
+    agentIndexMeta(meta);
+    pass({ memory: { search } });
+    expect(existsSync(recordPath)).toBe(false);
+  });
+
+  it("asks for nothing on a box with no agent database at all", () => {
+    pass({ memory: { search: { ...CLOUD_SMALL } } });
+    expect(existsSync(recordPath)).toBe(false);
+  });
+
+  it("reads another agent's index too", () => {
+    agentIndexMeta(EMBEDDED_META);
+    agentIndexMeta(KEYWORD_ONLY_META, "work");
+    pass({ memory: { search: { ...CLOUD_SMALL } } });
+    expect(rebuildRecord()).toMatchObject({ pending: true, reasons: ["keyword_only"] });
+  });
+
+  it("reads an agent whose agentDir lies outside the state directory, as the housekeeping does", () => {
+    // The same inventory scripts/openclaw-db-maintenance.py walks: the agents
+    // under the state directory AND `agents.entries.<id>.agentDir`.
+    agentIndexMeta(EMBEDDED_META);
+    const elsewhere = path.join(dir, "elsewhere", "work-agent");
+    agentIndexMeta(KEYWORD_ONLY_META, "work", elsewhere);
+    pass({ agents: { entries: { work: { agentDir: elsewhere } } }, memory: { search: { ...CLOUD_SMALL } } });
+    expect(rebuildRecord()).toMatchObject({ pending: true, reasons: ["keyword_only"] });
+  });
+
+  it("asks again once the key is corrected after the attempts ran out — and keeps the key out of the record", () => {
+    agentIndexMeta(KEYWORD_ONLY_META);
+    pass({ memory: { search: { ...CLOUD_SMALL } } });
+    // Three attempts against a key the endpoint refused, and the rebuild gave up.
+    writeFileSync(recordPath, JSON.stringify({ ...rebuildRecord(), attempts: 3, lastError: "memory index: exit 1", lastAttemptAt: "2026-10-23T09:00:00Z" }));
+    const spent = readFileSync(recordPath, "utf-8");
+    const same = pass({ memory: { search: { ...CLOUD_SMALL } } });
+    expect(same.out).not.toMatch(/built keyword-only/);
+    expect(readFileSync(recordPath, "utf-8")).toBe(spent);
+    // The owner re-links ClawBox AI: same provider, model and endpoint, new key.
+    const fixed = { ...CLOUD_SMALL, remote: { ...CLOUD_SMALL.remote, apiKey: "claw_box_token_relinked" } };
+    const again = pass({ memory: { search: fixed } });
+    expect(again.out).toMatch(/built keyword-only/);
+    expect(rebuildRecord()).toMatchObject({ pending: true, attempts: 0, reasons: ["keyword_only"] });
+    // Plain JSON, readable by the box's other tools: no key, and nothing made from one.
+    const record = readFileSync(recordPath, "utf-8");
+    expect(record).not.toContain("claw_box_token");
+    const recorded = JSON.parse(record) as Record<string, unknown>;
+    expect(Object.keys(recorded).sort()).toEqual(["attempts", "keywordOnlyFor", "lastAttemptAt", "pending", "reasons", "requestedAt"]);
+    // What the comparison does keep is the owner's alone, and holds no key either.
+    const sidecar = path.join(dir, "data", "openclaw-memory-rebuild.credential");
+    expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+    expect(readFileSync(sidecar, "utf-8")).not.toContain("claw_box_token");
+  });
+
+  it("leaves the index's database exactly as it found it", () => {
+    agentIndexMeta(KEYWORD_ONLY_META);
+    const db = path.join(dir, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const before = readFileSync(db);
+    pass({ memory: { search: { ...CLOUD_SMALL } } });
+    expect(readFileSync(db).equals(before)).toBe(true);
+  });
+
+  it("asks for nothing on a 2026.9 core", () => {
+    agentIndexMeta(KEYWORD_ONLY_META);
+    pass({ memory: { search: { ...CLOUD_SMALL } } }, { core2026_10: false });
+    expect(existsSync(recordPath)).toBe(false);
+  });
+});
+
 /** A `python3` on PATH that records how it was asked, and answers PY_EXIT. */
 function stubPython(binDir: string): void {
   mkdirSync(binDir, { recursive: true });
@@ -195,6 +347,8 @@ describe("gateway-pre-start.sh memory rebuild launch", () => {
       CLAWBOX_MEMORY_REBUILD_RECORD: recordPath,
       CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"),
       OPENCLAW_BIN: "/opt/openclaw/bin/openclaw",
+      OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
+      OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
     }, { PY_ARGS: args });
     return { r, args };
   }
@@ -207,6 +361,10 @@ describe("gateway-pre-start.sh memory rebuild launch", () => {
     const argv = readFileSync(args, "utf-8").trim().split("\n");
     expect(argv.slice(0, 3)).toEqual(["-I", path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py"), "memory-rebuild"]);
     expect(argv).toEqual(expect.arrayContaining(["--openclaw-bin", "/opt/openclaw/bin/openclaw", "--gateway-port", "18789"]));
+    // Where it looks, after the rebuild, at what the core actually built.
+    expect(argv).toEqual(expect.arrayContaining([
+      "--state-dir", path.join(dir, ".openclaw"), "--config", path.join(dir, ".openclaw", "openclaw.json"),
+    ]));
   });
 
   it.each([
