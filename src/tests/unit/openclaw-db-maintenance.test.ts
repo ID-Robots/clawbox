@@ -89,7 +89,12 @@ case "$1 $2" in
     ;;
   "update cleanup") echo '{"status":"ok","totals":{"removedBytes":0}}' ;;
   "memory reset") if [ "\${OC_RESET_EXIT:-0}" != 0 ]; then exit "$OC_RESET_EXIT"; fi; echo reset ;;
-  "memory index") echo indexed ;;
+  "memory index")
+    # The core writing what it built: OC_INDEX_META is the row it leaves.
+    if [ -n "\${OC_INDEX_META:-}" ]; then
+      python3 -c 'import os,sqlite3,sys; p=sys.argv[1]; os.makedirs(os.path.dirname(p), exist_ok=True); c=sqlite3.connect(p); c.execute("CREATE TABLE IF NOT EXISTS memory_index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); c.execute("INSERT OR REPLACE INTO memory_index_meta VALUES (?, ?)", ("memory_index_meta_v1", sys.argv[2])); c.commit(); c.close()' "$OPENCLAW_STATE_DIR/agents/main/agent/openclaw-agent.sqlite" "$OC_INDEX_META"
+    fi
+    echo indexed ;;
   *) echo "unexpected: $*" >&2; exit 64 ;;
 esac
 `,
@@ -577,6 +582,39 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py memory-rebuild (after t
     expect(r.code).toBe(0);
     expect(calledWith()).toEqual(["memory index --force"]);
     expect(JSON.parse(readFileSync(rebuildRecord(), "utf-8"))).toMatchObject({ pending: false, attempts: 1 });
+  });
+
+  /**
+   * The first-boot rebuild ran before the box had set any embedder; the core's
+   * fallback for an unset provider indexed text only, exited 0, and this said
+   * "memory index rebuilt for the new settings" — on a lab board whose memory
+   * search then matched words only for nine hours.
+   */
+  it("says so when the core built the index keyword-only, instead of claiming the rebuild", async () => {
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["rememberAcrossConversations", "sources"] }));
+    const r = await rebuild({ OC_INDEX_META: JSON.stringify({ model: "fts-only", provider: "none" }) }, ["--state-dir", stateDir, "--config", configPath]);
+    expect(r.code).toBe(0);
+    expect(calledWith()).toEqual(["memory index --force"]);
+    expect(r.out).toMatch(/memory index rebuilt KEYWORD-ONLY/);
+    expect(r.out).toMatch(/no embedding provider answered/);
+    expect(r.out).not.toMatch(/rebuilt for the new settings/);
+    // Done — another forced pass would build the same thing — and marked, so
+    // the next gateway start asks again only once an embedder is set.
+    expect(JSON.parse(readFileSync(rebuildRecord(), "utf-8"))).toMatchObject({ pending: false, attempts: 1, keywordOnly: true });
+  });
+
+  it("says the embeddings are back when it rebuilt a keyword-only index with one", async () => {
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["keyword_only"], keywordOnly: true }));
+    const r = await rebuild(
+      { OC_INDEX_META: JSON.stringify({ model: "text-embedding-3-small", provider: "openai-compatible", vectorDims: 1536 }) },
+      ["--state-dir", stateDir, "--config", configPath],
+    );
+    expect(r.code).toBe(0);
+    expect(calledWith()).toEqual(["memory index --force"]);
+    expect(r.out).toMatch(/memory index rebuilt with embeddings \(openai-compatible\/text-embedding-3-small\): it had been built keyword-only/);
+    const rec = JSON.parse(readFileSync(rebuildRecord(), "utf-8"));
+    expect(rec).toMatchObject({ pending: false, attempts: 1 });
+    expect(rec.keywordOnly).toBeUndefined();
   });
 
   it("stops trying after three attempts, rather than at every gateway start for ever", async () => {

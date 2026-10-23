@@ -4114,7 +4114,7 @@ def _memory_rebuild_state():
         return {"modelMigrated": True}
 
 
-def _record_memory_rebuild(changes):
+def _record_memory_rebuild(changes, note=None, extra=None):
     """Ask for the rebuild — only once the config these changes are in landed."""
     if not changes or not _memory_rebuild_record:
         return
@@ -4130,15 +4130,93 @@ def _record_memory_rebuild(changes):
     _state.pop("lastError", None)
     if "model" in changes:
         _state["modelMigrated"] = True
+    _state.update(extra or {})
     _tmp = _memory_rebuild_record + ".tmp"
     try:
         os.makedirs(os.path.dirname(_memory_rebuild_record), exist_ok=True)
         with open(_tmp, "w", encoding="utf-8") as _fh:
             json.dump(_state, _fh, indent=2, sort_keys=True)
         os.replace(_tmp, _memory_rebuild_record)
-        print("  Memory index: settings changed (%s); one rebuild runs after the gateway starts" % ", ".join(sorted(set(changes))))
+        print(note or "  Memory index: settings changed (%s); one rebuild runs after the gateway starts" % ", ".join(sorted(set(changes))))
     except Exception as exc:
         print("  WARN: could not record the memory index rebuild (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+
+
+# --- a memory index built keyword-only ---
+# The first-boot rebuild above runs before the box has set any embedder (the
+# ClawBox AI cloud is wired by the web server minutes later, the on-device one
+# only once it is installed), and for an unset provider the core's documented
+# creation-time fallback indexes TEXT ONLY: `memory_index_meta` says model
+# `fts-only`, provider `none`, and no vector table exists. Once `memory.search`
+# names an embedder the core pauses vector search over that index and
+# re-embeds nothing by itself, so the agent's memory search matched words only
+# until somebody forced a rebuild — on a box whose Memory Shard was never
+# switched on, nobody did (a lab board, for nine hours). A box swapped to Hermes
+# and back comes up on the same index: nothing rebuilds it while Hermes runs.
+#
+# So: an index built keyword-only, under a config that names an embedder now,
+# asks for the same one rebuild (`keyword_only`, no reset: there are no
+# vectors to drop). ONCE per embedder setting — `keywordOnlyFor` remembers the
+# setting it was asked for — so a provider that falls back instead of failing
+# (`local`) costs one rebuild, not one at every gateway start.
+#
+# Read from the agent databases directly, READ-ONLY: the core's own reading
+# (`openclaw memory status`) boots the whole CLI, 8-10 s on a Jetson, and has
+# no place inside a pre-start that runs before the gateway. The row is the one
+# the pinned core writes; a core without it reads as "not keyword-only", which
+# asks for nothing.
+_NO_EMBEDDER = ("", "auto", "none")
+
+
+def _embedder_setting(search):
+    """`provider/model` and a digest of where it embeds, or None when no embedder is named."""
+    import hashlib
+    if not isinstance(search, dict):
+        return None
+    _provider = search.get("provider")
+    if not isinstance(_provider, str) or _provider.strip().lower() in _NO_EMBEDDER:
+        return None
+    _model = search.get("model") if isinstance(search.get("model"), str) else ""
+    _remote = search.get("remote") if isinstance(search.get("remote"), dict) else {}
+    _base = _remote.get("baseUrl") if isinstance(_remote.get("baseUrl"), str) else ""
+    _label = "%s/%s" % (_provider.strip(), _model.strip() or "its default model")
+    _key = hashlib.sha256(json.dumps([_provider.strip(), _model.strip(), _base.strip()]).encode("utf-8")).hexdigest()[:16]
+    return _label, _key
+
+
+def _agent_index_keyword_only():
+    """Does any agent's memory index say it was built with no embeddings?"""
+    import glob
+    import sqlite3
+    import urllib.parse
+    _state_dir = os.environ.get("OPENCLAW_STATE_DIR") or os.path.dirname(cfg_path)
+    for _db in sorted(glob.glob(os.path.join(_state_dir, "agents", "*", "agent", "openclaw-agent.sqlite"))):
+        try:
+            _con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(_db), uri=True, timeout=2)
+            try:
+                _row = _con.execute("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'").fetchone()
+            finally:
+                _con.close()
+            _meta = json.loads(_row[0]) if _row else None
+        except Exception:
+            continue
+        if isinstance(_meta, dict) and (_meta.get("provider") == "none" or _meta.get("model") == "fts-only"):
+            return True
+    return False
+
+
+_keyword_only_rebuild = None
+
+
+def _record_keyword_only_rebuild():
+    if not _keyword_only_rebuild:
+        return
+    _label, _key = _keyword_only_rebuild
+    _record_memory_rebuild(
+        ["keyword_only"],
+        note="  Memory index: built keyword-only (no embeddings); %s is set now, so one rebuild runs after the gateway starts" % _label,
+        extra={"keywordOnlyFor": _key},
+    )
 
 
 # Read through globals() like the other migrations here, so a suite that runs a
@@ -4170,6 +4248,13 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
         ):
             _memory_search["model"] = "text-embedding-3-small"
             _memory_index_changes.append("model")
+        _setting = _embedder_setting(_memory_search)
+        if (
+            _setting
+            and _memory_rebuild_state().get("keywordOnlyFor") != _setting[1]
+            and _agent_index_keyword_only()
+        ):
+            _keyword_only_rebuild = _setting
     if _memory_index_changes:
         changed = True
 # --- end memory index defaults ---
@@ -4265,6 +4350,7 @@ if changed:
         os.replace(tmp_path, cfg_path)
         print("  Updated gateway config")
         _record_memory_rebuild(_memory_index_changes)
+        _record_keyword_only_rebuild()
     except Exception as exc:
         if tmp_path is not None:
             try:
@@ -4278,6 +4364,8 @@ if changed:
         )
 else:
     print("  Gateway config already correct, skipping write")
+    # It changes nothing in the config, so it needs no write to land first.
+    _record_keyword_only_rebuild()
 PY
 
 # OpenClaw 2 refuses to start while any legacy auth-profiles.json remains,
@@ -6873,6 +6961,8 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_MEMORY_REBUILD_R
   mkdir -p "$(dirname "$MEMORY_REBUILD_LOG")" 2>/dev/null || true
   setsid nohup python3 -I "$CLAWBOX_DB_MAINTENANCE" memory-rebuild \
     --data-dir "$CLAWBOX_ROOT/data" \
+    --state-dir "$OPENCLAW_STATE_DIR" \
+    --config "$OPENCLAW_CONFIG" \
     --openclaw-bin "$OPENCLAW_BIN" \
     --device-store "$CLAWBOX_DEVICE_STORE" \
     --gateway-port "${GATEWAY_PORT:-18789}" >>"$MEMORY_REBUILD_LOG" 2>&1 &

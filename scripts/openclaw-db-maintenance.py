@@ -61,7 +61,10 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
     Runs ``openclaw memory index --force`` once after the box changed the
     memory index's identity (see the memory block in gateway-pre-start.sh),
     preceded by ``openclaw memory reset --yes`` only when the MODEL changed;
-    bounded, niced, never twice at once, at most three attempts.
+    bounded, niced, never twice at once, at most three attempts. Reads back
+    (read-only) what the core built, and says so when it built the index
+    keyword-only — text and no vectors, the core's fallback when no embedder
+    answers — rather than reporting a rebuild.
 
 ``breaker-watch`` (detached from the pre-start after a ``start-guard`` recovery)
     The failed starts before a recovery trip the core's restart-loop breaker,
@@ -315,6 +318,27 @@ def sqlite_facts(path):
         }
     finally:
         con.close()
+
+
+def memory_index_built(path):
+    """What this agent database's memory index says it was built with — the
+    ``memory_index_meta_v1`` row the pinned core writes, read READ-ONLY — or
+    None when there is no such row to read. A core built with no embedder
+    writes model ``fts-only`` and provider ``none``: text chunks, no vectors."""
+    try:
+        con = sqlite3.connect("file:" + urllib.parse.quote(path) + "?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'").fetchone()
+        finally:
+            con.close()
+        meta = json.loads(row[0]) if row else None
+    except (sqlite3.Error, ValueError, TypeError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def keyword_only(meta):
+    return isinstance(meta, dict) and (meta.get("provider") == "none" or meta.get("model") == "fts-only")
 
 
 # Test seam: the free space every statvfs answers, so a suite can stand in
@@ -1787,11 +1811,35 @@ def cmd_memory_rebuild(args):
         write_json(path, rec)
         warn("memory index rebuild failed (%s); retried at the next gateway start" % rec["lastError"])
         return 0
+    # Exit 0 is not "rebuilt with embeddings". For an unset provider the core's
+    # creation-time fallback indexes text only and still exits 0 — this rebuild
+    # runs at first boot, before the box has set any embedder — and the line
+    # below used to call that a rebuild for the new settings, on an index whose
+    # every search then matched words only. So what was BUILT is read back.
+    built = [
+        memory_index_built(db["path"])
+        for db in (discover(args.state_dir, args.config) if args.state_dir else [])
+        if db["kind"] == "agent"
+    ]
+    text_only = any(keyword_only(meta) for meta in built)
     rec["pending"] = False
     rec["doneAt"] = iso(time.time())
     rec.pop("lastError", None)
+    if text_only:
+        rec["keywordOnly"] = True
+    else:
+        rec.pop("keywordOnly", None)
     write_json(path, rec)
-    log("memory index rebuilt for the new settings (session transcripts no longer indexed); its freed pages are compacted at the next gateway start")
+    if text_only:
+        # Not retried here: the same settings would build the same thing. The
+        # gateway pre-start asks again once memory.search names an embedder.
+        warn("memory index rebuilt KEYWORD-ONLY: no embedding provider answered, so it holds text and no vectors and memory search matches words only; it is rebuilt once memory.search names an embedder")
+    elif "keyword_only" in (rec.get("reasons") or []):
+        embedded = next((meta for meta in built if isinstance(meta, dict) and not keyword_only(meta)), {})
+        log("memory index rebuilt with embeddings (%s/%s): it had been built keyword-only"
+            % (embedded.get("provider") or "?", embedded.get("model") or "?"))
+    else:
+        log("memory index rebuilt for the new settings (session transcripts no longer indexed); its freed pages are compacted at the next gateway start")
     return 0
 
 
@@ -2082,6 +2130,9 @@ def main(argv=None):
 
     p = sub.add_parser("memory-rebuild")
     p.add_argument("--data-dir", required=True)
+    # Where the agent databases are, to read back what the rebuild built.
+    p.add_argument("--state-dir", default=None)
+    p.add_argument("--config", default=None)
     p.add_argument("--openclaw-bin", required=True)
     p.add_argument("--device-store", default=None)
     p.add_argument("--gateway-port", type=int, default=18789)
