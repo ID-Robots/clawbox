@@ -8,6 +8,7 @@ import {
   asHarnessError,
   HarnessError,
   type ClarifyQuestion,
+  type ConversationModel,
   type FetchLike,
   type HarnessAdapter,
   type HarnessCapabilities,
@@ -343,6 +344,13 @@ export class HermesAdapter implements HarnessAdapter {
    */
   private readonly sessions = new Map<string, string>();
   /**
+   * The model each of those sessions answers on, as its turns recorded it. A
+   * resumed session keeps its frozen launch from Hermes v0.22.4, so this is
+   * what the conversation goes on answering with after the header changes
+   * model — see `conversationModel`.
+   */
+  private readonly sessionModels = new Map<string, ConversationModel>();
+  /**
    * The in-flight turn per conversation, so Stop aborts the one the owner is
    * looking at and closing a tab aborts its own. A turn left running in
    * another tab is the point of a second tab, not collateral.
@@ -507,6 +515,7 @@ export class HermesAdapter implements HarnessAdapter {
       if (typeof data.sessionId === "string" && data.sessionId) {
         this.sessions.set(key, data.sessionId);
       }
+      this.holdSessionModel(key, resumed, data);
       // Same MEDIA: split as the gateway path, so a picture renders the same
       // way whichever edition answered.
       const reply = splitAssistantMedia(typeof data.text === "string" ? data.text : "");
@@ -571,6 +580,7 @@ export class HermesAdapter implements HarnessAdapter {
   async resetSession(): Promise<void> {
     const key = this.context().sessionKey;
     this.sessions.delete(key);
+    this.sessionModels.delete(key);
     // …and the replay log with it. Clearing only the session id would make the
     // agent forget while the screen refilled with the old conversation on the
     // next refresh — the worst of both, and exactly the split the durable
@@ -603,7 +613,41 @@ export class HermesAdapter implements HarnessAdapter {
   async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
     if (opts.running) this.inFlight.get(key)?.abort();
     this.sessions.delete(key);
+    this.sessionModels.delete(key);
     await this.deleteTranscript(key);
+  }
+
+  /**
+   * Only while a session is threaded: a conversation with none — a new chat,
+   * or one this page reloaded into, whose session id was never handed back —
+   * opens a fresh session on its next turn, and that one runs on whatever the
+   * header sends.
+   */
+  conversationModel(sessionKey: string): ConversationModel | null {
+    if (!this.sessions.has(sessionKey)) return null;
+    return this.sessionModels.get(sessionKey) ?? null;
+  }
+
+  /**
+   * Keep what the session behind `key` answers on, after a turn that came
+   * back. A turn that recorded a model settles it — the dashboard's own session
+   * info after any `/model … --session` switch, or the argv a NEW CLI session
+   * ran with. A RESUMED turn that recorded nothing was answered by the
+   * session's own route (the v0.22.4 CLI resume sends no `-m`), which is the
+   * model it already held, so that stays. A session this turn OPENED with
+   * nothing recorded is unknown, and unknown claims nothing.
+   */
+  private holdSessionModel(key: string, resumed: string | undefined, data: Record<string, unknown>): void {
+    const threaded = this.sessions.get(key);
+    const model = typeof data.model === "string" ? data.model.trim() : "";
+    if (!threaded) {
+      this.sessionModels.delete(key);
+    } else if (model) {
+      const provider = typeof data.provider === "string" ? data.provider.trim() : "";
+      this.sessionModels.set(key, { model, ...(provider ? { provider } : {}) });
+    } else if (threaded !== resumed) {
+      this.sessionModels.delete(key);
+    }
   }
 
   /**

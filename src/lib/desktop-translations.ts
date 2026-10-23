@@ -449,6 +449,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.closePreview": "Close preview",
     "chat.connectingPlaceholder": "Connecting...",
     "chat.tabNew": "New chat",
+    "chat.keepsItsModel": "This chat keeps its model; start a new chat to use the new model.",
     "chat.tabList": "Chats",
     "chat.tabBusy": "{label}, working",
     "chat.tabUnread": "{label}, new reply",
