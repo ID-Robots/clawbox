@@ -175,6 +175,17 @@ vi.mock("@/lib/plugin-repair-after-update", () => ({
   retryPluginRepairsAfterCoreUpdate: mockRetryAfterCoreUpdate,
 }));
 
+// What the agent databases weigh, which sizes the verify's `doctor --fix`.
+// 0 by default — what the real reader answers under this file's mocked
+// `fs/promises` — so only the cases about a large box move.
+const { mockOpenclawDatabaseBytes } = vi.hoisted(() => ({
+  mockOpenclawDatabaseBytes: vi.fn<(stateDir: string) => Promise<number>>(async () => 0),
+}));
+vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
+  openclawDatabaseBytes: mockOpenclawDatabaseBytes,
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
@@ -3827,6 +3838,119 @@ describe("updater", () => {
    *                   which is how a config refusal reads as "the gateway is
    *                   not listening".
    */
+  /**
+   * The verify's `doctor --fix` on a box with gigabytes of agent databases.
+   *
+   * A flat 90 s stopped it on every ~3 GB box, so the repairs it makes in the
+   * verify never landed there and every such update ended with "doctor --fix
+   * did not complete". The doctor below behaves like node's `execFile` bound: it
+   * needs time in proportion to the databases, and one given less is killed.
+   */
+  describe("a doctor sized to the agent databases", () => {
+    const GiB = 1024 ** 3;
+    // Slower than the verify's old flat bound allows for three of them.
+    const DOCTOR_MS_PER_GIB = 45_000;
+    const killedWarning = () => updater.getUpdateState().warnings?.find((w) => w.code === "openclaw-doctor-fix-failed");
+
+    let doctorTimeouts: number[];
+
+    /** Every answer as before, and a doctor that takes `bytes`' worth of time. */
+    function doctorTakesTimeFor(bytes: number) {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      const answer = mockExecFile.getMockImplementation()!;
+      doctorTimeouts = [];
+      mockExecFile.mockImplementation(((cmd: string, args: string[], opts: { timeout?: number }, cb?: (err: Error | null, out: { stdout: string; stderr: string }) => void) => {
+        if (!(args.includes("doctor") && args.includes("--fix"))) {
+          return (answer as unknown as (...a: unknown[]) => unknown)(cmd, args, opts, cb);
+        }
+        const timeout = opts?.timeout ?? 0;
+        doctorTimeouts.push(timeout);
+        const needsMs = Math.ceil(bytes / GiB) * DOCTOR_MS_PER_GIB;
+        // The gateway comes back once doctor has had its turn, however it ended.
+        mockGatewayUp.mockResolvedValue(true);
+        if (timeout > 0 && needsMs > timeout) {
+          cb?.(Object.assign(new Error("Command failed: openclaw doctor --fix --yes --non-interactive"), {
+            killed: true, signal: "SIGTERM", stdout: "Checking agent databases...\n", stderr: "",
+          }), { stdout: "", stderr: "" });
+        } else {
+          cb?.(null, { stdout: "Doctor complete.\n", stderr: "" });
+        }
+        return undefined as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
+    }
+
+    async function verifyOnBoxWith(bytes: number) {
+      vi.resetModules();
+      mockOpenclawDatabaseBytes.mockResolvedValue(bytes);
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      doctorTakesTimeFor(bytes);
+      // Down until doctor has run: the verify's recovery is what runs it.
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+    }
+
+    afterEach(() => {
+      mockOpenclawDatabaseBytes.mockResolvedValue(0);
+    });
+
+    it("lets doctor finish on a box with ~3 GB of agent databases", async () => {
+      const logged = vi.spyOn(console, "log");
+      await verifyOnBoxWith(3e9);
+
+      // The bound is in the update's log, with the size it was scaled by.
+      expect(logged.mock.calls.map((c) => String(c[0]))).toContain(
+        "[Updater] openclaw doctor --fix: bound 450s for 2.79 GiB of OpenClaw databases",
+      );
+      logged.mockRestore();
+
+      expect(doctorTimeouts.length).toBeGreaterThan(0);
+      // Not cut off, so the update says nothing about it...
+      expect(killedWarning()?.message).toBeUndefined();
+      expect(updater.getUpdateState().phase).toBe("completed");
+      // ...because its bound grew with the databases instead of the flat 90 s:
+      // three started GiB at two minutes each on top.
+      expect(Math.min(...doctorTimeouts)).toBeGreaterThan(90_000);
+      expect(doctorTimeouts.every((t) => t === 450_000)).toBe(true);
+      expect(updater.doctorFixTimeoutFor(3e9)).toBe(450_000);
+      expect(mockOpenclawDatabaseBytes).toHaveBeenCalled();
+    });
+
+    it("keeps the old 90 s for a box with no databases to read", async () => {
+      const logged = vi.spyOn(console, "log");
+      await verifyOnBoxWith(0);
+
+      expect(logged.mock.calls.map((c) => String(c[0]))).toContain(
+        "[Updater] openclaw doctor --fix: bound 90s for 0.00 GiB of OpenClaw databases",
+      );
+      logged.mockRestore();
+      expect(doctorTimeouts.length).toBeGreaterThan(0);
+      expect(doctorTimeouts.every((t) => t === 90_000)).toBe(true);
+      expect(killedWarning()).toBeUndefined();
+    });
+
+    it("still stops at the cap, and names the bound it was actually given", async () => {
+      // Fifty GiB of databases: doctor would need over half an hour, and the
+      // gateway is stopped for all of it — the cap is what keeps a verify sane.
+      await verifyOnBoxWith(50 * GiB);
+
+      expect(doctorTimeouts.every((t) => t === 1_200_000)).toBe(true);
+      expect(killedWarning()?.message).toContain("it was still running after 1200s and was stopped");
+      // A doctor that could not finish is a warning, not a failed update: the
+      // restart and the port probe after it are the verdict.
+      expect(updater.getUpdateState().phase).toBe("completed");
+    });
+  });
+
   describe("a core the config no longer suits", () => {
     // The mock matches on `key.includes(k) || k.includes(cmd)`, and `cmd` is
     // whatever `findOpenclawBin()` resolved — the bare string `openclaw` on a

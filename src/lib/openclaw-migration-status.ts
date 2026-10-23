@@ -167,3 +167,35 @@ export function migrationBudgetMs(
   const gib = Math.ceil(bytes / 1024 ** 3);
   return Math.min(budget.capMs, budget.baseMs + gib * budget.perGibMs);
 }
+
+/**
+ * What one `openclaw doctor --fix` costs per GiB of agent database on a Jetson
+ * Nano, rounded up. Doctor reads every database it repairs, and the first run
+ * under a core converts each one to incremental auto_vacuum — a full VACUUM
+ * plus `quick_check`/`integrity_check` (sqlite-maintenance in the pinned docs).
+ * The compaction measured beside it in scripts/openclaw-db-maintenance.py runs
+ * at ~16 MiB/s, a minute a GiB for the copy alone; the checks read it again.
+ */
+export const DOCTOR_FIX_MS_PER_GIB = 120_000;
+/**
+ * The longest any `doctor --fix` is given, however large the databases. The
+ * gateway is stopped for the whole run, so this is how long an owner's agents
+ * may be dark for a repair; a database that needs longer is a schema
+ * migration, which the update's `openclaw_install` step owns with its own
+ * budget (`openclawInstallTimeoutFor`).
+ */
+export const DOCTOR_FIX_CAP_MS = 1_200_000;
+
+/**
+ * The bound for one `openclaw doctor --fix`: the caller's old flat `baseMs`
+ * plus two minutes for every started GiB of database, never past twenty
+ * minutes (nor below `baseMs`). A flat 90 s was cut off on every ~3 GB box, and
+ * a doctor stopped half-way leaves its repairs for the next start to redo.
+ */
+export function doctorFixBudgetMs(databaseBytes: number, baseMs: number): number {
+  return migrationBudgetMs(databaseBytes, {
+    baseMs,
+    perGibMs: DOCTOR_FIX_MS_PER_GIB,
+    capMs: Math.max(baseMs, DOCTOR_FIX_CAP_MS),
+  });
+}

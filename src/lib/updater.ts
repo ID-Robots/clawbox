@@ -126,7 +126,7 @@ import {
   downgradeAuthorizedFor,
   writeDowngradeAuthorization,
 } from "./harness-downgrade-backup";
-import { describeOpenclawMigration, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
+import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -2056,7 +2056,25 @@ const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || 
 // tunable: a pre-start still running at this point is killed by systemd
 // itself, so the wait below never outlives the thing it waits for.
 const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
+// The floor of the update's `doctor --fix` bound; it grows with the databases.
 const DOCTOR_FIX_TIMEOUT_MS = 90_000;
+
+/**
+ * How long the update's `openclaw doctor --fix` (gateway_verify, and the
+ * standalone OpenClaw update's gateway_restart) may run on a box whose OpenClaw
+ * databases weigh `databaseBytes`: the old flat 90 s plus two minutes a GiB,
+ * never past twenty minutes (`doctorFixBudgetMs`).
+ *
+ * The flat 90 s was cut off on every box with ~3 GB of agent databases, so the
+ * repairs doctor exists to make in the verify never landed there. The cap is
+ * what keeps the verify sane: the gateway is stopped for the whole run, and a
+ * schema migration, the one thing that legitimately takes longer, belongs to
+ * `openclaw_install`'s own budget.
+ */
+export function doctorFixTimeoutFor(databaseBytes: number): number {
+  return doctorFixBudgetMs(databaseBytes, DOCTOR_FIX_TIMEOUT_MS);
+}
+
 const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
@@ -2196,6 +2214,14 @@ function doctorChildEnv(): NodeJS.ProcessEnv {
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
+  // Measured per run, before doctor touches them: the verify's doctor reads
+  // every agent database, and a flat 90 s stopped it on every ~3 GB box.
+  const databaseBytes = await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0);
+  const timeoutMs = doctorFixTimeoutFor(databaseBytes);
+  // Said on every run, not only when doctor is cut off: the bound it was given
+  // is what tells a field log "not long enough" apart from "stuck".
+  console.log(`[Updater] openclaw doctor --fix: bound ${Math.round(timeoutMs / 1000)}s `
+    + `for ${(databaseBytes / 1024 ** 3).toFixed(2)} GiB of OpenClaw databases`);
   try {
     // Asked again while another holder has the state under maintenance: the
     // core refuses before it acts (`@/lib/openclaw-maintenance`).
@@ -2203,7 +2229,7 @@ async function runOpenclawDoctorFix(): Promise<void> {
       timeout,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
-    }), { timeoutMs: DOCTOR_FIX_TIMEOUT_MS, label: "openclaw doctor --fix" });
+    }), { timeoutMs, label: "openclaw doctor --fix" });
   } catch (err) {
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
@@ -2239,7 +2265,7 @@ async function runOpenclawDoctorFix(): Promise<void> {
       return;
     }
     warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
-      + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err)}`);
+      + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err, timeoutMs)}`);
   }
 }
 
@@ -2250,12 +2276,13 @@ async function runOpenclawDoctorFix(): Promise<void> {
  * warning built from its first line would name the command back at the owner
  * and nothing else. Doctor states its own blocker — `Legacy exec approvals
  * exist at …` is the one this card is about — and it states it in the output,
- * so that is what is quoted. A killed child is called killed, because a 90 s
- * timeout and a refusal are not the same problem.
+ * so that is what is quoted. A killed child is called killed, with the bound
+ * it was actually given, because a timeout and a refusal are not the same
+ * problem.
  */
-function describeDoctorFailure(err: unknown): string {
+function describeDoctorFailure(err: unknown, timeoutMs: number): string {
   if ((err as { killed?: boolean } | null)?.killed) {
-    return `it was still running after ${Math.round(DOCTOR_FIX_TIMEOUT_MS / 1000)}s and was stopped`;
+    return `it was still running after ${Math.round(timeoutMs / 1000)}s and was stopped`;
   }
   const said = commandOutput(err)
     .split(/\r?\n/)

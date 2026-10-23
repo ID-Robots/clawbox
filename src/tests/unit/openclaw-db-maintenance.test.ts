@@ -314,11 +314,21 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     return bak;
   }
 
+  /**
+   * The gateway reached `gateway ready` after the copies were taken: what
+   * `start-guard` records at the next start. Without it a copy is the way
+   * back from a row the core refuses, and stays.
+   */
+  function gatewayStartedSince(): void {
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({ version: 1, provenAt: Date.now() / 1000 + 1 }));
+  }
+
   it("compacts a migrated database whatever its free pages, then retires its copy", () => {
     makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
     const bak = backup(agentDb("main"));
     const stateBak = backup(stateDb());
 
+    gatewayStartedSince();
     const r = prestart();
 
     expect(calledWith()).toEqual([
@@ -330,6 +340,38 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     expect(existsSync(stateBak)).toBe(false);
     expect(r.out).toMatch(/removed the pre-migration copy of agent main \(50 KB\): the migrated database passed its integrity check/);
     expect(record().cleanup.removedBytes).toBe(100_000);
+  });
+
+  it("keeps a verified copy until the gateway has started on the migrated database", () => {
+    // Every SQLite check can pass over a row the core refuses at startup —
+    // the start loop this copy is the way back from. The first start after an
+    // update used to retire it before the new core had ever run.
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const bak = backup(agentDb("main"));
+
+    const r = prestart();
+
+    expect(record().databases["agent:main"].lastCompact.ok).toBe(true);
+    expect(existsSync(bak)).toBe(true);
+    expect(r.out).toMatch(/rollback copy of agent main kept until the gateway has started on the migrated database/);
+    expect(calledWith()).not.toContain("update cleanup --yes --json");
+  });
+
+  it("keeps every copy while a start-loop recovery has not settled", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const bak = backup(agentDb("main"));
+    const now = Date.now() / 1000;
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({
+      version: 1,
+      // A ready line from before the recovery proves nothing about after it.
+      provenAt: now + 1,
+      episode: { stage: "repaired", actedFrom: now + 2, actedTo: now + 3 },
+    }));
+
+    const r = prestart();
+
+    expect(existsSync(bak)).toBe(true);
+    expect(r.out).toMatch(/migration rollback copies kept: the gateway's start-loop recovery has not settled/);
   });
 
   it("keeps every copy while any database is still behind the declared schema", () => {
@@ -389,6 +431,7 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     writeFileSync(path.join(captures, ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
     writeFileSync(path.join(captures, "run-1", "openclaw.sqlite"), "y".repeat(5_000));
 
+    gatewayStartedSince();
     const r = prestart();
 
     expect(calledWith()).toEqual([
@@ -429,6 +472,7 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     mkdirSync(path.join(captures, "someone-elses"), { recursive: true });
     writeFileSync(path.join(captures, "someone-elses", "keep.txt"), "mine");
 
+    gatewayStartedSince();
     const r = prestart();
 
     expect(existsSync(path.join(captures, "run-1"))).toBe(false);

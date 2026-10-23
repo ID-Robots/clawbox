@@ -28,7 +28,23 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
        VERIFIED: every database on the declared schema, no incomplete doctor
        run recorded for this core, and a successful compaction — which runs
        OpenClaw's ``quick_check``/``integrity_check``/``foreign_key_check`` —
-       of the database AFTER its copy was taken.
+       of the database AFTER its copy was taken. And only once the gateway has
+       STARTED on the migrated databases (``start-guard`` below records that):
+       a database can pass every SQLite check and still hold a row the core
+       refuses at startup, and the copy is then the way back.
+
+``start-guard`` (run by scripts/gateway-pre-start.sh, first, gateway stopped)
+    A single row the core refuses in the default agent's database (or the
+    shared one) stops the gateway from starting, and ``Restart=always`` then
+    restarts it every few seconds with nothing changing. When the unit has
+    restarted itself three times running and the gateway's own output names a
+    database it refused, this runs the core's own repair (``doctor --fix``,
+    then ``doctor --session-sqlite recover``, which renames a corrupt set aside
+    rather than deleting it); when the next start still fails on a database,
+    it puts back the newest pre-update copy of THAT database, setting the
+    current one aside, never deleting it. What it did is recorded in
+    ``data/openclaw-start-guard.json`` for the owner
+    (``src/lib/openclaw-start-recovery.ts``).
 
 ``preflight`` (run by install.sh before it promotes a new core / runs doctor)
     Refuses (exit 3) a core OLDER than the databases on disk — one a newer core
@@ -52,7 +68,7 @@ every change is the core's own command. The one thing deleted by hand is the
 migration's rollback copies, and only under the verification above — the core's
 own ``openclaw update cleanup`` is asked first, but it keeps every group until
 its OWN updater has recorded a later successful update, which ClawBox, which
-installs the pinned core with npm, never does. The one thing MOVED by hand is a
+installs the pinned core with npm, never does. Two things are MOVED by hand. A
 database newer than the core being installed, under the owner's override only:
 OpenClaw has no downgrade of its own (its docs: install a build that supports
 the schema, restore a backup matching the older build, or give the older build
@@ -60,6 +76,10 @@ a separate state dir; ``doctor --fix`` cannot repair a newer schema), so the
 files go, whole and unedited, beside the backup taken first, and the older core
 creates fresh ones — the separate state the core's own advice describes, for
 exactly the databases it cannot open.
+And ``start-guard``'s restore of a rollback copy, for which the core has no
+command either: its ``backup sqlite restore`` takes only its own snapshots,
+and its docs keep these groups for the operator "to restore the matching
+database generation".
 
 Exit status is 0 except ``preflight``'s refusal (3) and usage errors (2): this
 runs inside a blocking ExecStartPre, and a housekeeping failure must cost the
@@ -114,6 +134,38 @@ CLI_OVERHEAD_S = 20
 # migrates plus a gigabyte, the top of that range.
 DEFAULT_MIGRATION_FACTOR = 6.0
 DEFAULT_MIGRATION_MARGIN = 1024 * 1024 * 1024
+
+# ── start-guard ───────────────────────────────────────────────────────────
+GUARD_FILE = "openclaw-start-guard.json"
+GATEWAY_UNIT = "clawbox-gateway.service"
+# What journald calls this pre-start's own output (and the CLIs it runs).
+PRESTART_IDENT = "gateway-pre-start.sh"
+# Automatic restarts in a row before a failing start is called a loop. The
+# incident behind this was a dozen in eight minutes; three is the second minute.
+LOOP_RESTARTS = 3
+# ...all inside this window: three crashes over a month are not a loop.
+LOOP_WINDOW_S = 1800
+# An action is answered by the starts right after it; StartLimitBurst=20 per
+# hour ends any loop long before this, so an older one is a new episode.
+EPISODE_S = 3600
+# Rollback copies are kept this long at most without proof that the gateway
+# started on the migrated databases (no journal access, /tmp wiped by a reboot).
+COPY_PROOF_MAX_AGE_S = 7 * 86400
+STARTS_KEPT = 20
+# The restore leg's own names: a set-aside generation, and a copy on its way in.
+SET_ASIDE_MARK = ".clawbox-start-loop-"
+RESTORING_MARK = ".clawbox-restoring-"
+SQLITE_SIDECARS = ("", "-wal", "-shm", "-journal")
+# A plain file copy on the box's storage, planned well below what it does.
+RESTORE_COPY_BPS = 48 * 1024 * 1024
+RESTORE_MARGIN = 64 * 1024 * 1024
+# How much of each OpenClaw log file is read: the tail is where today is.
+LOG_TAIL_BYTES = 4 * 1024 * 1024
+# The updater's bound for one `doctor --fix` (src/lib/openclaw-migration-status.ts
+# doctorFixBudgetMs): 90 s plus two minutes a GiB, never past twenty minutes.
+DOCTOR_FIX_BASE_S = 90
+DOCTOR_FIX_PER_GIB_S = 120
+DOCTOR_FIX_CAP_S = 1200
 
 
 def log(msg):
@@ -801,6 +853,10 @@ def cleanup(args, dbs, core, status, record, deadline):
     if not ok:
         log("migration rollback copies kept: %s" % why)
         return
+    guard = read_json(os.path.join(args.data_dir, GUARD_FILE)) or {}
+    if recovery_unsettled(guard, time.time()):
+        log("migration rollback copies kept: the gateway's start-loop recovery has not settled")
+        return
     native_tried = False
     removed = 0
     for db in pending:
@@ -809,6 +865,9 @@ def cleanup(args, dbs, core, status, record, deadline):
             continue
         if not verified_after_backup(db, record):
             log("rollback copy of %s kept until a compaction has checked its integrity" % label(db))
+            continue
+        if not started_since(guard, max(b["mtime"] for b in db["backups"])):
+            log("rollback copy of %s kept until the gateway has started on the migrated database" % label(db))
             continue
         if not native_tried:
             native_tried = True
@@ -837,6 +896,9 @@ def cleanup(args, dbs, core, status, record, deadline):
         if not dbs or unchecked:
             log("update capture %s kept until %s has passed a compaction's integrity check" % (
                 os.path.basename(run), label(unchecked[0]) if unchecked else "a database"))
+            continue
+        if not started_since(guard, written):
+            log("update capture %s kept until the gateway has started on the migrated databases" % os.path.basename(run))
             continue
         freed = remove_tree(run)
         removed += freed
@@ -892,6 +954,540 @@ def cmd_prestart(args):
     record["updatedAt"] = iso(time.time())
     write_json(record_path, record)
     return 0
+
+
+# ── start-guard (gateway pre-start, first) ────────────────────────────────
+#
+# The incident: one session row the core refused in an agent database, and the
+# gateway exited at every start — `Restart=always` brought it back a dozen
+# times in eight minutes and nothing between two starts changed a thing. The
+# core degrades a secondary agent whose database it cannot admit and carries
+# on; the default or system agent's database, or the shared one, still stops
+# startup (integrity-and-recovery, state-and-sessions in the pinned docs).
+#
+# Evidence is the GATEWAY's own words, never this script's: its lines in the
+# unit's journal (when this account may read it — the web server's is not
+# always in a journal-reading group) and its rolling log file, which the same
+# account writes. Lines from this pre-start and from systemd are left out, and
+# so is anything logged while this guard's own commands ran.
+
+# A line about one of OpenClaw's databases...
+DB_SUBJECT_RE = re.compile(
+    r"agent[ -]database|openclaw-agent\.sqlite|openclaw\.sqlite|shared[ -]state database"
+    r"|session (?:row|store|record|entr(?:y|ies)|index)|sessions? table"
+    r"|SQLITE_CORRUPT|database disk image is malformed|malformed database schema",
+    re.IGNORECASE,
+)
+# ...that says it went wrong. Not "degraded": that is the core carrying on
+# without a secondary agent, which is not what stops a start.
+DB_FAILURE_RE = re.compile(r"invalid|malformed|validat|fail|refus|corrupt|cannot|unable|admission|error", re.IGNORECASE)
+# The core's own readiness line, announced on the same readiness decision that
+# admits the databases (gateway/health in the pinned docs). Not the HTTP
+# listener's line, which comes up before admission, and case-sensitive so a
+# channel's own "Gateway READY" is not taken for it.
+READY_RE = re.compile(r"\[gateway\] ready\b|(?:^|\")gateway ready(?:\"|$)")
+_ID = r"([A-Za-z0-9][A-Za-z0-9_.-]{0,127})"
+AGENT_REF_RES = (
+    re.compile(r"agent-database:" + _ID),
+    re.compile(r"/agents/" + _ID + r"/agent/"),
+    re.compile(r"agentId\\?[\"']?\s*[:=]\s*\\?[\"']?" + _ID),
+    re.compile(r"agent database\s+[\"'`(]?" + _ID, re.IGNORECASE),
+    re.compile(r"\bagent\s+[\"'`]" + _ID + r"[\"'`]", re.IGNORECASE),
+    # A session key, `agent:<id>:<rest>`: how 2026.10.6 names the agent when it
+    # refuses a row ("invalid persisted session row requires repair for
+    # agent:main:<key>"), with no database path or agent id beside it.
+    re.compile(r"(?<![A-Za-z0-9_.-])agent:" + _ID + r":"),
+)
+SQLITE_PATH_RE = re.compile(r"(/[^\s'\"\\,;()]+?\.sqlite)(?![A-Za-z0-9_.])")
+STATE_REF_RE = re.compile(r"shared[ -]state database", re.IGNORECASE)
+LOG_TIME_KEYS = ("time", "ts", "timestamp", "@timestamp", "date")
+
+
+def stamp(ts):
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(ts))
+
+
+def doctor_fix_seconds(database_bytes):
+    gib = -(-max(0, database_bytes) // (1024 ** 3))
+    return min(DOCTOR_FIX_CAP_S, DOCTOR_FIX_BASE_S + gib * DOCTOR_FIX_PER_GIB_S)
+
+
+def started_since(guard, moment):
+    """The gateway is known to have started after `moment` — or `moment` is
+    over a week old, past which nothing here can still tell."""
+    proven = guard.get("provenAt")
+    if isinstance(proven, (int, float)) and proven > moment:
+        return True
+    return time.time() - moment > COPY_PROOF_MAX_AGE_S
+
+
+def recovery_unsettled(guard, now):
+    """A start-loop recovery that the gateway has not yet started after."""
+    episode = guard.get("episode")
+    if not isinstance(episode, dict) or episode.get("settledAt"):
+        return False
+    acted = episode.get("actedTo")
+    return isinstance(acted, (int, float)) and now - acted < COPY_PROOF_MAX_AGE_S
+
+
+def _parse_time(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000.0 if value > 1e11 else float(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    import datetime
+
+    try:
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def journal_lines(unit, since):
+    """(time, text) the gateway printed under `unit` since `since`; [] when
+    the journal cannot be read."""
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", unit, "--since", "@%d" % int(since), "-o", "json", "--no-pager", "-q", "-n", "20000"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for raw in proc.stdout.decode("utf-8", "replace").splitlines():
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("SYSLOG_IDENTIFIER") in ("systemd", PRESTART_IDENT):
+            continue
+        msg = entry.get("MESSAGE")
+        if isinstance(msg, list):
+            try:
+                msg = bytes(msg).decode("utf-8", "replace")
+            except (TypeError, ValueError):
+                continue
+        try:
+            at = int(entry.get("__REALTIME_TIMESTAMP")) / 1e6
+        except (TypeError, ValueError):
+            continue
+        if isinstance(msg, str) and "[db-maintenance]" not in msg:
+            out.append((at, msg))
+    return out
+
+
+def openclaw_log_files(config_path, overrides):
+    """The core's rolling log files: `logging.file` when the config names one,
+    else `openclaw-*.log` in its default directories."""
+    if overrides:
+        dirs, files = list(overrides), []
+    else:
+        cfg = read_json(config_path) if config_path else None
+        logging_cfg = (cfg or {}).get("logging")
+        configured = logging_cfg.get("file") if isinstance(logging_cfg, dict) else None
+        files = [os.path.expanduser(configured.strip())] if isinstance(configured, str) and configured.strip() else []
+        tmp = os.environ.get("TMPDIR") or "/tmp"
+        dirs = ["/tmp/openclaw", os.path.join(tmp, "openclaw"), os.path.join(tmp, "openclaw-%d" % os.getuid())]
+    seen = set(files)
+    for directory in dirs:
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(directory, name)
+            if name.startswith("openclaw") and name.endswith(".log") and full not in seen:
+                seen.add(full)
+                files.append(full)
+    return files
+
+
+def file_log_lines(files, since):
+    """(time, raw line) from the tail of each log file written since `since`.
+    A line with no time of its own is left out: it cannot be placed."""
+    out = []
+    for path in files:
+        st = regular_file(path)
+        if not st or max(st.st_mtime, st.st_ctime) < since:
+            continue
+        try:
+            with open(path, "rb") as fh:
+                if st.st_size > LOG_TAIL_BYTES:
+                    fh.seek(st.st_size - LOG_TAIL_BYTES)
+                    fh.readline()
+                data = fh.read()
+        except OSError:
+            continue
+        for raw in data.decode("utf-8", "replace").splitlines():
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            at = None
+            for key in LOG_TIME_KEYS:
+                at = _parse_time(obj.get(key))
+                if at is not None:
+                    break
+            if at is not None and at >= since:
+                out.append((at, raw))
+    return out
+
+
+def outside(at, windows):
+    return not any(start <= at <= end for start, end in windows)
+
+
+def database_failures(lines, windows, after=0.0):
+    return [(at, text) for at, text in lines
+            if at > after and outside(at, windows) and DB_SUBJECT_RE.search(text) and DB_FAILURE_RE.search(text)]
+
+
+def named_databases(lines, dbs):
+    """The inventory entries the failure lines name — by agent id or path,
+    never one that is not on this box."""
+    by_agent = {db["agentId"]: db for db in dbs if db["kind"] == "agent"}
+    by_path = {}
+    for db in dbs:
+        by_path[os.path.realpath(db["path"])] = db
+    state = next((db for db in dbs if db["kind"] == "state"), None)
+    found = {}
+    for _at, text in lines:
+        for rx in AGENT_REF_RES:
+            for m in rx.finditer(text):
+                db = by_agent.get(m.group(1))
+                if db:
+                    found[key_of(db)] = db
+        for m in SQLITE_PATH_RE.finditer(text):
+            db = by_path.get(os.path.realpath(m.group(1)))
+            if db:
+                found[key_of(db)] = db
+        if state and STATE_REF_RE.search(text):
+            found[key_of(state)] = state
+    return [found[k] for k in sorted(found)]
+
+
+def startup_critical(dbs, config_path):
+    """The databases whose refusal stops the gateway from starting: the shared
+    state database and the default and system agents' (`agents.entries.<id>
+    .default`, `agents.defaults.systemAgent.agentId`; `main` when no entry is
+    marked default). A secondary agent's is degraded and the gateway carries on
+    without it, so it is never what a start loop is about."""
+    cfg = read_json(config_path) if config_path else None
+    agents = (cfg or {}).get("agents") if isinstance((cfg or {}).get("agents"), dict) else {}
+    entries = agents.get("entries") if isinstance(agents.get("entries"), dict) else {}
+    ids = {str(k) for k, v in entries.items() if isinstance(v, dict) and v.get("default") is True}
+    if not ids:
+        ids.add("main")
+    defaults = agents.get("defaults") if isinstance(agents.get("defaults"), dict) else {}
+    system = defaults.get("systemAgent") if isinstance(defaults.get("systemAgent"), dict) else {}
+    if isinstance(system.get("agentId"), str):
+        ids.add(system["agentId"])
+    return [db for db in dbs if db["kind"] == "state" or db.get("agentId") in ids]
+
+
+def step_of(name, rc, out, err):
+    tail = (err.strip().splitlines() or out.strip().splitlines() or [""])[-1][:300]
+    return {"command": name, "exit": rc, "said": tail}
+
+
+def repair_leg(args, dbs, deadline):
+    """The core's own repair: `doctor --fix`, then `doctor --session-sqlite
+    recover` — which renames a corrupt database set aside (`.corrupt-<time>`)
+    rather than deleting anything. (complete, steps)."""
+    binary = args.openclaw_bin
+    weight = sum(size_of(db["path"]) + size_of(db["path"] + "-wal") for db in dbs)
+    steps = []
+    left = deadline - time.monotonic() - KILL_GRACE_S
+    # A minute of what is left is kept for the recovery pass.
+    timeout = int(min(doctor_fix_seconds(weight), left - 60))
+    if timeout < 30:
+        return False, steps
+    log("running openclaw doctor --fix (at most %d s)" % timeout)
+    rc, out, err = _run(binary, ["doctor", "--fix", "--non-interactive", "--yes"], timeout)
+    steps.append(step_of("doctor --fix", rc, out, err))
+    left = int(deadline - time.monotonic() - KILL_GRACE_S)
+    if left < 30:
+        return False, steps
+    log("running openclaw doctor --session-sqlite recover (at most %d s)" % left)
+    rc, out, err = _run(binary, ["doctor", "--session-sqlite", "recover", "--session-sqlite-all-agents", "--non-interactive", "--json"], left)
+    step = step_of("doctor --session-sqlite recover", rc, out, err)
+    report = last_json_object(out)
+    if isinstance(report, dict) and isinstance(report.get("recoveryIssues"), list):
+        step["recoveryIssues"] = len(report["recoveryIssues"])
+    steps.append(step)
+    # Complete only when both commands said so: a doctor that exited non-zero
+    # did not finish its repair, whatever it changed on the way.
+    return all(s["exit"] == 0 for s in steps), steps
+
+
+def _fsync_dir(directory):
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def restore_database(db, backup, now, deadline):
+    """Put `backup` in place of `db`'s file set: the current set renamed aside
+    with one suffix (never deleted), the copy written beside it first and moved
+    in last, so a stop half-way changes nothing. (setAside paths, None) or
+    (None, reason)."""
+    path = db["path"]
+    directory = os.path.dirname(path)
+    avail = free_bytes(directory)
+    if avail is not None and avail < backup["bytes"] + RESTORE_MARGIN:
+        return None, "insufficient-disk"
+    if backup["bytes"] / float(RESTORE_COPY_BPS) > deadline - time.monotonic() - KILL_GRACE_S:
+        return None, "no-time"
+    tmp = path + RESTORING_MARK + str(os.getpid())
+    try:
+        with open(backup["path"], "rb") as src, open(tmp, "wb") as dst:
+            while True:
+                # The rate above is a plan; a slow card can miss it. A copy
+                # still running at the deadline is abandoned here, before the
+                # pre-start's own `timeout` kills it half-written.
+                if time.monotonic() > deadline - KILL_GRACE_S:
+                    raise TimeoutError("the copy outlived this start's budget")
+                chunk = src.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+        header_facts(tmp)
+        st = regular_file(path)
+        if st:
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    except TimeoutError:
+        remove_files([tmp])
+        return None, "no-time"
+    except (OSError, ValueError) as exc:
+        remove_files([tmp])
+        warn("could not copy %s (%s: %s)" % (backup["path"], type(exc).__name__, exc))
+        return None, "backup-unreadable"
+    suffix = SET_ASIDE_MARK + stamp(now)
+    moved = []
+    try:
+        for side in SQLITE_SIDECARS:
+            src = path + side
+            if os.path.lexists(src):
+                os.rename(src, src + suffix)
+                moved.append(src)
+        os.replace(tmp, path)
+    except OSError as exc:
+        for src in reversed(moved):
+            try:
+                os.rename(src + suffix, src)
+            except OSError:
+                warn("could not move %s back from %s" % (src, src + suffix))
+        remove_files([tmp])
+        warn("could not set %s aside (%s)" % (path, exc))
+        return None, "set-aside-failed"
+    _fsync_dir(directory)
+    return [src + suffix for src in moved], None
+
+
+def sweep_restoring(dbs):
+    """Copies on their way in that a killed start left half-written (power
+    lost, or a signal past the deadline). Only this guard's own names, and
+    never the only copy of anything: the backup they came from is untouched."""
+    for db in dbs:
+        directory, base = os.path.split(db["path"])
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        stale = [os.path.join(directory, n) for n in names if n.startswith(base + RESTORING_MARK)]
+        if stale and remove_files(stale):
+            log("removed a half-written restore copy beside %s" % label(db))
+
+
+def restore_leg(guard, targets, now, deadline):
+    """The newest pre-update copy of each refused database, put back. Never a
+    copy already put back once (that is a loop of its own). (ok, reason, done)."""
+    used = set(p for p in (guard.get("restoredFrom") or []) if isinstance(p, str))
+    if not targets:
+        return False, "database-unknown", []
+    plan = []
+    for db in targets:
+        backups, _capturing = backups_beside(db["path"])
+        fresh = [b for b in backups if b["path"] not in used]
+        # A `.bak.capturing` beside them is an interrupted capture; the
+        # completed groups are whole copies all the same.
+        if not fresh:
+            return False, "no-backup", []
+        plan.append((db, max(fresh, key=lambda b: b["mtime"])))
+    done = []
+    for db, backup in plan:
+        set_aside, reason = restore_database(db, backup, now, deadline)
+        if reason:
+            return False, reason, done
+        used.add(backup["path"])
+        guard["restoredFrom"] = sorted(used)
+        log("put back the pre-update copy of %s (%s); the refused one is kept as %s" % (
+            label(db), os.path.basename(backup["path"]), os.path.basename(set_aside[0]) if set_aside else "nothing"))
+        done.append({"database": label(db), "from": backup["path"], "setAside": set_aside})
+    return True, None, done
+
+
+def notice_of(outcome, reason, databases, kept, now):
+    return {
+        "outcome": outcome,
+        "reason": reason,
+        "databases": databases,
+        "keptCopies": kept,
+        "at": iso(now),
+    }
+
+
+def cmd_start_guard(args):
+    now = time.time()
+    deadline = time.monotonic() + max(0, args.budget_seconds)
+    path = os.path.join(args.data_dir, GUARD_FILE)
+    guard = read_json(path)
+    if guard is None:
+        warn("%s is unreadable; starting a new record" % path)
+        guard = {}
+    starts = [s for s in (guard.get("starts") or []) if isinstance(s, dict) and isinstance(s.get("at"), (int, float))]
+    restarts = max(0, args.restarts)
+    starts.append({"at": now, "restarts": restarts})
+    guard["starts"] = starts[-STARTS_KEPT:]
+    sweep_restoring(discover(args.state_dir, args.config))
+    episode = guard.get("episode") if isinstance(guard.get("episode"), dict) else None
+
+    def save():
+        guard["version"] = 1
+        guard["updatedAt"] = iso(time.time())
+        write_json(path, guard)
+        return 0
+
+    # One read of the gateway's own words: since the last look (at most a
+    # week back), and at least since the start of a loop.
+    last = guard["starts"][-(LOOP_RESTARTS + 1):]
+    scanned = guard.get("scannedTo") if isinstance(guard.get("scannedTo"), (int, float)) else 0
+    since = max(now - COPY_PROOF_MAX_AGE_S, min(scanned, last[0]["at"]) - 60)
+    lines = journal_lines(args.unit, since) + file_log_lines(openclaw_log_files(args.config, args.log_dir), since)
+    guard["scannedTo"] = now
+    windows = [tuple(w) for w in (guard.get("actionWindows") or [])
+               if isinstance(w, list) and len(w) == 2 and all(isinstance(x, (int, float)) for x in w)]
+
+    # What the last runs proved: a `gateway ready` is the core admitting
+    # every database it needs.
+    ready = [at for at, text in lines if READY_RE.search(text) and outside(at, windows)]
+    if ready and max(ready) > (guard.get("provenAt") or 0):
+        guard["provenAt"] = max(ready)
+    if episode and not episode.get("settledAt") and (guard.get("provenAt") or 0) > (episode.get("actedTo") or now):
+        episode["settledAt"] = guard["provenAt"]
+        log("the gateway has started since its start-loop recovery (%s)" % episode.get("stage"))
+
+    # A loop: the last few starts were each an automatic restart of the one
+    # before, all within the window.
+    loop = (
+        restarts >= LOOP_RESTARTS
+        and len(last) == LOOP_RESTARTS + 1
+        and all(isinstance(s.get("restarts"), int) for s in last)
+        and all(last[i + 1]["restarts"] == last[i]["restarts"] + 1 for i in range(LOOP_RESTARTS))
+        and now - last[0]["at"] <= LOOP_WINDOW_S
+    )
+    if not loop:
+        return save()
+    failures = database_failures(lines, windows, after=last[0]["at"] - 60)
+    if not failures:
+        log("the gateway has restarted itself %d times, and not over a database it refused (or its output could not be read); nothing to repair here" % restarts)
+        return save()
+    dbs = discover(args.state_dir, args.config)
+    critical = {key_of(db) for db in startup_critical(dbs, args.config)}
+    named = named_databases(failures, dbs)
+    if named and not any(key_of(db) in critical for db in named):
+        log("the gateway has restarted itself %d times; the database it names (%s) is not one that stops a start, so the loop has another cause"
+            % (restarts, ", ".join(label(db) for db in named)))
+        return save()
+    named = [db for db in named if key_of(db) in critical]
+    evidence = failures[-1][1].strip()[:300]
+    log("the gateway has restarted itself %d times over a database it refused: %s" % (restarts, evidence))
+
+    same = (
+        episode is not None
+        and not episode.get("settledAt")
+        and isinstance(episode.get("actedTo"), (int, float))
+        and now - episode["actedTo"] <= EPISODE_S
+    )
+    since_action = database_failures(lines, windows, after=episode["actedTo"]) if same else []
+    if same and not since_action:
+        # Still looping, but not over a database since the last action: the
+        # cause has moved on, and it is not one this guard repairs.
+        log("still restarting, but no database refusal since the last recovery step; nothing more to do here")
+        return save()
+    if since_action:
+        # What the last step did not fix is what the next one is about — and
+        # when that names only databases that cannot stop a start, the one it
+        # was about is fixed and the loop has moved on to another cause.
+        after = named_databases(since_action, dbs)
+        if after and not any(key_of(db) in critical for db in after):
+            log("since the last recovery step the gateway names only %s, which does not stop a start; nothing more to do here"
+                % ", ".join(label(db) for db in after))
+            return save()
+        named = [db for db in after if key_of(db) in critical] or named
+    stage = episode.get("stage") if same else None
+    if stage == "failed":
+        log("start-loop recovery already gave up on this loop; the owner has been told")
+        return save()
+    acted_from = time.time()
+    if stage is None or (stage == "repairing" and (episode.get("repairAttempts") or 0) < 2):
+        attempts = (episode.get("repairAttempts") or 0) + 1 if same else 1
+        complete, steps = repair_leg(args, dbs, deadline)
+        if not steps:
+            log("no time left in this start for the core's repair; it runs at the next one")
+            return save()
+        episode = {
+            "startedAt": episode.get("startedAt") if same else now,
+            "stage": "repaired" if complete else "repairing",
+            "repairAttempts": attempts,
+            "restarts": restarts,
+            "evidence": evidence,
+            "databases": [label(db) for db in named],
+            "steps": steps,
+        }
+        guard["notice"] = notice_of("repaired", None if complete else "repair-incomplete", episode["databases"], [], now)
+    elif stage in ("repaired", "repairing"):
+        ok, reason, done = restore_leg(guard, named, now, deadline)
+        episode["stage"] = "restored" if ok else "failed"
+        episode["restarts"] = restarts
+        episode["restored"] = done
+        if not ok:
+            episode["reason"] = reason
+            warn("could not put back a pre-update copy (%s); the gateway is left as it is" % reason)
+        kept = [os.path.basename(p) for d in done for p in d["setAside"][:1]]
+        guard["notice"] = notice_of("restored" if ok else "failed", reason, [d["database"] for d in done] or [label(db) for db in named], kept, now)
+    else:  # restored, and it still fails over a database
+        episode["stage"] = "failed"
+        episode["reason"] = "restore-did-not-help"
+        episode["restarts"] = restarts
+        warn("the gateway still refuses a database after its pre-update copy was put back; nothing more is tried")
+        notice = guard.get("notice") if isinstance(guard.get("notice"), dict) else {}
+        guard["notice"] = notice_of("failed", "restore-did-not-help", notice.get("databases") or [label(db) for db in named], notice.get("keptCopies") or [], now)
+    acted_to = time.time()
+    episode["actedFrom"], episode["actedTo"] = acted_from, acted_to
+    guard["episode"] = episode
+    windows.append((acted_from, acted_to))
+    guard["actionWindows"] = [list(w) for w in windows if now - w[1] < COPY_PROOF_MAX_AGE_S][-10:]
+    return save()
 
 
 # ── preflight / record-doctor (install.sh) ────────────────────────────────
@@ -1190,6 +1786,15 @@ def main(argv=None):
     p.add_argument("--live-rate-bps", type=float, default=DEFAULT_LIVE_RATE_BPS)
     p.add_argument("--cli-overhead-seconds", type=float, default=CLI_OVERHEAD_S)
 
+    p = sub.add_parser("start-guard")
+    common(p)
+    p.add_argument("--openclaw-bin", required=True)
+    p.add_argument("--unit", default=GATEWAY_UNIT)
+    p.add_argument("--restarts", type=int, default=0)
+    p.add_argument("--budget-seconds", type=int, default=420)
+    # Where the core's rolling log files are, instead of its default places.
+    p.add_argument("--log-dir", action="append", default=[])
+
     p = sub.add_parser("preflight")
     common(p)
     p.add_argument("--factor", type=float, default=DEFAULT_MIGRATION_FACTOR)
@@ -1219,6 +1824,7 @@ def main(argv=None):
     _FREE_BYTES_OVERRIDE = getattr(args, "free_bytes_override", None)
     handler = {
         "prestart": cmd_prestart,
+        "start-guard": cmd_start_guard,
         "preflight": cmd_preflight,
         "record-doctor": cmd_record_doctor,
         "memory-rebuild": cmd_memory_rebuild,

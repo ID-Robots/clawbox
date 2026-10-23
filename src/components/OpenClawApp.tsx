@@ -51,10 +51,50 @@ function MigrationNotice({ migration }: { migration: GatewayMigration }) {
   );
 }
 
+/**
+ * What `/setup-api/gateway/health` says the gateway pre-start did about a
+ * gateway that would not start over one of OpenClaw's databases (see
+ * src/lib/openclaw-start-recovery.ts). It changed the owner's data — repaired
+ * it, or put back a copy from before the last update — so it is said.
+ */
+interface GatewayStartRecovery {
+  outcome: "repaired" | "restored" | "failed";
+  reason: string | null;
+}
+
+function readStartRecovery(value: unknown): GatewayStartRecovery | null {
+  if (!value || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  if (r.outcome !== "repaired" && r.outcome !== "restored" && r.outcome !== "failed") return null;
+  return { outcome: r.outcome, reason: typeof r.reason === "string" ? r.reason : null };
+}
+
+function StartRecoveryNotice({ recovery }: { recovery: GatewayStartRecovery }) {
+  const { t } = useT();
+  const body = recovery.outcome === "repaired"
+    ? t("openclaw.startRecoveryRepaired")
+    : recovery.outcome === "restored"
+      ? t("openclaw.startRecoveryRestored")
+      : recovery.reason === "no-backup"
+        ? t("openclaw.startRecoveryNoBackup")
+        : t("openclaw.startRecoveryFailed");
+  return (
+    <div
+      role="status"
+      data-testid="openclaw-start-recovery-notice"
+      className="shrink-0 border-b border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+    >
+      <p className="font-semibold">{t("openclaw.startRecoveryTitle")}</p>
+      <p className="mt-1 text-amber-100/80">{body}</p>
+    </div>
+  );
+}
+
 export default function OpenClawApp() {
   const { t } = useT();
   const [status, setStatus] = useState<"checking" | "running" | "not-running">("checking");
   const [migration, setMigration] = useState<GatewayMigration | null>(null);
+  const [startRecovery, setStartRecovery] = useState<GatewayStartRecovery | null>(null);
   const [wsConfig, setWsConfig] = useState<{ wsUrl: string; token: string } | null>(null);
   const retryRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -66,6 +106,7 @@ export default function OpenClawApp() {
       const res = await fetch("/setup-api/gateway/health", { signal: AbortSignal.timeout(5000) });
       const data = await res.json();
       setMigration(readMigration(data?.migration));
+      setStartRecovery(readStartRecovery(data?.startRecovery));
       if (data.available) {
         // Fetch WS config for token + URL to pass to the SPA
         try {
@@ -119,6 +160,11 @@ export default function OpenClawApp() {
             <MigrationNotice migration={migration} />
           </div>
         )}
+        {startRecovery && (
+          <div className="max-w-lg overflow-hidden rounded-lg">
+            <StartRecoveryNotice recovery={startRecovery} />
+          </div>
+        )}
         <button
           onClick={() => checkGateway()}
           className="px-5 py-2 rounded-lg text-sm font-medium bg-[var(--coral-bright)] text-white hover:opacity-90 transition-opacity cursor-pointer"
@@ -138,6 +184,7 @@ export default function OpenClawApp() {
   return (
     <div className="h-full w-full flex flex-col">
       {migration && <MigrationNotice migration={migration} />}
+      {startRecovery && <StartRecoveryNotice recovery={startRecovery} />}
       <iframe
         src={iframeSrc}
         className="w-full flex-1 min-h-0 border-0"

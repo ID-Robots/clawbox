@@ -304,8 +304,77 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
   });
 });
 
+describe("gateway-pre-start.sh start-loop recovery block", () => {
+  const BLOCK = between("# ── Start-loop recovery", "# ── First boot on a NEW OpenClaw core");
+
+  /** The block with a `python3` that records its argv and a `systemctl` answering NRestarts. */
+  function guard(env: Record<string, string> = {}, core2026_10 = "1") {
+    const binDir = path.join(dir, "bin");
+    stubPython(binDir);
+    writeFileSync(path.join(binDir, "systemctl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > "${dir}/systemctl-args"\nprintf '%s\\n' "\${NRESTARTS:-0}"\n`);
+    chmodSync(path.join(binDir, "systemctl"), 0o755);
+    const openclaw = path.join(dir, "oc", "openclaw");
+    mkdirSync(path.dirname(openclaw), { recursive: true });
+    writeFileSync(openclaw, "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(openclaw, 0o755);
+    const args = path.join(dir, "py-args");
+    rmSync(args, { force: true });
+    const r = runBlock(BLOCK, {
+      SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
+      CLAWBOX_ROOT: dir,
+      CLAWBOX_OPENCLAW_2026_10: core2026_10,
+      OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
+      OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
+      OPENCLAW_BIN: openclaw,
+    }, { PY_ARGS: args, ...env });
+    const argv = existsSync(args) ? readFileSync(args, "utf-8").trim().split("\n") : [];
+    const opt = (name: string) => argv[argv.indexOf(name) + 1];
+    return { r, argv, opt, openclaw };
+  }
+
+  it("hands the helper systemd's count of automatic restarts and the gateway's own tree", () => {
+    const { r, argv, opt, openclaw } = guard({ NRESTARTS: "4" });
+    expect(r.status).toBe(0);
+    expect(argv.slice(0, 3)).toEqual(["-I", path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py"), "start-guard"]);
+    expect(readFileSync(path.join(dir, "systemctl-args"), "utf-8").trim()).toBe("show clawbox-gateway.service -p NRestarts --value");
+    expect(opt("--restarts")).toBe("4");
+    expect(opt("--unit")).toBe("clawbox-gateway.service");
+    expect(opt("--state-dir")).toBe(path.join(dir, ".openclaw"));
+    expect(opt("--config")).toBe(path.join(dir, ".openclaw", "openclaw.json"));
+    expect(opt("--data-dir")).toBe(path.join(dir, "data"));
+    expect(opt("--openclaw-bin")).toBe(openclaw);
+    // Most of the unit's 600 s, 150 held back for the rest of the pre-start.
+    expect(Number(opt("--budget-seconds"))).toBeGreaterThanOrEqual(440);
+    expect(Number(opt("--budget-seconds"))).toBeLessThanOrEqual(450);
+  });
+
+  it("counts an unreadable restart count as none", () => {
+    const { opt } = guard({ NRESTARTS: "[not set]" });
+    expect(opt("--restarts")).toBe("0");
+  });
+
+  it("turns a failed helper into a WARN, never a failed gateway start", () => {
+    const { r } = guard({ PY_EXIT: "7" });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/WARN: start-loop recovery stopped \(exit 7\); the gateway starts as it is/);
+  });
+
+  it("does nothing on a core older than 2026.10, whose session-sqlite recovery is not verified", () => {
+    const { r, argv } = guard({}, "0");
+    expect(r.status).toBe(0);
+    expect(argv).toEqual([]);
+  });
+
+  it("runs before the first config repair, and inside the unit's TimeoutStartSec", () => {
+    expect(SRC.indexOf("# ── Start-loop recovery")).toBeLessThan(SRC.indexOf("# ── First boot on a NEW OpenClaw core"));
+    expect(SRC.indexOf("# ── Start-loop recovery")).toBeGreaterThan(SRC.indexOf("export CLAWBOX_OPENCLAW_2026_10"));
+    expect(BLOCK).toContain("_sg_budget=$(( _sg_ceiling - 150 - SECONDS ))");
+    expect(BLOCK).toContain('timeout -k 10 "$(( _sg_budget + 30 ))"');
+  });
+});
+
 describe("gateway-pre-start.sh 2026.10 gate", () => {
-  const GATE = between("# OpenClaw 2026.10 or later.", "# ── First boot on a NEW OpenClaw core");
+  const GATE = between("# OpenClaw 2026.10 or later.", "# ── Start-loop recovery");
 
   function gate(effective: string, explicit?: string): string {
     const r = spawnSync("bash", ["-c", [

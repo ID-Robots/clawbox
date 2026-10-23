@@ -90,5 +90,24 @@ describe("/setup-api/gateway/health", () => {
       isPortOpenMock.mockResolvedValue(true);
       expect(await (await GET()).json()).toEqual({ available: true, port: 18789, restarting: false });
     });
+
+    it("says the pre-start put back a refused database's pre-update copy — outcome and time, no names", async () => {
+      // The owner's data changed under a gateway that would not start: said,
+      // beside `available`, and without the agent or the file it concerned,
+      // because this route answers before sign-in.
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      const at = new Date(Date.now() - 60_000).toISOString();
+      writeFileSync(path.join(root, "data", "openclaw-start-guard.json"), JSON.stringify({
+        version: 1,
+        episode: { stage: "restored", databases: ["agent main"] },
+        notice: { outcome: "restored", reason: null, databases: ["agent main"], keptCopies: ["openclaw-agent.sqlite.clawbox-start-loop-20261023T110000Z"], at },
+      }));
+      isPortOpenMock.mockResolvedValue(true);
+      expect(await (await GET()).json()).toEqual({
+        available: true, port: 18789, restarting: false,
+        startRecovery: { outcome: "restored", reason: null, at },
+      });
+    });
   });
 });

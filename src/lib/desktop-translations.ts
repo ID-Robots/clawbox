@@ -1048,6 +1048,11 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "openclaw.migrationSchemaBehind": "OpenClaw has not finished moving the agents' data to its new format, so the agents may not answer. Run the update again from Settings.",
     "openclaw.migrationIncomplete": "The last OpenClaw update did not finish migrating the agents' data. Run the update again from Settings.",
     "openclaw.migrationSchemaNewer": "The agents' data was written by a newer OpenClaw than the one installed, so the agents cannot open it. Update ClawBox to bring OpenClaw up to date.",
+    "openclaw.startRecoveryTitle": "OpenClaw could not start over an agent database",
+    "openclaw.startRecoveryRepaired": "The gateway kept restarting because OpenClaw refused data in an agent database. ClawBox ran OpenClaw's own repair on it. Anything the repair set aside is kept beside the database; nothing was deleted.",
+    "openclaw.startRecoveryRestored": "The gateway kept restarting because OpenClaw refused data in an agent database, and OpenClaw's own repair did not fix it. ClawBox put back that database's copy from before the last update. Conversations since then are kept in a copy beside it; nothing was deleted.",
+    "openclaw.startRecoveryNoBackup": "The gateway kept restarting because OpenClaw refused data in an agent database. OpenClaw's own repair did not fix it, and there is no copy from before the last update to put back. Nothing was deleted. Run the update again from Settings, or contact support.",
+    "openclaw.startRecoveryFailed": "The gateway kept restarting because OpenClaw refused data in an agent database. Neither OpenClaw's own repair nor the copy from before the last update got it started, so ClawBox stopped trying. Nothing was deleted. Run the update again from Settings, or contact support.",
     "openclaw.retry": "Retry",
     "openclaw.iframeTitle": "OpenClaw Control",
 

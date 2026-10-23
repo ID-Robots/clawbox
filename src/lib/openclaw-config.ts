@@ -43,6 +43,7 @@ import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { isConfigMutationConflict } from "@/lib/config-conflict";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { doctorFixBudgetMs, openclawDatabaseBytes } from "@/lib/openclaw-migration-status";
 import { ConfigChangedWhileHeldError, cliWritesConfig, holdWhileGatewayStarts } from "@/lib/gateway-start-guard";
 
 const exec = promisify(execFile);
@@ -4084,8 +4085,12 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
     // environment is the other half — see `@/lib/openclaw-doctor-ownership`.
     // It goes last in `spawnOpenclaw`'s merge, so an inherited supervisor mode
     // cannot put the refusal back.
+    //
+    // The bound grows with the agent databases, as the update's does: doctor
+    // reads every one of them, a flat 180 s stopped it half-way on a box with
+    // a few GB of them, and a stopped doctor here is a rolled-back sign-in.
     await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], {
-      timeoutMs: 180_000,
+      timeoutMs: doctorFixBudgetMs(await openclawDatabaseBytes(OPENCLAW_HOME).catch(() => 0), 180_000),
       env: withExternalGatewaySupervisor(),
     });
   } catch (err) {
