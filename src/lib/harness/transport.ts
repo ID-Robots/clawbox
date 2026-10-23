@@ -366,6 +366,15 @@ export interface TurnResult {
 }
 
 /**
+ * The model a conversation's session answers on, as its turns recorded it —
+ * `TurnResult.model`/`provider`, never what the header asked for.
+ */
+export interface ConversationModel {
+  readonly model: string;
+  readonly provider?: string;
+}
+
+/**
  * One replayed transcript row.
  *
  * Deliberately the chat's own `ChatMessage` rather than a narrower parallel
@@ -444,6 +453,17 @@ export interface HarnessAdapter {
    * MUST be idempotent: the (+) button is double-clickable.
    */
   resetSession(): Promise<void>;
+
+  /**
+   * The model the conversation on `sessionKey` is held to: its next turn
+   * resumes a session that answers on this model whatever the header now asks
+   * for. Hermes from v0.22.4 — a resumed session keeps its frozen launch, so a
+   * model picked mid-conversation applies to the next new chat. Null when the
+   * next turn opens a fresh session (none threaded yet, a reset, a reloaded
+   * page) or no turn recorded which model answered. A harness that holds no
+   * conversation to a model leaves this out.
+   */
+  conversationModel?(sessionKey: string): ConversationModel | null;
 
   /**
    * A fresh session key beside `mainSessionKey`, for a second conversation

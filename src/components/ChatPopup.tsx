@@ -605,6 +605,12 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import {
+  chatKeepsEarlierModel,
+  conversationModelFor,
+  withConversationModel,
+  type ConversationModels,
+} from '@/lib/chat-model-notice'
 
 // ── Waiting for a generated picture ─────────────────────────────────────────
 //
@@ -1949,8 +1955,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // Read-modify-write: `models` is a nested map, so a shallow merge of the
     // patch alone would drop every other provider's remembered pick.
     writeHermesChatPrefs({ models: { ...readHermesChatPrefs().models, [provider]: id } })
-    // Session kept — see changeHermesProvider. The next turn announces the
-    // change to the agent rather than starting the conversation over.
+    // Session kept — see changeHermesProvider. From Hermes v0.22.4 a resumed
+    // session keeps the model it started on, so the pick applies to the next
+    // new chat, and the line over the composer (`chatKeepsModel`) says so for
+    // as long as the header and the conversation disagree.
   }, [])
 
   const changeHermesReasoning = useCallback((next: string) => {
@@ -2717,6 +2725,27 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } =
     useHarnessAdapter(harnessWiring)
   useEffect(() => { adapterRef.current = adapter }, [adapter])
+  // The model each conversation's session is held to, by session key (the
+  // adapter's `conversationModel`). Kept as state rather than read off the
+  // adapter while rendering: it moves only when a turn comes back, a chat is
+  // reset or a tab is closed, and each of those notes it for the key it touched.
+  const [conversationModels, setConversationModels] = useState<ConversationModels<HarnessAdapter>>(
+    () => ({ adapter: null, byKey: {} }),
+  )
+  const noteConversationModel = useCallback((key: string) => {
+    const held = adapter.conversationModel?.(key) ?? null
+    setConversationModels(prev => withConversationModel(prev, adapter, key, held))
+  }, [adapter])
+  // "This chat keeps its model; start a new chat to use the new model." Said
+  // only when the header names a model other than the one the conversation on
+  // screen will go on answering with — the old model keeps answering (Hermes
+  // v0.22.4 freezes a session's launch) and this is the hint that it will. Not
+  // while the new provider's list is still loading: the model pill has nothing
+  // to name yet either.
+  const chatKeepsModel = !hermesModelsLoading && chatKeepsEarlierModel(
+    { provider: hermesProvider, model: hermesModel },
+    conversationModelFor(conversationModels, adapter, activeTabKey ?? mainSessionKey),
+  )
   // The gateway's status is produced by the socket handlers below; publish it
   // so the adapter's subscribers see one stream whichever harness is running.
   useEffect(() => {
@@ -4136,9 +4165,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   }, [clearToolCalls, clearClarifies, applyStreaming])
 
   const resetSession = useCallback(async () => {
+    // Captured BEFORE the await, as the adapter captures its own: the owner may
+    // switch tabs while the transcript delete is in flight, and the record to
+    // clear is the reset conversation's, not the one on screen by then.
+    const key = sessionKeyRef.current
     await adapter.resetSession()
+    // The next turn opens a fresh session on whatever the header names.
+    noteConversationModel(key)
     clearTranscript()
-  }, [adapter, clearTranscript])
+  }, [adapter, clearTranscript, noteConversationModel])
   const resetSessionRef = useRef(resetSession)
   useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
 
@@ -4374,6 +4409,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // live; the tab is gone now, so the mark must go too.
       if (busyKeysRef.current.delete(key)) setBusyKeys(new Set(busyKeysRef.current))
       await adapter.deleteSession(key, { running })
+      noteConversationModel(key)
     }
     if (sessionKeyRef.current === key) {
       // The neighbour on the left, else the one that slid into its place, else main.
@@ -4382,7 +4418,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     } else {
       void dispose()
     }
-  }, [tabs, switchSession, adapter, markTabsDirty])
+  }, [tabs, switchSession, adapter, markTabsDirty, noteConversationModel])
 
   // A new tab is named after the first thing the owner says in it, once —
   // and everywhere: the name goes to the box with the next sync, and a tab
@@ -6299,6 +6335,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
     // stream; those handlers paint the reply and end the run.
     if (result.acknowledgedOnly) return
+    // What the conversation this turn belongs to is held to now. Noted for the
+    // key it was SENT on, before the tab check below: the owner may be in
+    // another tab by now, and this one's record must be right on their return.
+    noteConversationModel(keyAtSend)
     // A COMMAND may have changed the model this box is configured to run —
     // `/model <id> --global` on Hermes writes config.yaml, which is the very
     // file the header reads. Without this the header kept the old name until
@@ -6356,7 +6396,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // where the batch card appears.
     void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming, refreshChatModelState])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming, refreshChatModelState, noteConversationModel])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
@@ -8692,6 +8732,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       {(voice.state === 'recording' || voice.state === 'transcribing') && (
         <div data-testid="voice-privacy" style={{ padding: '0 14px 6px', background: 'rgba(0,0,0,0.2)', fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>
           {t("chat.voice.privacy")}
+        </div>
+      )}
+
+      {/* The header names a model this conversation will not answer with: its
+          session keeps the model it started on, and the new one applies to
+          the next new chat. A line over the composer, beside the pill that
+          changed — nothing to dismiss and nothing in the way of sending. */}
+      {chatKeepsModel && (
+        <div
+          data-testid="chat-model-kept"
+          role="status"
+          aria-live="polite"
+          style={{ padding: '6px 14px 0', display: 'flex', alignItems: 'flex-start', gap: 6, background: 'rgba(0,0,0,0.2)', fontSize: 11.5, color: 'rgba(255,255,255,0.6)' }}
+        >
+          <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 15, flexShrink: 0 }}>info</span>
+          <span style={{ flex: 1 }}>{t('chat.keepsItsModel')}</span>
         </div>
       )}
 
