@@ -38,7 +38,9 @@ function normalizedProvider(provider: string | undefined): string {
  * blank is not a different provider. ClawBox AI is the one provider whose
  * model is not a choice — it runs one chat model, and the header shows it no
  * model pill — so two ClawBox AI pairs are the same pair whatever ids they
- * carry; every other model id is compared as Hermes wrote it.
+ * carry, under either spelling `isClawboxAiProvider` accepts (`clawai`,
+ * `deepseek`) — the same predicate that hides the pill; every other model id
+ * is compared as Hermes wrote it.
  */
 export function chatKeepsEarlierModel(
   selected: SelectedModel | null | undefined,
@@ -50,8 +52,8 @@ export function chatKeepsEarlierModel(
   const heldProvider = normalizedProvider(held?.provider);
   const selectedProvider = normalizedProvider(selected?.provider);
   if (heldProvider && selectedProvider) {
+    if (isClawboxAiProvider(heldProvider) && isClawboxAiProvider(selectedProvider)) return false;
     if (heldProvider !== selectedProvider) return true;
-    if (isClawboxAiProvider(heldProvider)) return false;
   }
   return heldModel !== selectedModel;
 }

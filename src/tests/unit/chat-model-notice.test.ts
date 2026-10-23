@@ -55,6 +55,17 @@ describe("chatKeepsEarlierModel", () => {
     )).toBe(false);
   });
 
+  it("reads both spellings of ClawBox AI as one provider, as the header's pill does", () => {
+    expect(chatKeepsEarlierModel(
+      { provider: "clawai", model: "deepseek-v4-flash" },
+      { model: "deepseek-v4-flash", provider: "deepseek" },
+    )).toBe(false);
+    expect(chatKeepsEarlierModel(
+      { provider: "deepseek", model: "deepseek-v4-flash" },
+      { model: "deepseek-v4-pro", provider: "clawai" },
+    )).toBe(false);
+  });
+
   it("does say it when the conversation moved ONTO or OFF ClawBox AI", () => {
     expect(chatKeepsEarlierModel(
       { provider: "clawai", model: "deepseek-v4-flash" },

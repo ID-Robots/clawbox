@@ -4165,9 +4165,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   }, [clearToolCalls, clearClarifies, applyStreaming])
 
   const resetSession = useCallback(async () => {
+    // Captured BEFORE the await, as the adapter captures its own: the owner may
+    // switch tabs while the transcript delete is in flight, and the record to
+    // clear is the reset conversation's, not the one on screen by then.
+    const key = sessionKeyRef.current
     await adapter.resetSession()
     // The next turn opens a fresh session on whatever the header names.
-    noteConversationModel(sessionKeyRef.current)
+    noteConversationModel(key)
     clearTranscript()
   }, [adapter, clearTranscript, noteConversationModel])
   const resetSessionRef = useRef(resetSession)
