@@ -77,4 +77,16 @@ describe("ClawBox AI plan card speaks the UI language", () => {
     expect(screen.getByText("Maximum usage")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Max tier, Trial" })).toBeInTheDocument();
   });
+
+  it("keeps the English floor of the blurb identical to the en pack, with no warranty", () => {
+    // The floor is what a box shows before its pack has the key, so it must
+    // say what the en pack says — a warranty dropped from one and not the
+    // other would still reach the screen.
+    pack.table = {};
+    render(<ClawboxAiPlanPicker tier="pro" onTierChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Plan/ }));
+
+    expect(screen.getByText(translations.en["ai.planBlurb"])).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/warrant/i);
+  });
 });
