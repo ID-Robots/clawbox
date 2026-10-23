@@ -277,7 +277,7 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Plan is taken from your account")).toBeInTheDocument();
     expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
     fireEvent.click(getByRole("button", { name: /^Plan/ }));
-    expect(getByText("Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.")).toBeInTheDocument();
+    expect(getByText("Max plan unlocks ClawKeep cloud backups and Remote Desktop for ClawBox owners.")).toBeInTheDocument();
     // The legacy "Paste token manually" dialog has been removed — connection
     // is handled exclusively through the portal handoff. Verify nothing in
     // the surface tries to mount a token-paste dialog.

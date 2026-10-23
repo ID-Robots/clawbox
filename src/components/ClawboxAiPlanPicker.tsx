@@ -108,7 +108,7 @@ export default function ClawboxAiPlanPicker({
       <p id="clawai-plan-panel" className="text-xs leading-relaxed text-orange-200/90">
         {tr(
           "ai.planBlurb",
-          "Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.",
+          "Max plan unlocks ClawKeep cloud backups and Remote Desktop for ClawBox owners.",
         )}
       </p>
       <div className="mt-4 flex items-center justify-between gap-3">

@@ -9,6 +9,7 @@ import {
 } from "@/lib/clawbox-ai-tiers";
 import { CLAWBOX_AI_CHAT_MODEL_LABEL } from "@/lib/clawbox-ai-models";
 import { codingModelName } from "@/lib/coding-model-names";
+import { MAX_PLAN_BONUSES } from "@/lib/max-subscription";
 import { CLAWAI_MODELS } from "@/lib/provider-models";
 import { translations } from "@/lib/translations";
 import type { Locale } from "@/lib/i18n";
@@ -98,6 +99,20 @@ describe("ClawBox AI plan copy is keyed and translated", () => {
       expect(translations[locale]["ai.planTierOption"]).toContain("{tier}");
       expect(translations[locale]["ai.planTierOptionTrial"]).toContain("{tier}");
     }
+  });
+
+  // ClawBox gives no extended warranty with Max, yet the plan card pitched one
+  // in every locale and the subscribe page listed it as a purchase bonus. The
+  // blurb keeps its key; only the promise is gone, and no rewording brings it
+  // back. Every offender is listed at once rather than the first one only.
+  it("plan copy promises no warranty", () => {
+    /** "warranty" as the ten locale packs spelled it. */
+    const WARRANTY = /warrant|garan|гаранц|保証|保修/i;
+    const promises = [
+      ...LOCALES.map((locale) => `${locale}: ${translations[locale]["ai.planBlurb"]}`),
+      ...MAX_PLAN_BONUSES.map((bonus) => `subscribe bonus: ${bonus}`),
+    ].filter((line) => WARRANTY.test(line));
+    expect(promises).toEqual([]);
   });
 });
 
