@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -97,14 +99,18 @@ function writeCore(): void {
 import datetime, glob, json, os, sqlite3, sys, time
 state = os.environ["OPENCLAW_STATE_DIR"]
 log_dir = os.environ["OC_LOG_DIR"]
+offset = float(os.environ.get("OC_TIME_OFFSET", "0"))
 def log(level, msg):
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset)
     os.makedirs(log_dir, exist_ok=True)
     with open(os.path.join(log_dir, "openclaw-%s.log" % now.strftime("%Y-%m-%d")), "a") as fh:
         fh.write(json.dumps({"time": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"), "level": level, "msg": msg}) + "\\n")
     if os.environ.get("OC_JOURNAL"):
         with open(os.environ["OC_JOURNAL"], "a") as fh:
-            fh.write(json.dumps({"__REALTIME_TIMESTAMP": str(int(time.time() * 1e6)), "SYSLOG_IDENTIFIER": "openclaw", "MESSAGE": msg}) + "\\n")
+            fh.write(json.dumps({"__REALTIME_TIMESTAMP": str(int((time.time() + offset) * 1e6)), "SYSLOG_IDENTIFIER": "openclaw", "MESSAGE": msg}) + "\\n")
+# The manual-start hint 2026.10.6 puts on its breaker lines.
+def hint(params):
+    return "Start a channel manually with: openclaw gateway call channels.start --params '%s'" % json.dumps(params, separators=(",", ":"))
 def bad_rows(db):
     c = sqlite3.connect(db)
     try:
@@ -119,6 +125,20 @@ def bad_rows(db):
         c.close()
 dbs = sorted(glob.glob(os.path.join(state, "agents", "*", "agent", "openclaw-agent.sqlite")))
 cmd = sys.argv[1:]
+if cmd[:1] == ["say"]:
+    # A line from the running gateway, later on.
+    log("info", cmd[1])
+    sys.exit(0)
+if cmd[:2] == ["channels", "status"]:
+    print(os.environ.get("OC_CHANNELS_STATUS", "{}"))
+    sys.exit(0)
+if cmd[:3] == ["gateway", "call", "channels.start"]:
+    if os.environ.get("OC_MANUAL_START_FAILS") == "1":
+        print("gateway call failed: channels.start refused", file=sys.stderr)
+        sys.exit(1)
+    params = json.loads(cmd[cmd.index("--params") + 1])
+    print(json.dumps({"channel": params["channel"], "accountId": params.get("accountId", "default"), "started": False, "outcome": {"status": "handed-off"}}))
+    sys.exit(0)
 if cmd[:1] == ["gateway"]:
     failure = os.environ.get("OC_GATEWAY_FAILS_WITH")
     if failure:
@@ -137,6 +157,13 @@ if cmd[:1] == ["gateway"]:
             log("error", msg)
             print("Gateway failed to start: " + msg, file=sys.stderr)
             sys.exit(1)
+    if os.environ.get("OC_BREAKER") == "1":
+        # Word for word what 2026.10.6 logs on a start after three unclean
+        # boots, and for each channel it then holds back.
+        log("error", "gateway restart-loop breaker tripped: 3 unclean boot(s) within %sms; suppressing channel/provider account auto-start. Inspect the stability bundle and fix the startup crash before restarting the service. %s"
+            % (os.environ.get("OC_BREAKER_WINDOW_MS", "300000"), hint({"channel": "<id>"})))
+        for channel in [c for c in os.environ.get("OC_HELD", "").split(",") if c]:
+            log("warn", "channel autostart suppressed by crash-loop breaker; refusing automatic start for %s. %s" % (channel, hint({"channel": channel})))
     log("info", "[gateway] ready")
     sys.exit(0)
 if cmd[:2] == ["doctor", "--fix"]:
@@ -204,12 +231,14 @@ function gateway(extra: Record<string, string> = {}): number {
  * systemd with `Restart=always`: the pre-start's guard, then the gateway; on a
  * failed start, again with one more automatic restart counted.
  */
-function bootLoop(extra: Record<string, string> = {}, maxStarts = 10) {
+function bootLoop(extra: Record<string, string> = {}, maxStarts = 10, afterGuard?: () => void) {
   const said: string[] = [];
   for (let start = 1, restarts = 0; start <= maxStarts; start++, restarts++) {
     const g = guard(restarts, extra);
     expect(g.status).toBe(0);
     said.push(g.out);
+    // The rest of the pre-start, between the guard and the gateway.
+    afterGuard?.();
     if (gateway(extra) === 0) return { up: true, starts: start, said: said.join("") };
   }
   return { up: false, starts: maxStarts, said: said.join("") };
@@ -259,6 +288,8 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     const g = guardFile();
     expect(g.episode).toMatchObject({ stage: "repaired", databases: ["agent main"] });
     expect(g.notice).toMatchObject({ outcome: "repaired", reason: null, databases: ["agent main"] });
+    // The recovered start follows unclean boots: the breaker watch is asked for.
+    expect(g.channels).toMatchObject({ watch: true, state: "watching" });
 
     // The next start (by hand, so no restarts counted) sees `gateway ready`
     // after the repair: the episode is over.
@@ -302,7 +333,7 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     const saved = process.env.CLAWBOX_ROOT;
     process.env.CLAWBOX_ROOT = root;
     try {
-      expect(await readOpenclawStartRecovery()).toEqual({ outcome: "restored", reason: null, at: g.notice.at });
+      expect(await readOpenclawStartRecovery()).toEqual({ outcome: "restored", reason: null, at: g.notice.at, channelsSuppressed: false });
     } finally {
       process.env.CLAWBOX_ROOT = saved;
     }
@@ -349,6 +380,8 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     expect(run.said).toMatch(/already gave up on this loop/);
     expect(sessionIds(agentDb("main"))).toEqual(["s-bad", "s1", "s2", "s3", "s4"]);
     expect(guardFile().notice).toMatchObject({ outcome: "failed", reason: "no-backup" });
+    // A gateway that does not start has no breaker to watch.
+    expect(guardFile().channels).toBeUndefined();
   });
 
   it("reads the gateway's words from the journal when the log file has none", () => {
@@ -441,5 +474,224 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     expect(g.starts).toHaveLength(2);
     expect(g.provenAt).toBeGreaterThan(g.starts[0].at);
     expect(g.episode).toBeUndefined();
+  });
+});
+
+/**
+ * `breaker-watch`: after the recovery, the core's restart-loop breaker. The
+ * failed starts before it were unclean boots, so the recovered start comes up
+ * with channel auto-start held back. The core lifts that itself; the watch
+ * follows the gateway's own words until it does, tells the owner meanwhile,
+ * and starts the held channels with the core's own override only when the
+ * core has not lifted it in time.
+ */
+describe.skipIf(!hasPython3)("openclaw-db-maintenance.py breaker-watch (after a start-guard recovery)", () => {
+  let server: http.Server;
+  let port: number;
+  let startupz: number;
+  let watcher: ChildProcess | null;
+
+  beforeEach(async () => {
+    startupz = 200;
+    watcher = null;
+    server = http.createServer((req, res) => {
+      res.writeHead(req.url === "/startupz" ? startupz : 404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    port = (server.address() as AddressInfo).port;
+  });
+  afterEach(async () => {
+    watcher?.kill("SIGKILL");
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  const TRIP = (windowMs: number) =>
+    `gateway restart-loop breaker tripped: 3 unclean boot(s) within ${windowMs}ms; suppressing channel/provider account auto-start.`;
+  const RECOVERED = "gateway restart-loop breaker recovered; channel auto-start restored";
+
+  /** The watch as the pre-start detaches it; resolves when it exits. */
+  function watch(extra: Record<string, string> = {}, args: string[] = []) {
+    const child = spawn("python3", [
+      "-I", HELPER, "breaker-watch",
+      "--data-dir", dataDir, "--config", path.join(stateDir, "openclaw.json"),
+      "--openclaw-bin", path.join(binDir, "openclaw"), "--log-dir", logDir, "--gateway-port", String(port),
+      "--poll-seconds", "0.1", "--wait-seconds", "10", "--read-grace-seconds", "5",
+      // The core lifts it at most a health-monitor check after the window:
+      // far off here, unless the case brings it near.
+      "--health-check-seconds", "600",
+      ...args,
+    ], { env: env(extra) });
+    watcher = child;
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const done = new Promise<{ code: number | null; out: string }>((resolve) => child.on("exit", (code) => resolve({ code, out })));
+    return { done };
+  }
+
+  /** The repaired start loop, the watch detached by the pre-start that follows the repair. */
+  function recoveredStart(extra: Record<string, string>, args: string[] = [], watchEnv: Record<string, string> = extra) {
+    let w: ReturnType<typeof watch> | null = null;
+    const run = bootLoop({ OC_DOCTOR_REPAIRS: "1", ...extra }, 10, () => {
+      if (!w && guardFile().channels?.watch === true) w = watch(watchEnv, args);
+    });
+    expect(run.up).toBe(true);
+    expect(w).not.toBeNull();
+    return w!;
+  }
+
+  /** A line from the running gateway. */
+  function coreSays(msg: string, extra: Record<string, string> = {}) {
+    expect(spawnSync("python3", [path.join(binDir, "core.py"), "say", msg], { env: env(extra) }).status).toBe(0);
+  }
+
+  async function until(check: () => boolean, ms = 20_000): Promise<boolean> {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      try {
+        if (check()) return true;
+      } catch {
+        // the record between two writes
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  }
+
+  async function ownerSees() {
+    const saved = process.env.CLAWBOX_ROOT;
+    process.env.CLAWBOX_ROOT = root;
+    try {
+      return await readOpenclawStartRecovery();
+    } finally {
+      process.env.CLAWBOX_ROOT = saved;
+    }
+  }
+
+  const manualStarts = () => (existsSync(calls) ? readFileSync(calls, "utf-8").trim().split("\n") : []).filter((l) => l.startsWith("gateway call") || l.startsWith("channels status"));
+
+  it("tells the owner which channels the breaker holds back after the repair, until the core lifts it itself", async () => {
+    // Journal and log file both: two copies of every line, one channel each.
+    const extra = { OC_BREAKER: "1", OC_HELD: "telegram,discord", OC_JOURNAL: journal };
+    const w = recoveredStart(extra);
+
+    expect(await until(() => guardFile().channels.state === "suppressed")).toBe(true);
+    expect(guardFile().channels).toMatchObject({ watch: true, held: [{ channel: "discord" }, { channel: "telegram" }] });
+    expect(await ownerSees()).toMatchObject({ outcome: "repaired", channelsSuppressed: true });
+
+    // The core's health monitor, once the window has drained.
+    coreSays(RECOVERED, extra);
+    const r = await w.done;
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/holds back discord, telegram/);
+    expect(r.out).toMatch(/lifted its restart-loop breaker; channel auto-start is back/);
+    expect(guardFile().channels).toMatchObject({ watch: false, state: "restored" });
+    expect(await ownerSees()).toMatchObject({ outcome: "repaired", channelsSuppressed: false });
+    // The core lifted it: nothing was started by hand.
+    expect(manualStarts()).toEqual([]);
+  });
+
+  it("starts each held account with the core's own override when the core has not lifted it in time", async () => {
+    const trip = TRIP(1000);
+    const status = {
+      channelAccounts: {
+        telegram: [{ accountId: "default", running: false, lastError: trip }],
+        // The account the breaker held back, and one the owner started since.
+        discord: [{ accountId: "default", running: false, lastError: { message: trip } }, { accountId: "ops", running: true, lastError: null }],
+      },
+    };
+    const extra = { OC_BREAKER: "1", OC_BREAKER_WINDOW_MS: "1000", OC_HELD: "telegram,discord", OC_CHANNELS_STATUS: JSON.stringify(status) };
+    const w = recoveredStart(extra, ["--health-check-seconds", "0.5", "--health-grace-seconds", "0", "--margin-seconds", "0.5"]);
+
+    const r = await w.done;
+
+    expect(r.code).toBe(0);
+    expect(manualStarts()).toEqual([
+      "channels status --json --timeout 10000",
+      "gateway call channels.start --params {\"accountId\": \"default\", \"channel\": \"discord\"} --json --timeout 30000",
+      "gateway call channels.start --params {\"accountId\": \"default\", \"channel\": \"telegram\"} --json --timeout 30000",
+    ]);
+    expect(r.out).toMatch(/had not lifted its restart-loop breaker; started discord \(default\), telegram \(default\) by hand/);
+    expect(guardFile().channels).toMatchObject({
+      watch: false,
+      state: "started",
+      manualStarts: [
+        { channel: "discord", accountId: "default", ok: true, exit: 0 },
+        { channel: "telegram", accountId: "default", ok: true, exit: 0 },
+      ],
+    });
+    expect(await ownerSees()).toMatchObject({ channelsSuppressed: false });
+  });
+
+  it("keeps telling the owner when the override fails too, and the next start looks again", async () => {
+    const extra = { OC_BREAKER: "1", OC_BREAKER_WINDOW_MS: "1000", OC_HELD: "telegram", OC_MANUAL_START_FAILS: "1" };
+    const w = recoveredStart(extra, ["--health-check-seconds", "0.5", "--health-grace-seconds", "0", "--margin-seconds", "0.5"]);
+
+    const r = await w.done;
+
+    expect(r.code).toBe(0);
+    // The gateway's status answered nothing usable: the channel the log named.
+    expect(manualStarts()).toContain("gateway call channels.start --params {\"channel\": \"telegram\"} --json --timeout 30000");
+    expect(r.out).toMatch(/channels\.start did not start telegram; the owner is told/);
+    expect(guardFile().channels).toMatchObject({ watch: true, state: "suppressed", manualStarts: [{ channel: "telegram", ok: false, exit: 1 }] });
+    expect(await ownerSees()).toMatchObject({ channelsSuppressed: true });
+
+    // The next start, past the window: the core lifts it as it boots.
+    const next = watch();
+    coreSays(RECOVERED);
+    expect((await next.done).code).toBe(0);
+    expect(guardFile().channels).toMatchObject({ watch: false, state: "restored" });
+    expect(await ownerSees()).toMatchObject({ channelsSuppressed: false });
+  });
+
+  it("says nothing about channels when the recovered start did not trip the breaker, whatever an earlier start said", async () => {
+    // A trip from an earlier start, before this one's pre-start.
+    coreSays(TRIP(300000), { OC_TIME_OFFSET: "-120" });
+    const w = recoveredStart({});
+
+    const r = await w.done;
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/did not trip the core's restart-loop breaker/);
+    expect(guardFile().channels).toMatchObject({ watch: false, state: "clear" });
+    expect(manualStarts()).toEqual([]);
+    expect(await ownerSees()).toMatchObject({ channelsSuppressed: false });
+  });
+
+  it("claims nothing when the gateway's own output cannot be read", async () => {
+    // The guard read the loop from the journal; the watch's account cannot,
+    // and the core's log file is somewhere it does not look.
+    const elsewhere = path.join(root, "elsewhere");
+    const w = recoveredStart({ OC_JOURNAL: journal, OC_LOG_DIR: elsewhere }, ["--read-grace-seconds", "1"], { OC_LOG_DIR: elsewhere });
+
+    const r = await w.done;
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/cannot be read/);
+    expect(guardFile().channels).toMatchObject({ watch: false, state: "unknown" });
+    expect(await ownerSees()).toMatchObject({ channelsSuppressed: false });
+  });
+
+  it("leaves the watch to the next start when the gateway does not start", async () => {
+    startupz = 503;
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({ channels: { watch: true, state: "watching", since: Date.now() / 1000 } }));
+
+    const r = await watch({}, ["--wait-seconds", "1"]).done;
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/waits for the next gateway start/);
+    expect(guardFile().channels).toMatchObject({ watch: true, state: "watching" });
+  });
+
+  it("does nothing when no recovery asked for it, and lets a day-old watch go", async () => {
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({ starts: [] }));
+    expect((await watch().done).code).toBe(0);
+    expect(guardFile()).toEqual({ starts: [] });
+
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({ channels: { watch: true, state: "suppressed", since: Date.now() / 1000 - 2 * 86400 } }));
+    expect((await watch().done).code).toBe(0);
+    expect(guardFile().channels).toMatchObject({ watch: false, state: "expired" });
+    expect(manualStarts()).toEqual([]);
   });
 });

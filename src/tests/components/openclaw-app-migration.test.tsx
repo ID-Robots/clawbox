@@ -80,6 +80,18 @@ describe("OpenClawApp and the agents' databases", () => {
     expect(notice).toHaveTextContent(text);
     expect(notice).toHaveTextContent(/nothing was deleted/i);
     expect(document.querySelector("iframe")).not.toBeNull();
+    // No restart-loop breaker holding channels back: nothing said about them.
+    expect(screen.queryByTestId("openclaw-start-recovery-channels")).toBeNull();
+  });
+
+  it("says the chat channels are still paused while OpenClaw's restart-loop breaker holds them back", async () => {
+    health = { ...health, startRecovery: { outcome: "repaired", reason: null, at: "2026-10-23T11:00:00Z", channelsSuppressed: true } };
+    render(<OpenClawApp />);
+    const notice = await screen.findByTestId("openclaw-start-recovery-notice");
+    expect(notice).toHaveTextContent("ClawBox ran OpenClaw's own repair on it");
+    expect(await screen.findByTestId("openclaw-start-recovery-channels")).toHaveTextContent(
+      "Chat channels such as Telegram and Discord are paused for now",
+    );
   });
 
   it("says it on the offline screen too, where a gateway it could not recover leaves the owner", async () => {

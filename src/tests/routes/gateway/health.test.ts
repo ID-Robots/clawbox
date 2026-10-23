@@ -106,8 +106,27 @@ describe("/setup-api/gateway/health", () => {
       isPortOpenMock.mockResolvedValue(true);
       expect(await (await GET()).json()).toEqual({
         available: true, port: 18789, restarting: false,
-        startRecovery: { outcome: "restored", reason: null, at },
+        startRecovery: { outcome: "restored", reason: null, at, channelsSuppressed: false },
       });
+    });
+
+    it("says the core's restart-loop breaker still holds channels back after the recovery — a yes, naming no channel", async () => {
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      const at = new Date(Date.now() - 60_000).toISOString();
+      writeFileSync(path.join(root, "data", "openclaw-start-guard.json"), JSON.stringify({
+        version: 1,
+        episode: { stage: "repaired", databases: ["agent main"] },
+        notice: { outcome: "repaired", reason: null, databases: ["agent main"], keptCopies: [], at },
+        channels: { watch: true, state: "suppressed", since: Date.now() / 1000 - 60, held: [{ channel: "telegram" }] },
+      }));
+      isPortOpenMock.mockResolvedValue(true);
+      const body = await (await GET()).json();
+      expect(body).toEqual({
+        available: true, port: 18789, restarting: false,
+        startRecovery: { outcome: "repaired", reason: null, at, channelsSuppressed: true },
+      });
+      expect(JSON.stringify(body)).not.toMatch(/telegram/);
     });
   });
 });

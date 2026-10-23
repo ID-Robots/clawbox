@@ -17,6 +17,14 @@
  * (`notice`); this module only reads it, per call, like
  * `openclaw-migration-status.ts` reads its sibling.
  *
+ * CHANNELS. The failed starts before a recovery trip the core's restart-loop
+ * breaker, and the recovered start then holds channel auto-start back: chat in
+ * the app works while the box's Telegram or Discord stays silent. The core
+ * lifts it on its own once the gateway has run through the breaker's window;
+ * the same helper's `breaker-watch` follows that after the start and records it
+ * in the same file (`channels.state`). `channelsSuppressed` is true while that
+ * says the core still holds channels back, so the owner is told.
+ *
  * WHAT IT ANSWERS. `null` for anything that is not a notice worth showing: no
  * file, an unreadable or malformed one, an outcome it does not know, one older
  * than `START_RECOVERY_NOTICE_MS`, or a box whose active harness is Hermes. An
@@ -51,6 +59,8 @@ export interface OpenclawStartRecovery {
   reason: OpenclawStartRecoveryReason | null;
   /** When the guard acted, ISO 8601. */
   at: string;
+  /** The core's restart-loop breaker still holds channel auto-start back after the recovered start. */
+  channelsSuppressed: boolean;
 }
 
 /** How long a notice is shown after the guard acted. */
@@ -92,9 +102,12 @@ export async function readOpenclawStartRecovery(now: number = Date.now()): Promi
   if (typeof raw.at !== "string") return null;
   const at = Date.parse(raw.at);
   if (!Number.isFinite(at) || now - at > START_RECOVERY_NOTICE_MS) return null;
+  const channels = (parsed as Record<string, unknown>).channels;
   return {
     outcome: raw.outcome as OpenclawStartRecoveryOutcome,
     reason: typeof raw.reason === "string" && REASONS.has(raw.reason) ? (raw.reason as OpenclawStartRecoveryReason) : null,
     at: raw.at,
+    channelsSuppressed: !!channels && typeof channels === "object" && !Array.isArray(channels)
+      && (channels as Record<string, unknown>).state === "suppressed",
   };
 }

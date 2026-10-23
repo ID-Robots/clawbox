@@ -1053,6 +1053,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "openclaw.startRecoveryRestored": "The gateway kept restarting because OpenClaw refused data in an agent database, and OpenClaw's own repair did not fix it. ClawBox put back that database's copy from before the last update. Conversations since then are kept in a copy beside it; nothing was deleted.",
     "openclaw.startRecoveryNoBackup": "The gateway kept restarting because OpenClaw refused data in an agent database. OpenClaw's own repair did not fix it, and there is no copy from before the last update to put back. Nothing was deleted. Run the update again from Settings, or contact support.",
     "openclaw.startRecoveryFailed": "The gateway kept restarting because OpenClaw refused data in an agent database. Neither OpenClaw's own repair nor the copy from before the last update got it started, so ClawBox stopped trying. Nothing was deleted. Run the update again from Settings, or contact support.",
+    "openclaw.startRecoveryChannelsPaused": "Chat channels such as Telegram and Discord are paused for now. After repeated failed starts, OpenClaw holds them back until the gateway has run cleanly for a few minutes, and ClawBox checks that they come back. If they are still off after a quarter of an hour, restart ClawBox.",
     "openclaw.retry": "Retry",
     "openclaw.iframeTitle": "OpenClaw Control",
 
