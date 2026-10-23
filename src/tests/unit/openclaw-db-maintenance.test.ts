@@ -605,6 +605,7 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py memory-rebuild (after t
 
   it("says the embeddings are back when it rebuilt a keyword-only index with one", async () => {
     writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["keyword_only"], keywordOnly: true, keywordOnlyFor: "a1b2c3d4e5f60718" }));
+    writeFileSync(path.join(dataDir, "openclaw-memory-rebuild.credential"), "{}");
     const r = await rebuild(
       { OC_INDEX_META: JSON.stringify({ model: "text-embedding-3-small", provider: "openai-compatible", vectorDims: 1536 }) },
       ["--state-dir", stateDir, "--config", configPath],
@@ -619,12 +620,24 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py memory-rebuild (after t
     // to text again under the same embedder (a swap to Hermes and back) would
     // never be asked for again by the gateway pre-start.
     expect(rec.keywordOnlyFor).toBeUndefined();
+    // And what the pre-start kept to tell a corrected key apart goes with it.
+    expect(existsSync(path.join(dataDir, "openclaw-memory-rebuild.credential"))).toBe(false);
   });
 
   it("keeps the once-per-setting guard when the rebuild came out keyword-only again", async () => {
     writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["keyword_only"], keywordOnlyFor: "a1b2c3d4e5f60718" }));
     await rebuild({ OC_INDEX_META: JSON.stringify({ model: "fts-only", provider: "none" }) }, ["--state-dir", stateDir, "--config", configPath]);
     expect(JSON.parse(readFileSync(rebuildRecord(), "utf-8"))).toMatchObject({ pending: false, keywordOnly: true, keywordOnlyFor: "a1b2c3d4e5f60718" });
+  });
+
+  it("calls nothing embedded that does not say which provider and model built it", async () => {
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["keyword_only"], keywordOnlyFor: "a1b2c3d4e5f60718" }));
+    writeFileSync(path.join(dataDir, "openclaw-memory-rebuild.credential"), "{}");
+    const r = await rebuild({ OC_INDEX_META: "{}" }, ["--state-dir", stateDir, "--config", configPath]);
+    expect(r.out).not.toMatch(/with embeddings/);
+    expect(r.out).toMatch(/what it was built with could not be read back/);
+    expect(JSON.parse(readFileSync(rebuildRecord(), "utf-8"))).toMatchObject({ pending: false, keywordOnlyFor: "a1b2c3d4e5f60718" });
+    expect(existsSync(path.join(dataDir, "openclaw-memory-rebuild.credential"))).toBe(true);
   });
 
   it("claims no embeddings it could not read back", async () => {

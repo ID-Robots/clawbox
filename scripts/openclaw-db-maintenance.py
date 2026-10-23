@@ -129,6 +129,10 @@ DOWNGRADE_AUTHORIZATION_TTL_S = 12 * 3600
 SET_ASIDE_DIR = "openclaw-newer-schema"
 RECORD_FILE = "openclaw-db-maintenance.json"
 MEMORY_REBUILD_FILE = "openclaw-memory-rebuild.json"
+# Beside it, 0600: the gateway pre-start's salted digest of the embedder key a
+# keyword-only rebuild was asked for under, so a corrected key asks again. Kept
+# out of the record, which is plain JSON other tools read.
+MEMORY_REBUILD_CREDENTIAL_FILE = "openclaw-memory-rebuild.credential"
 # The lock scripts/ensure-local-embeddings.sh holds for its own `memory index
 # --force`: shared, so the two rebuilds can never run at the same time.
 EMBED_LOCK_FILE = "local-embeddings.state.lock"
@@ -339,6 +343,27 @@ def memory_index_built(path):
 
 def keyword_only(meta):
     return isinstance(meta, dict) and (meta.get("provider") == "none" or meta.get("model") == "fts-only")
+
+
+def embedded(meta):
+    """Built WITH an embedder: the row names the provider and the model. An
+    object that names neither is not evidence of anything."""
+    def named(key, absent):
+        value = meta.get(key) if isinstance(meta, dict) else None
+        return isinstance(value, str) and value.strip() not in ("", absent)
+
+    return named("provider", "none") and named("model", "fts-only")
+
+
+def keyword_only_agent_dbs(state_dir, config_path):
+    """The agent databases — the same inventory every other step here walks,
+    `agents.entries.<id>.agentDir` included — whose memory index says it was
+    built keyword-only. Read-only. The gateway pre-start asks this too."""
+    return [
+        db["path"]
+        for db in discover(state_dir, config_path)
+        if db["kind"] == "agent" and keyword_only(memory_index_built(db["path"]))
+    ]
 
 
 # Test seam: the free space every statvfs answers, so a suite can stand in
@@ -1822,30 +1847,35 @@ def cmd_memory_rebuild(args):
         if db["kind"] == "agent"
     ]
     text_only = any(keyword_only(meta) for meta in built)
-    embedded = next((meta for meta in built if isinstance(meta, dict) and not keyword_only(meta)), None)
+    with_vectors = next((meta for meta in built if embedded(meta)), None)
     rec["pending"] = False
     rec["doneAt"] = iso(time.time())
     rec.pop("lastError", None)
     if text_only:
         rec["keywordOnly"] = True
-    elif embedded is not None:
+    elif with_vectors is not None:
         # Proved embedded: the pre-start's once-per-setting guard goes too, or
         # an index that falls back to text again under the same embedder (a
-        # swap to Hermes and back) would never be asked for again.
+        # swap to Hermes and back) would never be asked for again — and with it
+        # what the pre-start kept to tell a corrected key apart.
         rec.pop("keywordOnly", None)
         rec.pop("keywordOnlyFor", None)
+        try:
+            os.unlink(os.path.join(args.data_dir, MEMORY_REBUILD_CREDENTIAL_FILE))
+        except OSError:
+            pass
     write_json(path, rec)
     if text_only:
         # Not retried here: the same settings would build the same thing. The
         # gateway pre-start asks again once memory.search names an embedder.
         warn("memory index rebuilt KEYWORD-ONLY: no embedding provider answered, so it holds text and no vectors and memory search matches words only; it is rebuilt once memory.search names an embedder")
     elif "keyword_only" in (rec.get("reasons") or []):
-        if embedded is None:
+        if with_vectors is None:
             # The core exited 0 and that is all this knows: nothing read back.
             log("memory index rebuilt; what it was built with could not be read back")
         else:
             log("memory index rebuilt with embeddings (%s/%s): it had been built keyword-only"
-                % (embedded.get("provider") or "?", embedded.get("model") or "?"))
+                % (with_vectors["provider"], with_vectors["model"]))
     else:
         log("memory index rebuilt for the new settings (session transcripts no longer indexed); its freed pages are compacted at the next gateway start")
     return 0

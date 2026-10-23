@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -67,6 +67,7 @@ function pass(config: unknown, opts: { v2?: boolean; core2026_10?: boolean } = {
       CLAWBOX_OPENCLAW_2026_10: opts.v2 === false || opts.core2026_10 === false ? "0" : "1",
       CLAWBOX_MEMORY_REBUILD_RECORD: recordPath,
       CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"),
+      CLAWBOX_DB_MAINTENANCE_PY: path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py"),
     },
   });
   if (r.status !== 0) throw new Error(`config pass exited ${r.status}: ${r.stderr}`);
@@ -162,8 +163,8 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh memory index defaults", () =>
  * `memory_index_meta_v1`). `null` leaves the table out, as on a core that has
  * never indexed.
  */
-function agentIndexMeta(meta: Record<string, unknown> | null, agent = "main"): void {
-  const db = path.join(dir, "agents", agent, "agent", "openclaw-agent.sqlite");
+function agentIndexMeta(meta: Record<string, unknown> | null, agent = "main", agentDir?: string): void {
+  const db = path.join(agentDir ?? path.join(dir, "agents", agent, "agent"), "openclaw-agent.sqlite");
   mkdirSync(path.dirname(db), { recursive: true });
   const r = spawnSync("python3", ["-c", [
     "import sqlite3, sys",
@@ -255,6 +256,41 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh: a memory index built keyword
     agentIndexMeta(KEYWORD_ONLY_META, "work");
     pass({ memory: { search: { ...CLOUD_SMALL } } });
     expect(rebuildRecord()).toMatchObject({ pending: true, reasons: ["keyword_only"] });
+  });
+
+  it("reads an agent whose agentDir lies outside the state directory, as the housekeeping does", () => {
+    // The same inventory scripts/openclaw-db-maintenance.py walks: the agents
+    // under the state directory AND `agents.entries.<id>.agentDir`.
+    agentIndexMeta(EMBEDDED_META);
+    const elsewhere = path.join(dir, "elsewhere", "work-agent");
+    agentIndexMeta(KEYWORD_ONLY_META, "work", elsewhere);
+    pass({ agents: { entries: { work: { agentDir: elsewhere } } }, memory: { search: { ...CLOUD_SMALL } } });
+    expect(rebuildRecord()).toMatchObject({ pending: true, reasons: ["keyword_only"] });
+  });
+
+  it("asks again once the key is corrected after the attempts ran out — and keeps the key out of the record", () => {
+    agentIndexMeta(KEYWORD_ONLY_META);
+    pass({ memory: { search: { ...CLOUD_SMALL } } });
+    // Three attempts against a key the endpoint refused, and the rebuild gave up.
+    writeFileSync(recordPath, JSON.stringify({ ...rebuildRecord(), attempts: 3, lastError: "memory index: exit 1", lastAttemptAt: "2026-10-23T09:00:00Z" }));
+    const spent = readFileSync(recordPath, "utf-8");
+    const same = pass({ memory: { search: { ...CLOUD_SMALL } } });
+    expect(same.out).not.toMatch(/built keyword-only/);
+    expect(readFileSync(recordPath, "utf-8")).toBe(spent);
+    // The owner re-links ClawBox AI: same provider, model and endpoint, new key.
+    const fixed = { ...CLOUD_SMALL, remote: { ...CLOUD_SMALL.remote, apiKey: "claw_box_token_relinked" } };
+    const again = pass({ memory: { search: fixed } });
+    expect(again.out).toMatch(/built keyword-only/);
+    expect(rebuildRecord()).toMatchObject({ pending: true, attempts: 0, reasons: ["keyword_only"] });
+    // Plain JSON, readable by the box's other tools: no key, and nothing made from one.
+    const record = readFileSync(recordPath, "utf-8");
+    expect(record).not.toContain("claw_box_token");
+    const recorded = JSON.parse(record) as Record<string, unknown>;
+    expect(Object.keys(recorded).sort()).toEqual(["attempts", "keywordOnlyFor", "lastAttemptAt", "pending", "reasons", "requestedAt"]);
+    // What the comparison does keep is the owner's alone, and holds no key either.
+    const sidecar = path.join(dir, "data", "openclaw-memory-rebuild.credential");
+    expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+    expect(readFileSync(sidecar, "utf-8")).not.toContain("claw_box_token");
   });
 
   it("leaves the index's database exactly as it found it", () => {

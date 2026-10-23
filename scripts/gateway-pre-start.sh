@@ -1105,6 +1105,9 @@ export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
 # Where the memory-index block below asks for the one rebuild a change of the
 # index's identity needs (scripts/openclaw-db-maintenance.py memory-rebuild).
 export CLAWBOX_MEMORY_REBUILD_RECORD="$CLAWBOX_ROOT/data/openclaw-memory-rebuild.json"
+# What that block reads the agent databases with (read-only; see its
+# keyword-only check): the housekeeping script's own inventory and reader.
+export CLAWBOX_DB_MAINTENANCE_PY="$SCRIPT_DIR/openclaw-db-maintenance.py"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, re, sys, tempfile, secrets, shutil, time
@@ -4117,7 +4120,7 @@ def _memory_rebuild_state():
 def _record_memory_rebuild(changes, note=None, extra=None):
     """Ask for the rebuild — only once the config these changes are in landed."""
     if not changes or not _memory_rebuild_record:
-        return
+        return False
     _state = _memory_rebuild_state()
     _state.update({
         "pending": True,
@@ -4138,8 +4141,10 @@ def _record_memory_rebuild(changes, note=None, extra=None):
             json.dump(_state, _fh, indent=2, sort_keys=True)
         os.replace(_tmp, _memory_rebuild_record)
         print(note or "  Memory index: settings changed (%s); one rebuild runs after the gateway starts" % ", ".join(sorted(set(changes))))
+        return True
     except Exception as exc:
         print("  WARN: could not record the memory index rebuild (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+        return False
 
 
 # --- a memory index built keyword-only ---
@@ -4160,11 +4165,19 @@ def _record_memory_rebuild(changes, note=None, extra=None):
 # setting it was asked for — so a provider that falls back instead of failing
 # (`local`) costs one rebuild, not one at every gateway start.
 #
-# Read from the agent databases directly, READ-ONLY: the core's own reading
-# (`openclaw memory status`) boots the whole CLI, 8-10 s on a Jetson, and has
-# no place inside a pre-start that runs before the gateway. The row is the one
-# the pinned core writes; a core without it reads as "not keyword-only", which
-# asks for nothing.
+# Read from the agent databases directly, READ-ONLY, through the helper the
+# post-start rebuild reads them with (scripts/openclaw-db-maintenance.py, the
+# same agent inventory, `agents.entries.<id>.agentDir` included): the core's own
+# reading (`openclaw memory status`) boots the whole CLI, 8-10 s on a Jetson,
+# and has no place inside a pre-start that runs before the gateway. The row is
+# the one the pinned core writes; a core without it, or a helper that cannot be
+# loaded, reads as "not keyword-only", which asks for nothing.
+#
+# THE KEY IS PART OF THE SETTING. A rebuild against a key the endpoint refuses
+# fails its attempts and stops; correcting the key changes neither provider,
+# model nor endpoint, so `keywordOnlyFor` alone would never ask again. The key
+# is compared through a salted digest in its own 0600 file beside the record —
+# never in the record, which is plain JSON other tools read.
 _NO_EMBEDDER = ("", "auto", "none")
 
 
@@ -4181,28 +4194,63 @@ def _embedder_setting(search):
     _base = _remote.get("baseUrl") if isinstance(_remote.get("baseUrl"), str) else ""
     _label = "%s/%s" % (_provider.strip(), _model.strip() or "its default model")
     _key = hashlib.sha256(json.dumps([_provider.strip(), _model.strip(), _base.strip()]).encode("utf-8")).hexdigest()[:16]
-    return _label, _key
+    return _label, _key, _remote.get("apiKey")
 
 
 def _agent_index_keyword_only():
     """Does any agent's memory index say it was built with no embeddings?"""
-    import glob
-    import sqlite3
-    import urllib.parse
-    _state_dir = os.environ.get("OPENCLAW_STATE_DIR") or os.path.dirname(cfg_path)
-    for _db in sorted(glob.glob(os.path.join(_state_dir, "agents", "*", "agent", "openclaw-agent.sqlite"))):
+    _helper = os.environ.get("CLAWBOX_DB_MAINTENANCE_PY") or ""
+    if not _helper:
+        return False
+    try:
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location("clawbox_db_maintenance", _helper)
+        _dbm = importlib.util.module_from_spec(_spec)
+        # No __pycache__ left in the checkout: it runs as a script everywhere else.
+        _bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
         try:
-            _con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(_db), uri=True, timeout=2)
-            try:
-                _row = _con.execute("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'").fetchone()
-            finally:
-                _con.close()
-            _meta = json.loads(_row[0]) if _row else None
-        except Exception:
-            continue
-        if isinstance(_meta, dict) and (_meta.get("provider") == "none" or _meta.get("model") == "fts-only"):
-            return True
-    return False
+            _spec.loader.exec_module(_dbm)
+        finally:
+            sys.dont_write_bytecode = _bytecode
+        _state_dir = os.environ.get("OPENCLAW_STATE_DIR") or os.path.dirname(cfg_path)
+        return bool(_dbm.keyword_only_agent_dbs(_state_dir, cfg_path))
+    except Exception as exc:
+        print("  WARN: could not read how the memory index was built (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+        return False
+
+
+def _credential_file():
+    return os.path.join(os.path.dirname(_memory_rebuild_record), "openclaw-memory-rebuild.credential")
+
+
+def _credential_digest(api_key, salt):
+    import hashlib
+    return hashlib.sha256((salt + json.dumps(api_key, sort_keys=True)).encode("utf-8")).hexdigest()
+
+
+def _credential_unchanged(api_key):
+    """Is this the key the last keyword-only rebuild was asked for under? No record of one reads as changed."""
+    try:
+        with open(_credential_file(), "r", encoding="utf-8") as _fh:
+            _kept = json.load(_fh)
+        return isinstance(_kept, dict) and _kept.get("digest") == _credential_digest(api_key, str(_kept.get("salt") or ""))
+    except Exception:
+        return False
+
+
+def _remember_credential(api_key):
+    _path = _credential_file()
+    _salt = secrets.token_hex(16)
+    _tmp = _path + ".tmp"
+    try:
+        _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(_fd, "w", encoding="utf-8") as _fh:
+            json.dump({"salt": _salt, "digest": _credential_digest(api_key, _salt)}, _fh)
+        os.chmod(_tmp, 0o600)
+        os.replace(_tmp, _path)
+    except Exception as exc:
+        print("  WARN: could not record which key the memory index rebuild was asked for under (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
 
 
 _keyword_only_rebuild = None
@@ -4211,12 +4259,13 @@ _keyword_only_rebuild = None
 def _record_keyword_only_rebuild():
     if not _keyword_only_rebuild:
         return
-    _label, _key = _keyword_only_rebuild
-    _record_memory_rebuild(
+    _label, _key, _api_key = _keyword_only_rebuild
+    if _record_memory_rebuild(
         ["keyword_only"],
         note="  Memory index: built keyword-only (no embeddings); %s is set now, so one rebuild runs after the gateway starts" % _label,
         extra={"keywordOnlyFor": _key},
-    )
+    ):
+        _remember_credential(_api_key)
 
 
 # Read through globals() like the other migrations here, so a suite that runs a
@@ -4251,7 +4300,10 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
         _setting = _embedder_setting(_memory_search)
         if (
             _setting
-            and _memory_rebuild_state().get("keywordOnlyFor") != _setting[1]
+            and (
+                _memory_rebuild_state().get("keywordOnlyFor") != _setting[1]
+                or not _credential_unchanged(_setting[2])
+            )
             and _agent_index_keyword_only()
         ):
             _keyword_only_rebuild = _setting
