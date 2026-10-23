@@ -1822,22 +1822,30 @@ def cmd_memory_rebuild(args):
         if db["kind"] == "agent"
     ]
     text_only = any(keyword_only(meta) for meta in built)
+    embedded = next((meta for meta in built if isinstance(meta, dict) and not keyword_only(meta)), None)
     rec["pending"] = False
     rec["doneAt"] = iso(time.time())
     rec.pop("lastError", None)
     if text_only:
         rec["keywordOnly"] = True
-    else:
+    elif embedded is not None:
+        # Proved embedded: the pre-start's once-per-setting guard goes too, or
+        # an index that falls back to text again under the same embedder (a
+        # swap to Hermes and back) would never be asked for again.
         rec.pop("keywordOnly", None)
+        rec.pop("keywordOnlyFor", None)
     write_json(path, rec)
     if text_only:
         # Not retried here: the same settings would build the same thing. The
         # gateway pre-start asks again once memory.search names an embedder.
         warn("memory index rebuilt KEYWORD-ONLY: no embedding provider answered, so it holds text and no vectors and memory search matches words only; it is rebuilt once memory.search names an embedder")
     elif "keyword_only" in (rec.get("reasons") or []):
-        embedded = next((meta for meta in built if isinstance(meta, dict) and not keyword_only(meta)), {})
-        log("memory index rebuilt with embeddings (%s/%s): it had been built keyword-only"
-            % (embedded.get("provider") or "?", embedded.get("model") or "?"))
+        if embedded is None:
+            # The core exited 0 and that is all this knows: nothing read back.
+            log("memory index rebuilt; what it was built with could not be read back")
+        else:
+            log("memory index rebuilt with embeddings (%s/%s): it had been built keyword-only"
+                % (embedded.get("provider") or "?", embedded.get("model") or "?"))
     else:
         log("memory index rebuilt for the new settings (session transcripts no longer indexed); its freed pages are compacted at the next gateway start")
     return 0
