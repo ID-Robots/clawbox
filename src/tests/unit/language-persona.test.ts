@@ -30,6 +30,8 @@ import {
   personaWritesAllowed,
   RETIRED_RITUAL_DIRNAME,
   retireOnboardingRitual,
+  withLanguageLine,
+  withoutLanguageSection,
   writeLanguagePersona,
 } from "@/lib/language-persona";
 
@@ -113,6 +115,111 @@ describe("writeLanguagePersona content", () => {
     const userMd = read(files.userFile) ?? "";
     expect(userMd.match(/\*\*Language:\*\*/g)).toHaveLength(1);
     expect(userMd).toContain("Français (fr)");
+  });
+});
+
+// Switching the box back to English must take the instruction out of the
+// persona deterministically. The block and the line are spelled out here,
+// byte for byte what a Bulgarian pick has always written, rather than built
+// from the module: these are the files already on boxes in the field.
+describe("writeLanguagePersona: English strips the language instruction", () => {
+  const BG_SOUL_BLOCK =
+    "\n\n## Language\n\nYou MUST respond in Български. The user's preferred language is Български (bg). " +
+    "All messages, explanations, and summaries must be in Български. Only use English for code, technical terms, " +
+    "and tool names.\n";
+  const BG_USER_LINE = "- **Language:** Български (bg) — Always respond in Български";
+  const SOUL = "# SOUL.md - Who You Are\n\nSharp and quiet.\n";
+
+  it("emits exactly that block and line for a Bulgarian pick", async () => {
+    fs.writeFileSync(files.soulFile, SOUL, "utf-8");
+    fs.writeFileSync(files.userFile, "# USER.md - About Your Human\n- **Name:** Sam\n", "utf-8");
+    await writeLanguagePersona("bg", files);
+    expect(read(files.soulFile)).toBe(SOUL.trimEnd() + BG_SOUL_BLOCK);
+    expect(read(files.userFile)).toBe(`# USER.md - About Your Human\n- **Name:** Sam\n${BG_USER_LINE}\n`);
+  });
+
+  it("removes the block at the end of the file, trailing newline and all", async () => {
+    fs.writeFileSync(files.soulFile, SOUL.trimEnd() + BG_SOUL_BLOCK, "utf-8");
+    fs.writeFileSync(files.userFile, `# USER.md - About Your Human\n- **Name:** Sam\n${BG_USER_LINE}\n`, "utf-8");
+    expect(await writeLanguagePersona("en", files)).toBe(true);
+    expect(read(files.soulFile)).toBe(SOUL);
+    expect(read(files.userFile)).toBe("# USER.md - About Your Human\n- **Name:** Sam\n- **Language:** English (en)\n");
+  });
+
+  it("removes every copy of the block, not only the first", async () => {
+    fs.writeFileSync(files.soulFile, SOUL.trimEnd() + BG_SOUL_BLOCK.trimEnd() + BG_SOUL_BLOCK, "utf-8");
+    await writeLanguagePersona("en", files);
+    expect(read(files.soulFile)).toBe(SOUL);
+  });
+
+  it("removes a block that opens the file", async () => {
+    fs.writeFileSync(files.soulFile, BG_SOUL_BLOCK.trimStart() + "\n## Vibe\n\nCalm.\n", "utf-8");
+    await writeLanguagePersona("en", files);
+    expect(read(files.soulFile)).toBe("## Vibe\n\nCalm.\n");
+  });
+
+  it("keeps the section that follows the block, and the one before it", async () => {
+    fs.writeFileSync(files.soulFile, SOUL.trimEnd() + BG_SOUL_BLOCK + "\n## Vibe\n\nCalm.\n", "utf-8");
+    await writeLanguagePersona("en", files);
+    expect(read(files.soulFile)).toBe(`${SOUL}\n## Vibe\n\nCalm.\n`);
+  });
+
+  it("removes a block written with Windows line endings", async () => {
+    fs.writeFileSync(files.soulFile, (SOUL.trimEnd() + BG_SOUL_BLOCK).replace(/\n/g, "\r\n"), "utf-8");
+    await writeLanguagePersona("en", files);
+    const soul = read(files.soulFile) ?? "";
+    expect(soul).not.toContain("## Language");
+    expect(soul).not.toContain("MUST respond");
+  });
+
+  it("replaces a language line that ends the file with no newline after it", async () => {
+    fs.writeFileSync(files.userFile, `# USER.md - About Your Human\n- **Name:** Sam\n${BG_USER_LINE}`, "utf-8");
+    await writeLanguagePersona("en", files);
+    const user = read(files.userFile) ?? "";
+    expect(user).not.toContain("Always respond in");
+    expect(user).toBe("# USER.md - About Your Human\n- **Name:** Sam\n- **Language:** English (en)\n");
+  });
+
+  it("replaces every language line, the first line of the file included", async () => {
+    fs.writeFileSync(files.userFile, `${BG_USER_LINE}\n# USER.md\n${BG_USER_LINE}\n${BG_USER_LINE}\n`, "utf-8");
+    await writeLanguagePersona("en", files);
+    const user = read(files.userFile) ?? "";
+    expect(user).not.toContain("Always respond in");
+    expect(user.match(/\*\*Language:\*\*/g)).toHaveLength(1);
+  });
+
+  it("still writes the line after a name line that ends the file", async () => {
+    fs.writeFileSync(files.userFile, "# USER.md\n- **Name:** Sam", "utf-8");
+    await writeLanguagePersona("de", files);
+    expect(read(files.userFile)).toBe("# USER.md\n- **Name:** Sam\n- **Language:** Deutsch (de) — Always respond in Deutsch\n");
+  });
+
+  it("does not rewrite a SOUL.md that carries no language section", async () => {
+    fs.writeFileSync(files.soulFile, "# SOUL.md\n\nSpeaks several languages.\n\n## Languages I like\n\nAll.\n", "utf-8");
+    const before = fs.statSync(files.soulFile).mtimeMs;
+    await new Promise((r) => setTimeout(r, 15));
+    await writeLanguagePersona("en", files);
+    expect(fs.statSync(files.soulFile).mtimeMs).toBe(before);
+  });
+
+  it("never creates SOUL.md for English", async () => {
+    await writeLanguagePersona("en", files);
+    expect(read(files.soulFile)).toBeNull();
+  });
+});
+
+describe("withoutLanguageSection / withLanguageLine", () => {
+  it("hands unchanged text back unchanged", () => {
+    const soul = "# SOUL.md\n\n## Vibe\n\nCalm.\n";
+    expect(withoutLanguageSection(soul)).toBe(soul);
+  });
+
+  it("keeps a deeper heading inside the section with the section", () => {
+    expect(withoutLanguageSection("# S\n\n## Language\n\nX\n\n### Detail\n\nY\n\n## Next\n")).toBe("# S\n\n## Next\n");
+  });
+
+  it("adds the line at the end when there is no name line", () => {
+    expect(withLanguageLine("# USER.md\n\n", "- **Language:** English (en)")).toBe("# USER.md\n- **Language:** English (en)\n");
   });
 });
 

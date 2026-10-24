@@ -8453,6 +8453,50 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
 
+# ── Each ClawBox user's own language ───────────────────────────────────────
+#
+# A ClawBox user other than the owner may pick a language of their own in
+# Settings → Language. ClawBox keeps it in the device store
+# (`ui_language_by_user`), apart from the box default the persona carries
+# (src/lib/user-language.ts), so one person's pick never changes the agent's
+# language for the owner, another user or a cron run. This plugin hands it to
+# the agent in that user's own chat, and nowhere else.
+#
+# HARNESS FIRST: the core's typed `before_prompt_build` hook returning
+# `appendSystemContext` — rebuilt with the system prompt on every turn, never
+# written into the transcript, and read again after a pick with no gateway
+# restart. A non-bundled plugin's prompt hook needs the core's
+# `hooks.allowConversationAccess` grant, which the installer writes for this
+# plugin. Installed on every box: with no user picks there is nothing to add.
+CLAWBOX_USER_LANG_ID="clawbox-user-language"
+CLAWBOX_USER_LANG_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_USER_LANG_ID"
+CLAWBOX_USER_LANG_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_USER_LANG_ID"
+CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 install_clawbox_hook_plugin "$CLAWBOX_USER_LANG_ID" "$CLAWBOX_USER_LANG_DST" \
+  "a ClawBox user's chat answers in the box's language rather than their own" \
+  "$CLAWBOX_USER_LANG_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_USER_LANG_SRC/package.json" \
+  "$CLAWBOX_USER_LANG_SRC/index.mjs" \
+  "$CLAWBOX_USER_LANG_SRC/user-language.mjs"
+
+# Cheap proof the installed copy loads, registers its hook, and speaks only in
+# a user's own chat — one `node` start, no CLI.
+CLAWBOX_USER_LANG_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_USER_LANG_NODE" ]; then
+  if ! CLAWBOX_USER_LANG_DST="$CLAWBOX_USER_LANG_DST" "$CLAWBOX_USER_LANG_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_USER_LANG_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const hooks = [];
+    plugin.register({ on: (name) => hooks.push(name), config: {} });
+    if (!hooks.includes("before_prompt_build")) throw new Error("no before_prompt_build hook");
+    const { promptContext } = await import(`${dir}/user-language.mjs`);
+    const languages = async () => new Map([["alice", "de"]]);
+    if (!(await promptContext({ sessionKey: "agent:main:clawbox-user-alice" }, languages))) throw new Error("a user chat would not get its language");
+    if (await promptContext({ sessionKey: "agent:main:main" }, languages)) throw new Error("the owner chat would get a user language");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_USER_LANG_ID plugin did not load or did not register its hook — a ClawBox user's chat answers in the box's language rather than their own" >&2
+  fi
+fi
+
 # ── The Prime Radiant core block ───────────────────────────────────────────
 #
 # The most-linked pages of the owner's Prime Radiant wiki, one line each, in
@@ -9364,21 +9408,43 @@ line = "- **Language:** %s (%s)" % (name, lang)
 if lang != "en":
     line += " — Always respond in %s" % name
 
-SOUL_SECTION = re.compile(r"\n## Language\n[\s\S]*?(?=\n## |\n\Z|\Z)")
+SOUL_HEADING = re.compile(r"## Language[ \t]*\r?")
+SECTION_END = re.compile(r"#{1,2}[ \t]")
+
+
+def without_language_section(text):
+    # EVERY "## Language" section, from its heading to the next level-one or
+    # level-two heading or the end — withoutLanguageSection() in
+    # src/lib/language-persona.ts, line for line.
+    kept, in_section = [], False
+    for row in text.split("\n"):
+        if SOUL_HEADING.fullmatch(row):
+            in_section = True
+            continue
+        if in_section and SECTION_END.match(row):
+            in_section = False
+        if not in_section:
+            kept.append(row)
+    return "\n".join(kept)
 
 
 def user_md(text):
-    text = re.sub(r"\n- \*\*Language:\*\*.*\n", "\n", text)
-    if "- **Name:**" in text:
-        return re.sub(r"(- \*\*Name:\*\*.*\n)", lambda m: m.group(1) + line + "\n", text, count=1)
-    return text.rstrip() + "\n" + line + "\n"
+    # withLanguageLine() in src/lib/language-persona.ts: every language line
+    # out, this one in after the name line, else at the end.
+    rows = [row for row in text.split("\n") if not row.startswith("- **Language:**")]
+    for i, row in enumerate(rows):
+        if row.startswith("- **Name:**"):
+            rows.insert(i + 1, line)
+            out = "\n".join(rows)
+            return out if out.endswith("\n") else out + "\n"
+    return "\n".join(rows).rstrip() + "\n" + line + "\n"
 
 
 def soul_md(text):
-    stripped = SOUL_SECTION.sub("", text, count=1)
+    stripped = without_language_section(text)
     if lang == "en":
         # English is the absence of the instruction, not another instruction.
-        return stripped.rstrip() + "\n" if "## Language" in text else text
+        return stripped.rstrip() + "\n" if stripped != text else text
     return stripped.rstrip() + (
         "\n\n## Language\n\nYou MUST respond in %s. The user's preferred language is %s (%s). "
         "All messages, explanations, and summaries must be in %s. Only use English for code, "

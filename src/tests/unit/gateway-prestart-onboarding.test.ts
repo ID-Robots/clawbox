@@ -486,6 +486,45 @@ describe("gateway-pre-start: the language re-apply", () => {
     }
   }, SHELL_TIMEOUT_MS);
 
+  it("strips the language instruction the same way writeLanguagePersona does, wherever it sits", async () => {
+    // The cases the old one-shot regex got wrong: a section at the top of the
+    // file, two of them, Windows line endings, a language line with no newline
+    // after it. Both writers must take ALL of it out on English, and replace
+    // it whole on another locale.
+    const block =
+      "## Language\n\nYou MUST respond in Български. The user's preferred language is Български (bg). " +
+      "All messages, explanations, and summaries must be in Български. Only use English for code, technical terms, " +
+      "and tool names.\n";
+    const line = "- **Language:** Български (bg) — Always respond in Български";
+    const seeds: Array<{ user: string; soul: string }> = [
+      { user: `# USER.md - About Your Human\n- **Name:** Sam\n${line}\n`, soul: `# SOUL.md\n\nQuiet.\n\n${block}` },
+      { user: `# USER.md - About Your Human\n- **Name:** Sam\n${line}`, soul: `${block}\n## Vibe\n\nCalm.\n` },
+      { user: `${line}\n# USER.md\n${line}\n`, soul: `# SOUL.md\n\n${block}\n${block}` },
+      { user: "# USER.md\n- **Name:** Sam", soul: `# SOUL.md\r\n\r\n${block}`.replace(/\n/g, "\r\n") },
+    ];
+    for (const lang of ["en", "de"]) {
+      for (const [i, seed] of seeds.entries()) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        prepare(lang, { "USER.md": seed.user, "SOUL.md": seed.soul });
+        expect(apply().status, `${lang} seed ${i}`).toBe(0);
+        const fromShell = { user: read(userMd()), soul: read(soulMd()) };
+
+        const ref = path.join(dir, "reference");
+        fs.mkdirSync(ref);
+        const refFiles = { userFile: path.join(ref, "USER.md"), soulFile: path.join(ref, "SOUL.md") };
+        fs.writeFileSync(refFiles.userFile, seed.user, "utf-8");
+        fs.writeFileSync(refFiles.soulFile, seed.soul, "utf-8");
+        expect(await writeLanguagePersona(lang, refFiles)).toBe(true);
+
+        expect(fromShell.user, `USER.md for ${lang} seed ${i}`).toBe(read(refFiles.userFile));
+        expect(fromShell.soul, `SOUL.md for ${lang} seed ${i}`).toBe(read(refFiles.soulFile));
+        expect(fromShell.user, `USER.md for ${lang} seed ${i}`).not.toContain("Български");
+        expect(fromShell.soul, `SOUL.md for ${lang} seed ${i}`).not.toContain("Български");
+      }
+    }
+  }, SHELL_TIMEOUT_MS);
+
   it("leaves the persona alone while the ritual is armed", () => {
     // Editing USER.md now makes the next agent turn DELETE the armed
     // BOOTSTRAP.md — the same suppression the route defers, arriving late.
