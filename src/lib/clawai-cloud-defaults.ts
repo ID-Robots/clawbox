@@ -53,7 +53,7 @@ import { invalidateMemoryStatusCache, startMemoryIndex } from "@/lib/clawkeep-me
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { readEmbedderPin } from "@/lib/memory-embedder";
-import { readEmbeddingPlacement, switchToCloudEmbeddings } from "@/lib/memory-shard";
+import { readEmbeddingPlacement, refreshCloudEmbeddingsKey, switchToCloudEmbeddings } from "@/lib/memory-shard";
 import type { EmbeddingSource } from "@/lib/memory-shard-state";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { createSerialLock } from "@/lib/serial-lock";
@@ -309,7 +309,23 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
     // A box with no credential can promote nothing, and this runs at every
     // boot: reading the whole state there would be a voice inventory and an
     // openclaw.json read bought for an answer that is already known.
-    if ((await resolveClawaiToken()) === null) return applied;
+    const token = await resolveClawaiToken();
+    if (token === null) return applied;
+    // Before any decision, and whatever the plan or an owner's pick says: an
+    // embedder ALREADY on ClawBox AI must carry the credential the box holds
+    // now, or the core cannot start it and searches by keywords alone. A
+    // promotion below writes the key with everything else; this is the box
+    // that needs no promotion and still had a stale key.
+    try {
+      if (await refreshCloudEmbeddingsKey(token)) {
+        invalidateMemoryStatusCache();
+        console.warn(
+          `[clawai-cloud-defaults] memory search's ClawBox AI embedder now uses the current credential (${options.trigger ?? "boot"})`,
+        );
+      }
+    } catch (err) {
+      console.warn("[clawai-cloud-defaults] could not update memory search's ClawBox AI credential:", message(err));
+    }
     let status: CloudDefaultsStatus;
     let voice: VoiceSnapshot;
     try {

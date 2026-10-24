@@ -30,6 +30,7 @@ import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
+import { redactCredentialShapes } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
@@ -69,6 +70,7 @@ export type MemoryRunStatus = "idle" | "running" | "succeeded" | "failed";
  */
 export type MemoryStatusErrorCode =
   | "index_rebuild_required"
+  | "embedder_unavailable"
   | "index_keyword_only"
   | "index_identity_mismatched"
   | "index_identity_missing"
@@ -586,11 +588,30 @@ function openclawEnv(): NodeJS.ProcessEnv {
   // CLI as a detached grandchild and only forwards SIGTERM to it. With the
   // launcher's own opt-out, the pid this module records, supervises and
   // signals IS the CLI — verified: same JSON output, no child process.
-  return {
+  //
+  // THE CONFIG THE INDEXER READS IS NAMED, never left to the CLI's own lookup.
+  // `memory.search` — the provider, `remote.baseUrl`, `remote.apiKey` — reaches
+  // the core only through the openclaw.json it loads, and OpenClaw's memory
+  // docs say a rebuild runs "using [the gateway's] profile and environment,
+  // including any OPENCLAW_STATE_DIR or OPENCLAW_CONFIG_PATH". This module reads
+  // and writes `CONFIG_PATH`, which honours `CLAWBOX_OPENCLAW_HOME` and
+  // ClawBox's own meaning of `OPENCLAW_HOME` (the `.openclaw` directory itself);
+  // the CLI ignores the first and takes `OPENCLAW_HOME` for the ACCOUNT home,
+  // looking in `$OPENCLAW_HOME/.openclaw`. With either one set and nothing
+  // pinned, the pass would index against a config with no embedder in it — and
+  // the core's answer to "no provider" is an index of text only, written into
+  // whichever state directory it resolved. The same two pins and the same
+  // removal as `openclawChildEnv` in updater.ts,
+  // `gateway-pre-start.sh` and `ensure-local-embeddings.sh`.
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
+    OPENCLAW_CONFIG_PATH: CONFIG_PATH,
+    OPENCLAW_STATE_DIR: path.dirname(CONFIG_PATH),
     OPENCLAW_NO_RESPAWN: "1",
     PATH: parent ? `${prefix}${path.delimiter}${parent}` : prefix,
   };
+  delete env.OPENCLAW_HOME;
+  return env;
 }
 
 /**
@@ -744,6 +765,12 @@ function identityChangedByUpdate(code: string): boolean {
 const PROVIDER_UNSPECIFIED = new Set(["", "auto", "default", "none"]);
 
 /**
+ * What the core reports as `requestedProvider` when `memory.search.provider` is
+ * unset (2026.10). Only meaningful beside a config that could be read.
+ */
+const CORE_DEFAULT_PROVIDER = "openai";
+
+/**
  * Where the embedder runs, from the provider id the core reports.
  *
  * `openai-compatible` is one id for two things: ClawBox's own embedder behind
@@ -766,11 +793,18 @@ function providerLocation(provider: string, remoteBaseUrl: string | null): ClawK
 }
 
 /**
- * `memory.search.remote.baseUrl` (or its pre-2026.8 home), straight from
- * openclaw.json: the one fact providerLocation needs that the status probe
- * does not carry. Read from the file rather than the CLI because this runs
- * beside a probe that already costs a process boot. Null when unset or
- * unreadable — which providerLocation reports as "unknown", never as local.
+ * The embedder openclaw.json NAMES — `memory.search.provider` ("" when it names
+ * none) and `memory.search.remote.baseUrl` (or their pre-2026.8 home) —
+ * straight from the file: the two facts the status probe does not carry. Read
+ * from the file rather than the CLI because this runs beside a probe that
+ * already costs a process boot. Null when the file cannot be read, which is
+ * "not known", never "none"; a null `baseUrl` is what providerLocation reports
+ * as "unknown", never as local.
+ *
+ * The provider is wanted because the core's own report cannot say it: with
+ * `provider` unset the 2026.10 core reports its DEFAULT (`openai`) as the
+ * requested provider, so "the core was asked for an embedder and could not
+ * start it" and "nobody ever set one" read the same from the probe alone.
  *
  * The file is `CONFIG_PATH`, never a path built from the home directory:
  * that constant honours `CLAWBOX_OPENCLAW_HOME` / `OPENCLAW_HOME`, and on an
@@ -778,7 +812,7 @@ function providerLocation(provider: string, remoteBaseUrl: string | null): ClawK
  * read a file that is not there, so the card said "unknown" about an
  * embedder the boot script had just wired up.
  */
-async function readEmbeddingRemoteBaseUrl(): Promise<string | null> {
+async function readEmbeddingConfig(): Promise<{ provider: string; baseUrl: string | null } | null> {
   try {
     const raw = await fs.readFile(CONFIG_PATH, "utf8");
     const config = JSON.parse(raw) as Record<string, unknown>;
@@ -787,8 +821,13 @@ async function readEmbeddingRemoteBaseUrl(): Promise<string | null> {
       for (const key of keys) node = asRecord(node)[key];
       return typeof node === "string" && node.trim() ? node.trim() : null;
     };
-    return pick(config, ["memory", "search", "remote", "baseUrl"])
-      ?? pick(config, ["agents", "defaults", "memorySearch", "remote", "baseUrl"]);
+    return {
+      provider: pick(config, ["memory", "search", "provider"])
+        ?? pick(config, ["agents", "defaults", "memorySearch", "provider"])
+        ?? "",
+      baseUrl: pick(config, ["memory", "search", "remote", "baseUrl"])
+        ?? pick(config, ["agents", "defaults", "memorySearch", "remote", "baseUrl"]),
+    };
   } catch {
     return null;
   }
@@ -813,6 +852,7 @@ function statusVerdict(facts: {
   indexIdentity: ClawKeepMemoryStatus["indexIdentity"];
   indexIdentityCode: string;
   fellBack: boolean;
+  embedderUnavailable: boolean;
   keywordOnly: boolean;
   health: ClawKeepMemoryStatus["health"];
 }): { error: string; errorCode: MemoryStatusErrorCode | "" } {
@@ -820,6 +860,16 @@ function statusVerdict(facts: {
     return {
       error: "Memory search is not using the embedding model you configured. Re-run Memory Shard setup.",
       errorCode: "provider_mismatch",
+    };
+  }
+  // The core could not start the embedder openclaw.json names and answers with
+  // none at all. Not a fallback — no other model is embedding — and not the
+  // index's fault either: a full reindex would only fail the same way until the
+  // embedder answers, so the sentence sends the owner to the embedder first.
+  if (facts.embedderUnavailable) {
+    return {
+      error: "Memory search has fallen back to keyword-only: the embedding model it is set to use did not answer. Check the embedder, then run a full reindex.",
+      errorCode: "embedder_unavailable",
     };
   }
   // Above the mismatch it usually arrives with: the core calls an index it
@@ -864,6 +914,9 @@ export async function parseMemoryStatus(
   schedule: MemoryIndexSchedule,
   now = new Date(),
   remoteBaseUrl: string | null = null,
+  // The provider openclaw.json names ("" for none), or null when that is not
+  // known — then the core's own `requestedProvider` stands in for it.
+  configuredProvider: string | null = null,
 ): Promise<ClawKeepMemoryStatus> {
   const rows = Array.isArray(raw) ? raw : [raw];
   const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
@@ -908,20 +961,41 @@ export async function parseMemoryStatus(
   // banner, a degraded chip and a "re-run setup" on the failure of every box
   // that never pinned a provider. The comparison is case-insensitive for the
   // same reason: a difference of spelling is not a difference of provider.
+  //
+  // `none` is not a provider the core fell back TO: it is no embedder at all,
+  // which `embedderUnavailable` below names. Read as a fallback it sent the
+  // owner to re-run setup over a configuration that was right, and logged that
+  // the core was "embedding with none".
   const fellBack = Boolean(
     requestedProvider
     && provider
+    && provider.toLowerCase() !== "none"
     && !PROVIDER_UNSPECIFIED.has(requestedProvider.toLowerCase())
     && requestedProvider.toLowerCase() !== provider.toLowerCase(),
   );
+  // NO EMBEDDER AT ALL, WHERE ONE WAS ASKED FOR. The pinned core (2026.10.6)
+  // reports `provider: "none"` (with `custom.searchMode: "fts-only"`) when it
+  // could not start the embedder its config names — a refused key, an endpoint
+  // that does not answer — and from then on it can only match words. The
+  // configuration is the half the probe cannot vouch for (an unset provider is
+  // reported as the core's default), so openclaw.json is asked; only a box that
+  // could not read it falls back on the core's own `requestedProvider` — and
+  // never on that default, which from the probe alone is as likely to be "no
+  // provider was set" as a choice. ClawBox never writes it.
+  const askedFor = configuredProvider
+    ?? (requestedProvider.toLowerCase() === CORE_DEFAULT_PROVIDER ? "" : requestedProvider);
+  const embedderUnavailable = provider.toLowerCase() === "none"
+    && Boolean(askedFor) && !PROVIDER_UNSPECIFIED.has(askedFor.toLowerCase());
   // KEYWORD-ONLY: text chunks in the index and not one vector beside them, under
   // a configuration that names an embedder. `vector.index.state` is the core's
   // typed answer (`empty` | `complete` | `incomplete` | `unverified` in the
   // pinned SDK's MemoryProviderStatus), so this reads no English. It is how an
   // index built while no embedder answered stays after one is set: the core
   // pauses vector search over it and re-embeds nothing by itself, and every
-  // search is answered by keywords alone. `provider: "none"` is keyword-only
-  // search chosen on purpose, which `health` already reports, not a fault.
+  // search is answered by keywords alone. `provider: "none"` under a config
+  // that names none is keyword-only search chosen on purpose, which `health`
+  // already reports, not a fault; under one that names an embedder it is
+  // `embedderUnavailable`, above.
   const keywordOnly = chunks > 0
     && Boolean(provider) && provider !== "none"
     && cleanString(asRecord(vector.index).state) === "empty";
@@ -953,7 +1027,10 @@ export async function parseMemoryStatus(
   }
 
   let health: ClawKeepMemoryStatus["health"] = "unknown";
-  if (!provider || provider === "none") health = "unavailable";
+  // Degraded, not unavailable: memory search is ON and the core still matches
+  // words — it is the configured embedder that is missing.
+  if (embedderUnavailable) health = "degraded";
+  else if (!provider || provider === "none") health = "unavailable";
   else if (!semanticAvailable || providerMode === "degraded" || cleanString(custom.providerUnavailableReason)) health = "degraded";
   // A fallback embedder ANSWERS, so nothing above catches it: the core is
   // perfectly healthy embedding with the wrong model. Search still returns
@@ -975,7 +1052,9 @@ export async function parseMemoryStatus(
     available: Boolean(provider || model || files || chunks),
     provider,
     model,
-    location: providerLocation(provider, remoteBaseUrl),
+    // Where the embedder that did not answer is SUPPOSED to be, rather than
+    // "disabled" — memory search was not switched off.
+    location: providerLocation(embedderUnavailable ? askedFor : provider, remoteBaseUrl),
     health,
     semanticAvailable,
     indexIdentity,
@@ -995,12 +1074,12 @@ export async function parseMemoryStatus(
     // `semanticAvailable` says vector search COULD run; over a keyword-only
     // index there is nothing for it to search, and counting every chunk as a
     // vector was the card vouching for embeddings the index does not have.
-    vectors: semanticAvailable && !keywordOnly ? chunks : 0,
+    vectors: semanticAvailable && !keywordOnly && !embedderUnavailable ? chunks : 0,
     pendingFiles,
     failedItems,
     dirty: status.dirty === true,
     indexBytes,
-    ...statusVerdict({ indexIdentity, indexIdentityCode, fellBack, keywordOnly, health }),
+    ...statusVerdict({ indexIdentity, indexIdentityCode, fellBack, embedderUnavailable, keywordOnly, health }),
     run,
     schedule,
     nextRunAtMs: computeNextMemoryRunMs(schedule, now),
@@ -1059,7 +1138,7 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     (raw) => ({ raw, ok: true as const }),
     () => ({ raw: null, ok: false as const }),
   );
-  const [run, schedule, remoteBaseUrl] = await Promise.all([
+  const [run, schedule, embedding] = await Promise.all([
     readMemoryRunState(),
     readMemorySchedule(),
     // openclaw.json is what points the OTHER arm's client at an embedder, and
@@ -1069,12 +1148,22 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     // two endpoints it is pointed at, so THAT url is the answer: the loopback
     // proxy, or this box's ClawBox AI account. Hard-coded to the proxy, the
     // card said "On device" over an index being embedded in the cloud.
-    local ? resolveMemoryEmbedder().then((embedder) => embedder.baseUrl) : readEmbeddingRemoteBaseUrl(),
+    // A resolver that throws is "not known" (null), as an unreadable file is
+    // on the other arm — never a rejected status read.
+    local
+      ? resolveMemoryEmbedder().then(
+        (embedder) => ({ provider: embedder.provider, baseUrl: embedder.baseUrl }),
+        () => null,
+      )
+      : readEmbeddingConfig(),
   ]);
   if (!probe.ok) return unavailableStatus(run, schedule);
   try {
-    const status = await parseMemoryStatus(probe.raw, run, schedule, new Date(), remoteBaseUrl);
+    const status = await parseMemoryStatus(
+      probe.raw, run, schedule, new Date(), embedding?.baseUrl ?? null, embedding ? embedding.provider : null,
+    );
     noteProviderFallback(status);
+    noteEmbedderUnavailable(status, probe.raw);
     noteKeywordOnly(status);
     return status;
   } catch {
@@ -1106,6 +1195,44 @@ function noteProviderFallback(status: ClawKeepMemoryStatus): void {
     + `"${status.provider}" (${status.model || "no model named"}); memory search will not match openclaw.json `
     + "until Memory Shard setup is run again",
   );
+}
+
+/**
+ * A configured embedder the core could not start, in the device log, once per
+ * verdict like the line above — with the core's own reason, which is the one
+ * thing that tells a refused key from an endpoint that is not there.
+ *
+ * The reason is the core's (already redacted by it for tools) and is put
+ * through the credential shapes here as well, with addresses and paths taken
+ * out: it is the device log, and the rule of the line above holds — never the
+ * endpoint and never the key. It never reaches the status the API answers.
+ */
+let loggedEmbedderUnavailable = "";
+function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): void {
+  const verdict = status.errorCode === "embedder_unavailable" ? `${status.requestedProvider}/${status.location}` : "";
+  if (verdict === loggedEmbedderUnavailable) return;
+  loggedEmbedderUnavailable = verdict;
+  if (!verdict) return;
+  const reason = coreEmbedderFailure(raw);
+  console.warn(
+    `[clawkeep-memory] memory search has fallen back to keyword-only: the core could not start the embedder `
+    + `openclaw.json names ("${status.requestedProvider}"${status.location === "unknown" ? "" : `, ${status.location}`})`
+    + `${reason ? ` — ${reason}` : ""}; ${status.chunks} chunks and no embeddings until it answers and a full reindex runs`,
+  );
+}
+
+/** The core's own sentence for why no embedder started, made safe for the device log. */
+function coreEmbedderFailure(raw: unknown): string {
+  const rows = Array.isArray(raw) ? raw : [raw];
+  const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
+  const custom = asRecord(asRecord(row.status).custom);
+  const said = cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason);
+  if (!said) return "";
+  return redactCredentialShapes(said, "[redacted]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
+    .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
+    .replace(/\s+/g, " ")
+    .slice(0, 200);
 }
 
 /**
@@ -1249,6 +1376,8 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   // happens: the scheduler arms no timer at all in that state, and this is the
   // number every surface prints. The schedule itself is left as the owner saved
   // it, so switching back on restores the hour they chose.
+  // A keyword-only index read here is rebuilt behind the answer, not before it.
+  rebuildKeywordOnlyIndex(live).catch(() => { /* a later read asks again */ });
   return {
     ...live,
     enabled,
@@ -1284,9 +1413,105 @@ export function peekMemoryStatus(): ClawKeepMemoryStatus | null {
   return cachedStatus;
 }
 
-/** Pay the cold probe at boot so the first Settings open after a restart does not. */
+/**
+ * Pay the cold probe at boot so the first Settings open after a restart does
+ * not — and act on what it read: a keyword-only index gets its rebuild here
+ * (see {@link rebuildKeywordOnlyIndex}).
+ */
 export function warmMemoryStatusCache(): Promise<void> {
-  return reloadMemoryStatus().then(() => undefined);
+  return reloadMemoryStatus()
+    .then((status) => rebuildKeywordOnlyIndex(status))
+    .then(() => undefined);
+}
+
+/**
+ * The setting a keyword-only rebuild was last asked for in this process, and
+ * when it may be asked for again: never, once a pass started (a rebuild that
+ * ran and did not take is not run again for the same setting); after
+ * {@link KEYWORD_ONLY_RETRY_MS} when nothing could start (a pass running, the
+ * lock held, an update) — otherwise every status read, and the card polls
+ * them, would ask again and spawn a lock probe each time.
+ */
+let keywordOnlyRebuild: { setting: string; retryAtMs: number } | null = null;
+const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
+
+/**
+ * THE REBUILD THE CORE NEVER MAKES BY ITSELF, asked for by the web server and
+ * not only by a gateway start.
+ *
+ * An OpenClaw index built while `memory.search` named no embedder holds text
+ * only (`memory_index_meta`: model `fts-only`, provider `none` — the pinned
+ * core's creation-time fallback). Once an embedder is set the core reads the
+ * config, starts the embedder — and leaves that index as it is: its own syncs
+ * only mark an index of another model dirty, and a rebuild is the CLI's
+ * `openclaw memory index --force` (verified in 2026.10.6's memory-core). The
+ * box asked for that rebuild in two places, and both are OpenClaw events: the
+ * gateway pre-start (a GATEWAY START, three attempts per setting) and the one
+ * pass after ClawBox itself writes the cloud embedder. With Hermes the harness
+ * in play on a dual box neither comes round again — switching to Hermes,
+ * linking ClawBox AI from Hermes' side and every Hermes turn leave the
+ * OpenClaw gateway running as it is, and Memory Shard's own passes are off
+ * until the owner turns them on — so the agent's memory stayed keyword-only
+ * under a configuration that was right.
+ *
+ * So the status reading this box already takes (at boot, and whenever the
+ * owner or the assistant asks) asks for it too: the same full pass the
+ * embedder's write asks for (`embedderChanged`, which the Memory Shard switch
+ * does not govern on this arm — the index is the agent's own memory files),
+ * through the same `openclaw memory index --agent main --force`.
+ *
+ * Only when it can work and only once: a verdict of `index_keyword_only`,
+ * which means the core STARTED the configured embedder (one that does not
+ * answer is `embedder_unavailable`, where a pass could only fail); no pass
+ * running; the lock the gateway's own rebuild and the embeddings check hold
+ * free (a pass that met it would end as a failure on the owner's card); no
+ * update owning the box; and once per embedder setting per process — a pass
+ * that ran and still left text only is not run again until the setting
+ * changes or the web server restarts, and the card's "Run a full reindex"
+ * stays the owner's way to try again. One that could not start is asked for
+ * again ten minutes later, not on the next read. Nothing here on the edition without
+ * OpenClaw, whose index is ClawBox's own and never holds text without vectors.
+ */
+export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Promise<boolean> {
+  if (status.errorCode !== "index_keyword_only" || openclawIsAbsent()) return false;
+  const setting = `${status.provider}/${status.model}/${status.location}`;
+  if (keywordOnlyRebuild?.setting === setting && Date.now() < keywordOnlyRebuild.retryAtMs) return false;
+  // Claimed before the first await, so two reads that arrive together cannot
+  // both start one; every path that started nothing leaves a retry time.
+  keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY };
+  let started = false;
+  try {
+    if ((await readMemoryRunState()).status === "running") return false;
+    if (!(await embedLockFree())) return false;
+    const { updateInFlight } = await import("@/lib/updater");
+    if (await updateInFlight()) return false;
+    console.warn(
+      `[clawkeep-memory] the memory index is keyword-only while "${status.provider}" (${status.model || "no model named"}) `
+      + "answers; asking OpenClaw for one full rebuild (memory index --force)",
+    );
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    started = result.accepted;
+    if (!started) console.warn(`[clawkeep-memory] the keyword-only rebuild was not started: ${result.declined ?? "declined"}`);
+    return started;
+  } catch (err) {
+    console.warn("[clawkeep-memory] the keyword-only rebuild could not be started:", err instanceof Error ? err.message : err);
+    return false;
+  } finally {
+    if (!started) keywordOnlyRebuild = { setting, retryAtMs: Date.now() + KEYWORD_ONLY_RETRY_MS };
+  }
+}
+
+/**
+ * Is the lock every `memory index` on this box takes free right now? Asked the
+ * way the pass will take it — `flock -n` — so "free" means the pass would not
+ * meet it. Anything but a clean yes (busy, no flock, no data directory) is no.
+ */
+function embedLockFree(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("flock", ["-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, "true"], { stdio: "ignore" });
+    child.once("error", () => resolve(false));
+    child.once("close", (code) => resolve(code === 0));
+  });
 }
 
 /**
@@ -1685,7 +1910,9 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   // claim the box cannot back.
   let poll: NodeJS.Timeout | null = null;
   if (host) {
-    const dbPath = openclawAgentDbPath();
+    // The environment the pass was spawned with, so the database watched is
+    // the one its pinned state directory names.
+    const dbPath = openclawAgentDbPath(openclawEnv());
     const since = Date.now();
     let chunks = 0;
     poll = setInterval(() => {

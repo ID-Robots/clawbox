@@ -22,6 +22,7 @@ import { readLocalSources, stampLocalEmbeddingIdentity, writeLocalSources } from
 import {
   assertEmbedEndpointAllowed,
   defaultEmbedderSource,
+  embedEndpointAllowed,
   readEmbedderPin,
   writeEmbedderPin,
 } from "@/lib/memory-embedder";
@@ -455,6 +456,48 @@ export async function switchToCloudEmbeddings(endpoint: string, token: string): 
       await runOpenclawConfigUnset(`${home}.${key}`);
     }
   }
+}
+
+/**
+ * Hand OpenClaw's cloud embedder the box's CURRENT ClawBox AI credential.
+ *
+ * `switchToCloudEmbeddings` copies the credential into `memory.search` once, at
+ * the move, and nothing wrote it again: the cloud defaults skip a box whose
+ * cloud placement is already recorded, and the boot scripts never touch the
+ * key. So a box that re-linked — a new account, a token the portal re-minted —
+ * kept the OLD key there. The core could not start the embedder with it, said
+ * `provider: "none"` and indexed and searched by keywords alone under a
+ * configuration that was otherwise right, while every other ClawBox AI feature
+ * used the new credential.
+ *
+ * Only the key, and only where `memory.search` already points at THIS box's
+ * ClawBox AI endpoint (the fence `switchToCloudEmbeddings` records it through):
+ * the credential is never sent to an endpoint the owner set up themselves, and
+ * a key that is not a plain string (a secret reference) is not overwritten.
+ * Provider, model and endpoint stay as they are, so the index identity does not
+ * move and nothing is rebuilt for it here. Nothing on the edition where ClawBox
+ * is the indexer: there the credential is read per request.
+ *
+ * @returns whether it wrote.
+ */
+export async function refreshCloudEmbeddingsKey(token: string): Promise<boolean> {
+  if (openclawIsAbsent() || !token.trim()) return false;
+  const [config, home] = await Promise.all([
+    readConfig() as Promise<Record<string, unknown>>,
+    installedOpenclawVersion().then(embeddingConfigHome),
+  ]);
+  let node: unknown = config;
+  for (const part of home.split(".")) {
+    node = node && typeof node === "object" ? (node as Record<string, unknown>)[part] : undefined;
+  }
+  const remote = node && typeof node === "object" ? (node as Record<string, unknown>).remote : undefined;
+  if (!remote || typeof remote !== "object") return false;
+  const { baseUrl, apiKey } = remote as Record<string, unknown>;
+  if (typeof baseUrl !== "string" || !embedEndpointAllowed("cloud", baseUrl.trim())) return false;
+  if (apiKey !== undefined && typeof apiKey !== "string") return false;
+  if (typeof apiKey === "string" && apiKey.trim() === token.trim()) return false;
+  await runOpenclawConfigSetBatch([[`${home}.remote.apiKey`, token.trim()]]);
+  return true;
 }
 
 function embeddingKeyPresent(config: Record<string, unknown>, home: string, key: string): boolean {

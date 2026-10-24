@@ -116,6 +116,7 @@ const MEMORY_KEYS = [
   "clawkeep.memory.error.indexIdentityMismatched",
   "clawkeep.memory.error.indexIdentityMissing",
   "clawkeep.memory.error.indexKeywordOnly",
+  "clawkeep.memory.error.embedderUnavailable",
   "clawkeep.memory.error.providerMismatch",
   "clawkeep.memory.error.providerDegraded",
   "clawkeep.memory.error.statusUnavailable",

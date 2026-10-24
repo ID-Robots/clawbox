@@ -90,7 +90,14 @@ vi.mock("@/lib/harness/credentials", () => ({
   resolveClawaiToken: async () => "claw_test",
 }));
 
-import { embeddingConfigHome, readEmbeddingChoice, readEmbeddingPlacement, switchToCloudEmbeddings, switchToLocalEmbeddings } from "@/lib/memory-shard";
+import {
+  embeddingConfigHome,
+  readEmbeddingChoice,
+  readEmbeddingPlacement,
+  refreshCloudEmbeddingsKey,
+  switchToCloudEmbeddings,
+  switchToLocalEmbeddings,
+} from "@/lib/memory-shard";
 import { defaultEmbedderSource, readEmbedderPin } from "@/lib/memory-embedder";
 import { LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_PROVIDER } from "@/lib/memory-shard-state";
 
@@ -279,6 +286,82 @@ describe("switchToCloudEmbeddings on an OpenClaw box", () => {
     expect(batch).toContainEqual(["memory.search.model", "text-embedding-3-small"]);
     expect(batch.some(([, value]) => value === "text-embedding-3-large")).toBe(false);
     expect(batch[batch.length - 1]).toEqual(["memory.search.provider", "openai-compatible"]);
+  });
+});
+
+/**
+ * The key the move to the cloud copied into `memory.search` was never written
+ * again, so a box that re-linked went on offering the core the OLD credential:
+ * it could not start the embedder, reported `provider: "none"` and searched by
+ * keywords alone. The refresh brings only the key up to date, and only where
+ * the embedder already IS this box's ClawBox AI account.
+ */
+describe("refreshCloudEmbeddingsKey", () => {
+  const CLOUD_BASE = "https://clawbox.test/api/ai";
+  const onCloud = (apiKey: unknown, baseUrl = CLOUD_BASE, home: "v2" | "legacy" = "v2") => {
+    const search = {
+      provider: "openai-compatible",
+      model: "text-embedding-3-small",
+      remote: { baseUrl, ...(apiKey === undefined ? {} : { apiKey }) },
+    };
+    return home === "v2" ? { memory: { search } } : { agents: { defaults: { memorySearch: search } } };
+  };
+
+  beforeEach(() => installedCore("2026.10.6"));
+
+  it("rewrites a stale key on an embedder pointed at this box's ClawBox AI account, and only the key", async () => {
+    readConfig.mockResolvedValue(onCloud("claw_old"));
+    expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(true);
+    expect(runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
+    expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([["memory.search.remote.apiKey", "claw_new"]]);
+  });
+
+  it("gives the embedder a key it never had", async () => {
+    readConfig.mockResolvedValue(onCloud(undefined));
+    expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(true);
+    expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([["memory.search.remote.apiKey", "claw_new"]]);
+  });
+
+  it("writes nothing when the key is already the current one", async () => {
+    readConfig.mockResolvedValue(onCloud("claw_same"));
+    expect(await refreshCloudEmbeddingsKey("claw_same")).toBe(false);
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("never sends the credential to an embedder that is not this box's ClawBox AI account", async () => {
+    for (const baseUrl of ["https://embeddings.example.com/v1", PROXY_URL, "https://clawbox.test.example.com/api/ai"]) {
+      readConfig.mockResolvedValue(onCloud("claw_old", baseUrl));
+      expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(false);
+    }
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("leaves a key that is not a plain string — a secret reference — as it is", async () => {
+    readConfig.mockResolvedValue(onCloud({ source: "env", id: "CLAWBOX_AI_KEY" }));
+    expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(false);
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing over a config with no memory search, or an empty credential", async () => {
+    readConfig.mockResolvedValue({});
+    expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(false);
+    readConfig.mockResolvedValue(onCloud("claw_old"));
+    expect(await refreshCloudEmbeddingsKey("  ")).toBe(false);
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("follows the home the installed core reads", async () => {
+    installedCore("2026.7.2");
+    readConfig.mockResolvedValue(onCloud("claw_old", CLOUD_BASE, "legacy"));
+    expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(true);
+    expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([["agents.defaults.memorySearch.remote.apiKey", "claw_new"]]);
+  });
+
+  it("writes nothing on the edition that has no OpenClaw, where the credential is read per request", async () => {
+    openclawIsAbsent.mockReturnValue(true);
+    readConfig.mockResolvedValue(onCloud("claw_old"));
+    expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(false);
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
   });
 });
 
