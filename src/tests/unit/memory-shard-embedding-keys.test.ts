@@ -357,6 +357,17 @@ describe("refreshCloudEmbeddingsKey", () => {
     expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([["agents.defaults.memorySearch.remote.apiKey", "claw_new"]]);
   });
 
+  it("hands no working key to a cloud embedder the support lever has switched off", async () => {
+    cloudEmbeddingsOff.value = true;
+    try {
+      readConfig.mockResolvedValue(onCloud("claw_old"));
+      expect(await refreshCloudEmbeddingsKey("claw_new")).toBe(false);
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    } finally {
+      cloudEmbeddingsOff.value = false;
+    }
+  });
+
   it("writes nothing on the edition that has no OpenClaw, where the credential is read per request", async () => {
     openclawIsAbsent.mockReturnValue(true);
     readConfig.mockResolvedValue(onCloud("claw_old"));

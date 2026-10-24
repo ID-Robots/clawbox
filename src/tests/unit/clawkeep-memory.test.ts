@@ -1735,7 +1735,7 @@ describe("the OpenClaw index on a box where no gateway start comes round", () =>
   });
 
   /** A core that answers `memory status` with `status` and records every argv and its config pins. */
-  async function fakeCore(status: unknown): Promise<{ argv: string; env: string }> {
+  async function fakeCore(status: unknown, { indexExit = 0 } = {}): Promise<{ argv: string; env: string }> {
     const argv = path.join(tmpDir, "core-argv");
     const env = path.join(tmpDir, "core-env");
     const script = path.join(tmpDir, "fake-openclaw");
@@ -1747,6 +1747,7 @@ describe("the OpenClaw index on a box where no gateway start comes round", () =>
       JSON.stringify(status),
       "JSON",
       ";; esac",
+      `case "$*" in "memory index"*) exit ${indexExit};; esac`,
       "exit 0",
       "",
     ].join("\n"), { mode: 0o755 });
@@ -1833,6 +1834,31 @@ describe("the OpenClaw index on a box where no gateway start comes round", () =>
     } finally {
       release();
     }
+  });
+
+  it("asks again, after the retry time, for a rebuild that started and FAILED — and never for one that succeeded", async () => {
+    // Nothing else retries it here: no gateway start comes round and Memory
+    // Shard's own passes are off. A wake that timed out must not be final.
+    shard.enabled = false;
+    const { argv } = await fakeCore(KEYWORD_ONLY_STATUS, { indexExit: 1 });
+    const { parseMemoryStatus, readMemoryRunState, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(await rebuildKeywordOnlyIndex(status)).toBe(true);
+    await settledMemoryRun(tmpDir);
+    const failed = await readMemoryRunState();
+    expect(failed.status).toBe("failed");
+    // Just ended: not on the next read.
+    expect(await rebuildKeywordOnlyIndex({ ...status, run: failed })).toBe(false);
+    expect(await indexRuns(argv)).toHaveLength(1);
+    // The retry time after it ended: asked again.
+    const longAgo = { ...failed, finishedAtMs: failed.finishedAtMs - 11 * 60_000 };
+    expect(await rebuildKeywordOnlyIndex({ ...status, run: longAgo })).toBe(true);
+    await settledMemoryRun(tmpDir);
+    expect(await indexRuns(argv)).toHaveLength(2);
+    // A pass that succeeded and still left text only is not repeated, however long ago.
+    const succeeded = { ...(await readMemoryRunState()), status: "succeeded" as const, finishedAtMs: 0 };
+    expect(await rebuildKeywordOnlyIndex({ ...status, run: succeeded })).toBe(false);
+    expect(await indexRuns(argv)).toHaveLength(2);
   });
 
   it("asks for no rebuild while the configured embedder does not answer: a pass could only fail", async () => {

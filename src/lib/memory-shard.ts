@@ -473,7 +473,8 @@ export async function switchToCloudEmbeddings(endpoint: string, token: string): 
  * Only the key, and only where `memory.search` already points at THIS box's
  * ClawBox AI endpoint (the fence `switchToCloudEmbeddings` records it through):
  * the credential is never sent to an endpoint the owner set up themselves, and
- * a key that is not a plain string (a secret reference) is not overwritten.
+ * a key that is not a plain string (a secret reference) is not overwritten,
+ * nor anything while the support lever has the cloud embedder switched off.
  * Provider, model and endpoint stay as they are, so the index identity does not
  * move and nothing is rebuilt for it here. Nothing on the edition where ClawBox
  * is the indexer: there the credential is read per request.
@@ -482,6 +483,10 @@ export async function switchToCloudEmbeddings(endpoint: string, token: string): 
  */
 export async function refreshCloudEmbeddingsKey(token: string): Promise<boolean> {
   if (openclawIsAbsent() || !token.trim()) return false;
+  // The support lever (`clawai_cloud_embeddings: "off"`) takes a box OFF the
+  // cloud embedder: a working key handed to one it has switched off would put
+  // the owner's documents back on the wire it was pulled to stop.
+  if (await cloudEmbeddingsSwitchedOff()) return false;
   const [config, home] = await Promise.all([
     readConfig() as Promise<Record<string, unknown>>,
     installedOpenclawVersion().then(embeddingConfigHome),

@@ -1426,13 +1426,17 @@ export function warmMemoryStatusCache(): Promise<void> {
 
 /**
  * The setting a keyword-only rebuild was last asked for in this process, and
- * when it may be asked for again: never, once a pass started (a rebuild that
- * ran and did not take is not run again for the same setting); after
- * {@link KEYWORD_ONLY_RETRY_MS} when nothing could start (a pass running, the
- * lock held, an update) — otherwise every status read, and the card polls
- * them, would ask again and spawn a lock probe each time.
+ * when it may be asked for again. After {@link KEYWORD_ONLY_RETRY_MS} when
+ * nothing could start (a pass running, the lock held, an update) — otherwise
+ * every status read, and the card polls them, would ask again and spawn a lock
+ * probe each time. Once a pass started (`startedAtMs`): not again while that
+ * pass is the last word or once it SUCCEEDED (a forced rebuild that ran and
+ * still left text only would leave it again) — but a pass that FAILED (a wake
+ * that timed out, a dropped connection) is asked for again the same interval
+ * after it ended. Nothing else retries it on a box where no gateway start
+ * comes round and Memory Shard's own passes are off.
  */
-let keywordOnlyRebuild: { setting: string; retryAtMs: number } | null = null;
+let keywordOnlyRebuild: { setting: string; retryAtMs: number; startedAtMs: number | null } | null = null;
 const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
 
 /**
@@ -1468,18 +1472,28 @@ const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
  * update owning the box; and once per embedder setting per process — a pass
  * that ran and still left text only is not run again until the setting
  * changes or the web server restarts, and the card's "Run a full reindex"
- * stays the owner's way to try again. One that could not start is asked for
- * again ten minutes later, not on the next read. Nothing here on the edition without
+ * stays the owner's way to try again. One that could not start, or started
+ * and failed, is asked for again ten minutes later, not on the next read. Nothing here on the edition without
  * OpenClaw, whose index is ClawBox's own and never holds text without vectors.
  */
 export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Promise<boolean> {
   if (status.errorCode !== "index_keyword_only" || openclawIsAbsent()) return false;
   const setting = `${status.provider}/${status.model}/${status.location}`;
-  if (keywordOnlyRebuild?.setting === setting && Date.now() < keywordOnlyRebuild.retryAtMs) return false;
+  const claim = keywordOnlyRebuild;
+  if (claim?.setting === setting) {
+    // The run the reading carries is the live one (both callers read it after
+    // the probe), so the pass this process started is judged by its own end.
+    const run = status.run;
+    const startedPassFailed = claim.startedAtMs !== null
+      && run?.status === "failed" && run.startedAtMs >= claim.startedAtMs;
+    const retryAtMs = startedPassFailed ? run.finishedAtMs + KEYWORD_ONLY_RETRY_MS : claim.retryAtMs;
+    if (Date.now() < retryAtMs) return false;
+  }
   // Claimed before the first await, so two reads that arrive together cannot
   // both start one; every path that started nothing leaves a retry time.
-  keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY };
+  keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: null };
   let started = false;
+  let askedAtMs = 0;
   try {
     if ((await readMemoryRunState()).status === "running") return false;
     if (!(await embedLockFree())) return false;
@@ -1489,15 +1503,17 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
       `[clawkeep-memory] the memory index is keyword-only while "${status.provider}" (${status.model || "no model named"}) `
       + "answers; asking OpenClaw for one full rebuild (memory index --force)",
     );
+    askedAtMs = Date.now();
     const result = await startMemoryIndex("full", "manual", { embedderChanged: true });
     started = result.accepted;
-    if (!started) console.warn(`[clawkeep-memory] the keyword-only rebuild was not started: ${result.declined ?? "declined"}`);
+    if (started) keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: askedAtMs };
+    else console.warn(`[clawkeep-memory] the keyword-only rebuild was not started: ${result.declined ?? "declined"}`);
     return started;
   } catch (err) {
     console.warn("[clawkeep-memory] the keyword-only rebuild could not be started:", err instanceof Error ? err.message : err);
     return false;
   } finally {
-    if (!started) keywordOnlyRebuild = { setting, retryAtMs: Date.now() + KEYWORD_ONLY_RETRY_MS };
+    if (!started) keywordOnlyRebuild = { setting, retryAtMs: Date.now() + KEYWORD_ONLY_RETRY_MS, startedAtMs: null };
   }
 }
 
