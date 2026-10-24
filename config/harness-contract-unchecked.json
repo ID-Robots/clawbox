@@ -53,7 +53,7 @@
   "patchHermesConfig: unset is built at runtime": 1
  },
  "src/lib/memory-shard.ts": {
-  "config set: the key's first segment is computed at runtime": 2,
+  "config set: the key's first segment is computed at runtime": 3,
   "config unset: the key's first segment is computed at runtime": 1
  },
  "src/lib/openclaw-config.ts": {

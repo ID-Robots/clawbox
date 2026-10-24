@@ -1520,17 +1520,143 @@ describe("an index the core built keyword-only", () => {
     const script = path.join(tmpDir, "fake-openclaw");
     await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(KEYWORD_ONLY_STATUS)}\nJSON\n`, { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    // The read asks for the rebuild as well (see below): its lock and its
+    // indexer are this test's own, never the device's.
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
+    vi.resetModules();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { getMemoryStatus, invalidateMemoryStatusCache, warmMemoryStatusCache } = await lib();
       expect((await getMemoryStatus()).errorCode).toBe("index_keyword_only");
       invalidateMemoryStatusCache();
       await warmMemoryStatusCache();
-      const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("keyword-only"));
+      await settledMemoryRun(tmpDir);
+      const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("matches words only"));
       expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("keyword-only");
       expect(lines[0]).toContain("11 chunks");
       expect(lines[0]).toContain("openai-compatible");
       expect(lines[0]).not.toContain("/home/");
+    } finally {
+      warn.mockRestore();
+      delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+      delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+      delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+    }
+  });
+});
+
+/**
+ * A memory index reporting provider "none" on a box running Hermes, read
+ * against the pinned core (2026.10.6, memory-core's
+ * `resolveStatusProviderInfo`): when the core cannot start the embedder its
+ * config names — a refused key, an endpoint that is down — `memory status
+ * --deep --json` answers `provider: "none"`, `custom.searchMode: "fts-only"`
+ * and the configured id as `requestedProvider`. The fixture is that shape,
+ * written from the core's code rather than captured on a box (no box in this
+ * state was available), with a reason carrying an address, a credential shape
+ * and a path so the log's scrubbing is held to it.
+ */
+const EMBEDDER_UNAVAILABLE_STATUS = JSON.parse(
+  await fs.readFile(new URL("../fixtures/openclaw-memory-status-embedder-unavailable.json", import.meta.url), "utf8"),
+) as unknown;
+
+describe("a configured embedder the core could not start", () => {
+  type Row = { status: Record<string, unknown> & { custom: Record<string, unknown> } };
+  const copy = (raw: unknown) => JSON.parse(JSON.stringify(raw)) as Row[];
+  const CLOUD = "https://api.example.invalid/v1";
+
+  it("says keyword-only because the embedder did not answer — not a fallback, not 'switched off'", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(
+      EMBEDDER_UNAVAILABLE_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), CLOUD, "openai-compatible",
+    );
+    expect(status.errorCode).toBe("embedder_unavailable");
+    expect(status.error).toContain("keyword-only");
+    expect(status.error).toContain("did not answer");
+    // Memory search is on and still matches words: degraded, not unavailable.
+    expect(status.health).toBe("degraded");
+    // Where the embedder that did not answer is meant to be, not "disabled".
+    expect(status.location).toBe("cloud");
+    expect(status.vectors).toBe(0);
+    expect(status.chunks).toBe(11);
+  });
+
+  it("trusts the core's own requested provider when openclaw.json could not be read", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(EMBEDDER_UNAVAILABLE_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.errorCode).toBe("embedder_unavailable");
+  });
+
+  it("does not read the core's own default as a configured embedder when openclaw.json could not be read", async () => {
+    // With `provider` unset the core reports `openai` as requested. Without the
+    // file there is no telling that from a choice, and ClawBox never writes it.
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(EMBEDDER_UNAVAILABLE_STATUS);
+    rows[0].status.requestedProvider = "openai";
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, null);
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("unavailable");
+  });
+
+  it("is no fault on a box whose openclaw.json names no embedder, whatever default the core reports", async () => {
+    // With `provider` unset the 2026.10 core reports its default, `openai`, as
+    // the requested provider. Read from the probe alone that was a "fallback"
+    // to none: an amber banner and a "re-run setup" on every box not yet linked.
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(EMBEDDER_UNAVAILABLE_STATUS);
+    rows[0].status.requestedProvider = "openai";
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, "");
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("unavailable");
+    expect(status.location).toBe("disabled");
+  });
+
+  it("is no fault when the owner chose keyword-only search on purpose", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const rows = copy(EMBEDDER_UNAVAILABLE_STATUS);
+    rows[0].status.requestedProvider = "none";
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, "none");
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("unavailable");
+  });
+
+  it("is never read as the core falling back to another embedder", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    for (const configured of ["openai-compatible", "", null]) {
+      const status = await parseMemoryStatus(
+        EMBEDDER_UNAVAILABLE_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, configured,
+      );
+      expect(status.errorCode).not.toBe("provider_mismatch");
+    }
+  });
+
+  it("logs it once per verdict with the core's reason, and never its address, key or path", async () => {
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(EMBEDDER_UNAVAILABLE_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { getMemoryStatus, invalidateMemoryStatusCache, warmMemoryStatusCache } = await lib();
+      const status = await getMemoryStatus();
+      expect(status.errorCode).toBe("embedder_unavailable");
+      // The assistant is told a pass will not fix it.
+      expect(status.reindex?.reasons.map((r) => r.code)).toContain("embedder_unavailable");
+      invalidateMemoryStatusCache();
+      await warmMemoryStatusCache();
+      const all = warn.mock.calls.map((call) => call.join(" "));
+      const lines = all.filter((line) => line.includes("fallen back to keyword-only"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("openai-compatible");
+      expect(lines[0]).toContain("401");
+      expect(lines[0]).not.toContain("claw_PLACEHOLDER");
+      expect(lines[0]).not.toContain("example.invalid");
+      expect(lines[0]).not.toContain("/home/");
+      // Not the old reading of the same probe.
+      expect(all.some((line) => line.includes("embedding with \"none\""))).toBe(false);
+      // And no rebuild: under an embedder that does not answer it could only fail.
+      await expect(fs.access(path.join(tmpDir, "memory-index-state.json"))).rejects.toThrow();
     } finally {
       warn.mockRestore();
       delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
@@ -1585,5 +1711,164 @@ describe("a rebuild for an embedder the box itself just wrote", () => {
     const started = await startMemoryIndex("full", "manual");
     expect(started).toMatchObject({ accepted: false, declined: "disabled" });
     await expect(fs.access(argv)).rejects.toThrow();
+  });
+});
+
+/**
+ * On a box where Hermes is the harness in use, OpenClaw's index is still the one
+ * the memory card reads, and nothing OpenClaw does comes round to fix it: no
+ * gateway start, no pre-start rebuild. So the web server's own reading has to
+ * (1) ask the core about the config ClawBox wrote, not one the CLI looked up
+ * for itself, and (2) ask for the rebuild a keyword-only index needs.
+ */
+describe("the OpenClaw index on a box where no gateway start comes round", () => {
+  const saved = { home: process.env.OPENCLAW_HOME, clawboxHome: process.env.CLAWBOX_OPENCLAW_HOME };
+
+  afterEach(() => {
+    for (const [name, value] of [["OPENCLAW_HOME", saved.home], ["CLAWBOX_OPENCLAW_HOME", saved.clawboxHome]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+    delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+  });
+
+  /** A core that answers `memory status` with `status` and records every argv and its config pins. */
+  async function fakeCore(status: unknown, { indexExit = 0 } = {}): Promise<{ argv: string; env: string }> {
+    const argv = path.join(tmpDir, "core-argv");
+    const env = path.join(tmpDir, "core-env");
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      `printf '%s\\n' "$*" >> ${argv}`,
+      `printf 'CONFIG=%s STATE=%s HOME_VAR=%s\\n' "\${OPENCLAW_CONFIG_PATH-unset}" "\${OPENCLAW_STATE_DIR-unset}" "\${OPENCLAW_HOME-unset}" >> ${env}`,
+      `case "$*" in *"memory status"*) cat <<'JSON'`,
+      JSON.stringify(status),
+      "JSON",
+      ";; esac",
+      `case "$*" in "memory index"*) exit ${indexExit};; esac`,
+      "exit 0",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
+    vi.resetModules();
+    return { argv, env };
+  }
+
+  const indexRuns = async (argv: string) =>
+    (await fs.readFile(argv, "utf8").catch(() => "")).trim().split("\n").filter((line) => line.startsWith("memory index"));
+
+  it("points the core at the openclaw.json ClawBox reads, whatever OPENCLAW_HOME says", async () => {
+    // ClawBox reads OPENCLAW_HOME as the `.openclaw` directory itself; the CLI
+    // reads it as the ACCOUNT home and looks one level further down. Left to
+    // its own lookup it indexed against a config with no embedder in it.
+    const home = path.join(tmpDir, "openclaw-state");
+    delete process.env.CLAWBOX_OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = home;
+    const { argv, env } = await fakeCore(KEYWORD_ONLY_STATUS);
+    const { startMemoryIndex } = await lib();
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    await settledMemoryRun(tmpDir);
+    expect(await indexRuns(argv)).toHaveLength(1);
+    const lines = (await fs.readFile(env, "utf8")).trim().split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).toBe(`CONFIG=${path.join(home, "openclaw.json")} STATE=${home} HOME_VAR=unset`);
+    }
+  });
+
+  it("asks for ONE forced rebuild of a keyword-only index, with Memory Shard off", async () => {
+    shard.enabled = false;
+    const { argv } = await fakeCore(KEYWORD_ONLY_STATUS);
+    const { parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.errorCode).toBe("index_keyword_only");
+    expect(await rebuildKeywordOnlyIndex(status)).toBe(true);
+    await settledMemoryRun(tmpDir);
+    expect(await indexRuns(argv)).toEqual(["memory index --agent main --force"]);
+    // The same setting is not rebuilt again by the next read.
+    expect(await rebuildKeywordOnlyIndex(status)).toBe(false);
+    expect(await indexRuns(argv)).toHaveLength(1);
+  });
+
+  it("asks at boot, from the reading the warm-up takes", async () => {
+    shard.enabled = false;
+    const { argv } = await fakeCore(KEYWORD_ONLY_STATUS);
+    const { warmMemoryStatusCache } = await lib();
+    await warmMemoryStatusCache();
+    await settledMemoryRun(tmpDir);
+    expect(await indexRuns(argv)).toEqual(["memory index --agent main --force"]);
+  });
+
+  it("does not ask again on the very next read when the lock kept it from starting", async () => {
+    const { argv } = await fakeCore(KEYWORD_ONLY_STATUS);
+    const lock = path.join(tmpDir, "embed.lock");
+    // Its own process group: flock's `sleep` child holds the lock too, and both go.
+    const holder = spawn("flock", [lock, "sleep", "30"], { stdio: "ignore", detached: true });
+    const release = () => { try { process.kill(-(holder.pid as number), "SIGTERM"); } catch { /* gone */ } };
+    try {
+      // Held once a non-blocking take of the same lock fails.
+      for (let i = 0; i < 100; i += 1) {
+        const free = await new Promise<boolean>((resolve) => {
+          spawn("flock", ["-n", lock, "true"], { stdio: "ignore" }).once("close", (code) => resolve(code === 0));
+        });
+        if (!free) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const { parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+      const status = await parseMemoryStatus(KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+      expect(await rebuildKeywordOnlyIndex(status)).toBe(false);
+      const closed = new Promise((resolve) => holder.once("close", resolve));
+      release();
+      await closed;
+      // Free now, but the card polls: the same setting waits out its retry time.
+      expect(await rebuildKeywordOnlyIndex(status)).toBe(false);
+      expect(await indexRuns(argv)).toEqual([]);
+      // A setting that changed is a new question, asked at once.
+      expect(await rebuildKeywordOnlyIndex({ ...status, model: "text-embedding-3-large" })).toBe(true);
+      await settledMemoryRun(tmpDir);
+      expect(await indexRuns(argv)).toEqual(["memory index --agent main --force"]);
+    } finally {
+      release();
+    }
+  });
+
+  it("asks again, after the retry time, for a rebuild that started and FAILED — and never for one that succeeded", async () => {
+    // Nothing else retries it here: no gateway start comes round and Memory
+    // Shard's own passes are off. A wake that timed out must not be final.
+    shard.enabled = false;
+    const { argv } = await fakeCore(KEYWORD_ONLY_STATUS, { indexExit: 1 });
+    const { parseMemoryStatus, readMemoryRunState, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(await rebuildKeywordOnlyIndex(status)).toBe(true);
+    await settledMemoryRun(tmpDir);
+    const failed = await readMemoryRunState();
+    expect(failed.status).toBe("failed");
+    // Just ended: not on the next read.
+    expect(await rebuildKeywordOnlyIndex({ ...status, run: failed })).toBe(false);
+    expect(await indexRuns(argv)).toHaveLength(1);
+    // The retry time after it ended: asked again.
+    const longAgo = { ...failed, finishedAtMs: failed.finishedAtMs - 11 * 60_000 };
+    expect(await rebuildKeywordOnlyIndex({ ...status, run: longAgo })).toBe(true);
+    await settledMemoryRun(tmpDir);
+    expect(await indexRuns(argv)).toHaveLength(2);
+    // A pass that succeeded and still left text only is not repeated, however long ago.
+    const succeeded = { ...(await readMemoryRunState()), status: "succeeded" as const, finishedAtMs: 0 };
+    expect(await rebuildKeywordOnlyIndex({ ...status, run: succeeded })).toBe(false);
+    expect(await indexRuns(argv)).toHaveLength(2);
+  });
+
+  it("asks for no rebuild while the configured embedder does not answer: a pass could only fail", async () => {
+    const { argv } = await fakeCore(EMBEDDER_UNAVAILABLE_STATUS);
+    const { parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(
+      EMBEDDER_UNAVAILABLE_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, "openai-compatible",
+    );
+    expect(status.errorCode).toBe("embedder_unavailable");
+    expect(await rebuildKeywordOnlyIndex(status)).toBe(false);
+    expect(await indexRuns(argv)).toEqual([]);
   });
 });

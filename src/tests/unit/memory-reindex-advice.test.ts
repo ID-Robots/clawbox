@@ -91,6 +91,20 @@ describe("memoryReindexAdvice", () => {
     expect(memoryReindexAdvice({ ...HEALTHY, errorCode: "provider_mismatch" }, "openclaw")).toMatchObject({ needed: false, reasons: [{ code: "provider_fell_back", mode: "none" }] });
   });
 
+  it("gives an embedder that does not answer as the only reason: every pass it might suggest would fail", () => {
+    // Files waiting and files changed beside it used to ask for an incremental
+    // pass, which the assistant would start against an embedder that refuses.
+    const advice = memoryReindexAdvice(
+      { ...HEALTHY, errorCode: "embedder_unavailable", pendingFiles: 3, dirty: true, indexIdentity: "missing" },
+      "openclaw",
+    );
+    expect(advice).toEqual({
+      needed: false,
+      mode: null,
+      reasons: [expect.objectContaining({ code: "embedder_unavailable", mode: "none" })],
+    });
+  });
+
   it("asks for the full pass when one reason needs it and another only an incremental one", () => {
     const both = memoryReindexAdvice({ ...HEALTHY, indexIdentity: "mismatched", pendingFiles: 3 }, "local");
     expect(both.mode).toBe("full");

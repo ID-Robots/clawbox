@@ -1309,7 +1309,23 @@ function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): 
   const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
-  const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
+  // A `config` child reads and writes THE FILE THIS MODULE READS BACK. The
+  // CLI finds its config from OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR, else
+  // `$OPENCLAW_HOME/.openclaw` (the ACCOUNT home to the CLI, the `.openclaw`
+  // directory itself to ClawBox), else `$HOME/.openclaw`; `CONFIG_PATH` honours
+  // `CLAWBOX_OPENCLAW_HOME` and ClawBox's meaning of `OPENCLAW_HOME`. Unpinned,
+  // a `memory.search` write could land in a file that neither `readConfig` nor
+  // the memory status probe (pinned the same way in clawkeep-memory.ts) reads,
+  // and the core would go on indexing with no embedder. Only `config`: doctor
+  // and the rest keep the environment they always had. A caller's own env wins.
+  const pinConfig = args[0] === "config";
+  const env: NodeJS.ProcessEnv = {
+    HOME: "/home/clawbox",
+    ...process.env,
+    ...(pinConfig ? { OPENCLAW_CONFIG_PATH: CONFIG_PATH, OPENCLAW_STATE_DIR: path.dirname(CONFIG_PATH) } : {}),
+    ...(options.env ?? {}),
+  };
+  if (pinConfig && !(options.env && "OPENCLAW_HOME" in options.env)) delete env.OPENCLAW_HOME;
   const label = `${bin} ${(options.labelArgs ?? args).join(" ")}`;
 
   return new Promise((resolve, reject) => {

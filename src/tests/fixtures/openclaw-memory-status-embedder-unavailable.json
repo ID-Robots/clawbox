@@ -1,0 +1,69 @@
+[
+  {
+    "agentId": "main",
+    "status": {
+      "backend": "builtin",
+      "files": 1,
+      "chunks": 11,
+      "dirty": true,
+      "workspaceDir": "/home/clawbox/.openclaw/workspace",
+      "dbPath": "/home/clawbox/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+      "provider": "none",
+      "requestedProvider": "openai-compatible",
+      "sources": [
+        "memory"
+      ],
+      "extraPaths": [],
+      "sourceCounts": [
+        {
+          "source": "memory",
+          "files": 1,
+          "chunks": 11,
+          "dirty": true,
+          "issues": []
+        }
+      ],
+      "fts": {
+        "enabled": true,
+        "available": true
+      },
+      "vector": {
+        "enabled": true,
+        "index": {
+          "state": "empty"
+        },
+        "storeAvailable": true,
+        "semanticAvailable": false,
+        "available": false
+      },
+      "batch": {
+        "enabled": false,
+        "failures": 0,
+        "limit": 2
+      },
+      "custom": {
+        "searchMode": "fts-only",
+        "providerState": {
+          "mode": "degraded",
+          "providerId": "openai-compatible",
+          "reason": "Error: embeddings request to https://api.example.invalid/v1/embeddings failed (401) for key claw_PLACEHOLDER0000000000 at /home/clawbox/.openclaw/openclaw.json"
+        },
+        "providerUnavailableReason": "Error: embeddings request to https://api.example.invalid/v1/embeddings failed (401) for key claw_PLACEHOLDER0000000000 at /home/clawbox/.openclaw/openclaw.json",
+        "indexIdentity": {
+          "status": "valid"
+        }
+      }
+    },
+    "scan": {
+      "sources": [
+        {
+          "source": "memory",
+          "totalFiles": 1,
+          "issues": []
+        }
+      ],
+      "totalFiles": 1,
+      "issues": []
+    }
+  }
+]

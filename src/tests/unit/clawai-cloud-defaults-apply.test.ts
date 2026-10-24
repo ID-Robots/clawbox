@@ -32,8 +32,9 @@ vi.mock("@/lib/clawai-cloud-embeddings", () => ({
 }));
 
 const startIndex = vi.fn(async () => ({ accepted: true }));
+const invalidateStatus = vi.fn(() => {});
 vi.mock("@/lib/clawkeep-memory", () => ({
-  invalidateMemoryStatusCache: () => {},
+  invalidateMemoryStatusCache: () => invalidateStatus(),
   startMemoryIndex: (...a: unknown[]) => startIndex(...(a as [])),
 }));
 
@@ -61,8 +62,11 @@ const embedderPin = vi.fn(async () => null as string | null);
 vi.mock("@/lib/memory-embedder", () => ({ readEmbedderPin: () => embedderPin() }));
 
 const shardEnabled = vi.fn(async () => true);
+/** Whether `memory.search` held a stale ClawBox AI key that was rewritten. */
+const refreshKey = vi.fn(async (_token: string) => false);
 vi.mock("@/lib/memory-shard", () => ({
   getMemoryShardEnabled: () => shardEnabled(),
+  refreshCloudEmbeddingsKey: (token: string) => refreshKey(token),
   readEmbeddingPlacement: (...a: unknown[]) => placement(...(a as [])),
   switchToCloudEmbeddings: (...a: unknown[]) => switchToCloud(...(a as [])),
 }));
@@ -108,6 +112,7 @@ beforeEach(() => {
   voiceState.mockResolvedValue({ choice: "auto" });
   placement.mockResolvedValue({ source: "local", recorded: false });
   embedderPin.mockResolvedValue(null);
+  refreshKey.mockResolvedValue(false);
 });
 
 describe("applyClawaiCloudDefaults", () => {
@@ -300,6 +305,41 @@ describe("applyClawaiCloudDefaults", () => {
   it("does not touch the probe cache when the credential is the same one", async () => {
     await applyClawaiCloudDefaults({ trigger: "boot" });
     expect(forgetProbe).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A box that re-linked kept the OLD key in `memory.search`: the move to the
+   * cloud is the only write that put it there, and a box already recorded on
+   * the cloud is never moved again. The core could not start the embedder with
+   * it and reported `provider: "none"`. The key is brought up to date on every
+   * run, before and whatever the decisions below — an owner's own cloud pick
+   * included, which no promotion ever reaches.
+   */
+  it("hands an embedder already on ClawBox AI the credential the box holds now", async () => {
+    token.mockResolvedValue("claw_relinked");
+    placement.mockResolvedValue({ source: "cloud", recorded: true });
+    store.set(CHOICE_SOURCE_KEYS.embeddings, "owner");
+    refreshKey.mockResolvedValue(true);
+    const applied = await applyClawaiCloudDefaults({ trigger: "link", credentialChanged: true });
+    expect(refreshKey).toHaveBeenCalledWith("claw_relinked");
+    // The card's next read asks the core again instead of serving the old "none".
+    expect(invalidateStatus).toHaveBeenCalled();
+    // Not a move: provider, model and endpoint are where they were.
+    expect(applied.moved).not.toContain("embeddings");
+    expect(switchToCloud).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing of memory search on a box with no credential", async () => {
+    token.mockResolvedValue(null);
+    await applyClawaiCloudDefaults();
+    expect(refreshKey).not.toHaveBeenCalled();
+  });
+
+  it("goes on to the other capabilities when the key could not be written", async () => {
+    refreshKey.mockRejectedValue(new Error("config set failed"));
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("embeddings");
+    expect(applied.failed).toEqual([]);
   });
 });
 
