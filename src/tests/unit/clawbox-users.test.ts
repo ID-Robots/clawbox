@@ -148,6 +148,19 @@ describe("clawbox-users", () => {
       expect(await lib.listUsers()).toEqual([]);
     });
 
+    it("forgets the user's own UI language with the account, and nobody else's", async () => {
+      store.set("ui_language_by_user", { alice: "de", bob: "fr" });
+      await lib.removeUser("alice", { currentUser: "clawbox" });
+      expect(store.get("ui_language_by_user")).toEqual({ bob: "fr" });
+    });
+
+    it("keeps the language of a user whose account could not be removed", async () => {
+      store.set("ui_language_by_user", { alice: "de" });
+      vi.mocked(startRootStep).mockRejectedValue(new Error("Job failed"));
+      await expect(lib.removeUser("alice", { currentUser: "clawbox" })).rejects.toMatchObject({ code: "remove_failed" });
+      expect(store.get("ui_language_by_user")).toEqual({ alice: "de" });
+    });
+
     it("puts the user back under a NEW session version when userdel fails, so old sessions stay dead", async () => {
       const before = (await lib.listUsers())[0];
       vi.mocked(startRootStep).mockRejectedValue(new Error("Job failed"));

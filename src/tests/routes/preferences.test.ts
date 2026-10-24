@@ -31,6 +31,9 @@ vi.mock("@/lib/owner-session", () => ({
 // suite covers the credentials.
 vi.mock("@/lib/route-auth", () => ({
   requireSession: vi.fn(),
+  // Nobody signed in: the language read and write act on the box default.
+  // preferences-language.test.ts covers a user's own language.
+  sessionIdentity: vi.fn().mockResolvedValue(null),
 }));
 
 import { NextResponse } from "next/server";

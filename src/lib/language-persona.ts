@@ -331,9 +331,71 @@ export const LANG_NAMES: Record<string, string> = {
   sv: "Svenska", zh: "中文",
 };
 
+/** The SOUL.md heading of the language section, alone on its line. */
+const SOUL_LANGUAGE_HEADING = /^## Language[ \t]*\r?$/;
+/** What ends a section: the next heading of level one or two. */
+const SECTION_END = /^#{1,2}[ \t]/;
+/** The USER.md line this module writes, and every one an older build wrote. */
+const USER_LANGUAGE_LINE = "- **Language:**";
+const USER_NAME_LINE = "- **Name:**";
+
+/**
+ * `soulMd` with EVERY `## Language` section taken out: from the heading line
+ * up to, not including, the next level-one or level-two heading, or the end of
+ * the file.
+ *
+ * Line by line rather than one regular expression, because the expression this
+ * replaced removed only the first section and only one that a newline came
+ * before: a SOUL.md that started with the section, or carried it twice (an
+ * edit, a restore, a second writer), kept an instruction to answer in a
+ * language the owner had switched away from. Unchanged text comes back
+ * unchanged, so `!==` is the caller's "was there one".
+ *
+ * scripts/gateway-pre-start.sh has the Python twin
+ * (`without_language_section`), held to this one by
+ * src/tests/unit/gateway-prestart-onboarding.test.ts.
+ */
+export function withoutLanguageSection(soulMd: string): string {
+  const kept: string[] = [];
+  let inSection = false;
+  for (const line of soulMd.split("\n")) {
+    if (SOUL_LANGUAGE_HEADING.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (inSection && SECTION_END.test(line)) inSection = false;
+    if (!inSection) kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+/**
+ * `userMd` with every `- **Language:**` line replaced by `langLine`, placed
+ * after the `- **Name:**` line when there is one, else at the end.
+ *
+ * Every line, wherever it sits — the first line of the file and a last line
+ * with no newline after it included — so the English line that replaces a
+ * `— Always respond in …` one never leaves the old one behind.
+ */
+export function withLanguageLine(userMd: string, langLine: string): string {
+  const lines = userMd.split("\n").filter((line) => !line.startsWith(USER_LANGUAGE_LINE));
+  const nameAt = lines.findIndex((line) => line.startsWith(USER_NAME_LINE));
+  if (nameAt < 0) return `${lines.join("\n").trimEnd()}\n${langLine}\n`;
+  lines.splice(nameAt + 1, 0, langLine);
+  const text = lines.join("\n");
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
 /**
  * Rewrite the persona files for `lang`. Byte-for-byte the same content the
  * OpenClaw path has always written — only the target paths vary by harness.
+ *
+ * These are the box's persona: every chat and every cron or automation run
+ * reads them. The ONLY language that belongs here is the owner's, the box
+ * default (`pref:ui_language`); another ClawBox user's pick is theirs alone
+ * and reaches only their own chat (src/lib/user-language.ts). The callers are
+ * the preferences route on the owner's pick, the deferred repayment below and
+ * nothing else.
  *
  * Returns false and writes nothing for a language code outside the shipped set.
  */
@@ -347,19 +409,11 @@ export async function writeLanguagePersona(lang: string, files: PersonaFiles): P
 
   // Update USER.md with language preference
   try {
-    let userMd = await fs.readFile(userFile, "utf-8").catch(() => "# USER.md - About Your Human\n");
-    // Remove existing language line if present
-    userMd = userMd.replace(/\n- \*\*Language:\*\*.*\n/g, "\n");
-    // Add language preference after the header or at the end
-    const langLine = `- **Language:** ${langName} (${lang})` + (lang !== "en"
+    const userMd = await fs.readFile(userFile, "utf-8").catch(() => "# USER.md - About Your Human\n");
+    const langLine = `${USER_LANGUAGE_LINE} ${langName} (${lang})` + (lang !== "en"
       ? ` — Always respond in ${langName}`
       : "");
-    if (userMd.includes("- **Name:**")) {
-      userMd = userMd.replace(/(- \*\*Name:\*\*.*\n)/, `$1${langLine}\n`);
-    } else {
-      userMd = userMd.trimEnd() + `\n${langLine}\n`;
-    }
-    await fs.writeFile(userFile, userMd, "utf-8");
+    await fs.writeFile(userFile, withLanguageLine(userMd, langLine), "utf-8");
   } catch (err) {
     console.error(`[preferences] Failed to update ${userFile}:`, err instanceof Error ? err.message : err);
   }
@@ -367,22 +421,22 @@ export async function writeLanguagePersona(lang: string, files: PersonaFiles): P
   // Also write SOUL.md language instruction for strong enforcement
   if (lang !== "en") {
     try {
-      let soulMd = await fs.readFile(soulFile, "utf-8").catch(() => "# SOUL.md - Who You Are\n");
-      // Remove existing language section
-      soulMd = soulMd.replace(/\n## Language\n[\s\S]*?(?=\n## |\n$|$)/, "");
-      // Append language section
-      soulMd = soulMd.trimEnd() + `\n\n## Language\n\nYou MUST respond in ${langName}. The user's preferred language is ${langName} (${lang}). All messages, explanations, and summaries must be in ${langName}. Only use English for code, technical terms, and tool names.\n`;
-      await fs.writeFile(soulFile, soulMd, "utf-8");
+      const soulMd = await fs.readFile(soulFile, "utf-8").catch(() => "# SOUL.md - Who You Are\n");
+      // Every earlier section out, this one appended.
+      const next = withoutLanguageSection(soulMd).trimEnd()
+        + `\n\n## Language\n\nYou MUST respond in ${langName}. The user's preferred language is ${langName} (${lang}). All messages, explanations, and summaries must be in ${langName}. Only use English for code, technical terms, and tool names.\n`;
+      await fs.writeFile(soulFile, next, "utf-8");
     } catch (err) {
       console.error(`[preferences] Failed to update ${soulFile}:`, err instanceof Error ? err.message : err);
     }
   } else {
-    // English — remove language section from SOUL.md if present
+    // English is the absence of the instruction, not another instruction:
+    // every language section goes, and the file is written only if one was there.
     try {
-      let soulMd = await fs.readFile(soulFile, "utf-8").catch(() => "");
-      if (soulMd.includes("## Language")) {
-        soulMd = soulMd.replace(/\n## Language\n[\s\S]*?(?=\n## |\n$|$)/, "");
-        await fs.writeFile(soulFile, soulMd.trimEnd() + "\n", "utf-8");
+      const soulMd = await fs.readFile(soulFile, "utf-8").catch(() => "");
+      const stripped = withoutLanguageSection(soulMd);
+      if (stripped !== soulMd) {
+        await fs.writeFile(soulFile, stripped.trimEnd() + "\n", "utf-8");
       }
     } catch (err) {
       console.error(`[preferences] Failed to update ${soulFile}:`, err instanceof Error ? err.message : err);

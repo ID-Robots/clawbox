@@ -41,6 +41,7 @@ import { createSerialLock } from "@/lib/serial-lock";
 import { USERS_CONFIG_KEY, parseUserRegistry, type ClawboxUserRecord } from "@/lib/session-identity";
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 import { removeDesktopState } from "@/lib/desktop-state-store";
+import { forgetUserLanguage } from "@/lib/user-language";
 
 const execFile = promisify(execFileCb);
 
@@ -410,6 +411,11 @@ export async function removeUser(username: string, opts: { currentUser: string }
     // later under the same name starts on an empty desktop, never this one's.
     await removeDesktopState(removable).catch((err) => {
       console.error("[clawbox-users] could not remove the desktop state:", err instanceof Error ? err.message : err);
+    });
+    // Their own UI language too (src/lib/user-language.ts): the same name
+    // later starts on the box default, never this one's pick.
+    await forgetUserLanguage(removable).catch((err) => {
+      console.error("[clawbox-users] could not forget the user's language:", err instanceof Error ? err.message : err);
     });
     // And their chat (src/lib/user-chats.ts): the same name later starts with
     // an empty conversation, never this one's. Loaded here: it reaches the
