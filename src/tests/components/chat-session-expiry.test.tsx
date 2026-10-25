@@ -32,6 +32,8 @@ let wsConfigAnswer: "ok" | "session-gate" = "ok";
 let probeAnswer: "ok" | "session-gate" = "ok";
 /** ws-config refusals still to answer with the session gate's 401 before answering normally. */
 let wsConfigRefusals = 0;
+/** Upgrades still to refuse — closed before any frame, the way a browser reports the gate's plain 401. */
+let upgradeRefusals = 0;
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -48,6 +50,11 @@ class FakeGatewayWs {
 
   constructor(public url: string) {
     sockets.push(this);
+    if (upgradeRefusals > 0) {
+      upgradeRefusals -= 1;
+      setTimeout(() => this.serverClose(1006), 0);
+      return;
+    }
     setTimeout(() => this.emit({ type: "event", event: "connect.challenge", payload: { nonce: "n" } }), 0);
   }
 
@@ -154,6 +161,7 @@ beforeEach(() => {
   wsConfigAnswer = "ok";
   probeAnswer = "ok";
   wsConfigRefusals = 0;
+  upgradeRefusals = 0;
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -312,6 +320,29 @@ describe("the standalone chat page (ChatApp) on a lapsed session", () => {
     wsConfigRefusals = 1;
     render(<ChatApp />);
     expect(await screen.findByText("Failed to get gateway config")).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByText("chat.reconnect")).toBeInTheDocument();
+  });
+
+  it("signs the page out when the session gate refuses the socket itself, before any hello", async () => {
+    // The session ran out between ws-config and the upgrade: the gate answers
+    // the upgrade with a plain 401, which the browser reports as a bare close.
+    upgradeRefusals = 1;
+    probeAnswer = "session-gate";
+    render(<ChatApp />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT));
+    await settle();
+    expect(sockets).toHaveLength(1);
+    expect(connects).toBe(0);
+    expect(screen.queryByText("Could not connect to gateway")).toBeNull();
+    expect(screen.queryByText("chat.reconnect")).toBeNull();
+  });
+
+  it("a socket refused before any hello on a session that is still good is an ordinary failed connect, with its Reconnect", async () => {
+    upgradeRefusals = 1;
+    render(<ChatApp />);
+    expect(await screen.findByText("Could not connect to gateway")).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === SESSION_PROBE_URL)).toBe(true);
     expect(replace).not.toHaveBeenCalled();
     expect(screen.getByText("chat.reconnect")).toBeInTheDocument();
   });

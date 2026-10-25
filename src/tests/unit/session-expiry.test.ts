@@ -167,6 +167,45 @@ describe("installSessionExpiryGuard", () => {
     expect(replace).toHaveBeenCalledTimes(1);
   });
 
+  it("gives a refusal sent after a probe left a probe of its own, so the page still signs out", async () => {
+    // The tab is shown again and asks about its session while it is still good;
+    // that answer is slow. The session runs out, and a chat poll sent after the
+    // probe comes back refused. Joining the older probe would take its "still
+    // signed in" as the verdict on a refusal it never saw, and an idle chat
+    // would then stay on the page with nothing left to refuse.
+    const { win, replace } = fakeWindow();
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let answerFirstProbe: (res: Response) => void = () => {};
+    let probes = 0;
+    const original = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) !== SESSION_PROBE_URL) return gate401();
+      probes += 1;
+      if (probes === 1) return new Promise<Response>((resolve) => { answerFirstProbe = resolve; });
+      return gate401();
+    });
+    win.fetch = original as unknown as typeof fetch;
+    installSessionExpiryGuard(win as unknown as Window);
+    try {
+      const first = confirmSessionStillValid(original as unknown as typeof fetch);
+
+      now = 2_000;
+      expect((await win.fetch("/setup-api/chat/tabs")).status).toBe(401);
+      await vi.waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"));
+      expect(probes).toBe(2);
+
+      // The first probe's late "still signed in" changes nothing.
+      answerFirstProbe(new Response("{}", { status: 200 }));
+      await expect(first).resolves.toBe(true);
+      expect(replace).toHaveBeenCalledTimes(1);
+    } finally {
+      // Never leave a probe in flight for the next test to join.
+      answerFirstProbe(new Response("{}", { status: 200 }));
+      await flush();
+      clock.mockRestore();
+    }
+  });
+
   it("leaves the page alone on a route's own 401 and on every other answer", async () => {
     const { win, replace } = fakeWindow();
     const answers = [wrongPassword401(), new Response("{}", { status: 200 }), new Response("", { status: 403 })];

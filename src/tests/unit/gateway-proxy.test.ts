@@ -231,6 +231,25 @@ describe("gateway-proxy", () => {
       expect(html).toContain("/app/clawbox?email=");
     });
 
+    it("injects the lapsed-session guard first in <head>, ahead of the Control UI's own scripts", async () => {
+      // The gateway's own chat is the one page the box serves that is not a
+      // page of ours: without this, a session that ran out left it on screen
+      // with a dead socket instead of taking it to /login.
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<!doctype html><html><head><script type="module" src="/assets/index.js"></script></head><body>Gateway Content</body></html>'),
+      }));
+
+      const html = await (
+        await gatewayProxy.serveGatewayHTML(createRequest("http://clawbox.local/chat"))
+      ).text();
+
+      const guard = html.indexOf("__clawboxSessionGuard");
+      expect(guard).toBeGreaterThan(html.indexOf("<head>"));
+      expect(guard).toBeLessThan(html.indexOf("/assets/index.js"));
+      expect(html.startsWith("<!doctype html>")).toBe(true);
+    });
+
     it("injects it for a caller with no owner session too", async () => {
       // The shell is served without a session (first boot, the login redirect)
       // and simply carries no token. The directive handling is not a credential

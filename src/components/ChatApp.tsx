@@ -1223,9 +1223,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       failPending('Not connected')
       // A socket that never got as far as a hello is a failed connect — unless
       // the box closed it for its session (4401, scripts/upgrade-session-watch.js).
+      // Or refused it for one: the session gate answers an upgrade with a plain
+      // 401, which a browser reports as a bare close, so a session that ran out
+      // after ws-config was read reached the error panel and its Reconnect
+      // instead of /login. Ask first; only a live session is a failed connect.
       if (!connectedOnceRef.current && !isSessionExpiredClose(event)) {
-        setStatus('error')
-        setErrorMsg('Could not connect to gateway')
+        void confirmSessionStillValid().then((live) => {
+          if (!live || signedOutRef.current || unmountedRef.current || wsRef.current) return
+          setStatus('error')
+          setErrorMsg('Could not connect to gateway')
+        })
         return
       }
       // A live chat dropped: with 4401, or over plain HTTP — where the box cuts

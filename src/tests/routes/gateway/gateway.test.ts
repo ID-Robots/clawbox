@@ -109,7 +109,37 @@ describe("/setup-api/gateway", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("__OPENCLAW_WS_URL__");
-    expect(html).toContain("clawbox.local");
+  });
+
+  it("points the chat's socket at the page's own origin — the session-gated proxy — never at the gateway's port", async () => {
+    // The gateway's port checks only its own token, so a chat connected there
+    // outlived the ClawBox session that opened it. The page's own origin goes
+    // through production-server.js, which admits the upgrade on a live session
+    // and closes it when the session ends.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve("<html><head></head><body>Gateway</body></html>"),
+    });
+    const req = new NextRequest(new URL("http://clawbox.local/setup-api/gateway"), {
+      headers: { host: "evil\"</script><script>alert(1)</script>:80" },
+    });
+    const html = await (await GET(req)).text();
+    expect(html).toContain('var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.host;');
+    expect(html).not.toContain(":18789");
+    // Nothing from the request's Host reaches the script any more.
+    expect(html).not.toContain("alert(1)");
+  });
+
+  it("carries the lapsed-session guard, first in <head>, ahead of the page's own scripts", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve('<html><head><script type="module" src="/assets/index.js"></script></head><body>Gateway</body></html>'),
+    });
+    const html = await (await GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway")))).text();
+    const guard = html.indexOf("__clawboxSessionGuard");
+    expect(guard).toBeGreaterThan(html.indexOf("<head>"));
+    expect(guard).toBeLessThan(html.indexOf("__OPENCLAW_WS_URL__"));
+    expect(guard).toBeLessThan(html.indexOf("/assets/index.js"));
   });
 
   it("injects the gateway token for the owner and never for another ClawBox user", async () => {
