@@ -82,23 +82,40 @@ export function signOutExpiredSession(): void {
   window.location.replace(signedOutLoginPage());
 }
 
+let probeInFlight: Promise<boolean> | null = null;
+
 /**
- * Ask the box whether this page's session is still good, and leave for /login
- * if it is not. For a page that has nothing else to ask — a socket that just
- * dropped, a tab that comes back from the background. A box that cannot be
- * reached is not a lapsed session: that answers `true`.
+ * Ask the box whether this page's session is good NOW, and leave for /login if
+ * it is not. Every "signed out" signal goes through here rather than signing
+ * out on its own say-so, because each describes a session that may already be
+ * gone from this page: a request that left before another tab signed in again
+ * comes back refused, and a socket the box closed was opened on an older cookie
+ * than a password change in this browser has since replaced. A box that cannot
+ * be reached is not a lapsed session: that answers `true`.
+ *
+ * One probe at a time: the polls that all see a lapsed session at the same
+ * moment share it, and so does the guard below when it sees the probe's own
+ * refusal — so the page signs out once.
  */
-export async function confirmSessionStillValid(): Promise<boolean> {
-  try {
-    const res = await fetch(SESSION_PROBE_URL, { cache: "no-store" });
-    if (isSessionExpiredResponse(res)) {
-      signOutExpiredSession();
-      return false;
+export function confirmSessionStillValid(fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  if (probeInFlight) return probeInFlight;
+  const probe = (async () => {
+    try {
+      const res = await fetchImpl(SESSION_PROBE_URL, { cache: "no-store" });
+      if (isSessionExpiredResponse(res)) {
+        signOutExpiredSession();
+        return false;
+      }
+    } catch {
+      // offline, or the box restarting
     }
-  } catch {
-    // offline, or the box restarting
-  }
-  return true;
+    return true;
+  })();
+  probeInFlight = probe;
+  void probe.finally(() => {
+    if (probeInFlight === probe) probeInFlight = null;
+  });
+  return probe;
 }
 
 /**
@@ -110,9 +127,13 @@ export async function confirmSessionStillValid(): Promise<boolean> {
 export function installSessionExpiryGuard(win: Window = window): () => void {
   const original = win.fetch;
   if (typeof original !== "function") return () => {};
+  const unguarded = ((input: RequestInfo | URL, init?: RequestInit) => original.call(win, input, init)) as typeof fetch;
   const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const res = await original.call(win, input, init);
-    if (isSessionExpiredResponse(res)) signOutExpiredSession();
+    // Not on this answer alone — it may predate a sign-in in another tab. The
+    // probe asks about the current session, through the unguarded fetch so its
+    // own answer is not judged here a second time.
+    if (isSessionExpiredResponse(res)) void confirmSessionStillValid(unguarded);
     return res;
   };
   // Cast: some runtimes' `typeof fetch` carries extras (Bun's `preconnect`) a

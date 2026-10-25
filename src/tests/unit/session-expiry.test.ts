@@ -104,17 +104,67 @@ describe("signOutExpiredSession", () => {
   });
 });
 
+/** Let the guard's probe settle. */
+const flush = async () => {
+  for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
+};
+
 describe("installSessionExpiryGuard", () => {
-  it("takes the page to /login on the session gate's 401 to any request, and still hands the answer back", async () => {
+  it("on the session gate's 401 to any request, asks about the current session and signs out when that is refused too", async () => {
     const { win, replace } = fakeWindow();
-    const original = vi.fn(async () => gate401());
+    const original = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => gate401());
     win.fetch = original as unknown as typeof fetch;
     installSessionExpiryGuard(win as unknown as Window);
 
     const res = await win.fetch("/setup-api/files?dir=%7E");
     expect(res.status).toBe(401);
-    expect(original).toHaveBeenCalledWith("/setup-api/files?dir=%7E", undefined);
-    expect(replace).toHaveBeenCalledWith("/login?redirect=%2F");
+    await vi.waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"));
+    // The probe went out through the unguarded fetch, once.
+    expect(original.mock.calls.map(([input]) => String(input))).toEqual(["/setup-api/files?dir=%7E", SESSION_PROBE_URL]);
+  });
+
+  it("leaves the page alone on a late 401 for a session it has already replaced", async () => {
+    // A request that left before a sign-in in another tab comes back refused;
+    // the cookie the page holds now is good.
+    const { win, replace, order } = fakeWindow();
+    win.fetch = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === SESSION_PROBE_URL ? new Response("{}", { status: 200 }) : gate401(),
+    ) as unknown as typeof fetch;
+    installSessionExpiryGuard(win as unknown as Window);
+
+    expect((await win.fetch("/setup-api/kv?key=ui:pending-actions")).status).toBe(401);
+    await flush();
+    expect(replace).not.toHaveBeenCalled();
+    expect(order).toEqual([]);
+  });
+
+  it("asks once and signs out once for a burst of refusals", async () => {
+    const { win, replace, order } = fakeWindow();
+    const original = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => gate401());
+    win.fetch = original as unknown as typeof fetch;
+    installSessionExpiryGuard(win as unknown as Window);
+
+    await Promise.all(["/setup-api/kv", "/setup-api/files", "/setup-api/chat/tabs"].map((u) => win.fetch(u)));
+    await vi.waitFor(() => expect(replace).toHaveBeenCalled());
+    await flush();
+    expect(original.mock.calls.filter(([input]) => String(input) === SESSION_PROBE_URL)).toHaveLength(1);
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["event", "replace /login?redirect=%2F"]);
+  });
+
+  it("does not judge the probe's own refusal a second time", async () => {
+    // A chat asks through the page's (guarded) fetch: the guard sees the
+    // probe's 401 and must join that probe, not start another.
+    const { win, replace } = fakeWindow();
+    const original = vi.fn(async () => gate401());
+    win.fetch = original as unknown as typeof fetch;
+    installSessionExpiryGuard(win as unknown as Window);
+    vi.stubGlobal("fetch", win.fetch);
+
+    await expect(confirmSessionStillValid()).resolves.toBe(false);
+    await flush();
+    expect(original).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledTimes(1);
   });
 
   it("leaves the page alone on a route's own 401 and on every other answer", async () => {

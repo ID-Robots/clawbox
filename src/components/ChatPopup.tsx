@@ -75,7 +75,6 @@ import {
   confirmSessionStillValid,
   isSessionExpiredClose,
   isSessionExpiredResponse,
-  signOutExpiredSession,
 } from '@/lib/session-expiry'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
@@ -3075,12 +3074,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // a stale token on every reconnect and the gateway would reject it with
       // "token mismatch" forever. Always fetch the current token.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store', signal: controller.signal })
-      // The session ran out: there is no token to ask for and nothing to retry.
+      // The session gate refused it. Not on this answer alone — it may predate
+      // a sign-in in another tab — so ask about the current session: a lapsed
+      // one signs the page out (SESSION_EXPIRED_EVENT stops this chat and its
+      // ladder), a live one is an ordinary failure for the retry below.
       if (isSessionExpiredResponse(res)) {
-        if (!isCurrent()) return
-        stopForSignedOut()
-        signOutExpiredSession()
-        return
+        const live = await confirmSessionStillValid()
+        if (!isCurrent() || !live) return
+        throw new Error('ws-config was refused for a session the box still accepts')
       }
       const config = await res.json()
       if (!isCurrent()) return

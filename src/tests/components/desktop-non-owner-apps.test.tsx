@@ -34,6 +34,8 @@ let me: unknown = {};
 let updateLocked = false;
 let signedOut = false;
 let filesAnswer: "ok" | "session-gate" | "wrong-password" = "ok";
+/** The session probe (/users/me) refused too: the session really is over. */
+let probeRefused = false;
 
 function answer(body: unknown, headers: Record<string, string> = {}) {
   return {
@@ -65,6 +67,9 @@ function installFetch() {
     }
     // The middleware stamps the update lock on every /setup-api answer alike.
     const lock: Record<string, string> = updateLocked && url.includes("/setup-api/") ? { [UPDATE_LOCK_HEADER]: "1" } : {};
+    if (probeRefused && url.includes("/setup-api/users/me")) {
+      return { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), json: async () => ({ error: "Authentication required" }), text: async () => "" };
+    }
     if (url.includes("/setup-api/users/me")) return answer(me, lock);
     if (url.includes("/setup-api/kv")) return answer({}, lock);
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
@@ -120,6 +125,7 @@ beforeEach(() => {
   updateLocked = false;
   signedOut = false;
   filesAnswer = "ok";
+  probeRefused = false;
   installFetch();
   // The launcher asks matchMedia on its focus timer; the setup file's mock
   // loses its implementation to `mockReset` between cases.
@@ -367,12 +373,32 @@ describe("a desktop whose session is gone", () => {
       expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
       expect(replace).not.toHaveBeenCalled();
       filesAnswer = "session-gate";
+      probeRefused = true;
       const res = await fetch("/setup-api/files?dir=%7E");
       expect(res.status).toBe(401);
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"));
       expect(stopped).toHaveBeenCalled();
-      expect(replace).toHaveBeenCalledWith("/login?redirect=%2F");
     } finally {
       window.removeEventListener(SESSION_EXPIRED_EVENT, stopped);
+      restore();
+    }
+  });
+
+  it("a late refusal for a session this page has already replaced leaves the desktop where it is", async () => {
+    // The request left before a sign-in in another tab; asked now, the box
+    // still accepts the page's session.
+    me = OWNER;
+    const { replace, restore } = stubLocation();
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      filesAnswer = "session-gate";
+      const probesBefore = requests().filter((r) => r.url.pathname === "/setup-api/users/me").length;
+      expect((await fetch("/setup-api/files?dir=%7E")).status).toBe(401);
+      await waitFor(() => expect(requests().filter((r) => r.url.pathname === "/setup-api/users/me").length).toBeGreaterThan(probesBefore));
+      await act(async () => {});
+      expect(replace).not.toHaveBeenCalled();
+    } finally {
       restore();
     }
   });

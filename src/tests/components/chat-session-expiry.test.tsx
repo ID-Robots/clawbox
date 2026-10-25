@@ -30,6 +30,8 @@ const sockets: FakeGatewayWs[] = [];
 let connects = 0;
 let wsConfigAnswer: "ok" | "session-gate" = "ok";
 let probeAnswer: "ok" | "session-gate" = "ok";
+/** ws-config refusals still to answer with the session gate's 401 before answering normally. */
+let wsConfigRefusals = 0;
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -93,6 +95,10 @@ function installFetch() {
     const url = String(input);
     if (url.includes("/setup-api/gateway/ws-config")) {
       if (wsConfigAnswer === "session-gate") return sessionGate401();
+      if (wsConfigRefusals > 0) {
+        wsConfigRefusals -= 1;
+        return sessionGate401();
+      }
       return { ok: true, status: 200, headers: new Headers(), json: async () => ({ token: "t", wsUrl: "ws://localhost/gw" }) };
     }
     if (url.includes(SESSION_PROBE_URL)) {
@@ -147,6 +153,7 @@ beforeEach(() => {
   connects = 0;
   wsConfigAnswer = "ok";
   probeAnswer = "ok";
+  wsConfigRefusals = 0;
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -198,11 +205,22 @@ describe("the desktop chat (ChatPopup) on a lapsed session", () => {
 
   it("opens no socket at all when the session gate answers the chat's ws-config", async () => {
     wsConfigAnswer = "session-gate";
+    probeAnswer = "session-gate";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT));
     await settle();
     expect(sockets).toHaveLength(0);
     expect(screen.getByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
+  });
+
+  it("treats a late ws-config refusal on a session the box still accepts as an ordinary failure, and connects on the retry", async () => {
+    // The read left before a sign-in in another tab and came back refused;
+    // the page's cookie is good now.
+    wsConfigRefusals = 1;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(connects).toBe(1), { timeout: 10_000 });
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.queryByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeNull();
   });
 
   it("closes its live socket the moment anything else on the page sees the session end", async () => {
@@ -261,22 +279,40 @@ describe("the standalone chat page (ChatApp) on a lapsed session", () => {
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === SESSION_PROBE_URL)).toBe(true);
   });
 
-  it("a drop on a session that is still good stays on the page", async () => {
+  it("a drop on a session that is still good stays on the page and reconnects", async () => {
+    // Over plain HTTP a password changed in this browser cuts the socket
+    // opened on the old cookie with no code; the page holds the new one.
     render(<ChatApp />);
     await waitFor(() => expect(connects).toBe(1));
     await settle();
 
     await act(async () => { sockets[0].serverClose(1006); });
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === SESSION_PROBE_URL)).toBe(true));
-    await settle();
+    await waitFor(() => expect(connects).toBe(2), { timeout: 10_000 });
     expect(replace).not.toHaveBeenCalled();
+
+    // A late close from the socket it already let go of changes nothing.
+    await act(async () => { sockets[0].serverClose(1006); });
+    await settle();
+    await new Promise((r) => setTimeout(r, 3_500));
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1].closed).toBe(false);
   });
 
   it("opens no socket at all when the session gate answers the chat's ws-config", async () => {
     wsConfigAnswer = "session-gate";
+    probeAnswer = "session-gate";
     render(<ChatApp />);
     await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT));
     await settle();
     expect(sockets).toHaveLength(0);
+  });
+
+  it("treats a late ws-config refusal on a session the box still accepts as an ordinary failure, with its Reconnect", async () => {
+    wsConfigRefusals = 1;
+    render(<ChatApp />);
+    expect(await screen.findByText("Failed to get gateway config")).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByText("chat.reconnect")).toBeInTheDocument();
   });
 });

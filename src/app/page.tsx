@@ -84,7 +84,7 @@ import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
-import { signOutExpiredSession } from "@/lib/session-expiry";
+import { confirmSessionStillValid } from "@/lib/session-expiry";
 import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
 import { mergeDesktopApps, knownSetChanged } from "@/lib/desktop-app-merge";
@@ -2574,8 +2574,10 @@ function ChromeDesktopInner() {
         // third of the box's requests, for an hour). Read off the same
         // request, like the lock above; a 403 is NOT this — the session is
         // fine and the desktop is simply not the owner's (TASK-1256).
+        // Confirmed against the current session first: this poll may have
+        // left before a sign-in in another tab (src/lib/session-expiry.ts).
         if (res.status === 401) {
-          signOutExpiredSession();
+          void confirmSessionStillValid();
           return;
         }
         if (res.ok && ownerApiAccess) {

@@ -13,7 +13,6 @@ import {
   confirmSessionStillValid,
   isSessionExpiredClose,
   isSessionExpiredResponse,
-  signOutExpiredSession,
 } from '@/lib/session-expiry'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
@@ -169,6 +168,9 @@ interface ChatAppProps {
 const HEADER_REGION_ID = 'chatapp-header-region'
 const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
 const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+// The pause before a dropped live chat opens a new socket — ChatPopup's
+// RETRY_DELAY: long enough that a gateway bouncing under it is not hammered.
+const DROP_RECONNECT_DELAY_MS = 3000
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -791,6 +793,23 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
   }, [stopForSignedOut])
 
+  // The live socket went away and the page may still be signed in — the box
+  // closes a socket when the cookie it was OPENED on ends, which a password
+  // changed in this browser does while handing the page a new one. Ask: a
+  // lapsed session signs the page out (SESSION_EXPIRED_EVENT stops this chat),
+  // a live one gets a new socket after a pause. On the starting-retry timer,
+  // which unmount and sign-out already cancel.
+  const reconnectIfStillSignedIn = useCallback(() => {
+    void confirmSessionStillValid().then((live) => {
+      if (!live || signedOutRef.current || unmountedRef.current) return
+      if (startingRetryTimerRef.current) clearTimeout(startingRetryTimerRef.current)
+      startingRetryTimerRef.current = setTimeout(() => {
+        startingRetryTimerRef.current = null
+        if (!signedOutRef.current && !unmountedRef.current) void connectRef.current()
+      }, DROP_RECONNECT_DELAY_MS)
+    })
+  }, [])
+
   const connect = useCallback(async () => {
     // A signed-out page opens nothing: the next stop is /login.
     if (signedOutRef.current) return
@@ -839,11 +858,13 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       // on every reconnect — which the gateway refuses for ever. Newly reachable
       // now that the adapter effect can ask for a connect as well as mount.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store' })
-      // The session ran out: there is no token to ask for and nothing to retry.
+      // The session gate refused it. Not on this answer alone — it may predate
+      // a sign-in in another tab — so ask about the current session: a lapsed
+      // one signs the page out (SESSION_EXPIRED_EVENT stops this chat), a live
+      // one is an ordinary failure below, with its Reconnect.
       if (isSessionExpiredResponse(res)) {
-        stopForSignedOut()
-        signOutExpiredSession()
-        return
+        if (!(await confirmSessionStillValid())) return
+        throw new Error('ws-config was refused for a session the box still accepts')
       }
       const config = await res.json()
       token = config.token
@@ -1190,33 +1211,27 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     }
 
     const onClose = (event?: CloseEvent) => {
-      // Its own clock only: a late close from a socket a newer connect has
-      // already replaced must not disarm the newer attempt's.
-      if (wsRef.current === ws) clearHandshakeTimer()
+      // Only the socket that is CURRENTLY installed may tear anything down or
+      // reconnect, the rule ChatPopup keeps: a late close from one a newer
+      // connect or the link's own close already let go of describes a
+      // connection nobody is using.
+      if (wsRef.current !== ws) return
+      clearHandshakeTimer()
       wsRef.current = null
       // Same reason as the reconnect path: a request still waiting on a socket
       // that has gone away has to be told, or it never settles.
       failPending('Not connected')
-      // The box ended the socket because the session it was OPENED on ended
-      // (scripts/upgrade-session-watch.js). That need not be this page's
-      // session: a password changed in this browser revokes the old cookie
-      // and hands the page a new one. So ask: a lapsed session signs the page
-      // out (SESSION_EXPIRED_EVENT stops this chat), a live one reconnects.
-      if (isSessionExpiredClose(event)) {
-        void confirmSessionStillValid().then((valid) => {
-          if (valid && !signedOutRef.current && !unmountedRef.current) void connectRef.current()
-        })
-        return
-      }
-      if (!connectedOnceRef.current) {
+      // A socket that never got as far as a hello is a failed connect — unless
+      // the box closed it for its session (4401, scripts/upgrade-session-watch.js).
+      if (!connectedOnceRef.current && !isSessionExpiredClose(event)) {
         setStatus('error')
         setErrorMsg('Could not connect to gateway')
         return
       }
-      // A live chat dropped. Over plain HTTP the box cuts a lapsed session's
-      // socket without a close code, and this page has no poll of its own to
-      // hear the 401s the desktop hears — so it asks.
-      void confirmSessionStillValid()
+      // A live chat dropped: with 4401, or over plain HTTP — where the box cuts
+      // a lapsed session's socket — with no code at all. This page has no poll
+      // of its own to hear the 401s the desktop hears, so it asks.
+      reconnectIfStillSignedIn()
     }
 
     try {
