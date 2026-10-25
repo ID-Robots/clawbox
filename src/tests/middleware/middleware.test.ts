@@ -849,6 +849,45 @@ describe("middleware", () => {
     });
   });
 
+  describe("an expired session on the chat's own routes", () => {
+    // The chat reads its socket's address and token from ws-config and sends
+    // through /setup-api/chat; a session that ran out must be refused there
+    // like everywhere else, with the 401 the page reads as "signed out"
+    // (src/lib/session-expiry.ts) — not a route's own 401 for a wrong password.
+    const past = () => Math.floor(Date.now() / 1000) - 1;
+    const future = () => Math.floor(Date.now() / 1000) + 60;
+
+    for (const route of ["/setup-api/gateway/ws-config", "/setup-api/chat/tabs", "/api/chat"]) {
+      it(`refuses ${route} with the session gate's marked 401 once the cookie has expired`, async () => {
+        process.env.SESSION_SECRET = "test-secret";
+        writeConfig({ setup_complete: true, password_configured: true });
+        vi.resetModules();
+        const mod = await import("@/middleware");
+        const { SESSION_EXPIRED_HEADER, isSessionExpiredResponse } = await import("@/lib/session-expiry");
+
+        const res = await mod.middleware(new NextRequest(new URL(`http://localhost${route}`), {
+          headers: { cookie: `clawbox_session=${await createSignedSessionCookie(past())}` },
+        }));
+        expect(res.status).toBe(401);
+        expect(res.headers.get(SESSION_EXPIRED_HEADER)).toBe("expired");
+        expect(isSessionExpiredResponse(res)).toBe(true);
+        await expect(res.json()).resolves.toEqual({ error: "Authentication required" });
+      });
+    }
+
+    it("lets the same request through while the session is live", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const res = await mod.middleware(new NextRequest(new URL("http://localhost/setup-api/gateway/ws-config"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
+      }));
+      expect(res.status).toBe(200);
+    });
+  });
+
   describe("pre-auth sensitive-surface gate (setup window)", () => {
     // SESSION_SECRET is provisioned but setup_complete is NOT yet written — the
     // pre-setup wizard window. Sensitive desktop/agent backends must stay gated

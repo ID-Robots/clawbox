@@ -34,6 +34,7 @@ import {
   registryVersions,
   type SessionIdentity,
 } from "./session-identity";
+import { sessionExpiredHeaders } from "./session-expiry";
 
 function dataDir(): string {
   const root = process.env.CLAWBOX_ROOT
@@ -266,5 +267,14 @@ export async function requireSession(
 
   if (opts.allowBootstrap && !(await deviceHasOwner())) return null;
 
-  return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  return sessionRequiredResponse();
+}
+
+/**
+ * The 401 for a request that needs a session and has none — the same answer,
+ * marked the same way, as the middleware's session gate, so the page reads it
+ * as "signed out" (src/lib/session-expiry.ts) rather than as a route's own 401.
+ */
+export function sessionRequiredResponse(): NextResponse {
+  return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
 }

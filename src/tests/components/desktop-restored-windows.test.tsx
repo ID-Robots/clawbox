@@ -45,9 +45,14 @@ function installFetch() {
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
     return answer({});
   }));
+  fetchStub = vi.mocked(fetch);
 }
 
-const desktopPuts = () => vi.mocked(fetch).mock.calls.filter(([input, init]) =>
+// The desktop wraps `fetch` while it is mounted (src/lib/session-expiry.ts),
+// so the stub is read through its own reference.
+let fetchStub = vi.mocked(fetch);
+
+const desktopPuts = () => fetchStub.mock.calls.filter(([input, init]) =>
   String(input).includes("/setup-api/desktop/state") && (init?.method ?? "GET").toUpperCase() === "PUT");
 
 beforeEach(() => {

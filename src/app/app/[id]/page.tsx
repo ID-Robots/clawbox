@@ -8,6 +8,7 @@ import Link from "next/link";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { mayUseOwnerApis, useSettledSessionUser } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
+import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
@@ -389,6 +390,9 @@ export default function StandaloneAppPage() {
   // sign-in or sign-out made in another tab, reopening this same app on the
   // session that now holds (TASK-1247).
   useFollowSessionSwitch();
+  // …and a session that runs out takes this page to /login like the desktop,
+  // chat and its socket included, and back to this app after signing in.
+  useSessionExpiryGuard();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
   // null while unresolved — a harness-only app must not paint before we know

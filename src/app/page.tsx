@@ -84,6 +84,8 @@ import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
+import { confirmSessionStillValid } from "@/lib/session-expiry";
+import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
 import { mergeDesktopApps, knownSetChanged } from "@/lib/desktop-app-merge";
 import { PublicLinkBadge, PublicLinkDialog, PublicLinkMenuItems, usePublicAppLinks } from "@/components/PublicAppLink";
@@ -173,17 +175,6 @@ const PENDING_ACTION_MAX_AGE_MS = 60_000;
 
 // How often the owner-notice ring is read while the page is on screen.
 const RING_POLL_MS = 2_000;
-/**
- * Where a desktop whose session the box no longer accepts goes: the login
- * page, carrying the path it was on the way the middleware does for a
- * navigation (`redirect` is the pathname alone — never the query, which a
- * notice or a deep link may still be sitting in — so the two agree and the
- * person lands back where they were).
- */
-function signedOutLoginPage(pathname: string = window.location.pathname): string {
-  const params = new URLSearchParams({ redirect: pathname || "/" });
-  return `/login?${params.toString()}`;
-}
 // How often the owner-notice ring is still read while the page is HIDDEN (a
 // phone or a laptop tab in the background). Not paused like the other polls:
 // the ring delivers EVENTS — `register_webapp` is the only way a new web app's
@@ -662,6 +653,9 @@ function ChromeDesktopInner() {
   // flickers.)
   const ownerApiAccess = useMayUseOwnerApis();
   const ownerApis = ownerApiAccess === true;
+  // A session that runs out takes the whole desktop to /login — every app's
+  // request, not only the polls below, and the chat's socket with it.
+  useSessionExpiryGuard();
   // Account-level "is ClawBox AI configured on this device?" — drives
   // the shelf shield (colour + click target) and the offer-notification
   // visibility. Sourced from useClawboxLogin (which now polls
@@ -2580,8 +2574,10 @@ function ChromeDesktopInner() {
         // third of the box's requests, for an hour). Read off the same
         // request, like the lock above; a 403 is NOT this — the session is
         // fine and the desktop is simply not the owner's (TASK-1256).
+        // Confirmed against the current session first: this poll may have
+        // left before a sign-in in another tab (src/lib/session-expiry.ts).
         if (res.status === 401) {
-          window.location.replace(signedOutLoginPage());
+          void confirmSessionStillValid();
           return;
         }
         if (res.ok && ownerApiAccess) {
