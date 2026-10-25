@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import ChatApp from "@/components/ChatApp";
 import { resetHarnessCache } from "@/lib/client-harness";
@@ -175,8 +175,9 @@ describe("the desktop chat (ChatPopup) on a lapsed session", () => {
     expect(await screen.findByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByText(/Restarting/i)).toBeNull();
 
-    // Neither the retry ladder nor Try again opens another socket.
-    fireEvent.click(screen.getByText("chat.retry"));
+    // No Retry is offered (it could only do nothing), and the retry ladder
+    // opens no other socket on the way out.
+    expect(screen.queryByText("chat.retry")).toBeNull();
     await settle();
     expect(sockets).toHaveLength(1);
   });
@@ -212,8 +213,11 @@ describe("the desktop chat (ChatPopup) on a lapsed session", () => {
     await act(async () => { window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT)); });
     expect(sockets[0].closed).toBe(true);
     expect(await screen.findByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText("chat.retry")).toBeNull();
 
-    fireEvent.click(screen.getByText("chat.retry"));
+    // A connect from anywhere else on the page (the online/visibility
+    // listeners call it directly) opens nothing either.
+    await act(async () => { window.dispatchEvent(new Event("online")); });
     await settle();
     expect(sockets).toHaveLength(1);
   });
@@ -229,6 +233,9 @@ describe("the standalone chat page (ChatApp) on a lapsed session", () => {
     await act(async () => { sockets[0].serverClose(SESSION_EXPIRED_CLOSE_CODE, "Session expired"); });
     await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT));
     expect(await screen.findByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
+    // Neither the panel's Retry nor the header's Reconnect: both could only do nothing.
+    expect(screen.queryByText("chat.retry")).toBeNull();
+    expect(screen.queryByText("chat.reconnect")).toBeNull();
   });
 
   it("reconnects instead of signing out when the closed socket's session was replaced on this page", async () => {

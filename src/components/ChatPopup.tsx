@@ -2929,6 +2929,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // closed, nothing reconnects, and the page is on its way to /login
   // (src/lib/session-expiry.ts).
   const signedOutRef = useRef(false)
+  // …and drawn: a signed-out chat offers no Retry, which could only do nothing.
+  const [signedOut, setSignedOut] = useState(false)
 
   const refreshChatModelState = useCallback(async () => {
     if (!chatModelStoreHereRef.current) return
@@ -2966,6 +2968,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // code, and from SESSION_EXPIRED_EVENT when anything else on the page saw it.
   const stopForSignedOut = useCallback(() => {
     signedOutRef.current = true
+    setSignedOut(true)
     ++connectionGenerationRef.current
     connectionAbortRef.current?.abort()
     for (const timer of [retryTimerRef, connectionDeadlineTimerRef, handshakeTimerRef]) {
@@ -8282,14 +8285,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
-            <button
-              onClick={() => { retryCountRef.current = 0; connect() }}
-              style={{
-                background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
-                color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
-                fontSize: 13, fontWeight: 500,
-              }}
-            >{t("chat.retry")}</button>
+            {!signedOut && (
+              <button
+                onClick={() => { retryCountRef.current = 0; connect() }}
+                style={{
+                  background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                  color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 500,
+                }}
+              >{t("chat.retry")}</button>
+            )}
           </div>
         )}
 

@@ -494,6 +494,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Set once the box has said this page's session is over: nothing reconnects
   // while the page leaves for /login (src/lib/session-expiry.ts).
   const signedOutRef = useRef(false)
+  // …and drawn: a signed-out chat offers no Retry or Reconnect, which could only do nothing.
+  const [signedOut, setSignedOut] = useState(false)
   // Has this component gone? The starting-retry timer is the one deferred piece
   // of work here that OPENS A SOCKET rather than touching state, so a pending
   // one on an unmounted component is up to two minutes of sockets and ws-config
@@ -766,6 +768,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // one. Same reasons and same three triggers as ChatPopup's.
   const stopForSignedOut = useCallback(() => {
     signedOutRef.current = true
+    setSignedOut(true)
     for (const timer of [startingRetryTimerRef, handshakeTimerRef]) {
       if (timer.current) clearTimeout(timer.current)
       timer.current = null
@@ -1860,7 +1863,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           {caps.hasLiveConnection && status === 'connected' && (
             <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
           )}
-          {caps.hasLiveConnection && status === 'error' && (
+          {caps.hasLiveConnection && status === 'error' && !signedOut && (
             <button
               onClick={connect}
               style={{
@@ -1929,14 +1932,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
-            <button
-              onClick={connect}
-              style={{
-                background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
-                color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
-                fontSize: 13, fontWeight: 500,
-              }}
-            >{t("chat.retry")}</button>
+            {!signedOut && (
+              <button
+                onClick={connect}
+                style={{
+                  background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                  color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 500,
+                }}
+              >{t("chat.retry")}</button>
+            )}
           </div>
         )}
 
