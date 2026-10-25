@@ -123,12 +123,16 @@ function onClose(event) {
 
 var NativeWebSocket = window.WebSocket;
 if (typeof NativeWebSocket === "function") {
-  var GuardedWebSocket = function (url, protocols) {
-    var ws = arguments.length > 1 ? new NativeWebSocket(url, protocols) : new NativeWebSocket(url);
+  // Constructed for \`new.target\`, so a page's \`class X extends WebSocket\`
+  // still gets an X, with X's methods, out of \`super()\`.
+  var GuardedWebSocket = function () {
+    var ws = Reflect.construct(NativeWebSocket, Array.prototype.slice.call(arguments), new.target || GuardedWebSocket);
     try { ws.addEventListener("close", onClose); } catch (e) {}
     return ws;
   };
   GuardedWebSocket.prototype = NativeWebSocket.prototype;
+  // Statics, for the subclass too (\`AppSocket.OPEN\`).
+  try { Object.setPrototypeOf(GuardedWebSocket, NativeWebSocket); } catch (e) {}
   GuardedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
   GuardedWebSocket.OPEN = NativeWebSocket.OPEN;
   GuardedWebSocket.CLOSING = NativeWebSocket.CLOSING;

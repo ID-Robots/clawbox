@@ -164,6 +164,19 @@ describe("the Control UI's lapsed-session guard", () => {
     expect(win.WebSocket.CLOSED).toBe(3);
   });
 
+  it("keeps a page's own WebSocket subclass what it is, and still hears its closes", async () => {
+    const { win } = page({ probe: gate401 });
+    class AppSocket extends win.WebSocket {
+      hello() { return "hi"; }
+    }
+    const ws = new AppSocket("ws://clawbox.local/");
+    expect(ws).toBeInstanceOf(AppSocket);
+    expect(ws.hello()).toBe("hi");
+    expect(ws.url).toBe("ws://clawbox.local/");
+    ws.closeWith(4401);
+    await vi.waitFor(() => expect(win.location.replace).toHaveBeenCalledWith("/login?redirect=%2Fchat"));
+  });
+
   it("installs once, however many routes inject it", async () => {
     const { win, install, probes } = page({ request: gate401, probe: ok });
     install();
