@@ -138,13 +138,27 @@ const SENDER_ID_RE = /^\d{1,20}$/;
  * list when it sets one, else the channel root's, which is how OpenClaw
  * inherits it. Only numeric ids — `*`, usernames and every other shape name no
  * one a message could be addressed to.
+ *
+ * A restrictive root list (entries, no `*`) stays a safety boundary over an
+ * account's own list, as OpenClaw documents it: an id the root does not admit
+ * cannot DM the bot through the account either. Kept to the intersection,
+ * which can only ever name fewer people — the safe direction for a list that
+ * also decides who may approve mail.
  */
 export function telegramAccountAllowFrom(channel: unknown, account: string): string[] {
   const root = isBlock(channel) ? channel : {};
   const id = accountId(account) ?? DEFAULT_TELEGRAM_ACCOUNT;
   const own = namedAccounts(root).find((candidate) => candidate.id === id)?.block.allowFrom;
-  const list = Array.isArray(own) ? own : root.allowFrom;
-  if (!Array.isArray(list)) return [];
+  if (!Array.isArray(own)) return Array.isArray(root.allowFrom) ? senderIds(root.allowFrom) : [];
+  const ids = senderIds(own);
+  const boundary = root.allowFrom;
+  if (!Array.isArray(boundary) || boundary.length === 0) return ids;
+  if (boundary.some((entry) => typeof entry === "string" && entry.trim() === "*")) return ids;
+  const admitted = senderIds(boundary);
+  return ids.filter((sender) => admitted.includes(sender));
+}
+
+function senderIds(list: unknown[]): string[] {
   const ids: string[] = [];
   for (const entry of list) {
     const raw =

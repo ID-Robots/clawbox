@@ -467,6 +467,41 @@ describe("the allowlist readers on a multi-account OpenClaw channel", () => {
     expect(await readTelegramAllowFrom()).toEqual(["555"]);
   });
 
+  // OpenClaw: "a restrictive top-level allowFrom is a safety boundary" over an
+  // account's own list. An id the root does not admit cannot DM the bot, so it
+  // must not count as approved — this list also decides who may approve mail.
+  it("keeps an account's own allowFrom inside a restrictive top-level list", async () => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          allowFrom: ["555", "tg:777"],
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT, allowFrom: ["777", "888", "*"] } },
+        },
+      },
+    });
+    await makeStateDb([]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["777"]);
+  });
+
+  it("does not bound an account's list by a top-level wildcard or an empty top-level list", async () => {
+    for (const rootAllowFrom of [["*", "555"], []]) {
+      await writeOpenClawConfig({
+        channels: {
+          telegram: {
+            allowFrom: rootAllowFrom,
+            accounts: { default: { botToken: WORK_BOT, allowFrom: ["777", "888"] } },
+          },
+        },
+      });
+      await makeStateDb([]);
+      vi.resetModules();
+      const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+      expect(await readTelegramAllowFrom()).toEqual(["777", "888"]);
+    }
+  });
+
   it("lists the chosen account's pending requests for the desktop poller", async () => {
     await writeOpenClawConfig({
       channels: { telegram: { accounts: { work: { botToken: WORK_BOT } } } },
