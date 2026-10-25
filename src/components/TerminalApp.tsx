@@ -58,6 +58,7 @@ import {
 } from "@/lib/terminal-settings";
 import { canReadClipboard as clipboardReadable, copyToClipboard, readClipboard, readClipboardImages } from "@/lib/terminal-clipboard";
 import { isMacPlatform, isPlainCtrlV, shortcutLabel, terminalShortcut } from "@/lib/terminal-keys";
+import { confirmSessionStillValid } from "@/lib/session-expiry";
 import {
   TERMINAL_PASTE_MAX_BYTES,
   asPictureTaker,
@@ -1315,6 +1316,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       if (statusRef.current !== "error") {
         updateStatus("disconnected");
         if (ev.code !== 1000) {
+          // The box cuts a lapsed session's socket and refuses its reconnect,
+          // so a drop is also the moment to ask whether the session is over —
+          // which takes the page to /login instead of retrying for ever.
+          void confirmSessionStillValid();
           term.writeln(`\r\n\x1b[33m[${trRef.current("terminal.retrying", "Disconnected — will retry in 3s…")}]\x1b[0m`);
           reconnectTimerRef.current = setTimeout(() => {
             if (mountedRef.current) connect().catch(releaseAfterFailedConnect);

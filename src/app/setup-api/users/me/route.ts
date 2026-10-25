@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listUsers } from "@/lib/clawbox-users";
 import { sessionIdentity } from "@/lib/route-auth";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 export const dynamic = "force-dynamic";
 
@@ -9,10 +10,13 @@ export const dynamic = "force-dynamic";
 // know whose name to show and whether to offer the owner's apps.
 //
 // Cookie only — the MCP bearer is the agent, not a person, and gets 401.
+// Also the probe a page sends to learn whether its session is still good
+// (SESSION_PROBE_URL, src/lib/session-expiry.ts), so its 401 is marked as the
+// session gate's.
 export async function GET(request: Request) {
   const identity = await sessionIdentity(request);
   if (!identity) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
   }
   let multiUser = false;
   try {

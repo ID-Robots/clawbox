@@ -7,6 +7,14 @@ import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_EVENT,
+  confirmSessionStillValid,
+  isSessionExpiredClose,
+  isSessionExpiredResponse,
+  signOutExpiredSession,
+} from '@/lib/session-expiry'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
@@ -483,6 +491,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // The conversation read a restore is running, so a newer socket or the page
   // going away can call it off.
   const restoreAbortRef = useRef<AbortController | null>(null)
+  // Set once the box has said this page's session is over: nothing reconnects
+  // while the page leaves for /login (src/lib/session-expiry.ts).
+  const signedOutRef = useRef(false)
   // Has this component gone? The starting-retry timer is the one deferred piece
   // of work here that OPENS A SOCKET rather than touching state, so a pending
   // one on an unmounted component is up to two minutes of sockets and ws-config
@@ -751,7 +762,35 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     // and read the adapter through the ref above.
   }, [])
 
+  // The session is over: end the socket and the timer that would open a new
+  // one. Same reasons and same three triggers as ChatPopup's.
+  const stopForSignedOut = useCallback(() => {
+    signedOutRef.current = true
+    for (const timer of [startingRetryTimerRef, handshakeTimerRef]) {
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = null
+    }
+    restoreAbortRef.current?.abort()
+    const socket = wsRef.current
+    wsRef.current = null
+    if (socket) {
+      socket.onclose = null
+      socket.onmessage = null
+      try { socket.close() } catch { /* already closing */ }
+    }
+    failPending('Signed out')
+    setStatus('error')
+    setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+  }, [stopForSignedOut])
+
   const connect = useCallback(async () => {
+    // A signed-out page opens nothing: the next stop is /login.
+    if (signedOutRef.current) return
     // A box with no socket has nothing to open. The adapter reports such a
     // harness connected by itself; this guard is for the Retry button and the
     // mount effect, which reach `connect` directly and must never open a gateway
@@ -797,6 +836,12 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       // on every reconnect — which the gateway refuses for ever. Newly reachable
       // now that the adapter effect can ask for a connect as well as mount.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store' })
+      // The session ran out: there is no token to ask for and nothing to retry.
+      if (isSessionExpiredResponse(res)) {
+        stopForSignedOut()
+        signOutExpiredSession()
+        return
+      }
       const config = await res.json()
       token = config.token
       wsUrl = config.wsUrl
@@ -1141,7 +1186,14 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       }
     }
 
-    const onClose = () => {
+    const onClose = (event?: CloseEvent) => {
+      // The box ended the socket because this page's session ended
+      // (scripts/upgrade-session-watch.js): sign out rather than sit here.
+      if (isSessionExpiredClose(event)) {
+        stopForSignedOut()
+        signOutExpiredSession()
+        return
+      }
       // Its own clock only: a late close from a socket a newer connect has
       // already replaced must not disarm the newer attempt's.
       if (wsRef.current === ws) clearHandshakeTimer()
@@ -1152,7 +1204,12 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       if (!connectedOnceRef.current) {
         setStatus('error')
         setErrorMsg('Could not connect to gateway')
+        return
       }
+      // A live chat dropped. Over plain HTTP the box cuts a lapsed session's
+      // socket without a close code, and this page has no poll of its own to
+      // hear the 401s the desktop hears — so it asks.
+      void confirmSessionStillValid()
     }
 
     try {

@@ -5,6 +5,7 @@ import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { nonOwnerVerdict } from "@/lib/non-owner-scope";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
+import { SESSION_EXPIRED_EVENT, sessionExpiredHeaders } from "@/lib/session-expiry";
 
 // Multi-user ClawBox OS. A second ClawBox user gets the owner's desktop: the
 // store-installed apps — skills and web apps — in the icon grid, the launcher
@@ -32,6 +33,7 @@ const ALICE = { username: "alice", isOwner: false, multiUser: true };
 let me: unknown = {};
 let updateLocked = false;
 let signedOut = false;
+let filesAnswer: "ok" | "session-gate" | "wrong-password" = "ok";
 
 function answer(body: unknown, headers: Record<string, string> = {}) {
   return {
@@ -49,7 +51,17 @@ function installFetch() {
     // The middleware's answer to a session the box no longer accepts, on every
     // /setup-api request alike.
     if (signedOut && url.includes("/setup-api/")) {
-      return { ok: false, status: 401, headers: new Headers(), json: async () => ({ error: "Unauthorized" }), text: async () => "" };
+      return { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), json: async () => ({ error: "Authentication required" }), text: async () => "" };
+    }
+    // One app's own request, answered by the session gate or by the route's
+    // own refusal of a wrong password — while the desktop's polls still pass.
+    if (url.includes("/setup-api/files")) {
+      if (filesAnswer === "session-gate") {
+        return { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), json: async () => ({ error: "Authentication required" }), text: async () => "" };
+      }
+      if (filesAnswer === "wrong-password") {
+        return { ok: false, status: 401, headers: new Headers(), json: async () => ({ error: "Incorrect password" }), text: async () => "" };
+      }
     }
     // The middleware stamps the update lock on every /setup-api answer alike.
     const lock: Record<string, string> = updateLocked && url.includes("/setup-api/") ? { [UPDATE_LOCK_HEADER]: "1" } : {};
@@ -65,11 +77,16 @@ function installFetch() {
     }
     return answer({});
   }));
+  fetchStub = vi.mocked(fetch);
 }
+
+// The desktop wraps `fetch` while it is mounted (src/lib/session-expiry.ts),
+// so the stub is read through its own reference.
+let fetchStub = vi.mocked(fetch);
 
 /** Every request the desktop has made so far, as `METHOD path?query`. */
 function requests(): { method: string; url: URL; label: string }[] {
-  return vi.mocked(fetch).mock.calls.map(([input, init]) => {
+  return fetchStub.mock.calls.map(([input, init]) => {
     const url = new URL(String(input), "http://clawbox.local");
     const method = (init?.method ?? "GET").toUpperCase();
     return { method, url, label: `${method} ${url.pathname}${url.search}` };
@@ -102,6 +119,7 @@ beforeEach(() => {
   mounted.timezone = 0;
   updateLocked = false;
   signedOut = false;
+  filesAnswer = "ok";
   installFetch();
   // The launcher asks matchMedia on its focus timer; the setup file's mock
   // loses its implementation to `mockReset` between cases.
@@ -328,8 +346,46 @@ describe("a desktop whose session is gone", () => {
       const polls = () => requests().filter((r) => r.url.pathname === "/setup-api/kv").length;
       const before = polls();
       await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 6_000 });
-      const results = vi.mocked(fetch).mock.results;
+      const results = fetchStub.mock.results;
       await Promise.all(results.map((r) => r.value));
+      await act(async () => {});
+      expect(replace).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("any app's request the session gate refuses takes the desktop to login, and stops its live connections first", async () => {
+    // Not the desktop's own poll: one app's request, between two polls. The
+    // chat listens for the event to close its socket before the page leaves.
+    me = OWNER;
+    const { replace, restore } = stubLocation();
+    const stopped = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, stopped);
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      expect(replace).not.toHaveBeenCalled();
+      filesAnswer = "session-gate";
+      const res = await fetch("/setup-api/files?dir=%7E");
+      expect(res.status).toBe(401);
+      expect(stopped).toHaveBeenCalled();
+      expect(replace).toHaveBeenCalledWith("/login?redirect=%2F");
+    } finally {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, stopped);
+      restore();
+    }
+  });
+
+  it("a route's own 401 — a wrong password — leaves the desktop where it is", async () => {
+    me = OWNER;
+    const { replace, restore } = stubLocation();
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      filesAnswer = "wrong-password";
+      const res = await fetch("/setup-api/files?dir=%7E");
+      expect(res.status).toBe(401);
       await act(async () => {});
       expect(replace).not.toHaveBeenCalled();
     } finally {

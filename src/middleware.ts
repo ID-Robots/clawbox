@@ -14,6 +14,7 @@ import { USERS_CONFIG_KEY, identityFromClaims, parseUserRegistry, registryVersio
 import type { SessionIdentity } from "@/lib/session-identity";
 import { ownerUsername } from "@/lib/owner-username";
 import { NON_OWNER_HOME, nonOwnerVerdict, requestIntent } from "@/lib/non-owner-scope";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -792,13 +793,17 @@ export async function middleware(request: NextRequest) {
   // download stream is useless anyway, and the desktop shell drives the real
   // re-login. Genuine top-level page navigations (no /setup-api/ or /api/
   // prefix) still redirect below.
+  //
+  // The 401 is MARKED as the session gate's (src/lib/session-expiry.ts): a few
+  // routes answer 401 for a wrong current password or a refused key, and only
+  // this one means the page is signed out and must go to /login.
   const accept = request.headers.get("accept") || "";
   if (
     isSetupApiPath(pathname) ||
     pathname.startsWith("/api/") ||
     accept.includes("application/json")
   ) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
   }
 
   const loginUrl = new URL("/login", request.url);

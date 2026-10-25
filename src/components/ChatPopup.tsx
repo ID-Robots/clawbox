@@ -69,6 +69,13 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_EVENT,
+  isSessionExpiredClose,
+  isSessionExpiredResponse,
+  signOutExpiredSession,
+} from '@/lib/session-expiry'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
@@ -2917,6 +2924,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const restoreOwedRef = useRef(false)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Set once the box has said this page's session is over: the socket is
+  // closed, nothing reconnects, and the page is on its way to /login
+  // (src/lib/session-expiry.ts).
+  const signedOutRef = useRef(false)
 
   const refreshChatModelState = useCallback(async () => {
     if (!chatModelStoreHereRef.current) return
@@ -2948,12 +2959,45 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     }
   }, [])
 
+  // The session is over: end the socket and every timer that would open a new
+  // one, so nothing more is sent or shown while the page leaves for /login.
+  // Reached from the ws-config read's 401, from the box's session-expired close
+  // code, and from SESSION_EXPIRED_EVENT when anything else on the page saw it.
+  const stopForSignedOut = useCallback(() => {
+    signedOutRef.current = true
+    ++connectionGenerationRef.current
+    connectionAbortRef.current?.abort()
+    for (const timer of [retryTimerRef, connectionDeadlineTimerRef, handshakeTimerRef]) {
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = null
+    }
+    restoreAbortRef.current?.abort()
+    const socket = wsRef.current
+    wsRef.current = null
+    if (socket) {
+      socket.onclose = null
+      socket.onmessage = null
+      try { socket.close() } catch { /* already closing */ }
+    }
+    failPending('Signed out')
+    tearDownReloadOverlay()
+    setStatus('error')
+    setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+  }, [stopForSignedOut])
+
   const connect = useCallback(async () => {
     // A box with no socket has nothing to open. The adapter reports such a
     // harness connected on its own; this guard is for the window listeners and
     // recovery paths below, which call `connect` directly and must never open a
     // gateway socket on an edition that does not run one.
     if (!hasLiveConnectionRef.current) return
+    // A signed-out page opens nothing: the next stop is /login.
+    if (signedOutRef.current) return
     // Cancel any pending retry / auth-backoff timer so an explicit reconnect
     // (e.g. the "Try again" button) can't race with a previously scheduled one
     // and fire a duplicate connect later.
@@ -3027,6 +3071,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // a stale token on every reconnect and the gateway would reject it with
       // "token mismatch" forever. Always fetch the current token.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store', signal: controller.signal })
+      // The session ran out: there is no token to ask for and nothing to retry.
+      if (isSessionExpiredResponse(res)) {
+        if (!isCurrent()) return
+        stopForSignedOut()
+        signOutExpiredSession()
+        return
+      }
       const config = await res.json()
       if (!isCurrent()) return
       token = config.token
@@ -3724,6 +3775,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // socket and paint "could not be restored" under the reconnect overlay.
       // The next hello runs the restore again.
       restoreAbortRef.current?.abort()
+
+      // The box ended the socket because this page's session ended
+      // (scripts/upgrade-session-watch.js): sign out rather than reconnect.
+      if (isSessionExpiredClose(event)) {
+        stopForSignedOut()
+        signOutExpiredSession()
+        return
+      }
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth

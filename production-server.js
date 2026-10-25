@@ -18,8 +18,14 @@ const {
   USERS_CONFIG_KEY,
   ownerUsername,
   parseUserRegistry,
-  sessionIdentityFromCookieHeader,
+  sessionFromCookieHeader,
 } = require("./scripts/session-cookie.js");
+const {
+  SESSION_EXPIRED_CLOSE_CODE,
+  SESSION_EXPIRED_CLOSE_REASON,
+  createUpgradeSessionWatch,
+  recheckMsFromEnv,
+} = require("./scripts/upgrade-session-watch.js");
 const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
@@ -47,7 +53,10 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // valid ClawBox session cookie. WebSocket upgrades never pass through Next.js
 // middleware, so without this check any LAN client could reach the unauth PTY /
 // VNC services straight through the port-80 proxy (SEC-1). The gateway route
-// (default) is intentionally NOT gated here — it enforces its own auth token.
+// (the default, below) is gated the same way: the gateway's own token is not a
+// ClawBox session, and with only that check a chat kept working after the
+// session that opened the desktop had run out. Every gated socket is then
+// closed when its session ends (scripts/upgrade-session-watch.js).
 // `sanitizeClose` marks the one upstream that answers a code-less goodbye with
 // a status code no browser will accept — see createCloseFrameRewriter below.
 //
@@ -120,7 +129,7 @@ function resolveUpgradeTarget(reqUrl) {
       };
     }
   }
-  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false, gateway: true };
+  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: true, gateway: true };
 }
 
 // Current session generation and ClawBox users, read from data/config.json
@@ -162,12 +171,12 @@ function readSessionConfig() {
 // Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
 // src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
 // base64url payload carries { exp, gen, u?, sv? }) — and say WHO it speaks for
-// (scripts/session-cookie.js, TASK-1256). Mirrored in CJS because upgrades
-// bypass Next.js. Fails closed when the secret is absent.
-function upgradeSessionIdentity(req) {
+// (scripts/session-cookie.js, TASK-1256), and when it runs out. Mirrored in CJS
+// because upgrades bypass Next.js. Fails closed when the secret is absent.
+function upgradeSession(cookieHeader) {
   try {
     const { gen, users } = readSessionConfig();
-    return sessionIdentityFromCookieHeader(req.headers.cookie, {
+    return sessionFromCookieHeader(cookieHeader, {
       secret: process.env.SESSION_SECRET,
       sessionGen: gen,
       users,
@@ -184,18 +193,52 @@ function upgradeSessionIdentity(req) {
  */
 function authorizeUpgrade(gate, req) {
   if (!gate.requireAuth) return { ok: true, identity: null };
-  const identity = upgradeSessionIdentity(req);
+  const identity = upgradeSession(req.headers.cookie);
   if (!identity) return { ok: false, status: 401 };
   if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };
   return { ok: true, identity };
 }
 
+// ─── A gated socket outlives no session ───
+// Every socket the gate above admitted is re-judged on the same rule until it
+// closes: at its cookie's expiry and, for a revocation (a password change, a
+// removed ClawBox user), every few seconds. The browser then goes to /login
+// (src/lib/session-expiry.ts). CLAWBOX_WS_SESSION_RECHECK_MS exists for the
+// tests, which cannot wait the default out.
+const upgradeSessionWatch = createUpgradeSessionWatch({
+  verify: upgradeSession,
+  recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
+});
+
+/**
+ * Watch a gated `ws` socket: end it with the session-expired close code, which
+ * the browser reads as "signed out", and drop it outright if the peer never
+ * answers the closing handshake. `onEnd` tears down what it is relayed to.
+ */
+function endWsWithSession(clientWs, req, identity, onEnd = () => {}) {
+  if (!identity) return;
+  const unwatch = upgradeSessionWatch.watch(req.headers.cookie, identity, () => {
+    // The browser's close first, so the code it reads is this one and not
+    // whatever the upstream's teardown would have closed it with.
+    try {
+      clientWs.close(SESSION_EXPIRED_CLOSE_CODE, SESSION_EXPIRED_CLOSE_REASON);
+    } catch {
+      // already closing
+    }
+    onEnd();
+    setTimeout(() => {
+      if (clientWs.readyState !== WebSocket.CLOSED) clientWs.terminate();
+    }, 2_000).unref();
+  });
+  clientWs.once("close", unwatch);
+}
+
 // ─── A ClawBox user's chat (not the owner's) ───
-// The gateway route stays ungated for the owner's browser and every local
-// caller: the gateway enforces its own token. A cookie that names ANOTHER
-// ClawBox user is different — their chat must reach only their own sessions,
-// and their browser is never given the token — so that socket ends here and
-// scripts/gateway-user-relay.js speaks to the gateway for them.
+// The owner's chat socket is piped to the gateway, which also checks its own
+// token. A cookie that names ANOTHER ClawBox user is different — their chat
+// must reach only their own sessions, and their browser is never given the
+// token — so that socket ends here and scripts/gateway-user-relay.js speaks to
+// the gateway for them.
 const OPENCLAW_CONFIG_PATH = `${
   process.env.CLAWBOX_OPENCLAW_HOME
   || process.env.OPENCLAW_HOME
@@ -205,19 +248,20 @@ const RELAY_IDENTITY_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "da
 let relayIdentity = null;
 const userChatWss = new WebSocket.Server({ noServer: true });
 
-/** The ClawBox user (never the owner) a gateway upgrade's cookie names, or null. */
-function relayedChatUser(gate, req) {
+/** The ClawBox user (never the owner) a gateway upgrade's session names, or null. */
+function relayedChatUser(gate, identity) {
   if (!gate.gateway) return null;
-  const identity = upgradeSessionIdentity(req);
   return identity && !identity.isOwner ? identity.username : null;
 }
 
-function relayUserChatUpgrade(req, socket, head, url, username) {
+function relayUserChatUpgrade(req, socket, head, url, identity) {
   userChatWss.handleUpgrade(req, socket, head, (clientWs) => {
     if (!relayIdentity) relayIdentity = loadOrCreateRelayIdentity(RELAY_IDENTITY_PATH);
+    // The relay closes its gateway side when the browser's socket closes.
+    endWsWithSession(clientWs, req, identity);
     relayUserChat({
       clientWs,
-      username,
+      username: identity.username,
       token: readGatewayToken(OPENCLAW_CONFIG_PATH),
       identity: relayIdentity,
       connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
@@ -665,9 +709,8 @@ function attachUpgradeProxy(server) {
     if (!auth.ok) {
       return rejectUpgrade(socket, auth.status);
     }
-    const chatUser = relayedChatUser(gate, req);
-    if (chatUser) {
-      return relayUserChatUpgrade(req, socket, head, url, chatUser);
+    if (relayedChatUser(gate, auth.identity)) {
+      return relayUserChatUpgrade(req, socket, head, url, auth.identity);
     }
     const extraHeaders = terminalHeadersFor(gate, auth.identity);
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
@@ -701,6 +744,17 @@ function attachUpgradeProxy(server) {
     });
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
+    // A byte pipe has no frame boundary to put a close frame on, so a session
+    // that ends cuts both halves; the browser's reconnect then meets the 401s
+    // of the gate above and of /setup-api, and src/lib/session-expiry.ts
+    // takes it to /login.
+    if (auth.identity) {
+      const unwatch = upgradeSessionWatch.watch(req.headers.cookie, auth.identity, () => {
+        upstream.destroy();
+        socket.destroy();
+      });
+      socket.once("close", unwatch);
+    }
   });
 }
 
@@ -740,9 +794,8 @@ function startHttpsServer(httpServer) {
       if (!auth.ok) {
         return rejectUpgrade(socket, auth.status);
       }
-      const chatUser = relayedChatUser(gate, req);
-      if (chatUser) {
-        return relayUserChatUpgrade(req, socket, head, gate.url, chatUser);
+      if (relayedChatUser(gate, auth.identity)) {
+        return relayUserChatUpgrade(req, socket, head, gate.url, auth.identity);
       }
       wss.handleUpgrade(req, socket, head, (clientWs) => {
         const { targetPort, url } = gate;
@@ -755,6 +808,7 @@ function startHttpsServer(httpServer) {
             ...terminalHeadersFor(gate, auth.identity),
           },
         });
+        endWsWithSession(clientWs, req, auth.identity, () => upstream.terminate());
 
         // Close clientWs if upstream fails before "open" — without these the
         // client would hang forever waiting for a relay that will never start.
