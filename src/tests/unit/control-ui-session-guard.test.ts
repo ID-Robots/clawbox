@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { controlUiSessionGuardScriptBody } from "@/lib/control-ui-session-guard";
-import { SESSION_PROBE_URL, sessionExpiredHeaders } from "@/lib/session-expiry";
+import { SESSION_PROBE_TIMEOUT_MS, SESSION_PROBE_URL, sessionExpiredHeaders } from "@/lib/session-expiry";
 
 // The gateway's own Control UI chat on a lapsed session. Its page is the
 // gateway's bundle, not ours, so the one ClawBox code on it is the program the
@@ -138,6 +138,23 @@ describe("the Control UI's lapsed-session guard", () => {
     await flush();
     expect(probes()).toBeGreaterThan(0);
     expect(win.location.replace).not.toHaveBeenCalled();
+  });
+
+  it("gives up on a probe the network never answers, so the next signal asks again", async () => {
+    vi.useFakeTimers();
+    try {
+      const { win, nativeFetch, probes } = page({ probe: () => new Promise<Response>(() => {}) });
+      new win.WebSocket("ws://clawbox.local").closeWith(4401);
+      expect(probes()).toBe(1);
+      const signal = (nativeFetch.mock.calls[0] as unknown as [RequestInfo, RequestInit])[1].signal!;
+      await vi.advanceTimersByTimeAsync(SESSION_PROBE_TIMEOUT_MS - 1);
+      expect(signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signal.aborted).toBe(true);
+      expect(win.location.replace).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sends the standalone app page that frames the chat to /login, not just the frame", async () => {

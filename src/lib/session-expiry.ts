@@ -28,6 +28,14 @@ export const SESSION_EXPIRED_EVENT = "clawbox:session-expired";
 /** The cheapest read every signed-in person may make — what a page asks to learn whether its session is still good. */
 export const SESSION_PROBE_URL = "/setup-api/users/me";
 
+/**
+ * How long that read may take before the box counts as unreachable. A chat
+ * waits on the answer before it shows its error and its Retry, and a request
+ * the network swallows (a phone that left the Wi-Fi) would otherwise keep it
+ * spinning with nothing to press.
+ */
+export const SESSION_PROBE_TIMEOUT_MS = 5_000;
+
 /** What a chat shows for the moment between its session ending and the page reaching /login. */
 export const SESSION_EXPIRED_CHAT_MESSAGE = "Your session has expired. Taking you to sign in again…";
 
@@ -108,14 +116,18 @@ export function confirmSessionStillValid(
 ): Promise<boolean> {
   if (probeInFlight && probeInFlight.sentAt >= evidenceSentAt) return probeInFlight.promise;
   const probe = (async () => {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), SESSION_PROBE_TIMEOUT_MS) : null;
     try {
-      const res = await fetchImpl(SESSION_PROBE_URL, { cache: "no-store" });
+      const res = await fetchImpl(SESSION_PROBE_URL, { cache: "no-store", signal: controller?.signal });
       if (isSessionExpiredResponse(res)) {
         signOutExpiredSession();
         return false;
       }
     } catch {
-      // offline, or the box restarting
+      // offline, the box restarting, or no answer in SESSION_PROBE_TIMEOUT_MS
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     return true;
   })();

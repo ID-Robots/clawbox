@@ -25,6 +25,7 @@ import {
   SESSION_EXPIRED_CLOSE_CODE,
   SESSION_EXPIRED_HEADER,
   SESSION_EXPIRED_HEADER_VALUE,
+  SESSION_PROBE_TIMEOUT_MS,
   SESSION_PROBE_URL,
 } from "@/lib/session-expiry";
 
@@ -54,6 +55,7 @@ var EXPIRED = ${forScript(SESSION_EXPIRED_HEADER_VALUE)};
 var CLOSE_CODE = ${forScript(SESSION_EXPIRED_CLOSE_CODE)};
 var PROBE = ${forScript(SESSION_PROBE_URL)};
 var GAP_MS = ${forScript(gapMs)};
+var PROBE_TIMEOUT_MS = ${forScript(SESSION_PROBE_TIMEOUT_MS)};
 var nativeFetch = typeof window.fetch === "function" ? window.fetch : null;
 var leaving = false;
 var inFlight = null;
@@ -93,10 +95,15 @@ function refused(res) {
 function probe(evidenceSentAt) {
   if (leaving || !nativeFetch) return;
   if (inFlight && inFlight.sentAt >= evidenceSentAt) return;
-  var pending = nativeFetch.call(window, PROBE, { cache: "no-store" });
+  // Bounded, like the desktop's probe: an answer the network swallows is a box
+  // that cannot be reached, not a probe left open for ever.
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  var timer = controller ? setTimeout(function () { controller.abort(); }, PROBE_TIMEOUT_MS) : null;
+  var pending = nativeFetch.call(window, PROBE, controller ? { cache: "no-store", signal: controller.signal } : { cache: "no-store" });
   var entry = { sentAt: Date.now() };
   inFlight = entry;
   pending.then(function (res) { if (refused(res)) leave(); }, function () {}).then(function () {
+    if (timer) clearTimeout(timer);
     if (inFlight === entry) inFlight = null;
   });
 }

@@ -3,6 +3,7 @@ import {
   SESSION_EXPIRED_CLOSE_CODE,
   SESSION_EXPIRED_EVENT,
   SESSION_EXPIRED_HEADER,
+  SESSION_PROBE_TIMEOUT_MS,
   SESSION_PROBE_URL,
   confirmSessionStillValid,
   installSessionExpiryGuard,
@@ -248,8 +249,29 @@ describe("confirmSessionStillValid", () => {
     const probe = vi.fn(async () => gate401());
     vi.stubGlobal("fetch", probe);
     await expect(confirmSessionStillValid()).resolves.toBe(false);
-    expect(probe).toHaveBeenCalledWith(SESSION_PROBE_URL, { cache: "no-store" });
+    expect(probe).toHaveBeenCalledWith(SESSION_PROBE_URL, expect.objectContaining({ cache: "no-store", signal: expect.any(AbortSignal) }));
     expect(replace).toHaveBeenCalledWith("/login?redirect=%2Fapp%2Fterminal");
+  });
+
+  it("gives up on a probe the network never answers, and counts that as a box it cannot reach", async () => {
+    // A phone that left the Wi-Fi: the request is swallowed, never refused. A
+    // chat waits on this answer before it offers its error and its Retry.
+    const { replace } = fakeWindow();
+    vi.useFakeTimers();
+    try {
+      const swallowed = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+      }));
+      let settled = false;
+      const answer = confirmSessionStillValid(swallowed as unknown as typeof fetch).then((live) => { settled = true; return live; });
+      await vi.advanceTimersByTimeAsync(SESSION_PROBE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(answer).resolves.toBe(true);
+      expect(replace).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a live session, or a box that cannot be reached, is not a sign-out", async () => {

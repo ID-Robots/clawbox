@@ -29,7 +29,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const sockets: FakeGatewayWs[] = [];
 let connects = 0;
 let wsConfigAnswer: "ok" | "session-gate" = "ok";
-let probeAnswer: "ok" | "session-gate" = "ok";
+let probeAnswer: "ok" | "session-gate" | "swallowed" = "ok";
 /** ws-config refusals still to answer with the session gate's 401 before answering normally. */
 let wsConfigRefusals = 0;
 /** Upgrades still to refuse — closed before any frame, the way a browser reports the gate's plain 401. */
@@ -98,7 +98,7 @@ const sessionGate401 = () => ({
 });
 
 function installFetch() {
-  vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/setup-api/gateway/ws-config")) {
       if (wsConfigAnswer === "session-gate") return sessionGate401();
@@ -110,6 +110,12 @@ function installFetch() {
     }
     if (url.includes(SESSION_PROBE_URL)) {
       if (probeAnswer === "session-gate") return sessionGate401();
+      // The network swallows it: no answer, only the caller's own abort.
+      if (probeAnswer === "swallowed") {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+        });
+      }
       return { ok: true, status: 200, headers: new Headers(), json: async () => ({ username: "clawbox", isOwner: true }) };
     }
     if (url.includes("/setup-api/harness/active")) {
@@ -336,6 +342,18 @@ describe("the standalone chat page (ChatApp) on a lapsed session", () => {
     expect(connects).toBe(0);
     expect(screen.queryByText("Could not connect to gateway")).toBeNull();
     expect(screen.queryByText("chat.reconnect")).toBeNull();
+  });
+
+  it("a socket refused before any hello while the session probe goes unanswered still ends on the error and its Reconnect", async () => {
+    // A phone that left the Wi-Fi: the probe is swallowed, never refused. The
+    // chat must not spin on it for ever with nothing to press.
+    upgradeRefusals = 1;
+    probeAnswer = "swallowed";
+    render(<ChatApp />);
+    // The probe gives up after SESSION_PROBE_TIMEOUT_MS (5 s).
+    expect(await screen.findByText("Could not connect to gateway", {}, { timeout: 8_000 })).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByText("chat.reconnect")).toBeInTheDocument();
   });
 
   it("a socket refused before any hello on a session that is still good is an ordinary failed connect, with its Reconnect", async () => {
