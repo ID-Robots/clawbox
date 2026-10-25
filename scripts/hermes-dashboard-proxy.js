@@ -31,7 +31,9 @@ const net = require("net");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
-const { ownerUsername, sessionIdentityFromCookieHeader } = require("./session-cookie.js");
+const { ownerUsername, sessionFromCookieHeader } = require("./session-cookie.js");
+const { createUpgradeSessionWatch, recheckMsFromEnv } = require("./upgrade-session-watch.js");
+const SESSION_EXPIRED_HEADER = "x-clawbox-session";
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // script is standalone CommonJS and cannot import the TypeScript helper: an
@@ -374,20 +376,37 @@ function readSessionGeneration() {
 // tools, and other ClawBox users are never let into it. A cookie from before
 // multi-user (no `u` claim) is the owner's. The rule is scripts/session-cookie.js,
 // the same one production-server.js applies to its WebSocket upgrades.
-function hasValidSession(req) {
+// The session carries its `exp`, which the socket watch below needs.
+function ownerSession(cookieHeader) {
   try {
-    const identity = sessionIdentityFromCookieHeader(req.headers.cookie, {
+    const session = sessionFromCookieHeader(cookieHeader, {
       secret: sessionSecret(),
       sessionGen: readSessionGeneration(),
       // Only "is this the owner" is asked here, which needs no registry.
       users: new Map(),
       owner: ownerUsername(),
     });
-    return identity !== null && identity.isOwner === true;
+    return session !== null && session.isOwner === true ? session : null;
   } catch {
-    return false;
+    return null;
   }
 }
+
+function hasValidSession(req) {
+  return ownerSession(req.headers.cookie) !== null;
+}
+
+// A dashboard socket outlives no session. The gate above runs once, at the
+// upgrade, and the dashboard's sockets (its chat stream, its terminal) then
+// live as long as the tab — so a dashboard opened before the session ran out
+// kept working after every request to :80 was answered 401. Every admitted
+// socket is re-judged on the same rule (scripts/upgrade-session-watch.js, the
+// watch production-server.js keeps on its own sockets) and cut when its cookie
+// expires or is revoked. CLAWBOX_WS_SESSION_RECHECK_MS exists for the tests.
+const upgradeSessionWatch = createUpgradeSessionWatch({
+  verify: ownerSession,
+  recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
+});
 
 // ---------------------------------------------------------------------------
 // Hermes dashboard SSO broker
@@ -705,7 +724,9 @@ function handleRequest(req, res) {
     // navigations are redirected — and to the ClawBox origin on :80, since a
     // relative /login is served by THIS proxy (redirect loop).
     if (wantsJsonError(req)) {
-      res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      // Marked as the session gate's 401, the way src/middleware.ts marks its
+      // own (src/lib/session-expiry.ts): the dashboard's own 401s are not.
+      res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store", [SESSION_EXPIRED_HEADER]: "expired" });
       res.end(JSON.stringify({ error: "Authentication required", login: clawboxLoginUrl(req) }));
       return;
     }
@@ -796,7 +817,8 @@ function handleUpgrade(req, clientSocket, head) {
     try { clientSocket.destroy(); } catch {}
     return;
   }
-  if (!hasValidSession(req)) {
+  const session = ownerSession(req.headers.cookie);
+  if (!session) {
     try { clientSocket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"); } catch {}
     try { clientSocket.destroy(); } catch {}
     return;
@@ -881,6 +903,13 @@ function handleUpgrade(req, clientSocket, head) {
     }
     upstream.on("error", kill);
     clientSocket.on("error", kill);
+    // A byte pipe has no frame boundary to put a close frame on, so a session
+    // that ends cuts both halves; the dashboard's reconnect then meets the 401
+    // above. Armed here rather than at the 101, so a session that ran out
+    // while the SSO login above was in flight is cut at once.
+    const unwatch = upgradeSessionWatch.watch(req.headers.cookie, session, kill);
+    clientSocket.once("close", unwatch);
+    if (clientSocket.destroyed) unwatch();
   };
 
   if (browserHasHermesSession(req)) {

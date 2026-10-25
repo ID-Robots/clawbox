@@ -28,6 +28,14 @@ export const SESSION_EXPIRED_EVENT = "clawbox:session-expired";
 /** The cheapest read every signed-in person may make — what a page asks to learn whether its session is still good. */
 export const SESSION_PROBE_URL = "/setup-api/users/me";
 
+/**
+ * How long that read may take before the box counts as unreachable. A chat
+ * waits on the answer before it shows its error and its Retry, and a request
+ * the network swallows (a phone that left the Wi-Fi) would otherwise keep it
+ * spinning with nothing to press.
+ */
+export const SESSION_PROBE_TIMEOUT_MS = 5_000;
+
 /** What a chat shows for the moment between its session ending and the page reaching /login. */
 export const SESSION_EXPIRED_CHAT_MESSAGE = "Your session has expired. Taking you to sign in again…";
 
@@ -82,7 +90,7 @@ export function signOutExpiredSession(): void {
   window.location.replace(signedOutLoginPage());
 }
 
-let probeInFlight: Promise<boolean> | null = null;
+let probeInFlight: { promise: Promise<boolean>; sentAt: number } | null = null;
 
 /**
  * Ask the box whether this page's session is good NOW, and leave for /login if
@@ -95,25 +103,42 @@ let probeInFlight: Promise<boolean> | null = null;
  *
  * One probe at a time: the polls that all see a lapsed session at the same
  * moment share it, and so does the guard below when it sees the probe's own
- * refusal — so the page signs out once.
+ * refusal — so the page signs out once. Shared only with a signal that is no
+ * newer than the probe, though: `evidenceSentAt` is when the refused request
+ * left (now, for a signal with no request behind it). A probe sent before that
+ * may have been answered before the session ran out, and its "still signed in"
+ * would otherwise be the verdict on a refusal it never saw — the page would
+ * stay until the next refused request, which on an idle chat is never.
  */
-export function confirmSessionStillValid(fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  if (probeInFlight) return probeInFlight;
+export function confirmSessionStillValid(
+  fetchImpl: typeof fetch = fetch,
+  evidenceSentAt: number = Date.now(),
+): Promise<boolean> {
+  if (probeInFlight && probeInFlight.sentAt >= evidenceSentAt) return probeInFlight.promise;
   const probe = (async () => {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), SESSION_PROBE_TIMEOUT_MS) : null;
     try {
-      const res = await fetchImpl(SESSION_PROBE_URL, { cache: "no-store" });
+      const res = await fetchImpl(SESSION_PROBE_URL, { cache: "no-store", signal: controller?.signal });
       if (isSessionExpiredResponse(res)) {
         signOutExpiredSession();
         return false;
       }
     } catch {
-      // offline, or the box restarting
+      // offline, the box restarting, or no answer in SESSION_PROBE_TIMEOUT_MS
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     return true;
   })();
-  probeInFlight = probe;
+  // Stamped once the probe's request is on its way: the line above has already
+  // called `fetchImpl`, and when that is the guarded fetch it has stamped the
+  // same request — so the probe's own refusal joins it rather than starting
+  // another.
+  const entry = { promise: probe, sentAt: Date.now() };
+  probeInFlight = entry;
   void probe.finally(() => {
-    if (probeInFlight === probe) probeInFlight = null;
+    if (probeInFlight === entry) probeInFlight = null;
   });
   return probe;
 }
@@ -129,11 +154,12 @@ export function installSessionExpiryGuard(win: Window = window): () => void {
   if (typeof original !== "function") return () => {};
   const unguarded = ((input: RequestInfo | URL, init?: RequestInit) => original.call(win, input, init)) as typeof fetch;
   const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const sentAt = Date.now();
     const res = await original.call(win, input, init);
     // Not on this answer alone — it may predate a sign-in in another tab. The
     // probe asks about the current session, through the unguarded fetch so its
     // own answer is not judged here a second time.
-    if (isSessionExpiredResponse(res)) void confirmSessionStillValid(unguarded);
+    if (isSessionExpiredResponse(res)) void confirmSessionStillValid(unguarded, sentAt);
     return res;
   };
   // Cast: some runtimes' `typeof fetch` carries extras (Bun's `preconnect`) a

@@ -13,6 +13,7 @@ import {
   resolveOriginsPath,
 } from "./control-ui-origins";
 import { controlUiEmailDirectiveScript, controlUiLocale } from "./control-ui-email-directives";
+import { controlUiSessionGuardScript, injectAtHeadStart } from "./control-ui-session-guard";
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 const OPENCLAW_CONFIG_PATH = `${
@@ -325,6 +326,10 @@ export async function serveGatewayHTML(
       /<body\b[^>]*>/i,
       (match) => `${match}${CLAWBOX_BAR}${wsScript}${emailDirectives}`,
     );
+    // A lapsed session takes this chat to /login like every other page of the
+    // box (src/lib/control-ui-session-guard.ts). First thing in <head>, ahead
+    // of the UI's own scripts, so the socket it opens is one the guard sees.
+    html = injectAtHeadStart(html, controlUiSessionGuardScript());
     return new NextResponse(html, {
       status: 200,
       headers: {
