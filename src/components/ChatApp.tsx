@@ -1187,13 +1187,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     }
 
     const onClose = (event?: CloseEvent) => {
-      // The box ended the socket because this page's session ended
-      // (scripts/upgrade-session-watch.js): sign out rather than sit here.
-      if (isSessionExpiredClose(event)) {
-        stopForSignedOut()
-        signOutExpiredSession()
-        return
-      }
       // Its own clock only: a late close from a socket a newer connect has
       // already replaced must not disarm the newer attempt's.
       if (wsRef.current === ws) clearHandshakeTimer()
@@ -1201,6 +1194,17 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       // Same reason as the reconnect path: a request still waiting on a socket
       // that has gone away has to be told, or it never settles.
       failPending('Not connected')
+      // The box ended the socket because the session it was OPENED on ended
+      // (scripts/upgrade-session-watch.js). That need not be this page's
+      // session: a password changed in this browser revokes the old cookie
+      // and hands the page a new one. So ask: a lapsed session signs the page
+      // out (SESSION_EXPIRED_EVENT stops this chat), a live one reconnects.
+      if (isSessionExpiredClose(event)) {
+        void confirmSessionStillValid().then((valid) => {
+          if (valid && !signedOutRef.current && !unmountedRef.current) void connectRef.current()
+        })
+        return
+      }
       if (!connectedOnceRef.current) {
         setStatus('error')
         setErrorMsg('Could not connect to gateway')

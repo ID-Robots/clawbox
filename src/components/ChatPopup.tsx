@@ -72,6 +72,7 @@ import { describeChatFailure, describeFallbackReply, describeImageFailure, isUna
 import {
   SESSION_EXPIRED_CHAT_MESSAGE,
   SESSION_EXPIRED_EVENT,
+  confirmSessionStillValid,
   isSessionExpiredClose,
   isSessionExpiredResponse,
   signOutExpiredSession,
@@ -3776,13 +3777,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The next hello runs the restore again.
       restoreAbortRef.current?.abort()
 
-      // The box ended the socket because this page's session ended
-      // (scripts/upgrade-session-watch.js): sign out rather than reconnect.
-      if (isSessionExpiredClose(event)) {
-        stopForSignedOut()
-        signOutExpiredSession()
-        return
-      }
+      // The box ended the socket because the session it was OPENED on ended
+      // (scripts/upgrade-session-watch.js). That need not be this page's
+      // session: a password changed in this browser revokes the old cookie
+      // and hands the page a new one. So ask: a lapsed session signs the page
+      // out (SESSION_EXPIRED_EVENT stops this chat and its retry), a live one
+      // takes the ordinary reconnect below.
+      if (isSessionExpiredClose(event)) void confirmSessionStillValid()
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth

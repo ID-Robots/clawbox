@@ -169,6 +169,7 @@ describe("the desktop chat (ChatPopup) on a lapsed session", () => {
     await waitFor(() => expect(connects).toBe(1));
     await settle();
 
+    probeAnswer = "session-gate";
     await act(async () => { sockets[0].serverClose(SESSION_EXPIRED_CLOSE_CODE, "Session expired"); });
     await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT));
     expect(await screen.findByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
@@ -178,6 +179,20 @@ describe("the desktop chat (ChatPopup) on a lapsed session", () => {
     fireEvent.click(screen.getByText("chat.retry"));
     await settle();
     expect(sockets).toHaveLength(1);
+  });
+
+  it("reconnects instead of signing out when the closed socket's session was replaced on this page", async () => {
+    // A password changed in this browser revokes the cookie the socket was
+    // opened on and hands the page a new one. The box ends the old socket with
+    // the same code; the page is still signed in.
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(connects).toBe(1));
+    await settle();
+
+    await act(async () => { sockets[0].serverClose(SESSION_EXPIRED_CLOSE_CODE, "Session expired"); });
+    await waitFor(() => expect(connects).toBe(2), { timeout: 10_000 });
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.queryByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeNull();
   });
 
   it("opens no socket at all when the session gate answers the chat's ws-config", async () => {
@@ -210,9 +225,21 @@ describe("the standalone chat page (ChatApp) on a lapsed session", () => {
     await waitFor(() => expect(connects).toBe(1));
     await settle();
 
+    probeAnswer = "session-gate";
     await act(async () => { sockets[0].serverClose(SESSION_EXPIRED_CLOSE_CODE, "Session expired"); });
     await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT));
     expect(await screen.findByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
+  });
+
+  it("reconnects instead of signing out when the closed socket's session was replaced on this page", async () => {
+    render(<ChatApp />);
+    await waitFor(() => expect(connects).toBe(1));
+    await settle();
+
+    await act(async () => { sockets[0].serverClose(SESSION_EXPIRED_CLOSE_CODE, "Session expired"); });
+    await waitFor(() => expect(connects).toBe(2), { timeout: 10_000 });
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.queryByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeNull();
   });
 
   it("asks the box about its session when a live chat drops without a code, and signs out if it is over", async () => {
