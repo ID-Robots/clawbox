@@ -138,9 +138,10 @@ describe("startDbMaintenance", () => {
     expect(h.spawn).not.toHaveBeenCalled();
   });
 
-  it("answers already_running when systemd says the unit exists", async () => {
+  it("answers already_running when systemd says the unit is still there", async () => {
+    // systemd's own words for a second start while the first run goes (captured).
     h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
-      cb(new Error("exit 1"), "", "Failed to start transient service unit: Unit clawbox-openclaw-db-maintenance.service already exists."));
+      cb(new Error("exit 1"), "", "Failed to start transient service unit: Unit clawbox-openclaw-db-maintenance.service was already loaded or has a fragment file."));
     expect(await startDbMaintenance("scheduled")).toEqual({ started: false, code: "already_running" });
     expect(h.spawn).not.toHaveBeenCalled();
   });

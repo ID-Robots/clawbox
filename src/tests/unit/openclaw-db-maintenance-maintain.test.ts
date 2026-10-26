@@ -80,10 +80,15 @@ function writeStubs(): void {
 printf 'openclaw %s\\n' "$*" >> "$OC_CALLS"
 vacuum() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("VACUUM"); c.close()' "$1"; }
 case "$1 $2" in
+  # The answers below are the shapes OpenClaw 2026.10.6 gives, captured from
+  # the real core: ready, a refusal (on stdout, exit 1), and work still running.
   "gateway suspend")
-    if [ "\${OC_BUSY:-0}" != 0 ]; then echo "Gateway busy: 1 active root request (run r-1)" >&2; exit 1; fi
-    echo '{"status":"ready","suspensionId":"susp-1","expiresAtMs":1}' ;;
-  "gateway resume") echo '{"ok":true}' ;;
+    case "\${OC_BUSY:-0}" in
+      conflict) echo '{"ok":false,"error":{"type":"gateway_request_error","code":"UNAVAILABLE","message":"another gateway suspension is already prepared","details":{"reason":"gateway-suspension-conflict"},"retryable":true}}'; exit 1 ;;
+      active) echo '{"status":"busy","activeCount":1,"blockers":[{"kind":"root-request","runId":"r-1"}]}'; exit 1 ;;
+    esac
+    echo '{"status":"ready","suspensionId":"susp-1","expiresAtMs":1,"activeCount":0,"blockers":[],"writeCustody":[],"requestId":"x"}' ;;
+  "gateway resume") echo '{"ok":true,"status":"running","resumed":true}' ;;
   "doctor --session-sqlite")
     if [ -n "\${OC_SLEEP:-}" ]; then echo $$ > "$OC_PIDFILE"; sleep "$OC_SLEEP"; fi
     if [ "\${OC_COMPACT_EXIT:-0}" != 0 ]; then echo "compaction refused" >&2; exit "$OC_COMPACT_EXIT"; fi
@@ -114,7 +119,10 @@ state=$(cat "$SC_STATE" 2>/dev/null || echo inactive)
 case "$1" in
   is-active) echo "$state"; [ "$state" = active ] ;;
   stop) if [ "\${SC_STOP_FAIL:-0}" != 0 ]; then echo "Job for $2 failed" >&2; exit 1; fi; echo inactive > "$SC_STATE" ;;
-  restart) if [ -e "$GUARD_DIR" ]; then echo "condition failed: guard held" >&2; exit 0; fi; echo active > "$SC_STATE" ;;
+  restart)
+    if [ "\${SC_RESTART_FAIL:-0}" != 0 ]; then echo "Job for $2 failed because the control process exited with error code." >&2; exit 1; fi
+    if [ -e "$GUARD_DIR" ]; then echo "condition failed: guard held" >&2; exit 0; fi
+    echo active > "$SC_STATE" ;;
   *) echo "unexpected systemctl $*" >&2; exit 64 ;;
 esac
 `,
@@ -261,13 +269,21 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py maintain — the gatewa
 
   it("does nothing while the core says the gateway has work running", () => {
     makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 300 });
-    const r = maintain([], { OC_BUSY: "1" });
+    const r = maintain([], { OC_BUSY: "active" });
     expect(r.status).toBe(0);
     expect(calledWith()).toHaveLength(1);
     expect(calledWith()[0]).toMatch(SUSPEND);
     expect(gateway()).toBe("active");
     expect(record().lastRun).toMatchObject({ outcome: "gateway_busy", gatewayStopped: false });
-    expect(record().lastRun.message).toMatch(/not idle \(Gateway busy: 1 active root request/);
+    expect(record().lastRun.message).toBe("the gateway is not idle (busy, 1 active); nothing done");
+  });
+
+  it("says why in the core's own words when it refuses to suspend", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 300 });
+    const r = maintain([], { OC_BUSY: "conflict" });
+    expect(r.status).toBe(0);
+    expect(calledWith()).toHaveLength(1);
+    expect(record().lastRun.message).toBe("the gateway is not idle (another gateway suspension is already prepared); nothing done");
   });
 
   it("compacts a gateway that is already stopped without starting it", () => {
@@ -374,6 +390,22 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py maintain — the gatewa
     const r = maintain(["--free-trigger-bytes", "100000"]);
     expect(r.status).toBe(0);
     expect(record().lastRun.databases[0].why).toMatch(/[\d.]+ KB of free pages/);
+  });
+
+  it("keeps its hold when the gateway does not come back, and the next run starts it", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 300 });
+    const r = maintain([], { SC_RESTART_FAIL: "1" });
+    expect(r.status).toBe(1);
+    expect(gateway()).toBe("inactive");
+    expect(record().lastRun).toMatchObject({ outcome: "compacted", gatewayRestarted: false });
+    expect(record().hold).toMatchObject({ stopped: true });
+
+    const next = maintain();
+    expect(next.status).toBe(0);
+    expect(next.out).toMatch(/ended while holding the gateway; releasing it/);
+    expect(gateway()).toBe("active");
+    expect(record().hold).toBeUndefined();
+    expect(record().lastRun.outcome).toBe("nothing_to_do");
   });
 
   it("releases a gateway an earlier run left held, before anything else", () => {

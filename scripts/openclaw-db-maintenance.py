@@ -1944,6 +1944,25 @@ def find_key(node, key):
     return None
 
 
+def suspend_refusal(report, rc, out, err):
+    """Why the core did not answer ready, in its own words. 2026.10.6 answers a
+    refusal on stdout — `{"ok": false, "error": {"message": "another gateway
+    suspension is already prepared", ...}}` — and work still running as a
+    status with its count and blockers; the last line of either stream is only
+    the fallback (it is a lone `}` for the JSON)."""
+    if isinstance(report, dict):
+        error = report.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"].strip():
+            return error["message"].strip()[:300]
+        status = report.get("status")
+        if isinstance(status, str) and status != "ready":
+            active = report.get("activeCount")
+            return ("%s, %s active" % (status, active) if isinstance(active, int) else status)[:300]
+    lines = [line for line in (out.strip().splitlines() + err.strip().splitlines())
+             if line.strip() and "ExperimentalWarning" not in line and "--trace-warnings" not in line]
+    return (lines[-1] if lines else "exit %s" % rc)[:300]
+
+
 def suspend_gateway(binary, wait):
     """The core's own idle check: (suspension id, None) when the gateway had no
     tracked work running and has closed admission for the stop that follows,
@@ -1952,11 +1971,11 @@ def suspend_gateway(binary, wait):
     rc, out, err = _run(binary, ["gateway", "suspend", "--wait", str(wait), "--request-id", request_id, "--json"], wait + 60)
     report = last_json_object(out)
     suspension = find_key(report, "suspensionId") if report is not None else None
-    if rc == 0 and suspension:
+    if rc == 0 and suspension and (report or {}).get("status", "ready") == "ready":
         return suspension, None
     if rc is None:
         return None, "no answer in %d s" % (wait + 60)
-    return None, (err.strip().splitlines() or out.strip().splitlines() or ["exit %s" % rc])[-1][:300]
+    return None, suspend_refusal(report, rc, out, err)
 
 
 def resume_gateway(binary, suspension):
@@ -1966,10 +1985,14 @@ def resume_gateway(binary, suspension):
 
 
 def release_gateway(args, held, result):
-    """Put the gateway back the way the run found it."""
+    """Put the gateway back the way the run found it. False when that did not
+    fully happen — the guard is still up, or the gateway it stopped is not
+    running — and the record keeps its `hold` for the next run to finish."""
+    released = True
     if held.get("guard"):
         rc, tail = sudo_run(args, [args.guard_helper, "leave"], 60)
         if rc != 0:
+            released = False
             warn("could not lift the maintenance guard (exit %s): %s" % (rc, tail))
     if held.get("stopped"):
         log("starting the gateway again")
@@ -1980,9 +2003,11 @@ def release_gateway(args, held, result):
         if result["gatewayRestarted"]:
             log("the gateway is running again after %d s" % result["downtimeSeconds"])
         else:
+            released = False
             warn("the gateway did not come back (restart exit %s, now %s): %s" % (rc, state, tail))
     elif held.get("suspension"):
         resume_gateway(args.openclaw_bin, held["suspension"])
+    return released
 
 
 def release_stale_hold(args, record, record_path):
@@ -2145,13 +2170,17 @@ def cmd_maintain(args):
             record["run"]["phase"] = "starting the gateway again"
         record["lastRun"] = result
         write_json(record_path, record)
-        release_gateway(args, held, result)
+        released = release_gateway(args, held, result)
         result["finishedAt"] = iso(time.time())
         result["seconds"] = int(time.monotonic() - begun)
         # The restart's pre-start writes this file too: keep what it wrote.
         fresh = read_json(record_path) or record
         fresh.pop("run", None)
-        fresh.pop("hold", None)
+        if released:
+            fresh.pop("hold", None)
+        elif isinstance(record.get("hold"), dict):
+            # Left for release_stale_hold at the next run (the nightly slot at the latest).
+            fresh["hold"] = record["hold"]
         fresh["lastRun"] = result
         fresh["version"] = 1
         fresh["updatedAt"] = iso(time.time())
