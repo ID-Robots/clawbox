@@ -683,23 +683,61 @@ export const CODING_AGENT_AUTO_MERGE_CONFIG_KEY = "coding_agent_auto_merge";
  * becomes what it should always have been — a question about the BOX's
  * memory rather than about the filesystem.
  *
- * Two by default, and at most four: measured on this Orin (2026-09-05) a
- * `claude -p` run with its MCP server is ~270 MB resident two minutes in and
- * grows with its context, and the box is also carrying the web server, the
- * gateway and the desktop's Chromium. A team keeps its OWN rule
+ * Two by default. The ceiling scales with the host (`hostMaxParallelRuns`):
+ * four on a Jetson or anything under 16 GB of RAM — measured on an 8 GB Orin
+ * (2026-09-05) a `claude -p` run with its MCP server is ~270 MB resident two
+ * minutes in and grows with its context, and the box is also carrying the web
+ * server, the gateway and the desktop's Chromium — and on a bigger host one
+ * run per 4 GB, at most sixteen. The ceiling is only what the setting offers;
+ * the free-memory guard (`TEAM_SPAWN_MIN_AVAILABLE_MB`) stays the real safety.
+ * The automatic review pass does not take one of these slots: it has its own
+ * small pool (`REVIEW_PASS_POOL_RUNS`), so a box at its limit still reviews
+ * what it delivered and the reviews never crowd out the owner's own runs. A team keeps its OWN rule
  * (MAX_TEAM_WORKERS and the memory guard): its workers share a goal and a
  * board, and the orchestrator waits rather than failing.
  */
 export const CODING_AGENT_MAX_PARALLEL_CONFIG_KEY = "coding_agent_max_parallel_runs";
 export const DEFAULT_MAX_PARALLEL_RUNS = 2;
 export const MIN_MAX_PARALLEL_RUNS = 1;
+/** The ceiling on a Jetson or any host under `BIG_HOST_MIN_RAM_GB`. */
 export const MAX_MAX_PARALLEL_RUNS = 4;
+/** The ceiling on the biggest host, whatever its RAM. */
+export const MAX_MAX_PARALLEL_RUNS_BIG_HOST = 16;
+export const BIG_HOST_MIN_RAM_GB = 16;
+/** RAM a host needs per run before the ceiling grows past four. */
+export const RAM_GB_PER_PARALLEL_RUN = 4;
+/** Automatic review passes allowed at once, beside the owner's runs. */
+export const REVIEW_PASS_POOL_RUNS = 2;
+
+function isJetsonHost(): boolean {
+  try {
+    return fs.existsSync("/etc/nv_tegra_release");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The most runs at once THIS host may be set to: four on a Jetson or under
+ * 16 GB of RAM, otherwise floor(RAM GB / 4), capped at sixteen.
+ */
+export function hostMaxParallelRuns(
+  totalMemBytes: number = os.totalmem(),
+  jetson: boolean = isJetsonHost(),
+): number {
+  const gb = totalMemBytes / 1024 ** 3;
+  if (jetson || !Number.isFinite(gb) || gb < BIG_HOST_MIN_RAM_GB) return MAX_MAX_PARALLEL_RUNS;
+  return Math.min(
+    MAX_MAX_PARALLEL_RUNS_BIG_HOST,
+    Math.max(MAX_MAX_PARALLEL_RUNS, Math.floor(gb / RAM_GB_PER_PARALLEL_RUN)),
+  );
+}
 
 /** How many runs at once this box allows, from the raw config value. */
-export function maxParallelRunsFrom(raw: unknown): number {
+export function maxParallelRunsFrom(raw: unknown, ceiling: number = hostMaxParallelRuns()): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_PARALLEL_RUNS;
   const rounded = Math.round(raw);
-  if (rounded < MIN_MAX_PARALLEL_RUNS || rounded > MAX_MAX_PARALLEL_RUNS) return DEFAULT_MAX_PARALLEL_RUNS;
+  if (rounded < MIN_MAX_PARALLEL_RUNS || rounded > ceiling) return DEFAULT_MAX_PARALLEL_RUNS;
   return rounded;
 }
 
@@ -2997,10 +3035,11 @@ export async function setMaxParallelRuns(runs: unknown): Promise<number> {
   if (typeof runs !== "number" || !Number.isInteger(runs)) {
     throw new CodingAgentError("invalid", "The number of runs at once must be a whole number.");
   }
-  if (runs < MIN_MAX_PARALLEL_RUNS || runs > MAX_MAX_PARALLEL_RUNS) {
+  const ceiling = hostMaxParallelRuns();
+  if (runs < MIN_MAX_PARALLEL_RUNS || runs > ceiling) {
     // Refused rather than clamped, like the review rounds and the attempts: a
-    // caller that asked for eight meant something this box does not offer.
-    throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`);
+    // caller that asked for more meant something this box does not offer.
+    throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${ceiling}.`);
   }
   await configSet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY, runs);
   // A higher limit is room the queue may take at once.
@@ -4130,7 +4169,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // two at once, which is what shipping it on means.
     maxParallelRuns: maxParallelRunsFrom(config[CODING_AGENT_MAX_PARALLEL_CONFIG_KEY]),
     minMaxParallelRuns: MIN_MAX_PARALLEL_RUNS,
-    maxMaxParallelRuns: MAX_MAX_PARALLEL_RUNS,
+    maxMaxParallelRuns: hostMaxParallelRuns(),
     // Absent means standard — what every box did before the setting existed.
     ...(() => {
       const history = rememberHistoryPolicy(historyPolicyFrom(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY], config[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY]));
@@ -5055,6 +5094,8 @@ interface RunStore {
   pipelineAdvancing: Map<string, Promise<void>>;
   /** Starts past the gate and not yet visible to loadRuns() — see startingRuns. */
   startingRuns: number;
+  /** The same, for automatic review passes — their own pool. */
+  startingReviews: number;
   /**
    * The runs file as this process last read or wrote it. A file that has moved
    * on since means somebody else writes it too; writeAll() checks rather than
@@ -5093,6 +5134,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   transitions: new Map<string, Promise<CodingRun>>(),
   pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
+  startingReviews: 0,
   signature: null,
   historyPolicy: null,
 }));
@@ -13020,7 +13062,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // settings, the worktree, the auto-PR read) — so two starts that arrive
   // together both saw room for one. The same answer `teamSpawnSlot` already
   // gives with its `starting` count.
-  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider);
+  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider, !input.team && typeof input.reviewOf === "string");
   // Held beside the slot, and for the same span and the same reason: the folder
   // this run is starting in is claimed the moment `assertDirectoryFree` passes
   // and let go only once the record is visible, so a removal cannot slip
@@ -14060,7 +14102,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
   // beside it, so the box's own half and the credential are one verdict.
   // Held from the gate to the flip below, like every other start — see
   // `startingRuns`.
-  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider, !run.team && typeof run.reviewOf === "string");
   // Held beside the slot — see `startRun`. A resume reaches the same folder a
   // removal may be about to take, and by the same synchronous claim.
   let releaseDirectory: () => void = () => {};
@@ -14214,7 +14256,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // `startingRuns`. Every slot taken: queued, not refused.
   let releaseSlot: () => void;
   try {
-    releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+    releaseSlot = await assertCanSpawn(run.team ?? null, run.provider, !run.team && typeof run.reviewOf === "string");
   } catch (err) {
     if (err instanceof SlotsFullError && !fromQueue) return queueDraft(run);
     throw err;
@@ -14556,15 +14598,16 @@ export function deleteDraftRun(id: string): void {
  * Held from the gate to the insert, released in a `finally` so a start that
  * throws in between gives its slot back.
  */
-function holdSpawnSlot(): () => void {
-  store.startingRuns += 1;
+function holdSpawnSlot(review = false): () => void {
+  const key = review ? "startingReviews" : "startingRuns";
+  store[key] += 1;
   let released = false;
   return () => {
     if (released) return;
     released = true;
     // Never below zero: a double release would otherwise make the counter a
     // permanent discount on the limit.
-    store.startingRuns = Math.max(0, store.startingRuns - 1);
+    store[key] = Math.max(0, store[key] - 1);
   };
 }
 
@@ -14577,7 +14620,7 @@ function holdSpawnSlot(): () => void {
  * own awaits (the switch, readiness, the limit) are where the two starts read
  * the same number.
  */
-async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider): Promise<() => void> {
+async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider, reviewPass = false): Promise<() => void> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
@@ -14639,7 +14682,21 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   // start that has since inserted its record and given its slot back — so the
   // run is missing from `active` AND from `startingRuns`, and the gate counts
   // it nowhere.
-  const active = loadRuns().filter((r) => isLive(r.status));
+  const freeMb = reviewPass && TEAM_SPAWN_MIN_AVAILABLE_MB > 0 ? await memAvailableMb() : null;
+  const live = loadRuns().filter((r) => isLive(r.status));
+  if (reviewPass) {
+    // The automatic review pass has its own small pool, so it never takes a
+    // start slot from the owner's runs; the memory guard still applies.
+    const reviewing = live.filter((r) => r.reviewOf).length + store.startingReviews;
+    if (reviewing >= REVIEW_PASS_POOL_RUNS) {
+      throw new SlotsFullError(`This ClawBox is already running ${reviewing} review passes at once, which is all it allows.`);
+    }
+    if (reviewing + live.length + store.startingRuns >= 1 && freeMb !== null && freeMb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
+      throw new CodingAgentError("busy", `Not enough free memory for a review pass (${freeMb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).`, true);
+    }
+    return holdSpawnSlot(true);
+  }
+  const active = live.filter((r) => !r.reviewOf);
   // The runs already going PLUS the starts that have passed this gate and have
   // not reached their record yet — see `startingRuns`.
   const going = active.length + store.startingRuns;
