@@ -143,6 +143,15 @@ describe("the schema each pinned core supports", () => {
     expect(updater.openclawStateSchemaFor("2026.10.7")).toBe(20);
   });
 
+  it("records the agent databases' schema beside it, which moves on its own", () => {
+    // `openclaw.schemaVersions.agent` of the same packages: 2026.10.6 moved the
+    // agent databases to 25 with the state database still on 20, so a wrong
+    // row here would pass every state assertion above.
+    expect(updater.openclawAgentSchemaFor("2026.10.3")).toBe(24);
+    expect(updater.openclawAgentSchemaFor("2026.10.6")).toBe(25);
+    expect(updater.openclawAgentSchemaFor("2026.10.7")).toBe(25);
+  });
+
   it("answers null rather than guessing for a version it has not been told about", () => {
     expect(updater.openclawStateSchemaFor("2026.9.5")).toBeNull();
     expect(updater.openclawStateSchemaFor("")).toBeNull();
