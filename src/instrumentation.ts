@@ -696,4 +696,17 @@ export async function register() {
   } catch (err) {
     console.error('[instrumentation] Could not load the Prime Radiant nightly scheduler:', err instanceof Error ? err.message : err)
   }
+  try {
+    // The nightly OpenClaw database check, armed from the owner's schedule the
+    // same way. A slot only starts scripts/openclaw-db-maintenance.py
+    // `maintain`, which stops the gateway only when a database needs
+    // compacting and the core says it is idle.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const dbMaintenanceScheduler = require('./lib/openclaw-db-maintenance-scheduler')
+    void dbMaintenanceScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] OpenClaw database maintenance scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the OpenClaw database maintenance scheduler:', err instanceof Error ? err.message : err)
+  }
 }

@@ -127,6 +127,7 @@ import {
   writeDowngradeAuthorization,
 } from "./harness-downgrade-backup";
 import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
+import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -5173,11 +5174,20 @@ async function resumeContinuation(): Promise<boolean> {
   return true;
 }
 
+const DB_MAINTENANCE_BUSY =
+  "OpenClaw database maintenance is running (the gateway is stopped for it) — update when it has finished";
+
 export function startUpdate(
   opts: { allowHarnessDowngrade?: boolean } = {},
 ): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
+  }
+  // A database compaction holds the gateway down with the same guard the
+  // update takes and LIFTS when it is done — under a running compaction the
+  // update would lift it halfway and start the gateway beside the doctor.
+  if (dbMaintenanceRunning()) {
+    return { started: false, error: DB_MAINTENANCE_BUSY };
   }
 
   runtime.running = true;
@@ -5229,6 +5239,9 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
+  }
+  if (dbMaintenanceRunning()) {
+    return { started: false, error: DB_MAINTENANCE_BUSY };
   }
   // Every step in this list is OpenClaw's, so there is no filtered version of
   // it worth running — the whole flow is inapplicable. Refuse honestly instead

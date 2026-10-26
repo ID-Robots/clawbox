@@ -13,6 +13,7 @@
  *   clawbox system stats
  *   clawbox system info
  *   clawbox tokens [--days N] [--agent ID] [--json]
+ *   clawbox db-maintenance status [--json] | run [--dry-run] [--all] [--no-idle-check]
  *   clawbox update
  */
 
@@ -471,6 +472,28 @@ async function main() {
     }
     process.exit(res.status ?? 1);
 
+  } else if (cmd === "db-maintenance") {
+    // OpenClaw's agent databases: `status` reads them (read-only); `run`
+    // compacts the ones that need it with the core's own `doctor ... compact`,
+    // stopping the gateway for it only once the core says it is idle
+    // (scripts/openclaw-db-maintenance.py `maintain`, the nightly slot's job).
+    if (sub !== "status" && sub !== "run") {
+      console.error("Usage: clawbox db-maintenance status [--json] | run [--dry-run] [--all] [--no-idle-check]");
+      process.exit(1);
+    }
+    if (installEdition() === "hermes") {
+      console.error("This is a Hermes-edition ClawBox: there are no OpenClaw databases to maintain.");
+      process.exit(1);
+    }
+    const script = fileURLToPath(new URL("../scripts/openclaw-db-maintenance.py", import.meta.url));
+    const helperArgs = sub === "run" ? ["maintain", "--trigger", "cli", ...args.slice(2)] : ["status", ...args.slice(2)];
+    const res = spawnSync("python3", ["-I", script, ...helperArgs], { stdio: "inherit" });
+    if (res.error) {
+      console.error(`clawbox db-maintenance needs python3 on PATH: ${res.error.message}`);
+      process.exit(1);
+    }
+    process.exit(res.status ?? 1);
+
   } else if (cmd === "update") {
     // Re-running install.sh on a Hermes device risks unmasking the OpenClaw
     // gateway and breaking the edition lock, which is a support call, not an
@@ -518,7 +541,11 @@ Usage:
   clawbox edition                      Print this device's edition (openclaw | hermes | dual)
   clawbox tokens [--days N] [--agent ID] [--json]
                                        Tokens per OpenClaw agent and model (read-only; default: last 7 days)
-  clawbox update                       Update ClawBox + OpenClaw in place (OpenClaw edition only; runs the installer, needs sudo)
+  clawbox db-maintenance status [--json]
+                                       OpenClaw agent database sizes, what needs compacting, the last run (read-only)
+  clawbox db-maintenance run [--dry-run] [--all] [--no-idle-check]
+                                       Compact the databases that need it; stops the gateway while it runs, once it is idle
+  clawbox update                     Update ClawBox + OpenClaw in place (OpenClaw edition only; runs the installer, needs sudo)
 
 Code Projects:
   clawbox code init <projectId> <name> [template] [color]
