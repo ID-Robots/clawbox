@@ -12,7 +12,7 @@ import {
   HISTORY_RETENTION_MODES,
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
-  MAX_MAX_PARALLEL_RUNS,
+  hostMaxParallelRuns,
   MIN_MAX_PARALLEL_RUNS,
   setCodingAgentEnabled,
   setCodingGitAuthor,
@@ -310,9 +310,9 @@ export async function POST(request: Request) {
   if (hasMaxParallelRuns
     && (!Number.isInteger(fields.maxParallelRuns)
       || (fields.maxParallelRuns as number) < MIN_MAX_PARALLEL_RUNS
-      || (fields.maxParallelRuns as number) > MAX_MAX_PARALLEL_RUNS)) {
+      || (fields.maxParallelRuns as number) > hostMaxParallelRuns())) {
     return NextResponse.json(
-      { error: `The number of runs at once must be a whole number between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`, kind: "invalid" },
+      { error: `The number of runs at once must be a whole number between ${MIN_MAX_PARALLEL_RUNS} and ${hostMaxParallelRuns()}.`, kind: "invalid" },
       { status: 400 },
     );
   }
