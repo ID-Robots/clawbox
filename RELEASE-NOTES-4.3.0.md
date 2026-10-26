@@ -220,7 +220,7 @@ between Anthropic accounts get a long list of fixes.
   wherever the change can be applied live. Each of those used to cost about a
   minute of chat. Saving a model is quicker too, because the box makes one
   settings change instead of several.
-- OpenClaw is updated to 2026.10.6 and Hermes Agent to v0.22.4.
+- OpenClaw is updated to 2026.10.7 and Hermes Agent to v0.22.5.
 - Once setup is finished, the assistant answers your first chat message like
   any other, instead of starting a get-to-know-you conversation.
 - On OpenClaw, the assistant comes with a ClawBox handbook and a set of

@@ -140,6 +140,7 @@ describe("the schema each pinned core supports", () => {
     // `openclaw.schemaVersions.state`, which the harness-contract job checks.
     expect(updater.openclawStateSchemaFor("2026.10.3")).toBe(20);
     expect(updater.openclawStateSchemaFor("2026.10.6")).toBe(20);
+    expect(updater.openclawStateSchemaFor("2026.10.7")).toBe(20);
   });
 
   it("answers null rather than guessing for a version it has not been told about", () => {
