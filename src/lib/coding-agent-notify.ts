@@ -18,6 +18,9 @@
  *      lives in ~/.hermes/.env and is never read here, so ClawBox's copy of a
  *      token says nothing about whether that box can send.
  *
+ *      The owner can switch this leg off for the finish notice and keep the
+ *      desktop card — see {@link codingNoticeTelegramSwitchedOff}.
+ *
  * WHAT THE MESSAGE SAYS, AND WHAT IT DELIBERATELY DOES NOT
  *
  * The text is a fixed template: status, run id, a few counts. It never
@@ -31,6 +34,8 @@
  */
 
 import { pushPendingAction } from "@/lib/pending-actions";
+import { get as configGet } from "@/lib/config-store";
+import { PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 import { getActiveHarness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
@@ -191,6 +196,42 @@ async function notifyTelegram(message: string): Promise<void> {
 }
 
 /**
+ * The device setting that keeps the finish notice off Telegram.
+ *
+ * Two spellings of one switch: `CLAWBOX_CODING_NOTIFY_TELEGRAM=off` in the web
+ * server's environment (the `.env` clawbox-setup.service loads), or the
+ * `ui_coding_notify_telegram` preference, which takes effect without a
+ * restart. Either one saying off is enough. Anything else — unset, "on", a
+ * typo, a store that cannot be read — leaves the notice ON: that is what every
+ * customer box has always done, and a switch that fails closed would silence
+ * the notice on a box nobody asked to be quiet.
+ *
+ * Only the Telegram leg, and only of the finish notice. The desktop card is the
+ * notice's home and stays; the Anthropic account-limit notices below are rare
+ * and may need the owner to sign in again, so they still go to Telegram.
+ */
+export const CODING_NOTIFY_TELEGRAM_ENV = "CLAWBOX_CODING_NOTIFY_TELEGRAM";
+export const CODING_NOTIFY_TELEGRAM_PREF = "ui_coding_notify_telegram";
+
+const OFF_WORDS: ReadonlySet<string> = new Set(["off", "false", "0", "no", "disabled"]);
+
+function saysOff(value: unknown): boolean {
+  if (value === false) return true;
+  return typeof value === "string" && OFF_WORDS.has(value.trim().toLowerCase());
+}
+
+/** Which spelling switched the Telegram leg off, or null when it is on. */
+export async function codingNoticeTelegramSwitchedOff(): Promise<"env" | "pref" | null> {
+  if (saysOff(process.env[CODING_NOTIFY_TELEGRAM_ENV])) return "env";
+  try {
+    if (saysOff(await configGet(`${PREFERENCE_KEY_PREFIX}${CODING_NOTIFY_TELEGRAM_PREF}`))) return "pref";
+  } catch {
+    // Default on, as above.
+  }
+  return null;
+}
+
+/**
  * Fire both legs. Never throws; never blocks the caller on Telegram (the
  * Hermes CLI path alone can take seconds), which is why it is `void`ed from
  * the run's completion handler.
@@ -199,6 +240,15 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
   await notifyDesktop(run, message);
   try {
+    const off = await codingNoticeTelegramSwitchedOff();
+    if (off) {
+      // Said, like the other reasons a notice was not sent: "switched off" and
+      // "Telegram did not answer" send whoever goes looking to different places.
+      console.info(
+        `[coding-agent] Telegram finish notice is switched off on this device (${off === "env" ? CODING_NOTIFY_TELEGRAM_ENV : CODING_NOTIFY_TELEGRAM_PREF}); desktop card only`,
+      );
+      return;
+    }
     await notifyTelegram(message);
   } catch (err) {
     console.error("[coding-agent] telegram notice failed:", err instanceof Error ? err.message : err);

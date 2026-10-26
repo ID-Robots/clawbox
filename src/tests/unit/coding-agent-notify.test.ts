@@ -32,7 +32,14 @@ const readTelegramAllowFrom = vi.hoisted(() => vi.fn());
 const readConfigStrict = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom, readConfigStrict }));
 
-import { announceAnthropicLimit, announceCodingAgent, buildAnnouncement, buildAnthropicLimitNotice } from "@/lib/coding-agent-notify";
+import {
+  announceAnthropicLimit,
+  announceCodingAgent,
+  buildAnnouncement,
+  buildAnthropicLimitNotice,
+  CODING_NOTIFY_TELEGRAM_ENV,
+  CODING_NOTIFY_TELEGRAM_PREF,
+} from "@/lib/coding-agent-notify";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
@@ -135,10 +142,14 @@ beforeEach(() => {
   notifyHermesTelegramUser.mockReset().mockResolvedValue(true);
   readTelegramAllowFrom.mockReset().mockResolvedValue([]);
   readConfigStrict.mockReset().mockResolvedValue({});
+  // Unset for every case, so a value in the shell that runs the suite cannot
+  // silence the Telegram cases below.
+  vi.stubEnv(CODING_NOTIFY_TELEGRAM_ENV, undefined);
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("the text", () => {
@@ -574,5 +585,108 @@ describe("the Anthropic account-limit notices", () => {
     readTelegramAllowFrom.mockRejectedValue(new Error("no file"));
     kvSet.mockImplementation(() => { throw new Error("disk full"); });
     await expect(announceAnthropicLimit({ kind: "all_limited", resetAt: null, runId: null })).resolves.toBeUndefined();
+  });
+});
+
+describe("the device switch for the Telegram finish notice", () => {
+  const PREF_KEY = `pref:${CODING_NOTIFY_TELEGRAM_PREF}`;
+
+  /** An OpenClaw box with a working bot and one approved sender, plus whatever `extra` stores. */
+  function pairedOpenClaw(extra: Record<string, unknown> = {}): ReturnType<typeof vi.fn> {
+    configGet.mockImplementation(async (key: string) =>
+      key === "telegram_bot_token" ? "123:abc" : extra[key]);
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("is on by default: an unset switch still messages the approved senders", async () => {
+    const fetchMock = pairedOpenClaw();
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it(`${CODING_NOTIFY_TELEGRAM_ENV}=off keeps the notice off Telegram and keeps the desktop card`, async () => {
+    vi.stubEnv(CODING_NOTIFY_TELEGRAM_ENV, "off");
+    const fetchMock = pairedOpenClaw();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(ringEntry().type).toBe("coding_agent");
+    // Logged as switched off — not as "no bot" or "not delivered", which would
+    // send whoever reads the log to the pairing.
+    expect(info).toHaveBeenCalledWith(expect.stringContaining(CODING_NOTIFY_TELEGRAM_ENV));
+  });
+
+  it("is off on Hermes too, where the send goes through the harness", async () => {
+    vi.stubEnv(CODING_NOTIFY_TELEGRAM_ENV, "off");
+    getActiveHarness.mockResolvedValue("hermes");
+    readHermesApprovedUsers.mockResolvedValue([{ id: "42", name: "Maya" }]);
+    vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await announceCodingAgent(run());
+
+    expect(notifyHermesTelegramUser).not.toHaveBeenCalled();
+    expect(ringEntry().type).toBe("coding_agent");
+  });
+
+  it("reads the usual spellings of off, whatever their case and padding", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    for (const value of ["OFF", " off ", "false", "0", "no", "disabled"]) {
+      vi.stubEnv(CODING_NOTIFY_TELEGRAM_ENV, value);
+      const fetchMock = pairedOpenClaw();
+      await announceCodingAgent(run());
+      expect(fetchMock, value).not.toHaveBeenCalled();
+    }
+  });
+
+  it("anything that is not off leaves the notice on", async () => {
+    for (const value of ["on", "1", "true", "", "of"]) {
+      vi.stubEnv(CODING_NOTIFY_TELEGRAM_ENV, value);
+      const fetchMock = pairedOpenClaw();
+      await announceCodingAgent(run());
+      expect(fetchMock, JSON.stringify(value)).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it(`the ${CODING_NOTIFY_TELEGRAM_PREF} preference switches it off without a restart`, async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    for (const value of ["off", false]) {
+      kvSet.mockReset();
+      const fetchMock = pairedOpenClaw({ [PREF_KEY]: value });
+      await announceCodingAgent(run());
+      expect(fetchMock, String(value)).not.toHaveBeenCalled();
+      expect(ringEntry().type).toBe("coding_agent");
+    }
+    expect(info).toHaveBeenCalledWith(expect.stringContaining(CODING_NOTIFY_TELEGRAM_PREF));
+  });
+
+  it("a preference that says on, or a store that cannot be read, leaves it on", async () => {
+    let fetchMock = pairedOpenClaw({ [PREF_KEY]: "on" });
+    await announceCodingAgent(run());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock = pairedOpenClaw();
+    const stored = configGet.getMockImplementation()!;
+    configGet.mockImplementation(async (key: string) => {
+      if (key === PREF_KEY) throw new Error("EACCES");
+      return stored(key);
+    });
+    await announceCodingAgent(run());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not silence the Anthropic account-limit notice", async () => {
+    vi.stubEnv(CODING_NOTIFY_TELEGRAM_ENV, "off");
+    const fetchMock = pairedOpenClaw({ [PREF_KEY]: "off" });
+
+    await announceAnthropicLimit({ kind: "all_limited", resetAt: null, runId: null });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
