@@ -18,6 +18,9 @@
  *      lives in ~/.hermes/.env and is never read here, so ClawBox's copy of a
  *      token says nothing about whether that box can send.
  *
+ *      The owner can switch this leg off for the finish notice and keep the
+ *      desktop card — see {@link codingAgentTelegramOff}.
+ *
  * WHAT THE MESSAGE SAYS, AND WHAT IT DELIBERATELY DOES NOT
  *
  * The text is a fixed template: status, run id, a few counts. It never
@@ -31,6 +34,8 @@
  */
 
 import { pushPendingAction } from "@/lib/pending-actions";
+import { get as configGet } from "@/lib/config-store";
+import { PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 import { getActiveHarness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
@@ -191,6 +196,49 @@ async function notifyTelegram(message: string): Promise<void> {
 }
 
 /**
+ * The owner's switch for the Telegram leg of the finish notice.
+ *
+ * A preference, stored where every other one is — `pref:<name>` in the config
+ * store, written through POST /setup-api/preferences — and read on every
+ * notice, so a change holds from the next run on without a restart. The name
+ * carries the `ui_` prefix because that route skips a name without one of its
+ * prefixes: a bare `coding_agent_telegram_notify` would be answered `ok: true`
+ * and never stored.
+ *
+ * The web server's environment can say the same for a box its operator set
+ * up: `CLAWBOX_CODING_AGENT_TELEGRAM=off`.
+ *
+ * Either one saying off is enough. Anything else — unset, true, "on", a value
+ * this does not recognise, a store that cannot be read — leaves the leg ON:
+ * that is what every box has done until now, and a switch that failed closed
+ * would silence a box nobody asked to be quiet.
+ *
+ * Only the finish notice, and only its Telegram leg. The desktop card stays
+ * whatever this says, and the Anthropic account-limit notices below still go
+ * to Telegram: they are rare, and the auth one asks the owner to sign in again.
+ */
+export const CODING_AGENT_TELEGRAM_PREF = "ui_coding_agent_telegram_notify";
+export const CODING_AGENT_TELEGRAM_ENV = "CLAWBOX_CODING_AGENT_TELEGRAM";
+
+const OFF_WORDS: ReadonlySet<string> = new Set(["off", "false", "0", "no"]);
+
+function saysOff(value: unknown): boolean {
+  if (value === false || value === 0) return true;
+  return typeof value === "string" && OFF_WORDS.has(value.trim().toLowerCase());
+}
+
+/** Which of the two switched the Telegram leg off, or null when it is on. */
+export async function codingAgentTelegramOff(): Promise<"env" | "pref" | null> {
+  if (saysOff(process.env[CODING_AGENT_TELEGRAM_ENV])) return "env";
+  try {
+    if (saysOff(await configGet(`${PREFERENCE_KEY_PREFIX}${CODING_AGENT_TELEGRAM_PREF}`))) return "pref";
+  } catch {
+    // On, as above: a store that cannot be read is not the owner saying off.
+  }
+  return null;
+}
+
+/**
  * Fire both legs. Never throws; never blocks the caller on Telegram (the
  * Hermes CLI path alone can take seconds), which is why it is `void`ed from
  * the run's completion handler.
@@ -199,6 +247,12 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
   await notifyDesktop(run, message);
   try {
+    const off = await codingAgentTelegramOff();
+    if (off) {
+      const by = off === "env" ? CODING_AGENT_TELEGRAM_ENV : `the ${CODING_AGENT_TELEGRAM_PREF} preference`;
+      console.info(`[coding-agent] telegram notice for ${run.id} switched off by ${by}; desktop notice only`);
+      return;
+    }
     await notifyTelegram(message);
   } catch (err) {
     console.error("[coding-agent] telegram notice failed:", err instanceof Error ? err.message : err);
