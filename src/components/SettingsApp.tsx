@@ -44,6 +44,7 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import DbMaintenancePanel from "./DbMaintenancePanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
 import PathGuardPanel from "./PathGuardPanel";
 import ComputerUsePanel from "./ComputerUsePanel";
@@ -6401,6 +6402,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
             )}
 
+            {/* OpenClaw's agent databases: sizes, the nightly compaction and
+                "Run now". Self-fetching and outside the stats ternary, like the
+                password card below; the Hermes edition has no OpenClaw. */}
+            {edition !== "hermes" && <DbMaintenancePanel />}
 
             {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed).
                 It is about the box, not the assistant, so it lives with the box's

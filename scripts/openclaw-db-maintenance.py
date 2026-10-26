@@ -57,6 +57,22 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
 ``record-doctor`` (run by install.sh after ``doctor --fix``)
     Records the migration verdict for the status file.
 
+``maintain`` (the web server's nightly slot, Settings "Run now", the CLI)
+    The pre-start's compaction outside a gateway start, with a window of its
+    own (30 min) instead of what is left of a 600 s start. Measures every
+    database read-only and logs its size, and touches the gateway only when one
+    needs compacting — the pre-start's reasons, or 512 MB of free pages, a
+    256 MB write-ahead log, or auto_vacuum still NONE — and the disk can hold
+    the copy. Asks the core whether the gateway is idle (``gateway suspend``),
+    holds it down with the updater's guard (clawbox-gateway-maintenance.sh),
+    stops it, compacts, and starts it again; logs the sizes before and after to
+    ``data/openclaw-db-maintenance.log`` and records the run as ``lastRun``.
+    One run at a time; never from inside the gateway's own service.
+
+``status`` (read-only; the Settings card and ``clawbox-cli.ts db-maintenance``)
+    The databases' sizes, which ones a maintenance run would compact and why,
+    whether a run is in progress and how the last one went.
+
 ``memory-rebuild`` (detached from the pre-start, runs after the gateway starts)
     Runs ``openclaw memory index --force`` once after the box changed the
     memory index's identity (see the memory block in gateway-pre-start.sh),
@@ -96,7 +112,9 @@ database generation".
 
 Exit status is 0 except ``preflight``'s refusal (3) and usage errors (2): this
 runs inside a blocking ExecStartPre, and a housekeeping failure must cost the
-box its housekeeping, never its gateway.
+box its housekeeping, never its gateway. ``maintain``, which nothing blocks on,
+says what happened: 1 a failure (or a gateway that did not come back), 4 asked
+from inside the gateway's service, 75 another run in progress.
 """
 
 import argparse
@@ -128,6 +146,10 @@ DOWNGRADE_AUTHORIZATION_FILE = "harness-downgrade.json"
 DOWNGRADE_AUTHORIZATION_TTL_S = 12 * 3600
 SET_ASIDE_DIR = "openclaw-newer-schema"
 RECORD_FILE = "openclaw-db-maintenance.json"
+# `maintain`: one run at a time (flock), and its own log beside the record.
+MAINTAIN_LOCK_FILE = "openclaw-db-maintenance.lock"
+MAINTAIN_LOG_FILE = "openclaw-db-maintenance.log"
+MAINTAIN_LOG_MAX_BYTES = 512 * 1024
 MEMORY_REBUILD_FILE = "openclaw-memory-rebuild.json"
 # Beside it, 0600: the gateway pre-start's salted digest of the embedder key a
 # keyword-only rebuild was asked for under, so a corrected key asks again. Kept
@@ -155,6 +177,28 @@ DEFAULT_MIGRATION_MARGIN = 1024 * 1024 * 1024
 # ── start-guard ───────────────────────────────────────────────────────────
 GUARD_FILE = "openclaw-start-guard.json"
 GATEWAY_UNIT = "clawbox-gateway.service"
+# What `maintain` holds the gateway with: the updater's own guard and the two
+# systemctl verbs config/clawbox-sudoers already grants this account.
+GUARD_HELPER = "/usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh"
+SUDO = "/usr/bin/sudo"
+SYSTEMCTL = "/usr/bin/systemctl"
+# Its compaction budget: the whole window the gateway may stay down, not the
+# rest of a 600 s start. ~9.8 GB took 4 min on a Nano; 30 min is ~28 GB live.
+MAINTAIN_BUDGET_S = 1800
+# Reasons beyond the pre-start's 30 % that make a database worth a stopped
+# gateway: a big database's free pages as an amount rather than a share, a
+# write-ahead log the gateway never got to checkpoint away, and a database
+# still on auto_vacuum NONE, which the core's routine incremental reclamation
+# cannot shrink until one full compaction has switched it to INCREMENTAL.
+WAL_TRIGGER_BYTES = 256 * 1024 * 1024
+FREE_TRIGGER_BYTES = 512 * 1024 * 1024
+AUTOVACUUM_MIN_BYTES = 64 * 1024 * 1024
+# How long the core is given to find the gateway idle (`gateway suspend --wait`).
+IDLE_WAIT_S = 60
+# systemctl's own ceilings, from clawbox-gateway.service: TimeoutStopSec=330
+# (the gateway's graceful drain) and TimeoutStartSec=600 (the pre-start).
+STOP_TIMEOUT_S = 400
+RESTART_TIMEOUT_S = 720
 # What journald calls this pre-start's own output (and the CLIs it runs).
 PRESTART_IDENT = "gateway-pre-start.sh"
 # Automatic restarts in a row before a failing start is called a loop. The
@@ -198,12 +242,29 @@ BREAKER_MARGIN_S = 120
 BREAKER_WATCH_MAX_AGE_S = 86400
 
 
+# `maintain` also keeps its lines in data/openclaw-db-maintenance.log, the
+# file the owner's Settings card and a support session read back.
+_LOG_FH = None
+
+
+def _tee(line):
+    if _LOG_FH is None:
+        return
+    try:
+        _LOG_FH.write(time.strftime("%Y-%m-%dT%H:%M:%S%z ") + line + "\n")
+        _LOG_FH.flush()
+    except Exception:
+        pass
+
+
 def log(msg):
     print("  [db-maintenance] " + msg, flush=True)
+    _tee(msg)
 
 
 def warn(msg):
     print("  [db-maintenance] WARN: " + msg, file=sys.stderr, flush=True)
+    _tee("WARN: " + msg)
 
 
 def human(n):
@@ -659,10 +720,12 @@ def disk_needed(db, tmp):
     return max(db["bytes"], live), live
 
 
-def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S, capture_time=None):
+def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S, capture_time=None, extra=None):
     """[(db, why)] to compact, in the order to do them, and [(db, reason)] skipped.
     `capture_time`: when the newest update capture waiting to be retired was
-    written — a capture holds every database, so each must be checked after it."""
+    written — a capture holds every database, so each must be checked after it.
+    `extra`: the maintenance run's further reasons (`maintenance_reason`), a
+    function of the database answering a reason or None; the pre-start has none."""
     todo, skipped = [], []
     tmp = temp_dir()
     for db in dbs:
@@ -680,6 +743,8 @@ def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S,
             why = "migrated: its rollback copy waits for this integrity check"
         elif capture_time is not None and not verified_since(db, record, capture_time):
             why = "an update capture waits for this integrity check"
+        elif extra is not None:
+            why = extra(db)
         if not why:
             skipped.append((db, None))
             continue
@@ -714,21 +779,32 @@ def verified_after_backup(db, record):
     return verified_since(db, record, max([b["mtime"] for b in db["backups"]] or [0]))
 
 
+def note_skips(skipped, record):
+    for db, reason in skipped:
+        if reason:
+            log("%s not compacted: %s" % (label(db), reason))
+            entry = record.setdefault("databases", {}).setdefault(key_of(db), {})
+            entry["lastSkip"] = {"at": time.time(), "reason": reason}
+
+
 def compact_all(args, dbs, core, record, deadline):
     _root, runs = capture_dirs(args.state_dir)
     capture_time = max([tree_time(run) for run in runs]) if runs and dbs else None
     todo, skipped = plan_compaction(
         dbs, core, record, args.threshold, args.live_rate_bps, args.cli_overhead_seconds, capture_time,
     )
-    for db, reason in skipped:
-        if reason:
-            log("%s not compacted: %s" % (label(db), reason))
-            entry = record.setdefault("databases", {}).setdefault(key_of(db), {})
-            entry["lastSkip"] = {"at": time.time(), "reason": reason}
+    note_skips(skipped, record)
+    run_compactions(args.openclaw_bin, todo, record, deadline, "this start's", "next gateway start")
+
+
+def run_compactions(binary, todo, record, deadline, budget_name, later):
+    """Compact each planned database while the deadline lasts; [result] for
+    every one attempted, each also recorded as the database's `lastCompact`."""
+    results = []
     for db, why in todo:
         left = deadline - time.monotonic() - KILL_GRACE_S
         if db["estimate"] > left:
-            reason = "about %d s of work, %d s of this start's budget left — next gateway start" % (db["estimate"], max(0, int(left)))
+            reason = "about %d s of work, %d s of %s budget left — %s" % (db["estimate"], max(0, int(left)), budget_name, later)
             log("%s not compacted: %s" % (label(db), reason))
             record.setdefault("databases", {}).setdefault(key_of(db), {})["lastSkip"] = {"at": time.time(), "reason": reason}
             continue
@@ -736,7 +812,7 @@ def compact_all(args, dbs, core, record, deadline):
         before = db["bytes"]
         log("compacting %s (%s, %s; about %d s, at most %d s)" % (label(db), human(before), why, db["estimate"], timeout))
         started = time.monotonic()
-        rc, integrity, tail = run_compact(args.openclaw_bin, db, timeout)
+        rc, integrity, tail = run_compact(binary, db, timeout)
         seconds = int(time.monotonic() - started)
         measure(db)
         ok = rc == 0 and integrity != "failed"
@@ -751,12 +827,23 @@ def compact_all(args, dbs, core, record, deadline):
             "seconds": seconds,
             "userVersion": db.get("userVersion"),
         }
+        results.append({
+            "key": key_of(db),
+            "label": label(db),
+            "why": why,
+            "ok": ok,
+            "integrity": integrity,
+            "beforeBytes": before,
+            "afterBytes": db["bytes"],
+            "seconds": seconds,
+        })
         if ok:
             log("compacted %s: %s -> %s in %d s (integrity %s)" % (label(db), human(before), human(db["bytes"]), seconds, integrity))
         elif rc is None:
-            warn("compacting %s ran out of its %d s and was stopped; SQLite keeps the database as it was — next gateway start" % (label(db), timeout))
+            warn("compacting %s ran out of its %d s and was stopped; SQLite keeps the database as it was — %s" % (label(db), timeout, later))
         else:
             warn("compacting %s failed (exit %s, integrity %s): %s" % (label(db), rc, integrity, tail))
+    return results
 
 
 def migration_status(dbs, core, previous):
@@ -1746,6 +1833,398 @@ def cmd_record_doctor(args):
     return 0
 
 
+# ── maintain / status (scheduled and on demand, gateway held) ─────────────
+#
+# The pre-start compacts only inside a gateway START, with what is left of the
+# unit's 600 s TimeoutStartSec: a database too big for that window — the one
+# that needs it most — waits for a start that never has the time, and a gateway
+# that runs for weeks is never looked at. On a customer box an ~8 GB agent
+# database held SQLite transactions long enough to delay the gateway's liveness
+# heartbeat until the gateway was killed and restarted, over and over; the
+# core's compaction took it to 5 GB and the stalls stopped.
+#
+# `maintain` is the same native compaction on its own: the web server's
+# nightly slot (src/lib/openclaw-db-maintenance-scheduler.ts), the Settings
+# card's "Run now" and `clawbox-cli.ts db-maintenance run`. It measures first,
+# read-only, and touches the gateway only when a database needs it and the disk
+# can hold the copy; it asks the core whether the gateway is idle (`gateway
+# suspend`, which answers ready only with no tracked work running, and closes
+# admission to new work until the stop); it holds the gateway down with the
+# updater's own guard, so nothing restarts it under a running compaction; and
+# it always puts the gateway back the way it found it — after a success, a
+# failure or a SIGTERM, and at the next run after anything harder.
+
+
+def core_at_least(core, major, minor):
+    m = re.match(r"^(\d+)\.(\d+)", (core or {}).get("version") or "")
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= (major, minor)
+
+
+def maintenance_reason(wal_trigger, free_trigger, autovacuum_min):
+    """The maintenance run's reasons beyond the pre-start's, for plan_compaction."""
+    def why(db):
+        if db.get("walBytes", 0) >= wal_trigger:
+            return "a %s write-ahead log" % human(db["walBytes"])
+        if db.get("freeBytes", 0) >= free_trigger:
+            return "%s of free pages" % human(db["freeBytes"])
+        if db.get("autoVacuum") == 0 and db.get("bytes", 0) >= autovacuum_min:
+            return "auto_vacuum is off; compaction turns on the core's incremental reclamation"
+        return None
+    return why
+
+
+def default_paths(args):
+    """The box's own places, for the CLI; the web server passes every one."""
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    oc_home = os.environ.get("CLAWBOX_OPENCLAW_HOME") or os.environ.get("OPENCLAW_HOME") or os.path.join(home, ".openclaw")
+    args.state_dir = args.state_dir or oc_home
+    args.config = args.config or os.path.join(oc_home, "openclaw.json")
+    args.data_dir = args.data_dir or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    args.openclaw_bin = args.openclaw_bin or os.path.join(home, ".npm-global", "bin", "openclaw")
+    args.core_pkg = args.core_pkg or os.path.join(os.path.dirname(args.openclaw_bin), "..", "lib", "node_modules", "openclaw", "package.json")
+    args.device_store = args.device_store or os.path.join(args.data_dir, "config.json")
+
+
+def take_lock(path):
+    """The open, exclusively locked descriptor, or None when another run holds it."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def open_log(path):
+    try:
+        if os.path.getsize(path) > MAINTAIN_LOG_MAX_BYTES:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+    try:
+        return os.fdopen(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640), "a", encoding="utf-8")
+    except OSError as exc:
+        warn("could not open %s (%s)" % (path, exc))
+        return None
+
+
+def inside_gateway_unit(cgroup_file):
+    """Started from the gateway's own service (the agent's shell): stopping the
+    gateway would stop this run with it, holding the gateway down for good."""
+    try:
+        with open(cgroup_file, "r", encoding="utf-8") as fh:
+            return GATEWAY_UNIT in fh.read()
+    except OSError:
+        return False
+
+
+def gateway_state(args):
+    rc, out, _err = _run(args.systemctl, ["is-active", GATEWAY_UNIT], 30)
+    state = (out.strip().splitlines() or ["unknown"])[0].strip()
+    return state if rc is not None and state else "unknown"
+
+
+def sudo_run(args, argv, timeout):
+    """(rc, the last line it said); rc None when it outran `timeout`."""
+    rc, out, err = _run(args.sudo, ["-n"] + argv, timeout)
+    return rc, (err.strip().splitlines() or out.strip().splitlines() or [""])[-1][:300]
+
+
+def find_key(node, key):
+    if isinstance(node, dict):
+        if isinstance(node.get(key), str) and node[key]:
+            return node[key]
+        node = list(node.values())
+    if isinstance(node, list):
+        for value in node:
+            found = find_key(value, key)
+            if found:
+                return found
+    return None
+
+
+def suspend_gateway(binary, wait):
+    """The core's own idle check: (suspension id, None) when the gateway had no
+    tracked work running and has closed admission for the stop that follows,
+    (None, why not) otherwise. Without a ready answer nothing is stopped."""
+    request_id = "clawbox-db-maintenance-%d" % int(time.time())
+    rc, out, err = _run(binary, ["gateway", "suspend", "--wait", str(wait), "--request-id", request_id, "--json"], wait + 60)
+    report = last_json_object(out)
+    suspension = find_key(report, "suspensionId") if report is not None else None
+    if rc == 0 and suspension:
+        return suspension, None
+    if rc is None:
+        return None, "no answer in %d s" % (wait + 60)
+    return None, (err.strip().splitlines() or out.strip().splitlines() or ["exit %s" % rc])[-1][:300]
+
+
+def resume_gateway(binary, suspension):
+    rc, _out, err = _run(binary, ["gateway", "resume", suspension, "--json"], 60)
+    if rc != 0:
+        warn("could not lift the gateway's suspension (exit %s): %s — its lease expires by itself" % (rc, err.strip()[-300:]))
+
+
+def release_gateway(args, held, result):
+    """Put the gateway back the way the run found it."""
+    if held.get("guard"):
+        rc, tail = sudo_run(args, [args.guard_helper, "leave"], 60)
+        if rc != 0:
+            warn("could not lift the maintenance guard (exit %s): %s" % (rc, tail))
+    if held.get("stopped"):
+        log("starting the gateway again")
+        rc, tail = sudo_run(args, [args.systemctl, "restart", GATEWAY_UNIT], RESTART_TIMEOUT_S)
+        state = gateway_state(args)
+        result["gatewayRestarted"] = rc == 0 and state == "active"
+        result["downtimeSeconds"] = int(time.monotonic() - held["stoppedAt"])
+        if result["gatewayRestarted"]:
+            log("the gateway is running again after %d s" % result["downtimeSeconds"])
+        else:
+            warn("the gateway did not come back (restart exit %s, now %s): %s" % (rc, state, tail))
+    elif held.get("suspension"):
+        resume_gateway(args.openclaw_bin, held["suspension"])
+
+
+def release_stale_hold(args, record, record_path):
+    """A run that died holding the gateway (SIGKILL, a power cut): this run has
+    the lock, so that one is gone. Lift its guard and start what it stopped."""
+    hold = record.get("hold")
+    if not isinstance(hold, dict):
+        return
+    warn("an earlier maintenance run (pid %s, %s) ended while holding the gateway; releasing it" % (hold.get("pid"), hold.get("at")))
+    rc, tail = sudo_run(args, [args.guard_helper, "leave"], 60)
+    if rc != 0:
+        warn("could not lift the maintenance guard (exit %s): %s" % (rc, tail))
+    if hold.get("stopped") and gateway_state(args) != "active":
+        rc, tail = sudo_run(args, [args.systemctl, "restart", GATEWAY_UNIT], RESTART_TIMEOUT_S)
+        if rc != 0:
+            warn("could not start the gateway again (exit %s): %s" % (rc, tail))
+    record.pop("hold", None)
+    write_json(record_path, record)
+
+
+def describe(db):
+    if db.get("error"):
+        return "%s: %s, unreadable (%s)" % (label(db), human(db["bytes"]), db["error"])
+    av = {0: "none", 1: "full", 2: "incremental"}.get(db.get("autoVacuum"), "unknown")
+    return "%s: %s (database %s, write-ahead log %s), %d%% free pages, auto_vacuum %s" % (
+        label(db), human(db["bytes"]), human(db["fileBytes"]), human(db["walBytes"]), round(db.get("freeRatio", 0) * 100), av,
+    )
+
+
+def maintain(args, record, record_path, result, held):
+    def done(outcome, message):
+        result["outcome"], result["message"] = outcome, message
+        (warn if outcome in ("failed", "partial", "hold_failed", "stop_failed") else log)(message)
+
+    def phase(name):
+        record["run"]["phase"] = name
+        write_json(record_path, record)
+
+    if update_owns_box(args.device_store):
+        return done("update_in_progress", "an update owns the box; nothing done")
+    release_stale_hold(args, record, record_path)
+    core = core_schema(args.core_pkg)
+    if not core_at_least(core, 2026, 10):
+        return done("unsupported_core", "OpenClaw %s has no offline compaction ClawBox drives (2026.10 or later); nothing done" % ((core or {}).get("version") or "of unknown version"))
+    dbs = inventory(args.state_dir, args.config)
+    if not dbs:
+        return done("no_databases", "no OpenClaw databases on this box")
+    for db in dbs:
+        log(describe(db))
+    result["beforeBytes"] = sum(db["bytes"] for db in dbs)
+    log("before: %s in %d database(s), %s free on their disk" % (human(result["beforeBytes"]), len(dbs), human(dbs[0].get("avail"))))
+
+    extra = (lambda db: "asked for") if args.all else maintenance_reason(args.wal_trigger_bytes, args.free_trigger_bytes, args.autovacuum_min_bytes)
+    todo, skipped = plan_compaction(dbs, core, record, args.threshold, args.live_rate_bps, args.cli_overhead_seconds, None, extra)
+    note_skips(skipped, record)
+    result["skipped"] = [{"label": label(db), "reason": reason} for db, reason in skipped if reason]
+    fits = []
+    for db, why in todo:
+        if db["estimate"] > args.budget_seconds - KILL_GRACE_S:
+            reason = "about %d s of work, more than this run's %d s budget" % (db["estimate"], args.budget_seconds)
+            note_skips([(db, reason)], record)
+            result["skipped"].append({"label": label(db), "reason": reason})
+        else:
+            fits.append((db, why))
+    if not fits:
+        result["afterBytes"] = result["beforeBytes"]
+        if result["skipped"]:
+            return done("skipped", "nothing compacted: %s — %s" % (result["skipped"][0]["label"], result["skipped"][0]["reason"]))
+        return done("nothing_to_do", "every database is compact; the gateway was not touched")
+    planned = ", ".join("%s (%s)" % (label(db), why) for db, why in fits)
+    if args.dry_run:
+        result["afterBytes"] = result["beforeBytes"]
+        return done("dry_run", "would compact " + planned)
+
+    state = gateway_state(args)
+    if state not in ("active", "inactive", "failed"):
+        return done("gateway_starting", "the gateway is %s; nothing done" % state)
+    if state == "active" and not args.no_idle_check:
+        phase("waiting for the gateway to be idle")
+        suspension, why_not = suspend_gateway(args.openclaw_bin, args.idle_wait_seconds)
+        if not suspension:
+            return done("gateway_busy", "the gateway is not idle (%s); nothing done" % why_not)
+        held["suspension"] = suspension
+    record["hold"] = {"pid": os.getpid(), "at": iso(time.time()), "stopped": False}
+    write_json(record_path, record)
+    held["guard"] = True
+    rc, tail = sudo_run(args, [args.guard_helper, "enter"], 60)
+    if rc != 0:
+        return done("hold_failed", "could not hold the gateway down (exit %s): %s; nothing done" % (rc, tail))
+    if state == "active":
+        phase("stopping the gateway")
+        log("stopping the gateway for %s" % planned)
+        held["stoppedAt"] = time.monotonic()
+        rc, tail = sudo_run(args, [args.systemctl, "stop", GATEWAY_UNIT], STOP_TIMEOUT_S)
+        now = gateway_state(args)
+        if now != "active":
+            held["stopped"] = True
+            record["hold"]["stopped"] = True
+            write_json(record_path, record)
+        if rc != 0 or now not in ("inactive", "failed"):
+            return done("stop_failed", "the gateway did not stop (exit %s, now %s): %s; nothing compacted" % (rc, now, tail))
+        result["gatewayStopped"] = True
+
+    phase("compacting")
+    deadline = time.monotonic() + args.budget_seconds
+    results = run_compactions(args.openclaw_bin, fits, record, deadline, "this run's", "next maintenance run")
+    result["databases"] = results
+    result["afterBytes"] = sum(db["bytes"] for db in dbs)
+    sizes = "%s -> %s (%s reclaimed)" % (human(result["beforeBytes"]), human(result["afterBytes"]), human(max(0, result["beforeBytes"] - result["afterBytes"])))
+    failed = [r for r in results if not r["ok"]]
+    if not results:
+        return done("skipped", "nothing compacted in this run's budget; %s" % sizes)
+    if not failed:
+        return done("compacted", "compacted %d database(s): %s" % (len(results), sizes))
+    if len(failed) < len(results):
+        return done("partial", "compacted %d of %d database(s): %s" % (len(results) - len(failed), len(results), sizes))
+    return done("failed", "compaction failed for %s; %s" % (", ".join(r["label"] for r in failed), sizes))
+
+
+def cmd_maintain(args):
+    global _LOG_FH
+    default_paths(args)
+    record_path = os.path.join(args.data_dir, RECORD_FILE)
+    _LOG_FH = open_log(os.path.join(args.data_dir, MAINTAIN_LOG_FILE))
+    if inside_gateway_unit(args.cgroup_file):
+        warn("refusing to run inside %s: stopping the gateway would stop this run with it" % GATEWAY_UNIT)
+        return 4
+    try:
+        lock = take_lock(os.path.join(args.data_dir, MAINTAIN_LOCK_FILE))
+    except OSError as exc:
+        warn("cannot take the maintenance lock in %s: %s" % (args.data_dir, exc))
+        return 1
+    if lock is None:
+        log("another database maintenance run is in progress; nothing done")
+        return 75
+    record = read_json(record_path)
+    if record is None:
+        warn("%s is unreadable; starting a new record" % record_path)
+        record = {}
+    begun = time.monotonic()
+    log("database maintenance (%s) started" % args.trigger)
+    record["run"] = {"trigger": args.trigger, "pid": os.getpid(), "startedAt": iso(time.time()), "phase": "measuring"}
+    write_json(record_path, record)
+    result = {"trigger": args.trigger, "startedAt": record["run"]["startedAt"], "outcome": "failed", "message": "stopped before it finished", "databases": [], "skipped": [], "gatewayStopped": False}
+    held = {}
+    try:
+        maintain(args, record, record_path, result, held)
+    except SystemExit:
+        result["outcome"], result["message"] = "failed", "stopped by a signal before it finished"
+        warn(result["message"])
+        raise
+    except Exception as exc:
+        result["outcome"], result["message"] = "failed", "stopped: %s: %s" % (type(exc).__name__, exc)
+        warn(result["message"])
+    finally:
+        # A second SIGTERM must not cut the gateway's restart short.
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
+        if held.get("stopped"):
+            record["run"]["phase"] = "starting the gateway again"
+        record["lastRun"] = result
+        write_json(record_path, record)
+        release_gateway(args, held, result)
+        result["finishedAt"] = iso(time.time())
+        result["seconds"] = int(time.monotonic() - begun)
+        # The restart's pre-start writes this file too: keep what it wrote.
+        fresh = read_json(record_path) or record
+        fresh.pop("run", None)
+        fresh.pop("hold", None)
+        fresh["lastRun"] = result
+        fresh["version"] = 1
+        fresh["updatedAt"] = iso(time.time())
+        write_json(record_path, fresh)
+        log("database maintenance (%s) finished: %s" % (args.trigger, result["outcome"]))
+    bad = ("failed", "partial", "hold_failed", "stop_failed")
+    return 1 if result["outcome"] in bad or result.get("gatewayRestarted") is False else 0
+
+
+def cmd_status(args):
+    """Read-only: the databases, what a maintenance run would do, the last run."""
+    default_paths(args)
+    record = read_json(os.path.join(args.data_dir, RECORD_FILE)) or {}
+    core = core_schema(args.core_pkg)
+    dbs = inventory(args.state_dir, args.config)
+    extra = maintenance_reason(args.wal_trigger_bytes, args.free_trigger_bytes, args.autovacuum_min_bytes)
+    todo, skipped = plan_compaction(dbs, core, record, args.threshold, args.live_rate_bps, args.cli_overhead_seconds, None, extra)
+    needs = {key_of(db): why for db, why in todo}
+    blocked = {key_of(db): reason for db, reason in skipped if reason}
+    running = None
+    lock_path = os.path.join(args.data_dir, MAINTAIN_LOCK_FILE)
+    try:
+        lock = take_lock(lock_path) if os.path.exists(lock_path) else -1
+    except OSError:
+        lock = -1
+    if lock is None:
+        run = record.get("run")
+        running = run if isinstance(run, dict) else {"phase": "starting"}
+    elif lock >= 0:
+        os.close(lock)
+    databases = []
+    for db in dbs:
+        entry = (record.get("databases") or {}).get(key_of(db)) or {}
+        databases.append({
+            "key": key_of(db),
+            "label": label(db),
+            "kind": db["kind"],
+            "agentId": db.get("agentId"),
+            "bytes": db["bytes"],
+            "fileBytes": db["fileBytes"],
+            "walBytes": db["walBytes"],
+            "freeBytes": db.get("freeBytes"),
+            "freeRatio": db.get("freeRatio"),
+            "autoVacuum": db.get("autoVacuum"),
+            "error": db.get("error"),
+            "needs": needs.get(key_of(db)),
+            "blocked": blocked.get(key_of(db)),
+            "lastCompact": entry.get("lastCompact"),
+        })
+    report = {
+        "core": (core or {}).get("version"),
+        "supported": core_at_least(core, 2026, 10),
+        "totalBytes": sum(db["bytes"] for db in dbs),
+        "diskFreeBytes": dbs[0].get("avail") if dbs else free_bytes(args.state_dir),
+        "databases": databases,
+        "running": running,
+        "lastRun": record.get("lastRun"),
+    }
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    print("OpenClaw %s — %d database(s), %s, %s free on their disk" % (report["core"] or "?", len(dbs), human(report["totalBytes"]), human(report["diskFreeBytes"])))
+    for db in dbs:
+        why = needs.get(key_of(db)) or blocked.get(key_of(db))
+        print("  " + describe(db) + ("" if not why else ("  [needs compaction: %s]" % why if key_of(db) in needs else "  [%s]" % why)))
+    if running:
+        print("A maintenance run is in progress (%s)." % (running.get("phase") or "running"))
+    last = report["lastRun"]
+    if isinstance(last, dict):
+        print("Last run %s (%s): %s — %s" % (last.get("finishedAt") or last.get("startedAt"), last.get("trigger"), last.get("outcome"), last.get("message")))
+    return 0
+
+
 # ── memory-rebuild (after the gateway has started) ────────────────────────
 
 
@@ -2166,6 +2645,43 @@ def main(argv=None):
     common(p)
     p.add_argument("--verdict", choices=("complete", "incomplete"), required=True)
 
+    def maintenance(p):
+        # Every path defaults to the box's own (default_paths), for the CLI.
+        p.add_argument("--state-dir", default=None)
+        p.add_argument("--config", default=None)
+        p.add_argument("--data-dir", default=None)
+        p.add_argument("--core-pkg", default=None)
+        p.add_argument("--openclaw-bin", default=None)
+        p.add_argument("--device-store", default=None)
+        p.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+        p.add_argument("--wal-trigger-bytes", type=int, default=WAL_TRIGGER_BYTES)
+        p.add_argument("--free-trigger-bytes", type=int, default=FREE_TRIGGER_BYTES)
+        p.add_argument("--autovacuum-min-bytes", type=int, default=AUTOVACUUM_MIN_BYTES)
+        p.add_argument("--live-rate-bps", type=float, default=DEFAULT_LIVE_RATE_BPS)
+        p.add_argument("--cli-overhead-seconds", type=float, default=CLI_OVERHEAD_S)
+        p.add_argument("--free-bytes-override", type=int, default=None, help=argparse.SUPPRESS)
+
+    p = sub.add_parser("maintain")
+    maintenance(p)
+    p.add_argument("--trigger", choices=("scheduled", "manual", "cli"), default="cli")
+    p.add_argument("--budget-seconds", type=int, default=MAINTAIN_BUDGET_S)
+    p.add_argument("--idle-wait-seconds", type=int, default=IDLE_WAIT_S)
+    # Compact every database the disk can hold a copy of, needed or not.
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    # The operator's own call, from a terminal: stop the gateway without the
+    # core's idle check (a gateway too stalled to answer it).
+    p.add_argument("--no-idle-check", action="store_true")
+    # Test seams: the privileged commands and the cgroup this process is in.
+    p.add_argument("--sudo", default=SUDO, help=argparse.SUPPRESS)
+    p.add_argument("--systemctl", default=SYSTEMCTL, help=argparse.SUPPRESS)
+    p.add_argument("--guard-helper", default=GUARD_HELPER, help=argparse.SUPPRESS)
+    p.add_argument("--cgroup-file", default="/proc/self/cgroup", help=argparse.SUPPRESS)
+
+    p = sub.add_parser("status")
+    maintenance(p)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("memory-rebuild")
     p.add_argument("--data-dir", required=True)
     # Where the agent databases are, to read back what the rebuild built.
@@ -2210,6 +2726,8 @@ def main(argv=None):
         "start-guard": cmd_start_guard,
         "preflight": cmd_preflight,
         "record-doctor": cmd_record_doctor,
+        "maintain": cmd_maintain,
+        "status": cmd_status,
         "memory-rebuild": cmd_memory_rebuild,
         "breaker-watch": cmd_breaker_watch,
     }[args.cmd]
@@ -2217,7 +2735,8 @@ def main(argv=None):
         return handler(args)
     except Exception as exc:  # housekeeping never fails its caller
         warn("%s stopped: %s: %s" % (args.cmd, type(exc).__name__, exc))
-        return 0
+        # ...but a command an owner or a schedule asked for says it failed.
+        return 1 if args.cmd in ("maintain", "status") else 0
 
 
 if __name__ == "__main__":

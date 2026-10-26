@@ -108,6 +108,11 @@ sudo bash install.sh --step openclaw_install  # fixes stale core / 'Unrecognized
 # Token usage per OpenClaw agent and model, read-only (--days N, --agent ID, --json)
 bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts tokens
 
+# OpenClaw agent databases: sizes and what needs compacting (read-only), then compact
+# the ones that need it — pauses the assistant while it runs, only once it is idle
+bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts db-maintenance status
+bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts db-maintenance run      # --dry-run to only look
+
 # Password
 sudo passwd clawbox            # new password, effective everywhere immediately
 

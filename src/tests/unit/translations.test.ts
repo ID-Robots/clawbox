@@ -97,6 +97,8 @@ describe("translations", () => {
         // The setup wizard's "Choose your assistant" step (TASK-1149).
         "assistant",
         "wifi",
+        // Settings → System → Agent databases (OpenClaw database maintenance).
+        "dbMaintenance",
         "clawaiUsage",
         "update",
         "credentials",
