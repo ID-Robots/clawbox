@@ -9,7 +9,7 @@ import {
 import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
 import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
-import { defaultTelegramAccount, telegramAccountAllowFrom } from "./openclaw-telegram-account";
+import { defaultTelegramAccount, telegramAccountAllowFrom, telegramAccountDmPolicy } from "./openclaw-telegram-account";
 import fsSync from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { execFile, spawn } from "child_process";
@@ -3823,7 +3823,13 @@ export async function approveTelegramPairing(code: string): Promise<void> {
 export async function readTelegramAllowFrom(account?: string): Promise<string[]> {
   const channel = await readTelegramChannel();
   account ??= defaultTelegramAccount(channel).id;
-  const approved = await readPairedTelegramSenders(account);
+  // Only senders who can actually DM the bot: a pairing-store approval admits
+  // one under `dmPolicy: "pairing"` alone (see telegramAccountDmPolicy). Under
+  // `pairing` it admits them whatever a top-level allowFrom lists, so it is not
+  // filtered by that list — doing so would drop an owner who paired normally.
+  const policy = telegramAccountDmPolicy(channel, account);
+  if (policy === "disabled") return [];
+  const approved = policy === "pairing" ? await readPairedTelegramSenders(account) : [];
   for (const id of telegramAccountAllowFrom(channel, account)) {
     if (!approved.includes(id)) approved.push(id);
   }

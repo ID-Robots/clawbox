@@ -285,3 +285,48 @@ describe("install-x64.sh registers the Telegram channel the same way", () => {
     expect(JSON.parse(fs.readFileSync(openclawPath, "utf-8")).channels.telegram).toEqual(telegram);
   });
 });
+
+/**
+ * install.sh's post-install smoke calls getMe — and, on a QA box, sends a
+ * message — with the token it picks out of openclaw.json. It has to pick the
+ * bot src/lib/openclaw-telegram-account.ts picks, or it reports a healthy bot
+ * that is not the one this box chats as.
+ */
+describe("install.sh's Telegram smoke picks the bot the device reports", () => {
+  function smokePicker(): string {
+    const text = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
+    const open = "TG_TOKEN=$(as_clawbox python3 -c '\n";
+    const from = text.indexOf(open);
+    if (from < 0) throw new Error("install.sh: no Telegram smoke token picker");
+    const close = text.indexOf("\n' \"$OPENCLAW_CONFIG\"", from);
+    if (close < 0) throw new Error("install.sh: Telegram smoke token picker never closes");
+    return text.slice(from + open.length, close);
+  }
+
+  function pick(telegram: unknown): string {
+    const cfg = path.join(dir, "openclaw.json");
+    fs.writeFileSync(cfg, JSON.stringify({ channels: { telegram } }), "utf-8");
+    return execFileSync("python3", ["-I", "-c", smokePicker(), cfg], { encoding: "utf-8" }).trim();
+  }
+
+  const WORK_BOT = "444444:WorkAccountBotSecret";
+
+  it("keeps the top-level token, and follows the account rule when there is none", () => {
+    expect(pick({ botToken: NATIVE_BOT, accounts: { work: { botToken: WORK_BOT } } })).toBe(NATIVE_BOT);
+    expect(pick({ accounts: { work: { botToken: WORK_BOT }, default: { botToken: NATIVE_BOT } } })).toBe(NATIVE_BOT);
+    expect(pick({ defaultAccount: "Work", accounts: { default: { botToken: NATIVE_BOT }, work: { botToken: WORK_BOT } } })).toBe(WORK_BOT);
+    expect(pick({ accounts: { zulu: { botToken: NATIVE_BOT }, alpha: { botToken: "REPLACE_ME" }, mike: { botToken: WORK_BOT } } })).toBe(WORK_BOT);
+    expect(pick({ accounts: { work: { enabled: true } } })).toBe("");
+  });
+
+  // The device answers "a bot it cannot name" for a reference; the smoke must
+  // not verify — or message through — some other account's bot instead.
+  it.each([
+    ["a SecretRef in the top-level botToken", { botToken: ENV_REF, accounts: { work: { botToken: WORK_BOT } } }],
+    ["a ${VAR} top-level botToken", { botToken: "${TELEGRAM_BOT_TOKEN}", accounts: { work: { botToken: WORK_BOT } } }],
+    ["a top-level token reference", { token: ENV_REF, accounts: { work: { botToken: WORK_BOT } } }],
+    ["a reference in the default account", { defaultAccount: "home", accounts: { home: { botToken: ENV_REF }, work: { botToken: WORK_BOT } } }],
+  ])("skips the identity check for %s", (_name, telegram) => {
+    expect(pick(telegram)).toBe("@reference");
+  });
+});

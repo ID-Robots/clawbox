@@ -128,6 +128,26 @@ export function telegramCredentialBlocks(channel: unknown): Block[] {
   return [root, ...namedAccounts(root).map((account) => account.block)];
 }
 
+/** An account's own block, by the id its pairing store files it under; none for a single-account channel. */
+function accountBlock(root: Block, account: string): Block | undefined {
+  const id = accountId(account) ?? DEFAULT_TELEGRAM_ACCOUNT;
+  return namedAccounts(root).find((candidate) => candidate.id === id)?.block;
+}
+
+/**
+ * The DM policy an account runs under — its own, else the channel root's, else
+ * OpenClaw's default `pairing` — lowercased. It decides whether the pairing
+ * store admits anyone: only under `pairing` does an approval let a sender in;
+ * `allowlist` reads config `allowFrom` alone, approvals do not widen `open`,
+ * and `disabled` admits no one.
+ */
+export function telegramAccountDmPolicy(channel: unknown, account: string): string {
+  const root = isBlock(channel) ? channel : {};
+  const own = accountBlock(root, account)?.dmPolicy;
+  const policy = typeof own === "string" && own.trim() ? own : root.dmPolicy;
+  return typeof policy === "string" && policy.trim() ? policy.trim().toLowerCase() : "pairing";
+}
+
 /** Prefixes OpenClaw accepts on an `allowFrom` entry and strips. */
 const SENDER_PREFIX_RE = /^(?:telegram|tg):/i;
 /** A Telegram USER id — `allowFrom` holds people, never groups (negative ids) or `*`. */
@@ -147,8 +167,7 @@ const SENDER_ID_RE = /^\d{1,20}$/;
  */
 export function telegramAccountAllowFrom(channel: unknown, account: string): string[] {
   const root = isBlock(channel) ? channel : {};
-  const id = accountId(account) ?? DEFAULT_TELEGRAM_ACCOUNT;
-  const own = namedAccounts(root).find((candidate) => candidate.id === id)?.block.allowFrom;
+  const own = accountBlock(root, account)?.allowFrom;
   if (!Array.isArray(own)) return Array.isArray(root.allowFrom) ? senderIds(root.allowFrom) : [];
   const ids = senderIds(own);
   const boundary = root.allowFrom;

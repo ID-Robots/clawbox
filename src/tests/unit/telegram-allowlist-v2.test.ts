@@ -502,6 +502,49 @@ describe("the allowlist readers on a multi-account OpenClaw channel", () => {
     }
   });
 
+  // A pairing-store approval admits a sender only under `dmPolicy: "pairing"`,
+  // OpenClaw's default: `allowlist` reads config allowFrom alone, approvals do
+  // not widen `open`, and `disabled` admits no one. A stale approval left from
+  // before the owner switched policy must not count — this list decides who may
+  // approve mail and who gets the notice.
+  it.each([
+    ["the account's own allowlist policy", { dmPolicy: "allowlist" }, {}, ["777"]],
+    ["an allowlist policy inherited from the top level", {}, { dmPolicy: "allowlist" }, ["777"]],
+    ["an open policy with concrete ids", { dmPolicy: "open" }, {}, ["777"]],
+    ["a disabled policy", { dmPolicy: "disabled" }, {}, []],
+  ])("does not count stored approvals under %s", async (_name, account, root, expected) => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          ...root,
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT, allowFrom: ["777"], ...account } },
+        },
+      },
+    });
+    await makeStateDb([["telegram", "work", "888"]]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(expected);
+  });
+
+  // ...and under `pairing` the store approval IS what lets a sender in, whatever
+  // a top-level allowFrom lists: bounding it by that list would drop an owner
+  // who paired the ordinary way.
+  it("keeps stored approvals under the pairing policy, even beside a restrictive top-level list", async () => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          allowFrom: ["555"],
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT, dmPolicy: "pairing" } },
+        },
+      },
+    });
+    await makeStateDb([["telegram", "work", "888"]]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["888", "555"]);
+  });
+
   it("lists the chosen account's pending requests for the desktop poller", async () => {
     await writeOpenClawConfig({
       channels: { telegram: { accounts: { work: { botToken: WORK_BOT } } } },

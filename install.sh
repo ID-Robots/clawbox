@@ -10085,21 +10085,36 @@ else:
   # 2) Telegram bot identity (getMe) — only when a bot token is configured.
   local TG_TOKEN
   # A multi-account channel keeps its bots under accounts.<id> and none at the
-  # root; the account is picked the way src/lib/openclaw-telegram-account.ts
-  # does: defaultAccount, then "default", then the first (sorted) with a token.
+  # root; the bot is picked the way src/lib/openclaw-telegram-account.ts picks
+  # it: the root's own credential, else defaultAccount, else "default", else
+  # the first account (sorted) with a token. A credential held as a reference
+  # (a SecretRef, a ${VAR}, a `token` reference) prints "@reference": the token
+  # cannot be resolved here, and checking another account's bot instead would
+  # report a healthy bot that is not the one this box chats as.
   TG_TOKEN=$(as_clawbox python3 -c '
 import json, re, sys
 TOKEN = re.compile(r"^[0-9]{1,20}:[A-Za-z0-9_-]{1,200}$")
+ENV = re.compile(r"(?:^|[^$])\$\{[A-Z_][A-Z0-9_]*\}")
 def literal(block):
     tok = block.get("botToken") if isinstance(block, dict) else None
     return tok.strip() if isinstance(tok, str) and TOKEN.match(tok.strip()) else ""
+def is_ref(block):
+    if not isinstance(block, dict):
+        return False
+    tok = block.get("botToken")
+    if isinstance(tok, dict) or (isinstance(tok, str) and ENV.search(tok)):
+        return True
+    return block.get("token") not in (None, "")
 try:
     c = json.load(open(sys.argv[1]))
     tg = (c.get("channels", {}) or {}).get("telegram", {}) or {}
-    tok = tg.get("botToken")
-    tok = tok if isinstance(tok, str) else ""
+    root = tg.get("botToken")
     accounts = tg.get("accounts") if isinstance(tg.get("accounts"), dict) else {}
-    if not tok and accounts:
+    if isinstance(root, str) and root.strip() and not ENV.search(root):
+        tok = root
+    elif is_ref(tg):
+        tok = "@reference"
+    elif accounts:
         byid = {}
         for key, block in accounts.items():
             if isinstance(key, str) and key.strip() and isinstance(block, dict):
@@ -10111,12 +10126,20 @@ try:
         elif "default" in byid:
             pick = "default"
         else:
-            pick = next((i for i in sorted(byid) if literal(byid[i])), None)
-        tok = literal(byid[pick]) if pick else ""
+            pick = next((i for i in sorted(byid) if literal(byid[i])), None) \
+                or next((i for i in sorted(byid) if is_ref(byid[i])), None)
+        block = byid.get(pick) if pick else None
+        tok = literal(block) or ("@reference" if is_ref(block) else "")
+    else:
+        tok = ""
     print(tok)
 except Exception:
     print("")
 ' "$OPENCLAW_CONFIG" 2>/dev/null || echo "")
+  if [ "$TG_TOKEN" = "@reference" ]; then
+    echo "    [skip] Telegram bot token is a secret/env reference; identity not checked"
+    return "$SMOKE_FINDINGS"
+  fi
   if [ -z "$TG_TOKEN" ]; then
     echo "    [skip] no Telegram bot configured"
     # A box with no bot is not a finding, but the gateway smokes above may
