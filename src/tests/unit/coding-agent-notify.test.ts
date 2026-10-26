@@ -37,9 +37,13 @@ import {
   announceCodingAgent,
   buildAnnouncement,
   buildAnthropicLimitNotice,
-  CODING_NOTIFY_TELEGRAM_ENV,
-  CODING_NOTIFY_TELEGRAM_PREF,
 } from "@/lib/coding-agent-notify";
+
+// The names an owner writes into the web server's .env and the preferences
+// door. Literals rather than the module's exports, so a rename fails here
+// instead of quietly orphaning every box that set the old name.
+const CODING_NOTIFY_TELEGRAM_ENV = "CLAWBOX_CODING_NOTIFY_TELEGRAM";
+const CODING_NOTIFY_TELEGRAM_PREF = "ui_coding_notify_telegram";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
