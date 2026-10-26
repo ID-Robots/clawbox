@@ -394,6 +394,112 @@ describe("the Telegram leg", () => {
 });
 
 /**
+ * OpenClaw's multi-account Telegram channel keeps each bot under
+ * `channels.telegram.accounts.<id>`, and `openclaw channels add` moves the
+ * root's token there when a second account is added — so the root holds none.
+ * Reading only the root logged "no Telegram bot is configured" on a box whose
+ * bot works, and the approved senders it then asked for were the wrong
+ * account's: the pairing store files them per account.
+ */
+describe("the Telegram leg on a multi-account OpenClaw channel", () => {
+  const ROOT_BOT = "700001:RootChannelBot_0";
+  const DEFAULT_ACCOUNT_BOT = "700002:DefaultAccountBot_0";
+  const WORK_BOT = "700003:WorkAccountBot_00";
+  const ENV_REF = { source: "env", provider: "default", id: "TELEGRAM_WORK_BOT_TOKEN" };
+
+  function sentWith(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    return fetchMock.mock.calls.map(([url]) => String(url));
+  }
+
+  beforeEach(() => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+  });
+
+  it("still sends through the top-level token, for the default account", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: ROOT_BOT, accounts: { work: { botToken: WORK_BOT } } } },
+    });
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(sentWith(fetchMock)).toEqual([`https://api.telegram.org/bot${ROOT_BOT}/sendMessage`]);
+    expect(readTelegramAllowFrom).toHaveBeenCalledWith("default");
+  });
+
+  it("sends through accounts.default when the top level holds no token", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: {
+        telegram: {
+          enabled: true,
+          accounts: { work: { botToken: WORK_BOT }, default: { botToken: DEFAULT_ACCOUNT_BOT } },
+        },
+      },
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(sentWith(fetchMock)).toEqual([`https://api.telegram.org/bot${DEFAULT_ACCOUNT_BOT}/sendMessage`]);
+    expect(readTelegramAllowFrom).toHaveBeenCalledWith("default");
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining("no Telegram bot"));
+  });
+
+  it("follows defaultAccount to another account, and asks THAT account who is approved", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: {
+        telegram: {
+          enabled: true,
+          defaultAccount: "Work",
+          accounts: { default: { botToken: DEFAULT_ACCOUNT_BOT }, work: { botToken: WORK_BOT } },
+        },
+      },
+    });
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(sentWith(fetchMock)).toEqual([`https://api.telegram.org/bot${WORK_BOT}/sendMessage`]);
+    expect(readTelegramAllowFrom).toHaveBeenCalledWith("work");
+  });
+
+  it("says the bot could not be read — not that there is none — for an account holding a secret reference", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, defaultAccount: "work", accounts: { work: { botToken: ENV_REF } } } },
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("could not be read"));
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining("no Telegram bot is configured"));
+  });
+
+  it("says no bot is configured when no account holds a token at all", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, accounts: { work: { enabled: true }, family: { botToken: "" } } } },
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("no Telegram bot is configured"));
+  });
+});
+
+/**
  * The Anthropic account-limit notices (TASK-902): one when an account becomes
  * limited and the box moves on, one when that leaves no account — and never
  * the run card's type, which is deduped by run id and would take the place of

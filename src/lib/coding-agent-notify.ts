@@ -151,8 +151,10 @@ async function notifyTelegram(message: string): Promise<void> {
   // paired with `openclaw config set`, or restored with ~/.openclaw intact and a
   // fresh data/config.json, has none. Gating on the mirror silenced the notice
   // on such a box — working bot, approved senders, nothing delivered — and said
-  // so at INFO, so nothing ever told the owner.
-  const { token, known } = await readActiveTelegramBot("openclaw");
+  // so at INFO, so nothing ever told the owner. A multi-account channel keeps
+  // the bot under `accounts.<id>` instead, and the reader answers which account
+  // it took the bot from, so the approved senders below are that account's.
+  const { token, known, account } = await readActiveTelegramBot("openclaw");
   if (typeof token !== "string" || !token.trim()) {
     // The third state matters in the log even though it cannot matter to the
     // outcome: a notice is not a gate, so an unreadable store still costs only
@@ -173,7 +175,7 @@ async function notifyTelegram(message: string): Promise<void> {
     console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
     return;
   }
-  const ids = (await readTelegramAllowFrom())
+  const ids = (await readTelegramAllowFrom(account))
     .filter((id) => CHAT_ID_RE.test(id))
     .slice(0, MAX_TELEGRAM_RECIPIENTS);
   if (ids.length === 0) {

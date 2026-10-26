@@ -132,7 +132,11 @@ describe("readActiveTelegramBot", () => {
     writeOpenClawToken(OPENCLAW_BOT);
     mockGet.mockResolvedValue(MIRROR_BOT);
 
-    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: OPENCLAW_BOT, known: true });
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({
+      token: OPENCLAW_BOT,
+      known: true,
+      account: "default",
+    });
   });
 
   it("prefers Hermes' own env token over ClawBox's mirror", async () => {
@@ -147,7 +151,11 @@ describe("readActiveTelegramBot", () => {
   it("falls back to the mirror when the harness store holds nothing", async () => {
     mockGet.mockResolvedValue(MIRROR_BOT);
 
-    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: MIRROR_BOT, known: true });
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({
+      token: MIRROR_BOT,
+      known: true,
+      account: "default",
+    });
   });
 
   // Reporting a working bot as gone is the false failure this module exists to
@@ -168,7 +176,7 @@ describe("readActiveTelegramBot", () => {
   it("ignores a mirror value that could not be a bot token", async () => {
     mockGet.mockResolvedValue("token123");
 
-    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: true });
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: true, account: "default" });
     expect((await identity.readTelegramBotsInUse()).ids).toEqual([]);
   });
 
@@ -392,11 +400,141 @@ describe("readActiveTelegramBot", () => {
       },
     });
 
-    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false });
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false, account: "default" });
+  });
+});
+
+// OpenClaw's multi-account Telegram channel keeps each bot under
+// `channels.telegram.accounts.<id>`, and `openclaw channels add` moves the
+// root's token there when a second account is added. Asking only the root
+// answered "no bot" for a bot that works.
+describe("readActiveTelegramBot on a multi-account OpenClaw channel", () => {
+  const WORK_BOT = "444444:WorkAccountBot_000";
+  const ENV_REF = { source: "env", provider: "default", id: "TELEGRAM_WORK_BOT_TOKEN" };
+
+  it("keeps answering from the top-level token, as the default account", async () => {
+    writeOpenClawConfig({
+      channels: { telegram: { botToken: OPENCLAW_BOT, accounts: { work: { botToken: WORK_BOT } } } },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({
+      token: OPENCLAW_BOT,
+      known: true,
+      account: "default",
+    });
+  });
+
+  it("reads accounts.default when the top level holds no token", async () => {
+    writeOpenClawConfig({
+      channels: { telegram: { accounts: { work: { botToken: WORK_BOT }, default: { botToken: OPENCLAW_BOT } } } },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({
+      token: OPENCLAW_BOT,
+      known: true,
+      account: "default",
+    });
+  });
+
+  it("follows defaultAccount to another account, matched the way OpenClaw keys it", async () => {
+    writeOpenClawConfig({
+      channels: {
+        telegram: { defaultAccount: " Work ", accounts: { default: { botToken: OPENCLAW_BOT }, Work: { botToken: WORK_BOT } } },
+      },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: WORK_BOT, known: true, account: "work" });
+  });
+
+  it("falls back to the first account whose token could reach Telegram", async () => {
+    writeOpenClawConfig({
+      channels: {
+        telegram: { accounts: { zulu: { botToken: OPENCLAW_BOT }, alpha: { botToken: "REPLACE_ME" }, mike: { botToken: WORK_BOT } } },
+      },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: WORK_BOT, known: true, account: "mike" });
+  });
+
+  // The same third state the root's `token` reference gets: there IS a bot, and
+  // this side cannot name it. "No bot" would be the confident wrong answer.
+  it("says known:false for an account whose token is a secret reference", async () => {
+    writeOpenClawConfig({
+      channels: { telegram: { defaultAccount: "work", accounts: { work: { botToken: ENV_REF } } } },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false, account: "work" });
+  });
+
+  it("says known:false when the only bot is a reference and no default is named", async () => {
+    writeOpenClawConfig({
+      channels: { telegram: { accounts: { alpha: { enabled: true }, beta: { botToken: ENV_REF } } } },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false, account: "beta" });
+  });
+
+  it("says known:false for an account whose token is an env substitution", async () => {
+    writeOpenClawConfig({
+      channels: { telegram: { accounts: { default: { botToken: "${TELEGRAM_BOT_TOKEN}" } } } },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false, account: "default" });
+  });
+
+  it("says known:false for a secret reference in the top-level botToken too", async () => {
+    writeOpenClawConfig({ channels: { telegram: { botToken: ENV_REF } } });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false, account: "default" });
+  });
+
+  // `token: null` is what the control UI writes for a CLEARED reference — the
+  // installers read it the same way. Counting it as "a bot we cannot name"
+  // would make the approvals guard refuse every save on that box for good.
+  it("reports no bot, confidently, when no account holds a token at all", async () => {
+    writeOpenClawConfig({
+      channels: { telegram: { accounts: { work: { enabled: true, token: null }, home: { botToken: "" } } } },
+    });
+
+    const answer = await identity.readActiveTelegramBot("openclaw");
+
+    expect(answer.token).toBeNull();
+    expect(answer.known).toBe(true);
   });
 });
 
 describe("readTelegramBotsInUse", () => {
+  // Every account's bot is one this box polls, not only the default's: the
+  // approvals guard refusing the default bot and waving a second account's
+  // through is the same collision one account over.
+  it("counts every account's bot on a multi-account OpenClaw channel", async () => {
+    writeOpenClawConfig({
+      channels: {
+        telegram: { accounts: { default: { botToken: OPENCLAW_BOT }, work: { botToken: "444444:WorkAccountBot_000" } } },
+      },
+    });
+
+    const inUse = await identity.readTelegramBotsInUse();
+
+    expect(inUse.known).toBe(true);
+    expect(inUse.ids.sort()).toEqual(["111111", "444444"]);
+  });
+
+  it("reports known:false when any OpenClaw account holds a secret reference", async () => {
+    writeOpenClawConfig({
+      channels: {
+        telegram: {
+          accounts: {
+            default: { botToken: OPENCLAW_BOT },
+            work: { botToken: { source: "env", provider: "default", id: "TELEGRAM_WORK_BOT_TOKEN" } },
+          },
+        },
+      },
+    });
+
+    expect(await identity.readTelegramBotsInUse()).toEqual({ ids: ["111111"], known: false });
+  });
+
   it("collects every bot any INSTALLED harness on this box could be polling", async () => {
     process.env.CLAWBOX_EDITION = "dual";
     writeOpenClawToken(OPENCLAW_BOT);

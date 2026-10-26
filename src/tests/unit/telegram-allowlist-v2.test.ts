@@ -411,3 +411,163 @@ describe("GET /setup-api/telegram/pairing on an OpenClaw 2 box", () => {
     expect(body.pending[0]).toMatchObject({ id: "42", code: "ABCD2345", name: "Krasi" });
   });
 });
+
+// A multi-account channel keeps its bots under `channels.telegram.accounts`,
+// and the pairing store files each account's approvals under its own id. The
+// readers used to ask for the literal "default" account, which on such a box is
+// one nobody talks to, so the bot's real approvals read as nobody at all.
+describe("the allowlist readers on a multi-account OpenClaw channel", () => {
+  const WORK_BOT = "444444:WorkAccountBot_000";
+
+  async function writeOpenClawConfig(config: unknown): Promise<void> {
+    await fs.writeFile(path.join(tmpHome, "openclaw.json"), JSON.stringify(config), "utf-8");
+  }
+
+  it("reads the approvals of the account the box's bot is", async () => {
+    await writeOpenClawConfig({
+      channels: { telegram: { defaultAccount: "work", accounts: { work: { botToken: WORK_BOT } } } },
+    });
+    await makeStateDb([
+      ["telegram", "default", "111"],
+      ["telegram", "work", "888"],
+    ]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["888"]);
+    // An explicit account is still the caller's to name.
+    expect(await readTelegramAllowFrom("default")).toEqual(["111"]);
+  });
+
+  it("picks up the chosen account's config allowFrom when the top level has none", async () => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          accounts: {
+            default: { botToken: WORK_BOT, allowFrom: ["tg:777", 666, "*", "@someone", "-100123", "888"] },
+          },
+        },
+      },
+    });
+    await makeStateDb([["telegram", "default", "888"]]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["888", "777", "666"]);
+  });
+
+  it("inherits the top-level allowFrom for an account that sets none, as OpenClaw does", async () => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          allowFrom: ["telegram:555"],
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT }, home: { allowFrom: ["999"] } },
+        },
+      },
+    });
+    await makeStateDb([]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["555"]);
+  });
+
+  // OpenClaw: "a restrictive top-level allowFrom is a safety boundary" over an
+  // account's own list. An id the root does not admit cannot DM the bot, so it
+  // must not count as approved — this list also decides who may approve mail.
+  it("keeps an account's own allowFrom inside a restrictive top-level list", async () => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          allowFrom: ["555", "tg:777"],
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT, allowFrom: ["777", "888", "*"] } },
+        },
+      },
+    });
+    await makeStateDb([]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["777"]);
+  });
+
+  it("does not bound an account's list by a top-level wildcard or an empty top-level list", async () => {
+    for (const rootAllowFrom of [["*", "555"], []]) {
+      await writeOpenClawConfig({
+        channels: {
+          telegram: {
+            allowFrom: rootAllowFrom,
+            accounts: { default: { botToken: WORK_BOT, allowFrom: ["777", "888"] } },
+          },
+        },
+      });
+      await makeStateDb([]);
+      vi.resetModules();
+      const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+      expect(await readTelegramAllowFrom()).toEqual(["777", "888"]);
+    }
+  });
+
+  // A pairing-store approval admits a sender only under `dmPolicy: "pairing"`,
+  // OpenClaw's default: `allowlist` reads config allowFrom alone, approvals do
+  // not widen `open`, and `disabled` admits no one. A stale approval left from
+  // before the owner switched policy must not count — this list decides who may
+  // approve mail and who gets the notice.
+  it.each([
+    ["the account's own allowlist policy", { dmPolicy: "allowlist" }, {}, ["777"]],
+    ["an allowlist policy inherited from the top level", {}, { dmPolicy: "allowlist" }, ["777"]],
+    ["an open policy with concrete ids", { dmPolicy: "open" }, {}, ["777"]],
+    ["a disabled policy", { dmPolicy: "disabled" }, {}, []],
+  ])("does not count stored approvals under %s", async (_name, account, root, expected) => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          ...root,
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT, allowFrom: ["777"], ...account } },
+        },
+      },
+    });
+    await makeStateDb([["telegram", "work", "888"]]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(expected);
+  });
+
+  // ...and under `pairing` the store approval IS what lets a sender in, whatever
+  // a top-level allowFrom lists: bounding it by that list would drop an owner
+  // who paired the ordinary way.
+  it("keeps stored approvals under the pairing policy, even beside a restrictive top-level list", async () => {
+    await writeOpenClawConfig({
+      channels: {
+        telegram: {
+          allowFrom: ["555"],
+          defaultAccount: "work",
+          accounts: { work: { botToken: WORK_BOT, dmPolicy: "pairing" } },
+        },
+      },
+    });
+    await makeStateDb([["telegram", "work", "888"]]);
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    expect(await readTelegramAllowFrom()).toEqual(["888", "555"]);
+  });
+
+  it("lists the chosen account's pending requests for the desktop poller", async () => {
+    await writeOpenClawConfig({
+      channels: { telegram: { accounts: { work: { botToken: WORK_BOT } } } },
+    });
+    await makeStateDb([], [
+      { account: "default", id: "41", code: "AAAA2345", createdAt: "2026-09-01T09:00:00.000Z" },
+      { account: "work", id: "42", code: "ABCD2345", createdAt: "2026-09-01T10:00:00.000Z" },
+    ]);
+    const { readTelegramPairingRequests } = await import("@/lib/openclaw-config");
+    expect((await readTelegramPairingRequests()).map((r) => r.id)).toEqual(["42"]);
+  });
+
+  it("GET /setup-api/telegram/pairing reports the bot and its approved senders with no ClawBox mirror", async () => {
+    await writeOpenClawConfig({
+      channels: { telegram: { defaultAccount: "work", accounts: { work: { botToken: WORK_BOT } } } },
+    });
+    await makeStateDb([["telegram", "work", OWNER_ID]]);
+    vi.mocked(get).mockImplementation(async () => null);
+    const { GET } = await import("@/app/setup-api/telegram/pairing/route");
+    const res = await GET(new Request("http://localhost/setup-api/telegram/pairing"));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.configured).toBe(true);
+    expect(body.approved).toEqual([{ id: OWNER_ID }]);
+  });
+});

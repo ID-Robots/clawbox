@@ -7281,15 +7281,26 @@ const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
 // src/lib/telegram-bot-identity.ts recognises and refuses to guess at. Writing
 // the mirror as a botToken BESIDE that reference restores an older bot under a
 // re-pointed one exactly as overwriting botToken did.
-const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
+// OpenClaw's own schema also puts that reference in `botToken` itself, and a
+// `tokenFile` beats both - each is a bot OpenClaw holds.
 // `token: null` and `token: ""` are an UNSET reference, not a credential: the
 // control UI and `openclaw config set --json` both write null for a cleared
 // value. Counting them as a bot made the installer skip the restore on the one
 // path this block exists for - a factory reset, where ClawBox's mirror is the
 // only surviving copy - and print that it kept a bot, leaving the channel
 // enabled with nothing behind it for the gateway to poll.
+const holdsBot = (block) =>
+  !!block && typeof block === "object" && (
+    (typeof block.botToken === "string" ? block.botToken.trim() !== "" : block.botToken != null) ||
+    (block.token !== undefined && block.token !== null && block.token !== "") ||
+    (typeof block.tokenFile === "string" && block.tokenFile.trim() !== "")
+  );
+// A multi-account channel keeps its bots under `accounts.<id>` and none at the
+// root (`openclaw channels add` moves it there when a second account is added),
+// so a mirror written at the root beside them is a bot nothing asked for.
 const openclawHasBot =
-  existingToken !== "" || (rest.token !== undefined && rest.token !== null && rest.token !== "");
+  holdsBot(rest) ||
+  (!!rest.accounts && typeof rest.accounts === "object" && Object.values(rest.accounts).some(holdsBot));
 cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 // `rename` replaces the INODE, so the temp file's mode is the one that
@@ -10073,14 +10084,62 @@ else:
 
   # 2) Telegram bot identity (getMe) — only when a bot token is configured.
   local TG_TOKEN
+  # A multi-account channel keeps its bots under accounts.<id> and none at the
+  # root; the bot is picked the way src/lib/openclaw-telegram-account.ts picks
+  # it: the root's own credential, else defaultAccount, else "default", else
+  # the first account (sorted) with a token. A credential held as a reference
+  # (a SecretRef, a ${VAR}, a `token` reference) prints "@reference": the token
+  # cannot be resolved here, and checking another account's bot instead would
+  # report a healthy bot that is not the one this box chats as.
   TG_TOKEN=$(as_clawbox python3 -c '
-import json, sys
+import json, re, sys
+TOKEN = re.compile(r"^[0-9]{1,20}:[A-Za-z0-9_-]{1,200}$")
+ENV = re.compile(r"(?:^|[^$])\$\{[A-Z_][A-Z0-9_]*\}")
+def literal(block):
+    tok = block.get("botToken") if isinstance(block, dict) else None
+    return tok.strip() if isinstance(tok, str) and TOKEN.match(tok.strip()) else ""
+def is_ref(block):
+    if not isinstance(block, dict):
+        return False
+    tok = block.get("botToken")
+    if isinstance(tok, dict) or (isinstance(tok, str) and ENV.search(tok)):
+        return True
+    return block.get("token") not in (None, "")
 try:
     c = json.load(open(sys.argv[1]))
-    print(((c.get("channels", {}) or {}).get("telegram", {}) or {}).get("botToken", "") or "")
+    tg = (c.get("channels", {}) or {}).get("telegram", {}) or {}
+    root = tg.get("botToken")
+    accounts = tg.get("accounts") if isinstance(tg.get("accounts"), dict) else {}
+    if isinstance(root, str) and root.strip() and not ENV.search(root):
+        tok = root
+    elif is_ref(tg):
+        tok = "@reference"
+    elif accounts:
+        byid = {}
+        for key, block in accounts.items():
+            if isinstance(key, str) and key.strip() and isinstance(block, dict):
+                byid.setdefault(key.strip().lower(), block)
+        want = tg.get("defaultAccount")
+        want = want.strip().lower() if isinstance(want, str) else ""
+        if want in byid:
+            pick = want
+        elif "default" in byid:
+            pick = "default"
+        else:
+            pick = next((i for i in sorted(byid) if literal(byid[i])), None) \
+                or next((i for i in sorted(byid) if is_ref(byid[i])), None)
+        block = byid.get(pick) if pick else None
+        tok = literal(block) or ("@reference" if is_ref(block) else "")
+    else:
+        tok = ""
+    print(tok)
 except Exception:
     print("")
 ' "$OPENCLAW_CONFIG" 2>/dev/null || echo "")
+  if [ "$TG_TOKEN" = "@reference" ]; then
+    echo "    [skip] Telegram bot token is a secret/env reference; identity not checked"
+    return "$SMOKE_FINDINGS"
+  fi
   if [ -z "$TG_TOKEN" ]; then
     echo "    [skip] no Telegram bot configured"
     # A box with no bot is not a finding, but the gateway smokes above may
