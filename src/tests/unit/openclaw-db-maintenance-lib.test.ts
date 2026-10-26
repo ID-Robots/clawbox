@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 
 // src/lib/openclaw-db-maintenance.ts — the web server's side of the OpenClaw
@@ -55,6 +56,19 @@ import { computeNextDbMaintenanceMs, stop as stopScheduler } from "@/lib/opencla
 
 const recordPath = () => path.join(h.root, "data", "openclaw-db-maintenance.json");
 
+/**
+ * A live process whose command line names the helper, as a run's does
+ * (`python3 -I .../openclaw-db-maintenance.py maintain ...`). The real spawn:
+ * this suite mocks child_process for the module under test.
+ */
+let standIns: ChildProcess[] = [];
+async function liveHelperPid(): Promise<number> {
+  const { spawn } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", "openclaw-db-maintenance.py", "maintain"], { stdio: "ignore" });
+  standIns.push(child);
+  return child.pid as number;
+}
+
 /** A pid nothing can hold: above Linux's largest possible pid_max (2^22). */
 function deadPid(): number {
   return 2 ** 22 + 12345;
@@ -71,6 +85,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const child of standIns) child.kill("SIGKILL");
+  standIns = [];
   stopScheduler();
   rmSync(h.root, { recursive: true, force: true });
 });
@@ -99,11 +115,21 @@ describe("the nightly schedule", () => {
 });
 
 describe("dbMaintenanceRunning — what startUpdate asks", () => {
-  it("is true while the run's own process is alive, by its run record or its hold on the gateway", () => {
-    writeFileSync(recordPath(), JSON.stringify({ run: { pid: process.pid, phase: "compacting" } }));
+  it("is true while the run's own process is alive, by its run record or its hold on the gateway", async () => {
+    const pid = await liveHelperPid();
+    writeFileSync(recordPath(), JSON.stringify({ run: { pid, phase: "compacting" } }));
     expect(dbMaintenanceRunning()).toBe(true);
-    writeFileSync(recordPath(), JSON.stringify({ hold: { pid: process.pid, stopped: true } }));
+    writeFileSync(recordPath(), JSON.stringify({ hold: { pid, stopped: true } }));
     expect(dbMaintenanceRunning()).toBe(true);
+  });
+
+  it("is false for a hold a finished run left behind once its pid is another process's", () => {
+    // A run whose gateway did not come back keeps `hold` for the next run;
+    // pid 1 (alive, EPERM) and this process stand for a reused pid.
+    writeFileSync(recordPath(), JSON.stringify({ hold: { pid: 1, stopped: true }, lastRun: { outcome: "compacted", gatewayRestarted: false } }));
+    expect(dbMaintenanceRunning()).toBe(false);
+    writeFileSync(recordPath(), JSON.stringify({ run: { pid: process.pid } }));
+    expect(dbMaintenanceRunning()).toBe(false);
   });
 
   it("is false for a run that is gone, a record without one, or no record at all", () => {
@@ -163,7 +189,7 @@ describe("startDbMaintenance", () => {
     h.updating = true;
     expect(await startDbMaintenance("scheduled")).toEqual({ started: false, code: "update_in_progress" });
     h.updating = false;
-    writeFileSync(recordPath(), JSON.stringify({ run: { pid: process.pid } }));
+    writeFileSync(recordPath(), JSON.stringify({ run: { pid: await liveHelperPid() } }));
     expect(await startDbMaintenance("manual")).toEqual({ started: false, code: "already_running" });
     expect(h.execFile).not.toHaveBeenCalled();
     expect(h.spawn).not.toHaveBeenCalled();

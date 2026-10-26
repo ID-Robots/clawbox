@@ -128,7 +128,11 @@ export default function DbMaintenancePanel() {
     let alive = true;
     const timer = setInterval(() => {
       void load().then((s) => {
-        if (alive && s) setStatus(s);
+        if (!alive || !s) return;
+        setStatus(s);
+        // Over: "Maintenance started" no longer holds, and the last run's
+        // line now says how it went.
+        if (!s.running) setNotice((n) => (n?.key === "dbMaintenance.started" ? null : n));
       });
     }, POLL_MS);
     return () => { alive = false; clearInterval(timer); };

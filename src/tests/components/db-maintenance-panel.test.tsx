@@ -77,6 +77,24 @@ describe("DbMaintenancePanel", () => {
     expect((screen.getByTestId("db-maintenance-run") as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("drops the 'started' notice once the run is over and its result is shown", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<DbMaintenancePanel />);
+      fireEvent.click(await screen.findByTestId("db-maintenance-run"));
+      await screen.findByTestId("db-maintenance-running");
+      expect(screen.getByTestId("db-maintenance-notice").textContent).toMatch(/Maintenance started/);
+      // The next poll finds the run finished.
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ ...STATUS, lastRun: { ...STATUS.lastRun, trigger: "manual", outcome: "nothing_to_do" } }), { status: 200 }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await waitFor(() => expect(screen.queryByTestId("db-maintenance-running")).toBeNull());
+      expect(screen.getByTestId("db-maintenance-last").textContent).toContain("nothing needed compacting");
+      expect(screen.queryByTestId("db-maintenance-notice")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("switches the nightly check off through the route", async () => {
     render(<DbMaintenancePanel />);
     const toggle = await screen.findByTestId("db-maintenance-schedule-switch");

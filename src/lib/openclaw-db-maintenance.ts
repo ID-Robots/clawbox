@@ -169,6 +169,22 @@ function pidAlive(pid: unknown): boolean {
   }
 }
 
+/**
+ * `pid` is alive AND is the helper. A record can outlive its run — a run whose
+ * gateway did not come back keeps its `hold` for the next run to finish — and
+ * a pid is reused, so liveness alone would read any process (even pid 1, which
+ * answers EPERM) as a run, and refuse every update until the next night.
+ */
+function helperAlive(pid: unknown): boolean {
+  if (!pidAlive(pid)) return false;
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, "utf-8").includes("openclaw-db-maintenance.py");
+  } catch {
+    // Gone since, or a system with no /proc to ask: liveness is all there is there.
+    return !fs.existsSync("/proc/self/cmdline");
+  }
+}
+
 function readRecord(): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, RECORD_FILE), "utf-8"));
@@ -180,7 +196,8 @@ function readRecord(): Record<string, unknown> | null {
 
 /**
  * A maintenance run is in progress, by the record it keeps while it runs
- * (`run.pid`, alive) — or holds the gateway down (`hold.pid`, alive).
+ * (`run.pid`) — or holds the gateway down (`hold.pid`) — whose process is
+ * still the helper.
  * Synchronous: `startUpdate` asks it, and an update must not start under a
  * compaction, whose guard the updater's own would lift halfway through.
  */
@@ -189,7 +206,7 @@ export function dbMaintenanceRunning(): boolean {
   if (!record) return false;
   const run = record.run as { pid?: unknown } | undefined;
   const hold = record.hold as { pid?: unknown } | undefined;
-  return pidAlive(run?.pid) || pidAlive(hold?.pid);
+  return helperAlive(run?.pid) || helperAlive(hold?.pid);
 }
 
 async function nextRunAt(schedule: DbMaintenanceSchedule): Promise<number | null> {
