@@ -60,3 +60,11 @@ global.IntersectionObserver = NoopObserver as unknown as typeof IntersectionObse
 import os from "os";
 import path from "path";
 process.env.OPENCLAW_HOME ??= path.join(os.tmpdir(), `clawbox-vitest-openclaw-${process.pid}`);
+
+// The UI's translation table is loaded as the locale's own chunk
+// (src/lib/translation-chunks.ts) through a dynamic import. Warmed once here,
+// so in every component test it resolves from the module cache in a microtask
+// — the timing the suites were written against when the catalogue was the
+// aggregate module most of them had already imported for their expectations.
+// A test that mocks `@/lib/translation-chunks` is unaffected.
+await import("@/lib/translations-generated/en");

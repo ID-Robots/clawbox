@@ -58,9 +58,11 @@ let changed = 0;
 for (const { code } of LANGUAGES) {
   const file = path.join(outDir, `${code}.ts`);
   const next = renderModule(code, localeTable(code));
-  const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+  // Read, never "exists then read": the file is only ever compared and rewritten.
+  let prev: string | null = null;
+  try { prev = fs.readFileSync(file, "utf8"); } catch { prev = null; }
   if (prev !== next) { fs.writeFileSync(file, next); changed++; }
-  const stale = path.join(outDir, `${code}.json`);
-  if (fs.existsSync(stale)) fs.unlinkSync(stale);
+  // The JSON shape an earlier version wrote; gone if it is there.
+  try { fs.unlinkSync(path.join(outDir, `${code}.json`)); } catch { /* none */ }
 }
 console.log(`[gen-translation-chunks] ${LANGUAGES.length} locales, ${changed} file(s) written to ${path.relative(process.cwd(), outDir)}`);
