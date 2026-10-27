@@ -296,6 +296,19 @@ describe("a project's dependencies, installed before its start", () => {
     expect(fs.existsSync(path.join(project, "node_modules"))).toBe(false);
   });
 
+  it("installs again over a node_modules an interrupted install left, and marks a finished one", async () => {
+    withPackage();
+    fs.mkdirSync(path.join(project, "node_modules"));
+    fs.mkdirSync(path.join(project, ".clawbox"), { recursive: true });
+    fs.writeFileSync(path.join(project, ".clawbox", "deps-install-pending"), "1\n");
+    fakeTool("bun", "mkdir -p node_modules/next");
+    const input = { directory: project, searchPath: `${tools}:${searchPath}` };
+    expect(await start.installAppDependencies(input)).toEqual({ ok: true, installed: "bun" });
+    expect(fs.existsSync(path.join(project, ".clawbox", "deps-install-pending"))).toBe(false);
+    expect(await start.installAppDependencies(input)).toEqual({ ok: true, installed: null });
+    expect(called()).toEqual(["bun install"]);
+  });
+
   it("ends an install that does not finish in time, with what it started", async () => {
     withPackage();
     fakeTool("bun", "echo $$ > install.pid\nexec sleep 300");

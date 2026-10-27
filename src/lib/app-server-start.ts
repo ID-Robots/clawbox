@@ -268,6 +268,11 @@ export function dependencyInstallPlan(directory: string, searchPath: string): De
 
 const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies"] as const;
 
+/** Written before an install starts and removed once it succeeds. */
+function installPendingMarker(directory: string): string {
+  return path.join(directory, ".clawbox", "deps-install-pending");
+}
+
 /**
  * A package.json that declares dependencies, and nothing at node_modules —
  * not even a link, which an install would write through. One that declares
@@ -286,6 +291,9 @@ function needsDependencyInstall(directory: string): boolean {
     return !!deps && typeof deps === "object" && Object.keys(deps).length > 0;
   });
   if (!declared) return false;
+  // An install the box began and never saw finish (the service stopped
+  // mid-way) leaves a node_modules that is there but not whole.
+  if (fs.existsSync(installPendingMarker(directory))) return true;
   try {
     fs.lstatSync(path.join(directory, "node_modules"));
     return false;
@@ -356,7 +364,12 @@ function runInstall(bin: string, args: string[], directory: string, env: Record<
     const keep = (chunk: Buffer) => { output = (output + chunk.toString("utf-8")).slice(-OUTPUT_TAIL_BYTES); };
     child.stdout?.on("data", keep);
     child.stderr?.on("data", keep);
-    child.once("error", (err) => finish({ code: null, missing: (err as NodeJS.ErrnoException).code === "ENOENT" }));
+    child.once("error", (err) => {
+      const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+      // The process never started: its error is the only reason there is.
+      if (!missing && !output) output = err.message;
+      finish({ code: null, missing });
+    });
     // `close` waits for the output; a script that left a process holding the
     // pipe would keep it from ever coming, so `exit` answers shortly after.
     child.once("close", (code) => finish({ code, missing: false }));
@@ -411,13 +424,19 @@ async function installOnce(input: InstallDependenciesInput): Promise<DependencyO
   const plan = dependencyInstallPlan(directory, env.PATH);
   const timeoutMs = input.timeoutMs ?? DEPENDENCY_INSTALL_TIMEOUT_MS;
   const began = Date.now();
+  const marker = installPendingMarker(directory);
+  await fs.promises.mkdir(path.dirname(marker), { recursive: true });
+  await fs.promises.writeFile(marker, `${began}\n`);
   let args = plan.args;
   let run = await runInstall(plan.bin, args, directory, env, timeoutMs);
   if (run.code !== 0 && !run.timedOut && !run.missing && plan.fallback && LOCKFILE_MISMATCH_RE.test(run.output)) {
     args = plan.fallback;
     run = await runInstall(plan.bin, args, directory, env, Math.max(timeoutMs - (Date.now() - began), 1_000));
   }
-  if (run.code === 0 && !run.timedOut) return { ok: true, installed: plan.tool };
+  if (run.code === 0 && !run.timedOut) {
+    await fs.promises.rm(marker, { force: true });
+    return { ok: true, installed: plan.tool };
+  }
   // A half-made node_modules would read as installed next time, and the
   // retry would start straight into the same exit 127.
   await fs.promises.rm(path.join(directory, "node_modules"), { recursive: true, force: true }).catch(() => undefined);
