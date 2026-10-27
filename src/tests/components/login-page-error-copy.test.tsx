@@ -24,16 +24,18 @@ const catalogue = vi.hoisted(() => {
   return { arrived, release: () => release() };
 });
 
+const TABLE = vi.hoisted(() => ({
+  "login.subtitle": "Enter your password to continue",
+  "login.incorrectPassword": "Incorrect password",
+}));
+// The provider reads the locale's chunk (src/lib/translation-chunks.ts); the
+// aggregate is its fallback. Both are held behind the same gate.
+vi.mock("@/lib/translation-chunks", () => ({
+  loadLocaleTable: async () => { await catalogue.arrived; return TABLE; },
+}));
 vi.mock("@/lib/translations", async () => {
   await catalogue.arrived;
-  return {
-    translations: {
-      en: {
-        "login.subtitle": "Enter your password to continue",
-        "login.incorrectPassword": "Incorrect password",
-      },
-    },
-  };
+  return { translations: { en: TABLE } };
 });
 
 function answer(body: unknown, status = 200) {

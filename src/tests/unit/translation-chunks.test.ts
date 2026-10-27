@@ -6,7 +6,7 @@ import { translations } from "@/lib/translations";
 import { loadLocaleTable } from "@/lib/translation-chunks";
 
 // The per-locale chunks under src/lib/translations-generated/ are what the
-// desktop and /login actually load (one ~300 KB JSON instead of the 3.5 MB
+// desktop and /login actually load (one ~300 KB module instead of the 3.5 MB
 // aggregate). They are generated from the source tables and COMMITTED, so
 // this test is the guard: a translation edited in src/lib/*translations*.ts
 // without `bun run gen:translations` fails here, naming the fix.
@@ -22,20 +22,20 @@ function expectedTable(locale: string): Record<string, string> {
 
 describe("translation chunks", () => {
   for (const { code } of LANGUAGES) {
-    it(`${code}.json is the ${code} table laid over English (else run: bun run gen:translations)`, () => {
-      const file = path.join(generatedDir, `${code}.json`);
+    it(`${code} chunk is the ${code} table laid over English (else run: bun run gen:translations)`, async () => {
+      const file = path.join(generatedDir, `${code}.ts`);
       expect(fs.existsSync(file), `${file} is missing — run: bun run gen:translations`).toBe(true);
-      const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
-      expect(onDisk, `${code}.json drifted from src/lib/translations.ts — run: bun run gen:translations`).toEqual(expectedTable(code));
+      const loaded = await loadLocaleTable(code);
+      expect(loaded, `${code}.ts drifted from src/lib/translations.ts — run: bun run gen:translations`).toEqual(expectedTable(code));
+      expect(Object.keys(loaded)).toEqual(Object.keys(expectedTable(code)));
     });
   }
 
-  it("the loader hands back each locale's table, English for the default branch", async () => {
-    const bg = await loadLocaleTable("bg");
-    expect(bg["common.cancel"] ?? bg[Object.keys(bg)[0]]).toBeDefined();
-    expect(Object.keys(bg).length).toBe(Object.keys(translations.en).length);
+  it("the loader hands back English for the default branch and a different table for another locale", async () => {
     const en = await loadLocaleTable("en");
+    const bg = await loadLocaleTable("bg");
     expect(en).toEqual(expectedTable("en"));
+    expect(Object.keys(bg).length).toBe(Object.keys(en).length);
     expect(bg).not.toEqual(en);
   });
 });

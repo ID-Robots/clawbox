@@ -182,7 +182,8 @@ describe("the Memory Shard app", () => {
     mount();
     expect(screen.getByTestId("memory-shard-app")).toBeTruthy();
     await waitFor(() => expect(fetch).toHaveBeenCalled());
-    expect(screen.getByText(/Memory index — Loading/)).toBeTruthy();
+    // Awaited: the copy arrives with the locale's chunk, a moment after mount.
+    expect(await screen.findByText(/Memory index — Loading/)).toBeTruthy();
   });
 
   it("shows a cloud embedder as cloud", async () => {
