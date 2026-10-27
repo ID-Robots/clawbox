@@ -376,6 +376,10 @@ export async function registerServerApp(input: { id: string; directory: string; 
         // manifest ran, so its command is the one that works here. See
         // `restartServerAppsAtBoot` in app-server-start.ts.
         ...(manifest.start ? { start: manifest.start } : {}),
+        // The owner's opt-out survives a re-registration: a start that runs
+        // again rewrites this record, and dropping the flag would quietly put
+        // the app back on the boot pass for ever.
+        ...(existing?.autoStart === false ? { autoStart: false } : {}),
       }),
       "utf-8",
     );
