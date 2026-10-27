@@ -533,8 +533,10 @@ export async function POST(req: NextRequest) {
         busboy.on("file", (_field, fileStream, info) => {
           activeFileStream = fileStream as unknown as Readable;
           fileStream.on("error", fail);
-          fileName = info.filename;
-          const destPath = safePath(path.join(dir, fileName));
+          // An application/octet-stream part is a file to busboy even with no
+          // filename; it names no destination, so it is refused like a bad one.
+          fileName = info.filename ?? "";
+          const destPath = fileName ? safePath(path.join(dir, fileName)) : null;
           if (!destPath) {
             fileStream.resume();
             fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));

@@ -215,7 +215,7 @@ const IMAGE_ONLY_MESSAGE = "This device can only attach images";
  * Containment is still re-checked against the resolved directory after the
  * join; this is the first of two gates, not the only one.
  */
-function safeLeafName(raw: string): string | null {
+function safeLeafName(raw: string | undefined): string | null {
   const base = path.basename(String(raw ?? "").trim());
   const cleaned = base
     .replace(/[\u0000-\u001f\u007f/\\]/g, "")

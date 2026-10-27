@@ -281,6 +281,22 @@ describe("/setup-api/chat/attachments", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("refuses a file part that carries no filename", async () => {
+    // busboy treats an application/octet-stream part as a file even with no
+    // filename in its Content-Disposition, and then hands over `undefined`.
+    const res = await POST(request(Buffer.concat([
+      Buffer.from(
+        `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"\r\n`
+          + "Content-Type: application/octet-stream\r\n\r\n",
+      ),
+      PNG,
+      Buffer.from(`\r\n--${BOUNDARY}--\r\n`),
+    ])));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("Invalid filename");
+    expect(staged()).toEqual([]);
+  });
+
   it("does not land an upload as a dotfile", async () => {
     const res = await POST(request(multipart(".bashrc", PNG)));
     expect(res.status).toBe(200);

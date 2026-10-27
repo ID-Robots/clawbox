@@ -492,6 +492,27 @@ describe("POST /setup-api/files", () => {
       expect(body.name).toBe("");
     });
 
+    it("refuses a file part that carries no filename", async () => {
+      // busboy treats an application/octet-stream part as a file even with no
+      // filename in its Content-Disposition, and then hands over `undefined`.
+      const boundary = "----TestBoundary" + Date.now();
+      const req = createRequest("/setup-api/files", {
+        method: "POST",
+        headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+        body: Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"\r\n` +
+          `Content-Type: application/octet-stream\r\n\r\ndata\r\n--${boundary}--\r\n`,
+        ),
+      });
+
+      const res = await filesPost(req);
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe("invalid_destination");
+      expect(fs.readdirSync(TEST_ROOT)).toEqual([]);
+    });
+
     it("creates directory if it doesn't exist", async () => {
       const req = createMultipartRequest("/setup-api/files?dir=newparent", [
         { fieldName: "file", fileName: "test.txt", content: "test" },
