@@ -28,7 +28,8 @@
     "test:e2e:ui": "playwright test --ui",
     "verify:build-identity": "bash scripts/verify-build-identity.sh",
     "check:sudoers": "bash scripts/check-sudoers-coverage.sh",
-    "i18n:scan": "bun run scripts/i18n-scan.ts"
+    "i18n:scan": "bun run scripts/i18n-scan.ts",
+    "gen:translations": "bun run scripts/gen-translation-chunks.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

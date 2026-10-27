@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
+import { loadLocaleTable } from "@/lib/translation-chunks";
 
 export type Locale = "en" | "bg" | "de" | "es" | "fr" | "it" | "ja" | "nl" | "sv" | "zh";
 
@@ -131,19 +132,28 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   // Load translations when locale changes. Layer the active locale on
   // top of English so any key missing from the active locale falls back
   // to the English copy instead of rendering as the raw key string.
+  //
+  // One chunk per locale (src/lib/translation-chunks.ts): the generated table
+  // already carries English under every key the locale lacks, so a page parses
+  // ~300 KB for the locale it renders instead of the 3.5 MB aggregate module.
+  // The aggregate stays the fallback, so a stale or missing chunk (a build
+  // without the generated files, a mid-update deploy) still renders.
   useEffect(() => {
-    import("@/lib/translations")
-      .then((mod) => {
+    let cancelled = false;
+    loadLocaleTable(locale)
+      .catch(() => import("@/lib/translations").then((mod) => {
         const enBase = mod.translations.en ?? {};
         const active = mod.translations[locale] ?? enBase;
-        setTranslations({ ...enBase, ...active });
-      })
+        return { ...enBase, ...active };
+      }))
+      .then((table) => { if (!cancelled) setTranslations(table); })
       // A chunk load can fail for reasons that are not bugs: the device is
       // offline mid-update, or the page is being torn down while this is in
       // flight. Keep whatever copy is already in state (English, or the raw
       // keys on a first load) rather than turning it into an unhandled
       // rejection — nothing here is recoverable by retrying.
       .catch(() => {});
+    return () => { cancelled = true; };
   }, [locale]);
 
   const setLocale = useCallback((newLocale: Locale) => {

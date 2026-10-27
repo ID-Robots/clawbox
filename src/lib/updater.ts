@@ -4134,6 +4134,14 @@ async function execX64InstallRootStep(step: UpdateStepDef, startedAt: number, sk
 let cachedTargetVersion: string | null = null;
 let targetVersionCacheTime = 0;
 const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
+// A version check that SAW origin is good for half an hour: the desktop asks
+// every 30 min and every open Settings tab asks too, and each uncached answer
+// is three git round-trips to origin (1.6–2.3 s measured on the laptop, more on
+// a Jetson's WiFi), so the 60 s TTL meant nearly every poll paid them. A refusal
+// keeps the short TTL, so a box that could not reach the releases asks again
+// soon; `?force=1` (Settings → Check for updates) and a finished update still
+// drop the cache at once (invalidateVersionCache).
+const VERSION_INFO_GOOD_TTL = 30 * 60_000;
 
 // ASKED PER CALL, never frozen at import. `findOpenclawBin()` remembers only the
 // MANAGED core's path; a fallback answer ("openclaw", or a second core under
@@ -4364,13 +4372,18 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
 }
 
 export async function getVersionInfo(): Promise<VersionInfo> {
-  if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
-    return cachedVersionInfo;
+  if (cachedVersionInfo) {
+    const ttl = cachedVersionInfo.remote.reachable ? VERSION_INFO_GOOD_TTL : TARGET_VERSION_CACHE_TTL;
+    if (Date.now() - versionInfoCacheTime < ttl) return cachedVersionInfo;
   }
 
   const edition = readEdition();
   const hasHermes = hasHermesHarness();
-  const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent] = await Promise.all([
+  // One round of concurrent reads: the pinned branch's fetch and the release
+  // remote's check used to wait for the tag ls-remote to finish first, which
+  // put their round-trips in series with it for no reason (none reads the
+  // other's answer).
+  const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent, { target: pinnedBranchTarget, remote: pinnedRemote }, releaseRemote] = await Promise.all([
     getTargetVersion(),
     // The Hermes edition ships no openclaw binary, so skip the spawn and read
     // the version from the installed package.json (absent there too → null,
@@ -4389,8 +4402,6 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
-  ]);
-  const [{ target: pinnedBranchTarget, remote: pinnedRemote }, releaseRemote] = await Promise.all([
     getPinnedBranchTarget(PROJECT_DIR),
     checkReleaseRemote(PROJECT_DIR),
   ]);
