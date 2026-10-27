@@ -126,6 +126,23 @@ export function appScopeOf(cgroup: string, id: string): string | null {
 }
 
 /**
+ * The owner's own `clawbox-app-<id>.service` a server of `id` runs in, read
+ * from its /proc/<pid>/cgroup: the user unit owners hand-wrote before the box
+ * started apps itself (see `restartServerAppsAtBoot`). The box never stops
+ * it; it is named so that a stop it undoes — its `Restart=` brings the server
+ * straight back — can say why, and what the owner can do about it.
+ * Exported for its test.
+ */
+export function ownerAppServiceOf(cgroup: string, id: string): string | null {
+  if (!APP_ID_RE.test(id)) return null;
+  const unit = `${APP_UNIT_PREFIX}${id}.service`;
+  for (const line of cgroup.split("\n")) {
+    if (line.includes("/user@") && line.slice(line.lastIndexOf("/") + 1).trim() === unit) return unit;
+  }
+  return null;
+}
+
+/**
  * `systemd-run`'s prefix in front of the start command. Pure and exported for
  * its test. The unit name is rebuilt from the validated id and a per-start
  * stamp: a scope systemd has not finished collecting would refuse a reused
@@ -867,8 +884,11 @@ export async function stopServerApp(id: string, where: { port: number; directory
         return { ok: true, stopped: true, holder: now.holder };
       }
       if (Date.now() >= deadline) {
-        const still = now ? ` (pid ${[...now.ours.keys()][0]})` : "";
-        return { ok: false, detail: `The app's server${still} is still listening on port ${port}.` };
+        const pid = now ? [...now.ours.keys()][0] : undefined;
+        const still = pid ? ` (pid ${pid})` : "";
+        const unit = pid ? ownerAppServiceOf(await fs.promises.readFile(`/proc/${pid}/cgroup`, "utf-8").catch(() => ""), id) : null;
+        const why = unit ? ` It runs under the owner's own systemd unit ${unit}, which starts it again: stop and disable that unit (systemctl --user disable --now ${unit}), then try again.` : "";
+        return { ok: false, detail: `The app's server${still} is still listening on port ${port}.${why}` };
       }
       await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }

@@ -361,6 +361,39 @@ http.createServer((_q, r) => r.end("ok")).listen(Number(process.env.PORT), "127.
     expect(stop).toEqual({ ok: true, stopped: true, holder: null });
     expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("not_listening");
   });
+
+  it("names the owner's own unit when the server comes straight back, and leaves the unit alone", async () => {
+    fs.writeFileSync(path.join(project, "server.js"), PID_SERVER_JS);
+    const port = await freePort();
+    expect(await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath, noScope: true })).toEqual({ ok: true });
+    const pid = Number(fs.readFileSync(path.join(project, "server.pid"), "utf-8"));
+    // The server as the owner's unit runs it: in that unit, and back as soon
+    // as it is ended (here: never ended at all).
+    const realReadFile = fs.promises.readFile.bind(fs.promises);
+    const readFile = vi.spyOn(fs.promises, "readFile").mockImplementation(((file: fs.PathLike, ...rest: unknown[]) => {
+      if (file === `/proc/${pid}/cgroup`) return Promise.resolve("0::/user.slice/user-1000.slice/user@1000.service/app.slice/clawbox-app-hello-app.service\n");
+      return (realReadFile as (...a: unknown[]) => Promise<unknown>)(file, ...rest);
+    }) as typeof fs.promises.readFile);
+    const realKill = process.kill.bind(process);
+    const kill = vi.spyOn(process, "kill").mockImplementation(((target: number, signal?: string | number) => {
+      if (signal === undefined || signal === 0) return realKill(target, 0);
+      return true;
+    }) as typeof process.kill);
+    let stop: Awaited<ReturnType<typeof start.stopServerApp>>;
+    try {
+      stop = await start.stopServerApp("hello-app", { port, directory: project });
+    } finally {
+      kill.mockRestore();
+      readFile.mockRestore();
+    }
+    try {
+      expect(stop.ok).toBe(false);
+      expect(!stop.ok && stop.detail).toContain(`(pid ${pid}) is still listening on port ${port}`);
+      expect(!stop.ok && stop.detail).toContain("systemctl --user disable --now clawbox-app-hello-app.service");
+    } finally {
+      try { process.kill(pid, "SIGKILL"); } catch { /* gone already */ }
+    }
+  });
 });
 
 describe("a box whose node is not on the run's fixed PATH", () => {
@@ -690,6 +723,22 @@ describe("which scope is an app's own", () => {
     expect(start.appScopeOf(line("clawbox-app-audio-app-MH8K.scope"), "audio-app")).toBeNull();
     expect(start.appScopeOf(line("clawbox-setup.service"), "audio-app")).toBeNull();
     expect(start.appScopeOf("", "audio-app")).toBeNull();
+  });
+});
+
+describe("which unit is the owner's own for an app", () => {
+  const line = (unit: string) => `0::/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}\n`;
+
+  it("is exactly the user unit owners wrote for the app", () => {
+    expect(start.ownerAppServiceOf(line("clawbox-app-audio-app.service"), "audio-app")).toBe("clawbox-app-audio-app.service");
+  });
+
+  it("is never another app's, the box's own scope, the web server or a system unit", () => {
+    expect(start.ownerAppServiceOf(line("clawbox-app-audio-app.service"), "audio")).toBeNull();
+    expect(start.ownerAppServiceOf(line("clawbox-app-audio-app-mh8k2x1q.scope"), "audio-app")).toBeNull();
+    expect(start.ownerAppServiceOf(line("clawbox-setup.service"), "audio-app")).toBeNull();
+    expect(start.ownerAppServiceOf("0::/system.slice/clawbox-app-audio-app.service\n", "audio-app")).toBeNull();
+    expect(start.ownerAppServiceOf("", "audio-app")).toBeNull();
   });
 });
 
