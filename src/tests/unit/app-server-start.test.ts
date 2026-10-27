@@ -230,7 +230,7 @@ describe("a project's dependencies, installed before its start", () => {
 
   const called = () => (fs.existsSync(calls) ? fs.readFileSync(calls, "utf-8").trim().split("\n") : []);
   const withPackage = (extra: Record<string, unknown> = {}) =>
-    fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "next-app", scripts: { serve: "next build && next start" }, ...extra }));
+    fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "next-app", scripts: { serve: "next build && next start" }, dependencies: { next: "15.0.0" }, ...extra }));
 
   it("picks bun or npm from the lockfile, then packageManager, then what the PATH has", () => {
     fakeTool("bun", "exit 0");
@@ -256,9 +256,12 @@ describe("a project's dependencies, installed before its start", () => {
     expect(start.dependencyInstallPlan(project, tools).bin).toBe(path.join(tools, "bun"));
   });
 
-  it("installs nothing when node_modules is already there, or there is no package.json", async () => {
+  it("installs nothing when node_modules is already there, the package.json declares no dependencies, or there is none", async () => {
     fakeTool("bun", "mkdir -p node_modules");
     const input = { directory: project, searchPath: `${tools}:${searchPath}` };
+    expect(await start.installAppDependencies(input)).toEqual({ ok: true, installed: null });
+    // npm would only write a package-lock.json here, make no node_modules, and install again on every start.
+    withPackage({ dependencies: {}, devDependencies: {} });
     expect(await start.installAppDependencies(input)).toEqual({ ok: true, installed: null });
     withPackage();
     fs.mkdirSync(path.join(project, "node_modules"));

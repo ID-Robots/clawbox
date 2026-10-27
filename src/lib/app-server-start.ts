@@ -39,9 +39,10 @@
  * start does stop, what it printed is in the answer (`startOutputLine`), so
  * the run's feed says "bun: not found" rather than only an exit code.
  *
- * WHAT IT NEEDS FIRST. A project with a package.json and no node_modules gets
- * its dependencies installed before the start (`installAppDependencies`): a
- * Store package never carries node_modules (the publisher leaves it out), and
+ * WHAT IT NEEDS FIRST. A project whose package.json declares dependencies and
+ * that has no node_modules gets them installed before the start
+ * (`installAppDependencies`): a Store package never carries node_modules
+ * (the publisher leaves it out), and
  * `next build && next start` without them is the shell's exit 127. The same
  * install is what the Store's install calls before it registers a server app,
  * so Install again recovers an app installed before the box did this. An
@@ -265,9 +266,26 @@ export function dependencyInstallPlan(directory: string, searchPath: string): De
   };
 }
 
-/** A package.json and nothing at node_modules — not even a link, which an install would write through. */
+const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies"] as const;
+
+/**
+ * A package.json that declares dependencies, and nothing at node_modules —
+ * not even a link, which an install would write through. One that declares
+ * none has nothing to install: npm would only write a package-lock.json into
+ * the project and make no node_modules, so every start would install again.
+ */
 function needsDependencyInstall(directory: string): boolean {
-  if (!isFile(path.join(directory, "package.json"))) return false;
+  let pkg: Record<string, unknown>;
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf-8")) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  const declared = DEPENDENCY_FIELDS.some((field) => {
+    const deps = pkg?.[field];
+    return !!deps && typeof deps === "object" && Object.keys(deps).length > 0;
+  });
+  if (!declared) return false;
   try {
     fs.lstatSync(path.join(directory, "node_modules"));
     return false;
