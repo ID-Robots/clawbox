@@ -17,9 +17,10 @@
 # The groups and ignore rules below stay so that raising a limit brings back
 # one grouped majors-only PR, not a PR per minor/patch. The `update-types`
 # ignore rules only affect VERSION updates, never security updates (GitHub
-# docs, dependabot.yml options reference, `ignore` > `update-types`). A
-# `dependency-name` ignore without update-types, like the @novnc/novnc one,
-# does also block security updates for that package.
+# docs, dependabot.yml options reference, `ignore` > `update-types`). These
+# entries also set target-branch: "beta", which applies to version updates
+# only; security updates always target the default branch and are not
+# governed by these entries (and are disabled in repository settings).
 #
 # Keep package-lock.json synchronized for the dependency graph, and validate
 # the authoritative bun.lock with bun install --frozen-lockfile before a PR.
