@@ -42,7 +42,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import os from "os";
-import path from "@/lib/runtime-path";
+import path, { untraced } from "@/lib/runtime-path";
 import { listenerOwnedBy, registerServerApp, type RegisterOutcome } from "@/lib/app-proxy";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { DATA_DIR } from "@/lib/config-store";
@@ -71,7 +71,7 @@ const POLL_MS = 500;
 
 /** Where a started server's output goes: one file per app, rewritten on each start. */
 export function appServerLogPath(id: string): string {
-  return path.join(DATA_DIR, "app-servers", `${id}.log`);
+  return untraced(path.join(DATA_DIR, "app-servers", `${id}.log`));
 }
 
 // A constant, not an inline literal: the same Turbopack tracing reason as
@@ -430,12 +430,16 @@ export async function restartServerAppsAtBoot(options: BootRestartOptions = {}):
   if (process.env.CLAWBOX_APP_AUTOSTART === "0") return [];
   const dir = options.webappsDir ?? path.join(DATA_DIR, "webapps");
   const start = options.start ?? startServerApp;
-  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+  // Untraced: this runs from the instrumentation entry, whose file trace Next
+  // does not exclude the way it excludes a route's. A `readdir` over a path the
+  // build believes it knows is a glob over the project, and the build panicked
+  // on the first symlink it found in the owner's data/ (a venv a run left).
+  const entries = await fs.promises.readdir(untraced(dir), { withFileTypes: true }).catch(() => []);
   const started: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || !APP_ID_RE.test(entry.name)) continue;
     const id = entry.name;
-    const meta = await fs.promises.readFile(path.join(dir, id, "meta.json"), "utf-8")
+    const meta = await fs.promises.readFile(untraced(path.join(dir, id, "meta.json")), "utf-8")
       .then((raw) => JSON.parse(raw) as Record<string, unknown>)
       .catch(() => null);
     if (!meta || meta.autoStart === false) continue;
@@ -444,7 +448,7 @@ export async function restartServerAppsAtBoot(options: BootRestartOptions = {}):
     const port = typeof meta.port === "number" ? meta.port : Number.NaN;
     const name = typeof meta.name === "string" ? meta.name : id;
     if (!command || !isProxyablePort(port) || !directory) continue;
-    if (!(await fs.promises.stat(directory).catch(() => null))?.isDirectory()) continue;
+    if (!(await fs.promises.stat(untraced(directory)).catch(() => null))?.isDirectory()) continue;
     // Already up: a run, the owner's terminal, or a start that outlived a
     // web-server restart. Starting a second copy would fail on the port.
     if ((await listenerOwnedBy(port, directory)) === "owned") continue;
