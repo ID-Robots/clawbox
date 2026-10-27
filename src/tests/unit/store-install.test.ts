@@ -20,7 +20,8 @@ vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken, CLAWBOX_AI_PRO
 const ensureRepository = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/project-import", () => ({ ensureRepository, freeBytes: vi.fn(async () => null), IMPORT_FREE_RESERVE_BYTES: 0 }));
 const registerOrStartServerApp = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/app-server-start", () => ({ registerOrStartServerApp }));
+const installAppDependencies = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/app-server-start", () => ({ registerOrStartServerApp, installAppDependencies }));
 const deployWebapp = vi.hoisted(() => vi.fn());
 // Where deployed web apps live, per test — never the box's own data folder.
 const desk = vi.hoisted(() => ({ webapps: "", prefs: {} as Record<string, unknown> }));
@@ -100,6 +101,7 @@ beforeEach(() => {
   ensureRepository.mockResolvedValue({ initialized: true, detail: null });
   deployWebapp.mockResolvedValue(undefined);
   registerOrStartServerApp.mockResolvedValue({ ok: true });
+  installAppDependencies.mockResolvedValue({ ok: true, installed: null });
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -242,6 +244,58 @@ describe("installClawboxApp", () => {
     expect(out).toMatchObject({ ok: true, registered: false, webappUrl: null });
     expect(out.ok && out.detail).toContain("Nothing answered on port 4230.");
     expect(fs.existsSync(path.join(projectsRoot, "hello-app", "clawbox.json"))).toBe(true);
+  });
+
+  // A package never carries node_modules: a `next build && next start` used to
+  // exit 127 on the box, and the Store said only "exit code 127".
+  const NEXT_SERVER = [
+    file("clawbox.json", JSON.stringify({ name: "Next App", kind: "server", port: 4240, start: "bun run serve" })),
+    file("package.json", JSON.stringify({ name: "next-app", scripts: { serve: "next build && next start -p 4240" }, dependencies: { next: "15.0.0" } })),
+  ];
+
+  it("installs a server app's dependencies before it starts the server", async () => {
+    installAppDependencies.mockResolvedValue({ ok: true, installed: "bun" });
+    const pkg = await packageOf(NEXT_SERVER);
+    fetchMock.mockResolvedValue(served(pkg));
+    const out = await installClawboxApp(listing(pkg, { kind: "server" }));
+    expect(out).toMatchObject({ ok: true, registered: true, webappUrl: "/apps/hello-app/" });
+    const dir = path.join(projectsRoot, "hello-app");
+    expect(installAppDependencies).toHaveBeenCalledWith(expect.objectContaining({ directory: dir }));
+    expect(installAppDependencies.mock.invocationCallOrder[0]).toBeLessThan(registerOrStartServerApp.mock.invocationCallOrder[0]);
+  });
+
+  it("starts nothing when the dependencies would not install, and says which tool failed and what it printed", async () => {
+    installAppDependencies.mockResolvedValue({ ok: false, detail: "bun install failed: error: GET https://registry.example/next - 404" });
+    const pkg = await packageOf(NEXT_SERVER);
+    fetchMock.mockResolvedValue(served(pkg));
+    const out = await installClawboxApp(listing(pkg, { kind: "server" }));
+    expect(out).toMatchObject({ ok: true, registered: false, webappUrl: null, alreadyInstalled: false });
+    expect(out.ok && out.detail).toContain("bun install failed: error: GET https://registry.example/next - 404");
+    expect(out.ok && out.detail).not.toContain("exit code 127");
+    expect(registerOrStartServerApp).not.toHaveBeenCalled();
+    // The files stay, so Install again retries over them.
+    expect(fs.existsSync(path.join(projectsRoot, "hello-app", "package.json"))).toBe(true);
+  });
+
+  it("installs the dependencies on Install again, which is how an app installed before this recovers", async () => {
+    installAppDependencies.mockResolvedValueOnce({ ok: false, detail: "bun install failed: error: offline" });
+    const pkg = await packageOf(NEXT_SERVER);
+    fetchMock.mockResolvedValue(served(pkg));
+    expect(await installClawboxApp(listing(pkg, { kind: "server" }))).toMatchObject({ registered: false });
+    const again = await installClawboxApp(listing(pkg, { kind: "server" }));
+    expect(again).toMatchObject({ ok: true, alreadyInstalled: true, registered: true });
+    expect(installAppDependencies).toHaveBeenCalledTimes(2);
+    expect(registerOrStartServerApp).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs no install for an app the box does not start", async () => {
+    const pkg = await packageOf([...WEBAPP, file("package.json", "{}")]);
+    fetchMock.mockResolvedValue(served(pkg));
+    expect(await installClawboxApp(listing(pkg))).toMatchObject({ ok: true, registered: true });
+    const noStart = await packageOf([file("clawbox.json", JSON.stringify({ name: "Server", port: 4240 })), file("package.json", "{}")]);
+    fetchMock.mockResolvedValue(served(noStart));
+    await installClawboxApp(listing(noStart, { slug: "other-app" }));
+    expect(installAppDependencies).not.toHaveBeenCalled();
   });
 
   it("gives a tool a page saying where its files are", async () => {

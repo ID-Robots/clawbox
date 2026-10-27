@@ -38,6 +38,15 @@
  * alone, `npm start` on such a box exited 127 before anything listened. When a
  * start does stop, what it printed is in the answer (`startOutputLine`), so
  * the run's feed says "bun: not found" rather than only an exit code.
+ *
+ * WHAT IT NEEDS FIRST. A project with a package.json and no node_modules gets
+ * its dependencies installed before the start (`installAppDependencies`): a
+ * Store package never carries node_modules (the publisher leaves it out), and
+ * `next build && next start` without them is the shell's exit 127. The same
+ * install is what the Store's install calls before it registers a server app,
+ * so Install again recovers an app installed before the box did this. An
+ * install that fails starts nothing, and says which tool failed and what it
+ * printed last.
  */
 import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
@@ -150,6 +159,253 @@ export function startSearchPath(searchPath: string, places: ToolchainPlaces): st
   return dirs.join(":");
 }
 
+/**
+ * The environment a project's own command runs with: this user, the PATH
+ * `startSearchPath` builds, and nothing else of the web server's — its
+ * NODE_ENV=production would make an install leave out the devDependencies a
+ * `next build` needs.
+ */
+function appCommandEnv(searchPath: string, directory: string, extra: Record<string, string> = {}): Record<string, string> {
+  const home = process.env.HOME || directory;
+  const user = process.env.USER || process.env.LOGNAME || path.basename(home);
+  return scopeEnv({
+    HOME: home,
+    USER: user,
+    LOGNAME: user,
+    PATH: startSearchPath(searchPath, {
+      home: os.homedir(),
+      execPath: process.execPath,
+      envPath: process.env.PATH ?? "",
+      bunInstall: process.env.BUN_INSTALL,
+      nvmDir: process.env.NVM_DIR,
+    }),
+    LANG: process.env.LANG || "C.UTF-8",
+    ...extra,
+  });
+}
+
+/** How long a dependency install may take. A cold install of `next` and its build tools on a Jetson is minutes. */
+export const DEPENDENCY_INSTALL_TIMEOUT_MS = 10 * 60_000;
+
+export type DependencyTool = "bun" | "npm";
+
+/** How a project's dependencies are installed. */
+export interface DependencyInstallPlan {
+  tool: DependencyTool;
+  /** The binary, resolved on the PATH when it is there; its bare name otherwise (the spawn then says it is missing). */
+  bin: string;
+  args: string[];
+  /** What runs instead when `args` stopped on a lockfile that does not match package.json. */
+  fallback: string[] | null;
+}
+
+const BUN_LOCKFILES = ["bun.lock", "bun.lockb"];
+const NPM_LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"];
+const NPM_QUIET = ["--no-audit", "--no-fund"];
+/** bun's frozen install and `npm ci`, refusing a lockfile package.json has moved past. */
+const LOCKFILE_MISMATCH_RE = /lockfile had changes|lockfile is frozen|package\.json and package-lock\.json[^\n]*in sync/i;
+
+function isFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** An executable called `name` in one of the PATH's folders, or null. */
+function findOnPath(name: string, searchPath: string): string | null {
+  for (const dir of searchPath.split(":")) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const file = path.join(dir, name);
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      if (fs.statSync(file).isFile()) return file;
+    } catch {
+      // Not in this one.
+    }
+  }
+  return null;
+}
+
+function packageManagerOf(directory: string): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf-8")) as { packageManager?: unknown };
+    return typeof pkg?.packageManager === "string" ? pkg.packageManager.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Which tool installs a project's dependencies, and how. Exported for its test.
+ *
+ * bun when the project carries bun's lockfile or names bun as its
+ * `packageManager`; npm when it carries npm's lockfile; otherwise bun when the
+ * PATH has it, and npm when it does not. A lockfile is installed from as it
+ * is (`--frozen-lockfile`, `npm ci`), with a plain install to fall back on
+ * when package.json has moved past it.
+ */
+export function dependencyInstallPlan(directory: string, searchPath: string): DependencyInstallPlan {
+  const has = (name: string) => isFile(path.join(directory, name));
+  const bunLock = BUN_LOCKFILES.some(has);
+  const npmLock = NPM_LOCKFILES.some(has);
+  const bun = findOnPath("bun", searchPath);
+  const tool: DependencyTool = bunLock || packageManagerOf(directory).startsWith("bun")
+    ? "bun"
+    : npmLock ? "npm" : bun ? "bun" : "npm";
+  if (tool === "bun") {
+    return { tool, bin: bun ?? "bun", args: bunLock ? ["install", "--frozen-lockfile"] : ["install"], fallback: bunLock ? ["install"] : null };
+  }
+  return {
+    tool,
+    bin: findOnPath("npm", searchPath) ?? "npm",
+    args: npmLock ? ["ci", ...NPM_QUIET] : ["install", ...NPM_QUIET],
+    fallback: npmLock ? ["install", ...NPM_QUIET] : null,
+  };
+}
+
+/** A package.json and nothing at node_modules — not even a link, which an install would write through. */
+function needsDependencyInstall(directory: string): boolean {
+  if (!isFile(path.join(directory, "package.json"))) return false;
+  try {
+    fs.lstatSync(path.join(directory, "node_modules"));
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** How many of an install's last lines the answer carries, and how long they may be together. */
+const INSTALL_TAIL_LINES = 3;
+const INSTALL_TAIL_MAX = 300;
+/** npm's pointer to its own log file: a path, not a reason. */
+const NPM_LOG_POINTER_RE = /complete log of this run/i;
+
+/** The last lines an install printed, as one line. Exported for its test. */
+export function installOutputTail(output: string): string | null {
+  const lines = output
+    .replace(ANSI_RE, "")
+    .split(/\r?\n|\r/)
+    .map((line) => line.replace(CONTROL_RE, " ").replace(/\s+/g, " ").trim())
+    .filter((line) => line && !NPM_LOG_POINTER_RE.test(line));
+  if (lines.length === 0) return null;
+  const tail = lines.slice(-INSTALL_TAIL_LINES).join(" · ");
+  return tail.length > INSTALL_TAIL_MAX ? `…${tail.slice(-(INSTALL_TAIL_MAX - 1))}` : tail;
+}
+
+interface InstallRun {
+  code: number | null;
+  timedOut: boolean;
+  /** The binary was not there to run. */
+  missing: boolean;
+  output: string;
+}
+
+/** How long, after an install exits, its output may take to arrive before the answer is given without the rest. */
+const OUTPUT_DRAIN_MS = 1_000;
+
+/** One install command, its output kept to its last few screens. Never rejects. */
+function runInstall(bin: string, args: string[], directory: string, env: Record<string, string>, timeoutMs: number): Promise<InstallRun> {
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      // Its own process group, so a timeout ends the scripts it ran too.
+      child = spawn(/* turbopackIgnore: true */ bin, args, {
+        cwd: directory,
+        env: env as unknown as NodeJS.ProcessEnv,
+        detached: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      resolve({ code: null, timedOut: false, missing: false, output: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (typeof child.pid === "number") void endProcessGroup(child.pid);
+    }, timeoutMs);
+    const finish = (run: Omit<InstallRun, "output" | "timedOut">) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...run, timedOut, output });
+    };
+    const keep = (chunk: Buffer) => { output = (output + chunk.toString("utf-8")).slice(-OUTPUT_TAIL_BYTES); };
+    child.stdout?.on("data", keep);
+    child.stderr?.on("data", keep);
+    child.once("error", (err) => finish({ code: null, missing: (err as NodeJS.ErrnoException).code === "ENOENT" }));
+    // `close` waits for the output; a script that left a process holding the
+    // pipe would keep it from ever coming, so `exit` answers shortly after.
+    child.once("close", (code) => finish({ code, missing: false }));
+    child.once("exit", (code) => { setTimeout(() => finish({ code, missing: false }), OUTPUT_DRAIN_MS).unref(); });
+  });
+}
+
+function installFailure(plan: DependencyInstallPlan, args: string[], run: InstallRun, timeoutMs: number): string {
+  const label = `${plan.tool} ${args[0]}`;
+  if (run.missing) return `${label} failed: ${plan.tool} is not installed on this box.`;
+  if (run.timedOut) {
+    const limit = timeoutMs >= 60_000 ? `${Math.round(timeoutMs / 60_000)} min` : `${Math.round(timeoutMs / 1000)} s`;
+    return `${label} failed: it did not finish within ${limit}.`;
+  }
+  const said = installOutputTail(run.output);
+  if (said) return `${label} failed: ${said}`;
+  return `${label} failed: it stopped${run.code === null ? "" : ` with exit code ${run.code}`} and printed nothing.`;
+}
+
+export type DependencyOutcome = { ok: true; installed: DependencyTool | null } | { ok: false; detail: string };
+
+export interface InstallDependenciesInput {
+  directory: string;
+  /** The run's PATH, as for a start: `startSearchPath` adds where node and bun live beyond it. */
+  searchPath: string;
+  /** For the tests: a shorter limit. */
+  timeoutMs?: number;
+}
+
+const installing = new Map<string, Promise<DependencyOutcome>>();
+
+/**
+ * Install a project's dependencies when it has a package.json and no
+ * node_modules; nothing at all otherwise (`installed: null`). One install per
+ * folder at a time: a second caller gets the first one's answer. Never throws.
+ */
+export function installAppDependencies(input: InstallDependenciesInput): Promise<DependencyOutcome> {
+  const key = path.resolve(input.directory);
+  const running = installing.get(key);
+  if (running) return running;
+  const attempt = installOnce({ ...input, directory: key })
+    .catch((err): DependencyOutcome => ({ ok: false, detail: `Installing the app's dependencies failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) }))
+    .finally(() => { installing.delete(key); });
+  installing.set(key, attempt);
+  return attempt;
+}
+
+async function installOnce(input: InstallDependenciesInput): Promise<DependencyOutcome> {
+  const { directory } = input;
+  if (!needsDependencyInstall(directory)) return { ok: true, installed: null };
+  const env = appCommandEnv(input.searchPath, directory);
+  const plan = dependencyInstallPlan(directory, env.PATH);
+  const timeoutMs = input.timeoutMs ?? DEPENDENCY_INSTALL_TIMEOUT_MS;
+  const began = Date.now();
+  let args = plan.args;
+  let run = await runInstall(plan.bin, args, directory, env, timeoutMs);
+  if (run.code !== 0 && !run.timedOut && !run.missing && plan.fallback && LOCKFILE_MISMATCH_RE.test(run.output)) {
+    args = plan.fallback;
+    run = await runInstall(plan.bin, args, directory, env, Math.max(timeoutMs - (Date.now() - began), 1_000));
+  }
+  if (run.code === 0 && !run.timedOut) return { ok: true, installed: plan.tool };
+  // A half-made node_modules would read as installed next time, and the
+  // retry would start straight into the same exit 127.
+  await fs.promises.rm(path.join(directory, "node_modules"), { recursive: true, force: true }).catch(() => undefined);
+  return { ok: false, detail: installFailure(plan, args, run, timeoutMs) };
+}
+
 /** How much of a failed start's log is read back: its last few screens. */
 const OUTPUT_TAIL_BYTES = 16_384;
 /** How long the line taken from it may be. The feed caps a whole step at 160 characters anyway. */
@@ -242,24 +498,14 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
   const stat = await fs.promises.stat(directory).catch(() => null);
   if (!stat?.isDirectory()) return { ok: false, detail: "The project folder is gone." };
 
+  // Before anything is spawned: a start without its dependencies only ever
+  // exits 127, and this is what lets a retry recover from that.
+  const deps = await installAppDependencies({ directory, searchPath });
+  if (!deps.ok) return { ok: false, detail: deps.detail };
+
   const logFile = appServerLogPath(id);
   await fs.promises.mkdir(path.dirname(logFile), { recursive: true });
-  const home = process.env.HOME || directory;
-  const user = process.env.USER || process.env.LOGNAME || path.basename(home);
-  const env = scopeEnv({
-    HOME: home,
-    USER: user,
-    LOGNAME: user,
-    PATH: startSearchPath(searchPath, {
-      home: os.homedir(),
-      execPath: process.execPath,
-      envPath: process.env.PATH ?? "",
-      bunInstall: process.env.BUN_INSTALL,
-      nvmDir: process.env.NVM_DIR,
-    }),
-    LANG: process.env.LANG || "C.UTF-8",
-    PORT: String(port),
-  });
+  const env = appCommandEnv(searchPath, directory, { PORT: String(port) });
 
   const probe = input.noScope ? null : await probeSystemdRun();
   const scoped = probe?.available && probe.path ? buildAppScopeArgv(probe.path, id, Date.now().toString(36), command) : null;

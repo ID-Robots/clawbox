@@ -211,6 +211,137 @@ describe("a box whose node is not on the run's fixed PATH", () => {
   });
 });
 
+describe("a project's dependencies, installed before its start", () => {
+  // A Store package never carries node_modules, so `next build && next start`
+  // exited 127 on the box. The stand-ins for bun and npm below record how they
+  // were called and do what each test needs.
+  let tools: string;
+  let calls: string;
+
+  beforeEach(() => {
+    tools = path.join(base, "tools");
+    calls = path.join(base, "calls.log");
+    fs.mkdirSync(tools, { recursive: true });
+  });
+
+  function fakeTool(name: string, body: string): void {
+    fs.writeFileSync(path.join(tools, name), `#!/bin/sh\necho "${name} $*" >> "${calls}"\n${body}\n`, { mode: 0o755 });
+  }
+
+  const called = () => (fs.existsSync(calls) ? fs.readFileSync(calls, "utf-8").trim().split("\n") : []);
+  const withPackage = (extra: Record<string, unknown> = {}) =>
+    fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "next-app", scripts: { serve: "next build && next start" }, ...extra }));
+
+  it("picks bun or npm from the lockfile, then packageManager, then what the PATH has", () => {
+    fakeTool("bun", "exit 0");
+    const empty = path.join(base, "empty");
+    fs.mkdirSync(empty);
+    const planFor = (files: Record<string, string>, searchPath: string) => {
+      const dir = fs.mkdtempSync(path.join(base, "plan-"));
+      for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body);
+      const { tool, args, fallback } = start.dependencyInstallPlan(dir, searchPath);
+      return { tool, args, fallback };
+    };
+    const pkg = "{}";
+    const frozenBun = { tool: "bun", args: ["install", "--frozen-lockfile"], fallback: ["install"] };
+    expect(planFor({ "package.json": pkg, "bun.lock": "" }, empty)).toEqual(frozenBun);
+    expect(planFor({ "package.json": pkg, "bun.lockb": "" }, empty)).toEqual(frozenBun);
+    // bun's lockfile wins over npm's.
+    expect(planFor({ "package.json": pkg, "bun.lock": "", "package-lock.json": "{}" }, empty)).toEqual(frozenBun);
+    expect(planFor({ "package.json": JSON.stringify({ packageManager: "bun@1.2.0" }), "package-lock.json": "{}" }, empty)).toEqual({ tool: "bun", args: ["install"], fallback: null });
+    expect(planFor({ "package.json": pkg, "package-lock.json": "{}" }, tools)).toEqual({ tool: "npm", args: ["ci", "--no-audit", "--no-fund"], fallback: ["install", "--no-audit", "--no-fund"] });
+    expect(planFor({ "package.json": pkg }, tools)).toEqual({ tool: "bun", args: ["install"], fallback: null });
+    expect(planFor({ "package.json": pkg }, empty)).toEqual({ tool: "npm", args: ["install", "--no-audit", "--no-fund"], fallback: null });
+    // The bun it runs is the one on the PATH.
+    expect(start.dependencyInstallPlan(project, tools).bin).toBe(path.join(tools, "bun"));
+  });
+
+  it("installs nothing when node_modules is already there, or there is no package.json", async () => {
+    fakeTool("bun", "mkdir -p node_modules");
+    const input = { directory: project, searchPath: `${tools}:${searchPath}` };
+    expect(await start.installAppDependencies(input)).toEqual({ ok: true, installed: null });
+    withPackage();
+    fs.mkdirSync(path.join(project, "node_modules"));
+    expect(await start.installAppDependencies(input)).toEqual({ ok: true, installed: null });
+    expect(called()).toEqual([]);
+  });
+
+  it("installs from bun's lockfile, and falls back to a plain install when package.json has moved past it", async () => {
+    withPackage();
+    fs.writeFileSync(path.join(project, "bun.lock"), "{}");
+    fakeTool("bun", 'if [ "$2" = "--frozen-lockfile" ]; then echo "error: lockfile had changes, but lockfile is frozen" >&2; exit 1; fi\nmkdir -p node_modules/next');
+    const outcome = await start.installAppDependencies({ directory: project, searchPath: `${tools}:${searchPath}` });
+    expect(outcome).toEqual({ ok: true, installed: "bun" });
+    expect(called()).toEqual(["bun install --frozen-lockfile", "bun install"]);
+    expect(fs.existsSync(path.join(project, "node_modules", "next"))).toBe(true);
+  });
+
+  it("runs npm ci for npm's lockfile, with the same fallback", async () => {
+    withPackage();
+    fs.writeFileSync(path.join(project, "package-lock.json"), "{}");
+    fakeTool("npm", 'if [ "$1" = "ci" ]; then echo "npm error \\`npm ci\\` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync." >&2; exit 1; fi\nmkdir -p node_modules');
+    expect(await start.installAppDependencies({ directory: project, searchPath: `${tools}:${searchPath}` })).toEqual({ ok: true, installed: "npm" });
+    expect(called()).toEqual(["npm ci --no-audit --no-fund", "npm install --no-audit --no-fund"]);
+  });
+
+  it("says which tool failed and what it printed last, and leaves no half-made node_modules", async () => {
+    withPackage();
+    fakeTool("bun", 'mkdir -p node_modules/.cache\necho "bun install v1.2.0"\necho "error: GET https://registry.example/next - 404" >&2\nexit 1');
+    const outcome = await start.installAppDependencies({ directory: project, searchPath: `${tools}:${searchPath}` });
+    expect(outcome).toEqual({ ok: false, detail: "bun install failed: bun install v1.2.0 · error: GET https://registry.example/next - 404" });
+    // So the next try installs again rather than starting into the same 127.
+    expect(fs.existsSync(path.join(project, "node_modules"))).toBe(false);
+  });
+
+  it("ends an install that does not finish in time, with what it started", async () => {
+    withPackage();
+    fakeTool("bun", "echo $$ > install.pid\nexec sleep 300");
+    const outcome = await start.installAppDependencies({ directory: project, searchPath: `${tools}:${searchPath}`, timeoutMs: 1_000 });
+    expect(outcome).toEqual({ ok: false, detail: "bun install failed: it did not finish within 1 s." });
+    const pid = Number(fs.readFileSync(path.join(project, "install.pid"), "utf-8"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("starts nothing when the install fails, and the answer says why instead of exit code 127", async () => {
+    withPackage();
+    fakeTool("bun", 'echo "error: GET https://registry.example/next - 404" >&2\nexit 1');
+    const port = await freePort();
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath: `${tools}:${searchPath}`, noScope: true });
+    expect(outcome).toMatchObject({ ok: false, reason: "not_listening", detail: "bun install failed: error: GET https://registry.example/next - 404" });
+    expect(fs.existsSync(path.join(project, "server.pid"))).toBe(false);
+  });
+
+  it("installs, then starts, on a retry of an app installed without its dependencies", async () => {
+    withPackage();
+    fakeTool("bun", "mkdir -p node_modules");
+    const port = await freePort();
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath: `${tools}:${searchPath}`, noScope: true });
+    expect(outcome).toEqual({ ok: true });
+    expect(called()).toEqual(["bun install"]);
+  });
+});
+
+describe("the last lines an install printed", () => {
+  it("leaves out npm's pointer to its log file, colour and blank lines", () => {
+    const npm = [
+      "\x1b[31mnpm error\x1b[39m code E404",
+      "npm error 404 Not Found - GET https://registry.example/nope - Not found",
+      "",
+      "npm error 404  'nope@*' is not in this registry.",
+      "npm error A complete log of this run can be found in: /tmp/npm-cache/_logs/debug-0.log",
+    ].join("\n");
+    expect(start.installOutputTail(npm)).toBe("npm error code E404 · npm error 404 Not Found - GET https://registry.example/nope - Not found · npm error 404 'nope@*' is not in this registry.");
+    expect(start.installOutputTail("\n \n")).toBeNull();
+  });
+
+  it("is bounded, and keeps the end", () => {
+    const tail = start.installOutputTail(`error: ${"x".repeat(5_000)} the end`)!;
+    expect(tail.length).toBeLessThanOrEqual(300);
+    expect(tail.endsWith("the end")).toBe(true);
+  });
+});
+
 describe("the PATH a start command runs with", () => {
   it("keeps the run's own PATH in its order and adds where node and bun live beyond it", () => {
     for (const version of ["v18.20.4", "v22.11.0", "v20.9.0"]) fs.mkdirSync(path.join(base, ".nvm", "versions", "node", version, "bin"), { recursive: true });
