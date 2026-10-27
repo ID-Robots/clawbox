@@ -129,9 +129,9 @@ describe("promptContext", () => {
 
 describe("the device store reader", () => {
   it("resolves <ClawBox root>/data/config.json as the gateway's environment gives it", () => {
-    expect(deviceStoreFile({ CLAWBOX_ROOT: "/srv/cb" }, "/home/x")).toBe(path.join("/srv/cb", "data", "config.json"));
-    expect(deviceStoreFile({ CLAWBOX_HOME_DIR: "/home/y" }, "/home/x")).toBe(path.join("/home/y", "clawbox", "data", "config.json"));
-    expect(deviceStoreFile({}, "/home/x")).toBe(path.join("/home/x", "clawbox", "data", "config.json"));
+    expect(deviceStoreFile({ CLAWBOX_ROOT: "/srv/cb" }, "$HOME")).toBe(path.join("/srv/cb", "data", "config.json"));
+    expect(deviceStoreFile({ CLAWBOX_HOME_DIR: "~/other" }, "$HOME")).toBe(path.join("~/other", "clawbox", "data", "config.json"));
+    expect(deviceStoreFile({}, "$HOME")).toBe(path.join("$HOME", "clawbox", "data", "config.json"));
   });
 
   it("reads a pick, and a new pick after the store is replaced, with no restart", async () => {
