@@ -399,6 +399,7 @@ describe("readiness", () => {
 
 describe("spawning", () => {
   it("puts the run in a scope of its own and records the unit while it works", async () => {
+    const units: UnitLib = await import("@/lib/coding-run-unit");
     installSystemdRun();
     installSystemctl("active");
     writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
@@ -415,8 +416,11 @@ describe("spawning", () => {
     const asked = spawnCalls();
     expect(asked[0]).toContain("--user --scope");
     expect(asked[0]).toContain(`--unit=clawbox-run-${started.id}-`);
-    expect(asked[0]).toContain("MemoryHigh=3G");
-    expect(asked[0]).toContain("MemoryMax=4G");
+    // The caps are derived from this board's RAM (box-memory-policy.ts), so
+    // the test asks the module rather than pinning a size that is only right
+    // on one class of board.
+    expect(asked[0]).toContain(`MemoryHigh=${units.RUN_MEMORY_HIGH}`);
+    expect(asked[0]).toContain(`MemoryMax=${units.RUN_MEMORY_MAX}`);
     expect(asked[0]).toContain("CPUWeight=20");
     expect(asked[0]).toContain("IOWeight=20");
     expect(asked[0]).toContain("--nice=10");

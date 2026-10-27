@@ -56,6 +56,54 @@ export const HISTORY_LIMIT = 50;
  */
 export const SPOKEN_HISTORY_TIMEOUT_MS = 10_000;
 
+/**
+ * The DELTA half of `chat.history`, and the reason a read no longer has to pull
+ * fifty messages to learn that one arrived.
+ *
+ * The RPC takes an optional `cursor`. A cursor shaped `history-page:…` asks for a
+ * WINDOW of the transcript; any other cursor is a delta cursor, and the gateway
+ * answers with only what was appended since it:
+ *
+ *   { kind: "delta", messages, deltaCursor, … }  — what happened since
+ *   { kind: "reset" }                           — "I cannot tell you; read a page"
+ *
+ * A FULL page carries `deltaCursor` too, so a client's first read arms this and
+ * every read after it is the difference.
+ *
+ * A delta row is an ENVELOPE — `{ sessionKey, message, messageId, messageSeq,
+ * runId }` — around the same message object a page carries. `deltaHistoryRows`
+ * unwraps it, so the merge feeds `projectGatewayHistory` rows of one shape.
+ *
+ * OPTIONAL CAPABILITY, both ways: a core that predates the cursor REJECTS the
+ * param (the RPC validates what it is given) and one that predates the delta
+ * simply answers a page. The first is retried once without the cursor, the
+ * second is recognised by the absence of `kind` — so on an old box this is
+ * exactly the full read it always was, and no caller has to know which box it
+ * is talking to.
+ */
+/** The cursor that continues a delta, when the gateway offered one. */
+function asDeltaCursor(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * The rows of a delta, unwrapped from their envelopes.
+ *
+ * A row with no `message` field is already a message — the shape a page returns,
+ * and the shape a core that answers deltas without envelopes uses — so it is
+ * passed through rather than dropped.
+ */
+export function deltaHistoryRows(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((row) => {
+    if (row && typeof row === "object" && "message" in row) {
+      const inner = (row as { message?: unknown }).message;
+      if (inner && typeof inner === "object") return inner;
+    }
+    return row;
+  });
+}
+
 /** Strip gateway wrapper tags like `<final>`, `<thinking>`, etc. */
 export function stripGatewayTags(text: string): string {
   return text.replace(/<\/?(?:final|thinking|response|answer|reply)>/gi, "").trim();
@@ -322,6 +370,40 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     private readonly fetchImpl: FetchLike = (input, init) => fetch(input, init),
   ) {}
 
+  /**
+   * The last raw rows this adapter read for a session, and the gateway cursor
+   * that continues them.
+   *
+   * RAW, not projected: the six shipped fixes in `projectGatewayHistory` are
+   * the reason a merge must not re-derive anything, so a delta is appended to
+   * rows and the lot is projected again — one transcript, one rule set. Keyed
+   * by session, because a tab switch is a different transcript and a cursor
+   * pointing into the old one would graft two conversations together.
+   */
+  private historyDelta: { sessionKey: string; rows: unknown[]; cursor: string } | null = null;
+
+  /**
+   * Which cleaned transcript `historyDelta` belongs to.
+   *
+   * A read is a round trip, and the owner can clear or delete the session while
+   * one is in flight (a reset is two requests of its own; the spoken-history
+   * half is a third). Without this, the read finishes AFTER the reset and puts
+   * the forgotten rows back as the base, and the next delta appends the new
+   * conversation onto a transcript the owner believes is gone.
+   */
+  private historyGeneration = 0;
+
+  /**
+   * The order reads started in, and the one whose base is current.
+   *
+   * Two reads can overlap — the panel after a push, the catch-up on open — and
+   * the slower one may carry the older cursor. Only a read newer than the last
+   * committed one replaces the base; a stale arrival returns its own rows to
+   * its caller and leaves the cache alone.
+   */
+  private historyReadSeq = 0;
+  private historyCommittedSeq = 0;
+
   connect(): Promise<void> {
     return this.link.open();
   }
@@ -397,6 +479,13 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     } catch (err) {
       throw gatewayError(err);
     }
+    // The rows behind this cursor are the conversation that was just forgotten.
+    // Kept, they would be the base a delta appends to, and the next read would
+    // put the cleared transcript back on screen.
+    this.historyDelta = null;
+    // A read that started before this reset must not put those rows back.
+    this.historyGeneration += 1;
+    this.historyCommittedSeq = this.historyReadSeq;
   }
 
   /**
@@ -432,6 +521,15 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    * aborted first and the delete gets one paced retry.
    */
   async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
+    // The transcript behind this key is going away; a cursor pointing into it
+    // would graft a deleted conversation onto whatever takes its place.
+    if (this.historyDelta?.sessionKey === key) this.historyDelta = null;
+    // Same reason as the reset: a read in flight for this key belongs to a
+    // transcript that is about to be deleted.
+    if (key === this.link.sessionKey()) {
+      this.historyGeneration += 1;
+      this.historyCommittedSeq = this.historyReadSeq;
+    }
     if (opts.running) {
       await this.link.request("chat.abort", { sessionKey: key }).catch(() => { /* best effort */ });
     }
@@ -444,14 +542,18 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
   }
 
   async loadHistory(options?: HistoryOptions): Promise<HistoryPage> {
-    let result: Record<string, unknown>;
+    const sessionKey = this.link.sessionKey();
+    const limit = options?.limit ?? HISTORY_LIMIT;
+    const generation = this.historyGeneration;
+    const readSeq = ++this.historyReadSeq;
+    let rows: unknown[];
+    let cursor: string | null;
     let spokenPayload: unknown;
     try {
-      [result, spokenPayload] = await Promise.all([
-        this.link.request("chat.history", {
-          sessionKey: this.link.sessionKey(),
-          limit: options?.limit ?? HISTORY_LIMIT,
-        }) as Promise<Record<string, unknown>>,
+      // Both halves at once: the transcript's rows and the durable spoken-reply
+      // supplement are independent, and the supplement is a local route.
+      [{ rows, cursor }, spokenPayload] = await Promise.all([
+        this.readHistoryRows(sessionKey, limit),
         this.fetchImpl("/setup-api/chat/spoken-history", {
           cache: "no-store",
           // `.catch` covers a REJECTED request; it does nothing for one that
@@ -466,8 +568,86 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     } catch (err) {
       throw gatewayError(err);
     }
-    const msgs = (result.messages as unknown[]) || [];
-    return projectGatewayHistory(msgs, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
+    // The owner cleared or deleted the session while this read was out: these
+    // rows are the conversation that was just forgotten, so they are neither
+    // cached nor handed back to be painted.
+    if (generation !== this.historyGeneration) {
+      return projectGatewayHistory([], { items: [] }, { imageWaitFrom: options?.imageWaitFrom });
+    }
+    // Armed only when the gateway says it can continue from here. A box that
+    // answered a page WITHOUT a cursor gets the same page next time, exactly as
+    // before. Only the newest read may arm it: a slower older read that landed
+    // after a newer one would otherwise set the base back a step.
+    if (readSeq > this.historyCommittedSeq) {
+      this.historyCommittedSeq = readSeq;
+      this.historyDelta = cursor ? { sessionKey, rows, cursor } : null;
+    }
+    return projectGatewayHistory(rows, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
+  }
+
+  /**
+   * The raw rows of the transcript, and the cursor that continues them.
+   *
+   * A delta read when the gateway gave us a cursor to spend, a full page
+   * otherwise — and a full page again the moment the delta path says it cannot
+   * be trusted (`kind: "reset"`, or a delta we have no base for). The rows are
+   * capped at `limit` because a delta never shrinks them: a page carries the
+   * last `limit` messages, and both the image-failure window and the
+   * spoken-reply fold in the projection assume that same window.
+   */
+  private async readHistoryRows(
+    sessionKey: string,
+    limit: number,
+  ): Promise<{ rows: unknown[]; cursor: string | null }> {
+    const base = this.historyDelta?.sessionKey === sessionKey ? this.historyDelta : null;
+    let result = await this.requestHistory(sessionKey, limit, base?.cursor ?? null);
+    // "I cannot describe what changed" — the session was cleared, the gateway
+    // restarted, the cursor aged out — or a delta with nothing to merge it
+    // into. Both are a page, not a failure.
+    if (result.kind === "reset" || (result.kind === "delta" && !base)) {
+      result = await this.requestHistory(sessionKey, limit, null);
+    }
+    if (result.kind === "delta" && base) {
+      const appended = deltaHistoryRows(result.messages);
+      return {
+        rows: [...base.rows, ...appended].slice(-limit),
+        cursor: asDeltaCursor(result.deltaCursor),
+      };
+    }
+    return {
+      rows: Array.isArray(result.messages) ? result.messages : [],
+      cursor: asDeltaCursor(result.deltaCursor),
+    };
+  }
+
+  /**
+   * One `chat.history` RPC, with the delta cursor when there is one to spend.
+   *
+   * A core that predates the parameter REJECTS it rather than ignoring it: the
+   * RPC validates what it is given. One retry without the cursor, which answers
+   * with a page — and a page re-arms the base from its own result, so from then
+   * on this adapter reads pages, which is what it did before the cursor existed.
+   * Without that retry an old gateway would answer the chat's very first
+   * history read with an error, and the transcript would never load at all.
+   *
+   * The cached base is deliberately NOT dropped here: if the retry fails too the
+   * read failed for its own reasons (the socket went away, the box restarted),
+   * and the rows are still a sound base for the next attempt. Clearing them on a
+   * transient error would make the next read a full page for no reason.
+   */
+  private async requestHistory(
+    sessionKey: string,
+    limit: number,
+    cursor: string | null,
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { sessionKey, limit };
+    if (cursor) params.cursor = cursor;
+    try {
+      return (await this.link.request("chat.history", params)) as Record<string, unknown>;
+    } catch (err) {
+      if (!cursor) throw err;
+      return (await this.link.request("chat.history", { sessionKey, limit })) as Record<string, unknown>;
+    }
   }
 
   /**

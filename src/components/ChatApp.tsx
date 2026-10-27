@@ -464,6 +464,27 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
+  /**
+   * A push-driven read that arrived while this page was in a background tab,
+   * and that ONE read will therefore be owed when it comes back.
+   *
+   * A hidden tab is pushed exactly as much as a visible one, and each append
+   * used to cost a full `chat.history` — the same 50 messages, and the same
+   * synchronous scan behind them — to repaint a page nobody was looking at. So
+   * the read waits: one flag, not one per push, paid off by the catch-up effect
+   * below. ChatPopup.tsx carries the long form of the argument; this page has no
+   * open/closed state of its own, so the tab being visible IS "someone is
+   * looking".
+   */
+  const historyCatchUpOwedRef = useRef(false)
+  /**
+   * Whether a push-driven history read has to wait: this page is a background
+   * tab, so anything it reads is for nobody.
+   */
+  const historyReadMustWait = useCallback((): boolean =>
+    // Nothing here runs on the server, but the guard keeps a shallow render
+    // from throwing rather than silently reading the transcript.
+    typeof document !== 'undefined' && document.visibilityState !== 'visible', [])
   // The coalesced re-read a `session.message` push schedules: one read per
   // burst of appends, the same 400 ms the mascot chat waits (TASK-1364,
   // TASK-1372). Cleared on unmount.
@@ -1046,7 +1067,24 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           // `chat.history` is shown from the push itself.
           const spoken = pushedSpokenReply(push.message)
           if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
-          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void loadHistory() })
+          // A push only means the stored transcript moved: reading it for a
+          // background tab is pure cost, so the append is owed ONCE and paid
+          // when the tab comes forward (see `historyCatchUpOwedRef`).
+          if (historyReadMustWait()) {
+            historyCatchUpOwedRef.current = true
+            return
+          }
+          // Coalesce the burst an agent turn produces into one read — and
+          // re-check the gate when it fires, because the tab can go hidden
+          // inside the delay: the read would then be for an empty room, so it
+          // joins the one owed read instead.
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => {
+            if (historyReadMustWait()) {
+              historyCatchUpOwedRef.current = true
+              return
+            }
+            void loadHistory()
+          })
           return
         }
 
@@ -1120,11 +1158,21 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
             // a page refresh. Only fires on the ack-only case so normal
             // streamed replies don't pay an extra round-trip.
             if (isAckOnly) {
+              // Same rule as the pushed append above: a hidden tab owes the read
+              // rather than spending it, inside the delay as well as before it.
+              if (historyReadMustWait()) {
+                historyCatchUpOwedRef.current = true
+                return
+              }
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }
               ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
                 ackOnlyHistoryTimerRef.current = null
+                if (historyReadMustWait()) {
+                  historyCatchUpOwedRef.current = true
+                  return
+                }
                 void loadHistory()
               }, 3_000)
             }
@@ -1686,6 +1734,32 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       clearInterval(tick)
     }
   }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
+
+  // The read the suppressed pushes owe, paid once.
+  //
+  // Coming back to this tab is the first moment the appends that landed while
+  // it was hidden can be seen, so ONE read carries all of them — a
+  // `chat.history` per push, for a page in the background, was the cost this
+  // replaces. The effect above serves a harness with no socket at all; this one
+  // serves the gateway's pushes, and the two cannot both be owed on one box
+  // (`isAckOnly` and `session.message` are socket events).
+  useEffect(() => {
+    if (!caps.canListHistory) return
+    const catchUp = () => {
+      if (!historyCatchUpOwedRef.current) return
+      // Re-owed, not lost: a hidden tab is temporary.
+      if (document.visibilityState !== 'visible') return
+      historyCatchUpOwedRef.current = false
+      void loadHistory()
+    }
+    catchUp()
+    document.addEventListener('visibilitychange', catchUp)
+    window.addEventListener('focus', catchUp)
+    return () => {
+      document.removeEventListener('visibilitychange', catchUp)
+      window.removeEventListener('focus', catchUp)
+    }
+  }, [caps.canListHistory, loadHistory])
 
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
   // dependencies, so this is where the socket and the deferred refetch were

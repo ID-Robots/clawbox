@@ -709,4 +709,29 @@ export async function register() {
   } catch (err) {
     console.error('[instrumentation] Could not load the OpenClaw database maintenance scheduler:', err instanceof Error ? err.message : err)
   }
+  try {
+    // The app servers that were on the desktop before the reboot (see
+    // restartServerAppsAtBoot). They used to be restarted by a
+    // `clawbox-app-<id>.service` the OWNER hand-wrote, uncapped and outside
+    // every update; now the box starts them in the same capped scope a settle
+    // uses, from the `start` command it recorded in the app's meta.json.
+    //
+    // Delayed past the boot rush and not awaited: each start waits up to a
+    // minute for its own listener, and Next serves its first request before
+    // register() resolves. An app that is late is late; the desktop icon works
+    // as soon as the app answers.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { restartServerAppsAtBoot } = require('./lib/app-server-start')
+    setTimeout(() => {
+      void (restartServerAppsAtBoot() as Promise<string[]>)
+        .then((started: string[]) => {
+          if (started.length) console.log(`[instrumentation] Restarted app servers: ${started.join(', ')}`)
+        })
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Could not restart the app servers:', err instanceof Error ? err.message : err)
+        })
+    }, 30_000).unref()
+  } catch (err) {
+    console.error('[instrumentation] Could not load the app boot restart:', err instanceof Error ? err.message : err)
+  }
 }

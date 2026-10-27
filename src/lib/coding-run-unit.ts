@@ -28,6 +28,7 @@ import { execFile } from "child_process";
 import fs from "fs";
 import path from "./runtime-path";
 import { promisify } from "util";
+import { runMemoryLimits } from "@/lib/box-memory-policy";
 
 const execFileAsync = promisify(execFile);
 
@@ -35,14 +36,18 @@ const execFileAsync = promisify(execFile);
 export const RUN_UNIT_PREFIX = "clawbox-run-";
 
 /**
- * The memory the box will let one run have. Sane defaults, hardcoded for now:
- * MemoryHigh is the point where the kernel starts reclaiming hard and the run
- * merely slows down, MemoryMax the wall where it is killed. Together they are
- * what stops one runaway harness from taking the desktop, the gateway and the
- * web server down with it — the failure mode this device actually sees.
+ * The memory the box will let one run have. MemoryHigh is the point where the
+ * kernel starts reclaiming hard and the run merely slows down, MemoryMax the
+ * wall where it is killed. Together they are what stops one runaway harness
+ * from taking the desktop, the gateway and the web server down with it — the
+ * failure mode this device actually sees.
+ *
+ * Both are a SHARE of this box's RAM, not a literal: 8 GB boards, 16 GB
+ * laptops and 128 GB Sparks ship the same image. See `box-memory-policy.ts`.
  */
-export const RUN_MEMORY_HIGH = "3G";
-export const RUN_MEMORY_MAX = "4G";
+const RUN_LIMITS = runMemoryLimits();
+export const RUN_MEMORY_HIGH = RUN_LIMITS.high;
+export const RUN_MEMORY_MAX = RUN_LIMITS.max;
 
 /**
  * The CPU and disk share one run gets, against the default 100 every other

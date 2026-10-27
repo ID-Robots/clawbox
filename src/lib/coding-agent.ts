@@ -126,6 +126,7 @@ import {
   type TranscriptPinResult,
 } from "@/lib/coding-run-history";
 import type { ZipSource } from "@/lib/zip-writer";
+import { STATE_FLUSH_MS, STREAM_FLUSH_MS, flushDeadline } from "@/lib/run-flush-cadence";
 import {
   type CodingPauseMeter,
   type CodingPauseReason,
@@ -1025,7 +1026,7 @@ const MAX_STDERR_CHARS = 8_000;
 const MAX_STDOUT_LINE_CHARS = 1_000_000;
 const STOP_GRACE_MS = 3_000;
 /** How often progress is flushed to disk while a run is busy. */
-const FLUSH_INTERVAL_MS = 1_000;
+const FLUSH_INTERVAL_MS = STATE_FLUSH_MS;
 /**
  * How long a settling run waits for its project picture. The generation itself
  * is allowed two minutes upstream, which is the right budget while a run works
@@ -5069,6 +5070,8 @@ interface RunStore {
   live: Map<string, LiveRun>;
   waiters: Map<string, Set<() => void>>;
   flushTimer: NodeJS.Timeout | null;
+  /** When `flushTimer` is due, so a later persist can only bring it forward. Optional: a store from an older module. */
+  flushDueAt?: number | null;
   dirty: boolean;
   exitHookInstalled: boolean;
   /** A run's injected secrets, kept off the record — see runSecretEnv. */
@@ -5412,7 +5415,7 @@ function settleLostRun(run: CodingRun, tools: SpawnTools): void {
   finishRun(run, state, null);
 }
 
-function persist(immediate = false): void {
+function persist(immediate = false, delayMs: number = FLUSH_INTERVAL_MS): void {
   const list = loadRuns();
   if (immediate) {
     store.dirty = false;
@@ -5420,6 +5423,7 @@ function persist(immediate = false): void {
       clearTimeout(store.flushTimer);
       store.flushTimer = null;
     }
+    store.flushDueAt = null;
     try {
       writeAll(list);
     } catch (err) {
@@ -5428,9 +5432,19 @@ function persist(immediate = false): void {
     return;
   }
   store.dirty = true;
-  if (store.flushTimer) return;
+  const now = Date.now();
+  const due = flushDeadline(store.flushDueAt ?? null, now, delayMs);
+  if (store.flushTimer && (store.flushDueAt ?? Infinity) <= due) return;
+  if (store.flushTimer) {
+    // A nearer deadline than the one already scheduled: bring the flush
+    // forward rather than wait out the longer window.
+    clearTimeout(store.flushTimer);
+    store.flushTimer = null;
+  }
+  store.flushDueAt = due;
   const timer = setTimeout(() => {
     store.flushTimer = null;
+    store.flushDueAt = null;
     if (!store.dirty) return;
     store.dirty = false;
     try {
@@ -5438,7 +5452,7 @@ function persist(immediate = false): void {
     } catch (err) {
       console.error("[coding-agent] could not write the runs file:", err instanceof Error ? err.message : err);
     }
-  }, FLUSH_INTERVAL_MS);
+  }, Math.max(0, due - now));
   timer.unref();
   store.flushTimer = timer;
 }
@@ -12096,7 +12110,10 @@ function consumeStreamText(run: CodingRun, state: LiveRun, text: string): void {
     if (line && line.length <= MAX_STDOUT_LINE_CHARS && line.startsWith("{")) {
       try {
         handleEvent(run, state, JSON.parse(line) as StreamEvent);
-        persist();
+        // The stream's own cadence, not the state one: a harness emits lines
+        // far faster than anybody reads the record, and each flush rewrites
+        // the whole file.
+        persist(false, STREAM_FLUSH_MS);
       } catch {
         // not JSON — Claude Code prints the odd plain line; ignore it
       }

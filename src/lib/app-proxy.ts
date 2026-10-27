@@ -215,6 +215,8 @@ interface StoredMeta {
   port?: unknown;
   stripBasePath?: unknown;
   directory?: unknown;
+  /** The owner's opt-out from the boot pass; written by hand, kept on rewrite. */
+  autoStart?: unknown;
 }
 
 async function readMeta(id: string): Promise<StoredMeta | null> {
@@ -371,6 +373,15 @@ export async function registerServerApp(input: { id: string; directory: string; 
         port: manifest.port,
         directory: path.resolve(directory),
         ...(manifest.stripBasePath ? { stripBasePath: true } : {}),
+        // Kept so the box can bring the app back after a reboot without
+        // re-reading a clawbox.json the project may have deleted since — the
+        // manifest ran, so its command is the one that works here. See
+        // `restartServerAppsAtBoot` in app-server-start.ts.
+        ...(manifest.start ? { start: manifest.start } : {}),
+        // The owner's opt-out survives a re-registration: a start that runs
+        // again rewrites this record, and dropping the flag would quietly put
+        // the app back on the boot pass for ever.
+        ...(existing?.autoStart === false ? { autoStart: false } : {}),
       }),
       "utf-8",
     );
