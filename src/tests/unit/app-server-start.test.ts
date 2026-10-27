@@ -6,6 +6,7 @@
  * The box now starts it from the manifest's `start` (src/lib/app-server-start.ts).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "child_process";
 import fs from "fs";
 import net from "net";
 import os from "os";
@@ -316,6 +317,34 @@ http.createServer((_q, r) => r.end("ok")).listen(Number(process.env.PORT), "127.
       expect(other.listening).toBe(true);
     } finally {
       await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  });
+
+  it("ends only the server, never the process group of something the box did not start", async () => {
+    // A coding run's agent, working in the project folder, that started the
+    // app's server in its own process group: the group's leader is not the
+    // app's server, and ending the group would end the run.
+    fs.writeFileSync(path.join(project, "server.js"), PID_SERVER_JS);
+    const port = await freePort();
+    const agent = spawn("/bin/sh", ["-c", "node server.js & while :; do sleep 1; done"], {
+      cwd: project,
+      env: { ...process.env, PORT: String(port) },
+      detached: true,
+      stdio: "ignore",
+    });
+    try {
+      const deadline = Date.now() + 10_000;
+      while ((await proxy.listenerOwnedBy(port, project, { fresh: true })) !== "owned" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const server = Number(fs.readFileSync(path.join(project, "server.pid"), "utf-8"));
+
+      expect(await start.stopServerApp("hello-app", { port, directory: project })).toEqual({ ok: true, stopped: true, holder: null });
+
+      expect(() => process.kill(server, 0)).toThrow();
+      expect(() => process.kill(agent.pid as number, 0)).not.toThrow();
+    } finally {
+      try { process.kill(-(agent.pid as number), "SIGKILL"); } catch { /* gone */ }
     }
   });
 
