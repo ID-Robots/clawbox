@@ -14,8 +14,9 @@ import {
   writeLanguagePersona,
 } from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
-import { requireSession } from "@/lib/route-auth";
+import { requireSession, sessionIdentity } from "@/lib/route-auth";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
+import { languageFor, setUserLanguage } from "@/lib/user-language";
 
 export const dynamic = "force-dynamic";
 
@@ -120,6 +121,39 @@ const MAX_KEYS_PER_WRITE = 32;
 // to, or the wallpaper would stop changing on the box that hit it.
 const MAX_STORED_PREFERENCES = 500;
 
+// The one name whose answer depends on WHO asks. `pref:ui_language` is the box
+// default — the owner's pick, the persona's language and what /login renders —
+// and a signed-in ClawBox user other than the owner reads and writes a language
+// of their own instead (src/lib/user-language.ts).
+const LANGUAGE_KEY = "ui_language";
+
+/**
+ * Put the asker's own language in place of the box default in an answer about
+ * to go out, when the request asked for it (`asked`: named in `keys`, or
+ * `all=1` — which must serve a user's pick even on a box with no default set).
+ * A user with no pick of their own, the owner and a caller that is no person
+ * (the agent's bearer, /login before anyone signs in) keep the box default; a
+ * value the store holds that is not a locale we ship is left for
+ * `sanitizePreferences` to drop, exactly as before.
+ */
+async function answerLanguageFor(
+  req: Request,
+  asked: boolean,
+  result: Record<string, unknown>,
+  store: Record<string, unknown>,
+): Promise<void> {
+  if (!asked) return;
+  const who = await sessionIdentity(req);
+  if (!who || who.isOwner) return;
+  const lang = languageFor(who, store);
+  if (lang) result[LANGUAGE_KEY] = lang;
+}
+
+/** The answer differs by cookie, so no cache may hand one person's to another. */
+function preferencesJson(body: Record<string, unknown>): NextResponse {
+  return NextResponse.json(body, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie" } });
+}
+
 // GET /setup-api/preferences?keys=wp_opacity,wp_bg_color
 // GET /setup-api/preferences?all=1  (returns all pref:* keys)
 //
@@ -155,7 +189,8 @@ export async function GET(req: Request) {
         result[key.slice(PREFERENCE_KEY_PREFIX.length)] = value;
       }
     }
-    return NextResponse.json(sanitizePreferences(result));
+    await answerLanguageFor(req, true, result, allConfig);
+    return preferencesJson(sanitizePreferences(result));
   }
 
   if (!keysParam) {
@@ -179,7 +214,11 @@ export async function GET(req: Request) {
   for (const key of keys) {
     result[key] = allConfig[`${PREFERENCE_KEY_PREFIX}${key}`];
   }
-  return NextResponse.json(sanitizePreferences(result));
+  // The read /login and the desktop both make (UI_LANGUAGE_READ) lands here
+  // too: with no cookie it is the box default, with a user's cookie it is
+  // theirs, so each signed-in person's desktop renders in their own language.
+  await answerLanguageFor(req, keys.includes(LANGUAGE_KEY), result, allConfig);
+  return preferencesJson(sanitizePreferences(result));
 }
 
 // POST /setup-api/preferences  { wp_opacity: 80, wp_bg_color: "#111" }
@@ -225,6 +264,16 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+    // Whose language a `ui_language` in this body is. A signed-in ClawBox user
+    // other than the owner picks their OWN: it is kept apart from the box
+    // default and never reaches the persona below, which every chat and every
+    // cron run reads. The owner's cookie, and every caller that is no person —
+    // the agent's bearer, the setup wizard before a password exists, the e2e
+    // harness — set the box default exactly as before. Asked only when the
+    // body names the key, so the desktop's other writes pay for no cookie check.
+    const picker = Object.prototype.hasOwnProperty.call(body, LANGUAGE_KEY) ? await sessionIdentity(req) : null;
+    const pickerUsername = picker && !picker.isOwner ? picker.username : null;
+    let userLanguage: unknown;
     // Null-prototype accumulator, like every other one that takes a name from
     // outside: the key written below is `pref:` + a rebuilt name, so it cannot
     // be `__proto__` today, but a later change that drops the prefix or adds a
@@ -261,6 +310,12 @@ export async function POST(req: Request) {
         console.error(`[preferences] Rejected write: ${logSafe(check.reason ?? "")}`);
         return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }
+      // Validated like every other name, so a user's pick is refused for the
+      // same reasons the owner's is; stored after the bundle passes as a whole.
+      if (pickerUsername !== null && safeKey === LANGUAGE_KEY) {
+        userLanguage = value;
+        continue;
+      }
       entries[`${PREFERENCE_KEY_PREFIX}${safeKey}`] = value;
     }
     if (Object.keys(entries).length > 0) {
@@ -283,9 +338,17 @@ export async function POST(req: Request) {
       }
       await config.setMany(entries);
     }
-    // When language changes, update the persona files of the harness that is
-    // actually running. Validation above already constrained ui_language to a
-    // locale we ship, so nothing free-form reaches the agent's system prompt.
+    if (pickerUsername !== null) {
+      // Their own language and nothing else: not the box default, not the
+      // persona, not the deferral flag. Their chat carries it per turn instead
+      // (src/lib/user-language.ts).
+      if (userLanguage !== undefined) await setUserLanguage(pickerUsername, userLanguage);
+      return NextResponse.json({ ok: true });
+    }
+    // When the BOX DEFAULT changes, update the persona files of the harness
+    // that is actually running — only then: a user's own pick returned above.
+    // Validation above already constrained ui_language to a locale we ship, so
+    // nothing free-form reaches the agent's system prompt.
     //
     // The write is skipped while OpenClaw's first-conversation ritual is
     // pending or has never started: creating USER.md in a brand-new workspace

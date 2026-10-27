@@ -1,0 +1,7 @@
+{
+  "id": "clawbox-user-language",
+  "name": "ClawBox user language",
+  "description": "Tells the agent which language to answer in, in the own chat of each ClawBox user who picked one.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

@@ -114,7 +114,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     // fell back to the browser's language — so a box set to German greeted
     // its owner in English. A key added HERE alone would put it back there;
     // see src/lib/ui-language-read.ts.
-    fetch(UI_LANGUAGE_READ.url)
+    //
+    // The answer is the SIGNED-IN person's language: the box default (the
+    // owner's) with no session, a ClawBox user's own pick with theirs
+    // (src/lib/user-language.ts). Never from a cache, which would hand the
+    // previous person's answer to the next one on a shared browser.
+    fetch(UI_LANGUAGE_READ.url, { cache: "no-store" })
       .then((r) => r.json())
       .then((data) => {
         const saved = data.ui_language;
@@ -147,6 +152,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     // in-flight preference fetch (see `explicitPickRef` above).
     explicitPickRef.current = true;
     setLocaleResolved(true);
+    // The route decides whose pick this is from the session: the owner's sets
+    // the box default and the agent's persona, any other user's is their own.
     fetch("/setup-api/preferences", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
