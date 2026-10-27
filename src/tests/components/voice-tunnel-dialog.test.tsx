@@ -50,7 +50,8 @@ describe("VoiceTunnelDialog", () => {
     const { navigate } = renderDialog();
 
     const go = await screen.findByTestId("voice-tunnel-go");
-    expect(go.textContent).toBe(translations.en["chat.voice.tunnel.open"]);
+    // The copy arrives with the locale's chunk, a moment after the button does.
+    await waitFor(() => expect(go.textContent).toBe(translations.en["chat.voice.tunnel.open"]));
 
     fireEvent.click(go);
     // The whole point of the card: the destination is the LIVE address the
