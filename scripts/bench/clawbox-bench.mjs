@@ -6,6 +6,7 @@
 //
 //   node scripts/bench/clawbox-bench.mjs run [--out file] [--scenarios a,b] [--runs n] [--quick]
 //   node scripts/bench/clawbox-bench.mjs compare before.json after.json
+//   node scripts/bench/clawbox-bench.mjs history [dir]     every report in data/bench, oldest first
 //   node scripts/bench/clawbox-bench.mjs list
 //
 // Options: --auth cdp|token (default cdp: the signed-in desktop page on the
@@ -212,6 +213,26 @@ function printCompare(cmp, a, b) {
 async function main() {
   if (command === "list") {
     for (const s of await loadScenarios()) console.log(`${s.id.padEnd(16)} w=${String(s.weight).padStart(2)}  ${s.title}${s.needs.length ? `  [needs: ${s.needs.join(", ")}]` : ""}`);
+    return;
+  }
+  if (command === "history") {
+    const dir = argv[0] ?? path.join(REPO, "data", "bench");
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+    const reports = [];
+    for (const f of files) {
+      try { const r = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")); if (r.benchVersion && r.scenarios) reports.push({ file: f, ...r }); } catch { /* not a report */ }
+    }
+    reports.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+    if (!reports.length) { console.log(`no reports in ${dir}`); return; }
+    const ids = [...new Set(reports.flatMap((r) => Object.keys(r.scenarios)))];
+    const short = (id) => id.length > 7 ? id.slice(0, 7) : id;
+    console.log(`${"when".padEnd(16)} ${"commit".padEnd(9)} ${"mode".padEnd(5)} ${"overall".padStart(7)}  ${ids.map((id) => short(id).padStart(7)).join(" ")}  label`);
+    for (const r of reports) {
+      const when = String(r.startedAt).replace("T", " ").slice(0, 16);
+      const cells = ids.map((id) => String(r.scenarios[id]?.score ?? "—").padStart(7)).join(" ");
+      console.log(`${when.padEnd(16)} ${String(r.box?.clawboxCommit ?? "?").padEnd(9)} ${String(r.box?.authMode ?? "?").padEnd(5)} ${String(r.overall ?? "—").padStart(7)}  ${cells}  ${r.label ?? ""}${r.quick ? " (quick)" : ""}`);
+    }
+    console.log("\nscores from different auth modes or --quick runs are not comparable with each other");
     return;
   }
   if (command === "compare") {

@@ -7,12 +7,14 @@ export const title = "Owner API latency";
 export const weight = 10;
 export const order = 10;
 
-// [path, group] — "fast" routes read local state; "heavy" ones consult git,
-// the portal or a run store and are allowed more.
+// [path, group, session?] — "fast" routes read local state; "heavy" ones
+// consult git, the portal or a run store and are allowed more. A route marked
+// `session` answers only a signed-in person (401/403 to the MCP bearer), so
+// token mode leaves it out rather than counting it as an error.
 const ROUTES = [
-  ["/setup-api/users/me", "fast"],
+  ["/setup-api/users/me", "fast", "session"],
   ["/setup-api/system/battery", "fast"],
-  ["/setup-api/system/power/approval", "fast"],
+  ["/setup-api/system/power/approval", "fast", "session"],
   ["/setup-api/clawkeep", "fast"],
   ["/setup-api/chat/model", "fast"],
   ["/setup-api/chat/capabilities", "fast"],
@@ -34,7 +36,9 @@ export async function run({ client, opts, log }) {
   const n = opts.quick ? 3 : 5;
   const perRoute = {};
   const errors = [];
-  for (const [path, group] of ROUTES) {
+  const skipped = [];
+  for (const [path, group, session] of ROUTES) {
+    if (session && client.mode !== "cdp") { skipped.push(path); continue; }
     const samples = [];
     let bytes = 0;
     for (let i = 0; i < n; i++) {
@@ -53,7 +57,7 @@ export async function run({ client, opts, log }) {
   const heavyCold = Math.max(...heavy.map((r) => r.first));
   const pollBytes = Object.entries(perRoute).filter(([p]) => /battery|power|clawkeep|chat\/model|ai-models\/status|email|kv\?|pairing|coding-agent\/runs/.test(p)).reduce((a, [, r]) => a + r.bytes, 0);
   const slowest = Object.entries(perRoute).sort((a, b) => b[1].p50 - a[1].p50).slice(0, 5).map(([p, r]) => `${p} ${r.p50.toFixed(0)} ms`);
-  log(`fast p50 ${fastP50.toFixed(1)} ms, heavy p50 ${heavyP50.toFixed(0)} ms, slowest: ${slowest.join("; ")}`);
+  log(`fast p50 ${fastP50.toFixed(1)} ms, heavy p50 ${heavyP50.toFixed(0)} ms, slowest: ${slowest.join("; ")}${skipped.length ? `; not asked in ${client.mode} mode: ${skipped.join(", ")}` : ""}`);
   return {
     metrics: {
       fast_p50_ms: { value: fastP50, unit: "ms", dir: "lower", good: 10, bad: 150, label: "median of the fast routes' medians" },
@@ -63,6 +67,6 @@ export async function run({ client, opts, log }) {
       poll_cycle_kb: { value: pollBytes / 1024, unit: "KB", dir: "lower", good: 20, bad: 300, label: "bytes one round of the desktop's polls carries" },
       errors: { value: errors.length, unit: "", dir: "lower", good: 0, bad: 3, weight: 2, label: "non-2xx answers" },
     },
-    details: { perRoute, errors, calls: n },
+    details: { perRoute, errors, calls: n, skipped, mode: client.mode },
   };
 }

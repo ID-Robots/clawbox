@@ -9,6 +9,9 @@ export const id = "files";
 export const title = "Files app";
 export const weight = 7;
 export const order = 50;
+// The upload and the read-back run inside the desktop page (a Blob body, the
+// app\'s own download path), so the token client cannot run this area.
+export const needs = ["page"];
 
 const UPLOAD_BYTES = 200 * 1024;
 const LIST_CALLS = 3;
