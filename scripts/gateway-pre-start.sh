@@ -9454,7 +9454,10 @@ def soul_md(text):
 
 def rewrite(path, transform, default=None):
     try:
-        with open(path, encoding="utf-8") as fh:
+        # newline="": no universal-newline translation, so a CRLF file reaches
+        # the transforms with its CRs, exactly as fs.readFile hands it to
+        # writeLanguagePersona — else this writer alone would turn it into LF.
+        with open(path, encoding="utf-8", newline="") as fh:
             before = fh.read()
     except FileNotFoundError:
         # Only the non-English SOUL.md is worth creating; see soul_md above.

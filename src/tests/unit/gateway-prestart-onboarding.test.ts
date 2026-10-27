@@ -501,6 +501,12 @@ describe("gateway-pre-start: the language re-apply", () => {
       { user: `# USER.md - About Your Human\n- **Name:** Sam\n${line}`, soul: `${block}\n## Vibe\n\nCalm.\n` },
       { user: `${line}\n# USER.md\n${line}\n`, soul: `# SOUL.md\n\n${block}\n${block}` },
       { user: "# USER.md\n- **Name:** Sam", soul: `# SOUL.md\r\n\r\n${block}`.replace(/\n/g, "\r\n") },
+      // Windows line endings on both sides of the section: the kept lines must
+      // keep their CR in both writers, not lose it in one of them.
+      {
+        user: `# USER.md\n- **Name:** Sam\n${line}\n- **Timezone:** UTC\n`.replace(/\n/g, "\r\n"),
+        soul: `# SOUL.md\n\nQuiet.\n\n${block}\n## Vibe\n\nCalm.\n`.replace(/\n/g, "\r\n"),
+      },
     ];
     for (const lang of ["en", "de"]) {
       for (const [i, seed] of seeds.entries()) {
