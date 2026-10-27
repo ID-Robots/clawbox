@@ -1,33 +1,39 @@
-# Dependabot config. Posture: security fixes + major versions only.
+# Dependabot config. Posture: no version PRs; security is triaged by hand.
 #
-# Minor and patch version PRs are switched off: they were too much churn for
-# too little value. Dependabot opens, per ecosystem, ONE monthly PR grouping
-# the available MAJOR updates, against beta (all dependency changes are
-# reviewed and tested on beta before release).
+# Version-update PRs are switched off for every ecosystem: each entry below
+# sets `open-pull-requests-limit: 0`. The team takes only urgent and security
+# updates, and takes them by hand. Minor and patch PRs were too much churn for
+# too little value; the grouped monthly MAJOR PRs that replaced them are off
+# now too.
 #
-# Security fixes: the `update-types` ignore rules below only affect VERSION
-# updates, never security updates (GitHub docs, dependabot.yml options
-# reference, `ignore` > `update-types`). A `dependency-name` ignore without
-# update-types, like the @novnc/novnc one, does also block security updates
-# for that package.
-# Dependabot SECURITY UPDATE PRs stay disabled in repository Settings > Code
-# security: GitHub always targets them at the default branch and ignores
-# target-branch, which would bypass beta. Instead
+# Security alerts are triaged by hand onto beta. Dependabot alerts stay
+# enabled. Dependabot SECURITY UPDATE PRs stay disabled in repository
+# Settings > Code security: GitHub always targets them at the default branch
+# and ignores target-branch, which would bypass beta. Instead
 # .github/workflows/dependency-audit.yml audits bun.lock weekly and keeps one
 # tracking issue open while a vulnerable package is present; the fix lands
-# as a tested PR to beta. Dependabot alerts stay enabled.
+# as a tested PR to beta.
+#
+# The groups and ignore rules below stay so that raising a limit brings back
+# one grouped majors-only PR, not a PR per minor/patch. The `update-types`
+# ignore rules only affect VERSION updates, never security updates (GitHub
+# docs, dependabot.yml options reference, `ignore` > `update-types`). A
+# `dependency-name` ignore without update-types, like the @novnc/novnc one,
+# does also block security updates for that package.
 #
 # Keep package-lock.json synchronized for the dependency graph, and validate
 # the authoritative bun.lock with bun install --frozen-lockfile before a PR.
 version: 2
 updates:
   # bun-managed app. bun.lock is authoritative (CI runs
-  # `bun install --frozen-lockfile`). Monthly, majors only, one grouped PR.
+  # `bun install --frozen-lockfile`). No version PRs (limit 0); if the limit
+  # is raised: monthly, majors only, one grouped PR.
   - package-ecosystem: "bun"
     directory: "/"
     schedule:
       interval: "monthly"
     target-branch: "beta"
+    open-pull-requests-limit: 0
     groups:
       majors:
         update-types: ["major"]
@@ -57,13 +63,14 @@ updates:
     target-branch: "beta"
     open-pull-requests-limit: 0
 
-  # GitHub Actions pins (checkout, setup-node, gh-pages, …). Majors only,
-  # one grouped monthly PR.
+  # GitHub Actions pins (checkout, setup-node, gh-pages, …). No version PRs
+  # (limit 0); if the limit is raised: majors only, one grouped monthly PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
     target-branch: "beta"
+    open-pull-requests-limit: 0
     groups:
       majors:
         update-types: ["major"]
