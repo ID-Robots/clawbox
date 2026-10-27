@@ -87,6 +87,8 @@ export interface GatewayStartWaitOptions {
 }
 
 export const GATEWAY_CRASH_LOOP_RESTARTS = 3;
+const DEFAULT_POLL_MS = 5_000;
+const DEFAULT_MAX_POLL_MS = 15_000;
 
 /** Where the unit is in its start, as far as the wait is concerned. */
 export function gatewayStartPhase(state: GatewayStartState | null): "starting" | "failed" | "stopped" | "unknown" {
@@ -106,8 +108,13 @@ export async function waitForGatewayStart(options: GatewayStartWaitOptions): Pro
   const crashLoopRestarts = options.crashLoopRestarts ?? GATEWAY_CRASH_LOOP_RESTARTS;
   const started = now();
   const elapsed = () => now() - started;
-  const firstWindowMs = Math.max(0, options.firstWindowMs);
-  const limitMs = Math.max(firstWindowMs, options.limitMs);
+  // A bound that is not a number (an unparsable env override) must not make
+  // the wait endless, nor a NaN gap turn it into a spin of `systemctl show`:
+  // no limit means no extension past the first window, no gap the defaults.
+  const finite = (value: number, fallback: number) => (Number.isFinite(value) ? value : fallback);
+  const firstWindowMs = Math.max(0, finite(options.firstWindowMs, 0));
+  const limitMs = Math.max(firstWindowMs, finite(options.limitMs, firstWindowMs));
+  const maxPollMs = Math.max(1, finite(options.maxPollMs, DEFAULT_MAX_POLL_MS));
 
   // A probe that answers early with "closed" (a test double, a refused
   // connect) must not turn the wait into a spin: every round lasts its length.
@@ -121,7 +128,7 @@ export async function waitForGatewayStart(options: GatewayStartWaitOptions): Pro
 
   if (await portRound(firstWindowMs)) return { kind: "listening", waitedMs: elapsed() };
 
-  let pollMs = Math.max(1, options.pollMs);
+  let pollMs = Math.min(maxPollMs, Math.max(1, finite(options.pollMs, DEFAULT_POLL_MS)));
   let lastCount: number | null = null;
   let restarts = 0;
   let stoppedReads = 0;
@@ -167,7 +174,7 @@ export async function waitForGatewayStart(options: GatewayStartWaitOptions): Pro
     // not a start, and the screen must not call it one.
     if (stoppedReads === 0) options.onStillStarting?.(state, elapsed());
     if (await portRound(Math.min(pollMs, remaining))) return { kind: "listening", waitedMs: elapsed() };
-    pollMs = Math.min(Math.max(1, options.maxPollMs), Math.round(pollMs * 1.5));
+    pollMs = Math.min(maxPollMs, Math.round(pollMs * 1.5));
   }
 }
 

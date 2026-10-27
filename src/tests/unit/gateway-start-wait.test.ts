@@ -194,6 +194,49 @@ describe("waitForGatewayStart", () => {
     expect(verdict).toMatchObject({ kind: "timed-out", waitedMs: 20_000 });
     expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1_000, 5_000, 5_000, 5_000, 4_000]);
   });
+
+  it("stays bounded, and never spins, when its numbers are not numbers", async () => {
+    // What `Number("abc")` makes of an unparsable env override.
+    let clock = 0;
+    const readState = vi.fn(async () => unit("active", "running"));
+    const verdict = await waitForGatewayStart({
+      firstWindowMs: 1_000,
+      limitMs: Number.NaN,
+      pollMs: Number.NaN,
+      maxPollMs: Number.NaN,
+      unknownIsStarting: true,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      waitForPort: async () => false,
+      readState,
+    });
+    // No limit is no extension: the first window, one look at the unit, done.
+    expect(verdict).toMatchObject({ kind: "timed-out", waitedMs: 1_000 });
+    expect(readState).toHaveBeenCalledTimes(1);
+
+    clock = 0;
+    readState.mockClear();
+    const sleeps: number[] = [];
+    await waitForGatewayStart({
+      firstWindowMs: 1_000,
+      limitMs: 60_000,
+      pollMs: Number.NaN,
+      maxPollMs: Number.NaN,
+      unknownIsStarting: true,
+      now: () => clock,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
+      waitForPort: async () => false,
+      readState,
+    });
+    // The default gaps, each a real wait: 5 s growing to 15 s.
+    expect(sleeps.slice(0, 5)).toEqual([1_000, 5_000, 7_500, 11_250, 15_000]);
+    expect(readState.mock.calls.length).toBeLessThan(10);
+  });
 });
 
 describe("gatewayStartPhase", () => {
