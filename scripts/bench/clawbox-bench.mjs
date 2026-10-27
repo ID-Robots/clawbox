@@ -92,6 +92,8 @@ async function boxFacts(client) {
   return facts;
 }
 
+const fmtPct = (v) => (typeof v === "number" ? v.toFixed(0) : "?");
+
 function fmt(v, unit) {
   if (v === null || v === undefined) return "—";
   if (typeof v !== "number") return String(v);
@@ -123,7 +125,8 @@ async function runOnce(scenarios, client, log) {
       const after = host.snapshot();
       const metrics = r?.metrics ?? {};
       const score = r?.skipped ? null : scoreArea(metrics);
-      results[sc.id] = { title: sc.title, weight: sc.weight, score, skipped: r?.skipped ?? null, metrics, details: r?.details ?? null, durationMs: Date.now() - t0, host: host.delta(before, after) };
+      const hd = host.delta(before, after);
+      results[sc.id] = { title: sc.title, weight: sc.weight, score, skipped: r?.skipped ?? null, metrics, details: r?.details ?? null, durationMs: Date.now() - t0, host: hd, load: { sysBusyPct: hd.system.cpuBusyPct, gatewayCpuPct: hd.gateway.cpuPct, webCpuPct: hd.web.cpuPct } };
       log(`  ${sc.id}: ${score === null ? `no score (${r?.skipped ?? "no scorable metric"})` : `${score}/100`} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     } catch (err) {
       results[sc.id] = { title: sc.title, weight: sc.weight, score: null, error: String(err?.stack || err), metrics: {}, durationMs: Date.now() - t0 };
@@ -158,7 +161,9 @@ function mergeRuns(runs) {
     const scores = entries.map((e) => e.score).filter((s) => typeof s === "number");
     const spread = scores.length > 1 ? Math.round((Math.max(...scores) - Math.min(...scores)) * 10) / 10 : 0;
     const med = scores.length ? Math.round(median(scores) * 10) / 10 : null;
-    scenarios[id] = { ...base, metrics, score: med, scoreSamples: scores, spread, details: entries.map((e) => e.details) };
+    const load = {};
+    for (const k of ["sysBusyPct", "gatewayCpuPct", "webCpuPct"]) load[k] = median(entries.map((e) => e.load?.[k]));
+    scenarios[id] = { ...base, metrics, score: med, scoreSamples: scores, spread, load, details: entries.map((e) => e.details) };
   }
   const spreads = Object.values(scenarios).map((s) => s.spread ?? 0);
   return { startedAt: runs[0].startedAt, finishedAt: runs[runs.length - 1].finishedAt, scenarios, hostDelta: runs[runs.length - 1].hostDelta, noise: Math.round(Math.max(0, ...spreads) * 10) / 10 };
@@ -185,9 +190,10 @@ function printCompare(cmp, a, b) {
   console.log(`before: ${a.label || a.box?.clawboxCommit || "?"} (${a.startedAt})`);
   console.log(`after:  ${b.label || b.box?.clawboxCommit || "?"} (${b.startedAt})`);
   console.log(`threshold: ±${cmp.threshold} points, or an area's own run-to-run spread when larger\n`);
-  console.log(`${"area".padEnd(16)} ${"before".padStart(7)} ${"after".padStart(7)} ${"delta".padStart(7)}  ${"±".padStart(5)}  verdict`);
+  console.log(`${"area".padEnd(16)} ${"before".padStart(7)} ${"after".padStart(7)} ${"delta".padStart(7)}  ${"±".padStart(5)}  ${"box busy %".padStart(12)}  verdict`);
   for (const [id, e] of Object.entries(cmp.areas)) {
-    console.log(`${id.padEnd(16)} ${String(e.before ?? "—").padStart(7)} ${String(e.after ?? "—").padStart(7)} ${String(e.delta ?? "—").padStart(7)}  ${String(e.threshold ?? "—").padStart(5)}  ${mark(e.verdict)}`);
+    const busy = e.load ? `${fmtPct(e.load.before)}→${fmtPct(e.load.after)}` : "";
+    console.log(`${id.padEnd(16)} ${String(e.before ?? "—").padStart(7)} ${String(e.after ?? "—").padStart(7)} ${String(e.delta ?? "—").padStart(7)}  ${String(e.threshold ?? "—").padStart(5)}  ${busy.padStart(12)}  ${mark(e.verdict)}${e.caveat ? `  (${e.caveat})` : ""}`);
   }
   console.log(`${"OVERALL".padEnd(16)} ${String(cmp.overall.before ?? "—").padStart(7)} ${String(cmp.overall.after ?? "—").padStart(7)} ${String(cmp.overall.delta ?? "—").padStart(7)}  ${mark(cmp.overall.verdict)}`);
   const moved = [];

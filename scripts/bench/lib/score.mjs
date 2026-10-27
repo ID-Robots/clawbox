@@ -82,6 +82,18 @@ export function compareReports(a, b, { threshold = 3 } = {}) {
       entry.threshold = Math.round(t * 10) / 10;
       entry.verdict = d >= t ? "better" : d <= -t ? "worse" : "same";
     }
+    // The box's own load while the area ran (CPU busy % of the whole box and
+    // of the gateway): a verdict taken while the owner's agent was working is
+    // a verdict about the owner's agent. Said next to it, never silently.
+    const la = sa?.load, lb = sb?.load;
+    if (la || lb) {
+      entry.load = { before: la?.sysBusyPct ?? null, after: lb?.sysBusyPct ?? null, gatewayBefore: la?.gatewayCpuPct ?? null, gatewayAfter: lb?.gatewayCpuPct ?? null };
+      const sysD = (lb?.sysBusyPct ?? 0) - (la?.sysBusyPct ?? 0);
+      const gwD = (lb?.gatewayCpuPct ?? 0) - (la?.gatewayCpuPct ?? 0);
+      if (Math.abs(sysD) >= 15 || Math.abs(gwD) >= 15) {
+        entry.caveat = `box ${sysD + gwD > 0 ? "busier" : "quieter"} during the after run: cpu ${Math.round(la?.sysBusyPct ?? 0)}→${Math.round(lb?.sysBusyPct ?? 0)}%, gateway ${Math.round(la?.gatewayCpuPct ?? 0)}→${Math.round(lb?.gatewayCpuPct ?? 0)}%`;
+      }
+    }
     const names = new Set([...Object.keys(sa?.metrics || {}), ...Object.keys(sb?.metrics || {})]);
     for (const n of names) {
       const ma = sa?.metrics?.[n], mb = sb?.metrics?.[n];
