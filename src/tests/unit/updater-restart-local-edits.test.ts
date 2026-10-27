@@ -149,6 +149,7 @@ beforeEach(async () => {
   restoreEnv = saveEnv(
     "CLAWBOX_ROOT", "CLAWBOX_LOCAL_EDITS_DIR", "CLAWBOX_PRESERVE_LOCAL_EDITS_SH", "HOME", "GIT_CONFIG_NOSYSTEM",
     "GATEWAY_HEALTH_WAIT_MS", "GATEWAY_RECOVERY_WAIT_MS", "GATEWAY_WAIT_INTERVAL_MS",
+    "GATEWAY_START_LIMIT_MS", "GATEWAY_START_POLL_MS", "GATEWAY_START_POLL_MAX_MS",
   );
   store.clear();
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-restart-edits-")));
@@ -174,6 +175,9 @@ beforeEach(async () => {
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+  process.env.GATEWAY_START_LIMIT_MS = "1";
+  process.env.GATEWAY_START_POLL_MS = "1";
+  process.env.GATEWAY_START_POLL_MAX_MS = "1";
   // What next.config.ts bakes into a real build; each case says otherwise when it means to.
   process.env.CLAWBOX_PRESERVE_LOCAL_EDITS_SH = SCRIPT_TEXT;
   vi.resetModules();
