@@ -23,6 +23,24 @@ run the page scenarios), `--base-url`, `--url-match <text>` (which page is the
 desktop), `--out <file>`, `--runs <n>`, `--label <text>`, `--verbose` (every
 metric), `--quick`.
 
+## The loop
+
+```bash
+bun run bench -- --runs 2 --label before --out data/bench/before.json
+# change code …
+bash scripts/bench/rebuild-and-restart.sh      # build (checked), SIGTERM the UI, wait, reload the kiosk desktop
+bun run bench -- --runs 2 --label after --out data/bench/after.json
+node scripts/bench/clawbox-bench.mjs compare data/bench/before.json data/bench/after.json
+```
+
+`rebuild-and-restart.sh` is for a box whose UI runs as the calling user under
+systemd with `Restart=always` (the x64 dev install): it refuses to restart
+anything when the build failed — a failed Turbopack build takes the previous
+build's files with it, and a restart on top of one crash-loops the UI — and
+reloads the desktop page over the DevTools port so the page the bench
+measures runs the new code. On a box with the in-app updater, update through
+it instead and run the bench before and after.
+
 ## What it touches
 
 It reads; it opens one page of its own at `/` and closes it (visible on the
