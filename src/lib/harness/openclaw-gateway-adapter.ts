@@ -382,6 +382,28 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    */
   private historyDelta: { sessionKey: string; rows: unknown[]; cursor: string } | null = null;
 
+  /**
+   * Which cleaned transcript `historyDelta` belongs to.
+   *
+   * A read is a round trip, and the owner can clear or delete the session while
+   * one is in flight (a reset is two requests of its own; the spoken-history
+   * half is a third). Without this, the read finishes AFTER the reset and puts
+   * the forgotten rows back as the base, and the next delta appends the new
+   * conversation onto a transcript the owner believes is gone.
+   */
+  private historyGeneration = 0;
+
+  /**
+   * The order reads started in, and the one whose base is current.
+   *
+   * Two reads can overlap — the panel after a push, the catch-up on open — and
+   * the slower one may carry the older cursor. Only a read newer than the last
+   * committed one replaces the base; a stale arrival returns its own rows to
+   * its caller and leaves the cache alone.
+   */
+  private historyReadSeq = 0;
+  private historyCommittedSeq = 0;
+
   connect(): Promise<void> {
     return this.link.open();
   }
@@ -461,6 +483,9 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     // Kept, they would be the base a delta appends to, and the next read would
     // put the cleared transcript back on screen.
     this.historyDelta = null;
+    // A read that started before this reset must not put those rows back.
+    this.historyGeneration += 1;
+    this.historyCommittedSeq = this.historyReadSeq;
   }
 
   /**
@@ -499,6 +524,12 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     // The transcript behind this key is going away; a cursor pointing into it
     // would graft a deleted conversation onto whatever takes its place.
     if (this.historyDelta?.sessionKey === key) this.historyDelta = null;
+    // Same reason as the reset: a read in flight for this key belongs to a
+    // transcript that is about to be deleted.
+    if (key === this.link.sessionKey()) {
+      this.historyGeneration += 1;
+      this.historyCommittedSeq = this.historyReadSeq;
+    }
     if (opts.running) {
       await this.link.request("chat.abort", { sessionKey: key }).catch(() => { /* best effort */ });
     }
@@ -513,6 +544,8 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
   async loadHistory(options?: HistoryOptions): Promise<HistoryPage> {
     const sessionKey = this.link.sessionKey();
     const limit = options?.limit ?? HISTORY_LIMIT;
+    const generation = this.historyGeneration;
+    const readSeq = ++this.historyReadSeq;
     let rows: unknown[];
     let cursor: string | null;
     let spokenPayload: unknown;
@@ -535,10 +568,20 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     } catch (err) {
       throw gatewayError(err);
     }
+    // The owner cleared or deleted the session while this read was out: these
+    // rows are the conversation that was just forgotten, so they are neither
+    // cached nor handed back to be painted.
+    if (generation !== this.historyGeneration) {
+      return projectGatewayHistory([], { items: [] }, { imageWaitFrom: options?.imageWaitFrom });
+    }
     // Armed only when the gateway says it can continue from here. A box that
     // answered a page WITHOUT a cursor gets the same page next time, exactly as
-    // before.
-    this.historyDelta = cursor ? { sessionKey, rows, cursor } : null;
+    // before. Only the newest read may arm it: a slower older read that landed
+    // after a newer one would otherwise set the base back a step.
+    if (readSeq > this.historyCommittedSeq) {
+      this.historyCommittedSeq = readSeq;
+      this.historyDelta = cursor ? { sessionKey, rows, cursor } : null;
+    }
     return projectGatewayHistory(rows, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
   }
 

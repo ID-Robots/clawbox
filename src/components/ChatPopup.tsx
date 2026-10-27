@@ -3663,10 +3663,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               // The other half of the audit's idle reads. Nothing is looking at
               // this transcript while the panel is shut or the window is in the
               // background, so the refetch is owed, not spent — EXCEPT when the
-              // read is not for the screen at all: a spoken question's answer
-              // must still be said aloud with the chat closed, and that is the
-              // one thing this read may do without an audience.
-              if (historyReadMustWait() && !speakRestored) {
+              // read is not for the screen at all. Two things it may do with no
+              // audience: say a spoken question's answer aloud, and paint the
+              // clip a typed question was promised (the clip is part of the
+              // transcript, so the read that paints it has to happen).
+              if (historyReadMustWait() && !speakRestored && !clipRestored) {
                 historyCatchUpOwedRef.current = true
                 return
               }
@@ -3677,7 +3678,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 ackOnlyHistoryTimerRef.current = null
                 // The panel may have shut inside the three seconds above; the
                 // read is then owed to the catch-up, not spent here.
-                if (historyReadMustWait() && !speakRestored) {
+                if (historyReadMustWait() && !speakRestored && !clipRestored) {
                   historyCatchUpOwedRef.current = true
                   return
                 }
@@ -7269,7 +7270,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // Re-owed, not lost: a hidden window and a shut panel are both temporary.
       if (document.visibilityState !== 'visible') return
       historyCatchUpOwedRef.current = false
-      void loadHistory()
+      // Through the reconciler, not `loadHistory` directly: it also settles an
+      // image wait, which is what clears the "Generating image…" banner when
+      // the picture landed while the panel was shut. A plain read paints the
+      // picture and leaves the banner up until the 20 s backstop tick.
+      void reconcileTranscriptRef.current()
     }
     catchUp()
     document.addEventListener('visibilitychange', catchUp)

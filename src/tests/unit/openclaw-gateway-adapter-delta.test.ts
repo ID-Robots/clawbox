@@ -161,4 +161,48 @@ describe("OpenClawGatewayAdapter chat.history deltas", () => {
     // base a delta appends to.
     expect(texts(page)).toEqual([]);
   });
+  it("does not hand back a cleared transcript when the read started before the reset", async () => {
+    // A read is a round trip and a reset is two requests of its own, so the read
+    // can come back AFTER the owner cleared the conversation. Its rows are the
+    // forgotten transcript: neither painted nor kept as a delta base.
+    let finishRead: (value: unknown) => void = () => {};
+    const inFlight = new Promise((resolve) => { finishRead = resolve; });
+    const { adapter, calls } = adapterWith([
+      inFlight as unknown as Answer,
+      {},
+      { messages: [assistant("after the reset", 9)], deltaCursor: "delta:new" },
+    ]);
+
+    const stale = adapter.loadHistory();
+    await adapter.resetSession();
+    finishRead({ messages: [user("forgotten", 1)], deltaCursor: "delta:old" });
+
+    expect(texts(await stale)).toEqual([]);
+
+    const fresh = await adapter.loadHistory();
+    // No cursor from the cleared transcript is spent on the new one.
+    expect(calls[2]).toEqual({ sessionKey: MAIN, limit: 50 });
+    expect(texts(fresh)).toEqual(["after the reset"]);
+  });
+
+  it("keeps the newer read's base when an older one finishes last", async () => {
+    let finishOld: (value: unknown) => void = () => {};
+    const old = new Promise((resolve) => { finishOld = resolve; });
+    const { adapter, calls } = adapterWith([
+      old as unknown as Answer,
+      { messages: [user("newer", 2)], deltaCursor: "delta:new" },
+      { kind: "delta", messages: [], deltaCursor: "delta:new2" },
+    ]);
+
+    const older = adapter.loadHistory();
+    const newer = await adapter.loadHistory();
+    expect(texts(newer)).toEqual(["newer"]);
+
+    finishOld({ messages: [user("older", 1)], deltaCursor: "delta:old" });
+    await older;
+
+    // The next read continues from the newer page, not the one that landed last.
+    await adapter.loadHistory();
+    expect(calls[2]).toEqual({ sessionKey: MAIN, limit: 50, cursor: "delta:new" });
+  });
 });
