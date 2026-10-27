@@ -215,6 +215,8 @@ interface StoredMeta {
   port?: unknown;
   stripBasePath?: unknown;
   directory?: unknown;
+  /** The owner's opt-out from the boot pass; written by hand, kept on rewrite. */
+  autoStart?: unknown;
 }
 
 async function readMeta(id: string): Promise<StoredMeta | null> {
