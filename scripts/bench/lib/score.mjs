@@ -54,11 +54,21 @@ export function percentile(values, p) {
 
 /**
  * Compare two reports. A verdict per area and overall: "better" / "worse"
- * only past `threshold` points (default 3 — about the run-to-run noise of a
- * quiet box; pass the larger of the two reports' `noise` when they have it),
- * otherwise "same". Metrics carry their raw delta so a regression can be read
- * back to the number that moved.
+ * only past the threshold, otherwise "same". The threshold is `threshold`
+ * points (default 3 — about the run-to-run noise of a quiet box) or, per
+ * area, the larger run-to-run `spread` either report recorded for it
+ * (`--runs n` stores one), so a noisy area asks for a bigger move while a
+ * steady one still registers a small real gain. Metrics carry their raw
+ * delta so a regression can be read back to the number that moved.
  */
+/** An area's run-to-run spread: what `--runs n` recorded, else the span of its score samples. */
+function spreadOf(s) {
+  if (!s) return 0;
+  if (typeof s.spread === "number") return s.spread;
+  const v = (s.scoreSamples || []).filter((x) => typeof x === "number");
+  return v.length > 1 ? Math.max(...v) - Math.min(...v) : 0;
+}
+
 export function compareReports(a, b, { threshold = 3 } = {}) {
   const areas = {};
   const ids = new Set([...Object.keys(a.scenarios || {}), ...Object.keys(b.scenarios || {})]);
@@ -67,8 +77,10 @@ export function compareReports(a, b, { threshold = 3 } = {}) {
     const entry = { before: sa?.score ?? null, after: sb?.score ?? null, verdict: "n/a", metrics: {} };
     if (typeof entry.before === "number" && typeof entry.after === "number") {
       const d = entry.after - entry.before;
+      const t = Math.max(threshold, spreadOf(sa), spreadOf(sb));
       entry.delta = Math.round(d * 10) / 10;
-      entry.verdict = d >= threshold ? "better" : d <= -threshold ? "worse" : "same";
+      entry.threshold = Math.round(t * 10) / 10;
+      entry.verdict = d >= t ? "better" : d <= -t ? "worse" : "same";
     }
     const names = new Set([...Object.keys(sa?.metrics || {}), ...Object.keys(sb?.metrics || {})]);
     for (const n of names) {
@@ -87,8 +99,17 @@ export function compareReports(a, b, { threshold = 3 } = {}) {
   const before = a.overall ?? null, after = b.overall ?? null;
   const overall = { before, after, verdict: "n/a" };
   if (typeof before === "number" && typeof after === "number") {
+    // The overall moves with its weighted mean, so its noise is the areas'
+    // spreads weighted the same way, never one noisy area's whole spread.
+    const weighted = (r) => {
+      let num = 0, den = 0;
+      for (const s of Object.values(r.scenarios || {})) { if (typeof s?.score !== "number") continue; const w = s.weight ?? 1; num += spreadOf(s) * w; den += w; }
+      return den ? num / den : 0;
+    };
+    const t = Math.max(threshold, weighted(a), weighted(b));
     overall.delta = Math.round((after - before) * 10) / 10;
-    overall.verdict = overall.delta >= threshold ? "better" : overall.delta <= -threshold ? "worse" : "same";
+    overall.threshold = Math.round(t * 10) / 10;
+    overall.verdict = overall.delta >= t ? "better" : overall.delta <= -t ? "worse" : "same";
   }
   return { threshold, overall, areas };
 }

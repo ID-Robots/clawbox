@@ -156,9 +156,11 @@ function mergeRuns(runs) {
       metrics[name] = { ...proto, value: median(values), samples: values };
     }
     const scores = entries.map((e) => e.score).filter((s) => typeof s === "number");
-    scenarios[id] = { ...base, metrics, score: scores.length ? median(scores) : null, scoreSamples: scores, details: entries.map((e) => e.details) };
+    const spread = scores.length > 1 ? Math.round((Math.max(...scores) - Math.min(...scores)) * 10) / 10 : 0;
+    const med = scores.length ? Math.round(median(scores) * 10) / 10 : null;
+    scenarios[id] = { ...base, metrics, score: med, scoreSamples: scores, spread, details: entries.map((e) => e.details) };
   }
-  const spreads = Object.values(scenarios).map((s) => s.scoreSamples?.length > 1 ? Math.max(...s.scoreSamples) - Math.min(...s.scoreSamples) : 0);
+  const spreads = Object.values(scenarios).map((s) => s.spread ?? 0);
   return { startedAt: runs[0].startedAt, finishedAt: runs[runs.length - 1].finishedAt, scenarios, hostDelta: runs[runs.length - 1].hostDelta, noise: Math.round(Math.max(0, ...spreads) * 10) / 10 };
 }
 
@@ -182,10 +184,10 @@ function printCompare(cmp, a, b) {
   const mark = (v) => v === "better" ? "▲ better" : v === "worse" ? "▼ worse" : v === "same" ? "= same" : "n/a";
   console.log(`before: ${a.label || a.box?.clawboxCommit || "?"} (${a.startedAt})`);
   console.log(`after:  ${b.label || b.box?.clawboxCommit || "?"} (${b.startedAt})`);
-  console.log(`threshold: ±${cmp.threshold} points\n`);
-  console.log(`${"area".padEnd(16)} ${"before".padStart(7)} ${"after".padStart(7)} ${"delta".padStart(7)}  verdict`);
+  console.log(`threshold: ±${cmp.threshold} points, or an area's own run-to-run spread when larger\n`);
+  console.log(`${"area".padEnd(16)} ${"before".padStart(7)} ${"after".padStart(7)} ${"delta".padStart(7)}  ${"±".padStart(5)}  verdict`);
   for (const [id, e] of Object.entries(cmp.areas)) {
-    console.log(`${id.padEnd(16)} ${String(e.before ?? "—").padStart(7)} ${String(e.after ?? "—").padStart(7)} ${String(e.delta ?? "—").padStart(7)}  ${mark(e.verdict)}`);
+    console.log(`${id.padEnd(16)} ${String(e.before ?? "—").padStart(7)} ${String(e.after ?? "—").padStart(7)} ${String(e.delta ?? "—").padStart(7)}  ${String(e.threshold ?? "—").padStart(5)}  ${mark(e.verdict)}`);
   }
   console.log(`${"OVERALL".padEnd(16)} ${String(cmp.overall.before ?? "—").padStart(7)} ${String(cmp.overall.after ?? "—").padStart(7)} ${String(cmp.overall.delta ?? "—").padStart(7)}  ${mark(cmp.overall.verdict)}`);
   const moved = [];
@@ -210,8 +212,7 @@ async function main() {
     const [fa, fb] = argv;
     if (!fa || !fb) throw new Error("compare needs two report files");
     const a = JSON.parse(fs.readFileSync(fa, "utf8")), b = JSON.parse(fs.readFileSync(fb, "utf8"));
-    const threshold = Math.max(3, a.noise ?? 0, b.noise ?? 0);
-    const cmp = compareReports(a, b, { threshold });
+    const cmp = compareReports(a, b, { threshold: 3 });
     printCompare(cmp, a, b);
     if (opts.out) fs.writeFileSync(opts.out, JSON.stringify(cmp, null, 2));
     return;
