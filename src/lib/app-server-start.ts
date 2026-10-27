@@ -48,9 +48,22 @@ import { APP_ID_RE } from "@/lib/code-projects";
 import { DATA_DIR } from "@/lib/config-store";
 import { type ClawboxManifest, isProxyablePort } from "@/lib/clawbox-manifest";
 import { probeSystemdRun, scopeEnv } from "@/lib/coding-run-unit";
+import { appMemoryLimits } from "@/lib/box-memory-policy";
 
 /** Every unit this module is ever allowed to name. */
 export const APP_UNIT_PREFIX = "clawbox-app-";
+
+/**
+ * What an app server yields under contention, against the default 100. A WEIGHT
+ * is not a quota: a lone app on an idle box still gets every core, while one
+ * that is compiling in a loop cannot starve the desktop the owner is looking
+ * at. `IOWeight` only applies where the user manager delegates the `io`
+ * controller; the nice level reaches the disk either way, because the kernel's
+ * I/O schedulers derive best-effort priority from nice.
+ */
+export const APP_CPU_WEIGHT = 20;
+export const APP_IO_WEIGHT = 20;
+export const APP_NICE = 10;
 
 /** How long a started server has to be found listening. A production build's server answers in seconds; a dev server on this board can take most of a minute. */
 export const APP_START_WAIT_MS = 60_000;
@@ -73,9 +86,34 @@ const START_SHELL: string = "/bin/sh";
  */
 export function buildAppScopeArgv(systemdRunPath: string, id: string, stamp: string, command: string): { bin: string; argv: string[] } | null {
   if (!APP_ID_RE.test(id) || !/^[a-z0-9]{1,16}$/.test(stamp)) return null;
+  // The cap is a share of this box's RAM, not a literal: an 8 GB Orin Nano, a
+  // 16 GB laptop and a 128 GB Spark run the same image, and a number written
+  // for one is an OOM kill on another. See box-memory-policy.ts — measured on
+  // this box before the cap existed: one app wrote 14 MB/s and peaked at
+  // 3.7 GB with nothing to throttle it.
+  const limits = appMemoryLimits();
   return {
     bin: systemdRunPath,
-    argv: ["--user", "--scope", `--unit=${APP_UNIT_PREFIX}${id}-${stamp}`, "--collect", "--quiet", "--", START_SHELL, "-c", command],
+    argv: [
+      "--user",
+      "--scope",
+      `--unit=${APP_UNIT_PREFIX}${id}-${stamp}`,
+      "--collect",
+      "--quiet",
+      "-p",
+      `MemoryHigh=${limits.high}`,
+      "-p",
+      `MemoryMax=${limits.max}`,
+      "-p",
+      `CPUWeight=${APP_CPU_WEIGHT}`,
+      "-p",
+      `IOWeight=${APP_IO_WEIGHT}`,
+      `--nice=${APP_NICE}`,
+      "--",
+      START_SHELL,
+      "-c",
+      command,
+    ],
   };
 }
 
@@ -357,4 +395,62 @@ export async function registerOrStartServerApp(input: StartServerAppInput): Prom
   const started = await startServerApp(input);
   if (!started.ok) return { ok: false, reason: "not_listening", detail: started.detail };
   return registerServerApp({ id, directory, manifest });
+}
+
+/**
+ * Bring back the app servers that were on the desktop before the box rebooted.
+ *
+ * WHY A BOOT PASS AND NOT A SYSTEMD UNIT. The scope a start runs in already
+ * outlives the web server (that is what `buildAppScopeArgv` is for), so an
+ * in-app update — `systemctl restart clawbox-setup` — does not end an app. A
+ * REBOOT does. The box used to leave that to the owner, and what owners did was
+ * hand-write a `clawbox-app-<id>.service` of their own: unmanaged, uncapped,
+ * outside every update, and invisible to the desktop it serves. Here the box
+ * starts the app itself, in the same capped scope a settle uses, from the
+ * `start` command registration recorded in `data/webapps/<id>/meta.json`.
+ *
+ * WHAT IT WILL NOT DO. Nothing is started that the box did not itself start:
+ * a meta without `start` (a static webapp, a legacy stub) is skipped, and so is
+ * one that says `"autoStart": false` — the owner's opt-out, written by hand
+ * into meta.json. An app whose port already answers is left alone: somebody
+ * (a run, the owner's terminal) is already serving it, and a second copy would
+ * collide on the port rather than help.
+ *
+ * `CLAWBOX_APP_AUTOSTART=0` in the web server's environment turns the whole
+ * pass off, for a box whose owner would rather choose.
+ */
+export interface BootRestartOptions {
+  /** A test's start, instead of the real one. */
+  start?: (input: StartServerAppInput) => Promise<StartOutcome>;
+  /** A test's webapps folder, instead of the box's. */
+  webappsDir?: string;
+}
+
+export async function restartServerAppsAtBoot(options: BootRestartOptions = {}): Promise<string[]> {
+  if (process.env.CLAWBOX_APP_AUTOSTART === "0") return [];
+  const dir = options.webappsDir ?? path.join(DATA_DIR, "webapps");
+  const start = options.start ?? startServerApp;
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const started: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !APP_ID_RE.test(entry.name)) continue;
+    const id = entry.name;
+    const meta = await fs.promises.readFile(path.join(dir, id, "meta.json"), "utf-8")
+      .then((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .catch(() => null);
+    if (!meta || meta.autoStart === false) continue;
+    const command = typeof meta.start === "string" ? meta.start.trim() : "";
+    const directory = typeof meta.directory === "string" ? meta.directory : "";
+    const port = typeof meta.port === "number" ? meta.port : Number.NaN;
+    const name = typeof meta.name === "string" ? meta.name : id;
+    if (!command || !isProxyablePort(port) || !directory) continue;
+    if (!(await fs.promises.stat(directory).catch(() => null))?.isDirectory()) continue;
+    // Already up: a run, the owner's terminal, or a start that outlived a
+    // web-server restart. Starting a second copy would fail on the port.
+    if ((await listenerOwnedBy(port, directory)) === "owned") continue;
+    const outcome = await start({ id, directory, manifest: { name, port, start: command, kind: "server" } as ClawboxManifest, searchPath: process.env.PATH ?? "" });
+    if (outcome.ok) started.push(id);
+    else console.error(`[app-boot] ${id} did not come back: ${outcome.detail}`);
+  }
+  return started;
 }

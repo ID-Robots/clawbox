@@ -13,6 +13,7 @@ import path from "path";
 import type { AddressInfo } from "net";
 import { saveEnv } from "@/tests/helpers/env";
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
+import { appMemoryLimits } from "@/lib/box-memory-policy";
 
 // Starts real servers and asks `ss` about them.
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
@@ -295,12 +296,89 @@ describe("what a failed start printed, as one line", () => {
 });
 
 describe("the scope a started app runs in", () => {
-  it("is named from the validated id, and the command stays one argument", () => {
+  it("is capped by a share of this board's RAM, yields CPU and disk, and keeps the command one argument", () => {
+    const limits = appMemoryLimits();
     expect(start.buildAppScopeArgv("/usr/bin/systemd-run", "hello-app", "abc123", "bun run preview --port 4173")).toEqual({
       bin: "/usr/bin/systemd-run",
-      argv: ["--user", "--scope", "--unit=clawbox-app-hello-app-abc123", "--collect", "--quiet", "--", "/bin/sh", "-c", "bun run preview --port 4173"],
+      argv: [
+        "--user",
+        "--scope",
+        "--unit=clawbox-app-hello-app-abc123",
+        "--collect",
+        "--quiet",
+        "-p",
+        `MemoryHigh=${limits.high}`,
+        "-p",
+        `MemoryMax=${limits.max}`,
+        "-p",
+        `CPUWeight=${start.APP_CPU_WEIGHT}`,
+        "-p",
+        `IOWeight=${start.APP_IO_WEIGHT}`,
+        `--nice=${start.APP_NICE}`,
+        "--",
+        "/bin/sh",
+        "-c",
+        "bun run preview --port 4173",
+      ],
     });
+    // Derived, not a literal: the same image ships on 8 GB and 128 GB boards,
+    // and a number written for one is wrong on the other.
+    expect(limits.maxBytes).toBeLessThan(os.totalmem());
+    expect(limits.highBytes).toBeLessThan(limits.maxBytes);
     expect(start.buildAppScopeArgv("/usr/bin/systemd-run", "../etc", "abc", "true")).toBeNull();
     expect(start.buildAppScopeArgv("/usr/bin/systemd-run", "hello-app", "a b", "true")).toBeNull();
+  });
+});
+
+describe("bringing the desktop's app servers back at boot", () => {
+  function webapp(id: string, meta: Record<string, unknown>): void {
+    const dir = path.join(root, "data", "webapps", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ name: id, ...meta }));
+  }
+
+  it("starts only what the box itself started, from the recorded command", async () => {
+    const asked: string[] = [];
+    webapp("hello-app", { port: 4230, directory: project, start: "node server.js" });
+    webapp("static-site", { port: 4231, directory: project });
+    webapp("opted-out", { port: 4232, directory: project, start: "node server.js", autoStart: false });
+    webapp("gone", { port: 4233, directory: path.join(base, "nowhere"), start: "node server.js" });
+    const started = await start.restartServerAppsAtBoot({
+      webappsDir: path.join(root, "data", "webapps"),
+      start: async (input) => {
+        asked.push(`${input.id}:${input.manifest.start}`);
+        return { ok: true };
+      },
+    });
+    expect(started).toEqual(["hello-app"]);
+    expect(asked).toEqual(["hello-app:node server.js"]);
+  });
+
+  it("does nothing when the owner turned it off", async () => {
+    webapp("hello-app", { port: 4230, directory: project, start: "node server.js" });
+    const previous = process.env.CLAWBOX_APP_AUTOSTART;
+    process.env.CLAWBOX_APP_AUTOSTART = "0";
+    try {
+      const started = await start.restartServerAppsAtBoot({
+        webappsDir: path.join(root, "data", "webapps"),
+        start: async () => ({ ok: true }),
+      });
+      expect(started).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.CLAWBOX_APP_AUTOSTART;
+      else process.env.CLAWBOX_APP_AUTOSTART = previous;
+    }
+  });
+
+  it("survives a meta.json that is not JSON", async () => {
+    const dir = path.join(root, "data", "webapps", "broken-app");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "meta.json"), "{ nope");
+    webapp("hello-app", { port: 4230, directory: project, start: "node server.js" });
+    const started = await start.restartServerAppsAtBoot({
+      webappsDir: path.join(root, "data", "webapps"),
+      start: async () => ({ ok: true }),
+    });
+    expect(started).toEqual(["hello-app"]);
   });
 });

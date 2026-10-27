@@ -371,6 +371,11 @@ export async function registerServerApp(input: { id: string; directory: string; 
         port: manifest.port,
         directory: path.resolve(directory),
         ...(manifest.stripBasePath ? { stripBasePath: true } : {}),
+        // Kept so the box can bring the app back after a reboot without
+        // re-reading a clawbox.json the project may have deleted since — the
+        // manifest ran, so its command is the one that works here. See
+        // `restartServerAppsAtBoot` in app-server-start.ts.
+        ...(manifest.start ? { start: manifest.start } : {}),
       }),
       "utf-8",
     );
