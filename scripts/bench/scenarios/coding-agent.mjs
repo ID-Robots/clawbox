@@ -177,6 +177,35 @@ export async function run({ client, host, log, repoRoot }) {
   details.extraFiles = extraFiles;
   const success = run?.status === "completed" && fileOk ? 1 : 0;
 
+  // The automatic review pass (Settings → Coding Agent → review pass): a run
+  // of its own with `reviewOf` = this run, started by the box right after a
+  // completed run. Waited for — bounded — so the folder is not deleted under
+  // it and its spend is in the picture; not scored, since the owner's switch
+  // decides whether it exists at all.
+  details.reviewPass = st.reviewPass === true ? "waited" : "off";
+  if (st.reviewPass === true && run?.status === "completed") {
+    const until = Date.now() + Math.min(6 * 60_000, Math.max(60_000, deadline - Date.now()));
+    let review = null;
+    for (let i = 0; i < 20 && !review; i++) {
+      await sleep(POLL_MS);
+      const l = await client.http("/setup-api/coding-agent/runs?limit=10", { timeoutMs: 30_000 }).catch(() => null);
+      review = (l?.json?.runs ?? []).find((r) => r?.reviewOf === runId) ?? null;
+    }
+    if (!review) details.reviewPass = "none appeared within a minute";
+    while (review && !TERMINAL.has(review.status)) {
+      if (Date.now() > until) { details.reviewPass = "stopped at the deadline"; review = (await stopRun(client, review.id, log)) ?? review; break; }
+      await sleep(POLL_MS);
+      const g = await client.http(`/setup-api/coding-agent/runs?id=${encodeURIComponent(review.id)}`, { timeoutMs: 30_000 }).catch(() => null);
+      if (readRun(g)) review = readRun(g);
+      else if (g?.status === 404) break;
+    }
+    if (review) {
+      const reviewMs = typeof review.completedAt === "number" && typeof review.startedAt === "number" ? review.completedAt - review.startedAt : null;
+      details.reviewRun = { id: review.id, status: review.status, wallMs: reviewMs, numTurns: review.numTurns ?? null, tokensUsed: review.tokensUsed ?? null };
+      log(`review pass ${review.id} ${review.status}${reviewMs !== null ? ` in ${(reviewMs / 1000).toFixed(1)} s` : ""}`);
+    }
+  }
+
   // What the run left running (a server it was told to leave up — none, for
   // this task), ended so the box is as it was.
   if (run?.leftover) {
