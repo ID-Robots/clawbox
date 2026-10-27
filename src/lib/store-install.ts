@@ -313,10 +313,15 @@ async function registerInstalledApp(appId: string, directory: string, manifest: 
       }
       const outcome = await registerOrStartServerApp({ id: appId, directory, manifest, searchPath });
       if (outcome.ok) return { registered: true, webappUrl: `/apps/${appId}/`, detail: null };
+      // A port something else holds is not fixed by starting the app from the
+      // Coding Agent: it would collide on the same port.
+      const next = outcome.reason === "not_owned"
+        ? "Stop what holds the port, then install it again."
+        : "Start it from the Coding Agent, then use Add to desktop.";
       return {
         registered: false,
         webappUrl: null,
-        detail: `${manifest.name} is in your projects, but its server could not be put on the desktop: ${outcome.detail} Start it from the Coding Agent, then use Add to desktop.`,
+        detail: `${manifest.name} is in your projects, but its server could not be put on the desktop: ${outcome.detail} ${next}`,
       };
     }
     const html = manifest.kind !== "tool" && (await exists(path.join(directory, "index.html")))

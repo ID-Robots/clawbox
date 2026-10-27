@@ -48,16 +48,24 @@
  * so Install again recovers an app installed before the box did this. An
  * install that fails starts nothing, and says which tool failed and what it
  * printed last.
+ *
+ * WHAT STOPS IT. `stopServerApp`: the uninstall, before the app's folder goes
+ * (a server left running from a removed folder held the app's port, and the
+ * next install of the same app found it taken), and an install again that
+ * finds such a leftover on the port. Only a process proven to be the app's —
+ * its scope, its folder — is ever stopped, never whatever holds the port.
  */
 import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
-import { listenerOwnedBy, registerServerApp, type RegisterOutcome } from "@/lib/app-proxy";
+import { forgetListenerVerdict, listenerOwnedBy, portListeners, processCwd, registerServerApp, type RegisterOutcome } from "@/lib/app-proxy";
+import { runChild } from "@/lib/child-run";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { DATA_DIR } from "@/lib/config-store";
 import { type ClawboxManifest, isProxyablePort } from "@/lib/clawbox-manifest";
-import { probeSystemdRun, scopeEnv } from "@/lib/coding-run-unit";
+import { findSystemdTool, probeSystemdRun, scopeEnv } from "@/lib/coding-run-unit";
+import { isInside } from "@/lib/file-guard";
 import { appMemoryLimits } from "@/lib/box-memory-policy";
 
 /** Every unit this module is ever allowed to name. */
@@ -88,6 +96,35 @@ export function appServerLogPath(id: string): string {
 // child-run.ts's SCRIPT_RUNNER.
 const START_SHELL: string = "/bin/sh";
 
+/** The per-start stamp in an app's scope name. */
+const SCOPE_STAMP_RE = /^[a-z0-9]{1,16}$/;
+const SCOPE_SUFFIX = ".scope";
+
+/**
+ * The scope a box-started server of `id` runs in, read from its
+ * /proc/<pid>/cgroup: `clawbox-app-<id>-<stamp>.scope` and nothing looser.
+ * Exported for its test.
+ *
+ * Split at the LAST hyphen, because ids have hyphens of their own: the scope
+ * of `audio-app` is never taken for one of `audio`. An owner's hand-written
+ * `clawbox-app-<id>.service` is not a scope and is never matched — it is the
+ * owner's, not the box's, to stop.
+ */
+export function appScopeOf(cgroup: string, id: string): string | null {
+  if (!APP_ID_RE.test(id)) return null;
+  for (const line of cgroup.split("\n")) {
+    // hierarchy-ID:controllers:path — one line on cgroup v2, one per hierarchy on v1.
+    const at = line.indexOf(":", line.indexOf(":") + 1);
+    if (at < 0) continue;
+    const unit = line.slice(line.lastIndexOf("/") + 1).trim();
+    if (!unit.startsWith(APP_UNIT_PREFIX) || !unit.endsWith(SCOPE_SUFFIX)) continue;
+    const name = unit.slice(APP_UNIT_PREFIX.length, -SCOPE_SUFFIX.length);
+    const dash = name.lastIndexOf("-");
+    if (dash > 0 && name.slice(0, dash) === id && SCOPE_STAMP_RE.test(name.slice(dash + 1))) return unit;
+  }
+  return null;
+}
+
 /**
  * `systemd-run`'s prefix in front of the start command. Pure and exported for
  * its test. The unit name is rebuilt from the validated id and a per-start
@@ -95,7 +132,7 @@ const START_SHELL: string = "/bin/sh";
  * name.
  */
 export function buildAppScopeArgv(systemdRunPath: string, id: string, stamp: string, command: string): { bin: string; argv: string[] } | null {
-  if (!APP_ID_RE.test(id) || !/^[a-z0-9]{1,16}$/.test(stamp)) return null;
+  if (!APP_ID_RE.test(id) || !SCOPE_STAMP_RE.test(stamp)) return null;
   // The cap is a share of this box's RAM, not a literal: an 8 GB Orin Nano, a
   // 16 GB laptop and a 128 GB Spark run the same image, and a number written
   // for one is an OOM kill on another. See box-memory-policy.ts — measured on
@@ -551,6 +588,14 @@ export interface StartServerAppInput {
 const inFlight = new Map<string, Promise<StartOutcome>>();
 
 /**
+ * The process groups this web server made for app starts — each start's
+ * detached child leads one — while their leader lives. `stopServerApp` ends a
+ * whole group only when the box made it: a server a coding run started can
+ * share a group with the run's agent.
+ */
+const startedGroups = new Set<number>();
+
+/**
  * Run the manifest's `start` command in the project folder and wait for the
  * project's own listener on the manifest's port. One start per app at a time:
  * a second caller gets the first one's answer. Never throws.
@@ -610,6 +655,11 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
       // server that had already stopped.
       child.once("error", () => { gone = true; });
       child.once("exit", (code) => { gone = true; exited = code; });
+      const group = child.pid;
+      if (typeof group === "number") {
+        startedGroups.add(group);
+        child.once("exit", () => { startedGroups.delete(group); });
+      }
     } finally {
       await log.close().catch(() => undefined);
     }
@@ -664,17 +714,197 @@ async function endProcessGroup(pgid: number): Promise<void> {
   try { process.kill(-pgid, "SIGKILL"); } catch { /* gone in the meantime */ }
 }
 
+// ── Stopping an app's server ─────────────────────────────────────────────────
+
+/** How long a start of the same app that is under way is waited for before a stop gives up. */
+const STOP_START_WAIT_MS = 20_000;
+/** How long `systemctl --user stop` of an app's scope may take before the scope is killed instead. */
+const SCOPE_STOP_TIMEOUT_MS = 10_000;
+/** How long the port has, once the server was told to stop, to have none of it listening. */
+const STOP_PORT_WAIT_MS = 5_000;
+
+export type StopOutcome =
+  /** `holder`: a listener on the port that is NOT the app's, left running (its pid; null when it is another user's). */
+  | { ok: true; stopped: boolean; holder: { pid: number | null } | null }
+  | { ok: false; detail: string };
+
+/** The process group a pid leads or belongs to, from /proc/<pid>/stat; null when it cannot be read. */
+async function processGroupOf(pid: number): Promise<number | null> {
+  const stat = await fs.promises.readFile(`/proc/${pid}/stat`, "utf-8").catch(() => null);
+  if (!stat) return null;
+  // pid (comm) state ppid pgrp …: comm may hold spaces and parentheses, so count from the last one.
+  const pgid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2]);
+  return Number.isInteger(pgid) && pgid > 1 ? pgid : null;
+}
+
+async function appScopeOfPid(pid: number, id: string): Promise<string | null> {
+  return appScopeOf(await fs.promises.readFile(`/proc/${pid}/cgroup`, "utf-8").catch(() => ""), id);
+}
+
+/**
+ * Is this process the app's own server? Proven, never assumed from the port
+ * (a manifest can name any port, the gateway's included):
+ *  - it runs in the scope the box starts this app in (`appScopeOf`), or
+ *  - its working directory is in the app's folder — or WAS, in a folder of
+ *    that name since removed (`processCwd` reads the kernel's "(deleted)").
+ * The scope, when it is in one. Null when it is not the app's, and always for
+ * the web server itself.
+ */
+async function appProcess(pid: number, id: string, real: string | null): Promise<{ scope: string | null } | null> {
+  if (pid === process.pid) return null;
+  const scope = await appScopeOfPid(pid, id);
+  if (scope) return { scope };
+  if (!real) return null;
+  const cwd = await processCwd(pid);
+  return cwd && isInside(cwd.path, real) ? { scope: null } : null;
+}
+
+/** systemd's own stop for the scope, bounded: a server that will not go on SIGTERM is killed instead. */
+async function stopAppScope(scope: string): Promise<void> {
+  const systemctl = await findSystemdTool("systemctl");
+  if (!systemctl) return;
+  const env = scopeEnv({ PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin" });
+  const stop = await runChild(systemctl, ["--user", "stop", scope], { timeoutMs: SCOPE_STOP_TIMEOUT_MS, env });
+  if (stop.code === 0) return;
+  await runChild(systemctl, ["--user", "kill", "--signal=SIGKILL", scope], { timeoutMs: 5_000, env });
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Ended by its process group when the box made that group, by itself otherwise; asked first, then made to. */
+async function endAppProcess(pid: number, id: string): Promise<void> {
+  const group = await processGroupOf(pid);
+  const ownGroup = await processGroupOf(process.pid);
+  // Never the web server's own group, and never a group the box did not make:
+  // a server a coding run started can share its group with the run's agent,
+  // whose working directory is in the project folder too. The group is the
+  // server's own when it leads it, the box's when a start of this web server
+  // made it or its leader is in the app's scope; otherwise only the server
+  // itself is ended.
+  if (group && group !== ownGroup && group !== process.pid && (group === pid || startedGroups.has(group) || (await appScopeOfPid(group, id)))) {
+    await endProcessGroup(group);
+    return;
+  }
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  const deadline = Date.now() + END_GRACE_MS;
+  while (Date.now() < deadline) {
+    if (!pidAlive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* gone in the meantime */ }
+}
+
+async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const settled = await Promise.race([
+    promise.then(() => true, () => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), ms); }),
+  ]);
+  clearTimeout(timer);
+  return settled;
+}
+
+/**
+ * Stop the server an app runs on `port` — only one that is provably this
+ * app's (`appProcess`), never whatever holds the port. Its scope goes with
+ * systemd's own `systemctl --user stop`; a server outside a scope (a box with
+ * no user manager, a run's own) by its process group. Answers once none of
+ * the app's is listening any more, and forgets the proxy's cached verdict
+ * for the port. A start of the same app still under way is waited for first:
+ * it would bring the server up again behind the stop.
+ *
+ * `ok: false` only when the app's server is still listening, or the box could
+ * not tell: a caller about to remove the app's folder must not go on then.
+ * A listener that is not the app's is left alone and named in `holder`.
+ * Never throws.
+ */
+export async function stopServerApp(id: string, where: { port: number; directory: string | null }): Promise<StopOutcome> {
+  const { port } = where;
+  if (!APP_ID_RE.test(id) || !isProxyablePort(port)) return { ok: true, stopped: false, holder: null };
+  try {
+    const directory = where.directory ? path.resolve(where.directory) : null;
+    const pending = inFlight.get(id) ?? (directory ? installing.get(directory) : undefined);
+    if (pending && !(await settledWithin(pending, STOP_START_WAIT_MS))) {
+      return { ok: false, detail: "The app's server is still being started. Try again once it is up." };
+    }
+    const real = directory ? await fs.promises.realpath(directory).catch(() => directory) : null;
+
+    const find = async () => {
+      const found = await portListeners(port);
+      if (!found) return null;
+      const ours = new Map<number, string | null>();
+      let holder: { pid: number | null } | null = found.listening && found.pids.length === 0 ? { pid: null } : null;
+      for (const pid of found.pids) {
+        const own = await appProcess(pid, id, real);
+        if (own) ours.set(pid, own.scope);
+        else holder ??= { pid };
+      }
+      return { ours, holder };
+    };
+
+    const first = await find();
+    if (!first) return { ok: false, detail: `The box could not tell who is listening on port ${port} (the socket listing failed).` };
+    if (first.ours.size === 0) return { ok: true, stopped: false, holder: first.holder };
+
+    for (const scope of new Set([...first.ours.values()].filter((s): s is string => !!s))) await stopAppScope(scope);
+    // Outside a scope, or one systemd could not be asked to stop.
+    for (const pid of first.ours.keys()) {
+      if (pidAlive(pid)) await endAppProcess(pid, id);
+    }
+
+    const deadline = Date.now() + STOP_PORT_WAIT_MS;
+    for (;;) {
+      const now = await find();
+      if (now && now.ours.size === 0) {
+        forgetListenerVerdict(port);
+        return { ok: true, stopped: true, holder: now.holder };
+      }
+      if (Date.now() >= deadline) {
+        const still = now ? ` (pid ${[...now.ours.keys()][0]})` : "";
+        return { ok: false, detail: `The app's server${still} is still listening on port ${port}.` };
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    }
+  } catch (err) {
+    return { ok: false, detail: `Stopping the app's server failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) };
+  }
+}
+
+/** The refusal for a port a process that is not the app's holds. */
+export function portTakenBy(port: number, pid: number | null): string {
+  return pid === null ? `Port ${port} is taken by another user's process.` : `Port ${port} is taken by another process (pid ${pid}).`;
+}
+
 /**
  * Register a project's server app, starting the server first when the only
  * thing in the way is that nothing is listening and the manifest says how to
- * start it. Any other refusal — a port that is somebody else's, a listing
- * that failed — is returned as it is: starting a second server would not
- * change it.
+ * start it.
+ *
+ * A port that is taken is reclaimed only from the app's OWN leftover server:
+ * one in this app's scope, or running from its folder as it was before the
+ * folder was removed (an uninstall before the box stopped servers, a folder
+ * deleted by hand). That one is stopped and a fresh one started. Anything
+ * else keeps the port and is named in the refusal; the app is never moved to
+ * another port. A listing that failed is returned as it is.
  */
 export async function registerOrStartServerApp(input: StartServerAppInput): Promise<RegisterOutcome> {
   const { id, directory, manifest } = input;
   const first = await registerServerApp({ id, directory, manifest });
-  if (first.ok || first.reason !== "not_listening" || !manifest.start || !manifest.port) return first;
+  if (first.ok || !manifest.start || !manifest.port) return first;
+  if (first.reason === "not_owned") {
+    const freed = await stopServerApp(id, { port: manifest.port, directory });
+    if (!freed.ok) return { ok: false, reason: "not_owned", detail: freed.detail };
+    if (freed.holder) return { ok: false, reason: "not_owned", detail: portTakenBy(manifest.port, freed.holder.pid) };
+  } else if (first.reason !== "not_listening") {
+    return first;
+  }
   const started = await startServerApp(input);
   if (!started.ok) return { ok: false, reason: "not_listening", detail: started.detail };
   return registerServerApp({ id, directory, manifest });
@@ -697,7 +927,8 @@ export async function registerOrStartServerApp(input: StartServerAppInput): Prom
  * one that says `"autoStart": false` — the owner's opt-out, written by hand
  * into meta.json. An app whose port already answers is left alone: somebody
  * (a run, the owner's terminal) is already serving it, and a second copy would
- * collide on the port rather than help.
+ * collide on the port rather than help. A port held by anything but the app
+ * is left alone too, and logged; only the app's own leftover is stopped.
  *
  * `CLAWBOX_APP_AUTOSTART=0` in the web server's environment turns the whole
  * pass off, for a box whose owner would rather choose.
@@ -734,7 +965,19 @@ export async function restartServerAppsAtBoot(options: BootRestartOptions = {}):
     if (!(await fs.promises.stat(untraced(directory)).catch(() => null))?.isDirectory()) continue;
     // Already up: a run, the owner's terminal, or a start that outlived a
     // web-server restart. Starting a second copy would fail on the port.
-    if ((await listenerOwnedBy(port, directory)) === "owned") continue;
+    const verdict = await listenerOwnedBy(port, directory);
+    if (verdict === "owned") continue;
+    // Taken by something that is not the app as it is now: its own leftover
+    // (a folder removed and made again under it) is stopped first, exactly as
+    // an install again does; anything else keeps the port, and a start that
+    // could only die on it is not made.
+    if (verdict === "not_owned") {
+      const freed = await stopServerApp(id, { port, directory });
+      if (!freed.ok || freed.holder) {
+        console.error(`[app-boot] ${id} not started: ${freed.ok ? portTakenBy(port, freed.holder?.pid ?? null) : freed.detail}`);
+        continue;
+      }
+    }
     const outcome = await start({ id, directory, manifest: { name, port, start: command, kind: "server" } as ClawboxManifest, searchPath: process.env.PATH ?? "" });
     if (outcome.ok) started.push(id);
     else console.error(`[app-boot] ${id} did not come back: ${outcome.detail}`);

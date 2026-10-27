@@ -460,6 +460,16 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
               message: "The ClawBox stopped part-way through the removal: the app's project folder could not be fully removed and some of it may already be gone. The app is still on the desktop.",
               next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still on the desktop, that part of its project folder may already be deleted, and quote what the device said.",
             },
+            // An app with a server of its own has it stopped before any folder
+            // goes; one that would not stop removed nothing. The stop is
+            // bounded well inside this call's 60 s.
+            {
+              status: 503,
+              match: /"code"\s*:\s*"server_stop_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox could not stop the app's server, so nothing was removed and the app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still installed, that its server would not stop, and quote what the device said.",
+            },
             {
               status: 503,
               code: "ENDPOINT_DOWN",

@@ -28,7 +28,13 @@ function isProxyablePort(port) {
 
 function cwdInside(pid, real) {
   try {
-    const rel = path.relative(real, fs.readlinkSync(`/proc/${pid}/cwd`));
+    const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+    // A folder removed under the process reads `<path> (deleted)`: lexically
+    // inside a folder made again under the same name, and not in it. A link
+    // count of 0 is the proof; the suffix alone is not (processCwd in
+    // src/lib/app-proxy.ts).
+    if (cwd.endsWith(" (deleted)") && fs.statSync(`/proc/${pid}/cwd`).nlink === 0) return false;
+    const rel = path.relative(real, cwd);
     return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
   } catch {
     return false;
