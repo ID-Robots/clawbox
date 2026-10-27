@@ -2622,6 +2622,43 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
   // cancellable on unmount.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
+  /**
+   * A push-driven read that arrived while nobody was looking at this chat, and
+   * that ONE read will therefore be owed later.
+   *
+   * This panel stays MOUNTED behind the desktop with the popup shut, and the
+   * window spends most of its life in the background — but the gateway pushes
+   * every append into the session either way, and each push used to cost a
+   * whole 50-message `chat.history` (the audit measured 46 reads an hour at
+   * ~206 KB while the popup was closed, each one also a synchronous ~8 MiB
+   * scan in the web server) to repaint a transcript nobody was reading. So the
+   * read waits: a flag, not a queue, and when the panel is opened again or the
+   * window comes back to the front the debt is paid ONCE however many pushes
+   * were suppressed. See `historyReadMustWait` and the catch-up effect below.
+   */
+  const historyCatchUpOwedRef = useRef(false)
+  /**
+   * `isOpen`, for the socket handlers.
+   *
+   * `connect` is memoised with no dependencies on purpose (a new identity tears
+   * the socket down and rebuilds it), so its handlers cannot close over the
+   * prop: they ask this ref, kept current by the effect below.
+   */
+  const isOpenRef = useRef(isOpen)
+  useEffect(() => { isOpenRef.current = isOpen }, [isOpen])
+  /**
+   * Whether a push-driven history read has to WAIT.
+   *
+   * Two ways nobody is looking: the panel is shut, or the window is in the
+   * background. Either one makes a `chat.history` round-trip — and the box-side
+   * scan behind it — pure cost.
+   */
+  const historyReadMustWait = useCallback((): boolean => {
+    if (!isOpenRef.current) return true
+    // Nothing here runs on the server, but the guard keeps a shallow render
+    // from throwing rather than silently reading the transcript.
+    return typeof document !== 'undefined' && document.visibilityState !== 'visible'
+  }, [])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // `transcriptRef` — the transcript itself, so it can follow content that
   // grows without a new message: pills, run and approval cards, pictures that
@@ -3452,8 +3489,26 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           // supplement route below restores the same identity after refresh.
           const spoken = pushedSpokenReply(push.message)
           if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
-          // Coalesce the burst an agent turn produces into one read.
-          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void reconcileTranscriptRef.current() })
+          // A push is a SIGNAL that the stored transcript moved, and the read
+          // it causes is only worth its cost while someone can see the result.
+          // A coding run in flight appends every few seconds for as long as it
+          // works, so a shut panel or a background window used to pay for every
+          // one of them: the read is owed ONCE instead, and paid on open.
+          if (historyReadMustWait()) {
+            historyCatchUpOwedRef.current = true
+            return
+          }
+          // Coalesce the burst an agent turn produces into one read — and
+          // re-check the gate when it fires, because the panel can shut inside
+          // the delay: the read would then be for an empty room, so it joins
+          // the one owed read instead.
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => {
+            if (historyReadMustWait()) {
+              historyCatchUpOwedRef.current = true
+              return
+            }
+            void reconcileTranscriptRef.current()
+          })
           return
         }
 
@@ -3605,11 +3660,27 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               // then be that turn's.
               const clipRestored = finishedRun !== null && askedTurnKeyRef.current === finishedRun
               if (clipRestored) askedTurnKeyRef.current = null
+              // The other half of the audit's idle reads. Nothing is looking at
+              // this transcript while the panel is shut or the window is in the
+              // background, so the refetch is owed, not spent — EXCEPT when the
+              // read is not for the screen at all: a spoken question's answer
+              // must still be said aloud with the chat closed, and that is the
+              // one thing this read may do without an audience.
+              if (historyReadMustWait() && !speakRestored) {
+                historyCatchUpOwedRef.current = true
+                return
+              }
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }
               ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
                 ackOnlyHistoryTimerRef.current = null
+                // The panel may have shut inside the three seconds above; the
+                // read is then owed to the catch-up, not spent here.
+                if (historyReadMustWait() && !speakRestored) {
+                  historyCatchUpOwedRef.current = true
+                  return
+                }
                 // What loadHistory ANSWERS, not messagesRef: the ref follows
                 // the state a render later, so right here it may still be
                 // the transcript from before the read.
@@ -7174,6 +7245,40 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       clearInterval(tick)
     }
   }, [harnessLoaded, isOpen, caps, loadHistory])
+
+  // The read the suppressed pushes owe, paid once.
+  //
+  // Both push paths above (`session.message`, and the ack-only refetch) fold a
+  // suppressed read into `historyCatchUpOwedRef` instead of spending it, so the
+  // transcript can be stale by however many appends landed while the panel was
+  // shut or the window was in the background. Nobody needs the intermediate
+  // states: opening the panel or bringing the window forward is the first
+  // moment the difference is visible, and ONE read then carries every append
+  // that was skipped. `loadHistory` reconciles against what is on screen, so a
+  // catch-up over an unchanged transcript paints nothing.
+  //
+  // Deliberately NOT gated on `caps.hasLiveConnection`: the ack-only refetch is
+  // the gateway's, and a harness with no socket is covered by the refresh effect
+  // above. Nor on `sendingRef`: a catch-up landing under this device's own turn
+  // keeps its optimistic bubbles (`mergeRestoredTranscript`), which is exactly
+  // what an ordinary refetch does.
+  useEffect(() => {
+    if (!isOpen || !caps.canListHistory) return
+    const catchUp = () => {
+      if (!historyCatchUpOwedRef.current) return
+      // Re-owed, not lost: a hidden window and a shut panel are both temporary.
+      if (document.visibilityState !== 'visible') return
+      historyCatchUpOwedRef.current = false
+      void loadHistory()
+    }
+    catchUp()
+    document.addEventListener('visibilitychange', catchUp)
+    window.addEventListener('focus', catchUp)
+    return () => {
+      document.removeEventListener('visibilitychange', catchUp)
+      window.removeEventListener('focus', catchUp)
+    }
+  }, [isOpen, caps, loadHistory])
 
   // Open the first conversation, once both of its inputs are in.
   //
