@@ -1314,7 +1314,7 @@ OPENCLAW_RETRY=/usr/bin/env
 if [ -n "${SRC_DIR:-}" ] && [ -x "$SRC_DIR/scripts/openclaw-maintenance-retry.sh" ]; then
   OPENCLAW_RETRY="$SRC_DIR/scripts/openclaw-maintenance-retry.sh"
 fi
-OPENCLAW_VERSION="2026.10.6"
+OPENCLAW_VERSION="2026.10.7"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1335,8 +1335,8 @@ OPENCLAW_VERSION="2026.10.6"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v0.22.4 == "Hermes Agent v0.22.4".
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-4d04303818b61bf3aa09278af48356315515965b}"
+# Current pin: upstream tag v0.22.5 == "Hermes Agent v0.22.5".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-bf0203a794a07aac3ff764972ab9087baa4e4f4e}"
 
 # WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
 # guess. ClawBox supervises the gateway itself, as the SYSTEM unit
