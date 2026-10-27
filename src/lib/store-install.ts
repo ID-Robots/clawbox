@@ -11,9 +11,10 @@
  * own the way an imported folder is (`ensureRepository`), and put on the
  * desktop the way its clawbox.json says:
  *
- *   - a `port`: the existing server-app flow — started with its `start`
- *     command when nothing listens yet, then proxied under `/apps/<slug>/`
- *     (`registerOrStartServerApp`, src/lib/app-proxy.ts);
+ *   - a `port`: the existing server-app flow — its dependencies installed
+ *     when it has a package.json and a `start` (`installAppDependencies`),
+ *     started with that command when nothing listens yet, then proxied
+ *     under `/apps/<slug>/` (`registerOrStartServerApp`, src/lib/app-proxy.ts);
  *   - a `webapp` or `site` with an index.html: bundled into one page, as a
  *     code project's build is (`bundleFolderHtml`), and served as a desktop
  *     web app;
@@ -37,7 +38,7 @@ import { readStoreMarker, STORE_MARKER, type StoreMarker } from "./store-install
 import { isPng, placeIcon, readIconBytes, safeAppId, webappIconPath } from "./webapp-icon";
 import { getDefaultDirectory } from "./coding-agent";
 import { ensureRepository, freeBytes, IMPORT_FREE_RESERVE_BYTES } from "./project-import";
-import { registerOrStartServerApp } from "./app-server-start";
+import { installAppDependencies, registerOrStartServerApp } from "./app-server-start";
 import { bundleFolderHtml, deployWebapp, webappPath } from "./code-projects";
 import { getAll as configGetAll } from "./config-store";
 import { resolveClawaiToken } from "./harness/credentials";
@@ -299,12 +300,18 @@ async function registerInstalledApp(appId: string, directory: string, manifest: 
   const meta = { name: manifest.name, description: manifest.description ?? (description || undefined) };
   try {
     if (manifest.port) {
-      const outcome = await registerOrStartServerApp({
-        id: appId,
-        directory,
-        manifest,
-        searchPath: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-      });
+      const searchPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+      // A package never carries node_modules, and a `start` such as `next
+      // build && next start` exits 127 without them. Only an app the box is
+      // about to start gets an install: a web app or a tool runs none of the
+      // package's code here, and an install runs its scripts.
+      if (manifest.start) {
+        const deps = await installAppDependencies({ directory, searchPath });
+        if (!deps.ok) {
+          return { registered: false, webappUrl: null, detail: `${manifest.name} is in your projects, but its server was not started: ${deps.detail}` };
+        }
+      }
+      const outcome = await registerOrStartServerApp({ id: appId, directory, manifest, searchPath });
       if (outcome.ok) return { registered: true, webappUrl: `/apps/${appId}/`, detail: null };
       return {
         registered: false,
