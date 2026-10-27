@@ -169,6 +169,171 @@ describe("an app whose server the run has already stopped", () => {
   });
 });
 
+describe("an install again over the app's own server, left running from a removed folder", () => {
+  // The pid goes OUTSIDE the project: the folder is removed under the server.
+  const PID_SERVER_JS = `
+const http = require("http");
+require("fs").writeFileSync(process.env.PID_FILE, String(process.pid));
+http.createServer((_q, r) => r.end("ok")).listen(Number(process.env.PORT), "127.0.0.1");
+`;
+  const started: number[] = [];
+  let pidFile: string;
+
+  function writeApp(): void {
+    fs.mkdirSync(path.join(project, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(project, "server.js"), PID_SERVER_JS);
+  }
+
+  function serverPid(): number {
+    const pid = Number(fs.readFileSync(pidFile, "utf-8"));
+    started.push(pid);
+    return pid;
+  }
+
+  function alive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The Store's uninstall as beta did it: the folder goes, the server stays. Then the install puts the same files back. */
+  function removeAndReinstallFolder(): void {
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.mkdirSync(project, { recursive: true });
+    writeApp();
+  }
+
+  beforeEach(() => {
+    pidFile = path.join(base, "app-server.pid");
+    started.length = 0;
+    writeApp();
+  });
+
+  afterEach(() => {
+    for (const pid of started) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  });
+
+  it("stops the leftover and starts a new server", async () => {
+    const port = await freePort();
+    const manifest = manifestFor(port, `PID_FILE='${pidFile}' node server.js`);
+    expect(await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest, searchPath, noScope: true })).toEqual({ ok: true });
+    const before = serverPid();
+
+    removeAndReinstallFolder();
+    // Longer ago than the listener cache remembers, as on the board.
+    proxy._resetListenerCacheForTests();
+    expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("not_owned");
+
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest, searchPath, noScope: true });
+
+    expect(outcome).toEqual({ ok: true });
+    const after = serverPid();
+    expect(after).not.toBe(before);
+    expect(alive(before)).toBe(false);
+    expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("owned");
+  });
+
+  it("does not take the leftover for the new server within the listener cache's 30 seconds", async () => {
+    const port = await freePort();
+    const manifest = manifestFor(port, `PID_FILE='${pidFile}' node server.js`);
+    expect(await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest, searchPath, noScope: true })).toEqual({ ok: true });
+    const before = serverPid();
+
+    removeAndReinstallFolder();
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest, searchPath, noScope: true });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(serverPid()).not.toBe(before);
+    expect(alive(before)).toBe(false);
+  });
+
+  it("does not take a leftover running in a subfolder of the removed folder for the project's own", async () => {
+    const port = await freePort();
+    const manifest = manifestFor(port, `cd sub && PID_FILE='${pidFile}' node ../server.js`);
+    expect(await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest, searchPath, noScope: true })).toEqual({ ok: true });
+    const before = serverPid();
+
+    removeAndReinstallFolder();
+    proxy._resetListenerCacheForTests();
+    // Its working directory reads `<project>/sub (deleted)`: lexically inside the new folder, and not in it.
+    expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("not_owned");
+
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest, searchPath, noScope: true });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(serverPid()).not.toBe(before);
+    expect(alive(before)).toBe(false);
+  });
+
+  it("refuses a port another process holds, names it, and leaves it running", async () => {
+    const port = await freePort();
+    // This test's own process: a listener that is not the app's, and must never be signalled.
+    const other = net.createServer();
+    await new Promise<void>((resolve) => other.listen(port, "127.0.0.1", resolve));
+    try {
+      const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, `PID_FILE='${pidFile}' node server.js`), searchPath, noScope: true });
+      expect(outcome).toEqual({ ok: false, reason: "not_owned", detail: `Port ${port} is taken by another process (pid ${process.pid}).` });
+      expect(fs.existsSync(pidFile)).toBe(false);
+      expect(other.listening).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  });
+});
+
+describe("stopping an app's server", () => {
+  const PID_SERVER_JS = `
+const http = require("http");
+require("fs").writeFileSync("server.pid", String(process.pid));
+http.createServer((_q, r) => r.end("ok")).listen(Number(process.env.PORT), "127.0.0.1");
+`;
+
+  it("stops the server running from the app's folder and forgets that it was listening", async () => {
+    fs.writeFileSync(path.join(project, "server.js"), PID_SERVER_JS);
+    const port = await freePort();
+    expect(await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath, noScope: true })).toEqual({ ok: true });
+    const pid = Number(fs.readFileSync(path.join(project, "server.pid"), "utf-8"));
+    // Cached as the app's own for the next 30 seconds.
+    expect(await proxy.listenerOwnedBy(port, project)).toBe("owned");
+
+    expect(await start.stopServerApp("hello-app", { port, directory: project })).toEqual({ ok: true, stopped: true, holder: null });
+
+    expect(await proxy.listenerOwnedBy(port, project)).toBe("not_listening");
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("stops nothing that is not the app's, and says who holds the port", async () => {
+    const port = await freePort();
+    const other = net.createServer();
+    await new Promise<void>((resolve) => other.listen(port, "127.0.0.1", resolve));
+    try {
+      expect(await start.stopServerApp("hello-app", { port, directory: project })).toEqual({ ok: true, stopped: false, holder: { pid: process.pid } });
+      expect(other.listening).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  });
+
+  it("has nothing to do on a port nobody listens on", async () => {
+    expect(await start.stopServerApp("hello-app", { port: await freePort(), directory: project })).toEqual({ ok: true, stopped: false, holder: null });
+  });
+
+  it("waits for a start of the same app that is still under way", async () => {
+    fs.writeFileSync(path.join(project, "server.js"), PID_SERVER_JS);
+    const port = await freePort();
+    const starting = start.startServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath, noScope: true });
+    const stop = await start.stopServerApp("hello-app", { port, directory: project });
+    expect(await starting).toEqual({ ok: true });
+    expect(stop).toEqual({ ok: true, stopped: true, holder: null });
+    expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("not_listening");
+  });
+});
+
 describe("a box whose node is not on the run's fixed PATH", () => {
   // The run's list names the home folders and the FHS ones. node from nvm,
   // or from a tarball the web server's own unit puts on its PATH, is on
@@ -477,6 +642,28 @@ describe("the scope a started app runs in", () => {
   });
 });
 
+describe("which scope is an app's own", () => {
+  const line = (unit: string) => `0::/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}\n`;
+
+  it("is exactly the scope the box starts it in", () => {
+    expect(start.appScopeOf(line("clawbox-app-audio-app-mh8k2x1q.scope"), "audio-app")).toBe("clawbox-app-audio-app-mh8k2x1q.scope");
+    // cgroup v1 names it on the systemd hierarchy's line.
+    expect(start.appScopeOf(`12:pids:/user.slice\n1:name=systemd:/user.slice/user@1000.service/app.slice/clawbox-app-audio-app-mh8k2x1q.scope\n`, "audio-app"))
+      .toBe("clawbox-app-audio-app-mh8k2x1q.scope");
+  });
+
+  it("is never another app's, an owner's own unit, or a name without the box's stamp", () => {
+    expect(start.appScopeOf(line("clawbox-app-audio-app-mh8k2x1q.scope"), "audio")).toBeNull();
+    expect(start.appScopeOf(line("clawbox-app-audio-mh8k2x1q.scope"), "audio-app")).toBeNull();
+    expect(start.appScopeOf(line("clawbox-app-audio-app.service"), "audio-app")).toBeNull();
+    expect(start.appScopeOf(line("clawbox-app-audio-app-mh8k2x1q.service"), "audio-app")).toBeNull();
+    expect(start.appScopeOf(line("clawbox-app-audio-app.scope"), "audio-app")).toBeNull();
+    expect(start.appScopeOf(line("clawbox-app-audio-app-MH8K.scope"), "audio-app")).toBeNull();
+    expect(start.appScopeOf(line("clawbox-setup.service"), "audio-app")).toBeNull();
+    expect(start.appScopeOf("", "audio-app")).toBeNull();
+  });
+});
+
 describe("bringing the desktop's app servers back at boot", () => {
   function webapp(id: string, meta: Record<string, unknown>): void {
     const dir = path.join(root, "data", "webapps", id);
@@ -514,6 +701,31 @@ describe("bringing the desktop's app servers back at boot", () => {
     } finally {
       if (previous === undefined) delete process.env.CLAWBOX_APP_AUTOSTART;
       else process.env.CLAWBOX_APP_AUTOSTART = previous;
+    }
+  });
+
+  it("starts nothing into a port another process holds, and leaves that process alone", async () => {
+    const port = await freePort();
+    const other = net.createServer();
+    await new Promise<void>((resolve) => other.listen(port, "127.0.0.1", resolve));
+    const asked: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      webapp("hello-app", { port, directory: project, start: "node server.js" });
+      const started = await start.restartServerAppsAtBoot({
+        webappsDir: path.join(root, "data", "webapps"),
+        start: async (input) => {
+          asked.push(input.id);
+          return { ok: true };
+        },
+      });
+      expect(started).toEqual([]);
+      expect(asked).toEqual([]);
+      expect(other.listening).toBe(true);
+      expect(errors).toHaveBeenCalledWith(`[app-boot] hello-app not started: Port ${port} is taken by another process (pid ${process.pid}).`);
+    } finally {
+      errors.mockRestore();
+      await new Promise<void>((resolve) => other.close(() => resolve()));
     }
   });
 
