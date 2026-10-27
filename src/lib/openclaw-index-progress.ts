@@ -150,8 +150,9 @@ export function ptyHostArgs(argv: string[]): string[] {
  *
  * Not configurable in OpenClaw's memory settings: both versions resolve it as
  * `<state dir>/agents/<id>/agent/openclaw-agent.sqlite`, the state directory
- * being `OPENCLAW_STATE_DIR` or `~/.openclaw` — and the pass is spawned with
- * this process's environment, so it resolves the same one.
+ * being `OPENCLAW_STATE_DIR` or `~/.openclaw` — so the caller hands in the
+ * environment the pass is spawned with, which pins `OPENCLAW_STATE_DIR`, and
+ * this resolves the same one.
  */
 export function openclawAgentDbPath(env: Record<string, string | undefined> = process.env): string {
   const override = env.CLAWKEEP_MEMORY_AGENT_DB?.trim();

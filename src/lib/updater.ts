@@ -127,6 +127,7 @@ import {
   writeDowngradeAuthorization,
 } from "./harness-downgrade-backup";
 import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
+import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -166,7 +167,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.10.6";
+const OPENCLAW_VERSION_FALLBACK = "2026.10.7";
 
 /**
  * The state-DB schema each pinned core supports, read from the published
@@ -196,6 +197,7 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.2": 20,
   "2026.10.3": 20,
   "2026.10.6": 20,
+  "2026.10.7": 20,
 };
 
 /**
@@ -216,6 +218,7 @@ const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.2": 24,
   "2026.10.3": 24,
   "2026.10.6": 25,
+  "2026.10.7": 25,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */
@@ -5173,11 +5176,20 @@ async function resumeContinuation(): Promise<boolean> {
   return true;
 }
 
+const DB_MAINTENANCE_BUSY =
+  "OpenClaw database maintenance is running (the gateway is stopped for it) — update when it has finished";
+
 export function startUpdate(
   opts: { allowHarnessDowngrade?: boolean } = {},
 ): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
+  }
+  // A database compaction holds the gateway down with the same guard the
+  // update takes and LIFTS when it is done — under a running compaction the
+  // update would lift it halfway and start the gateway beside the doctor.
+  if (dbMaintenanceRunning()) {
+    return { started: false, error: DB_MAINTENANCE_BUSY };
   }
 
   runtime.running = true;
@@ -5229,6 +5241,9 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
+  }
+  if (dbMaintenanceRunning()) {
+    return { started: false, error: DB_MAINTENANCE_BUSY };
   }
   // Every step in this list is OpenClaw's, so there is no filtered version of
   // it worth running — the whole flow is inapplicable. Refuse honestly instead

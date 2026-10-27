@@ -9,6 +9,7 @@ import {
 import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
 import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
+import { defaultTelegramAccount, telegramAccountAllowFrom, telegramAccountDmPolicy } from "./openclaw-telegram-account";
 import fsSync from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { execFile, spawn } from "child_process";
@@ -1309,7 +1310,23 @@ function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): 
   const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
-  const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
+  // A `config` child reads and writes THE FILE THIS MODULE READS BACK. The
+  // CLI finds its config from OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR, else
+  // `$OPENCLAW_HOME/.openclaw` (the ACCOUNT home to the CLI, the `.openclaw`
+  // directory itself to ClawBox), else `$HOME/.openclaw`; `CONFIG_PATH` honours
+  // `CLAWBOX_OPENCLAW_HOME` and ClawBox's meaning of `OPENCLAW_HOME`. Unpinned,
+  // a `memory.search` write could land in a file that neither `readConfig` nor
+  // the memory status probe (pinned the same way in clawkeep-memory.ts) reads,
+  // and the core would go on indexing with no embedder. Only `config`: doctor
+  // and the rest keep the environment they always had. A caller's own env wins.
+  const pinConfig = args[0] === "config";
+  const env: NodeJS.ProcessEnv = {
+    HOME: "/home/clawbox",
+    ...process.env,
+    ...(pinConfig ? { OPENCLAW_CONFIG_PATH: CONFIG_PATH, OPENCLAW_STATE_DIR: path.dirname(CONFIG_PATH) } : {}),
+    ...(options.env ?? {}),
+  };
+  if (pinConfig && !(options.env && "OPENCLAW_HOME" in options.env)) delete env.OPENCLAW_HOME;
   const label = `${bin} ${(options.labelArgs ?? args).join(" ")}`;
 
   return new Promise((resolve, reject) => {
@@ -3740,13 +3757,27 @@ export async function listTelegramPairingRequests(): Promise<TelegramPairingRequ
 }
 
 /**
+ * The Telegram channel block, for the readers below to find this box's bot in
+ * — the account telegram-bot-identity.ts reports (see defaultTelegramAccount),
+ * not the literal "default", which on a multi-account channel can be an
+ * account nobody talks to. The lenient reader: an unreadable openclaw.json
+ * reads as no block, whose account is "default", the answer every box had
+ * before.
+ */
+async function readTelegramChannel(): Promise<unknown> {
+  return (await readConfig()).channels?.telegram;
+}
+
+/**
  * Pending Telegram DM pairing requests read straight from OpenClaw's pairing
  * store — a plain read with no CLI cold-start, so it's cheap enough to poll
  * for the desktop "new request" popup. OpenClaw 2 answers from the state
  * database; the legacy file path mirrors the allowFrom store, with the default
- * account unsuffixed (`telegram-pairing.json`).
+ * account unsuffixed (`telegram-pairing.json`). `account` defaults to the
+ * box's bot, as {@link readTelegramAllowFrom}'s does.
  */
-export async function readTelegramPairingRequests(account = "default"): Promise<TelegramPairingRequest[]> {
+export async function readTelegramPairingRequests(account?: string): Promise<TelegramPairingRequest[]> {
+  account ??= defaultTelegramAccount(await readTelegramChannel()).id;
   const fromStore = readPairingRequests("telegram", account);
   if (fromStore) return withDerivedNames(fromStore);
   const file = path.join(
@@ -3776,16 +3807,38 @@ export async function approveTelegramPairing(code: string): Promise<void> {
 }
 
 /**
- * Approved Telegram sender ids, read from the allowFrom store (empty on any
- * failure). `account` is OpenClaw's channel account id; ClawBox is single-account
- * so it defaults to "default". The v2 state database wins whenever it exists:
- * it is what the gateway enforces, and a migrated box's leftover JSON is a
- * stale copy that must not shadow it. Without one, the legacy file
- * (`telegram-default-allowFrom.json`) is the store.
+ * Approved Telegram sender ids for one channel account (empty on any failure):
+ * the senders the pairing store has approved, then the numeric ids the
+ * account's config `allowFrom` lets in — its own list, else the channel
+ * root's, which is how OpenClaw inherits it. `account` is OpenClaw's channel
+ * account id and defaults to this box's bot (see readTelegramChannel); a
+ * caller that already holds the bot's account (telegram-bot-identity.ts
+ * reports it) passes it, so the senders and the token come from one account.
+ *
+ * The v2 state database wins whenever it exists: it is what the gateway
+ * enforces, and a migrated box's leftover JSON is a stale copy that must not
+ * shadow it. Without one, the legacy file (`telegram-default-allowFrom.json`)
+ * is the store.
  */
-export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
+export async function readTelegramAllowFrom(account?: string): Promise<string[]> {
+  const channel = await readTelegramChannel();
+  account ??= defaultTelegramAccount(channel).id;
+  // Only senders who can actually DM the bot: a pairing-store approval admits
+  // one under `dmPolicy: "pairing"` alone (see telegramAccountDmPolicy). Under
+  // `pairing` it admits them whatever a top-level allowFrom lists, so it is not
+  // filtered by that list — doing so would drop an owner who paired normally.
+  const policy = telegramAccountDmPolicy(channel, account);
+  if (policy === "disabled") return [];
+  const approved = policy === "pairing" ? await readPairedTelegramSenders(account) : [];
+  for (const id of telegramAccountAllowFrom(channel, account)) {
+    if (!approved.includes(id)) approved.push(id);
+  }
+  return approved;
+}
+
+async function readPairedTelegramSenders(account: string): Promise<string[]> {
   const fromStore = readPairingAllowEntries("telegram", account);
-  if (fromStore) return fromStore;
+  if (fromStore) return [...fromStore];
   const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { allowFrom?: unknown };
@@ -3806,6 +3859,10 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
  * the gateway enforces, so this throws — before the legacy files are touched,
  * leaving the state exactly as it was — and the caller must not report a
  * reset that did not happen.
+ *
+ * Unlike the readers above, `account` stays "default" rather than following the
+ * box's bot: this is the reset for setTelegramToken's write, and the root
+ * `botToken` it writes is the default account's credential in OpenClaw.
  */
 export async function clearTelegramPairingState(account = "default"): Promise<void> {
   if (!clearPairingState("telegram", account)) {

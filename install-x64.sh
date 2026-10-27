@@ -85,7 +85,7 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.10.6"
+OPENCLAW_VERSION="2026.10.7"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
@@ -859,10 +859,15 @@ try {
     // it does not restore an older bot over one `openclaw config set` re-pointed.
     // An env REFERENCE under `token` ({source:'env',…}) is a bot OpenClaw holds
     // too — see the same block in install.sh.
-    const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
-    // `token: null`/`token: ""` is an UNSET reference, not a credential - see
-    // the same block in install.sh.
-    const openclawHasBot=existingToken!==''||(rest.token!==undefined&&rest.token!==null&&rest.token!=='');
+    // `token: null`/`token: ""` is an UNSET reference, not a credential; a
+    // reference in `botToken` itself, a `tokenFile`, and any multi-account
+    // `accounts.<id>` credential are bots OpenClaw holds - see the same block
+    // in install.sh.
+    const holdsBot=(b)=>!!b&&typeof b==='object'&&(
+      (typeof b.botToken==='string'?b.botToken.trim()!=='':b.botToken!=null)||
+      (b.token!==undefined&&b.token!==null&&b.token!=='')||
+      (typeof b.tokenFile==='string'&&b.tokenFile.trim()!==''));
+    const openclawHasBot=holdsBot(rest)||(!!rest.accounts&&typeof rest.accounts==='object'&&Object.values(rest.accounts).some(holdsBot));
     c.channels.telegram=openclawHasBot?{...rest,enabled:true}:{...rest,enabled:true,botToken:cb.telegram_bot_token};
     process.stderr.write(openclawHasBot
       ? '  Telegram channel registered in OpenClaw config (kept the bot OpenClaw already holds)\n'

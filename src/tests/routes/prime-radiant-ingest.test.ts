@@ -12,7 +12,7 @@ import path from "path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
-const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
+const auth = vi.hoisted(() => ({ requireSession: vi.fn(), sessionIdentity: vi.fn() }));
 vi.mock("@/lib/route-auth", () => auth);
 const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
@@ -111,6 +111,7 @@ async function readSse(res: Response): Promise<Array<{ event: string; data: unkn
 
 beforeEach(() => {
   auth.requireSession.mockReset().mockResolvedValue(null);
+  auth.sessionIdentity.mockReset().mockResolvedValue(null);
   owner.hasPersonSession.mockReset().mockResolvedValue(true);
   creds.resolveClawaiToken.mockReset().mockResolvedValue(null);
   setFlashClientOverride(client);
@@ -287,6 +288,66 @@ describe("an ingest through the routes", () => {
     const list = await (await listGET(new Request(`${API}/ingest`))).json();
     expect(list.running).toBe(first.job.id);
     await ingestFinished(first.job.id);
+  });
+
+  it("ends the stream when the session it was opened on runs out, and only then", async () => {
+    // Fake intervals only: the import's own pauses stay on the real clock.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      delayMs = 2_000;
+      auth.sessionIdentity.mockResolvedValue({ username: "clawbox", isOwner: true });
+      const { job } = await (await ingest({ folders: ["Documents"] })).json();
+      const reader = (await events(job.id)).body!.getReader();
+      const frames: string[] = [];
+      let ended = false;
+      const pump = (async () => {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) { ended = true; return; }
+          frames.push(new TextDecoder().decode(value));
+        }
+      })();
+      const settled = (ms: number) => Promise.race([pump, new Promise((r) => setTimeout(r, ms))]);
+
+      // Re-judged while the session holds: the stream stays.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled(50);
+      expect(ended).toBe(false);
+      expect(frames[0]).toMatch(/^event: job/);
+
+      // The session runs out: the next re-judgement ends it, the import still running.
+      auth.sessionIdentity.mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled(1_000);
+      expect(ended).toBe(true);
+      expect(frames.join("")).not.toMatch(/event: end/);
+      expect((await (await jobGet(job.id)).json()).job.status).toBe("running");
+      await ingestFinished(job.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never re-judges a stream the assistant's bearer opened", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      delayMs = 1_000;
+      const { job } = await (await ingest({ folders: ["Documents"] })).json();
+      const reader = (await events(job.id)).body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toMatch(/^event: job/);
+      await vi.advanceTimersByTimeAsync(20_000);
+      // Pings, and on to the end of the import — never cut short.
+      const frames: string[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        frames.push(new TextDecoder().decode(value));
+      }
+      expect(frames.join("")).toMatch(/event: end/);
+      expect(auth.sessionIdentity).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes the stream when the client goes away", async () => {

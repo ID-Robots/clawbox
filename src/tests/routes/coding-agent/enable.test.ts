@@ -30,6 +30,8 @@ const setAutoMerge = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   setCodingAgentEnabled: setEnabled,
+  // A Jetson-sized host: the ceiling the range checks below are written for.
+  hostMaxParallelRuns: () => 4,
   getCodingAgentStatus: getStatus,
   setEffort,
   setGenerateImages,

@@ -7,6 +7,13 @@ import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_EVENT,
+  confirmSessionStillValid,
+  isSessionExpiredClose,
+  isSessionExpiredResponse,
+} from '@/lib/session-expiry'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
@@ -161,6 +168,9 @@ interface ChatAppProps {
 const HEADER_REGION_ID = 'chatapp-header-region'
 const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
 const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+// The pause before a dropped live chat opens a new socket — ChatPopup's
+// RETRY_DELAY: long enough that a gateway bouncing under it is not hammered.
+const DROP_RECONNECT_DELAY_MS = 3000
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -483,6 +493,11 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // The conversation read a restore is running, so a newer socket or the page
   // going away can call it off.
   const restoreAbortRef = useRef<AbortController | null>(null)
+  // Set once the box has said this page's session is over: nothing reconnects
+  // while the page leaves for /login (src/lib/session-expiry.ts).
+  const signedOutRef = useRef(false)
+  // …and drawn: a signed-out chat offers no Retry or Reconnect, which could only do nothing.
+  const [signedOut, setSignedOut] = useState(false)
   // Has this component gone? The starting-retry timer is the one deferred piece
   // of work here that OPENS A SOCKET rather than touching state, so a pending
   // one on an unmounted component is up to two minutes of sockets and ws-config
@@ -751,7 +766,53 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     // and read the adapter through the ref above.
   }, [])
 
+  // The session is over: end the socket and the timer that would open a new
+  // one. Same reasons and same three triggers as ChatPopup's.
+  const stopForSignedOut = useCallback(() => {
+    signedOutRef.current = true
+    setSignedOut(true)
+    for (const timer of [startingRetryTimerRef, handshakeTimerRef]) {
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = null
+    }
+    restoreAbortRef.current?.abort()
+    const socket = wsRef.current
+    wsRef.current = null
+    if (socket) {
+      socket.onclose = null
+      socket.onmessage = null
+      try { socket.close() } catch { /* already closing */ }
+    }
+    failPending('Signed out')
+    setStatus('error')
+    setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+  }, [stopForSignedOut])
+
+  // The live socket went away and the page may still be signed in — the box
+  // closes a socket when the cookie it was OPENED on ends, which a password
+  // changed in this browser does while handing the page a new one. Ask: a
+  // lapsed session signs the page out (SESSION_EXPIRED_EVENT stops this chat),
+  // a live one gets a new socket after a pause. On the starting-retry timer,
+  // which unmount and sign-out already cancel.
+  const reconnectIfStillSignedIn = useCallback(() => {
+    void confirmSessionStillValid().then((live) => {
+      if (!live || signedOutRef.current || unmountedRef.current) return
+      if (startingRetryTimerRef.current) clearTimeout(startingRetryTimerRef.current)
+      startingRetryTimerRef.current = setTimeout(() => {
+        startingRetryTimerRef.current = null
+        if (!signedOutRef.current && !unmountedRef.current) void connectRef.current()
+      }, DROP_RECONNECT_DELAY_MS)
+    })
+  }, [])
+
   const connect = useCallback(async () => {
+    // A signed-out page opens nothing: the next stop is /login.
+    if (signedOutRef.current) return
     // A box with no socket has nothing to open. The adapter reports such a
     // harness connected by itself; this guard is for the Retry button and the
     // mount effect, which reach `connect` directly and must never open a gateway
@@ -797,6 +858,14 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       // on every reconnect — which the gateway refuses for ever. Newly reachable
       // now that the adapter effect can ask for a connect as well as mount.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store' })
+      // The session gate refused it. Not on this answer alone — it may predate
+      // a sign-in in another tab — so ask about the current session: a lapsed
+      // one signs the page out (SESSION_EXPIRED_EVENT stops this chat), a live
+      // one is an ordinary failure below, with its Reconnect.
+      if (isSessionExpiredResponse(res)) {
+        if (!(await confirmSessionStillValid())) return
+        throw new Error('ws-config was refused for a session the box still accepts')
+      }
       const config = await res.json()
       token = config.token
       wsUrl = config.wsUrl
@@ -1141,18 +1210,35 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       }
     }
 
-    const onClose = () => {
-      // Its own clock only: a late close from a socket a newer connect has
-      // already replaced must not disarm the newer attempt's.
-      if (wsRef.current === ws) clearHandshakeTimer()
+    const onClose = (event?: CloseEvent) => {
+      // Only the socket that is CURRENTLY installed may tear anything down or
+      // reconnect, the rule ChatPopup keeps: a late close from one a newer
+      // connect or the link's own close already let go of describes a
+      // connection nobody is using.
+      if (wsRef.current !== ws) return
+      clearHandshakeTimer()
       wsRef.current = null
       // Same reason as the reconnect path: a request still waiting on a socket
       // that has gone away has to be told, or it never settles.
       failPending('Not connected')
-      if (!connectedOnceRef.current) {
-        setStatus('error')
-        setErrorMsg('Could not connect to gateway')
+      // A socket that never got as far as a hello is a failed connect — unless
+      // the box closed it for its session (4401, scripts/upgrade-session-watch.js).
+      // Or refused it for one: the session gate answers an upgrade with a plain
+      // 401, which a browser reports as a bare close, so a session that ran out
+      // after ws-config was read reached the error panel and its Reconnect
+      // instead of /login. Ask first; only a live session is a failed connect.
+      if (!connectedOnceRef.current && !isSessionExpiredClose(event)) {
+        void confirmSessionStillValid().then((live) => {
+          if (!live || signedOutRef.current || unmountedRef.current || wsRef.current) return
+          setStatus('error')
+          setErrorMsg('Could not connect to gateway')
+        })
+        return
       }
+      // A live chat dropped: with 4401, or over plain HTTP — where the box cuts
+      // a lapsed session's socket — with no code at all. This page has no poll
+      // of its own to hear the 401s the desktop hears, so it asks.
+      reconnectIfStillSignedIn()
     }
 
     try {
@@ -1799,7 +1885,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           {caps.hasLiveConnection && status === 'connected' && (
             <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
           )}
-          {caps.hasLiveConnection && status === 'error' && (
+          {caps.hasLiveConnection && status === 'error' && !signedOut && (
             <button
               onClick={connect}
               style={{
@@ -1868,14 +1954,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
-            <button
-              onClick={connect}
-              style={{
-                background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
-                color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
-                fontSize: 13, fontWeight: 500,
-              }}
-            >{t("chat.retry")}</button>
+            {!signedOut && (
+              <button
+                onClick={connect}
+                style={{
+                  background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                  color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 500,
+                }}
+              >{t("chat.retry")}</button>
+            )}
           </div>
         )}
 

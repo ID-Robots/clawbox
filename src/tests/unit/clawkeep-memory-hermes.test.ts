@@ -136,15 +136,19 @@ const NOTES = "The deposit is two months' rent.";
  *  pack words. A status carrying anything else is English on a German desktop. */
 const MEMORY_STATUS_CODES = [
   "",
+  "index_rebuild_required",
+  "embedder_unavailable",
+  "index_keyword_only",
   "index_identity_mismatched",
   "index_identity_missing",
+  "provider_mismatch",
   "provider_degraded",
   "status_unavailable",
 ];
 
 describe("what ClawBox's own index tells the shared parser", () => {
   it("comes out as an embedder ON THIS DEVICE, not one it cannot place", async () => {
-    // The trap this closes: `readEmbeddingRemoteBaseUrl()` reads openclaw.json,
+    // The trap this closes: `readEmbeddingConfig()` reads openclaw.json,
     // which does not exist on this SKU, so it answers null and
     // providerLocation() reports "unknown" — an embedder running on loopback,
     // drawn as one the box cannot account for. The local arm passes its own
@@ -591,5 +595,41 @@ describe("how far the pass has got", () => {
       progress: { filesDone: 3, filesTotal: 9, chunks: 40 },
     }));
     expect((await readMemoryRunState()).progress).toBeNull();
+  });
+});
+
+describe("the embedder this edition reports", () => {
+  it("answers a status, not an error, when the embedder cannot be resolved", async () => {
+    // The resolver reads ClawBox's own store; one that throws is "not known",
+    // as an unreadable openclaw.json is on the other arm — never a rejected
+    // read that turns the card's route into a 500.
+    const store = await import("@/lib/config-store");
+    const get = vi.mocked(store.get);
+    const original = get.getMockImplementation();
+    get.mockImplementation(async (key: string) => {
+      if (key === "memory_shard_embedder") throw new Error("EACCES: permission denied");
+      return original ? original(key) : undefined;
+    });
+    try {
+      const { getMemoryStatus } = await lib();
+      const status = await getMemoryStatus();
+      expect(status.errorCode).toBe("status_unavailable");
+    } finally {
+      if (original) get.mockImplementation(original);
+    }
+  });
+
+  it("never asks a core this edition does not have for a keyword-only rebuild", async () => {
+    const { rebuildKeywordOnlyIndex, getMemoryStatus } = await lib();
+    const status = await getMemoryStatus();
+    const started = await rebuildKeywordOnlyIndex({
+      ...status,
+      errorCode: "index_keyword_only",
+      provider: "openai-compatible",
+      model: "text-embedding-3-small",
+      location: "cloud",
+    });
+    expect(started).toBe(false);
+    expect(spawned).toEqual([]);
   });
 });

@@ -69,6 +69,13 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_EVENT,
+  confirmSessionStillValid,
+  isSessionExpiredClose,
+  isSessionExpiredResponse,
+} from '@/lib/session-expiry'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
@@ -2917,6 +2924,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const restoreOwedRef = useRef(false)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Set once the box has said this page's session is over: the socket is
+  // closed, nothing reconnects, and the page is on its way to /login
+  // (src/lib/session-expiry.ts).
+  const signedOutRef = useRef(false)
+  // …and drawn: a signed-out chat offers no Retry, which could only do nothing.
+  const [signedOut, setSignedOut] = useState(false)
 
   const refreshChatModelState = useCallback(async () => {
     if (!chatModelStoreHereRef.current) return
@@ -2948,12 +2961,46 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     }
   }, [])
 
+  // The session is over: end the socket and every timer that would open a new
+  // one, so nothing more is sent or shown while the page leaves for /login.
+  // Reached from the ws-config read's 401, from the box's session-expired close
+  // code, and from SESSION_EXPIRED_EVENT when anything else on the page saw it.
+  const stopForSignedOut = useCallback(() => {
+    signedOutRef.current = true
+    setSignedOut(true)
+    ++connectionGenerationRef.current
+    connectionAbortRef.current?.abort()
+    for (const timer of [retryTimerRef, connectionDeadlineTimerRef, handshakeTimerRef]) {
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = null
+    }
+    restoreAbortRef.current?.abort()
+    const socket = wsRef.current
+    wsRef.current = null
+    if (socket) {
+      socket.onclose = null
+      socket.onmessage = null
+      try { socket.close() } catch { /* already closing */ }
+    }
+    failPending('Signed out')
+    tearDownReloadOverlay()
+    setStatus('error')
+    setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+  }, [stopForSignedOut])
+
   const connect = useCallback(async () => {
     // A box with no socket has nothing to open. The adapter reports such a
     // harness connected on its own; this guard is for the window listeners and
     // recovery paths below, which call `connect` directly and must never open a
     // gateway socket on an edition that does not run one.
     if (!hasLiveConnectionRef.current) return
+    // A signed-out page opens nothing: the next stop is /login.
+    if (signedOutRef.current) return
     // Cancel any pending retry / auth-backoff timer so an explicit reconnect
     // (e.g. the "Try again" button) can't race with a previously scheduled one
     // and fire a duplicate connect later.
@@ -3027,6 +3074,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // a stale token on every reconnect and the gateway would reject it with
       // "token mismatch" forever. Always fetch the current token.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store', signal: controller.signal })
+      // The session gate refused it. Not on this answer alone — it may predate
+      // a sign-in in another tab — so ask about the current session: a lapsed
+      // one signs the page out (SESSION_EXPIRED_EVENT stops this chat and its
+      // ladder), a live one is an ordinary failure for the retry below.
+      if (isSessionExpiredResponse(res)) {
+        const live = await confirmSessionStillValid()
+        if (!isCurrent() || !live) return
+        throw new Error('ws-config was refused for a session the box still accepts')
+      }
       const config = await res.json()
       if (!isCurrent()) return
       token = config.token
@@ -3724,6 +3780,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // socket and paint "could not be restored" under the reconnect overlay.
       // The next hello runs the restore again.
       restoreAbortRef.current?.abort()
+
+      // The box ended the socket because the session it was OPENED on ended
+      // (scripts/upgrade-session-watch.js). That need not be this page's
+      // session: a password changed in this browser revokes the old cookie
+      // and hands the page a new one. So ask: a lapsed session signs the page
+      // out (SESSION_EXPIRED_EVENT stops this chat and its retry), a live one
+      // takes the ordinary reconnect below.
+      if (isSessionExpiredClose(event)) void confirmSessionStillValid()
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth
@@ -8222,14 +8286,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
-            <button
-              onClick={() => { retryCountRef.current = 0; connect() }}
-              style={{
-                background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
-                color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
-                fontSize: 13, fontWeight: 500,
-              }}
-            >{t("chat.retry")}</button>
+            {!signedOut && (
+              <button
+                onClick={() => { retryCountRef.current = 0; connect() }}
+                style={{
+                  background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                  color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 500,
+                }}
+              >{t("chat.retry")}</button>
+            )}
           </div>
         )}
 

@@ -15,6 +15,8 @@ import { BASE_URL, CLAWBOX_PORT } from "./helpers/container";
 import {
   configureAiModel,
   getChatWsConfig,
+  getStatus,
+  loginSessionCookie,
 } from "./helpers/setup-api";
 import { READY_ACTION_TIMEOUT, waitForGatewayReady } from "./helpers/readiness";
 
@@ -44,6 +46,41 @@ const HAS_KEY = !!(
 );
 
 test.describe.configure({ mode: "serial" });
+
+/** Open the chat's gateway socket the way the desktop does, with or without a session. */
+function dialGateway(wsUrl: string, cookie?: string): Promise<{ ok: boolean; status?: number; reason?: string }> {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(wsUrl, { headers: cookie ? { cookie } : {} });
+    const timer = setTimeout(() => { ws.terminate(); resolve({ ok: false, reason: "timeout after 30s" }); }, 30_000);
+    ws.on("open", () => { clearTimeout(timer); ws.close(); resolve({ ok: true }); });
+    ws.on("error", (err) => { clearTimeout(timer); resolve({ ok: false, reason: `error: ${(err as Error).message}` }); });
+    ws.on("unexpected-response", (_req, res) => {
+      clearTimeout(timer);
+      resolve({ ok: false, status: res.statusCode, reason: `HTTP ${res.statusCode} ${res.statusMessage ?? ""}`.trim() });
+    });
+  });
+}
+
+// The chat socket is held to the ClawBox session like every other surface: a
+// browser whose session has run out (or never had one) is refused at the
+// upgrade, before anything reaches the gateway — so this needs no AI key.
+test.describe("chat socket without a session", () => {
+  test.beforeAll(async () => {
+    const status = await getStatus();
+    test.skip(!status.setup_complete, "setup did not complete — the box has no session gate to test yet");
+  });
+
+  test("is refused with no session cookie", async () => {
+    const result = await dialGateway(`ws://localhost:${CLAWBOX_PORT}/`);
+    expect(result).toMatchObject({ ok: false, status: 401 });
+  });
+
+  test("is refused with a session cookie the box did not sign", async () => {
+    const forged = `${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, gen: 0 })).toString("base64url")}.${"0".repeat(64)}`;
+    const result = await dialGateway(`ws://localhost:${CLAWBOX_PORT}/`, `clawbox_session=${forged}`);
+    expect(result).toMatchObject({ ok: false, status: 401 });
+  });
+});
 
 test.describe("chat round trip", () => {
   test.skip(!HAS_KEY, "no AI keys in .env.test — cannot exercise real chat");
@@ -84,18 +121,11 @@ test.describe("chat round trip", () => {
     const config = await getChatWsConfig();
     // ChatApp/ChatPopup open the gateway WS at the wsUrl root itself
     // (production-server.js proxies the upgrade to the gateway on 18789).
-    // No sub-path is required — auth happens via the first message after
-    // upgrade, not via query string.
-    const result = await new Promise<{ ok: boolean; reason?: string }>((resolve) => {
-      const ws = new WebSocket(config.wsUrl);
-      const timer = setTimeout(() => { ws.terminate(); resolve({ ok: false, reason: "timeout after 30s" }); }, 30_000);
-      ws.on("open", () => { clearTimeout(timer); ws.close(); resolve({ ok: true }); });
-      ws.on("error", (err) => { clearTimeout(timer); resolve({ ok: false, reason: `error: ${(err as Error).message}` }); });
-      ws.on("unexpected-response", (_req, res) => {
-        clearTimeout(timer);
-        resolve({ ok: false, reason: `HTTP ${res.statusCode} ${res.statusMessage ?? ""}`.trim() });
-      });
-    });
+    // No sub-path is required — the gateway's own auth happens via the first
+    // message after upgrade. The upgrade itself carries the ClawBox session,
+    // exactly as the desktop's does: without one it is refused (below).
+    const cookie = await loginSessionCookie();
+    const result = await dialGateway(config.wsUrl, cookie);
     if (!result.ok) throw new Error(`gateway WS did not upgrade: ${result.reason} (url=${config.wsUrl})`);
   });
 

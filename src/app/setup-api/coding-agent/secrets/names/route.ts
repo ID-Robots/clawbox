@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasValidSession } from "@/lib/route-auth";
 import { listSecrets, SecretStoreError } from "@/lib/project-secrets";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(request: Request) {
   if (!(await hasValidSession(request))) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
   }
   try {
     const secrets = await listSecrets();

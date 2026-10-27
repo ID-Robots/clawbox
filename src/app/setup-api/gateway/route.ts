@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { sessionIdentity } from "@/lib/route-auth";
 import { controlUiEmailDirectiveScript, controlUiLocale } from "@/lib/control-ui-email-directives";
+import { controlUiSessionGuardScript, injectAtHeadStart } from "@/lib/control-ui-session-guard";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 import { envPort } from "@/lib/port-probe";
 import { readEditionSource } from "@/lib/edition-source";
@@ -27,16 +28,6 @@ export async function GET(request: NextRequest) {
       return gatewayOfflineResponse(await getGatewayServiceHealth());
     }
     let html = await res.text();
-    // Use the request hostname so WebSocket connects to the right address.
-    // The Host header is attacker-controllable and gets embedded in the inline
-    // <script> below, so only accept hostname / IP-literal characters — anything
-    // else (quotes, angle brackets) falls back to the mDNS name so it can't
-    // break out of the JS string context (reflected XSS).
-    const rawHost = request.headers.get("host")?.replace(/:\d+$/, "") || "";
-    const host = /^[A-Za-z0-9.-]+$/.test(rawHost) || /^\[[0-9a-fA-F:]+\]$/.test(rawHost)
-      ? rawHost
-      : "clawbox.local";
-    const wsUrl = `ws://${host}:${GATEWAY_PORT}`;
     // Rewrite relative asset paths (href="./assets/…" / src="./assets/…" →
     // "/assets/…") so they resolve through Next.js rewrites which proxy to the
     // gateway. Anchored to href=/src= attributes so a bare "./" inside an inline
@@ -52,10 +43,18 @@ export async function GET(request: NextRequest) {
           .replace(/</g, "\\u003c")
           .replace(/>/g, "\\u003e")
       : '""';
+    // The socket goes to the page's OWN origin, the way `serveGatewayHTML`
+    // points it: production-server.js forwards that upgrade to the gateway only
+    // on a live ClawBox session, and closes it when the session ends. This page
+    // used to point the chat at the gateway's port itself, which checks only
+    // its own token — so a chat opened here outlived the session that opened
+    // it, while every other app on the box was already being answered 401.
+    // Read from `location` in the browser, so no request header reaches the
+    // script.
     const autoConnect = `<script>
       (function(){
         var KEY="openclaw.control.settings.v1";
-        var wsUrl=${JSON.stringify(wsUrl)};
+        var wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.host;
         try{
           var s=JSON.parse(localStorage.getItem(KEY)||"{}");
           s.url=wsUrl;
@@ -90,6 +89,9 @@ export async function GET(request: NextRequest) {
     // `$&` / `` $` `` / `$'` / `$1` are substitutions inside a replacement
     // string. Same reason as `serveGatewayHTML`.
     html = html.replace(/<head\b[^>]*>/i, (match) => match + autoConnect + emailDirectives);
+    // And the lapsed-session guard `serveGatewayHTML` injects: a refused
+    // request or a cut socket takes this chat to /login.
+    html = injectAtHeadStart(html, controlUiSessionGuardScript());
     return new NextResponse(html, {
       status: 200,
       headers: {

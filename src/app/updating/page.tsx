@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
+import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import ReconnectStage from "@/components/ReconnectStage";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { updateWhatsNewPanel } from "@/lib/update-whats-new";
@@ -226,6 +227,12 @@ export default function UpdatingPage() {
   // Signed-in page like the desktop: a sign-in or sign-out in another tab
   // reopens it on the session that now holds (TASK-1247).
   useFollowSessionSwitch();
+  // And to /login when the session runs out (src/lib/session-expiry.ts). The
+  // status poll reads any failure as the rebuild having stopped the server, so
+  // a session that ran out during a long update held this screen for ever. A
+  // stopped server is no sign-out: only the session gate's marked 401,
+  // confirmed by a probe, leaves.
+  useSessionExpiryGuard();
   return (
     <I18nProvider>
       <UpdatingScreen />

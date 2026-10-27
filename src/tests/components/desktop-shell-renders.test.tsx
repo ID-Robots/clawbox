@@ -145,10 +145,15 @@ function installFetch() {
     if (url.includes("/setup-api/preferences?all=1")) return answer(prefs);
     return answer({});
   }));
+  fetchStub = vi.mocked(fetch);
 }
 
-const pairingPolls = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/setup-api/telegram/pairing"));
-const approvalAsks = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/setup-api/system/power/approval"));
+// The desktop wraps `fetch` while it is mounted (src/lib/session-expiry.ts),
+// so the stub is read through its own reference.
+let fetchStub = vi.mocked(fetch);
+
+const pairingPolls = () => fetchStub.mock.calls.filter(([input]) => String(input).includes("/setup-api/telegram/pairing"));
+const approvalAsks = () => fetchStub.mock.calls.filter(([input]) => String(input).includes("/setup-api/system/power/approval"));
 
 // The translation catalogue reaches the desktop through a dynamic import in
 // I18nProvider, which on a cold, loaded worker takes 1-3 s: a case that counted

@@ -50,11 +50,16 @@ function installFetch() {
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
     return answer({});
   }));
+  fetchStub = vi.mocked(fetch);
 }
+
+// The desktop wraps `fetch` while it is mounted (src/lib/session-expiry.ts),
+// so the stub is read through its own reference.
+let fetchStub = vi.mocked(fetch);
 
 /** The POSTs that asked the server to start Chrome, by body. */
 function launches(): unknown[] {
-  return vi.mocked(fetch).mock.calls
+  return fetchStub.mock.calls
     .filter(([input, init]) => String(input).includes("/setup-api/desktop/chrome") && (init?.method ?? "GET").toUpperCase() === "POST")
     .map(([, init]) => JSON.parse(String(init?.body ?? "null")));
 }
@@ -122,7 +127,7 @@ describe("the Google Chrome icon in Monitor Mode", () => {
     status = { available: true, installed: false };
     render(<ChromeDesktop />);
     const icon = await chromeIcon();
-    vi.mocked(fetch).mockImplementation(async () => {
+    fetchStub.mockImplementation(async () => {
       throw new TypeError("Failed to fetch");
     });
     fireEvent.click(icon);
@@ -166,7 +171,7 @@ describe("the Google Chrome icon in Monitor Mode", () => {
   it("is not drawn off the ClawBox Desktop session", async () => {
     status = { available: false };
     render(<ChromeDesktop />);
-    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/setup-api/desktop/chrome"))).toBe(true));
+    await waitFor(() => expect(fetchStub.mock.calls.some(([input]) => String(input).includes("/setup-api/desktop/chrome"))).toBe(true));
     expect(await screen.findByTestId("desktop-surface")).toBeInTheDocument();
     await wait(100);
     expect(document.querySelector(CHROME_ICON)).toBeNull();

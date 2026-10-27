@@ -121,7 +121,8 @@ describe("how many runs at once", () => {
     expect(lib.DEFAULT_MAX_PARALLEL_RUNS).toBe(2);
     expect(await lib.setMaxParallelRuns(4)).toBe(4);
     expect(await lib.getMaxParallelRuns()).toBe(4);
-    await expect(lib.setMaxParallelRuns(5)).rejects.toMatchObject({ kind: "invalid" });
+    const ceiling = lib.hostMaxParallelRuns();
+    await expect(lib.setMaxParallelRuns(ceiling + 1)).rejects.toMatchObject({ kind: "invalid" });
     await expect(lib.setMaxParallelRuns(0)).rejects.toMatchObject({ kind: "invalid" });
     await expect(lib.setMaxParallelRuns(2.5)).rejects.toMatchObject({ kind: "invalid" });
     // Refused, not saved: the value the owner had is still in force.
@@ -129,7 +130,44 @@ describe("how many runs at once", () => {
     const status = await lib.getCodingAgentStatus();
     expect(status.maxParallelRuns).toBe(4);
     expect(status.minMaxParallelRuns).toBe(1);
-    expect(status.maxMaxParallelRuns).toBe(4);
+    expect(status.maxMaxParallelRuns).toBe(ceiling);
+  });
+
+  it("scales the ceiling with the host: four on a Jetson or under 16 GB, one per 4 GB above, at most sixteen", () => {
+    const GB = 1024 ** 3;
+    expect(lib.hostMaxParallelRuns(8 * GB, true)).toBe(4);
+    expect(lib.hostMaxParallelRuns(64 * GB, true)).toBe(4);
+    expect(lib.hostMaxParallelRuns(8 * GB, false)).toBe(4);
+    expect(lib.hostMaxParallelRuns(15.9 * GB, false)).toBe(4);
+    expect(lib.hostMaxParallelRuns(16 * GB, false)).toBe(4);
+    expect(lib.hostMaxParallelRuns(24 * GB, false)).toBe(6);
+    expect(lib.hostMaxParallelRuns(62 * GB, false)).toBe(15);
+    expect(lib.hostMaxParallelRuns(128 * GB, false)).toBe(16);
+    expect(lib.hostMaxParallelRuns(Number.NaN, false)).toBe(4);
+    expect(lib.maxParallelRunsFrom(8, 4)).toBe(2);
+    expect(lib.maxParallelRunsFrom(8, 15)).toBe(8);
+  });
+
+  it("starts an automatic review pass beside a full box, from its own pool of two", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    makePlainProject("alpha");
+    makePlainProject("beta");
+    makePlainProject("gamma");
+    makePlainProject("delta");
+    await lib.setMaxParallelRuns(1);
+    const a = await lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    await expect(lib.startRun({ task: "two", directory: "beta", source: "owner" })).rejects.toMatchObject({ kind: "busy" });
+    const r1 = await lib.startRun({ task: "review one", directory: "beta", source: "owner", reviewOf: a.id });
+    const r2 = await lib.startRun({ task: "review two", directory: "gamma", source: "owner", reviewOf: a.id });
+    expect(r1.status).toBe("running");
+    expect(r2.status).toBe("running");
+    await expect(lib.startRun({ task: "review three", directory: "delta", source: "owner", reviewOf: a.id }))
+      .rejects.toMatchObject({ kind: "busy", message: expect.stringMatching(/review passes/) });
+    fs.writeFileSync(flag, "go");
+    await finished(a.id);
+    await finished(r1.id);
+    await finished(r2.id);
   });
 
   it("reads a value nothing on this box could have written as the default", async () => {

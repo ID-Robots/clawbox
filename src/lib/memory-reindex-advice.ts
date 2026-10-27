@@ -26,7 +26,8 @@ export interface MemoryReindexReason {
     | "files_changed"
     | "last_pass_stopped"
     | "size_ceiling"
-    | "provider_fell_back";
+    | "provider_fell_back"
+    | "embedder_unavailable";
   mode: MemoryReindexMode;
   /** One plain sentence for a person. */
   detail: string;
@@ -65,6 +66,19 @@ export function memoryReindexAdvice(s: MemoryStatusFacts, arm: MemoryIndexArm): 
   // A probe that failed says nothing about the index; inventing a reason from
   // its zeros would send the assistant to rebuild an index that is fine.
   if (s.available === false) return { needed: false, mode: null, reasons };
+  // An embedder that does not answer is the ONLY reason worth giving: no pass
+  // can embed anything until it does (the core refuses a sync under a remote
+  // provider it could not start), so "files are waiting" beside it would send
+  // the assistant to start a pass that can only fail. Once the embedder
+  // answers, the index reads keyword-only and that reason asks for the pass.
+  if (s.errorCode === "embedder_unavailable") {
+    reasons.push({
+      code: "embedder_unavailable",
+      mode: "none",
+      detail: "Memory search has fallen back to keyword-only: the embedding model it is set to use did not answer (a refused sign-in or key, or an endpoint that is down). A pass cannot fix that; once the embedder answers, a full pass embeds every file.",
+    });
+    return { needed: false, mode: null, reasons };
+  }
 
   const chunks = typeof s.chunks === "number" ? s.chunks : null;
   const empty = chunks === 0;
@@ -152,7 +166,6 @@ export function memoryReindexAdvice(s: MemoryStatusFacts, arm: MemoryIndexArm): 
       detail: "Memory search is not using the embedding model that was set (it fell back to another). Setting the provider again fixes that; a pass does not.",
     });
   }
-
   const passes = reasons.filter((r) => r.mode !== "none");
   return {
     needed: passes.length > 0,

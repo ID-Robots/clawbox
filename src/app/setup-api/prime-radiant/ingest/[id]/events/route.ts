@@ -11,14 +11,22 @@
  * so a client that reconnects after the end is never left waiting. A comment
  * line every 15 s keeps proxies from closing an idle stream. 404 for an id
  * this box has no job for. Read-only: never creates the state database.
+ *
+ * A stream opened on a person's session ends when that session does: the gate
+ * above runs once, and an import runs for as long as its files take, so the
+ * stream used to go on reporting to a page whose every other request was
+ * already answered 401. Re-judged every SESSION_RECHECK_MS by the same rule
+ * (expiry, a password change, a removed user); the page's reconnect then meets
+ * the session gate, and its fallback poll takes it to /login.
  */
-import { requireSession } from "@/lib/route-auth";
+import { requireSession, sessionIdentity } from "@/lib/route-auth";
 import { getIngestJob, safeJobId, subscribeIngest, type IngestEvent } from "@/lib/prime-radiant/ingest";
 import { fail } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
 const HEARTBEAT_MS = 15_000;
+const SESSION_RECHECK_MS = 5_000;
 
 function frame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -31,6 +39,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   if (!id) return fail("not_found", "No such ingest job.", 404);
   const job = getIngestJob(id);
   if (!job) return fail("not_found", "No such ingest job.", 404);
+  // Only a person's cookie runs out mid-stream; the assistant's bearer and the
+  // test harness were let in without one.
+  const onSession = (await sessionIdentity(req)) !== null;
 
   const encoder = new TextEncoder();
   let cleanup = () => {};
@@ -84,10 +95,17 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       }
       const heartbeat = setInterval(() => send(": ping\n\n"), HEARTBEAT_MS);
       heartbeat.unref?.();
+      const sessionCheck = onSession
+        ? setInterval(() => {
+          void sessionIdentity(req).then((who) => { if (!who) close(); }, () => {});
+        }, SESSION_RECHECK_MS)
+        : null;
+      sessionCheck?.unref?.();
       const onAbort = () => close();
       req.signal.addEventListener("abort", onAbort, { once: true });
       cleanup = () => {
         clearInterval(heartbeat);
+        if (sessionCheck) clearInterval(sessionCheck);
         unsubscribe?.();
         req.signal.removeEventListener("abort", onAbort);
       };
