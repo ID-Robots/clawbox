@@ -165,6 +165,9 @@ beforeEach(() => {
     "GATEWAY_HEALTH_WAIT_MS",
     "GATEWAY_RECOVERY_WAIT_MS",
     "GATEWAY_WAIT_INTERVAL_MS",
+    "GATEWAY_START_LIMIT_MS",
+    "GATEWAY_START_POLL_MS",
+    "GATEWAY_START_POLL_MAX_MS",
     "UPDATER_REMOTE_RETRY_DELAY_MS",
     "UPDATER_REMOTE_CHECK_RETRY_DELAY_MS",
   );
@@ -172,6 +175,9 @@ beforeEach(() => {
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+  process.env.GATEWAY_START_LIMIT_MS = "1";
+  process.env.GATEWAY_START_POLL_MS = "1";
+  process.env.GATEWAY_START_POLL_MAX_MS = "1";
   // The retry backoff must not turn a unit test into a wall-clock wait. BOTH
   // knobs: the version-check delay defaults to 1200 ms and two of these cases
   // sleep on it twice, which spent over half of vitest's 5 s default before any
