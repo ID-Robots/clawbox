@@ -1783,6 +1783,11 @@ export const de: Record<string, string> = {
   "whatsNew.goToSlide": "Highlight {number} zeigen",
   "whatsNew.back": "Zurück",
   "whatsNew.next": "Weiter",
+  "whatsNew.openFullscreen": "Bildschirmfoto im Vollbild ansehen",
+  "whatsNew.fullscreenLabel": "Bildschirmfoto: {title}",
+  "whatsNew.closeFullscreen": "Vollbild schließen",
+  "whatsNew.previousScreenshot": "Vorheriges Bildschirmfoto",
+  "whatsNew.nextScreenshot": "Nächstes Bildschirmfoto",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "Läuft auf dieser ClawBox.",
   "localModels.chatBannerBody": "Die erste Antwort kann bis zu einer Minute dauern, während das lokale Modell lädt. Danach geht es schneller.",

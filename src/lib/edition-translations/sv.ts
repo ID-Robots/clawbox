@@ -1780,6 +1780,11 @@ export const sv: Record<string, string> = {
   "whatsNew.goToSlide": "Visa nyhet {number}",
   "whatsNew.back": "Tillbaka",
   "whatsNew.next": "Nästa",
+  "whatsNew.openFullscreen": "Visa skärmbilden i helskärm",
+  "whatsNew.fullscreenLabel": "Skärmbild: {title}",
+  "whatsNew.closeFullscreen": "Stäng helskärm",
+  "whatsNew.previousScreenshot": "Föregående skärmbild",
+  "whatsNew.nextScreenshot": "Nästa skärmbild",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "Körs på den här ClawBoxen.",
   "localModels.chatBannerBody": "Det första svaret kan ta upp till en minut medan den lokala modellen laddas. Sedan går det snabbare.",

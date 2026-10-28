@@ -58,6 +58,12 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.goToSlide": "Show highlight {number}",
   "whatsNew.back": "Back",
   "whatsNew.next": "Next",
+  // The slide's screenshot, full screen. {title} is the highlight's title.
+  "whatsNew.openFullscreen": "View screenshot full screen",
+  "whatsNew.fullscreenLabel": "Screenshot: {title}",
+  "whatsNew.closeFullscreen": "Close full screen",
+  "whatsNew.previousScreenshot": "Previous screenshot",
+  "whatsNew.nextScreenshot": "Next screenshot",
 
   "whatsNew.readMore": "Read what's new in 4.3",
 
