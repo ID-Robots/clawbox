@@ -48,6 +48,13 @@ import {
 } from "./x64-integration";
 import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
 import {
+  describeStillStarting,
+  formatWaited,
+  readGatewayStartState,
+  waitForGatewayStart,
+  type GatewayStartVerdict,
+} from "./gateway-start-wait";
+import {
   OpenclawStateMaintenanceError,
   isOpenclawMaintenanceRefusal,
   withOpenclawMaintenanceRetry,
@@ -2059,6 +2066,13 @@ const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || 
 // tunable: a pre-start still running at this point is killed by systemd
 // itself, so the wait below never outlives the thing it waits for.
 const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
+// How long a gateway systemd says is still starting is waited for, after the
+// windows above have passed: the same ceiling, since a box with large agent
+// databases spends minutes of it in the pre-start and more loading them once
+// the process is up (see `@/lib/gateway-start-wait`). Tunable for tests only.
+const GATEWAY_START_LIMIT_MS = Number(process.env.GATEWAY_START_LIMIT_MS || String(GATEWAY_PRE_START_TIMEOUT_MS));
+const GATEWAY_START_POLL_MS = Number(process.env.GATEWAY_START_POLL_MS || "5000");
+const GATEWAY_START_POLL_MAX_MS = Number(process.env.GATEWAY_START_POLL_MAX_MS || "15000");
 // The floor of the update's `doctor --fix` bound; it grows with the databases.
 const DOCTOR_FIX_TIMEOUT_MS = 90_000;
 
@@ -2120,6 +2134,103 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
     intervalMs: GATEWAY_WAIT_INTERVAL_MS,
     probeTimeoutMs: 1_000,
   });
+}
+
+/** The running step's detail line, or none. Ignored once the step has ended. */
+function showRunningStepDetail(detail: string | undefined): void {
+  const running = runtime.state.steps[runtime.state.currentStepIndex];
+  if (running?.status === "running") running.detail = detail;
+}
+
+/**
+ * Wait for clawbox-gateway the way systemd sees it, not for one flat window.
+ *
+ * `firstWindowMs` is the port-only window this call site always had, so a
+ * gateway that starts quickly is answered exactly as before. Past it the unit
+ * is followed: still starting (pre-start, auto-restart, up but not listening)
+ * means wait on, up to GATEWAY_START_LIMIT_MS, with the update screen saying
+ * so; failed, stopped or crash-looping ends the wait at once. A box with a
+ * large memory database reached "not listening on port 18789" a few seconds
+ * before its gateway came up, and the owner read that red X as a broken update.
+ *
+ * `afterRestart`: this process has just started the unit and systemd took the
+ * restart, so a unit systemctl cannot describe is still the one starting.
+ * Before any restart there is no such evidence, and "could not look" goes on
+ * to the repair, as it always did.
+ */
+async function waitForGatewayToStart(firstWindowMs: number, afterRestart: boolean): Promise<GatewayStartVerdict> {
+  let lastLogged = "";
+  try {
+    const verdict = await waitForGatewayStart({
+      waitForPort: waitForGateway,
+      readState: () => readGatewayStartState("clawbox-gateway.service"),
+      firstWindowMs,
+      limitMs: GATEWAY_START_LIMIT_MS,
+      pollMs: GATEWAY_START_POLL_MS,
+      maxPollMs: GATEWAY_START_POLL_MAX_MS,
+      unknownIsStarting: afterRestart,
+      onStillStarting: (state, waitedMs) => {
+        showRunningStepDetail(describeStillStarting(state, waitedMs));
+        // Once per change of state, not per round: ten minutes of rounds would
+        // bury the one line that says where the start stood.
+        const described = state ? describeUnitState(state) : "unknown";
+        if (described !== lastLogged) {
+          lastLogged = described;
+          console.log(`[Updater] clawbox-gateway still starting after ${formatWaited(waitedMs)}: ${described}`);
+        }
+      },
+    });
+    if (verdict.kind === "listening" && verdict.waitedMs > firstWindowMs) {
+      console.log(`[Updater] clawbox-gateway listening after ${formatWaited(verdict.waitedMs)}`);
+    }
+    return verdict;
+  } finally {
+    showRunningStepDetail(undefined);
+  }
+}
+
+/**
+ * What a gateway wait that did not end listening found, as the head of the
+ * step's error. Always opens with the sentence the update has always used, so
+ * nothing that reads it loses its anchor; what follows says which ending it was.
+ */
+function gatewayNotListeningPrefix(verdict: Exclude<GatewayStartVerdict, { kind: "listening" }>): string {
+  const base = `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`;
+  const unit = verdict.state ? `clawbox-gateway.service is ${describeUnitState(verdict.state)}` : null;
+  if (verdict.kind === "timed-out") {
+    return `${base} after ${formatWaited(verdict.waitedMs)} of waiting for it to start${unit ? ` (${unit})` : ""}`;
+  }
+  switch (verdict.reason) {
+    case "unit-failed":
+    case "unit-stopped":
+      return unit ? `${base} (${unit})` : base;
+    case "crash-loop":
+      return `${base} (clawbox-gateway.service restarted ${verdict.restarts} times while starting)`;
+    default:
+      return base;
+  }
+}
+
+/**
+ * Restart the gateway for the recovery below, and leave its readiness to the
+ * wait that follows.
+ *
+ * A restart whose job is still running after the client's 60 s and the 360 s
+ * settle budget is a pre-start still at work — the unit allows it 600 s, and
+ * the database housekeeping in it is budgeted for most of that — so it is the
+ * start the wait follows, not a failure. A restart systemd finished with the
+ * unit down, or never answered about, still throws.
+ */
+async function restartGatewayForRecovery(): Promise<void> {
+  try {
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
+  } catch (err) {
+    // By name, not `instanceof`: two dozen suites import this module beside a
+    // `@/lib/openclaw-config` mock without the class, where `instanceof
+    // undefined` would throw (openclaw-config-mock-completeness.test.ts).
+    if (!(err instanceof Error) || err.name !== "GatewayNotReadyError") throw err;
+    console.warn(`[Updater] ${err.message}; following the unit's start instead`);
+  }
 }
 
 /**
@@ -3636,15 +3747,22 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // quiesced repair below starts through sudo — and the legacy quarantine's
     // hard-coded /home/clawbox — so it gets the restart and the diagnosis, not
     // the appliance's repairs. Its sudoers grant carries this restart.
+    // Same unit, same slow start on large databases: followed the same way.
     gatewayNeedsRecovery = false;
-    if (!options.restartFirst && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
-    if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
-    throw new Error(await describeDeadGateway(await readGatewayJournalTail()));
+    if (!options.restartFirst && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
+    await restartGatewayForRecovery();
+    const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+    if (verdict.kind === "listening") return;
+    throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
   }
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
-  if (!recoverImmediately && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+  // Followed, not raced: a gateway systemd says is still starting is waited
+  // for here rather than stopped for the repair below and started over, which
+  // on a large database only begins the same slow start again. Anything else
+  // past the old 30 s — failed, stopped, crash-looping, or a unit systemctl
+  // cannot describe — goes on to the repair exactly as before.
+  if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
 
   // post_update and the standalone OpenClaw updater both run several config,
   // doctor and plugin commands. Do all remaining repair against a stopped,
@@ -3673,20 +3791,22 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // read that turns "not listening" into a diagnosis. A throw from inside
   // restartGateway would abort the function before the legacy-state quarantine
   // it exists to perform ever ran.
-  await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
-  if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+  await restartGatewayForRecovery();
+  const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+  if (verdict.kind === "listening") return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
-    throw new Error(await describeDeadGateway(beforeRecoveryLog));
+    throw new Error(await describeDeadGateway(beforeRecoveryLog, gatewayNotListeningPrefix(verdict)));
   }
 
   await withGatewayQuiesced(async () => {
     await quarantineLegacyOpenclawState();
     await runOpenclawDoctorFix();
   });
-  await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
-  if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+  await restartGatewayForRecovery();
+  const afterRecovery = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+  if (afterRecovery.kind === "listening") return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
   throw new Error(

@@ -31,7 +31,7 @@
 // It only reads, clicks and drags; it never changes a setting. Leave the
 // desktop alone while it runs — a moving pointer or typing skews the numbers.
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -116,6 +116,17 @@ const metrics = async () => Object.fromEntries((await send("Performance.getMetri
 
 // ── Process CPU (/proc) ──
 const HZ = 100;
+const WEB_SERVER_PID = (() => {
+  try {
+    const pid = Number(execFileSync("systemctl", ["show", "-p", "MainPID", "--value", process.env.CLAWBOX_UI_UNIT || "clawbox-setup.service"], { encoding: "utf8", timeout: 5000 }).trim());
+    if (pid > 0) return pid;
+  } catch { /* no systemd: fall through */ }
+  for (const d of fs.readdirSync("/proc")) {
+    if (!/^\d+$/.test(d)) continue;
+    try { if (/clawbox-web|production-server\.js/.test(fs.readFileSync(`/proc/${d}/cmdline`, "utf8"))) return Number(d); } catch { /* gone */ }
+  }
+  return -1;
+})();
 function processes() {
   const out = [];
   for (const d of fs.readdirSync("/proc")) {
@@ -123,7 +134,13 @@ function processes() {
     try {
       const cmd = fs.readFileSync(`/proc/${d}/cmdline`, "utf8");
       let kind = null;
-      if (/production-server\.js|clawbox-web|next-server/.test(cmd)) kind = "web-server";
+      // The web server is the unit's main process, found by its pid: its
+      // cmdline reads `clawbox-web` (the title production-server.js sets),
+      // and an agent-built app registered on the box runs its own
+      // `next-server` — matched by name, that one was counted as ours
+      // (2026-10-27: a 20 % "web-server" that was the owner's audiobook app).
+      if (Number(d) === WEB_SERVER_PID) kind = "web-server";
+      else if (/next-server|clawbox-web|production-server\.js/.test(cmd)) kind = "other-node-servers";
       else if (/chrome/.test(cmd) && /clawbox-kiosk/.test(cmd)) {
         kind = /--type=gpu-process/.test(cmd) ? "chrome-gpu" : /--type=renderer/.test(cmd) ? "chrome-renderers" : /--type=/.test(cmd) ? "chrome-other" : "chrome-browser";
       }

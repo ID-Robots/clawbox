@@ -22,24 +22,11 @@ import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
 import ChromeWindow, { type WindowMode, type WindowRect } from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
-import SettingsApp, { type UISettings } from "@/components/SettingsApp";
-import AppStore from "@/components/AppStore";
-import HermesSkillsStore from "@/components/HermesSkillsStore";
-import FilesApp from "@/components/FilesApp";
-import ClawKeepApp from "@/components/ClawKeepApp";
-import MemoryShardApp from "@/components/MemoryShardApp";
-import PrimeRadiantApp from "@/components/PrimeRadiantApp";
-import ScreenshotApp from "@/components/ScreenshotApp";
+import type { UISettings } from "@/components/SettingsApp";
 import ScreenshotOverlay from "@/components/ScreenshotOverlay";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
-import SystemUpdateApp from "@/components/SystemUpdateApp";
 import TimezoneAdopter from "@/components/TimezoneAdopter";
 import type { StoreApp } from "@/components/AppStore";
-import TerminalTabs from "@/components/TerminalTabs";
-import CodingAgentApp from "@/components/CodingAgentApp";
-import InstalledAppSettings from "@/components/InstalledAppSettings";
-import BrowserApp from "@/components/BrowserApp";
-import VNCApp from "@/components/VNCApp";
 import WebappFrame from "@/components/WebappFrame";
 import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } from "@/components/ChatPopup";
 
@@ -50,7 +37,6 @@ import InstalledAppIcon from "@/components/InstalledAppIcon";
 import AgentBrowserIcon from "@/components/AgentBrowserIcon";
 import GoogleChromeIcon from "@/components/GoogleChromeIcon";
 import PrimeRadiantIcon from "@/components/PrimeRadiantIcon";
-import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
@@ -100,6 +86,43 @@ import {
 
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
+
+/**
+ * What a window shows while its app's code is on the way (a few hundred ms
+ * the first time on a Jetson, nothing after). Deliberately plain: the window
+ * chrome is already there, and the app replaces this the moment it lands.
+ */
+function WindowLoading() {
+  return (
+    <div className="h-full flex items-center justify-center text-white/40" aria-busy="true">
+      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 28 }}>progress_activity</span>
+    </div>
+  );
+}
+
+// The apps a window can hold are loaded when a window first opens them, not
+// with the desktop (2026-10-27): statically imported, Settings, Files,
+// ClawKeep, the Coding Agent and the rest put ~1 MB of JavaScript in front of
+// the shelf on every load, for windows most loads never open. The shelf, the
+// launcher, the mascot, the chat popup and the notices stay eager — they ARE
+// the desktop. `ssr: false` as for the mascot: the page is a client component
+// and these read the window and the box on mount. The options are spelled out
+// on every line because next/dynamic takes only an object LITERAL there.
+const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: false, loading: WindowLoading });
+const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false, loading: WindowLoading });
+const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false, loading: WindowLoading });
+const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false, loading: WindowLoading });
+const ClawKeepApp = dynamic(() => import("@/components/ClawKeepApp"), { ssr: false, loading: WindowLoading });
+const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ssr: false, loading: WindowLoading });
+const PrimeRadiantApp = dynamic(() => import("@/components/PrimeRadiantApp"), { ssr: false, loading: WindowLoading });
+const ScreenshotApp = dynamic(() => import("@/components/ScreenshotApp"), { ssr: false, loading: WindowLoading });
+const SystemUpdateApp = dynamic(() => import("@/components/SystemUpdateApp"), { ssr: false, loading: WindowLoading });
+const TerminalTabs = dynamic(() => import("@/components/TerminalTabs"), { ssr: false, loading: WindowLoading });
+const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false, loading: WindowLoading });
+const InstalledAppSettings = dynamic(() => import("@/components/InstalledAppSettings"), { ssr: false, loading: WindowLoading });
+const BrowserApp = dynamic(() => import("@/components/BrowserApp"), { ssr: false, loading: WindowLoading });
+const VNCApp = dynamic(() => import("@/components/VNCApp"), { ssr: false, loading: WindowLoading });
+const SetupWizard = dynamic(() => import("@/components/SetupWizard"), { ssr: false, loading: WindowLoading });
 
 // Every built-in id. This is the VALIDITY filter for a saved desktop list —
 // an id naming no built-in reserves an empty grid slot — and it is deliberately

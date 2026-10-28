@@ -157,6 +157,9 @@ beforeEach(() => {
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+  process.env.GATEWAY_START_LIMIT_MS = "1";
+  process.env.GATEWAY_START_POLL_MS = "1";
+  process.env.GATEWAY_START_POLL_MAX_MS = "1";
   delete process.env.OPENCLAW_PIN_VERSION;
   vi.mocked(get).mockReset();
   vi.mocked(get).mockResolvedValue(undefined as never);
@@ -177,6 +180,9 @@ afterEach(() => {
   delete process.env.GATEWAY_HEALTH_WAIT_MS;
   delete process.env.GATEWAY_RECOVERY_WAIT_MS;
   delete process.env.GATEWAY_WAIT_INTERVAL_MS;
+  delete process.env.GATEWAY_START_LIMIT_MS;
+  delete process.env.GATEWAY_START_POLL_MS;
+  delete process.env.GATEWAY_START_POLL_MAX_MS;
 });
 
 afterAll(() => {

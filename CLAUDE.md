@@ -32,6 +32,7 @@ Bun runtime (package management + builds), Node.js 24 (production runtime), Next
 - **Flaky shards**: each vitest shard in `pr-tests-coverage.yml` runs through `scripts/vitest-shard.sh`, which reruns a failed shard ONCE; a pass on the rerun leaves a `::warning::` annotation and a "Flaky vitest shard" job-summary section naming the tests — fix those tests, do not lean on the rerun
 - Test coverage for: config store, network utils, auth, OAuth, system info, updater, gateway proxy, middleware, API routes
 - **CI** and the bots' scripts: [docs/agents/testing-and-ci.md](docs/agents/testing-and-ci.md); the on-device suite: [docs/nano-hardware-tests.md](docs/nano-hardware-tests.md)
+- **The bench**: `bun run bench` scores the LIVE box per area (chat, desktop, idle, API, Prime Radiant, Memory Shard, files, terminal, a coding run, resources) and overall, through the signed-in kiosk Chrome; `compare before.json after.json` says better/same/worse after an update: [docs/clawbox-bench.md](docs/clawbox-bench.md)
 - **This map**: `node scripts/check-claude-md-no-loss.mjs <base-ref>` proves a move out of a long CLAUDE.md lost no paragraph (CI runs it on every pull request into beta); `src/tests/unit/claude-md-map.test.ts` is the size guard
 
 ## Rules every change keeps
@@ -123,7 +124,7 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 - [update-and-install.md](docs/agents/update-and-install.md) — read this when you touch `update/*`, `updater.ts`, `install.sh`, a root step, `config/*.service`, the AP or `production-server.js`.
 - [testing-and-ci.md](docs/agents/testing-and-ci.md) — read this when you touch a workflow, `e2e-install` or the triage and review bots.
 
-Elsewhere in the tree: `mcp/README.md` (the MCP tool list, kept in step with the code), `src/lib/prime-radiant/README.md`, `scripts/x64-migration/README.md`, `docs/nano-hardware-tests.md`, `docs/root-exec-mirror.md`, `docs/update-launcher-transition.md`, `docs/updater-legacy-handover.md`, `docs/hermes-reasoning-levels.md`, `docs/clawkeep-backup-mgmt-spec.md`, `CONTRIBUTING.md` and `.env.example`.
+Elsewhere in the tree: `mcp/README.md` (the MCP tool list, kept in step with the code), `src/lib/prime-radiant/README.md`, `scripts/x64-migration/README.md`, `docs/nano-hardware-tests.md`, `docs/clawbox-bench.md`, `docs/root-exec-mirror.md`, `docs/update-launcher-transition.md`, `docs/updater-legacy-handover.md`, `docs/hermes-reasoning-levels.md`, `docs/clawkeep-backup-mgmt-spec.md`, `CONTRIBUTING.md` and `.env.example`.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

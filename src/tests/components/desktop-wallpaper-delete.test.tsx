@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, beforeAll } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
 import { resetHarnessCache } from "@/lib/client-harness";
@@ -164,6 +164,14 @@ async function openAppearanceSettings() {
   fireEvent.click(settings!);
   fireEvent.click(await screen.findByRole("button", { name: /appearance/i }, PAINTS_SOON));
 }
+
+// Settings is loaded when its window first opens (page.tsx `LAZY_WINDOW`),
+// and in vitest that first `import()` is also the module's transform — on a
+// loaded CI box longer than the wait below. Warm it once per file so the
+// tests measure the desktop, not the transform.
+beforeAll(async () => {
+  await import("@/components/SettingsApp");
+});
 
 beforeEach(() => {
   window.localStorage.clear();
