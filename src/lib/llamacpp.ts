@@ -44,11 +44,12 @@ export const SUPERSEDED_LLAMACPP_HF_FILE = "gemma-4-e2b-it-edited-q4_0.gguf";
  * fails if they disagree.
  *
  * 32k with a q8_0 KV cache replaced 131k with q4_0. Measured on an 8 GB Jetson
- * (reports/clawbox/local-ai/BENCHMARK.md): the lean local prompt is ~1k tokens
- * and the full OpenClaw one ~13k, so a 131k window only ever held empty cache,
- * while q4_0 keys cost answer quality on a 2B model. 8192 output tokens is a
- * whole one-file web app, and it matches the 25% of the window OpenClaw keeps
- * free for the answer before it compacts.
+ * (reports/clawbox/local-ai/BENCHMARK.md): the lean local prompt is ~1.3k tokens
+ * and the full OpenClaw one ~13.4k, so a 131k window only ever held empty cache;
+ * the same ten tasks passed at the same speed either way, with more of the box's
+ * memory left over at 32k. 8192 output tokens is a whole one-file web app — at
+ * 131072 a page-writing turn ran past 8,000 tokens and into the agent timeout —
+ * and it matches the 25% of the window OpenClaw keeps free before it compacts.
  */
 export const DEFAULT_LLAMACPP_CONTEXT_WINDOW = 32768;
 export const DEFAULT_LLAMACPP_MAX_TOKENS = 8192;
