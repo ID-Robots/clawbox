@@ -19,7 +19,14 @@ import { useDismissedCodingRuns } from '@/lib/use-dismissed-coding-runs'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
-import { gatewayFrameError, isGatewayStartingRefusal } from '@/lib/chat-gateway-starting'
+import {
+  AGENT_STARTING_DEADLINE_MS,
+  AGENT_STARTING_RETRY_DELAYS_MS,
+  AgentStartingTimeoutError,
+  gatewayFrameError,
+  isGatewayStartingRefusal,
+  retryWhileAgentStarting,
+} from '@/lib/chat-gateway-starting'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
 import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
@@ -2847,12 +2854,34 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // an identical value and a user click triggers two patches (state
   // change + this effect).
   const lastSentThinkingRef = useRef<string | null | undefined>(undefined)
+  // The push still waiting for the agent to finish starting (see the effect),
+  // and whether the picker is showing that wait. A gateway that has just
+  // restarted answers the socket before its agent is ready, and refuses this
+  // patch until it is — a state every restart passes through, not a fault, so
+  // it gets a quiet "Starting…" on the picker rather than a red line telling
+  // the owner to run `openclaw doctor --fix`.
+  const effortPushRef = useRef<AbortController | null>(null)
+  const [effortWaitingForAgent, setEffortWaitingForAgent] = useState(false)
+  // Set once the bounded wait has run out and said so; cleared by the next push
+  // that lands, so an agent that never comes up is reported once, not per try.
+  const effortStartNoticeShownRef = useRef(false)
+  useEffect(() => () => { effortPushRef.current?.abort() }, [])
   useEffect(() => {
     // A sticky patch is an OpenClaw gateway call. A harness whose reasoning
     // dial is per-turn carries the level on the turn instead, so pushing here
     // could only ever reject with 'Not connected' — see the predicate for why
     // the capability is checked outright rather than left to the key guard.
-    if (!shouldPatchSessionDefaults({ capabilities: caps, status, sessionKey: sessionKeyRef.current })) return
+    if (!shouldPatchSessionDefaults({ capabilities: caps, status, sessionKey: sessionKeyRef.current })) {
+      // The socket went away under a push still waiting on the agent: the wait
+      // goes with it, and the next hello pushes the level again.
+      if (effortPushRef.current) {
+        effortPushRef.current.abort()
+        effortPushRef.current = null
+        lastSentThinkingRef.current = undefined
+        setEffortWaitingForAgent(false)
+      }
+      return
+    }
     // Let the model route repair a legacy Pro-only policy before asking the
     // gateway to pin this session to Flash.
     if (chatModelState?.needsFlashModelMigration) return
@@ -2869,9 +2898,48 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     const wireValue = `${wireLevel}:${model ?? ''}`
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
-    void adapter.patchSessionDefaults({ thinkingLevel: wireLevel, ...(model ? { model } : {}) }).catch((err: unknown) => {
+    // A newer level replaces one still waiting on the agent; only the latest is
+    // ever applied.
+    effortPushRef.current?.abort()
+    const push = new AbortController()
+    effortPushRef.current = push
+    const ownsPush = () => effortPushRef.current === push
+    void retryWhileAgentStarting(
+      () => adapter.patchSessionDefaults({ thinkingLevel: wireLevel, ...(model ? { model } : {}) }),
+      {
+        signal: push.signal,
+        delaysMs: AGENT_STARTING_RETRY_DELAYS_MS,
+        deadlineMs: AGENT_STARTING_DEADLINE_MS,
+        onWaiting: () => { if (ownsPush()) setEffortWaitingForAgent(true) },
+      },
+    ).then(() => {
+      if (!ownsPush()) return
+      effortPushRef.current = null
+      effortStartNoticeShownRef.current = false
+      setEffortWaitingForAgent(false)
+    }, (err: unknown) => {
+      // Called off — a newer level, a dropped socket or the popup going away
+      // owns what happens next.
+      if (!ownsPush()) return
+      effortPushRef.current = null
+      setEffortWaitingForAgent(false)
       // Reset so a reconnect or next user change retries.
       lastSentThinkingRef.current = undefined
+      // The agent was still starting when the wait ran out. Not the core's
+      // repair advice and not red: one plain note (the same treatment as the
+      // unsupported-level note below), and the picker is usable again — the
+      // next re-read or change pushes the level once more.
+      if (err instanceof AgentStartingTimeoutError) {
+        if (effortStartNoticeShownRef.current) return
+        effortStartNoticeShownRef.current = true
+        setMessages(msgs => [...msgs, {
+          role: 'system',
+          text: tr('chat.effort.agentStartingSlow', 'The assistant is still starting up. Your effort setting will be applied once it is ready.'),
+          timestamp: Date.now(),
+          variant: 'success',
+        }])
+        return
+      }
       // The gateway itself tells us the level to fall back to when a model
       // exposes no (or a narrower) reasoning control — e.g. local Gemma:
       //   thinkingLevel "high" is not supported for llamacpp/... (use off)
@@ -2901,7 +2969,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       }])
     })
   // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
-  }, [status, headerProvider, headerModel, headerThinkingLevels, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
+  }, [status, headerProvider, headerModel, headerThinkingLevels, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel, tr])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -3214,10 +3282,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           // needs `operator.approvals` on a paired device, which this connect
           // frame already is — so an approve/deny card costs one flag on a call
           // that was being made anyway, and no poll.
+          // Bound to this connection: a wait for an agent still starting ends
+          // with it, and the next hello asks again.
           void subscribeSessionApprovals(wsRequest, boundKey, (replay, forKey) => {
             if (forKey !== sessionKeyRef.current) return
             setApprovals(prev => approvalsAfterReplay(prev, replay))
-          })
+          }, { signal: controller.signal })
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
           // socket. A skill change no longer does either, so it never raises
@@ -3299,7 +3369,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           void loadPendingQuestions(wsRequest, boundKey, (pending, forKey) => {
             if (forKey !== sessionKeyRef.current) return
             setQuestions(prev => questionsAfterReplay(prev, pending))
-          })
+          }, { signal: controller.signal })
         },
         reject: (err: Error) => {
           if (!isCurrent()) return
@@ -4413,14 +4483,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // Blanks the view and marks the greet done, so an empty new tab does not
     // greet itself with an unasked-for "hi".
     clearTranscript()
+    const connectionSignal = connectionAbortRef.current?.signal
     void subscribeSessionApprovals(wsRequest, key, (replay, forKey) => {
       if (forKey !== sessionKeyRef.current) return
       setApprovals(prev => approvalsAfterReplay(prev, replay))
-    })
+    }, { signal: connectionSignal })
     void loadPendingQuestions(wsRequest, key, (pending, forKey) => {
       if (forKey !== sessionKeyRef.current) return
       setQuestions(prev => questionsAfterReplay(prev, pending))
-    })
+    }, { signal: connectionSignal })
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
     const stash = tabStashRef.current.get(key)
@@ -7411,6 +7482,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // because the state update from the event handler doesn't propagate
   // into that frozen closure.
   const reloadReasonRef = useRef<'skill' | 'provider' | 'restart'>('skill')
+  // The effort picker's quiet "Starting…": from the gateway restart (the
+  // overlay a startup refusal or a dropped socket raises) until the agent
+  // behind it takes the level (the push waiting in the sticky-effort effect).
+  // Disabled meanwhile, because a level picked now could not be applied yet.
+  const effortStarting = caps.canPatchSessionDefaults
+    && (effortWaitingForAgent || (reloadingSkill && reloadReason === 'restart'))
   const reloadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // Drives the reload overlay's progress bar from 0 toward 90% (it parks at
   // 90 until the gateway answers, then the resolve callback completes it to
@@ -9406,9 +9483,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               }))}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
+              disabled={effortStarting}
               /* Brain glyph instead of a "Thinking: " word prefix — see
                  REASONING_PILL_ICON. */
-              triggerLabel={tr(`chat.effort.${effectiveThinkingLevel}`, THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel)}
+              triggerLabel={effortStarting
+                ? tr('chat.effort.starting', 'Starting…')
+                : tr(`chat.effort.${effectiveThinkingLevel}`, THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel)}
               triggerIcon={REASONING_PILL_ICON}
               triggerMaxWidth={120}
               popoverWidth={180}

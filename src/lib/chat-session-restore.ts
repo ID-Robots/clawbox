@@ -19,7 +19,7 @@
 // without rendering the chat; the component only wires them in.
 
 import { HarnessError } from "@/lib/harness/transport";
-import { isGatewayStartingRefusal, type GatewayRefusal } from "@/lib/chat-gateway-starting";
+import { isAgentStartingRefusal, type GatewayRefusal } from "@/lib/chat-gateway-starting";
 
 /**
  * The longest one gateway RPC may go unanswered before the chat gives up on it.
@@ -113,10 +113,15 @@ function refusalChain(err: unknown): GatewayRefusal[] {
  * anchored on the sentences the gateway actually sends — "session history is
  * rebuilding; retry shortly", "chat.history unavailable during gateway
  * restart" — never on a bare "unavailable".
+ *
+ * An agent still finishing its startup inspection is a "not yet" whatever its
+ * `retryable` says (see `isAgentStartingRefusal`): the history read right after
+ * a restart can land before the agent is ready, and the restore's own deadline
+ * still bounds the wait.
  */
 export function isRetryableRestoreRefusal(err: unknown): boolean {
+  if (isAgentStartingRefusal(err)) return true;
   for (const refusal of refusalChain(err)) {
-    if (isGatewayStartingRefusal(refusal)) return true;
     if (refusal.code === "UNAVAILABLE" && refusal.retryable === true) return true;
     if (refusal.retryable === false) return false;
     const message = typeof refusal.message === "string" ? refusal.message : "";
