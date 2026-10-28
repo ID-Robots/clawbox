@@ -191,6 +191,65 @@ describe("WhatsNewCard", () => {
     expect(onDismiss).not.toHaveBeenCalled();
   });
 
+  describe("a surface drawn over it keeps its own keys", () => {
+    const rect = (x: number) =>
+      ({ left: x, top: 0, width: 100, height: 100, right: x + 100, bottom: 100, x, y: 0, toJSON: () => ({}) }) as DOMRect;
+    /** jsdom has no layout: say what is on top at each point. */
+    const topmostAt = (pick: (x: number) => Element) =>
+      Object.defineProperty(document, "elementFromPoint", { configurable: true, value: (x: number) => pick(x) });
+    afterEach(() => {
+      delete (document as unknown as Record<string, unknown>).elementFromPoint;
+    });
+
+    it("an approval prompt above it, with the focus on its button: Escape, the arrows and Tab are the prompt's", () => {
+      const onDismiss = vi.fn();
+      render(
+        <>
+          <button>Deny</button>
+          <WhatsNewCard state={MAX} onDismiss={onDismiss} />
+        </>,
+      );
+      const deny = screen.getByRole("button", { name: "Deny" });
+      const dialog = screen.getByRole("dialog");
+      vi.spyOn(dialog, "getBoundingClientRect").mockReturnValue(rect(0));
+      vi.spyOn(deny, "getBoundingClientRect").mockReturnValue(rect(500));
+      topmostAt((x) => (x >= 500 ? deny : dialog));
+
+      deny.focus();
+      fireEvent.keyDown(deny, { key: "Escape" });
+      fireEvent.keyDown(deny, { key: "ArrowRight" });
+      const tabNotPrevented = fireEvent.keyDown(deny, { key: "Tab" });
+      expect(onDismiss).not.toHaveBeenCalled();
+      expect(slide()).toHaveAttribute("data-slide", "0");
+      expect(tabNotPrevented).toBe(true);
+      expect(document.activeElement).toBe(deny);
+
+      // The focus back on the dialog: the keys are its own again.
+      dialog.focus();
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(slide()).toHaveAttribute("data-slide", "1");
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+    });
+
+    it("the screenshot overlay covering the screen: its Escape does not dismiss the card", () => {
+      const onDismiss = vi.fn();
+      render(
+        <>
+          <div data-testid="overlay" />
+          <WhatsNewCard state={MAX} onDismiss={onDismiss} />
+        </>,
+      );
+      const overlay = screen.getByTestId("overlay");
+      vi.spyOn(screen.getByRole("dialog"), "getBoundingClientRect").mockReturnValue(rect(0));
+      topmostAt(() => overlay);
+      fireEvent.keyDown(window, { key: "Escape" });
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(onDismiss).not.toHaveBeenCalled();
+      expect(slide()).toHaveAttribute("data-slide", "0");
+    });
+  });
+
   it("takes the focus when it opens, keeps Tab inside, and gives the focus back when it closes", () => {
     const { rerender } = render(
       <>

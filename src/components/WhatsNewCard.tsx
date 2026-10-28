@@ -52,6 +52,7 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
   // Which way the last turn went, so the new slide comes in from that side.
   const [direction, setDirection] = useState<1 | -1>(1);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
   const touchStartX = useRef<number | null>(null);
   const last = index === total - 1;
   const item = HIGHLIGHTS[index];
@@ -93,12 +94,15 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
   // page: the dialog covers it all, so it hears them first (capture) and the
   // desktop behind it does not hear them at all. A key typed into a field is
   // left alone, so a composer that grabbed the focus keeps its cursor keys.
-  // Tab is kept inside the dialog.
+  // Tab is kept inside the dialog. None of it while a surface drawn OVER the
+  // dialog has the keys — a power approval prompt, the screenshot overlay:
+  // its Escape is not a dismissal of this card, and its Tab is its own.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       const dialog = dialogRef.current;
-      if (!dialog) return;
+      const backdrop = backdropRef.current;
+      if (!dialog || !backdrop || !keysAreOurs(dialog, backdrop)) return;
       if (event.key === "Tab") {
         trapTab(event, dialog);
         return;
@@ -143,6 +147,7 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
     // `main-screen-scrim`: in monitor mode the dialog centres on the main
     // monitor, not on the seam between two (globals.css).
     <div
+      ref={backdropRef}
       className="main-screen-scrim fixed inset-0 flex items-center justify-center bg-black/60 p-3 sm:p-6 overscroll-contain animate-in fade-in duration-200"
       style={{
         zIndex: DESKTOP_LAYERS.overlay,
@@ -327,6 +332,27 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
       </div>
     </div>
   );
+}
+
+/**
+ * Are the keys the dialog's? Not when something is drawn over it (the
+ * screenshot overlay covers the screen), nor when the focus is on a surface
+ * stacked above it (a power approval prompt focuses its own button). Focus on
+ * the page behind the scrim — a composer that took it — is the dialog's to
+ * take back. Without layout (jsdom) the dialog is taken to be on top.
+ */
+function keysAreOurs(dialog: HTMLElement, backdrop: HTMLElement): boolean {
+  if (typeof document.elementFromPoint !== "function") return true;
+  const drawnByUs = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return true;
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return hit === null || backdrop.contains(hit);
+  };
+  if (!drawnByUs(dialog)) return false;
+  const active = document.activeElement;
+  if (!active || active === document.body || active === document.documentElement || dialog.contains(active)) return true;
+  return drawnByUs(active);
 }
 
 /** Is this key event headed for something the owner types into? */
