@@ -17,6 +17,9 @@
 # reconfigure, AI-provider change, Local-only toggle, chat model
 # switch, and crash-triggered restart.
 set -euo pipefail
+# When this pre-start began, for the step timings below (bash 5's microsecond
+# clock; empty on an older bash, which then times from the first step).
+CLAWBOX_PRESTART_T0_US="${EPOCHREALTIME:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -206,6 +209,127 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_V2
 
+# ── Step timings, and the checks a start may take on trust ──────────────────
+#
+# Every gateway (re)start waits for this whole script, and a box log showed
+# ~36 s of it on a start whose every check answered "already current" — the
+# one a provider sign-in causes. Two things follow from that, both here:
+#
+# TIMINGS. Each step below is opened with `"${CLAWBOX_STEP:-:}" "<name>"`,
+# which logs how long the step before it took ("  Timing: <step> <ms> ms"),
+# and the EXIT trap logs the last one and the total. Called through the
+# variable on purpose: the test suites run single sections of this file on
+# their own, and in such a slice the call is `:` and does nothing.
+#
+# STAMPS. The three checks that cost a CLI cold start on every boot whatever
+# their answer — the Codex plugin's registry dependencies, the core's
+# plugin-consent report and the Claude Code version report — ask
+# scripts/gateway-pre-start-stamps.py whether the answer the last full check
+# recorded still holds, and skip the CLI when it does. That helper says yes
+# only when nothing the check reads has changed, the record is under a day
+# old, this start is not systemd restarting the gateway after a failure, and
+# the previous start reached `gateway ready` (its docstring has the whole
+# list). A miss is today's full check, never a failure. CLAWBOX_PRESTART_FULL=1
+# turns every reuse off.
+CLAWBOX_STAMPS_PY="$SCRIPT_DIR/gateway-pre-start-stamps.py"
+CLAWBOX_STAMPS_FILE="$CLAWBOX_ROOT/data/gateway-pre-start-stamps.json"
+CLAWBOX_STAMPS_GUARD="$CLAWBOX_ROOT/data/openclaw-start-guard.json"
+CLAWBOX_STAMPS_READY=0
+if [ -f "$CLAWBOX_STAMPS_PY" ] && command -v python3 >/dev/null 2>&1; then
+  CLAWBOX_STAMPS_READY=1
+fi
+# What the stamps let this start skip, for the closing timing line.
+CLAWBOX_STAMPS_REUSED=""
+CLAWBOX_STAMP_KEY=""
+CLAWBOX_STAMP_VALUE=""
+CLAWBOX_STAMP_WHY=""
+
+# Ask whether a check may be skipped: `clawbox_stamp_check <step> <kind>
+# [key inputs...]`. 0 = reuse CLAWBOX_STAMP_VALUE; 1 = run the full check, and
+# remember its answer under CLAWBOX_STAMP_KEY (empty when there is no key).
+clawbox_stamp_check() {
+  local step="$1" kind="$2" out state reuse=()
+  shift 2
+  CLAWBOX_STAMP_KEY=""
+  CLAWBOX_STAMP_VALUE=""
+  CLAWBOX_STAMP_WHY=""
+  [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] || return 1
+  [ "${CLAWBOX_PRESTART_FULL:-0}" = "1" ] && reuse=(--no-reuse)
+  out="$(timeout -k 5 20 python3 -I "$CLAWBOX_STAMPS_PY" check --step "$step" --kind "$kind" \
+    --record "$CLAWBOX_STAMPS_FILE" --guard "$CLAWBOX_STAMPS_GUARD" \
+    --script "$SCRIPT_DIR/gateway-pre-start.sh" \
+    --core-pkg "$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json" \
+    "${reuse[@]}" "$@" 2>/dev/null)" || return 1
+  state="${out%%$'\t'*}"
+  out="${out#*$'\t'}"
+  CLAWBOX_STAMP_KEY="${out%%$'\t'*}"
+  [ "$CLAWBOX_STAMP_KEY" = "-" ] && CLAWBOX_STAMP_KEY=""
+  case "$out" in *$'\t'*) out="${out#*$'\t'}" ;; *) out="" ;; esac
+  if [ "$state" = "hit" ]; then
+    CLAWBOX_STAMP_VALUE="$out"
+    CLAWBOX_STAMPS_REUSED="${CLAWBOX_STAMPS_REUSED:+$CLAWBOX_STAMPS_REUSED, }$step"
+    return 0
+  fi
+  CLAWBOX_STAMP_WHY="$out"
+  return 1
+}
+
+# Record a full check's answer: `clawbox_stamp_remember <step> <key> [value]`.
+# Never fails the boot; a record that cannot be written is the next full check.
+clawbox_stamp_remember() {
+  [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && [ -n "${2:-}" ] || return 0
+  if ! timeout -k 5 20 python3 -I "$CLAWBOX_STAMPS_PY" remember --step "$1" --key "$2" --value "${3:-}" \
+      --record "$CLAWBOX_STAMPS_FILE" >/dev/null 2>&1; then
+    echo "  WARN: could not record the $1 check in $CLAWBOX_STAMPS_FILE; the next start runs it in full" >&2
+  fi
+  return 0
+}
+
+# Milliseconds on bash 5's clock (or date's), into CLAWBOX_NOW_MS.
+clawbox_now_ms() {
+  local us="${EPOCHREALTIME:-}"
+  if [ -n "$us" ]; then
+    us="${us/[.,]/}"
+    CLAWBOX_NOW_MS=$(( 10#$us / 1000 ))
+  else
+    CLAWBOX_NOW_MS="$(date +%s%3N 2>/dev/null || echo 0)"
+  fi
+}
+CLAWBOX_STEP_NAME="startup and version probe"
+CLAWBOX_STEP_STARTED_MS=0
+CLAWBOX_PRESTART_STARTED_MS=0
+if [ -n "${CLAWBOX_PRESTART_T0_US:-}" ]; then
+  _t0="${CLAWBOX_PRESTART_T0_US/[.,]/}"
+  CLAWBOX_PRESTART_STARTED_MS=$(( 10#$_t0 / 1000 ))
+else
+  clawbox_now_ms
+  CLAWBOX_PRESTART_STARTED_MS="$CLAWBOX_NOW_MS"
+fi
+CLAWBOX_STEP_STARTED_MS="$CLAWBOX_PRESTART_STARTED_MS"
+
+# Close the step that is open and open the next one (an empty name opens none).
+clawbox_step_mark() {
+  clawbox_now_ms
+  if [ -n "$CLAWBOX_STEP_NAME" ]; then
+    echo "  Timing: $CLAWBOX_STEP_NAME $(( CLAWBOX_NOW_MS - CLAWBOX_STEP_STARTED_MS )) ms"
+  fi
+  CLAWBOX_STEP_NAME="${1:-}"
+  CLAWBOX_STEP_STARTED_MS="$CLAWBOX_NOW_MS"
+}
+CLAWBOX_STEP=clawbox_step_mark
+
+# The closing lines, on every exit. `set +e` first: under `set -e` a command
+# failing inside an EXIT trap replaces the script's own exit status, and a
+# timing line must never turn a good start into a failed one (or hide a bad one).
+clawbox_prestart_finish() {
+  local rc="$1"
+  set +e
+  clawbox_step_mark ""
+  echo "  Timing: pre-start total $(( CLAWBOX_NOW_MS - CLAWBOX_PRESTART_STARTED_MS )) ms (exit $rc); reused instead of re-checked: ${CLAWBOX_STAMPS_REUSED:-nothing}"
+  return 0
+}
+trap 'clawbox_prestart_finish "$?"' EXIT
+
 # OpenClaw 2026.10 or later. What this script drives for the agent databases —
 # the memory-index defaults (`memory.search.rememberAcrossConversations`,
 # `memory.search.sources`), the DeepSeek `contextTokens` cap and the offline
@@ -224,6 +348,8 @@ if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
   fi
 fi
 export CLAWBOX_OPENCLAW_2026_10
+
+"${CLAWBOX_STEP:-:}" "start-loop recovery"
 
 # ── Start-loop recovery: a database the core refuses at every start ─────────
 #
@@ -269,6 +395,8 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -x "$OPENCLAW_BIN" ] && [ -f 
     echo "  WARN: start-loop recovery stopped (exit $_sg_rc); the gateway starts as it is" >&2
   fi
 fi
+
+"${CLAWBOX_STEP:-:}" "config check"
 
 # ── First boot on a NEW OpenClaw core: make the config loadable again ───────
 #
@@ -984,6 +1112,7 @@ then
       ;;
   esac
 fi
+"${CLAWBOX_STEP:-:}" "hostname and allowed origins"
 # Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then
@@ -1096,6 +1225,8 @@ if [ -n "$CLAWBOX_EXTRA_ORIGINS" ]; then
   done <<<"$CLAWBOX_EXTRA_ORIGINS"
 fi
 export CLAWBOX_EXTRA_ORIGINS
+
+"${CLAWBOX_STEP:-:}" "config pass"
 
 # The device store the Next app writes (`data/config.json`), not openclaw.json.
 # The cloud-voice migration below needs the portal-confirmed plan stamp that
@@ -4420,6 +4551,7 @@ else:
     _record_keyword_only_rebuild()
 PY
 
+"${CLAWBOX_STEP:-:}" "legacy auth sweep"
 # OpenClaw 2 refuses to start while any legacy auth-profiles.json remains,
 # even when the credentials were already copied into SQLite. Provider setup
 # normally runs doctor before restarting, but an interrupted configure or a
@@ -4454,6 +4586,8 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
     fi
   fi
 fi
+
+"${CLAWBOX_STEP:-:}" "provider plugin payload and local AI auth"
 
 # ── Where the DeepSeek provider plugin's payload lives (TASK-1302) ──────────
 #
@@ -5425,10 +5559,22 @@ CAUSEPY
 # can conservatively miss a newly accepted surface, but cannot invent one.
 # A payload install CAN change a surface: invalidate the snapshot before that
 # operation so a later id never uses an answer from before the install.
-# The snapshot is in memory for this boot only, never persisted across boots.
+#
+# ACROSS BOOTS, only through the `plugin-consent` stamp (see "the checks a
+# start may take on trust" near the top): the first ask of a boot may take the
+# report the last full check recorded, when nothing the report depends on has
+# changed and the last start came up. A report that still had a consent
+# PENDING is never recorded, and a report taken on trust only ever settles a
+# plugin it names as consented or unrecorded — for any other answer the core
+# is asked again, then and there (`clawbox_plugin_consent_state`).
 CLAWBOX_CONSENT_STATES=""
 CLAWBOX_CONSENT_STATES_READY=0
 CLAWBOX_CONSENT_POSTWRITE_READY=0
+# 1 while CLAWBOX_CONSENT_STATES is the recorded report rather than the core's
+# answer this boot; the key the core's first answer this boot is recorded under.
+CLAWBOX_CONSENT_FROM_STAMP=0
+CLAWBOX_CONSENT_STAMP_ASKED=0
+CLAWBOX_CONSENT_STAMP_KEY=""
 
 # `@openclaw/discord`, `openclaw-discord` and `discord` are one plugin: the
 # registry answers to all three and `ensureChannelPlugin` enables whichever one
@@ -5455,6 +5601,25 @@ clawbox_plugin_canonical_id() {
 clawbox_consent_states_load() {
   local rc=0 file=""
   [ "$CLAWBOX_CONSENT_STATES_READY" = "0" ] || return "$CLAWBOX_CONSENT_STATES_READY"
+  CLAWBOX_CONSENT_FROM_STAMP=0
+  if [ "${CLAWBOX_CONSENT_STAMP_ASKED:-0}" = "0" ] && [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ]; then
+    CLAWBOX_CONSENT_STAMP_ASKED=1
+    if clawbox_stamp_check plugin-consent plugins --config "$OPENCLAW_CONFIG" --openclaw-home "$OPENCLAW_HOME_DIR" \
+        --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules"; then
+      case "$CLAWBOX_STAMP_VALUE" in
+        ok|"ok "*)
+          CLAWBOX_CONSENT_STAMP_KEY="$CLAWBOX_STAMP_KEY"
+          CLAWBOX_CONSENT_STATES=" ${CLAWBOX_STAMP_VALUE#ok} "
+          CLAWBOX_CONSENT_STATES_READY=1
+          CLAWBOX_CONSENT_FROM_STAMP=1
+          echo "  Plugin consent: nothing the core's report depends on changed since the last full check; reusing that report instead of asking again"
+          return 1
+          ;;
+      esac
+    fi
+    CLAWBOX_CONSENT_STAMP_KEY="${CLAWBOX_STAMP_KEY:-}"
+    [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Plugin consent: asking the core (${CLAWBOX_STAMP_WHY})"
+  fi
   # THROUGH A FILE, not through the environment. Measured on a box: this answer
   # is 285 KB for 65 plugin reports, and Linux caps a single environment string
   # at MAX_ARG_STRLEN (131 072), so the `VAR="$out" python3 -` idiom the rest of
@@ -5557,6 +5722,16 @@ PY
   rm -f "$file" 2>/dev/null || true
   case "$CLAWBOX_CONSENT_STATES" in
     ok|"ok "*)
+      # Recorded for the next start once, under the key taken before this
+      # boot's first ask — and never with a consent still pending, which the
+      # enable below is about to change.
+      if [ -n "${CLAWBOX_CONSENT_STAMP_KEY:-}" ]; then
+        case " $CLAWBOX_CONSENT_STATES " in
+          *" pending:"*) ;;
+          *) clawbox_stamp_remember plugin-consent "$CLAWBOX_CONSENT_STAMP_KEY" "$CLAWBOX_CONSENT_STATES" ;;
+        esac
+        CLAWBOX_CONSENT_STAMP_KEY=""
+      fi
       CLAWBOX_CONSENT_STATES=" ${CLAWBOX_CONSENT_STATES#ok} "
       CLAWBOX_CONSENT_STATES_READY=1
       return 1
@@ -5576,16 +5751,27 @@ PY
 #   3  it does not name the plugin, names it in a state it would not load, or
 #      could not be asked at all
 clawbox_plugin_consent_state() {
-  local id ready=0
+  local id ready=0 state=3 again=0
   id="$(clawbox_plugin_canonical_id "$1")"
   clawbox_consent_states_load || ready=$?
   [ "$ready" = "1" ] || return 3
   case "$CLAWBOX_CONSENT_STATES" in
-    *" pending:$id "*) return 1 ;;
-    *" consented:$id "*) return 0 ;;
-    *" seen:$id "*) return 2 ;;
+    *" pending:$id "*) state=1 ;;
+    *" consented:$id "*) state=0 ;;
+    *" seen:$id "*) state=2 ;;
   esac
-  return 3
+  # The last full check's report, taken on trust, settles a plugin only when
+  # it says consented or unrecorded. Anything else may be what has changed, so
+  # the core is asked now, before an enable is spent on a stale answer.
+  if [ "$state" != "0" ] && [ "$state" != "2" ] && [ "${CLAWBOX_CONSENT_FROM_STAMP:-0}" = "1" ]; then
+    echo "  Plugin consent: the recorded report does not settle $id; asking the core"
+    CLAWBOX_CONSENT_FROM_STAMP=0
+    CLAWBOX_CONSENT_STATES=""
+    CLAWBOX_CONSENT_STATES_READY=0
+    clawbox_plugin_consent_state "$1" || again=$?
+    return "$again"
+  fi
+  return "$state"
 }
 
 # Set by clawbox_plugin_consent_outcome for its caller's own message.
@@ -5730,6 +5916,7 @@ clawbox_deepseek_switch_on_for_row() {
   clawbox_plugin_boot_without deepseek "$stage" "$lead$detail"
 }
 
+"${CLAWBOX_STEP:-:}" "Codex plugin check"
 # A `.openclaw` INSIDE the state directory is what the CLI leaves behind when
 # it was run with OPENCLAW_HOME pointing at the state directory (see the pin
 # near the top): a second config, a second empty index, nothing the gateway
@@ -5820,7 +6007,21 @@ fi
 # be a completely healthy global/project install. Retain the filesystem check
 # as the fallback for older CLIs or malformed registry output.
 CODEX_REGISTRY_DEPS_OK=0
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+_codex_registry_key=""
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ] \
+  && [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] \
+  && clawbox_stamp_check codex-registry plugins --config "$OPENCLAW_CONFIG" --openclaw-home "$OPENCLAW_HOME_DIR" \
+    --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules" \
+  && [ "$CLAWBOX_STAMP_VALUE" = "1" ]; then
+  # A CLI cold start on every boot for an answer that cannot have changed:
+  # only a POSITIVE verdict is ever recorded, and only reused while nothing it
+  # reads has changed and the last start came up (see "the checks a start may
+  # take on trust" near the top).
+  CODEX_REGISTRY_DEPS_OK=1
+  echo "  Codex plugin dependencies: nothing they depend on changed since the last full check, which the core's registry passed; not asked again"
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  _codex_registry_key="${CLAWBOX_STAMP_KEY:-}"
+  [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Codex plugin dependencies: asking the core's registry (${CLAWBOX_STAMP_WHY})"
   # `-k 5` for the reason spelled out above the sibling call: without it the
   # ceiling is not one, because a survivor holds this substitution's pipe.
   CODEX_REGISTRY_DEPS_OK="$(
@@ -5840,6 +6041,9 @@ for plugin in plugins:
 else:
     print("0")'
   )" || CODEX_REGISTRY_DEPS_OK=0
+  if [ "$CODEX_REGISTRY_DEPS_OK" = "1" ] && [ -n "$_codex_registry_key" ]; then
+    clawbox_stamp_remember codex-registry "$_codex_registry_key" 1
+  fi
 fi
 # TOTAL, like the reader in the background-job block below and the two
 # assignments above: this is a BLOCKING ExecStartPre under `set -euo
@@ -5913,6 +6117,7 @@ print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
 PY
 )" || CODEX_PLUGIN_ENABLED=1
 fi
+"${CLAWBOX_STEP:-:}" "background job defaults"
 # ── OpenClaw 2's three background jobs, brought to their defaults ONCE ─────
 #
 # Owner ruling 2026-09-15, reversing TASK-609's opt-outs of 2026-09-03: the box
@@ -6211,6 +6416,7 @@ STATEPY
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "Codex install and consent"
 CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
   CODEX_SHOULD_LOAD=1
@@ -6366,6 +6572,8 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
       "$CODEX_CONSENT_SPEC"
   fi
 fi
+
+"${CLAWBOX_STEP:-:}" "managed plugin consent"
 
 # ── Capability consent for the OTHER ClawBox-managed plugins ────────────────
 #
@@ -6548,6 +6756,8 @@ MANAGEDPY
       "$(clawbox_managed_plugin_row_spec "$MANAGED_PLUGIN")"
   done
 fi
+
+"${CLAWBOX_STEP:-:}" "plugin repair retry"
 
 # ── Re-attempting a plugin a PREVIOUS boot switched off ─────────────────────
 #
@@ -6858,6 +7068,7 @@ REATTEMPTPY
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "Codex auth mirror"
 # Codex reads its ChatGPT session from a Codex CLI-style auth.json. Without
 # one the app-server falls back to api.openai.com with no bearer -> 401
 # "Missing bearer or basic authentication in header", which is what users hit
@@ -6919,6 +7130,7 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "embeddings and memory helpers"
 # Semantic memory embeddings default. OpenClaw's memory search defaults to
 # OpenAI embeddings, which need an OPENAI_API_KEY many boxes don't have
 # (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
@@ -7021,6 +7233,7 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_MEMORY_REBUILD_R
   echo "  Memory index rebuild running in the background once the gateway is up (see $MEMORY_REBUILD_LOG)"
 fi
 
+"${CLAWBOX_STEP:-:}" "MCP registration"
 # Ensure the per-install MCP bearer token exists and is wired into the
 # openclaw MCP server registration. The token lets the MCP subprocess
 # (mcp/clawbox-mcp.ts) authenticate back to /setup-api/* on port 80 —
@@ -7314,6 +7527,8 @@ then
   echo "  WARN: could not write the MCP server registration; the ClawBox MCP tools are unavailable this boot" >&2
 fi
 unset CLAWBOX_MCP_TOKEN_VAL
+
+"${CLAWBOX_STEP:-:}" "ClawBox hook plugins"
 
 # ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ────────────
 #
@@ -7686,6 +7901,8 @@ PY
 then
   echo "  WARN: could not drop the retired $CLAWBOX_RETIRED_PLUGIN_ID plugin from $OPENCLAW_CONFIG — the gateway may still try to load it" >&2
 fi
+
+"${CLAWBOX_STEP:-:}" "email directive hook"
 
 # ── The outbound EMAIL:-directive hook plugin ───────────────────────────────
 #
@@ -8071,6 +8288,7 @@ PY
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "DeepSeek provider plugin"
 # Seed CLAWBOX.md in the OpenClaw workspace so the agent's session-start
 # context includes ClawBox-specific guidance (where user-installed skills
 # actually live, how to control the desktop Chromium via the browser_*
@@ -8224,6 +8442,7 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$(clawbox_deepseek_row_needs_switch_
   # See `clawbox_deepseek_switch_on_for_row`.
   clawbox_deepseek_switch_on_for_row
 fi
+"${CLAWBOX_STEP:-:}" "workspace and bootstrap"
 # Resolve the workspace from agents.defaults.workspace in openclaw.json,
 # matching the same logic getSkillsDir() uses on the ClawBox API side —
 # falls back to ~/.openclaw/workspace when unset, handles absolute vs
@@ -8453,6 +8672,8 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
 
+"${CLAWBOX_STEP:-:}" "language, Prime Radiant and backup hooks"
+
 # ── Each ClawBox user's own language ───────────────────────────────────────
 #
 # A ClawBox user other than the owner may pick a language of their own in
@@ -8569,6 +8790,8 @@ else
   echo "  $CLAWBOX_BACKUP_SCOPE_ID: not installed — the core predates 2026.10 (no backupResources)"
 fi
 
+
+"${CLAWBOX_STEP:-:}" "default skills and cron alerts"
 
 # ── Default skills (TASK-1639): ClawBox's own first-party skills, seeded ────
 #
@@ -8733,6 +8956,7 @@ ALERTREC
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "workspace guide"
 CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # Topping an existing CLAWBOX.md up, section by section.
@@ -9489,6 +9713,8 @@ PY_LANG
 fi
 # --- end guide seeding ---
 
+"${CLAWBOX_STEP:-:}" "Claude Code version report"
+
 # ── Report the installed Claude Code to Anthropic ─────────────────────────
 #
 # On the subscription (OAuth) path the core presents itself to Anthropic as
@@ -9511,15 +9737,25 @@ fi
 # Never fails the boot: a failed rewrite means the old number and a chat that
 # says so, which is where the box was.
 
-clawbox_installed_claude_code_version() {
-  # The unit's PATH is systemd's; the coding agent installs `claude` under the
-  # user's own bin dirs, so those are looked in explicitly.
-  local candidate out version
+# Every Claude Code binary the version question below would ask, in its order,
+# one path per line. The unit's PATH is systemd's; the coding agent installs
+# `claude` under the user's own bin dirs, so those are looked in explicitly.
+clawbox_claude_code_candidates() {
+  local candidate
   for candidate in claude "$HOME/.local/bin/claude" "$HOME/.npm-global/bin/claude" claude-code; do
     case "$candidate" in
       */*) [ -x "$candidate" ] || continue ;;
-      *) command -v "$candidate" >/dev/null 2>&1 || continue ;;
+      *) candidate="$(command -v "$candidate" 2>/dev/null)" || continue ;;
     esac
+    printf '%s\n' "$candidate"
+  done
+}
+
+clawbox_installed_claude_code_version() {
+  local candidate out version candidates=()
+  mapfile -t candidates < <(clawbox_claude_code_candidates)
+  for candidate in "${candidates[@]}"; do
+    [ -n "$candidate" ] || continue
     out="$(timeout 5 "$candidate" --version 2>/dev/null | head -n 1)" || continue
     version="${out%% *}"
     if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -9621,13 +9857,34 @@ PY
 # `@openclaw/ai` from the package's own node_modules, and that bundle carries
 # its own copy of the constant.
 CLAWBOX_CORE_DIST="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw"
-if CLAWBOX_INSTALLED_CLAUDE_CODE="$(clawbox_installed_claude_code_version)"; then
+# Asking costs a Claude Code start and a read of every bundle file in the core,
+# on every boot, for an answer that only a new core or a new Claude Code can
+# change — so a box whose core package and Claude Code binaries are both what
+# the last full check saw takes that check's answer (see "the checks a start
+# may take on trust" near the top).
+_ccv_args=()
+_ccv_key=""
+while IFS= read -r _ccv_candidate; do
+  [ -n "$_ccv_candidate" ] && _ccv_args+=(--candidate "$_ccv_candidate")
+done < <(clawbox_claude_code_candidates)
+CLAWBOX_STAMP_KEY=""
+CLAWBOX_STAMP_WHY=""
+if [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && [ "${#_ccv_args[@]}" -gt 0 ] \
+  && clawbox_stamp_check claude-code claude "${_ccv_args[@]}"; then
+  echo "  Anthropic client version: the core and Claude Code are unchanged since the last full check (Claude Code ${CLAWBOX_STAMP_VALUE:-as installed}); not asked again"
+elif CLAWBOX_INSTALLED_CLAUDE_CODE="$(clawbox_installed_claude_code_version)"; then
+  _ccv_key="${CLAWBOX_STAMP_KEY:-}"
+  [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Anthropic client version: checking the core's bundle (${CLAWBOX_STAMP_WHY})"
   if ! clawbox_report_installed_claude_code_version "$CLAWBOX_CORE_DIST" "$CLAWBOX_INSTALLED_CLAUDE_CODE"; then
     echo "  WARN: could not rewrite the core's Claude Code version — Anthropic keeps seeing the core's own number" >&2
+  elif [ -n "$_ccv_key" ]; then
+    clawbox_stamp_remember claude-code "$_ccv_key" "$CLAWBOX_INSTALLED_CLAUDE_CODE"
   fi
 else
   echo "  Anthropic client version: no Claude Code on this box; the core's own number is kept"
 fi
+
+"${CLAWBOX_STEP:-:}" "agent databases"
 
 # ── Agent databases: migration status, compaction, migration copies ─────────
 #

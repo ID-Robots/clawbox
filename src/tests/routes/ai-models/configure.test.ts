@@ -3648,6 +3648,43 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
     });
 
+    it("stores the device login's portal token the same way, and switches the running gateway without a stop", async () => {
+      // `clawai/poll` posts the device login as `authMode: "subscription"`, but
+      // what it hands over is the portal's API token. It used to take the OAuth
+      // lane: a legacy auth-profiles.json, `doctor --fix` with the gateway
+      // STOPPED, and the restart after it — a minute or two of "Connecting…"
+      // for a profile the CLI paste replaced with the API key anyway.
+      const hot = await import("@/lib/gateway-hot-apply");
+      // The provider plugin is already on disk, so no plugin code arrives and
+      // nothing in this save needs a restart.
+      mockFs.access.mockResolvedValue(undefined);
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+        authMode: "subscription",
+        clawaiTier: "flash",
+      }));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).gatewayRestarting).toBeFalsy();
+      const paste = vi.mocked(spawnOpenclawCli).mock.calls.find(
+        (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key"),
+      );
+      expect((paste?.[1] as { stdinData?: string })?.stdinData).toContain("claw_token_abc");
+      // No OAuth bundle, no doctor, so no stop of the gateway.
+      expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
+      expect(mockFs.writeFile.mock.calls.some(([file]) => String(file).includes("auth-profiles.json"))).toBe(false);
+      // The metadata says what the store holds: an API key, never `oauth`.
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands.filter((c) => c.startsWith("config set auth.profiles.deepseek:default "))).toEqual(
+        expect.not.arrayContaining([expect.stringContaining('"mode":"oauth"')]),
+      );
+      expect(commands).toContain('config set auth.profiles.deepseek:default {"provider":"deepseek","mode":"api_key"} --json');
+      // Applied to the running gateway: confirmed live, never restarted.
+      expect(hot.awaitGatewayHotApply).toHaveBeenCalledTimes(1);
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    });
+
     it("fails closed when OpenClaw 2 doctor rejects before creating a migrated sibling", async () => {
       // The early failure is the dangerous case: there is no .migrated-* file
       // yet, but the legacy auth-profiles.json we just wrote still prevents an
@@ -4725,10 +4762,9 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(mockPut).not.toHaveBeenCalled();
     });
 
-    // Claude's sign-in only. The ClawBox AI device login is the row that would
-    // be easy to miss: `clawai/poll` posts it as `authMode: "subscription"`,
-    // so it runs this same doctor — over `deepseek:default`, whose credential
-    // the CLI pastes afterwards.
+    // Claude's sign-in only. (The ClawBox AI device login, which `clawai/poll`
+    // posts as `authMode: "subscription"`, no longer reaches this doctor at all:
+    // its portal token is pasted — see "the device login's portal token" above.)
     it.each<[string, Record<string, unknown>]>([
       ["the ChatGPT sign-in", {
         provider: "openai",
@@ -4743,12 +4779,6 @@ describe("POST /setup-api/ai-models/configure", () => {
         apiKey: "access-token",
         authMode: "subscription",
         projectId: "my-project-id",
-      }],
-      ["the ClawBox AI device login", {
-        provider: "clawai",
-        apiKey: "claw_token_abc",
-        authMode: "subscription",
-        clawaiTier: "flash",
       }],
     ])("never asks the store for %s", async (_what, body) => {
       const res = await configurePost(jsonRequest(body));
