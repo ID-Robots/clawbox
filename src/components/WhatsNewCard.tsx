@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type TouchEvent as ReactTouchEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type TouchEvent as ReactTouchEvent } from "react";
 import { useT } from "@/lib/i18n";
 import {
   displayVersion,
@@ -11,6 +11,8 @@ import {
   type WhatsNewState,
 } from "@/lib/whats-new";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { isEditable, keysAreOurs, trapTab } from "@/lib/modal-keys";
+import WhatsNewLightbox from "@/components/WhatsNewLightbox";
 
 interface WhatsNewCardProps {
   state: WhatsNewState;
@@ -53,6 +55,11 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
   const [direction, setDirection] = useState<1 | -1>(1);
   const dialogRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
+  // The slide's screenshot, full screen (WhatsNewLightbox). Mirrored in a ref
+  // for the window's key handler, which stands aside while it is up.
+  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreenRef = useRef(false);
+  const expandButtonRef = useRef<HTMLButtonElement>(null);
   const touchStartX = useRef<number | null>(null);
   const last = index === total - 1;
   const item = HIGHLIGHTS[index];
@@ -97,8 +104,12 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
   // Tab is kept inside the dialog. None of it while a surface drawn OVER the
   // dialog has the keys — a power approval prompt, the screenshot overlay:
   // its Escape is not a dismissal of this card, and its Tab is its own.
-  useEffect(() => {
+  // Attached in a layout effect, before the dialog is first painted: a key
+  // pressed the moment it shows (a passive effect can run later than that)
+  // was lost.
+  useLayoutEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (fullscreenRef.current) return;
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       const dialog = dialogRef.current;
       const backdrop = backdropRef.current;
@@ -127,6 +138,25 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
     const img = new Image();
     img.src = following.image;
   }, [index]);
+
+  const openFullscreen = () => {
+    engageRef.current?.();
+    fullscreenRef.current = true;
+    setFullscreen(true);
+  };
+  const closeFullscreen = useCallback(() => {
+    fullscreenRef.current = false;
+    setFullscreen(false);
+  }, []);
+  // Back from the full-screen view, the focus returns to the expand button —
+  // of the slide now on screen, which the view may have turned.
+  const wasFullscreen = useRef(false);
+  useEffect(() => {
+    if (fullscreen) { wasFullscreen.current = true; return; }
+    if (!wasFullscreen.current) return;
+    wasFullscreen.current = false;
+    expandButtonRef.current?.focus({ preventScroll: true });
+  }, [fullscreen]);
 
   const onTouchStart = (event: ReactTouchEvent) => {
     touchStartX.current = event.touches[0]?.clientX ?? null;
@@ -212,7 +242,9 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
               {/* The frame keeps its shape while the picture loads, and its
                   height is a share of the viewport, so a short screen gets a
                   smaller picture rather than a dialog that runs off it. */}
-              <div className="mx-auto w-full max-h-[34dvh] aspect-[16/10] overflow-hidden rounded-xl border border-white/10 bg-black/40">
+              <div className="relative mx-auto w-full max-h-[34dvh] aspect-[16/10] overflow-hidden rounded-xl border border-white/10 bg-black/40">
+                {/* A click on the picture opens it full screen too; the
+                    button is the keyboard's and the screen reader's way. */}
                 {/* eslint-disable-next-line @next/next/no-img-element -- a fixed asset from public/, drawn at its own size */}
                 <img
                   src={item.image}
@@ -221,9 +253,21 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
                   height={640}
                   decoding="async"
                   draggable={false}
-                  className="block h-full w-full object-cover object-center select-none"
+                  onClick={openFullscreen}
+                  className="block h-full w-full cursor-zoom-in object-cover object-center select-none"
                   data-testid="whats-new-image"
                 />
+                <button
+                  ref={expandButtonRef}
+                  type="button"
+                  onClick={openFullscreen}
+                  aria-label={t("whatsNew.openFullscreen")}
+                  aria-haspopup="dialog"
+                  className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-black/55 text-white/90 backdrop-blur-sm transition-colors hover:bg-black/75 hover:text-white cursor-pointer"
+                  data-testid="whats-new-expand"
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">open_in_full</span>
+                </button>
               </div>
               <h3 className="mt-3.5 mb-0 text-center text-[15px] font-semibold leading-snug text-white">
                 {t(item.title)}
@@ -330,59 +374,7 @@ export default function WhatsNewCard({ state, onDismiss, onEngage }: WhatsNewCar
           </div>
         </div>
       </div>
+      {fullscreen && <WhatsNewLightbox index={index} onStep={step} onClose={closeFullscreen} />}
     </div>
   );
-}
-
-/**
- * Are the keys the dialog's? Not when something is drawn over it (the
- * screenshot overlay covers the screen), nor when the focus is on a surface
- * stacked above it (a power approval prompt focuses its own button). Focus on
- * the page behind the scrim — a composer that took it — is the dialog's to
- * take back. Without layout (jsdom) the dialog is taken to be on top.
- */
-function keysAreOurs(dialog: HTMLElement, backdrop: HTMLElement): boolean {
-  if (typeof document.elementFromPoint !== "function") return true;
-  const drawnByUs = (el: Element) => {
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return true;
-    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    return hit === null || backdrop.contains(hit);
-  };
-  if (!drawnByUs(dialog)) return false;
-  const active = document.activeElement;
-  if (!active || active === document.body || active === document.documentElement || dialog.contains(active)) return true;
-  return drawnByUs(active);
-}
-
-/** Is this key event headed for something the owner types into? */
-function isEditable(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  const tag = target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-}
-
-/**
- * Keep Tab inside the dialog: past the last control it wraps to the first,
- * before the first to the last, and from outside it lands on the first.
- */
-function trapTab(event: KeyboardEvent, dialog: HTMLElement): void {
-  const focusable = Array.from(
-    dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
-  );
-  if (focusable.length === 0) return;
-  const first = focusable[0];
-  const lastEl = focusable[focusable.length - 1];
-  const active = document.activeElement;
-  if (!dialog.contains(active) || active === dialog) {
-    event.preventDefault();
-    (event.shiftKey ? lastEl : first).focus();
-  } else if (event.shiftKey && active === first) {
-    event.preventDefault();
-    lastEl.focus();
-  } else if (!event.shiftKey && active === lastEl) {
-    event.preventDefault();
-    first.focus();
-  }
 }

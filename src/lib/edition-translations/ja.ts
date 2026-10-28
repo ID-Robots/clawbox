@@ -1793,6 +1793,11 @@ export const ja: Record<string, string> = {
   "whatsNew.goToSlide": "新機能 {number} を表示",
   "whatsNew.back": "戻る",
   "whatsNew.next": "次へ",
+  "whatsNew.openFullscreen": "スクリーンショットを全画面で表示",
+  "whatsNew.fullscreenLabel": "スクリーンショット: {title}",
+  "whatsNew.closeFullscreen": "全画面表示を閉じる",
+  "whatsNew.previousScreenshot": "前のスクリーンショット",
+  "whatsNew.nextScreenshot": "次のスクリーンショット",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "この ClawBox 上で動作しています。",
   "localModels.chatBannerBody": "ローカルモデルの読み込み中は、最初の返信に最大 1 分ほどかかることがあります。その後は速くなります。",

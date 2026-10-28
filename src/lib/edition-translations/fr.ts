@@ -1793,6 +1793,11 @@ export const fr: Record<string, string> = {
   "whatsNew.goToSlide": "Afficher la nouveauté {number}",
   "whatsNew.back": "Retour",
   "whatsNew.next": "Suivant",
+  "whatsNew.openFullscreen": "Voir la capture en plein écran",
+  "whatsNew.fullscreenLabel": "Capture d'écran : {title}",
+  "whatsNew.closeFullscreen": "Fermer le plein écran",
+  "whatsNew.previousScreenshot": "Capture précédente",
+  "whatsNew.nextScreenshot": "Capture suivante",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "Tourne sur cette ClawBox.",
   "localModels.chatBannerBody": "La première réponse peut prendre jusqu'à une minute, le temps que le modèle local se charge. Ensuite, c'est plus rapide.",

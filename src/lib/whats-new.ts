@@ -36,7 +36,9 @@ export const WHATS_NEW_RELEASE = "4.3";
  * new" panel when the target release's own notes cannot be read (TASK-1205).
  * The panel has room for the full `body`; the card is a carousel of one
  * highlight per slide, so it shows the `summary` (one or two lines) under a
- * screenshot of the feature itself, `image`, served from `public/`.
+ * screenshot of the feature itself, `image`, served from `public/`. The
+ * slide's full-screen view shows the same picture at full resolution,
+ * `fullImage` (up to 1920x1200), fitted to the screen.
  */
 export const WHATS_NEW_HIGHLIGHTS = [
   {
@@ -45,6 +47,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.screenshotBody",
     summary: "whatsNew.screenshotSummary",
     image: "/whats-new/4.3/screenshot.webp",
+
+    fullImage: "/whats-new/4.3/screenshot-full.webp",
   },
   {
     icon: "travel_explore",
@@ -52,6 +56,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.sharedBrowserBody",
     summary: "whatsNew.sharedBrowserSummary",
     image: "/whats-new/4.3/agent-browser.webp",
+
+    fullImage: "/whats-new/4.3/agent-browser-full.webp",
   },
   {
     icon: "add_link",
@@ -59,6 +65,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.publicLinksBody",
     summary: "whatsNew.publicLinksSummary",
     image: "/whats-new/4.3/public-link.webp",
+
+    fullImage: "/whats-new/4.3/public-link-full.webp",
   },
   {
     icon: "smart_toy",
@@ -66,6 +74,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.grokBody",
     summary: "whatsNew.grokSummary",
     image: "/whats-new/4.3/model-picker.webp",
+
+    fullImage: "/whats-new/4.3/model-picker-full.webp",
   },
   {
     icon: "mic",
@@ -73,6 +83,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.holdToTalkBody",
     summary: "whatsNew.holdToTalkSummary",
     image: "/whats-new/4.3/hold-to-talk.webp",
+
+    fullImage: "/whats-new/4.3/hold-to-talk-full.webp",
   },
   {
     icon: "account_tree",
@@ -80,6 +92,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.agentChartBody",
     summary: "whatsNew.agentChartSummary",
     image: "/whats-new/4.3/agent-chart.webp",
+
+    fullImage: "/whats-new/4.3/agent-chart-full.webp",
   },
   {
     icon: "menu_book",
@@ -87,6 +101,8 @@ export const WHATS_NEW_HIGHLIGHTS = [
     body: "whatsNew.primeRadiantBody",
     summary: "whatsNew.primeRadiantSummary",
     image: "/whats-new/4.3/prime-radiant.webp",
+
+    fullImage: "/whats-new/4.3/prime-radiant-full.webp",
   },
 ] as const;
 
