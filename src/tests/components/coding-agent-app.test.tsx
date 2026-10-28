@@ -2853,6 +2853,13 @@ describe("CodingAgentApp — the run page's honesty", () => {
  */
 describe("the live poll", () => {
   const LIVE = { ...RUN, id: "run-live0009", status: "running", completedAt: null, summary: null };
+  /** A settled board, as the team list answers it (the fields the app and its charts read). */
+  const TEAM_DONE = {
+    id: "team-done00001", goal: "Ship the toggle", projectId: "site", directory: PROJECT.directory, source: "agent", status: "done",
+    plannerRunId: null, branch: null, base: null, runs: [], tasks: [], log: [{ ts: RUN.startedAt, actor: "planner", type: "note", message: "planned", payload: null }],
+    alerts: 0, error: null, shape: null, repoMap: null, singleRun: false, dynamic: false, lastLeadAt: 0, finalReview: null, pr: null,
+    createdAt: RUN.startedAt, updatedAt: RUN.startedAt, finishedAt: RUN.completedAt,
+  };
   let visibility: DocumentVisibilityState = "visible";
   const reads = (url: string) => vi.mocked(globalThis.fetch).mock.calls
     .filter(([input, init]) => input.toString() === url && (init?.method ?? "GET") === "GET").length;
@@ -2889,6 +2896,46 @@ describe("the live poll", () => {
     await advance(5_000);
     expect(reads("/setup-api/coding-agent/git")).toBe(2);
     expect(runsReads()).toBe(13);
+  });
+
+  it("reads the settled runs and teams slim on a tick and keeps the text it already holds", async () => {
+    // A settled run with progress lines on screen, a live run that keeps the
+    // poll going. The box answers a tick (`slim=1`) with the settled run's
+    // lines emptied — what a settled record costs every 5 s otherwise — and
+    // the page must keep drawing the lines it read in full on mount.
+    // Filed under the folder project the fixture lists (`runBelongsTo`).
+    const settled = { ...RUN, projectId: null, directory: PROJECT.directory, progress: ["Wrote the toggle into index.html"], progressAt: [RUN.startedAt + 1000] };
+    stubFetch({ enabled: true, readiness: READY }, [settled, LIVE], { projects: [PROJECT] });
+    const whole = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/runs?") && url.includes("slim=1")) {
+        return json({ runs: [{ ...settled, slim: true, progress: [], progressAt: [] }, LIVE] });
+      }
+      if (url === "/setup-api/coding-agent/team") return json({ teams: [TEAM_DONE] });
+      if (url === "/setup-api/coding-agent/team?slim=1") return json({ teams: [{ ...TEAM_DONE, slim: true, log: [] }] });
+      return whole(input, init);
+    }));
+    render(<CodingAgentApp />);
+    await advance(50);
+    // Under the fake timers no `findBy` can wait, so each step is a click and
+    // a flush: the project's page, its Runs tab, the settled run's page.
+    fireEvent.click(screen.getByTestId("coding-agent-project-site"));
+    await advance(50);
+    fireEvent.click(screen.getByTestId("coding-agent-workspace-runs"));
+    await advance(50);
+    fireEvent.click(screen.getByTestId(`coding-agent-details-${RUN.id}`));
+    await advance(50);
+    screen.getByTestId("coding-agent-run-page");
+    expect(screen.getByText(/Wrote the toggle into index\.html/)).toBeInTheDocument();
+    const urls = () => vi.mocked(globalThis.fetch).mock.calls.map(([input]) => input.toString());
+    expect(urls().filter((u) => u.startsWith("/setup-api/coding-agent/runs?") && u.includes("slim=1"))).toHaveLength(0);
+    expect(urls()).toContain("/setup-api/coding-agent/team");
+
+    await advance(5_100);
+    expect(urls().filter((u) => u.startsWith("/setup-api/coding-agent/runs?") && u.includes("slim=1"))).toHaveLength(1);
+    expect(urls()).toContain("/setup-api/coding-agent/team?slim=1");
+    expect(screen.getByText(/Wrote the toggle into index\.html/)).toBeInTheDocument();
   });
 
   it("keeps GitHub's minute on the box's own clock when its wall clock steps back", async () => {

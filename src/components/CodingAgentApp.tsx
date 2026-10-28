@@ -59,6 +59,7 @@ import VNCApp from "./VNCApp";
 import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
 import CodingTeamCard, { isTeamActive, type TeamView } from "./CodingTeamCard";
+import { mergeSlimRuns, mergeSlimTeams } from "@/lib/coding-agent-slim";
 import CodingRunNotesCard from "./CodingRunNotesCard";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
@@ -742,10 +743,17 @@ export default function CodingAgentApp() {
       if (!s.ok) throw new Error("status");
       setStatus(await s.json() as AppStatus);
     }));
-    const runs = read("runs", () => fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }).then(async (r) => {
+    // A tick reads the settled runs SLIM — their progress lines and result
+    // text emptied on the box (`?slim=1`, src/lib/coding-agent-slim.ts) —
+    // and merges what comes back over the full records this window holds
+    // from its mount read; a settled run's text never changes, and sending
+    // it every 5 s was most of a 337 KB tick. The other callers read whole,
+    // which is also what fills a run that settled between two ticks.
+    const runs = read("runs", () => fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1${tick ? "&slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
       if (!r.ok) return;
       const data = await r.json() as { runs?: Run[] };
-      setRuns(Array.isArray(data.runs) ? data.runs : []);
+      const next = Array.isArray(data.runs) ? data.runs : [];
+      setRuns((prev) => (tick ? mergeSlimRuns(prev, next) : next));
     }));
     const githubDue = !tick || monotonicNow() - githubAskedAt.current >= GITHUB_LIVE_POLL_MS;
     const github = !githubDue ? Promise.resolve() : read("github", () => {
@@ -768,10 +776,13 @@ export default function CodingAgentApp() {
     // The teams, on the runs' own beat: the agent charts on home and on a
     // team run's page are drawn from them, and a chart must move with the
     // runs it shows. One list read — the Team tab's card reads the same one.
-    const teamsRead = read("teams", () => fetch("/setup-api/coding-agent/team", { cache: "no-store" }).then(async (r) => {
+    // Slim on a tick like the runs: a settled board's log and its tasks'
+    // text were two thirds of a 694 KB read, for teams done days before.
+    const teamsRead = read("teams", () => fetch(`/setup-api/coding-agent/team${tick ? "?slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
       if (!r.ok) return;
       const data = await r.json().catch(() => null) as { teams?: TeamView[] } | null;
-      if (Array.isArray(data?.teams)) setTeams(data.teams);
+      const next = data?.teams;
+      if (Array.isArray(next)) setTeams((prev) => (tick ? mergeSlimTeams(prev, next) : next));
     }));
     try {
       // The status read is the one whose failure is the page's failure; the

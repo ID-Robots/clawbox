@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { clearFinishedRuns, getHistoryPolicy, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
+import { slimRun } from "@/lib/coding-agent-slim";
 import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -11,6 +12,14 @@ export const dynamic = "force-dynamic";
  * GET ?id=…&wait=<seconds> → the same, but held open until the run finishes
  *                            or `wait` elapses (capped), so a caller can
  *                            block instead of polling every few seconds.
+ *
+ * GET ?slim=1              → the list with every SETTLED run's free text
+ *                            emptied (progress, result text, pipeline, allow
+ *                            rules, denials) and `slim: true` on it — what the
+ *                            Coding Agent app's 5 s live poll reads, merged
+ *                            over the full records it holds
+ *                            (src/lib/coding-agent-slim.ts). A live run is
+ *                            always whole.
  *
  * GET ?history=1[&offset=&limit=&project=]
  *                          → { runs, total, offset }: the OLDER runs a history
@@ -74,6 +83,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const id = url.searchParams.get("id");
   const withArtifacts = url.searchParams.get("artifacts") === "1";
+  const slim = url.searchParams.get("slim") === "1";
 
   try {
     if (id) {
@@ -97,7 +107,7 @@ export async function GET(request: Request) {
     }
     const limitRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT)) : DEFAULT_LIMIT;
-    return NextResponse.json({ runs: listRuns(limit).map((run) => withDerived(run, withArtifacts)) });
+    return NextResponse.json({ runs: listRuns(limit).map((run) => withDerived(slim ? slimRun(run) : run, withArtifacts)) });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not read the coding runs" },
