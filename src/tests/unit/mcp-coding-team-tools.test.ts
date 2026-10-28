@@ -236,6 +236,22 @@ describe("a second team: queued, not refused", () => {
     expect(one).toMatch(/only the owner can cancel it/);
   });
 
+  it("coding_team_status says a team that waits for a free slot on the box is waiting — not failed, not to be started again", async () => {
+    const reason = "This ClawBox is already starting or running 2 coding runs at once, which is all it allows; the team waits for a free slot.";
+    const waiting = { ...TEAM, status: "planning", tasks: [], plannerRunId: null, slotWaits: [{ role: "planner", taskId: null, reason, since: Date.UTC(2026, 9, 28, 12, 0) }] };
+    apiGet.mockResolvedValueOnce({ team: waiting });
+    const one = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+    expect(one).toMatch(/^Team team-k3x9q2ab: planning — waiting for a free slot/);
+    expect(one).toContain("Waiting for a free slot on the box since 2026-10-28T12:00:00.000Z: the planner starts once other runs finish");
+    expect(one).toContain("The planner has not started yet: it waits for a free slot on the box.");
+    expect(one).toMatch(/do not start it again/);
+    expect(one).toContain("Nothing has failed");
+    expect(one).not.toMatch(/Still working|stopped short/);
+    apiGet.mockResolvedValueOnce({ teams: [{ ...waiting, status: "working", slotWaits: [{ role: "worker", taskId: "t2", reason, since: 0 }] }] });
+    const list = JSON.parse(await ok("coding_team_status", { log: 0 })) as Array<Record<string, unknown>>;
+    expect(list[0]).toMatchObject({ status: "working", waiting_for: "a free slot: the worker of t2" });
+  });
+
   it("coding_team_stop explains that a queued team is the owner's to cancel", async () => {
     apiPost.mockRejectedValueOnce(new ApiError(403, JSON.stringify({ error: "That team is waiting in the queue; only the owner can cancel a queued team.", kind: "owner_only" })));
     const out = await refused("coding_team_stop", { team_id: TEAM.id });

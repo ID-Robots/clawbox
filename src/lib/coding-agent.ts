@@ -696,9 +696,10 @@ export const CODING_AGENT_AUTO_MERGE_CONFIG_KEY = "coding_agent_auto_merge";
  * the free-memory guard (`TEAM_SPAWN_MIN_AVAILABLE_MB`) stays the real safety.
  * The automatic review pass does not take one of these slots: it has its own
  * small pool (`REVIEW_PASS_POOL_RUNS`), so a box at its limit still reviews
- * what it delivered and the reviews never crowd out the owner's own runs. A team keeps its OWN rule
- * (MAX_TEAM_WORKERS and the memory guard): its workers share a goal and a
- * board, and the orchestrator waits rather than failing.
+ * what it delivered and the reviews never crowd out the owner's own runs. A
+ * team's runs take these slots like anyone's (`parallelSlotHolders`), within
+ * a ceiling of the team's own (MAX_TEAM_WORKERS) and the memory guard, and a
+ * team refused one waits for it rather than failing (`teamSpawnSlot`).
  */
 export const CODING_AGENT_MAX_PARALLEL_CONFIG_KEY = "coding_agent_max_parallel_runs";
 export const DEFAULT_MAX_PARALLEL_RUNS = 2;
@@ -735,6 +736,17 @@ export function hostMaxParallelRuns(
     MAX_MAX_PARALLEL_RUNS_BIG_HOST,
     Math.max(MAX_MAX_PARALLEL_RUNS, Math.floor(gb / RAM_GB_PER_PARALLEL_RUN)),
   );
+}
+
+/**
+ * The live runs that hold one of the owner's `coding_agent_max_parallel_runs`
+ * slots: every one but the automatic review passes, which have their own pool
+ * (`REVIEW_PASS_POOL_RUNS`) — a team's runs, any team's, included. ONE count
+ * for the ordinary gate and for a team's (`teamSpawnSlot`), so the two never
+ * disagree about how full the box is.
+ */
+function parallelSlotHolders<R extends Pick<CodingRun, "reviewOf">>(live: readonly R[]): R[] {
+  return live.filter((r) => !r.reviewOf);
 }
 
 /** How many runs at once this box allows, from the raw config value. */
@@ -950,9 +962,14 @@ export const MAX_DIRECTORY_CHARS = 512;
  * the first. Measured on this Orin Nano (2026-09-05): a `claude -p` run is
  * ~210 MB resident two minutes in with its MCP server at ~60 MB, and grows
  * with its context; the guard is set for three of them beside the web
- * server, the gateway and the desktop's Chromium on a 7.6 GB board. A run
- * that is not the team's still waits for the team, and the team waits for
- * it: the one-run-at-a-time rule is between STRANGERS.
+ * server, the gateway and the desktop's Chromium on a 7.6 GB board.
+ *
+ * The team SHARES the box: its runs count against the owner's
+ * `coding_agent_max_parallel_runs` like any run's, and a run that is not the
+ * team's — a single run, the automatic review pass the box starts after one,
+ * another team's — is a slot taken, never a reason to fail. Refusing the team
+ * outright beside any of them killed it at its first second while single runs
+ * went on side by side up to the limit.
  */
 export const MAX_TEAM_WORKERS = 3;
 export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
@@ -961,31 +978,72 @@ export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
 })();
 
 /**
- * Whether one more run of `team` may start beside the runs already live.
- * The orchestrator asks this before it dispatches a worker, so a full board
- * or a tight box makes it WAIT rather than fail; assertCanSpawn asks it
- * again at the spawn, which is the gate. `starting` is how many of the
- * team's workers the orchestrator has dispatched that have not reached
- * their run yet (a worktree is being added): they hold a slot and a share
- * of the memory already, and a count of persisted runs alone would admit a
- * third worker beside two that are seconds from spawning.
+ * Whether one more run of `team` may start beside the runs already live: the
+ * team's own runs under MAX_TEAM_WORKERS, every run's under the owner's limit
+ * (`getMaxParallelRuns`, counted as the ordinary gate counts it), and — once
+ * anything at all is going on the box — the memory guard. Every refusal is a
+ * WAIT: each of them clears as runs settle, so the orchestrator asks again
+ * rather than failing the team. The orchestrator asks this before it starts a
+ * planner, a worker, a reviewer or a lead; assertCanSpawn asks it again at
+ * the spawn, which is the gate.
+ *
+ * `starting` is how many of the team's workers the orchestrator has
+ * dispatched that have not reached their run yet (a worktree is being
+ * added): they hold a slot and a share of the memory already, and a count of
+ * persisted runs alone would admit a third worker beside two that are
+ * seconds from spawning.
  */
 export async function teamSpawnSlot(team: RunTeam, starting = 0): Promise<{ ok: true } | { ok: false; reason: string; wait: boolean }> {
-  const active = loadRuns().filter((r) => isLive(r.status));
-  const stranger = active.find((r) => r.team?.id !== team.id);
-  if (stranger) return { ok: false, wait: false, reason: `A coding run is already in progress (${stranger.id}). Wait for it or stop it first.` };
-  const going = active.length + Math.max(0, starting);
-  if (going >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${going} runs going.` };
-  if (going >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
-    const mb = await memAvailableMb();
-    // No reading is no evidence of room: a box that cannot say how much
-    // memory it has left is not one to start a second run on.
-    if (mb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${going} going.` };
-    if (mb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
-      return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${going} going (${mb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
+  const slot = await judgeTeamSlot(team, starting, false);
+  return slot.ok ? { ok: true } : slot;
+}
+
+/**
+ * teamSpawnSlot's verdict; with `take`, the slot is HELD (`holdSpawnSlot`) in
+ * the same synchronous step as the counts it was judged on — the shape the
+ * ordinary gate has, for the same reason: a hold taken after this resolved
+ * would race every other start that read the same counts meanwhile.
+ *
+ * The team's own starts are the orchestrator's `starting` or the ones past
+ * the gate (`startingTeams`), whichever is more — never the two added, since
+ * a worker that is spawning is in both. Everyone else's starts past the gate
+ * are the rest of `startingRuns`.
+ */
+async function judgeTeamSlot(
+  team: RunTeam,
+  starting: number,
+  take: boolean,
+): Promise<{ ok: true; release: () => void } | { ok: false; reason: string; wait: true }> {
+  const limit = await getMaxParallelRuns();
+  // Read only once something is going, and then the counts are read again
+  // after it: the verdict and the hold must sit after the LAST await.
+  let freeMb: number | null | undefined;
+  for (;;) {
+    const live = loadRuns().filter((r) => isLive(r.status));
+    const atGate = store.startingTeams?.get(team.id) ?? 0;
+    const ownStarting = Math.max(0, starting, atGate);
+    const othersStarting = Math.max(0, store.startingRuns - atGate);
+    const own = live.filter((r) => r.team?.id === team.id).length + ownStarting;
+    if (own >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${own} runs going.` };
+    const holding = parallelSlotHolders(live).length + othersStarting + ownStarting;
+    if (holding >= limit) {
+      return { ok: false, wait: true, reason: `This ClawBox is already starting or running ${holding} coding runs at once, which is all it allows; the team waits for a free slot.` };
     }
+    const going = live.length + othersStarting + store.startingReviews + ownStarting;
+    if (going >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
+      if (freeMb === undefined) {
+        freeMb = await memAvailableMb();
+        continue;
+      }
+      // No reading is no evidence of room: a box that cannot say how much
+      // memory it has left is not one to start a second run on.
+      if (freeMb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${going} going.` };
+      if (freeMb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
+        return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${going} going (${freeMb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
+      }
+    }
+    return { ok: true, release: take ? holdSpawnSlot(false, team.id) : () => {} };
   }
-  return { ok: true };
 }
 /** Longest a status request may block waiting for a run to finish. */
 export const MAX_WAIT_MS = 120_000;
@@ -5146,6 +5204,8 @@ interface RunStore {
   startingRuns: number;
   /** The same, for automatic review passes — their own pool. */
   startingReviews: number;
+  /** Of `startingRuns`, the ones that are a team's, by team id — see judgeTeamSlot. Made on first use. */
+  startingTeams?: Map<string, number>;
   /**
    * The runs file as this process last read or wrote it. A file that has moved
    * on since means somebody else writes it too; writeAll() checks rather than
@@ -14660,11 +14720,14 @@ export function deleteDraftRun(id: string): void {
  * that are nobody's team.
  *
  * Held from the gate to the insert, released in a `finally` so a start that
- * throws in between gives its slot back.
+ * throws in between gives its slot back. A team's start is counted under its
+ * team too (`startingTeams`), so the team's own look does not count it twice.
  */
-function holdSpawnSlot(review = false): () => void {
+function holdSpawnSlot(review = false, teamId: string | null = null): () => void {
   const key = review ? "startingReviews" : "startingRuns";
   store[key] += 1;
+  const teams = teamId ? (store.startingTeams ??= new Map()) : null;
+  if (teams && teamId) teams.set(teamId, (teams.get(teamId) ?? 0) + 1);
   let released = false;
   return () => {
     if (released) return;
@@ -14672,6 +14735,11 @@ function holdSpawnSlot(review = false): () => void {
     // Never below zero: a double release would otherwise make the counter a
     // permanent discount on the limit.
     store[key] = Math.max(0, store[key] - 1);
+    if (teams && teamId) {
+      const left = (teams.get(teamId) ?? 0) - 1;
+      if (left > 0) teams.set(teamId, left);
+      else teams.delete(teamId);
+    }
   };
 }
 
@@ -14732,13 +14800,13 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     throw new CodingAgentError("not_ready", refusal);
   }
   if (team) {
-    // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory
-    // guard — the team's own rule, and the orchestrator's `starting` count is
-    // what covers the gap there, so `startingRuns` is deliberately not read by
-    // it or the two would double-count one worker.
-    const slot = await teamSpawnSlot(team);
+    // A team's run shares the box with every other run: the owner's limit,
+    // the team's own MAX_TEAM_WORKERS and the memory guard, each refusal a
+    // wait the orchestrator sits out. Judged and held in one step — see
+    // judgeTeamSlot.
+    const slot = await judgeTeamSlot(team, 0, true);
     if (!slot.ok) throw new CodingAgentError("busy", slot.reason, slot.wait);
-    return holdSpawnSlot();
+    return slot.release;
   }
   const limit = await getMaxParallelRuns();
   // BOTH terms read after the last await, in the same synchronous window the
@@ -14760,7 +14828,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     }
     return holdSpawnSlot(true);
   }
-  const active = live.filter((r) => !r.reviewOf);
+  const active = parallelSlotHolders(live);
   // The runs already going PLUS the starts that have passed this gate and have
   // not reached their record yet — see `startingRuns`.
   const going = active.length + store.startingRuns;
@@ -14968,6 +15036,7 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
   store.startingRuns = 0;
+  store.startingTeams?.clear();
   if (store.queueRetry) clearTimeout(store.queueRetry);
   store.queueRetry = null;
   store.queuePumpAgain = false;
@@ -15050,6 +15119,7 @@ async function drainForTests(initial: ChildProcess[], timeoutMs: number): Promis
     killed = endEveryLiveRun();
     // A start this sweep interrupted must not keep its slot either.
     store.startingRuns = 0;
+    store.startingTeams?.clear();
     // A live run with no child yet — a spawn caught mid-flight — gives
     // `settleWork` nothing to wait on, and it would answer at once. Give the
     // spawn a turn rather than spinning on it.

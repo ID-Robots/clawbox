@@ -2656,13 +2656,80 @@ describe("the team's spawn slot", () => {
     expect(memAvailable).not.toHaveBeenCalled();
   });
 
-  it("refuses outright, not as a wait, while a stranger's run holds the box", async () => {
-    fs.writeFileSync(runsFile(), JSON.stringify([liveWorker("team-other")]));
+  /** A live run of no team, of a review pass, or of another team: what a team now shares the box with. */
+  const liveRun = (id: string, extra: Record<string, unknown> = {}) => ({ ...liveWorker("team-x"), id, team: null, ...extra });
+  const planner = { id: "team-1", role: "planner" as const, taskId: null };
+
+  it("admits a team's run beside runs that are not the team's — a single run, its review pass, another team's — within the owner's limit", async () => {
+    // Before: any live run of no team refused the planner outright (wait: false),
+    // and the automatic review pass the box starts after every run was one.
+    writeConfig({ coding_agent_max_parallel_runs: 4 });
+    fs.writeFileSync(runsFile(), JSON.stringify([
+      liveRun("run-single01"),
+      liveRun("run-review01", { reviewOf: "run-single00" }),
+      liveRun("run-otherteam", { team: { id: "team-2", role: "worker", taskId: "t1" } }),
+    ]));
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
-    const slot = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" });
-    expect(slot).toMatchObject({ ok: false, wait: false });
+    memAvailable.mockClear();
+    expect(await lib.teamSpawnSlot(planner)).toEqual({ ok: true });
+    // Not the team's first run on the box: the memory guard was asked.
+    expect(memAvailable).toHaveBeenCalledTimes(1);
+  });
+
+  // The runs file is read once per test (the store is kept per file path), so
+  // each case below writes the box it is about once.
+
+  it("makes a team WAIT, never fail, while the box is at the owner's limit — strangers counted the way the ordinary gate counts them", async () => {
+    writeConfig({ coding_agent_max_parallel_runs: 3 });
+    fs.writeFileSync(runsFile(), JSON.stringify([
+      liveRun("run-single01"),
+      liveRun("run-single02"),
+      // A review pass has its own pool, as it has for the ordinary gate: no slot of the owner's.
+      liveRun("run-review01", { reviewOf: "run-single01" }),
+    ]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    memAvailable.mockClear();
+    // Two single runs and one of the team's own workers being started: the third of three.
+    const full = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, 1);
+    expect(full).toMatchObject({ ok: false, wait: true });
+    expect((full as { reason: string }).reason).toContain("3 coding runs at once");
+    // A count refusal needs no memory reading.
     expect(memAvailable).not.toHaveBeenCalled();
+    // Nothing of the team's starting: the third slot is the planner's.
+    expect(await lib.teamSpawnSlot(planner)).toEqual({ ok: true });
+  });
+
+  it("makes a team wait when memory is tight beside runs that are not its own, a review pass's included", async () => {
+    writeConfig({ coding_agent_max_parallel_runs: 4 });
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRun("run-single01"), liveRun("run-review01", { reviewOf: "run-single00" })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    memAvailable.mockResolvedValueOnce(500);
+    const tight = await lib.teamSpawnSlot(planner);
+    expect(tight).toMatchObject({ ok: false, wait: true });
+    expect((tight as { reason: string }).reason).toContain("beside the 2 going (500 MB free");
+    memAvailable.mockResolvedValueOnce(null);
+    expect(await lib.teamSpawnSlot(planner)).toMatchObject({ ok: false, wait: true, reason: expect.stringContaining("Cannot read") });
+  });
+
+  it("lets two teams work side by side: each its own ceiling, the owner's limit shared", async () => {
+    writeConfig({ coding_agent_max_parallel_runs: 4 });
+    const ofTeam = (id: string, teamId: string, taskId: string) => liveRun(id, { team: { id: teamId, role: "worker", taskId } });
+    fs.writeFileSync(runsFile(), JSON.stringify([ofTeam("run-a0000001", "team-a", "t1"), ofTeam("run-a0000002", "team-a", "t2"), ofTeam("run-b0000001", "team-b", "t1")]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    // Team A's third beside team B's first: A's own ceiling's last, the limit's fourth.
+    expect(await lib.teamSpawnSlot({ id: "team-a", role: "worker", taskId: "t3" })).toEqual({ ok: true });
+    // A team's ceiling is its own: A at three with one being started waits on it…
+    const own = await lib.teamSpawnSlot({ id: "team-a", role: "reviewer", taskId: "t1" }, 1);
+    expect(own).toMatchObject({ ok: false, wait: true });
+    expect((own as { reason: string }).reason).toContain(`${lib.MAX_TEAM_WORKERS} runs going`);
+    // …and the limit is shared: B, at one of its own, waits once its next would be the fifth.
+    const shared = await lib.teamSpawnSlot({ id: "team-b", role: "worker", taskId: "t2" }, 1);
+    expect(shared).toMatchObject({ ok: false, wait: true });
+    expect((shared as { reason: string }).reason).toContain("4 coding runs at once");
   });
 });
 

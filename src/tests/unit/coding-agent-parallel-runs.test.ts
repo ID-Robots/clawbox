@@ -318,6 +318,53 @@ describe("how many runs at once", () => {
     await finished(reviewer.id);
   });
 
+  /**
+   * A team was refused outright beside ANY live run that was not its own —
+   * the automatic review pass the box starts after every run among them — and
+   * died at its first second, while single runs went on side by side up to
+   * the limit. A team now shares the box: its runs take the owner's slots
+   * like anyone's, and a full box is a wait.
+   */
+  it("starts two teams' planners beside a live single run, and makes the next team run WAIT at the limit", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    for (const name of ["alpha", "beta", "gamma", "delta"]) makeGitProject(name);
+    await lib.setMaxParallelRuns(3);
+    const planner = (teamId: string) => ({ id: teamId, role: "planner" as const, taskId: null });
+    const single = await lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    const a = await lib.startRun({ task: "plan a", directory: "beta", source: "owner", readOnly: true, team: planner("team-aaaa0001") });
+    const b = await lib.startRun({ task: "plan b", directory: "gamma", source: "owner", readOnly: true, team: planner("team-bbbb0002") });
+    expect([a.status, b.status]).toEqual(["running", "running"]);
+    expect(lib.runningCount()).toBe(3);
+    // At the limit: a team's run is refused as a WAIT, which the orchestrator sits out…
+    await expect(lib.startRun({ task: "plan c", directory: "delta", source: "owner", readOnly: true, team: planner("team-cccc0003") }))
+      .rejects.toMatchObject({ kind: "busy", wait: true, message: expect.stringMatching(/3 coding runs at once/) });
+    // …and the ordinary gate counts the teams' runs as slots taken.
+    await expect(lib.startRun({ task: "two", directory: "delta", source: "owner" })).rejects.toMatchObject({ kind: "busy" });
+    fs.writeFileSync(flag, "go");
+    for (const run of [single, a, b]) await finished(run.id);
+  });
+
+  it("does not let a team's start and a single start that arrive together both take the last slot", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    makeGitProject("alpha");
+    makeGitProject("beta");
+    await lib.setMaxParallelRuns(1);
+    const single = () => lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    const planner = () => lib.startRun({ task: "plan", directory: "beta", source: "owner", readOnly: true, team: { id: "team-aaaa0001", role: "planner", taskId: null } });
+    // In both orders: whichever reaches the gate second sees the first's hold.
+    for (const order of [[single, planner], [planner, single]]) {
+      fs.rmSync(flag, { force: true });
+      const both = await Promise.allSettled(order.map((start) => start()));
+      expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect((both.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toMatchObject({ kind: "busy" });
+      expect(lib.runningCount()).toBe(1);
+      fs.writeFileSync(flag, "go");
+      await finished((both.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ id: string }>).value.id);
+    }
+  });
+
   it("names the live run that holds a folder: the team's own never beside a reader, a stranger's or another team's always", () => {
     const dir = "/home/clawbox/Projects/site";
     const mine = { id: "run-aaaaaaaa", status: "running" as const, directory: dir, readOnly: false, team: { id: "team-aaaa0001", role: "worker" as const, taskId: "t1" } };
