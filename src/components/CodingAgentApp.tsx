@@ -1922,30 +1922,10 @@ export default function CodingAgentApp() {
               {t("codingAgent.history.title")}
             </button>
           </div>
-          {projects.length > 0 && (
-            <div className="px-3 pt-3 pb-1">
-              <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("codingAgent.projectsTitle")}</p>
-              <ul className="space-y-0.5" data-testid="coding-agent-sidebar-projects">
-                {projects.map((project) => {
-                  const active = view.face === "project" && view.project.directory === project.directory;
-                  return (
-                    <li key={project.directory}>
-                      <button
-                        type="button"
-                        onClick={() => { disarmClear(); setPage("home"); setOpenRunId(null); setOpenProjectDir(project.directory); }}
-                        aria-current={active ? "page" : undefined}
-                        className={`${SIDEBAR_ITEM} ${active ? SIDEBAR_ACTIVE : ""}`}
-                        title={project.directory}
-                      >
-                        <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }} aria-hidden="true">{project.kind === "codeProject" ? "web" : "folder"}</span>
-                        <span className="truncate">{project.name}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
+          {/* No projects list here: the home page lists every project, and
+              the rail's copy of it (25 rows on the owner's box) was the
+              tallest thing in the window — "lean home", the owner's brief of
+              2026-10-28. */}
           {runs.length > 0 && (
             <div className="px-3 pt-3 pb-4">
               <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("codingAgent.recentRuns")}</p>
@@ -2355,97 +2335,51 @@ export default function CodingAgentApp() {
                         setOpenProjectDir(project.directory);
                       }
                     }}
-                    className={`${CARD_SURFACE} px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
+                    className={`${CARD_SURFACE} px-3 py-2 flex items-center justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {/* The picture the box drew for this project while a run
-                            worked in it (src/lib/project-icon.ts). Absent until
-                            one has been drawn, which is most of a fresh box. */}
-                        <ProjectIcon project={project} size="w-6 h-6" />
-                        <span className="text-xs font-medium text-[var(--text-primary)] break-words">{project.name}</span>
-                        {/* Says where the folder lives: a code project's is
-                            under the checkout, not in the owner's folder. */}
-                        {project.kind === "codeProject" && (
-                          <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
-                            {t("codingAgent.codeProject")}
-                          </span>
-                        )}
-                        {project.onDesktop && (
-                          <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
-                            {t("codingAgent.onDesktop")}
-                          </span>
-                        )}
-                        {/* A clawbox.json makes the folder a ClawBox APP, not
-                            just a folder with history. */}
-                        {project.app && (
-                          <span
-                            className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
-                            title={project.app.description ?? undefined}
-                            data-testid={`coding-agent-app-chip-${project.folder}`}
-                          >
-                            {t("codingAgent.clawboxApp")}
-                          </span>
-                        )}
-                        {running && (
-                          <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
-                            {t("codingAgent.runInProgress")}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5 break-words">
-                        {project.lastCommit
-                          ? <>{firstLine(project.lastCommit.subject, 80)} · {timeAgo(project.lastCommit.date, t)}</>
-                          : t("codingAgent.noCommits")}
-                      </p>
+                    <div className="min-w-0 flex-1 flex items-center gap-2 flex-wrap">
+                      {/* The picture the box drew for this project while a run
+                          worked in it (src/lib/project-icon.ts). Absent until
+                          one has been drawn, which is most of a fresh box. */}
+                      <ProjectIcon project={project} size="w-6 h-6" />
+                      <span className="text-xs font-medium text-[var(--text-primary)] break-words">{project.name}</span>
+                      {/* ONE pill, the one that matters most: a run at work,
+                          else that the desktop has it, else that it is a code
+                          project (under the checkout, not in the owner's
+                          folder). The ClawBox-app badge, the last commit's
+                          subject and the Store and Delete buttons left the row
+                          for the project's page — a row's job is to open it. */}
+                      {running ? (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
+                          {t("codingAgent.runInProgress")}
+                        </span>
+                      ) : project.onDesktop ? (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
+                          {t("codingAgent.onDesktop")}
+                        </span>
+                      ) : project.kind === "codeProject" ? (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
+                          {t("codingAgent.codeProject")}
+                        </span>
+                      ) : null}
                     </div>
-                    {(project.onDesktop || project.app?.port) && (
+                    <span className="text-[11px] text-[var(--text-muted)] shrink-0 self-center">
+                      {project.lastCommit ? timeAgo(project.lastCommit.date, t) : t("codingAgent.noCommits")}
+                    </span>
+                    {project.onDesktop && (
                       <button
                         type="button"
                         // The desktop registers a deployed web app under
                         // `installed-<folder>` (page.tsx, getAllApps); the
                         // bare folder name matches no app there, and the
-                        // click did nothing at all. A project whose manifest
-                        // declares a port but is not on the desktop yet is
-                        // put there first (the box checks its server is up).
+                        // click did nothing at all.
                         onClick={(e) => { e.stopPropagation(); void openOrAddProject(project); }}
                         data-testid={`coding-agent-open-${project.folder}`}
                         className={BTN_SECONDARY}
                       >
-                        {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
+                        {t("codingAgent.open")}
                       </button>
                     )}
-                    {/* Only a ClawBox app (a clawbox.json at its root) can go to
-                        the Store; quiet and an icon for the same reason as the
-                        delete beside it — the words are its name and title. */}
-                    {project.app && (
-                      <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); setPublishTarget({ folder: project.folder, directory: project.directory }); }}
-                        data-testid={`coding-agent-publish-${project.folder}`}
-                        title={t("codingAgent.publish")}
-                        aria-label={t("codingAgent.publishFor", { name: project.name })}
-                        className={BTN_QUIET}
-                      >
-                        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">storefront</span>
-                      </button>
-                    )}
-                    {/* Removing the folder. Quiet rather than secondary, and an
-                        icon rather than a word: it sits on every row of a list
-                        whose purpose is to OPEN a project, and a red button per
-                        row would make the destructive act the loudest thing on
-                        the page. Everything that makes it safe is in the dialog
-                        behind it — the row's only job is to open that. */}
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(project); }}
-                      data-testid={`coding-agent-delete-${project.folder}`}
-                      title={t("codingAgent.delete.action")}
-                      aria-label={t("codingAgent.delete.actionFor", { name: project.name })}
-                      className={`${BTN_QUIET} hover:text-red-300`}
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
-                    </button>
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                   </li>
                 );
@@ -3251,19 +3185,60 @@ export default function CodingAgentApp() {
                     {t("codingAgent.codeProject")}
                   </span>
                 )}
-                {p.onDesktop && (
+                {/* A clawbox.json makes the folder a ClawBox APP, not just a
+                    folder with history; said here, not on the home row. */}
+                {p.app && (
+                  <span
+                    className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
+                    title={p.app.description ?? undefined}
+                    data-testid={`coding-agent-app-chip-${p.folder}`}
+                  >
+                    {t("codingAgent.clawboxApp")}
+                  </span>
+                )}
+                <div className="ml-auto flex items-center gap-1.5">
+                  {(p.onDesktop || p.app?.port) && (
+                    <button
+                      type="button"
+                      // Through the one helper, so this button knows about the
+                      // standalone page too — it dispatched the desktop-only
+                      // event directly and did nothing on `/app/coding`. A
+                      // project whose manifest declares a port but is not on
+                      // the desktop yet is put there first.
+                      onClick={() => void openOrAddProject(p)}
+                      data-testid="coding-agent-project-open"
+                      className={BTN_SECONDARY}
+                    >
+                      {p.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
+                    </button>
+                  )}
+                  {/* Only a ClawBox app (a clawbox.json at its root) can go to
+                      the Store. */}
+                  {p.app && (
+                    <button
+                      type="button"
+                      onClick={() => setPublishTarget({ folder: p.folder, directory: p.directory })}
+                      data-testid={`coding-agent-publish-${p.folder}`}
+                      title={t("codingAgent.publish")}
+                      aria-label={t("codingAgent.publishFor", { name: p.name })}
+                      className={BTN_QUIET}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">storefront</span>
+                    </button>
+                  )}
+                  {/* Removing the folder. Quiet and an icon: everything that
+                      makes it safe is in the dialog behind it. */}
                   <button
                     type="button"
-                    // Through the one helper, so this button knows about the
-                    // standalone page too — it dispatched the desktop-only
-                    // event directly and did nothing on `/app/coding`.
-                    onClick={() => void openOrAddProject(p)}
-                    data-testid="coding-agent-project-open"
-                    className={`${BTN_SECONDARY} ml-auto`}
+                    onClick={() => setDeleteTarget(p)}
+                    data-testid={`coding-agent-delete-${p.folder}`}
+                    title={t("codingAgent.delete.action")}
+                    aria-label={t("codingAgent.delete.actionFor", { name: p.name })}
+                    className={`${BTN_QUIET} hover:text-red-300`}
                   >
-                    {t("codingAgent.open")}
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
                   </button>
-                )}
+                </div>
               </div>
               <button
                 type="button"

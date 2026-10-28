@@ -492,10 +492,12 @@ describe("CodingAgentApp", () => {
     await screen.findByTestId("coding-agent-project-site");
     expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
     // The agents come first (2026-10-12): with nothing at work, the newest
-    // run's chart — one chart, never a list of runs.
+    // run — one, never a list of runs. A run that sent out no helper is a
+    // plain row, not a one-node chart (lean home, 2026-10-28).
     const agents = screen.getByTestId("coding-agent-live-agents");
     expect(agents).toHaveAttribute("data-live", "0");
-    expect(agents.querySelectorAll('[data-testid^="coding-agent-live-run-"][data-shape]')).toHaveLength(1);
+    expect(agents.querySelectorAll('[data-testid^="coding-agent-live-run-"][data-plain="true"]')).toHaveLength(1);
+    expect(agents.querySelectorAll('[data-testid^="coding-agent-live-run-"][data-shape]')).toHaveLength(0);
     expect(screen.queryAllByText("somewhere else").every((el) => agents.contains(el))).toBe(true);
     expect(screen.queryAllByText("inside the project").every((el) => agents.contains(el))).toBe(true);
 
@@ -981,8 +983,11 @@ describe("CodingAgentApp", () => {
         expect(screen.queryByTestId("coding-agent-state")).toBeNull();
         expect(within(sidebar).queryByText(t("codingAgent.title"))).toBeNull();
         expect(within(sidebar).getByTestId("coding-agent-sidebar-settings")).toBeInTheDocument();
-        // A project entry opens the project's page…
-        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-projects")).getByText(SITE_PROJECT.name));
+        // No projects list in the rail (lean home, 2026-10-28): the page
+        // lists them, and its row opens the project's page…
+        expect(within(sidebar).queryByTestId("coding-agent-sidebar-projects")).toBeNull();
+        expect(within(sidebar).queryByText(SITE_PROJECT.name)).toBeNull();
+        fireEvent.click(screen.getByTestId("coding-agent-project-site"));
         await screen.findByTestId("coding-agent-project-page");
         // …whose folder fills the column, with the runs and the team as tabs.
         expect(screen.getByTestId("coding-agent-workspace")).toHaveAttribute("data-fill", "true");
@@ -1849,7 +1854,9 @@ describe("projects", () => {
 
       const site = screen.getByTestId("coding-agent-project-site");
       expect(site.textContent).toContain("My Site");
-      expect(site.textContent).toContain("Coding agent: add a dark mode toggle");
+      // The row says WHEN, not what the last commit was: the subject moved
+      // to the project page's git line (lean home, 2026-10-28).
+      expect(site.textContent).not.toContain("Coding agent: add a dark mode toggle");
       expect(site.textContent).toContain("3h ago");
       expect(site.textContent).toContain(translations.en["codingAgent.onDesktop"]);
       expect(site.textContent).not.toContain(translations.en["codingAgent.runInProgress"]);
@@ -2718,37 +2725,43 @@ describe("CodingAgentApp — the run page's honesty", () => {
     /** A folder project of the owner's, which is the kind the list offers Delete on. */
     const SHOP = { ...PROJECT, folder: "shop", directory: "/home/clawbox/Projects/shop", name: "My Shop" };
 
-    it("offers Delete on every project row without making it the loudest thing there", async () => {
+    /** Lean home (2026-10-28): a row opens the project; Delete waits on the project's page. */
+    async function openProject(folder: string) {
+      fireEvent.click(await screen.findByTestId(`coding-agent-project-${folder}`));
+      await screen.findByTestId("coding-agent-project-page");
+    }
+
+    it("offers Delete on the project's page, not on its row — a row's job is to open it", async () => {
       stubFetch({ enabled: true, readiness: READY }, [], { projects: [SHOP, SITE_PROJECT] });
       render(<CodingAgentApp />);
       await screen.findByTestId("coding-agent-projects");
       for (const folder of ["shop", "site"]) {
-        const button = screen.getByTestId(`coding-agent-delete-${folder}`);
-        expect(button).toHaveAttribute("title", translations.en["codingAgent.delete.action"]);
+        expect(screen.queryByTestId(`coding-agent-delete-${folder}`)).toBeNull();
+        expect(screen.queryByTestId(`coding-agent-publish-${folder}`)).toBeNull();
       }
-      // The row still opens the project: the Delete button must not swallow
-      // the click the row is for.
-      fireEvent.click(screen.getByTestId("coding-agent-project-shop"));
-      await screen.findByTestId("coding-agent-project-page");
+      await openProject("shop");
+      const button = screen.getByTestId("coding-agent-delete-shop");
+      expect(button).toHaveAttribute("title", translations.en["codingAgent.delete.action"]);
+      expect(screen.queryByTestId("coding-agent-delete-site")).toBeNull();
     });
 
-    it("opens the dialog over the row, naming the folder and its size", async () => {
+    it("opens the dialog over the page, naming the folder and its size", async () => {
       stubFetch({ enabled: true, readiness: READY }, [], { projects: [SHOP] });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
+      await openProject("shop");
+      fireEvent.click(screen.getByTestId("coding-agent-delete-shop"));
 
       const dialog = await screen.findByRole("dialog");
       expect(within(dialog).getByText(t("codingAgent.delete.title", { name: "My Shop" }))).toBeInTheDocument();
       expect((await screen.findByTestId("coding-agent-delete-facts")).textContent)
         .toContain(t("codingAgent.delete.whatIsThere", { size: "2.0 KB", files: 7 }));
-      // The row is not opened by the Delete button.
-      expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
     });
 
     it("drops the row and says where the folder went", async () => {
       stubFetch({ enabled: true, readiness: READY }, [], { projects: [SHOP, SITE_PROJECT] });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
+      await openProject("shop");
+      fireEvent.click(screen.getByTestId("coding-agent-delete-shop"));
       await screen.findByTestId("coding-agent-delete-facts");
       fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
       fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
@@ -3051,7 +3064,17 @@ describe("publishing a ClawBox app to the Store", () => {
     });
     render(<CodingAgentApp />);
     await screen.findByTestId("coding-agent-projects");
+    // The home row carries neither the Store button nor the app badge any
+    // more; the project's page does (lean home, 2026-10-28).
+    expect(screen.queryByTestId("coding-agent-publish-site")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-app-chip-site")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-project-scratch"));
+    await screen.findByTestId("coding-agent-project-page");
     expect(screen.queryByTestId("coding-agent-publish-scratch")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    expect(screen.getByTestId("coding-agent-app-chip-site")).toBeInTheDocument();
     const publish = screen.getByTestId("coding-agent-publish-site");
     expect(publish).toHaveAccessibleName(translations.en["codingAgent.publishFor"].replace("{name}", "My Site"));
     fireEvent.click(publish);

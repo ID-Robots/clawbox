@@ -18,7 +18,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { isLive, type CodingRunStatus } from "@/lib/coding-agent-status";
-import CodingAgentDiagram, { type DiagramRun } from "./CodingAgentDiagram";
+import CodingAgentDiagram, { DiagramFigures, type DiagramRun } from "./CodingAgentDiagram";
 import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
 import { TEAM_STATUS_TONE, isTeamActive, type TeamView } from "./CodingTeamCard";
 import { RUN_TONE } from "./RunProgressBar";
@@ -175,6 +175,21 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, openTeam
       )}
     />
   );
+  /** A run that sent out no helper: one node is no chart, so the newest such run is a plain row. */
+  const lone = (run: LiveRun) => (run.subagents?.length ?? 0) + (run.activeSubagents?.length ?? 0) === 0;
+  const runRow = (run: LiveRun) => (
+    <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2`} data-testid={`coding-agent-live-run-${run.id}`} data-plain="true">
+      <ChartHeader
+        icon="smart_toy"
+        chip={<span className={`${chipClass} ${RUN_TONE[run.status]?.chip ?? ""}`}>{t(runStatusKey(run.status))}</span>}
+        title={firstLine(run.task)}
+        action={t("codingAgent.diagram.openRun")}
+        onAction={() => onOpenRun(run.id)}
+        testId={`coding-agent-live-open-run-${run.id}`}
+      />
+      <DiagramFigures source={{ kind: "run", run }} lookup={runOf} />
+    </div>
+  );
   const runChart = (run: LiveRun) => (
     <CodingAgentDiagram
       key={run.id}
@@ -207,7 +222,7 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, openTeam
       {liveTeams.map(teamChart)}
       {liveRuns.map(runChart)}
       {latest?.kind === "team" && teamChart(latest.team)}
-      {latest?.kind === "run" && runChart(latest.run)}
+      {latest?.kind === "run" && (lone(latest.run) ? runRow(latest.run) : runChart(latest.run))}
       {waiting.length > 0 && (
         <ul className="mt-2 space-y-1" data-testid="coding-agent-live-queued">
           {waiting.map((q) => (
