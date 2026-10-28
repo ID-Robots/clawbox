@@ -239,6 +239,15 @@ describe("the effort picker while the agent is starting", () => {
     expect(screen.queryByText(/Not connected/)).toBeNull();
   });
 
+  it("still reports a gateway refusal that only mentions something not connected", async () => {
+    // The socket-gone exemption above is for this chat's own words, not for a
+    // refusal that will not change — staying quiet here would leave the pill
+    // showing a level the box never took.
+    patchRefusals.push({ code: "INVALID_REQUEST", message: "provider account not connected" });
+    await mountChat();
+    await screen.findByText(/Failed to change effort: provider account not connected/, {}, { timeout: 8_000 });
+  });
+
   it("shows Starting… from the moment the gateway drops until it is back", async () => {
     await mountChat();
     await picker("Medium");

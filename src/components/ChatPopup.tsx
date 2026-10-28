@@ -2944,8 +2944,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The socket went away under the push — a restart drops it, and the
       // status only leaves 'connected' when the reconnect starts, so a push
       // still waiting on the agent lands here. Not a failure of the change:
-      // the reset above makes the next hello push it again.
-      if (/\b(?:not connected|connection restarted)\b/i.test(message)) return
+      // the reset above makes the next hello push it again. Matched whole —
+      // these are this chat's own words for the socket (wsRequest,
+      // failPending) — so a gateway refusal that merely mentions something
+      // "not connected" is still reported.
+      if (/^(?:not connected|connection restarted)$/i.test(message)) return
       // The gateway itself tells us the level to fall back to when a model
       // exposes no (or a narrower) reasoning control — e.g. local Gemma:
       //   thinkingLevel "high" is not supported for llamacpp/... (use off)
