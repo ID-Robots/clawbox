@@ -1254,7 +1254,7 @@ describe("PrimeRadiantApp — Questions", () => {
     expect(await screen.findByTestId("prime-radiant-count-accuracy")).toHaveTextContent("Accuracy 75%");
     await openTab("questions");
     expect(await screen.findByTestId("prime-radiant-accuracy-percent")).toHaveTextContent("75% correct");
-    expect(screen.getByTestId("prime-radiant-accuracy-change")).toHaveTextContent("+25 points since the last check");
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-accuracy-change")).toHaveTextContent("+25 points since the last check"));
     expect(screen.getByTestId("prime-radiant-accuracy-trend")).toBeInTheDocument();
     expect(screen.queryByTestId("prime-radiant-accuracy-not-judged")).toBeNull();
     const row = await screen.findByTestId("prime-radiant-golden-row");

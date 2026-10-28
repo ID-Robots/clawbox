@@ -10,9 +10,12 @@ vi.mock("fs/promises", () => ({
 // The effective branch is worked out with git; the route's own contract is
 // what it does with the answer, so the resolver is stubbed here and covered
 // against real repositories in updater-branch-resolution.test.ts.
-const { mockResolveEffective, mockDowngrade } = vi.hoisted(() => ({ mockResolveEffective: vi.fn(), mockDowngrade: vi.fn() }));
+const { mockResolveEffective, mockDowngrade, mockInvalidate } = vi.hoisted(() => ({ mockResolveEffective: vi.fn(), mockDowngrade: vi.fn(), mockInvalidate: vi.fn() }));
 vi.mock("@/lib/updater", () => ({
   resolveEffectiveUpdateBranch: mockResolveEffective,
+  // A good update verdict is cached for 30 min; the route drops it when the
+  // branch it was for changes (the assertions below).
+  invalidateVersionCache: mockInvalidate,
   // Read off origin with git in the updater (updater-harness-downgrade.test.ts);
   // here, what the route does with the answer.
   checkBranchHarnessDowngrade: mockDowngrade,
@@ -151,6 +154,9 @@ describe("/setup-api/system/update-branch", () => {
         "feature/test\n",
         "utf-8"
       );
+      // The next version poll must look at feature/test, not at the verdict
+      // cached for the previous branch.
+      expect(mockInvalidate).toHaveBeenCalledTimes(1);
     });
 
     it("clears branch when set to null", async () => {
@@ -163,6 +169,7 @@ describe("/setup-api/system/update-branch", () => {
       expect(mockUnlink).toHaveBeenCalled();
       // The owner sees at once what clearing the pin fell back to.
       expect(body.effective).toEqual({ branch: "main", source: "default" });
+      expect(mockInvalidate).toHaveBeenCalledTimes(1);
     });
 
     it("answers the new effective branch after a save", async () => {
@@ -180,6 +187,13 @@ describe("/setup-api/system/update-branch", () => {
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
       expect(body.branch).toBe(null);
+    });
+
+    it("keeps the cached verdict when nothing was recorded", async () => {
+      const res = await updateBranchPost(jsonRequest({ branch: "not a branch" }));
+
+      expect(res.status).toBe(400);
+      expect(mockInvalidate).not.toHaveBeenCalled();
     });
 
     it("returns 400 for invalid branch name", async () => {
@@ -284,6 +298,8 @@ describe("/setup-api/system/update-branch", () => {
       expect(mockDowngrade).toHaveBeenCalledWith("main");
       // … and the pin that was there is written back as it was.
       expect(mockWriteFile).toHaveBeenCalledWith(expect.stringContaining(".update-branch"), "beta\n", "utf-8");
+      // The pin is back where it was, so the cached verdict still holds.
+      expect(mockInvalidate).not.toHaveBeenCalled();
     });
 
     it("lets the same or a newer branch through, and a check that cannot run", async () => {

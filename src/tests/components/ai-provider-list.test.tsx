@@ -255,7 +255,8 @@ describe("AiProviderList", () => {
     // TimeoutStartSec, and three unlabelled grey bars for that long are
     // indistinguishable from a page that has hung.
     const live = screen.getByTestId("ai-provider-list-checking");
-    expect(live).toHaveTextContent(translations.en["settings.checking"]);
+    // The copy arrives with the locale's chunk, a moment after the row does.
+    await waitFor(() => expect(live).toHaveTextContent(translations.en["settings.checking"]));
     expect(live).toHaveAttribute("role", "status");
     expect(live).toHaveAttribute("aria-live", "polite");
   });
