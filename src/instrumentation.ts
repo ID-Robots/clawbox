@@ -734,4 +734,28 @@ export async function register() {
   } catch (err) {
     console.error('[instrumentation] Could not load the app boot restart:', err instanceof Error ? err.message : err)
   }
+  try {
+    // The app servers the AGENT runs as user units of its own
+    // (`<app>-app.service`, no cap) get the same MemoryHigh/MemoryMax a scope
+    // has (see capForeignAppServers). Once after the boot pass above, then
+    // every APP_CAPS_SWEEP_MS, because the agent starts such a unit whenever
+    // it likes; CLAWBOX_APP_CAPS=0 turns it off.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { capForeignAppServers, APP_CAPS_SWEEP_MS } = require('./lib/app-unit-limits')
+    const pass = () => {
+      void (capForeignAppServers() as Promise<string[]>)
+        .then((capped: string[]) => {
+          if (capped.length) console.log(`[instrumentation] Capped app server units: ${capped.join(', ')}`)
+        })
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Could not cap the app server units:', err instanceof Error ? err.message : err)
+        })
+    }
+    if (process.env.CLAWBOX_APP_CAPS !== '0') {
+      setTimeout(pass, 90_000).unref()
+      setInterval(pass, APP_CAPS_SWEEP_MS as number).unref()
+    }
+  } catch (err) {
+    console.error('[instrumentation] Could not load the app unit caps:', err instanceof Error ? err.message : err)
+  }
 }
