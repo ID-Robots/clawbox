@@ -4,6 +4,7 @@ import path from "@/lib/runtime-path";
 import { isSafeBranch } from "@/lib/update-branch";
 import {
   checkBranchHarnessDowngrade,
+  invalidateVersionCache,
   resolveEffectiveUpdateBranch,
   type EffectiveUpdateBranch,
 } from "@/lib/updater";
@@ -110,6 +111,9 @@ export async function POST(request: Request) {
           return refuseDowngrade(detail);
         }
       }
+      // The cached update verdict was for the branch just cleared; a good
+      // answer is held for 30 min (VERSION_INFO_GOOD_TTL), so drop it.
+      invalidateVersionCache();
       return NextResponse.json({ success: true, branch: null, effective });
     }
 
@@ -125,6 +129,8 @@ export async function POST(request: Request) {
     }
 
     await writeFile(UPDATE_BRANCH_FILE, branch + "\n", "utf-8");
+    // Same as the clear above: the next version poll must look at THIS branch.
+    invalidateVersionCache();
     return NextResponse.json({ success: true, branch, effective: await effectiveBranch() });
   } catch (err) {
     return NextResponse.json(

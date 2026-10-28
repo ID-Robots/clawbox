@@ -4499,12 +4499,14 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   const edition = readEdition();
   const hasHermes = hasHermesHarness();
-  // One round of concurrent reads: the pinned branch's fetch and the release
-  // remote's check used to wait for the tag ls-remote to finish first, which
-  // put their round-trips in series with it for no reason (none reads the
-  // other's answer).
-  const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent, { target: pinnedBranchTarget, remote: pinnedRemote }, releaseRemote] = await Promise.all([
-    getTargetVersion(),
+  // One round of concurrent reads. The release remote's check used to wait
+  // for the tag ls-remote to finish first for no reason (neither reads the
+  // other's answer). The pinned branch's fetch still runs AFTER the tag fetch:
+  // both are `git fetch` in the same checkout, and two at once race for the
+  // same ref locks (`origin/<branch>` is updated by the tag fetch's default
+  // refspec too), which would turn a reachable origin into a refused fetch.
+  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
+    getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
     // The Hermes edition ships no openclaw binary, so skip the spawn and read
     // the version from the installed package.json (absent there too → null,
     // which is correct: there is no OpenClaw version to report on Hermes).
@@ -4522,7 +4524,6 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
-    getPinnedBranchTarget(PROJECT_DIR),
     checkReleaseRemote(PROJECT_DIR),
   ]);
   // THREE reads of the same question, none of which may be overruled by
