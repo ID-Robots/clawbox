@@ -484,10 +484,24 @@ export interface TeamBoard {
   pr: TeamPr | null;
   /** The figures, kept current on every save (`teamMetrics`). */
   metrics: TeamMetrics;
+  /**
+   * The team's runs held back right now until the box has a free slot for
+   * them (`teamSpawnSlot`: the owner's limit, the team's own, the memory
+   * guard). Absent while nothing waits, and on a settled team.
+   */
+  slotWaits?: SlotWait[];
   createdAt: number;
   updatedAt: number;
   /** When the team settled (done, failed, stopped); null while it works. */
   finishedAt: number | null;
+}
+
+/** One of the team's runs waiting for a free slot on the box: which, why, since when (ms). */
+export interface SlotWait {
+  role: TeamRunRef["role"];
+  taskId: string | null;
+  reason: string;
+  since: number;
 }
 
 export class BoardAccessError extends Error {
@@ -600,6 +614,14 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     log.push(entry as unknown as LogEntry);
   }
   const finalReview = b.finalReview as Record<string, unknown> | null | undefined;
+  // Only an unsettled team has a run waiting; one that is not a wait is dropped.
+  const slotWaits = Array.isArray(b.slotWaits) && !isSettledTeamStatus(b.status as TeamStatus)
+    ? (b.slotWaits as unknown[]).flatMap((w): SlotWait[] => {
+        const wait = w as Record<string, unknown> | null;
+        if (!wait || !(RUN_ROLES as readonly unknown[]).includes(wait.role) || typeof wait.reason !== "string" || typeof wait.since !== "number") return [];
+        return [{ role: wait.role as SlotWait["role"], taskId: typeof wait.taskId === "string" ? wait.taskId : null, reason: wait.reason, since: wait.since }];
+      })
+    : [];
   const board: TeamBoard = {
     id: b.id,
     goal: b.goal,
@@ -645,6 +667,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
       : null,
     pr: normalizeTeamPr(b.pr),
     metrics: EMPTY_METRICS,
+    ...(slotWaits.length ? { slotWaits } : {}),
     createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
     finishedAt: typeof b.finishedAt === "number" ? b.finishedAt : null,
@@ -1253,7 +1276,11 @@ export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus
   board.status = status;
   if (status === "failed" && note) board.error = note;
   board.updatedAt = now;
-  if (isSettledTeamStatus(status)) board.finishedAt ??= now;
+  if (isSettledTeamStatus(status)) {
+    board.finishedAt ??= now;
+    // Nothing of a settled team waits for anything.
+    delete board.slotWaits;
+  }
   append(board, { ts: now, actor, type: "team_status", message: `Team → ${status}${note ? `: ${firstLine(note)}` : ""}` });
 }
 

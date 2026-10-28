@@ -145,6 +145,7 @@ import {
   waitingOn,
   type Actor,
   type ReviewMode,
+  type SlotWait,
   type TeamAdvice,
   type TeamAgents,
   type TeamBoard,
@@ -172,8 +173,12 @@ const WAIT_SLICE_MS = 60_000;
 const SLOT_WAIT_MS = 15_000;
 /** How often a run that is HELD (paused by the owner) is looked at again. */
 const HELD_POLL_MS = 2_000;
-/** How often a reviewer waiting for room (the team's slots, the memory guard) asks again. */
-const REVIEWER_SLOT_POLL_MS = 3_000;
+/**
+ * How often a run of the team waiting for room — the team's own slots, the
+ * owner's limit on runs at once, the memory guard — asks again: a planner,
+ * a reviewer, a lead, and a worker while none of the team's is going.
+ */
+const ROOM_POLL_MS = 3_000;
 /** A planner, a worker, a reviewer or a lead that has not settled by then is stopped. */
 export const RUN_BUDGET_MS = 60 * 60_000;
 /** A teammate at work is named by its run and its task's first line, cut here. */
@@ -741,16 +746,20 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const models = await readTeamModels();
   const brief = () => withTeamModels(PLANNER_BRIEF, models);
 
-  // 1. The planner: a read-only run whose final message is the plan.
-  const planner = await startRun({
+  // 1. The planner: a read-only run whose final message is the plan — once
+  //    the box has a slot for it. A box busy with other runs makes the team
+  //    wait for one (the board says so), never fail.
+  const plannerRole: RunTeam = { id: board.id, role: "planner", taskId: null };
+  const planner = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
     task: board.goal,
     projectId: board.projectId,
     directory: board.directory,
     source,
-    team: { id: board.id, role: "planner", taskId: null },
+    team: plannerRole,
     readOnly: true,
     extraBrief: brief(),
-  });
+  }));
+  if (!planner) return;
   board.plannerRunId = planner.id;
   board.runs.push(castRef(planner, "planner", null));
   saveBoard(board);
@@ -775,15 +784,17 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     // prose is asked to say it as the JSON the team reads. On the record as
     // an alert, so a team that needed another ask says so.
     bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON plan (attempt ${attempt} of ${MAX_PLANNER_ATTEMPTS}).` });
-    const again = await startRun({
-      task: replanTask(board.goal, answer, plan.reason),
+    const reask = replanTask(board.goal, answer, plan.reason);
+    const again = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
+      task: reask,
       projectId: board.projectId,
       directory: board.directory,
       source,
-      team: { id: board.id, role: "planner", taskId: null },
+      team: plannerRole,
       readOnly: true,
       extraBrief: brief(),
-    });
+    }));
+    if (!again) return;
     board.runs.push(castRef(again, "planner", null));
     saveBoard(board);
     const replanned = await settle(team, again.id);
@@ -847,8 +858,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   saveBoard(board);
 
   // 2. Workers: every task whose dependencies are done gets a worker as soon
-  //    as the box has room for one (MAX_TEAM_WORKERS, the memory guard) and
-  //    the planner's shape allows another beside the ones going, and they
+  //    as the box has room for one (MAX_TEAM_WORKERS, the owner's limit on
+  //    runs at once, the memory guard) and the planner's shape allows
+  //    another beside the ones going, and they
   //    settle in whatever order they finish. In place (no team branch)
   //    there is one slot: two workers in one checkout write over each other.
   const inFlight = new Map<string, Promise<void>>();
@@ -862,6 +874,10 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // the next worker and for a sibling's reviewer alike, and ONLY until the
   // run is live — counted twice, two live workers would shut out a valid third.
   const starting = new Set<string>();
+  // Workers the SPAWN refused for room after the look admitted them — the
+  // two raced someone else's start: back to pending, unstarted, and the next
+  // look comes after a pause rather than at once.
+  const spawnRefusals: Array<{ taskId: string; reason: string }> = [];
   // Tasks whose worker settled and that the lead has not looked at yet —
   // only ever filled while the owner's switch was on when the team started.
   const leadAfter: string[] = [];
@@ -909,24 +925,31 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       team.workerSlots = slots;
       const ready = readyTasks(board).filter((t) => !inFlight.has(t.task_id));
       let waitingForRoom = false;
-      for (const task of ready) {
+      // The worker this round leaves waiting for room, said on the board.
+      let roomWait = spawnRefusals.splice(0).pop() ?? null;
+      if (roomWait) waitingForRoom = true;
+      for (const task of roomWait ? [] : ready) {
         if (inFlight.size >= slots) break;
-        if (inFlight.size >= 1) {
-          // A worker whose worktree is still being added has no persisted
-          // run yet; without the reservation the memory guard would not even
-          // be consulted for the second worker.
-          const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id }, starting.size);
-          if (!slot.ok) {
-            waitingForRoom = slot.wait;
-            // A refusal that is not "wait" — a stranger's run holds the box —
-            // goes on the board, or the team ends with "never ran" and no why.
-            if (!slot.wait) bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No worker for ${task.task_id}: ${slot.reason}` });
-            break;
-          }
+        // Every worker asks, the first one too: the box is shared with runs
+        // that are not the team's, and they may hold every slot. A worker
+        // whose worktree is still being added has no persisted run yet, and
+        // the reservation is how the look sees it.
+        const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id }, starting.size);
+        if (!slot.ok) {
+          waitingForRoom = slot.wait;
+          if (slot.wait) roomWait = { taskId: task.task_id, reason: slot.reason };
+          // A refusal that is not "wait" goes on the board, or the team ends
+          // with "never ran" and no why.
+          else bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No worker for ${task.task_id}: ${slot.reason}` });
+          break;
         }
         starting.add(task.task_id);
         const work = workTask(team, task, source, starting, () => starting.delete(task.task_id))
           .then((settled) => {
+            if (typeof settled === "object") {
+              spawnRefusals.push({ taskId: task.task_id, reason: settled.room });
+              return;
+            }
             // Accepted, rejected or failed alike: the plan may need a look.
             if (settled && board.dynamic) leadAfter.push(task.task_id);
           })
@@ -936,6 +959,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
           .finally(() => { starting.delete(task.task_id); inFlight.delete(task.task_id); });
         inFlight.set(task.task_id, work);
       }
+      setWorkerSlotWait(team, roomWait);
       if (inFlight.size === 0) {
         if (isExhausted(board)) {
           // Every task is in. Before the team may say "done", the project's
@@ -956,7 +980,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
           break;
         }
         if (!waitingForRoom) break;
-        await sleep(SLOT_WAIT_MS);
+        await sleep(ROOM_POLL_MS);
         continue;
       }
       // Something is working: wake on the first settle, or after a while to
@@ -1043,6 +1067,7 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
 
   let run: CodingRun | null = null;
   const waitingSince = Date.now();
+  const who = { role: "worker" as const, taskId: task.task_id };
   while (!run) {
     if (team.stopRequested) return;
     try {
@@ -1055,6 +1080,7 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
       });
     } catch (err) {
       if (err instanceof SlotsFullError && Date.now() - waitingSince < RUN_BUDGET_MS) {
+        noteSlotWait(team, who, err.message);
         await sleep(SLOT_WAIT_MS);
         continue;
       }
@@ -1063,6 +1089,7 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
       return;
     }
   }
+  clearSlotWait(team, who);
   const me = worker(run.id);
   bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
   board.runs.push(castRef(run, "worker", task.task_id));
@@ -1089,9 +1116,10 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
  * this task's reviewer; `onStarted` is called once the worker's run is
  * persisted — the reservation it held is released there.
  * True when a worker ran and its outcome is on the board (accepted, rejected
- * or failed); false when the team was stopped before that.
+ * or failed); false when the team was stopped before that; `room` when the
+ * spawn refused it for room — the task is still pending, unstarted.
  */
-async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, starting: ReadonlySet<string>, onStarted?: () => void): Promise<boolean> {
+async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, starting: ReadonlySet<string>, onStarted?: () => void): Promise<boolean | { room: string }> {
   const { board, bus } = team;
 
   // Its own worktree and branch, when the team has a branch to fork from.
@@ -1143,6 +1171,13 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       run = await startWorker(false);
     }
   } catch (err) {
+    // Refused for ROOM at the spawn: a start of someone else's took the slot
+    // the look had seen. Not a failure of the task — nothing ran — so no
+    // alert: its worktree and branch go back, and it waits for the next look.
+    if (err instanceof CodingAgentError && err.wait) {
+      if (worktree) await removeWorktree(board.directory, worktree.path, { dropBranch: worktree.branch });
+      return { room: err.message };
+    }
     if (worktree) await removeWorktree(board.directory, worktree.path);
     throw err;
   }
@@ -1359,9 +1394,10 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
  * budget: room frees as a sibling settles. Accepting by rule there skipped
  * the review of a task that only finished at a busy moment, and its alert
  * helped fail a team whose work was all verified (bench, 2026-09-22). Only a
- * refusal that cannot clear on its own — a stranger's run on the box, the
- * switch off — is "no reviewer": accepted by rule, with an alert the
- * ceiling does not count.
+ * refusal that cannot clear on its own — the switch off, an account that
+ * cannot run — is "no reviewer": accepted by rule, with an alert the
+ * ceiling does not count. Runs that are not the team's are room taken, and
+ * waited out like any other.
  *
  * `starting` is the orchestrator's live set of worker launches: a sibling
  * whose worktree is still being added has no persisted run, and without its
@@ -1400,15 +1436,20 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
   // A started run, or why none could start; null once the team is stopped.
   const launch = async (resumeOf: string | null): Promise<CodingRun | { reason: string } | null> => {
     const waitingSince = Date.now();
-    for (;;) {
-      if (team.stopRequested) return null;
-      const started = await start(resumeOf);
-      if ("id" in started) return started;
-      if (!started.wait) return { reason: started.reason };
-      if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
-        return { reason: `no room for ${Math.round(RUN_BUDGET_MS / 60_000)} minutes (${started.reason})` };
+    try {
+      for (;;) {
+        if (team.stopRequested) return null;
+        const started = await start(resumeOf);
+        if ("id" in started) return started;
+        if (!started.wait) return { reason: started.reason };
+        if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
+          return { reason: `no room for ${Math.round(RUN_BUDGET_MS / 60_000)} minutes (${started.reason})` };
+        }
+        noteSlotWait(team, role, started.reason);
+        await sleep(ROOM_POLL_MS);
       }
-      await sleep(REVIEWER_SLOT_POLL_MS);
+    } finally {
+      clearSlotWait(team, role);
     }
   };
   const noReviewer = (reason: string): { verdict: "accepted"; notes: string } => {
@@ -1628,39 +1669,35 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
   // What every role runs on now — read for each turn, before the seat is
   // taken: an account connected, or gone, since the plan is what it adds by.
   const models = await readTeamModels();
-  // A seat beside the workers still going: the memory guard is waited out
-  // the way a worker's is; a stranger's run holding the box is an alert.
-  for (;;) {
-    const slot = await teamSpawnSlot({ id: board.id, role: "lead", taskId }, reserved());
-    if (slot.ok) break;
-    if (!slot.wait) {
-      bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${slot.reason}` });
-      return;
-    }
-    await sleep(SLOT_WAIT_MS);
-    if (team.stopRequested) return;
-  }
+  // A seat beside the workers still going, and beside whatever else the box
+  // runs: the room is waited out the way a worker's is; a refusal that
+  // cannot clear by waiting is an alert.
+  const lead: RunTeam = { id: board.id, role: "lead", taskId };
   // The inbox is written from what was said up to now; what is said after
   // waits for the next turn. It counts as read only once the lead gave an
   // answer the team can act on (below): a lead that failed, ran out of
   // budget or answered nothing usable leaves it unread — shown to every
   // later turn, and calling the next one back on its own once.
-  const writtenAt = Date.now();
-  let run: CodingRun;
+  let writtenAt = Date.now();
+  let run: CodingRun | null;
   try {
-    run = await startRun({
-      task: leadTask(board, taskIds, replanContext(board, dispatched())),
-      projectId: board.projectId,
-      directory: board.directory,
-      source,
-      team: { id: board.id, role: "lead", taskId },
-      readOnly: true,
-      extraBrief: withTeamModels(REPLAN_BRIEF, models),
+    run = await startWhenRoom(team, lead, reserved, () => {
+      writtenAt = Date.now();
+      return startRun({
+        task: leadTask(board, taskIds, replanContext(board, dispatched())),
+        projectId: board.projectId,
+        directory: board.directory,
+        source,
+        team: lead,
+        readOnly: true,
+        extraBrief: withTeamModels(REPLAN_BRIEF, models),
+      });
     });
   } catch (err) {
     bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
+  if (!run) return;
   team.leadTurnsAt = [team.leadTurnsAt[1], writtenAt];
   board.runs.push(castRef(run, "lead", taskId));
   saveBoard(board);
@@ -1702,6 +1739,87 @@ function sleep(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
   });
+}
+
+/**
+ * Start one of the team's runs once the box has room for it — the planner,
+ * a re-asked planner, a lead. Asked first (`teamSpawnSlot`, the workers
+ * still being started counted by `reserved`), then the spawn, whose own
+ * refusal for room is the same wait: the look and the spawn may race a start
+ * of someone else's. It waits as long as it takes, saying so on the board
+ * (`noteSlotWait`) — the box frees slots as runs settle, and a team is never
+ * failed for being asked at a busy moment. The owner's Stop ends the wait
+ * (null). A refusal that cannot clear by waiting — the switch off, an
+ * account that cannot run — is thrown, as before.
+ */
+async function startWhenRoom(team: LiveTeam, who: RunTeam, reserved: () => number, start: () => Promise<CodingRun>): Promise<CodingRun | null> {
+  try {
+    for (;;) {
+      if (team.stopRequested) return null;
+      const slot = await teamSpawnSlot(who, reserved());
+      if (!slot.ok && !slot.wait) throw new CodingAgentError("busy", slot.reason);
+      if (slot.ok) {
+        try {
+          return await start();
+        } catch (err) {
+          if (!(err instanceof CodingAgentError) || !err.wait) throw err;
+          noteSlotWait(team, who, err.message);
+        }
+      } else {
+        noteSlotWait(team, who, slot.reason);
+      }
+      await sleep(ROOM_POLL_MS);
+    }
+  } finally {
+    clearSlotWait(team, who);
+  }
+}
+
+/** "the planner", "the worker of t2", "the lead after t3". */
+function slotWaitName(who: Pick<SlotWait, "role" | "taskId">): string {
+  if (!who.taskId) return `the ${who.role}`;
+  return who.role === "lead" ? `the lead after ${who.taskId}` : `the ${who.role} of ${who.taskId}`;
+}
+
+/**
+ * On the board: `who` waits for a free slot on the box, and why — what
+ * coding_team_status says for a team that waits, rather than a failure. One
+ * note when the wait begins; a new reason only updates the entry.
+ */
+function noteSlotWait(team: LiveTeam, who: Pick<SlotWait, "role" | "taskId">, reason: string): void {
+  const { board, bus } = team;
+  // A refusal read after the owner's Stop: nothing of a stopped team waits.
+  if (team.stopRequested || isSettledTeamStatus(board.status)) return;
+  const waits = board.slotWaits ?? [];
+  const at = waits.findIndex((w) => w.role === who.role && w.taskId === who.taskId);
+  if (at >= 0 && waits[at].reason === reason) return;
+  if (at >= 0) {
+    waits[at] = { ...waits[at], reason };
+  } else {
+    waits.push({ role: who.role, taskId: who.taskId, reason, since: Date.now() });
+    bus.send(SYSTEM, { type: "note", ...(who.taskId ? { task_id: who.taskId } : {}), text: `Waiting for a free slot on the box before ${slotWaitName(who)} starts: ${reason}` });
+  }
+  board.slotWaits = waits;
+  saveBoard(board);
+}
+
+/** `who` waits no more: it started, or never will. */
+function clearSlotWait(team: LiveTeam, who: Pick<SlotWait, "role" | "taskId">): void {
+  const { board } = team;
+  const waits = board.slotWaits;
+  if (!waits?.some((w) => w.role === who.role && w.taskId === who.taskId)) return;
+  const left = waits.filter((w) => !(w.role === who.role && w.taskId === who.taskId));
+  if (left.length) board.slotWaits = left;
+  else delete board.slotWaits;
+  saveBoard(board);
+}
+
+/** The worker the orchestrator's last round left waiting for room — at most one — or none. */
+function setWorkerSlotWait(team: LiveTeam, wait: { taskId: string; reason: string } | null): void {
+  for (const w of team.board.slotWaits ?? []) {
+    if (w.role === "worker" && w.taskId !== wait?.taskId) clearSlotWait(team, w);
+  }
+  if (wait) noteSlotWait(team, { role: "worker", taskId: wait.taskId }, wait.reason);
 }
 
 /** Wait for a run to settle, in slices, honouring a stop and the budget; what it spent goes on the board. */

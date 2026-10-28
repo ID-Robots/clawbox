@@ -1680,6 +1680,8 @@ interface TeamPayload {
   status: "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
   /** A queued team's place in line (1 is next). Absent from an older server, and on any other team. */
   queuePosition?: number;
+  /** The team's runs waiting for a free slot on the box right now. Absent while none waits, and from an older server. */
+  slotWaits?: { role: string; taskId: string | null; reason: string; since: number }[];
   plannerRunId: string | null;
   tasks: TeamTaskPayload[];
   log: { ts: number; actor: { kind: string; id?: string }; type: string; message: string }[];
@@ -1749,9 +1751,19 @@ export function teamAdviceSentence(team: Pick<TeamPayload, "advice" | "singleRun
   return `Advice: ${advice.overlap}% of the files this plan's tasks name are shared with another task, so they cannot run side by side — a single coding_agent_run would likely have been cheaper. Prefer one next time for a goal like this.`;
 }
 
+/** "the planner", "the worker of t2", "the lead after t3". */
+function slotWaitName(wait: { role: string; taskId: string | null }): string {
+  if (!wait.taskId) return `the ${wait.role}`;
+  return wait.role === "lead" ? `the lead after ${wait.taskId}` : `the ${wait.role} of ${wait.taskId}`;
+}
+
 function describeTeam(team: TeamPayload, withLog: boolean): string {
   const parts: string[] = [];
-  parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${team.error ? ` — ${team.error}` : ""}`);
+  const waits = team.status === "queued" ? [] : (team.slotWaits ?? []);
+  parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${waits.length ? " — waiting for a free slot" : ""}${team.error ? ` — ${team.error}` : ""}`);
+  for (const w of waits) {
+    parts.push(`Waiting for a free slot on the box since ${new Date(w.since).toISOString()}: ${slotWaitName(w)} starts once other runs finish (${redact(firstLine(w.reason, 200))}). Nothing has failed; the ClawBox starts it by itself.`);
+  }
   parts.push(`Goal: ${redact(firstLine(team.goal, 200))}`);
   parts.push(`Folder: ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}`);
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
@@ -1797,7 +1809,7 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   }
   if (team.tasks.length === 0) {
     parts.push(team.status === "planning"
-      ? "The planner is still reading the folder and writing the plan."
+      ? (waits.some((w) => w.role === "planner") ? "The planner has not started yet: it waits for a free slot on the box." : "The planner is still reading the folder and writing the plan.")
       : team.status === "queued" ? "Not started: it waits for the team ahead of it to finish." : "No tasks were posted.");
   } else {
     parts.push("Tasks:");
@@ -1824,6 +1836,8 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   }
   if (team.status === "queued") {
     parts.push("Queued: the ClawBox starts it by itself when the team ahead of it finishes, and only the owner can cancel it. Tell the user and stop; check again later with coding_team_status.");
+  } else if ((team.status === "planning" || team.status === "working" || team.status === "reviewing") && waits.length) {
+    parts.push("Waiting for a free slot: the box is busy with other runs, and the team goes on by itself as they finish. Tell the user and stop; do not start it again — check later with coding_team_status.");
   } else if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
     parts.push("Still working. Tell the user and stop; check again later with coding_team_status.");
   } else if (team.status === "done") {
@@ -1899,6 +1913,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           team_id: t.id,
           status: t.status,
           ...(t.status === "queued" && t.queuePosition ? { queue_position: t.queuePosition } : {}),
+          ...(t.status !== "queued" && t.slotWaits?.length ? { waiting_for: `a free slot: ${t.slotWaits.map(slotWaitName).join(", ")}` } : {}),
           ...(t.pr ? { pull_request: `#${t.pr.number} ${t.pr.phase}` } : {}),
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
