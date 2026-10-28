@@ -2949,7 +2949,7 @@ describe("per-role models: bulk tasks, each run's own account, the cost by provi
       ["worker", "t2", "anthropic", "claude-opus-5-5", "worker"],
       ["reviewer", "t2", "anthropic", "claude-sonnet-5", "reviewer"],
     ]);
-    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 80_000, anthropic: 41_000 });
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 80_000, anthropic: 41_000, openai: 0 });
     expect(done.metrics.tokensUsed).toBe(121_000);
     // And the same off disk.
     const { loadBoard } = await import("@/lib/coding-team-board");
@@ -3032,6 +3032,6 @@ describe("per-role models: bulk tasks, each run's own account, the cost by provi
     expect(String(starts[0].extraBrief)).not.toContain("Team models");
     // Runs whose records name no provider keep the cast list as it was.
     expect(done.runs.every((r) => !("provider" in r) && !("model" in r))).toBe(true);
-    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0 });
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0, openai: 0 });
   });
 });

@@ -168,7 +168,7 @@ describe("tokens per provider", () => {
       { id: "run-00000007", role: "worker", taskId: "t3", tokens: 1_000 },
     );
     const m = board.teamMetrics(b);
-    expect(m.tokensByProvider).toEqual({ "clawbox-ai": 140_000, anthropic: 23_000 });
+    expect(m.tokensByProvider).toEqual({ "clawbox-ai": 140_000, anthropic: 23_000, openai: 0 });
     expect(m.tokensUsed).toBe(164_000);
     board.saveBoard(b);
     const back = board.loadBoard(b.id)!;
@@ -180,7 +180,7 @@ describe("tokens per provider", () => {
   });
 
   it("is every provider at zero on a new board", () => {
-    expect(fresh().metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0 });
+    expect(fresh().metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0, openai: 0 });
   });
 
   it("loads a board from before the field — and one hand-edited — without inventing an account", () => {
@@ -191,7 +191,7 @@ describe("tokens per provider", () => {
     delete (raw.metrics as Record<string, unknown>).tokensByProvider;
     raw.runs = [
       { id: "run-00000001", role: "planner", taskId: null, tokens: 4_000 },
-      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000, provider: "openai", model: "gpt x", modelRole: "boss" },
+      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000, provider: "mistral", model: "gpt x", modelRole: "boss" },
       { id: "run-00000003", role: "worker", taskId: "t2", tokens: 7_000, provider: "anthropic", model: 42, modelRole: "bulk" },
     ];
     fs.writeFileSync(file, JSON.stringify(raw));
@@ -201,7 +201,7 @@ describe("tokens per provider", () => {
       { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000 },
       { id: "run-00000003", role: "worker", taskId: "t2", tokens: 7_000, provider: "anthropic", modelRole: "bulk" },
     ]);
-    expect(back.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 7_000 });
+    expect(back.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 7_000, openai: 0 });
     expect(back.metrics.tokensUsed).toBe(17_000);
   });
 });

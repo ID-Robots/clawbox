@@ -44,8 +44,23 @@ import {
   ANTHROPIC_MODELS,
   CODING_PROVIDERS,
   DEFAULT_CODING_PROVIDER,
+  OPENAI_MODELS,
   resolveRunProvider,
 } from "../../src/lib/coding-provider";
+
+/**
+ * Every model a caller may name, whichever provider it belongs to. One enum
+ * for both, because a schema cannot say "this model, with that provider" —
+ * resolveRunProvider below checks the pair.
+ */
+const RUN_MODELS: readonly string[] = [...ANTHROPIC_MODELS, ...OPENAI_MODELS];
+
+/** A provider as a report names it to the owner. */
+const PROVIDER_WORDS: Readonly<Record<string, string>> = {
+  "clawbox-ai": "ClawBox AI",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+};
 // Pure too: the store's own bounds, so the output cap below is derived from
 // what the device can actually hold rather than from a round number.
 import { MAX_SECRETS } from "../../src/lib/project-secrets-shape";
@@ -587,7 +602,7 @@ function describeRun(run: RunPayload, tail: number): string {
     // Which account paid is said whenever it is not the box's own plan: the
     // owner asked for that run to go somewhere else and is entitled to see it
     // in the report, and "model claude-opus-5-5" alone does not say whose bill.
-    run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${run.provider} account` : null,
+    run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${PROVIDER_WORDS[run.provider] ?? run.provider} account` : null,
     run.model ? `model ${run.model}` : (run.requestedModel ? `model ${run.requestedModel}` : null),
     `${run.numTurns} turns`,
     run.thinkingTokens ? `${run.thinkingTokens} reasoning tokens` : null,
@@ -865,6 +880,10 @@ function runRow(run: RunPayload): Record<string, unknown> {
     task: redact(firstLine(run.task, 80)),
     started_by: run.source,
     project: runProject(run),
+    // Which account the run is on, and its model: the owner's question when a
+    // box runs on more than one ("which of these went to OpenAI?").
+    ...(run.provider ? { provider: run.provider } : {}),
+    ...(run.model || run.requestedModel ? { model: run.model || run.requestedModel } : {}),
     elapsed: run.status === "draft" || run.status === "queued" ? "not started" : elapsed(run),
     ...(run.status === "queued" && run.queued?.position ? { queue_position: run.queued.position } : {}),
     ...(run.ci ? { ci_failed: `PR #${run.ci.prNumber}: ${run.ci.checks.length || "some"} check(s)${run.ci.tests.length ? `, ${run.ci.tests.length} failing test(s)` : ""}` } : {}),
@@ -983,7 +1002,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A Claude Code session works in the background in one folder (project_id or directory); the task must stand alone. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
+    "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A coding session (Codex on openai) works in the background in one folder (project_id or directory); the task must stand alone. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -991,11 +1010,11 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
       provider: zEnumOf(
         CODING_PROVIDERS,
-        `Who pays: "clawbox-ai" (the box's plan) or "anthropic" (the owner's own, once connected). Omit for the owner's default.`,
+        `Who pays: "clawbox-ai" (the box's plan), "anthropic" or "openai" (the owner's own, once connected). Omit: default.`,
       ).optional(),
       model: zEnumOf(
-        ANTHROPIC_MODELS,
-        `For provider "anthropic" only; omit for its default. Naming a model with "clawbox-ai" is refused.`,
+        RUN_MODELS,
+        `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Naming a model with "clawbox-ai" is refused.`,
       ).optional(),
       delivery_pipeline: zBool(
         false,

@@ -1201,9 +1201,9 @@ describe("a team's model and effort per role", () => {
     const section = screen.getByTestId("coding-agent-role-models");
     expect([...section.querySelectorAll("[data-testid^='coding-agent-role-'][data-testid$='-provider']")].map((x) => x.getAttribute("data-testid")))
       .toEqual(["coding-agent-role-planner-provider", "coding-agent-role-worker-provider", "coding-agent-role-reviewer-provider", "coding-agent-role-bulk-provider"]);
-    // A server from before the connected list: both accounts the build knows are the connected ones.
+    // A server from before the connected list: every account the build knows is a connected one.
     expect(planner.value).toBe("auto");
-    expect(texts(planner)).toEqual([t("codingAgent.roleProvider.auto"), "ClawBox AI", "Anthropic"]);
+    expect(texts(planner)).toEqual([t("codingAgent.roleProvider.auto"), "ClawBox AI", "Anthropic", "OpenAI (ChatGPT)"]);
     // On the team's own account the model select keeps the two older choices.
     expect(model("planner").value).toBe("auto");
     expect(texts(model("planner"))).toEqual(["Default (cheaper model)", "Your model", "Cheaper model"]);
@@ -1422,16 +1422,20 @@ describe("a team's model and effort per role", () => {
 /**
  * The connected providers (the owner's brief, 2026-10-28): a team can run on
  * several accounts at once, so the single "Runs on" choice became a list with
- * Connect/Disconnect per account, a greyed row for an account no runner in
- * the tree can run on, and a way to Settings → Providers.
+ * Connect/Disconnect per account — OpenAI among them, on the Codex runner — and
+ * a way to Settings → Providers.
  */
 describe("the connected providers", () => {
   const ENABLE = "/setup-api/coding-agent/enable";
-  const NO_RUNNER = "Coding runs need a runner for this provider; not available yet.";
+  const OPENAI_MISSING = "Your OpenAI account is not connected. Open the Coding Agent app → Settings and save an OpenAI API key, or sign in with ChatGPT there.";
 
-  it("lists each account with Connect or Disconnect, the OpenAI row greyed with its sentence, and a way to Settings → Providers", async () => {
-    stubFetch({ enabled: true, readiness: { ...READY, providers: [{ id: "clawbox-ai", ready: true, problems: [] }, { id: "anthropic", ready: true, problems: [] }] } }, {
-      providers: ["clawbox-ai", "anthropic"],
+  it("lists each account with Connect or Disconnect, OpenAI held until it is set up, and a way to Settings → Providers", async () => {
+    stubFetch({ enabled: true, readiness: { ...READY, providers: [
+      { id: "clawbox-ai", ready: true, problems: [] },
+      { id: "anthropic", ready: true, problems: [] },
+      { id: "openai", ready: false, problems: [OPENAI_MISSING] },
+    ] } }, {
+      providers: ["clawbox-ai", "anthropic", "openai"],
       connectedProviders: ["clawbox-ai"],
     });
     const opened: unknown[] = [];
@@ -1453,12 +1457,17 @@ describe("the connected providers", () => {
       await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { providers: ["clawbox-ai", "anthropic"] } }));
       await screen.findByTestId("coding-agent-provider-anthropic-connected");
       expect(screen.getByTestId("coding-agent-provider-disconnect-clawbox-ai")).not.toBeDisabled();
-      // ChatGPT: set up in Settings, perhaps, but nothing here can run on it.
+      // OpenAI: a real account now, on the Codex runner — one row, held at
+      // Connect until its own credential is there, saying what is missing.
+      expect(screen.getAllByTestId("coding-agent-provider-openai")).toHaveLength(1);
       const openai = screen.getByTestId("coding-agent-provider-openai");
-      expect(openai).toHaveAttribute("data-runner", "none");
+      expect(openai).toHaveAttribute("data-connected", "false");
+      expect(openai).not.toHaveAttribute("data-runner");
       expect(openai).toHaveTextContent("OpenAI (ChatGPT)");
       expect(screen.getByTestId("coding-agent-provider-connect-openai")).toBeDisabled();
-      expect(screen.getByTestId("coding-agent-provider-openai-no-runner").textContent).toBe(NO_RUNNER);
+      expect(screen.getByTestId("coding-agent-provider-openai-not-set-up")).toHaveTextContent(OPENAI_MISSING);
+      // …and the card that sets it up is on the same page.
+      expect(screen.getByTestId("coding-agent-openai-card")).toBeInTheDocument();
       // Settings → Providers, through the desktop's own handoff.
       fireEvent.click(screen.getByTestId("coding-agent-providers-setup"));
       expect(opened.length).toBeGreaterThan(0);

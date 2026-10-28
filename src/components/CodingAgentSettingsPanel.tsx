@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { dispatchOpenSettingsSection, notifyCodingAgentChanged } from "@/lib/ui-events";
-import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
+import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, type CodingProvider } from "@/lib/coding-provider";
 import {
   MODEL_ROLES,
   ROLE_AUTO,
@@ -21,6 +21,7 @@ import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
 // The toggle lives in its own module now — the secrets card draws one too.
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
+import CodingAgentOpenAICard from "./CodingAgentOpenAICard";
 import CodingRunHistoryCard from "./CodingRunHistoryCard";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
 import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
@@ -89,7 +90,7 @@ export interface Readiness {
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
 
 /** Which account pays for a run — src/lib/coding-provider.ts. */
-export type CodingProviderId = "clawbox-ai" | "anthropic";
+export type CodingProviderId = CodingProvider;
 
 export interface GitHubState {
   installed: boolean;
@@ -250,11 +251,6 @@ export interface RoleModelMapEntry {
  * one decision on screen, as they are one pair in the runner: "auto", a tier
  * on the team's own account ("standard", "economy"), or "provider/model".
  */
-/** A provider Settings → Providers can set up that NO coding runner in this tree can run on yet: listed so the owner sees it, greyed. */
-const PROVIDERS_WITHOUT_RUNNER: readonly { id: string; nameKey: string }[] = [
-  { id: "openai", nameKey: "codingAgent.providerName.openai" },
-];
-
 /** What a role's row says the role IS, where its name alone does not: the planner is the lead too, and bulk work needs its examples. */
 const ROLE_HINT_KEY: Partial<Record<ModelRole, string>> = {
   planner: "codingAgent.roleModelsRoleHint.planner",
@@ -914,22 +910,6 @@ export default function CodingAgentSettingsPanel(_props: {
                   </li>
                 );
               })}
-              {/* Set up in Settings → Providers, perhaps, but nothing here can
-                  run a coding run on it: the runner is Claude Code, which
-                  speaks the Anthropic API only. Listed greyed, so the owner
-                  is not left wondering where ChatGPT went. */}
-              {PROVIDERS_WITHOUT_RUNNER.map(({ id, nameKey }) => (
-                <li key={id} className="flex flex-wrap items-center gap-x-2 gap-y-1 opacity-60" data-testid={`coding-agent-provider-${id}`} data-connected="false" data-runner="none">
-                  <span className="text-xs text-[var(--text-primary)] min-w-[7rem]">{t(nameKey)}</span>
-                  <span className="ml-auto" />
-                  <button type="button" disabled data-testid={`coding-agent-provider-connect-${id}`} className={BTN_SECONDARY}>
-                    {t("codingAgent.providers.connect")}
-                  </button>
-                  <p className="w-full text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid={`coding-agent-provider-${id}-no-runner`}>
-                    {t("codingAgent.providers.noRunner")}
-                  </p>
-                </li>
-              ))}
             </ul>
             <button
               type="button"
@@ -1672,6 +1652,13 @@ export default function CodingAgentSettingsPanel(_props: {
           leave the owner nothing to press. */}
       {(status?.providers?.length ?? 0) > 1 && (
         <CodingAgentAnthropicCard onChanged={() => void refreshStatus()} />
+      )}
+
+      {/* The owner's own OpenAI account — an API key or a ChatGPT sign-in —
+          for runs on OpenAI, which run on the Codex CLI. Drawn on a server
+          that offers the provider at all, for the Anthropic card's reason. */}
+      {(status?.providers ?? []).includes("openai") && (
+        <CodingAgentOpenAICard onChanged={() => void refreshStatus()} />
       )}
 
       {/* GitHub. gh keeps the token and lends it to git; ClawBox never
