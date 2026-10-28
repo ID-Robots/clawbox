@@ -1,26 +1,34 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { normalizeAllowedModelIds } from "@/lib/clawbox-ai-models";
+import {
+  normalizeAllowedModelIds,
+  normalizeClawboxAiPlanTier,
+  normalizeClawboxAiTier,
+  type ClawboxAiPlanTier,
+} from "@/lib/clawbox-ai-models";
 import { monotonicNow } from "@/lib/visible-interval";
 
 // Lightweight client hook for "is the device signed in to a ClawBox AI
 // account, and what does that account entitle?". Backed by
 // /setup-api/ai-models/status.
 //
-// `loggedIn` and `tier` reflect the user's *account-level* state — i.e.
-// the tier on the stored claw_ token regardless of which provider is
-// driving the current chat. A Max subscriber chatting via OpenAI is
-// still loggedIn=true with tier="pro" so ClawKeep + Remote Desktop
-// stay unlocked. The chat-header *badge* uses a separate endpoint
-// field (`clawaiTier`) that reflects the active chat provider — that
-// goes blank when chatting via OpenAI, which is the right behaviour
-// for the badge.
+// `loggedIn`, `plan` and `tier` reflect the user's *account-level* state —
+// i.e. the PLAN the stored claw_ token's account pays for, regardless of
+// which provider is driving the current chat. A Max subscriber chatting via
+// OpenAI is still loggedIn=true with tier="pro" so ClawKeep + Remote Desktop
+// stay unlocked. The chat-header *badge* uses a separate endpoint field
+// (`clawaiTier`) that reflects the active chat provider — that goes blank
+// when chatting via OpenAI, which is the right behaviour for the badge.
 //
-// Free users (tier === null after auto-tier device-pair) are still
-// considered logged in — they have a paired token, just not a paid
-// badge. Callers that need to gate on a paid plan should check
-// `tier !== null` themselves.
+// The plan comes from the route's `clawaiPlan` (the portal's plan verdict),
+// NEVER from its model tiers: a Free sign-in stamps the box's model tier
+// "flash", the same as the Pro plan, and reading that stamp as the plan is
+// what showed Free accounts the "Welcome to ClawBox Pro" celebration.
+//
+// Free users (tier === null) are still considered logged in — they have a
+// paired token, just not a paid plan. Callers that need to gate on a paid
+// plan should check `tier !== null` themselves.
 //
 // Polls every 30s by default so the gate flips quickly after the user
 // signs in on the portal in another tab. Callers that need faster
@@ -33,7 +41,20 @@ export type ClawboxAiTier = "flash" | "pro" | string;
 
 export interface ClawboxLoginState {
   loggedIn: boolean;
+  /**
+   * The PAID plan the account is on — `"flash"` is the plan marketed as Pro,
+   * `"pro"` the one marketed as Max (the names are off by one) — or null for
+   * Free, for no account, and for a plan that is not known yet. Fails closed:
+   * nothing paid is unlocked on a plan nobody has confirmed.
+   */
   tier: ClawboxAiTier | null;
+  /**
+   * The same plan with "Free" and "not known" kept apart: `"free"`, `"flash"`
+   * (Pro), `"pro"` (Max), or null when the portal has not answered for this
+   * account and no answer is on record. For callers that announce a CHANGE of
+   * plan, to whom "we cannot tell" must be no change at all.
+   */
+  plan: ClawboxAiPlanTier | null;
   /**
    * Model ids the portal says this account may run, or null when the question
    * has not been answered (no token, portal unreachable, poll failed, older
@@ -54,6 +75,10 @@ interface AiStatusResponse {
   // for chat. Falls back to `clawaiTier` when missing so older
   // callers (and pre-rollout responses) keep working.
   clawaiAccountTier?: ClawboxAiTier | null;
+  // The PLAN ("free" / "flash" = Pro / "pro" = Max, null = not known). The
+  // two tiers above are MODEL defaults and only stand in for the plan when
+  // this is absent — a pre-rollout server.
+  clawaiPlan?: string | null;
   // The portal's entitlement list for the paired token. Absent on a
   // pre-rollout server, which reads as "not answered", not as "empty".
   clawaiAllowedModels?: string[] | null;
@@ -89,7 +114,13 @@ function sameIds(a: string[] | null, b: string[] | null): boolean {
 
 /** One answer of the status route: the facts read off a 2xx body, or "I don't know right now". */
 type Answer =
-  | { ok: true; loggedIn: boolean; tier: ClawboxAiTier | null; allowedModels: string[] | null }
+  | {
+      ok: true;
+      loggedIn: boolean;
+      tier: ClawboxAiTier | null;
+      plan: ClawboxAiPlanTier | null;
+      allowedModels: string[] | null;
+    }
   | { ok: false };
 
 interface Subscriber {
@@ -165,13 +196,20 @@ function shortestInterval(): number {
 }
 
 function readAnswer(data: AiStatusResponse): Answer {
+  const planAnswered = data.clawaiPlan !== undefined;
+  const plan = planAnswered ? normalizeClawboxAiPlanTier(data.clawaiPlan) : null;
   return {
     ok: true,
-    // Account-level tier first; fall back to the badge tier for
-    // older /status responses that didn't yet emit
-    // `clawaiAccountTier` (zero-downtime rollout — old client +
-    // new server, or vice versa, still resolves a sensible value).
-    tier: data.clawaiAccountTier ?? data.clawaiTier ?? null,
+    // The plan's paid tier: "free" and "not known" are both null here.
+    // A pre-rollout /status emits no `clawaiPlan`; there the account tier,
+    // then the badge tier, is the only answer there is (zero-downtime
+    // rollout — old client + new server, or vice versa, still resolves a
+    // sensible value), and `plan` stays "not known" so nothing is announced
+    // off a model tier.
+    tier: planAnswered
+      ? normalizeClawboxAiTier(plan)
+      : (data.clawaiAccountTier ?? data.clawaiTier ?? null),
+    plan,
     // `loggedIn` means "device has a clawai profile configured"
     // independent of which provider is currently active for chat.
     // Older responses without `clawaiConfigured` fall back to the
@@ -271,6 +309,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS, enable
   const [state, setState] = useState<ClawboxLoginState>({
     loggedIn: false,
     tier: null,
+    plan: null,
     allowedModels: null,
     loading: true,
   });
@@ -294,6 +333,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS, enable
           ? {
               loggedIn: prev.loggedIn,
               tier: prev.tier,
+              plan: prev.plan,
               allowedModels: prev.allowedModels,
               loading: false,
             }
@@ -309,7 +349,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS, enable
           preserveOnTransient();
           return;
         }
-        const { loggedIn, tier, allowedModels } = answer;
+        const { loggedIn, tier, plan, allowedModels } = answer;
         // Keep the previous array when the poll brought the same ids back.
         // A fresh array every 30 s would be a new identity for every consumer
         // that memoises on it — see the same-ref rule in preserveOnTransient.
@@ -317,9 +357,10 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS, enable
           !prev.loading
             && prev.loggedIn === loggedIn
             && prev.tier === tier
+            && prev.plan === plan
             && sameIds(prev.allowedModels, allowedModels)
             ? prev
-            : { loggedIn, tier, allowedModels, loading: false }
+            : { loggedIn, tier, plan, allowedModels, loading: false }
         ));
       },
     });

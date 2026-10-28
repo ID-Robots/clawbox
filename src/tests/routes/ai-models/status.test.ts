@@ -878,6 +878,124 @@ describe("/setup-api/ai-models/status", () => {
     });
   });
 
+  // The PLAN the account pays for, apart from the MODEL tier the box runs. A
+  // Free sign-in stamps `clawai_tier: "flash"` — Free and Pro run the same
+  // model — and reading that stamp as the plan greeted Free accounts with the
+  // "Welcome to ClawBox Pro" celebration and opened Pro-only screens to them.
+  describe("clawaiPlan — the plan, never the model tier", () => {
+    const clawaiConfig = {
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      models: { providers: { deepseek: { apiKey: "claw_plan123" } } },
+    };
+    /** Key-keyed store, so the plan and the model stamp cannot stand in for each other. */
+    function store(values: Record<string, unknown>) {
+      mockGetConfigValue.mockImplementation(async (key: string) => (values[key] ?? null) as never);
+    }
+
+    it("says free for a Free account the portal confirms, whatever the box's model stamp", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({ clawai_tier: "flash" });
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: "flash", allowedModels: ["deepseek-v4-flash"] }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiPlan).toBe("free");
+    });
+
+    it("says free from the plan on record when the portal cannot answer for a Free sign-in", async () => {
+      // The reported box: signed in Free, the model stamp "flash", the portal
+      // out of reach on this poll — which used to answer the stamp as the plan.
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({ clawai_tier: "flash", clawai_plan_tier: "free" });
+      fetchSpy.mockRejectedValue(new Error("ETIMEDOUT"));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiPlan).toBe("free");
+    });
+
+    it("says not known — never Pro — when the portal cannot answer and no plan is on record", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({ clawai_tier: "flash" });
+      fetchSpy.mockResolvedValue(new Response("upstream down", { status: 503 }));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiPlan).toBeNull();
+    });
+
+    it("reads the plan on record when the portal refuses the credential", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({ clawai_tier: "flash", clawai_plan_tier: "free" });
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token" } }),
+        { status: 401 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiPlan).toBe("free");
+    });
+
+    it("says flash for a Pro account and pro for a Max account", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({});
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "pro" }), { status: 200 }));
+      expect((await (await GET()).json()).clawaiPlan).toBe("flash");
+
+      resetPortalTierCache();
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "max" }), { status: 200 }));
+      expect((await (await GET()).json()).clawaiPlan).toBe("pro");
+    });
+
+    it("says Max for a Max subscriber whose box runs Flash", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({ clawai_tier: "flash" });
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "max", deviceTier: "flash" }), { status: 200 }));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiPlan).toBe("pro");
+    });
+
+    it("keeps the plan on record when the portal answers in words this build cannot read", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfig as never);
+      store({ clawai_tier: "flash", clawai_plan_tier: "pro" });
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "enterprise-2027" }), { status: 200 }));
+
+      expect((await (await GET()).json()).clawaiPlan).toBe("pro");
+    });
+
+    it("says free for a box with no ClawBox AI account at all", async () => {
+      mockReadConfig.mockResolvedValue({
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "token" } } },
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-4" } } },
+      } as never);
+      store({ clawai_tier: "flash", clawai_plan_tier: "pro" });
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiConfigured).toBe(false);
+      expect(body.clawaiPlan).toBe("free");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("says not known — never Free — when the status itself cannot be read", async () => {
+      mockReadConfig.mockRejectedValue(new Error("EACCES"));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiPlan).toBeNull();
+    });
+  });
+
   describe("clawai account tier vs active provider", () => {
     it("returns clawaiAccountTier=pro alongside clawaiTier=null when chatting via OpenAI but a Max clawai profile is configured", async () => {
       // The bug we're fixing: a Max subscriber switches the chat
