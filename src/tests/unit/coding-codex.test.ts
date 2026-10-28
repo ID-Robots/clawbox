@@ -121,10 +121,14 @@ describe("effort", () => {
     expect(codexReasoningEffort("low", "gpt-5.2")).toBe("low");
   });
 
-  it("gives ultracode the model's top level — its thinking half; Codex has no Workflow tool", () => {
-    expect(codexReasoningEffort("ultracode", "gpt-6-astra")).toBe("ultra");
-    expect(codexReasoningEffort("ultracode", "gpt-5.6-luna")).toBe("max");
-    expect(codexReasoningEffort("ultracode", "gpt-5.5")).toBe("xhigh");
+  it("gives ultracode its thinking half, xhigh — Codex has no Workflow tool for the rest", () => {
+    // Ultracode is xhigh plus orchestration (EFFORT_LEVELS); it must never put a
+    // Codex run on a costlier tier than any Claude run's level reaches.
+    expect(codexReasoningEffort("ultracode", "gpt-6-astra")).toBe("xhigh");
+    expect(codexReasoningEffort("ultracode", "gpt-5.6-luna")).toBe("xhigh");
+    expect(codexReasoningEffort("ultracode", "gpt-5.2")).toBe("xhigh");
+    // And Codex's own top word is not a box level to pass through.
+    expect(codexReasoningEffort("ultra", "gpt-6-astra")).toBe("xhigh");
   });
 
   it("maps every box level to something every offered model accepts", () => {

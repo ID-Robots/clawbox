@@ -40,9 +40,13 @@ export function livePreviewCommand(run: {
   if (run.live && run.transcriptPath) {
     return `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
   }
-  if (run.sessionId && run.directory && SESSION_ID.test(run.sessionId) && run.provider === "openai") {
+  if (run.provider === "openai") {
     // A Codex thread, in the coding agent's own Codex home (never ~/.codex),
-    // continued with the CLI install.sh puts in ~/.local/bin.
+    // continued with the CLI install.sh puts in ~/.local/bin — once the run
+    // has settled. A live run is still writing that thread, and a second
+    // session on it would interleave turns with the run's own. Codex keeps no
+    // transcript a terminal could tail, so a live one has nothing to open.
+    if (run.live || !run.sessionId || !run.directory || !SESSION_ID.test(run.sessionId)) return null;
     return `cd ${quoted(run.directory)} && CODEX_HOME=${quoted(CODEX_HOME)} "$HOME/${CODEX_BINARY_PATH}" resume ${quoted(run.sessionId)}`;
   }
   if (run.sessionId && run.directory && SESSION_ID.test(run.sessionId)) {
