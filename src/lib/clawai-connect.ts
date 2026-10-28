@@ -30,6 +30,15 @@ export interface ClawAiConnectSession {
   verificationUrl?: string;
   error?: string | null;
   /**
+   * The configure's own `code` for a refusal the owner can act on (today the
+   * ClawBox AI credential slot: `clawai_slot_owner_key`, `clawai_slot_conflict`,
+   * `clawai_slot_backup_failed`), and the profile it names. Carried beside
+   * `error` so the panel can say it in the owner's language and offer the
+   * removal, instead of only the English sentence.
+   */
+  errorCode?: string | null;
+  errorProfileId?: string | null;
+  /**
    * What the configure answered BESIDE success: a save that landed and could
    * not do all of it (today: the session sweep the doctor stop defers). It
    * travels on the session for the same reason `error` does — the configure

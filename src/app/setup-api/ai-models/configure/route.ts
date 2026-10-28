@@ -52,6 +52,17 @@ import {
   type GatewayAuthProfileRead,
   type GatewayOAuthBundle,
 } from "@/lib/openclaw-auth-store";
+import {
+  backupClawaiSlot,
+  CLAWAI_PROFILE_ID,
+  clearClawaiSlotFailures,
+  describeClawaiSlot,
+  inspectClawaiSlot,
+  slotBlocksSignIn,
+  slotNeedsBackup,
+  slotNeedsLogout,
+  type ClawaiSlot,
+} from "@/lib/clawai-profile-slot";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -552,9 +563,10 @@ function pasteWouldChangeNothing(
 async function pasteAuthApiKey(provider: string, profileId: string, key: string): Promise<void> {
   // The sign-in guard is NOT here, deliberately: see `assertNoSignInAt`. By
   // the time this runs the request has already written its own
-  // `auth.profiles.<key>` metadata, and on the ClawBox AI lane that metadata
+  // `auth.profiles.<key>` metadata, and on a subscription save that metadata
   // says `oauth` — a guard reading the box at this point would refuse the very
-  // save that wrote it. It is asked once, of the store as it was BEFORE this
+  // save that wrote it. (Not on ClawBox AI's: its slot has its own guard,
+  // `makeRoomForClawboxAi`, asked again at paste time for this reason.) It is asked once, of the store as it was BEFORE this
   // request touched anything.
   //
   // NOT PASTED when the paste would change nothing (TASK-1535): a Settings save
@@ -572,6 +584,133 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
   // The paste writes openclaw.json itself (the profile metadata), so what this
   // request's transaction has staged before it lands before it, in order.
   await flushConfigWrites();
+  try {
+    await pasteThroughCli(provider, profileId, key);
+  } catch (err) {
+    // The pinned core refuses an API key over a profile of another type or
+    // provider at the id — in its own words, which the generic 500 below used
+    // to swallow into "check your credentials" over a perfectly good key.
+    if (err instanceof Error && CORE_PROFILE_CONFLICT.test(err.message)) {
+      throw new AuthProfileConflictError(profileId, provider);
+    }
+    throw err;
+  }
+}
+
+/** The pinned core's refusal of an API key over another kind of profile at the id (`saveModelProviderApiKey`). */
+const CORE_PROFILE_CONFLICT = /belongs to another sign-in/i;
+
+/** The core refused to store an API key: the profile at the id is another sign-in. */
+class AuthProfileConflictError extends Error {
+  constructor(readonly profileId: string, readonly provider: string) {
+    super(`auth profile ${profileId} belongs to another sign-in`);
+    this.name = "AuthProfileConflictError";
+  }
+}
+
+/** A ClawBox AI sign-in would overwrite the owner's own DeepSeek key, which may still work. */
+class ClawaiSlotHeldError extends Error {
+  constructor(readonly slot: ClawaiSlot) {
+    super(`${CLAWAI_PROFILE_ID} holds ${describeClawaiSlot(slot)}`);
+    this.name = "ClawaiSlotHeldError";
+  }
+}
+
+/** The profile in the ClawBox AI slot could not be backed up, so it was not replaced. */
+class ClawaiSlotBackupError extends Error {
+  constructor() {
+    super(`${CLAWAI_PROFILE_ID} could not be backed up before replacing it`);
+    this.name = "ClawaiSlotBackupError";
+  }
+}
+
+/**
+ * Remove a saved auth profile with core's own verb. Unpinned, like the paste
+ * and the guard (see `pasteAuthApiKey`): all three let the core pick the
+ * agent, so all three address one store. The CLI tells a running gateway; it
+ * writes openclaw.json too (`cliWritesConfig`), so what this request staged
+ * lands first.
+ */
+async function logoutAuthProfile(profileId: string): Promise<void> {
+  await flushConfigWrites();
+  await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: 60_000 });
+}
+
+/**
+ * Make the ClawBox AI slot ready for the paste that follows (see
+ * src/lib/clawai-profile-slot.ts for the rule).
+ *
+ * `ownerSignIn` is the owner signing in to ClawBox AI — a device login or a
+ * pasted portal token — with what the guard found before this request wrote
+ * anything (null when it could not look). Then a stale profile is backed up
+ * and logged out, the owner's key is replaced only when the guard heard
+ * DeepSeek (or the gateway) refuse it, and core's cooldown for the slot is
+ * cleared so the first chat after the sign-in is not skipped. `false` is
+ * every other pass (the fallback provisioning a save of another provider
+ * runs): it replaces only ClawBox's own token written in the wrong shape, and
+ * answers `proceed: false` for anything else — the owner's key is never
+ * overwritten by a save that was not about it.
+ *
+ * Asked AGAIN here, at paste time, because what the guard saw is not always
+ * what is there now: a sign-in's own credential migration can import a
+ * profile into the slot after the guard looked.
+ */
+async function makeRoomForClawboxAi(
+  token: string,
+  knownTokens: readonly string[],
+  ownerSignIn: { checked: ClawaiSlot | null } | false,
+): Promise<{ proceed: true; warning?: string } | { proceed: false; slot: ClawaiSlot }> {
+  const found = await inspectClawaiSlot({ token, knownTokens });
+  let slot = found;
+  if (ownerSignIn === false) {
+    if (found.kind === "owner-key" || (found.kind === "stale" && !found.ours)) return { proceed: false, slot: found };
+  } else if (found.kind === "owner-key") {
+    const checked = ownerSignIn.checked;
+    if (checked?.kind !== "owner-key" || checked.rejected !== true) throw new ClawaiSlotHeldError(found);
+    slot = checked;
+  }
+  const steps: string[] = [];
+  if (slotNeedsBackup(slot)) {
+    const backup = backupClawaiSlot();
+    if (backup.ok) steps.push(`backed up as ${path.basename(backup.file)}`);
+    // Only a profile that is GONE since the look — no row, no store — may be
+    // replaced without a copy: there is nothing left to keep. A store that
+    // could not be read at this moment (locked, busy) still holds it, and the
+    // logout and the paste below would destroy what no copy was taken of.
+    else if (backup.reason !== "absent" && backup.reason !== "no-store") throw new ClawaiSlotBackupError();
+  }
+  if (slotNeedsLogout(slot)) {
+    try {
+      await logoutAuthProfile(CLAWAI_PROFILE_ID);
+      steps.push("removed with `models auth logout`");
+    } catch (err) {
+      // Not the end of it: the paste below either lands or is refused in the
+      // core's own words, which the handler answers as a conflict.
+      console.warn(
+        `[configure] could not log out ${CLAWAI_PROFILE_ID} before storing the ClawBox AI token:`,
+        err instanceof Error ? logSafe(err.message) : err,
+      );
+    }
+  }
+  if (ownerSignIn !== false || steps.length > 0) {
+    const cleared = clearClawaiSlotFailures();
+    if (cleared.ok) steps.push("its cooldown and auth failures cleared");
+    else if (cleared.reason !== "no-store") console.warn(`[configure] could not clear the gateway's auth failures for ${CLAWAI_PROFILE_ID}`);
+  }
+  if (slot.kind !== "free" && slot.kind !== "same" && steps.length > 0) {
+    console.log(`[configure] ClawBox AI: ${CLAWAI_PROFILE_ID} held ${describeClawaiSlot(slot)}; ${steps.join(", ")}`);
+  }
+  return slot.kind === "owner-key"
+    ? {
+        proceed: true,
+        warning: "Your own DeepSeek API key, saved in the slot ClawBox AI uses, was refused by DeepSeek, so ClawBox AI"
+          + " replaced it. A copy of it is kept on this device.",
+      }
+    : { proceed: true };
+}
+
+/** The paste itself: the key rides stdin, never argv. */
+async function pasteThroughCli(provider: string, profileId: string, key: string): Promise<void> {
   await spawnOpenclawCli(
     [
       "models", "auth", "paste-api-key",
@@ -613,8 +752,10 @@ class SignInWouldBeLostError extends Error {
 /**
  * Refuse a save whose API key would delete a subscription sign-in.
  *
- * `models auth paste-api-key` REPLACES whatever sits at `--profile-id`; there
- * is no merge and no refusal of its own. The CLI's default id is
+ * `models auth paste-api-key` REPLACES an API key at `--profile-id`. Over any
+ * other kind of profile the pinned core now refuses on its own ("belongs to
+ * another sign-in", answered as `AuthProfileConflictError`); cores before it
+ * replaced that too, with no merge. The CLI's default id is
  * `<provider>:manual`, chosen so a pasted key never lands on another
  * credential — ClawBox overrides it to `<provider>:default`, and that override
  * is what makes a collision possible at all. Measured with `openclaw models
@@ -637,7 +778,7 @@ class SignInWouldBeLostError extends Error {
  * have no sign-in lane at all.
  *
  * ASKED ONCE, BEFORE ANY WRITE. Later in the same request the save writes
- * `auth.profiles.<key>` itself — `{mode: "oauth"}` on the ClawBox AI lane —
+ * `auth.profiles.<key>` itself — `{mode: "oauth"}` on a subscription save —
  * so a guard consulted at paste time would refuse the save that wrote it.
  *
  * REFUSED rather than written under a second id. `applyAuthProfileConfig` does
@@ -1122,6 +1263,20 @@ function clawboxProxyHosts(deepseekProvider: OpenAiProviderConfig | undefined): 
       .map((url) => (typeof url === "string" && url.trim() ? hostOfUrl(url.trim()) : null))
       .filter((host): host is string => host !== null),
   );
+}
+
+/**
+ * Where the owner's own DeepSeek key is used, when the deepseek entry names an
+ * endpoint of the owner's: its `baseUrl`, unless that is a ClawBox AI proxy
+ * host (then null, and the key is asked about at DeepSeek's own API). An
+ * owner who points the provider at an endpoint of their own is asked there,
+ * so a key DeepSeek itself would refuse is not mistaken for a dead one.
+ */
+function ownerDeepseekBaseUrl(config: OpenClawConfig | null): string | null {
+  const entry = config?.models?.providers?.[CLAWBOX_AI_PROVIDER];
+  const baseUrl = typeof entry?.baseUrl === "string" ? entry.baseUrl.trim() : "";
+  const host = baseUrl ? hostOfUrl(baseUrl) : null;
+  return host && !clawboxProxyHosts(entry).has(host) ? baseUrl : null;
 }
 
 /**
@@ -1649,6 +1804,14 @@ async function configureClawboxAi(
      * the box already held.
      */
     credentialChanged?: boolean;
+    /**
+     * Set when the OWNER is signing in to ClawBox AI (the device login, a
+     * pasted portal token): what the handler's guard found in the slot before
+     * anything was written, and where a sentence about a replaced key goes.
+     * Absent on the fallback pass, which never replaces the owner's key — see
+     * `makeRoomForClawboxAi`.
+     */
+    ownerSignIn?: { checked: ClawaiSlot | null; knownTokens: readonly string[]; warn: (sentence: string) => void };
   },
 ) {
   const clawboxAiToken = await getConfiguredClawboxAiToken(preferredToken);
@@ -1657,6 +1820,26 @@ async function configureClawboxAi(
   }
 
   const credentialChanged = extra?.credentialChanged === true;
+
+  // The slot first (src/lib/clawai-profile-slot.ts): the paste below is
+  // refused by the core over a stale sign-in there, and must never overwrite
+  // the owner's own DeepSeek key. Not on the Hermes-only edition, which has
+  // no OpenClaw store.
+  if (!openclawIsAbsent()) {
+    const owner = extra?.ownerSignIn;
+    const room = await makeRoomForClawboxAi(
+      clawboxAiToken,
+      owner ? owner.knownTokens : [clawboxAiToken],
+      owner ? { checked: owner.checked } : false,
+    );
+    if (!room.proceed) {
+      console.warn(
+        `[AI Config] Left ClawBox AI unconfigured on this pass: ${CLAWAI_PROFILE_ID} holds ${describeClawaiSlot(room.slot)}, which only the owner may replace`,
+      );
+      return false;
+    }
+    if (room.warning) owner?.warn(room.warning);
+  }
 
   // ClawBox AI uses the portal token generated by the user; stored through
   // the CLI so the credential lands in the auth store of the running
@@ -2649,8 +2832,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // Skipped where no sign-in lane exists: the two local providers have none,
     // OpenRouter is deliberately absent from OAUTH_PROVIDERS (see the
     // openrouter branch below — every save that reaches it is key-based), and
-    // the ClawBox AI profile is written by this route alone. It is one CLI cold
-    // start, and this is the wizard's critical path.
+    // the ClawBox AI slot has a guard of its own just below, which reads the
+    // store rather than paying a CLI cold start. That one is the wizard's
+    // critical path.
     //
     // xAI is skipped too, and NOT because it has no sign-in: ClawBox offers
     // one (the panel's Subscription tab, through `/setup-api/ai-models/xai-
@@ -2674,6 +2858,34 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     ) {
       await assertNoSignInAt(config.profileKey);
     }
+
+    // ClawBox AI's own guard, at the same point and for the same reason: what
+    // holds its slot is asked BEFORE anything is written (src/lib/clawai-
+    // profile-slot.ts). A stale sign-in there is replaced at paste time; the
+    // owner's own DeepSeek key is replaced only when DeepSeek refuses it — and
+    // DeepSeek is asked HERE, where a refusal still leaves no trail. One
+    // sqlite read on every other box; the request to DeepSeek only when the
+    // slot holds a key that is not ClawBox AI's.
+    const clawaiKnownTokens = [previousClawaiToken, clawboxAiToken].filter(Boolean);
+    let clawaiSlotChecked: ClawaiSlot | null = null;
+    if (isClawAI && !openclawIsAbsent()) {
+      clawaiSlotChecked = await inspectClawaiSlot({
+        token: clawboxAiToken,
+        knownTokens: clawaiKnownTokens,
+        checkOwnerKey: true,
+        ownerKeyBaseUrl: ownerDeepseekBaseUrl(configBeforeSave),
+      });
+      if (slotBlocksSignIn(clawaiSlotChecked)) throw new ClawaiSlotHeldError(clawaiSlotChecked);
+    }
+    // A sentence for the answer when the sign-in replaced the owner's key.
+    let clawaiSlotWarning: string | undefined;
+    const clawaiOwnerSignIn = {
+      checked: clawaiSlotChecked,
+      knownTokens: clawaiKnownTokens,
+      warn: (sentence: string) => {
+        clawaiSlotWarning = sentence;
+      },
+    };
 
     // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
     // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
@@ -3315,6 +3527,12 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // "ollama-local" / "llamacpp-local" sentinels stop authenticating.
         markLocalAiTokenMigrated();
       }
+      if (isClawAI && !openclawIsAbsent()) {
+        // A pasted portal token is the owner signing in too: the slot is made
+        // ready here, ahead of the paste that would otherwise meet it first.
+        const room = await makeRoomForClawboxAi(apiKeyValue, clawaiKnownTokens, { checked: clawaiSlotChecked });
+        if (room.proceed && room.warning) clawaiOwnerSignIn.warn(room.warning);
+      }
       await pasteAuthApiKey(ocProvider, config.profileKey, apiKeyValue);
     } else {
       const authProfiles = await readAuthProfiles();
@@ -3322,7 +3540,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // doctor call: the gate compares `expires`, and a second `Date.now()`
       // would make every sign-in look like one the store did not take.
       let oauthBundle: GatewayOAuthBundle | undefined;
-      if (authMode === "subscription") {
+      // NOT for ClawBox AI. Its device login rides this branch for the doctor
+      // stop and the deferred sweep, but its credential is an API key — the
+      // portal token, pasted further down. Written here as an OAuth bundle it
+      // was imported by the migration into an empty slot as an `oauth`
+      // profile, over which the pinned core then refused that very paste
+      // ("belongs to another sign-in"), and every box that ever signed in this
+      // way kept the stale sign-in (src/lib/clawai-profile-slot.ts).
+      if (authMode === "subscription" && !isClawAI) {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
         // `id` is the OAuth id_token (a JWT). The Codex app-server authenticates
@@ -3659,7 +3884,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         `auth.profiles.${config.profileKey}`,
         // Subscription → "oauth"; every key-based provider → "api_key". The old
         // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
-        JSON.stringify(authMode === "subscription"
+        // ClawBox AI's device login is a "subscription" save over an API key:
+        // its metadata says what the store holds.
+        JSON.stringify(authMode === "subscription" && !isClawAI
           ? { provider: ocProvider, mode: "oauth" }
           : { provider: ocProvider, mode: "api_key" }),
         "--json",
@@ -4178,6 +4405,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           // re-link cannot be a credential change for one of them and not the
           // other.
           credentialChanged: clawboxAiToken !== previousClawaiToken,
+          ownerSignIn: clawaiOwnerSignIn,
         },
       );
       if (!clawboxAiConfigured) {
@@ -4706,7 +4934,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const sessionSweepWarning = sessionSweepFailed
       ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
       : undefined;
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, sessionSweepWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, sessionSweepWarning, clawaiSlotWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({
@@ -4747,6 +4975,66 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             // --help on 2026.8.1).
             + `openclaw models auth logout ${err.profileId}`
             + " — then paste the key.",
+          code: "sign_in_would_be_lost",
+          profileId: err.profileId,
+        },
+        { status: 409 },
+      );
+    }
+    // The ClawBox AI slot holds the owner's own DeepSeek key, and DeepSeek did
+    // not refuse it: nothing was written, and the owner decides. The sentence
+    // names the slot and where it is removed; the code is what the panel
+    // translates and hangs the removal on.
+    if (err instanceof ClawaiSlotHeldError) {
+      console.warn(`[configure] refused a ClawBox AI sign-in: ${logSafe(err.message)}`);
+      return NextResponse.json(
+        {
+          error: "This box already has your own DeepSeek API key saved in the credential slot ClawBox AI signs in to"
+            + ` (${CLAWAI_PROFILE_ID}), and ClawBox does not replace a key you saved while it may still work.`
+            + " To use ClawBox AI instead, remove the saved DeepSeek key in Settings → Providers → ClawBox AI,"
+            + " then sign in again.",
+          code: "clawai_slot_owner_key",
+          profileId: CLAWAI_PROFILE_ID,
+        },
+        { status: 409 },
+      );
+    }
+    if (err instanceof ClawaiSlotBackupError) {
+      console.error(`[configure] ${err.message}; the sign-in was not stored`);
+      return NextResponse.json(
+        {
+          error: `ClawBox could not back up the sign-in saved in the ClawBox AI credential slot (${CLAWAI_PROFILE_ID}),`
+            + " so it did not replace it. Try again; if it fails again, remove that saved sign-in in"
+            + " Settings → Providers → ClawBox AI and sign in again.",
+          code: "clawai_slot_backup_failed",
+          profileId: CLAWAI_PROFILE_ID,
+        },
+        { status: 500 },
+      );
+    }
+    // The core refused the paste over another kind of profile at the id. For
+    // ClawBox AI that is what the slot handling exists to prevent, so reaching
+    // it means the slot could not be read or cleared; for any other provider
+    // it is the sign-in guard's own case, met at the paste instead of before.
+    if (err instanceof AuthProfileConflictError) {
+      console.warn(`[configure] the core refused an API key over another sign-in at ${err.profileId}`);
+      if (err.profileId === CLAWAI_PROFILE_ID) {
+        return NextResponse.json(
+          {
+            error: `Another saved sign-in holds the credential slot ClawBox AI signs in to (${CLAWAI_PROFILE_ID}),`
+              + " and OpenClaw would not replace it. Remove that saved sign-in in Settings → Providers → ClawBox AI,"
+              + " then sign in again.",
+            code: "clawai_slot_conflict",
+            profileId: err.profileId,
+          },
+          { status: 409 },
+        );
+      }
+      return NextResponse.json(
+        {
+          error: "This box is signed in to that provider, and the sign-in is stored in the same credential slot"
+            + ` (${err.profileId}). OpenClaw will not replace it with an API key. Remove the sign-in first — in the`
+            + ` Terminal: openclaw models auth logout ${err.profileId} — then paste the key.`,
           code: "sign_in_would_be_lost",
           profileId: err.profileId,
         },

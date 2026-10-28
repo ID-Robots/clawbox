@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import ClawaiSlotNotice, { CLAWAI_SLOT_ERROR_KEYS } from "./ClawaiSlotNotice";
 import DeviceCodeCard from "./DeviceCodeCard";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
@@ -87,6 +88,8 @@ export default function PaidFeatureGate({
   const { t } = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The sign-in was refused over the ClawBox AI credential slot: the notice offers its removal. */
+  const [slotRefusal, setSlotRefusal] = useState(0);
   /**
    * The handoff finished and the poll has not caught up yet.
    *
@@ -106,13 +109,22 @@ export default function PaidFeatureGate({
     // With nothing stored it stays Pro, not the panel's unpaired Free default:
     // this card connects someone to a feature only a paid plan unlocks.
     getTier: () => readStoredUiTier(),
-    onStart: () => setError(null),
+    onStart: () => {
+      setError(null);
+      setSlotRefusal(0);
+    },
     onBusyChange: setBusy,
     onComplete: () => {
       clawaiLogin.reset();
       setConnected(true);
     },
-    onError: setError,
+    // A refusal the box can name is said in the owner's language, with the
+    // removal under it — the same as on the Providers panel.
+    onError: (message, detail) => {
+      const key = detail?.code ? CLAWAI_SLOT_ERROR_KEYS[detail.code] : undefined;
+      setError(key ? t(key, { profileId: detail?.profileId ?? "deepseek:default" }) : message);
+      if (key) setSlotRefusal((n) => n + 1);
+    },
   });
 
   const name = t(FEATURE_KEYS[feature].name);
@@ -215,6 +227,16 @@ export default function PaidFeatureGate({
 
         {error && (
           <p role="alert" className="text-xs text-red-300" data-testid="paid-gate-connect-error">{error}</p>
+        )}
+        {slotRefusal > 0 && (
+          <ClawaiSlotNotice
+            embedded={false}
+            refreshKey={slotRefusal}
+            onRemoved={() => {
+              setSlotRefusal(0);
+              setError(null);
+            }}
+          />
         )}
       </div>
     </div>

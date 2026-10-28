@@ -249,6 +249,14 @@ vi.mock("@/lib/openclaw-core-generation", () => ({
 vi.mock("@/lib/openclaw-auth-store", () => ({
   readGatewayAuthProfile: vi.fn(),
   putGatewayOAuthProfile: vi.fn(),
+  // The ClawBox AI slot (src/lib/clawai-profile-slot.ts) reads through these.
+  // Seeded EMPTY — no profile at deepseek:default, no failure state, nothing to
+  // back up or clear — which is every box this file was written against; the
+  // slot cases below say what the store holds.
+  withGatewayAuthProfileCredential: vi.fn(() => null),
+  readGatewayProviderAuth: vi.fn(() => ({ kind: "no-store" })),
+  backupGatewayAuthProfile: vi.fn(() => ({ ok: false, reason: "absent" })),
+  clearGatewayAuthProfileFailures: vi.fn(() => ({ ok: false, reason: "no-store" })),
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({
@@ -281,10 +289,14 @@ import { getLocalAiToken } from "@/lib/local-ai-token";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
+  backupGatewayAuthProfile,
+  clearGatewayAuthProfileFailures,
   putGatewayOAuthProfile,
   readGatewayAuthProfile,
+  withGatewayAuthProfileCredential,
   type GatewayAuthProfileRead,
   type GatewayOAuthBundle,
+  type StoredCredential,
 } from "@/lib/openclaw-auth-store";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 
@@ -4894,6 +4906,242 @@ describe("POST /setup-api/ai-models/configure", () => {
       const res = await configurePost(jsonRequest({ provider: "openrouter", apiKey: "sk-or-v1-test" }));
       expect(res.status).toBe(200);
       expect((await res.json()).warning ?? "").not.toContain("is in no model list");
+    });
+  });
+
+  /**
+   * The ClawBox AI credential slot — `deepseek:default` — when something else
+   * already holds it (src/lib/clawai-profile-slot.ts). Found on a box: a stale
+   * `oauth` profile there made the pinned core refuse the sign-in's API-key
+   * paste ("belongs to another sign-in"), the route answered a generic 500 and
+   * the provider stayed in the auth cooldown its old credential had earned.
+   *
+   * The store is the policy's to read (`withGatewayAuthProfileCredential`), and
+   * the CLI mock below is what changes it, the way core's verbs would: a logout
+   * empties the slot, a paste fills it — or is refused over another kind of
+   * profile, in the core's own words.
+   */
+  describe("the ClawBox AI credential slot", () => {
+    const TOKEN = "claw_FAKE-fresh-portal-token";
+    const EARLIER_TOKEN = "claw_FAKE-earlier-portal-token";
+    const OWNER_KEY = "sk-FAKE-owner-deepseek-key";
+    const CORE_REFUSAL = "The API-key profile belongs to another sign-in. Manage that saved sign-in first.";
+    const DEVICE_LOGIN = { provider: "clawai", apiKey: TOKEN, authMode: "subscription", clawaiTier: "flash" };
+    const LOGOUT = "models auth logout deepseek:default --yes";
+    let slot: StoredCredential | null;
+
+    beforeEach(() => {
+      slot = null;
+      vi.mocked(withGatewayAuthProfileCredential).mockImplementation(
+        ((profileId: string, use: (credential: StoredCredential) => unknown) =>
+          profileId === "deepseek:default" && slot ? use(slot) : null) as typeof withGatewayAuthProfileCredential,
+      );
+      vi.mocked(backupGatewayAuthProfile).mockReturnValue({ ok: true, file: "/backups/deepseek_default-1.json" });
+      vi.mocked(clearGatewayAuthProfileFailures).mockReturnValue({ ok: true, store: "shared" });
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[], options?: { stdinData?: string }) => {
+        if (args.join(" ") === LOGOUT) slot = null;
+        if (args.includes("paste-api-key") && args.includes("deepseek:default")) {
+          if (slot && (slot.type !== "api_key" || slot.provider !== "deepseek")) throw new Error(CORE_REFUSAL);
+          slot = { type: "api_key", provider: "deepseek", secret: (options?.stdinData ?? "").trim() };
+        }
+        return "";
+      });
+    });
+
+    /** Every CLI call of the request, argv joined, in order. */
+    const cliCalls = () => vi.mocked(spawnOpenclawCli).mock.calls.map((call) => (call[0] as string[]).join(" "));
+    const firstPaste = () => cliCalls().findIndex((call) => call.startsWith("models auth paste-api-key") && call.includes("deepseek:default"));
+    /** DeepSeek's API answering `status` for the owner's key; every other host stays unreachable. */
+    function deepseekAnswers(status: number) {
+      const fetchMock = vi.fn(async (input: unknown) => {
+        if (String(input).startsWith("https://api.deepseek.com/")) return new Response("{}", { status });
+        throw new Error("network disabled in tests");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    }
+
+    it("replaces a stale oauth sign-in there, clears its cooldown, and the device login succeeds", async () => {
+      slot = { type: "oauth", provider: "deepseek", secret: EARLIER_TOKEN };
+
+      const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+      expect(res.status).toBe(200);
+      // Kept first, then removed with core's own verb, then the paste lands.
+      expect(vi.mocked(backupGatewayAuthProfile)).toHaveBeenCalledWith("deepseek:default", expect.stringContaining("auth-profile-backups"));
+      const logout = cliCalls().indexOf(LOGOUT);
+      expect(logout).toBeGreaterThanOrEqual(0);
+      expect(firstPaste()).toBeGreaterThan(logout);
+      expect(vi.mocked(backupGatewayAuthProfile).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(spawnOpenclawCli).mock.invocationCallOrder[logout]);
+      // The cooldown the old credential earned is gone before the new one is stored.
+      expect(vi.mocked(clearGatewayAuthProfileFailures)).toHaveBeenCalledWith(["deepseek:default"]);
+      expect(vi.mocked(clearGatewayAuthProfileFailures).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(spawnOpenclawCli).mock.invocationCallOrder[firstPaste()]);
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: TOKEN });
+      expect(pasteCallFor("deepseek:default")?.[0]).not.toContain(TOKEN);
+    });
+
+    it("signs in on an EMPTY store with one consistent credential and the proxy provider entry, never colliding with itself", async () => {
+      // The box's sequence, from an empty slot: the sign-in stops the gateway
+      // and runs the credential migration, which imports whatever the legacy
+      // auth file holds at an id the store lacks — core's own rule. On beta the
+      // sign-in had written its portal token there as an OAuth bundle, so the
+      // migration put an `oauth` deepseek:default into the empty store, the
+      // sign-in's own API-key paste was refused over it ("belongs to another
+      // sign-in"), the save answered 500 before `models.providers.deepseek`
+      // was written, and every chat after it went out on the oauth token and
+      // got 401.
+      vi.mocked(runOpenclawDoctorFix).mockImplementation(async () => {
+        const legacy = mockFs.writeFile.mock.calls
+          .filter((call) => String(call[0]).includes("auth-profiles.json"))
+          .map((call) => JSON.parse(String(call[1])) as { profiles?: Record<string, { type?: string; provider?: string; access?: string; key?: string }> })
+          .at(-1);
+        const imported = legacy?.profiles?.["deepseek:default"];
+        if (imported && !slot) {
+          slot = {
+            type: String(imported.type),
+            provider: String(imported.provider),
+            secret: imported.access ?? imported.key ?? null,
+          };
+        }
+        return "completed";
+      });
+
+      const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+      expect(res.status).toBe(200);
+      // ONE credential, the API key, written straight into the slot: there was
+      // never a profile of the sign-in's own making to log out.
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: TOKEN });
+      expect(cliCalls()).not.toContain(LOGOUT);
+      expect(vi.mocked(backupGatewayAuthProfile)).not.toHaveBeenCalled();
+      // And the provider entry the chat resolves: the portal token, at the ClawBox AI proxy.
+      const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
+      const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
+      expect(providerDef.baseUrl).toBe(process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai");
+      expect(providerDef.apiKey).toBe(TOKEN);
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands.filter((command) => command.startsWith("config set auth.profiles.deepseek:default ")).every((command) => command.includes('"mode":"api_key"'))).toBe(true);
+    });
+
+    it("no longer writes the portal token as an OAuth sign-in for the migration to import", async () => {
+      const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+      expect(res.status).toBe(200);
+      const written = mockFs.writeFile.mock.calls.map((call) => String(call[1]));
+      expect(written.some((data) => data.includes("deepseek:default"))).toBe(false);
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      const metadata = commands.filter((command) => command.startsWith("config set auth.profiles.deepseek:default "));
+      expect(metadata.length).toBeGreaterThan(0);
+      for (const command of metadata) expect(command).toContain('"mode":"api_key"');
+    });
+
+    it("refuses, before anything is written, a sign-in over the owner's own DeepSeek key that still works", async () => {
+      slot = { type: "api_key", provider: "deepseek", secret: OWNER_KEY };
+      const asked = deepseekAnswers(200);
+
+      const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ code: "clawai_slot_owner_key", profileId: "deepseek:default" });
+      expect(body.error).toContain("deepseek:default");
+      expect(body.error).toContain("Settings → Providers");
+      expect(JSON.stringify(body)).not.toContain(OWNER_KEY);
+      expect(asked).toHaveBeenCalledWith("https://api.deepseek.com/models", expect.anything());
+      // Nothing of the sign-in happened: no copy, no logout, no paste, no
+      // credential migration, no token recorded.
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: OWNER_KEY });
+      expect(vi.mocked(backupGatewayAuthProfile)).not.toHaveBeenCalled();
+      expect(cliCalls()).not.toContain(LOGOUT);
+      expect(pasteCallFor("deepseek:default")).toBeUndefined();
+      expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
+      expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ clawai_token: TOKEN }));
+    });
+
+    it("replaces the owner's key once DeepSeek refuses it, keeps a copy, and says so", async () => {
+      slot = { type: "api_key", provider: "deepseek", secret: OWNER_KEY };
+      deepseekAnswers(401);
+
+      const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).warning).toContain("was refused by DeepSeek, so ClawBox AI replaced it");
+      expect(vi.mocked(backupGatewayAuthProfile)).toHaveBeenCalledTimes(1);
+      // An API key over an API key: core takes the paste, no logout needed.
+      expect(cliCalls()).not.toContain(LOGOUT);
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: TOKEN });
+    });
+
+    it.each(["unreadable", "write-failed"] as const)(
+      "replaces nothing it could not back up (%s): no logout, no paste, a refusal the panel can say",
+      async (reason) => {
+        slot = { type: "api_key", provider: "deepseek", secret: OWNER_KEY };
+        deepseekAnswers(401);
+        vi.mocked(backupGatewayAuthProfile).mockReturnValue({ ok: false, reason });
+
+        const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ code: "clawai_slot_backup_failed", profileId: "deepseek:default" });
+        expect(cliCalls()).not.toContain(LOGOUT);
+        expect(pasteCallFor("deepseek:default")).toBeUndefined();
+        expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: OWNER_KEY });
+      },
+    );
+
+    it("answers the core's own refusal as a conflict the owner can act on, never a generic 500", async () => {
+      slot = { type: "oauth", provider: "deepseek", secret: EARLIER_TOKEN };
+      const store = vi.mocked(spawnOpenclawCli).getMockImplementation()!;
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[], options?: { stdinData?: string }) => {
+        if (args.join(" ") === LOGOUT) throw new Error("Unknown auth profile");
+        return store(args, options);
+      });
+
+      const res = await configurePost(jsonRequest(DEVICE_LOGIN));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ code: "clawai_slot_conflict", profileId: "deepseek:default" });
+      expect(body.error).toContain("Settings → Providers");
+      expect(body.error).not.toContain("check your credentials");
+    });
+
+    it("gives a pasted portal token the same repair", async () => {
+      slot = { type: "oauth", provider: "deepseek", secret: EARLIER_TOKEN };
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: TOKEN, authMode: "token", clawaiTier: "flash" }));
+
+      expect(res.status).toBe(200);
+      const logout = cliCalls().indexOf(LOGOUT);
+      expect(logout).toBeGreaterThanOrEqual(0);
+      expect(firstPaste()).toBeGreaterThan(logout);
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: TOKEN });
+    });
+
+    it("never lets another provider's save overwrite the owner's key on its fallback pass", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_FAKE-stored-fallback-token" });
+      slot = { type: "api_key", provider: "deepseek", secret: OWNER_KEY };
+
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+      expect(res.status).toBe(200);
+      expect(pasteCallFor("deepseek:default")).toBeUndefined();
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: OWNER_KEY });
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(false);
+    });
+
+    it("lets the fallback pass repair ClawBox's own token stored in the wrong shape", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_FAKE-stored-fallback-token" });
+      slot = { type: "oauth", provider: "deepseek", secret: "claw_FAKE-stored-fallback-token" };
+
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+      expect(res.status).toBe(200);
+      expect(cliCalls()).toContain(LOGOUT);
+      expect(slot).toEqual({ type: "api_key", provider: "deepseek", secret: "claw_FAKE-stored-fallback-token" });
     });
   });
 });

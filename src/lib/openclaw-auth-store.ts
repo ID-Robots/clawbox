@@ -56,10 +56,16 @@
  *
  * Creates nothing — no database, table or row: a store that is not there is
  * core's to make, and `no-store` is the caller's to act on. Nothing here
- * throws, and no token leaves it: a fingerprint stands in for one.
+ * throws, and no token leaves it: a fingerprint stands in for one. Two
+ * deliberate exceptions, both for a caller about to replace a profile (the
+ * ClawBox AI slot, src/lib/clawai-profile-slot.ts): `backupGatewayAuthProfile`
+ * copies the entry into a 0600 file of the caller's choosing, and
+ * `withGatewayAuthProfileCredential` hands the credential to an in-process
+ * check — neither returns it.
  */
 
-import path from "./runtime-path";
+import fs from "fs";
+import path, { untraced } from "./runtime-path";
 import { openSqlite } from "./openclaw-session-store";
 import {
   AUTH_STATE_CELLS,
@@ -490,6 +496,208 @@ export function readGatewayProviderAuth(provider: string, paths?: GatewayAuthPat
     return { kind: "present", profiles, order: orderOf(localState) ?? orderOf(baseState), failures };
   } catch (err) {
     return { kind: "unreadable", cause: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** One stored credential, as `withGatewayAuthProfileCredential` hands it to its caller's check. */
+export interface StoredCredential {
+  type: string;
+  /** The provider the profile belongs to: its own field, else its id's prefix. */
+  provider: string;
+  /** `key` of an api_key profile, `token` of a token one, `access` of an oauth one; null for a marker or an empty field. */
+  secret: string | null;
+}
+
+/**
+ * The profile a turn resolves at `profileId` — the main agent's own copy
+ * where it holds one (see the header), else the store's — with the store it
+ * came from. Null when there is no store or no profile there. Throws when a
+ * database that is there cannot be asked.
+ */
+function resolvedEntry(where: GatewayAuthPaths, profileId: string): { found: Found; entry: Json; local: boolean } | null {
+  const found = findStore(where);
+  if (!found) return null;
+  const blob = parseBlob(found.json) as Json | null;
+  const profiles = blob && profilesOf(blob);
+  if (!profiles) return null;
+  const local = found.store === "shared" ? findAgentLocalCopy(where, profileId) : null;
+  if (local) return { found, entry: local.entry, local: true };
+  const entry = profileAt(profiles, profileId);
+  return entry ? { found, entry, local: false } : null;
+}
+
+/**
+ * Hand the credential the gateway resolves at `profileId` to `use`, in
+ * process, and answer what `use` answers — or null when there is no profile
+ * there, no store, or a store that cannot be read.
+ *
+ * For the checks a fingerprint cannot answer: whose token this is (its
+ * format), and whether its provider still takes it. The credential goes to
+ * `use` and nowhere else — this module never returns or logs it, and a caller
+ * must not either.
+ */
+export function withGatewayAuthProfileCredential<T>(
+  profileId: string,
+  use: (credential: StoredCredential) => T,
+  paths?: GatewayAuthPaths,
+): T | null {
+  let credential: StoredCredential;
+  try {
+    const resolved = resolvedEntry(paths ?? gatewayAuthPaths(), profileId);
+    if (!resolved) return null;
+    const { entry } = resolved;
+    const type = typeof entry.type === "string" ? entry.type : "";
+    const raw = type === "oauth" ? entry.access : type === "token" ? entry.token : type === "api_key" ? entry.key : null;
+    credential = {
+      type,
+      provider: providerOf(profileId, entry),
+      secret: typeof raw === "string" && raw !== "" && !raw.startsWith(FENCE_PREFIX) ? raw : null,
+    };
+  } catch {
+    return null;
+  }
+  // Outside the try: a check that throws is the caller's error, not a store that cannot be read.
+  return use(credential);
+}
+
+export type GatewayAuthBackupResult =
+  | { ok: true; file: string }
+  | { ok: false; reason: "absent" | "no-store" | "unreadable" | "write-failed" };
+
+/** How many backups of one profile id are kept; the oldest beyond this are removed after a new one is written. */
+const BACKUPS_KEPT_PER_PROFILE = 20;
+
+/**
+ * Copy the profile the gateway resolves at `profileId` — the entry as stored,
+ * credential included, the shared row's entry beside it when the main
+ * agent's own copy shadows it, and core's usage stats for the id — into a
+ * NEW file under `dir`, before a caller replaces or removes it. The file is
+ * 0600 in a 0700 directory and is never overwritten; the oldest backups of
+ * the same id beyond the last twenty are removed. Creates nothing in the
+ * store and never throws; the answer names the file, never what is in it.
+ */
+export function backupGatewayAuthProfile(
+  profileId: string,
+  dir: string,
+  paths?: GatewayAuthPaths,
+): GatewayAuthBackupResult {
+  let snapshot: string;
+  try {
+    const where = paths ?? gatewayAuthPaths();
+    if (!findStore(where)) return { ok: false, reason: "no-store" };
+    const resolved = resolvedEntry(where, profileId);
+    if (!resolved) return { ok: false, reason: "absent" };
+    const { found, entry, local } = resolved;
+    const shared = local ? profileAt(profilesOf(parseBlob(found.json) as Json) ?? {}, profileId) : null;
+    const stateDb = local ? mainAgentDb(where) : found.dbPath;
+    const stats = mapOf(readStateBlob(stateDb, local ? "agent" : found.store), "usageStats")[profileId] ?? null;
+    snapshot = JSON.stringify({
+      profileId,
+      store: found.store,
+      copy: local ? "main-agent" : "store",
+      backedUpAt: new Date().toISOString(),
+      profile: entry,
+      ...(local ? { sharedProfile: shared } : {}),
+      usageStats: stats,
+    }, null, 2);
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const safeId = profileId.replace(/[^A-Za-z0-9._-]/g, "_");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let file = "";
+    for (let n = 0; n < 100 && !file; n += 1) {
+      const candidate = untraced(path.join(dir, `${safeId}-${stamp}${n ? `-${n}` : ""}.json`));
+      try {
+        // `wx`: a backup is never written over another one.
+        fs.writeFileSync(candidate, snapshot, { mode: 0o600, flag: "wx" });
+        file = candidate;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+    }
+    if (!file) return { ok: false, reason: "write-failed" };
+    pruneBackups(dir, `${safeId}-`);
+    return { ok: true, file };
+  } catch (err) {
+    // The directory or the file could not be written: the path is ours, never a credential.
+    console.error("[auth-store] could not back up an auth profile:", err instanceof Error ? err.message : err);
+    return { ok: false, reason: "write-failed" };
+  }
+}
+
+/** Remove the oldest of one id's backups beyond BACKUPS_KEPT_PER_PROFILE. Best effort: a backup that stays is harmless. */
+function pruneBackups(dir: string, prefix: string): void {
+  try {
+    const mine = fs.readdirSync(dir).filter((name) => name.startsWith(prefix) && name.endsWith(".json")).sort();
+    for (const name of mine.slice(0, Math.max(0, mine.length - BACKUPS_KEPT_PER_PROFILE))) {
+      fs.rmSync(untraced(path.join(dir, name)), { force: true });
+    }
+  } catch {
+    /* the new backup is written; pruning is housekeeping */
+  }
+}
+
+export type GatewayAuthClearResult =
+  | { ok: true; store: GatewayAuthStoreKind }
+  | { ok: false; reason: "no-store" | "write-failed" };
+
+/** Drop `profileIds`' usage stats from one database's state row, in one IMMEDIATE transaction. Creates nothing. */
+function clearStateIn(dbPath: string, kind: GatewayAuthStoreKind, profileIds: readonly string[]): void {
+  const db = openSqlite(dbPath, false);
+  let open = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    open = true;
+    clearUsageStats(db, AUTH_STATE_CELLS[kind], profileIds, Date.now());
+    db.exec("COMMIT");
+    open = false;
+  } finally {
+    if (open) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* closing rolls it back anyway */
+      }
+    }
+    db.close();
+  }
+}
+
+/**
+ * Drop core's failure bookkeeping for `profileIds` — `usageStats[<id>]`, which
+ * holds a profile's cooldown, disable window, block and error counts — from
+ * the state row of the store the gateway resolves, and from the main agent's
+ * own state row where that database exists (core merges it over the shared
+ * one, see the header). Every credential, every order and every other
+ * profile's stats stay exactly as they were; nothing is created.
+ *
+ * WHY THIS IS WRITTEN HERE: the pinned core has no verb for it. `models auth`
+ * lists, logs in and out, pastes and orders; `paste-api-key` keeps the
+ * profile's usage stats (`saveModelProviderApiKey`), so a credential stored
+ * over one the provider refused inherits its cooldown — "Provider deepseek has
+ * auth issue (skipping all models)" — until the window runs out. The same
+ * helper `putGatewayOAuthProfile` clears an id's stats with.
+ *
+ * Never throws: `no-store` when there is no store row to clear, `write-failed`
+ * when a database that is there could not be written.
+ */
+export function clearGatewayAuthProfileFailures(
+  profileIds: readonly string[],
+  paths?: GatewayAuthPaths,
+): GatewayAuthClearResult {
+  try {
+    const where = paths ?? gatewayAuthPaths();
+    const found = findStore(where);
+    if (!found) return { ok: false, reason: "no-store" };
+    clearStateIn(found.dbPath, found.store, profileIds);
+    if (found.store === "shared" && isFile(mainAgentDb(where))) clearStateIn(mainAgentDb(where), "agent", profileIds);
+    return { ok: true, store: found.store };
+  } catch (err) {
+    console.error("[auth-store] could not clear an auth profile's failure state:", err instanceof Error ? err.message : err);
+    return { ok: false, reason: "write-failed" };
   }
 }
 

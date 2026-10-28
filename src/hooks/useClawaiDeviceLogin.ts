@@ -10,6 +10,29 @@ import { humanizeApiError } from "@/lib/api-error-message";
 // (/setup-api/ai-models/clawai/start + /poll) are harness-agnostic: start only
 // mints a code and writes the session file.
 
+/**
+ * The machine half of a failed sign-in, beside its sentence: the configure
+ * route's `code` and the auth profile it names. A host that knows the code
+ * says it in the owner's language and offers the remedy; one that does not
+ * shows the sentence.
+ */
+export interface ClawaiLoginErrorDetail {
+  code?: string;
+  profileId?: string;
+}
+
+/**
+ * How long the panel follows a sign-in that is `configuring` before it stops
+ * and says so. Past the poll route's own three-minute ceiling — which answers
+ * an error the hook shows first — so this only fires when the route cannot
+ * answer at all (a server that restarted, a session file that cannot be
+ * read): never an endless "Connecting…".
+ */
+export const CLAWAI_CONFIGURING_CEILING_MS = 4 * 60 * 1000;
+
+/** The code the hook gives its own give-up, so a host can say it in the owner's language. */
+export const CLAWAI_CONFIGURING_TIMEOUT_CODE = "clawai_configuring_timeout";
+
 export interface ClawaiDeviceLoginOptions {
   scope?: "primary" | "local";
   /** Read at start() time so a tier change between renders is picked up. */
@@ -27,7 +50,7 @@ export interface ClawaiDeviceLoginOptions {
    * shows that instead of a plain success.
    */
   onComplete: (warning?: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, detail?: ClawaiLoginErrorDetail) => void;
 }
 
 export interface ClawaiDeviceLogin {
@@ -60,6 +83,8 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
   // reset to phase 0 every interval and look like the progress bar is looping
   // back to the start.
   const configuringShownRef = useRef(false);
+  // When this attempt first answered `configuring` — what the ceiling counts from.
+  const configuringSinceRef = useRef<number | null>(null);
 
   const stop = useCallback(() => {
     if (pollTimerRef.current) {
@@ -71,6 +96,7 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
     startControllerRef.current?.abort();
     startControllerRef.current = null;
     configuringShownRef.current = false;
+    configuringSinceRef.current = null;
     setPolling(false);
   }, []);
 
@@ -87,6 +113,16 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
     const controller = new AbortController();
     pollControllerRef.current = controller;
     const again = () => {
+      const since = configuringSinceRef.current;
+      if (since !== null && Date.now() - since > CLAWAI_CONFIGURING_CEILING_MS) {
+        stop();
+        cbRef.current.onBusyChange?.(false);
+        cbRef.current.onError(
+          "ClawBox AI setup did not finish on this device. Check Settings → Providers, then sign in again.",
+          { code: CLAWAI_CONFIGURING_TIMEOUT_CODE },
+        );
+        return;
+      }
       pollTimerRef.current = setTimeout(() => { void tick(interval); }, Math.max(interval, 1) * 1000);
     };
     try {
@@ -99,7 +135,13 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
       // `unknown` on `error`, deliberately: the poll route relays a failure
       // raised four hops upstream, and the type here was never a guarantee
       // about what is in the field — only about what this file expected.
-      const data = await response.json().catch(() => ({})) as { status?: string; error?: unknown; warning?: unknown };
+      const data = await response.json().catch(() => ({})) as {
+        status?: string;
+        error?: unknown;
+        warning?: unknown;
+        code?: unknown;
+        profileId?: unknown;
+      };
 
       if (data.status === "complete") {
         stop();
@@ -108,6 +150,7 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         return;
       }
       if (data.status === "configuring") {
+        if (configuringSinceRef.current === null) configuringSinceRef.current = Date.now();
         if (!configuringShownRef.current) {
           configuringShownRef.current = true;
           setDeviceCode(null);
@@ -123,7 +166,13 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         stop();
         cbRef.current.onBusyChange?.(false);
         setDeviceCode(null);
-        cbRef.current.onError(humanizeApiError(data.error, "ClawBox AI authorisation failed"));
+        const detail: ClawaiLoginErrorDetail = {
+          ...(typeof data.code === "string" && data.code ? { code: data.code } : {}),
+          ...(typeof data.profileId === "string" && data.profileId ? { profileId: data.profileId } : {}),
+        };
+        const message = humanizeApiError(data.error, "ClawBox AI authorisation failed");
+        if (detail.code || detail.profileId) cbRef.current.onError(message, detail);
+        else cbRef.current.onError(message);
         return;
       }
       // Pending (or a transient upstream blip): schedule the next tick.

@@ -91,6 +91,41 @@ async function readErrorBody(response: Response): Promise<{ raw: string; sentenc
   return { raw, sentence: humanizeApiError(raw, "") };
 }
 
+/**
+ * The machine half of a failed configure: its `code` and the profile it
+ * names, when the body is JSON that carries them. A code is a word, a profile
+ * id a provider and a name — anything else is dropped rather than relayed.
+ */
+function refusalDetail(raw: string): { errorCode: string | null; errorProfileId: string | null } {
+  try {
+    const body = JSON.parse(raw) as { code?: unknown; profileId?: unknown };
+    const code = typeof body.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code) ? body.code : null;
+    const profileId = typeof body.profileId === "string" && /^[A-Za-z0-9._-]{1,64}:[A-Za-z0-9._-]{1,64}$/.test(body.profileId)
+      ? body.profileId
+      : null;
+    return { errorCode: code, errorProfileId: profileId };
+  } catch {
+    return { errorCode: null, errorProfileId: null };
+  }
+}
+
+/**
+ * Write the session's terminal state, and try once more when the write
+ * fails. The poll answers from this file and nothing else: a background
+ * configure that ended without landing its answer here left the panel on
+ * "configuring" until the timeout, which then said "timed out" over a save
+ * that had been refused for a reason the owner could act on.
+ */
+async function settleSession(next: ClawAiConnectSession): Promise<void> {
+  try {
+    await writeClawAiSession(next);
+  } catch (err) {
+    console.error("[clawai/poll] Could not record the sign-in's outcome; retrying once:", err instanceof Error ? err.message : err);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await writeClawAiSession(next);
+  }
+}
+
 // Run the configure pipeline server-side AFTER acknowledging the poll
 // request. Holding the poll's HTTP response open for the full ~50 s
 // gateway restart left the embedded Chromium dropping the connection
@@ -171,7 +206,10 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
       // The RAW body in the journal, deliberately: the owner is spared the
       // braces, the operator diagnosing this box is not spared the evidence.
       console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.raw.slice(0, 200));
-      await writeClawAiSession({ ...session, status: "error", error: userFacing });
+      // The code and the profile ride beside the sentence: a refusal the owner
+      // can act on (the ClawBox AI slot held by another sign-in) is answered
+      // in their language, with the removal next to it.
+      await settleSession({ ...session, status: "error", error: userFacing, ...refusalDetail(configureBody.raw) });
       return;
     }
 
@@ -217,17 +255,22 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
       }
     }
 
-    await writeClawAiSession({
+    await settleSession({
       ...session,
       status: "complete",
       error: null,
+      errorCode: null,
+      errorProfileId: null,
       warning,
       completedAt: Date.now(),
     });
   } catch (err) {
     const userFacing = formatUserFacingError(err instanceof Error ? err.message : "Failed to save ClawBox AI token.");
     console.error("[clawai/poll] Background configure threw", err);
-    await writeClawAiSession({ ...session, status: "error", error: userFacing });
+    await settleSession({ ...session, status: "error", error: userFacing, errorCode: null, errorProfileId: null }).catch((writeErr) => {
+      // Nothing left to tell the panel through: the poll's own timeout answers it.
+      console.error("[clawai/poll] Could not record the failed sign-in:", writeErr instanceof Error ? writeErr.message : writeErr);
+    });
   }
 }
 
@@ -247,7 +290,12 @@ export async function POST() {
     return NextResponse.json({ status: "complete", ...(session.warning ? { warning: session.warning } : {}) });
   }
   if (session.status === "error" && session.error) {
-    return NextResponse.json({ status: "error", error: session.error });
+    return NextResponse.json({
+      status: "error",
+      error: session.error,
+      ...(session.errorCode ? { code: session.errorCode } : {}),
+      ...(session.errorProfileId ? { profileId: session.errorProfileId } : {}),
+    });
   }
   if (session.status === "configuring") {
     // The background configure normally flips the session to complete/error
@@ -356,6 +404,8 @@ export async function POST() {
     ...session,
     status: "configuring",
     error: null,
+    errorCode: null,
+    errorProfileId: null,
     configuringStartedAt: Date.now(),
   };
   await writeClawAiSession(configuringSession);

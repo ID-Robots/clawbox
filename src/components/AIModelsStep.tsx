@@ -39,7 +39,8 @@ import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
-import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import ClawaiSlotNotice, { CLAWAI_SLOT_ERROR_KEYS } from "./ClawaiSlotNotice";
+import { useClawaiDeviceLogin, type ClawaiLoginErrorDetail } from "@/hooks/useClawaiDeviceLogin";
 import XaiSignInPanel from "@/components/XaiSignInPanel";
 import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 // Tier data + the ClawBox AI card/row/device-login now live in shared modules so
@@ -649,21 +650,42 @@ export default function AIModelsStep({
   // reset identities are stable.
   const clawaiFinishRef = useRef<{
     complete: (warning?: string) => void;
-    error: (message: string) => void;
+    error: (message: string, detail?: ClawaiLoginErrorDetail) => void;
     configuring: () => void;
   }>({ complete: () => {}, error: () => {}, configuring: () => {} });
+  // A ClawBox AI sign-in this panel started is past its device code and the
+  // box is finishing it. While it is, the save itself moves the box's provider
+  // to ClawBox AI before the poll has its answer — see the reset effect below.
+  const clawaiFinishingRef = useRef(false);
+  // A refusal about the ClawBox AI credential slot arrived (or Settings is
+  // showing the ClawBox AI panel): the slot notice reads the slot again on
+  // every bump and offers the removal.
+  const [clawaiSlotRefreshKey, setClawaiSlotRefreshKey] = useState(0);
+  const [clawaiSlotRefused, setClawaiSlotRefused] = useState(false);
 
   const clawaiLogin = useClawaiDeviceLogin({
     scope: configureScope,
     getTier: () => clawaiTier,
-    onStart: () => setStatus(null),
+    onStart: () => {
+      clawaiFinishingRef.current = false;
+      setStatus(null);
+    },
     onBusyChange: setSaving,
-    onConfiguring: () => clawaiFinishRef.current.configuring(),
+    onConfiguring: () => {
+      clawaiFinishingRef.current = true;
+      clawaiFinishRef.current.configuring();
+    },
     // The warning travels: a ClawBox AI sign-in is a `subscription` save, so it
     // takes the doctor stop and the deferred session sweep — the one path most
     // likely to produce the sentence, and until now the one that dropped it.
-    onComplete: (warning) => clawaiFinishRef.current.complete(warning),
-    onError: (message) => clawaiFinishRef.current.error(message),
+    onComplete: (warning) => {
+      clawaiFinishingRef.current = false;
+      clawaiFinishRef.current.complete(warning);
+    },
+    onError: (message, detail) => {
+      clawaiFinishingRef.current = false;
+      clawaiFinishRef.current.error(message, detail);
+    },
   });
   // Stable identities (see the hook) — pulled out so effects/callbacks can
   // depend on them directly instead of on the whole result object.
@@ -671,6 +693,13 @@ export default function AIModelsStep({
 
   useEffect(() => {
     if (normalizedCurrentProvider !== "clawai") return;
+    // NOT while this panel's own sign-in is finishing. The configure records
+    // ClawBox AI as the box's provider before its last step, and Settings
+    // re-reads the provider on any providers-changed signal — so this effect
+    // used to stop the very poll that was about to report the outcome, and
+    // left the configuring overlay on screen for good: a refused save was an
+    // endless "Connecting…". The poll ends the attempt itself, either way.
+    if (clawaiFinishingRef.current) return;
     stopClawaiLogin();
     resetClawaiLogin();
     setSaving(false);
@@ -860,25 +889,46 @@ export default function AIModelsStep({
   // so updating the ref in an effect is soon enough.
   useEffect(() => {
     clawaiFinishRef.current = {
-      complete: showSuccessAndContinue,
-      error: showError,
+      complete: (warning) => {
+        setClawaiSlotRefused(false);
+        showSuccessAndContinue(warning);
+      },
+      error: (message, detail) => {
+        // A refusal about the ClawBox AI credential slot, said in the owner's
+        // language and with the removal right under it; anything else is the
+        // route's own sentence, as before.
+        const key = detail?.code ? CLAWAI_SLOT_ERROR_KEYS[detail.code] : undefined;
+        if (key) {
+          setClawaiSlotRefused(true);
+          setClawaiSlotRefreshKey((n) => n + 1);
+          showError(t(key, { profileId: detail?.profileId ?? "deepseek:default" }));
+          return;
+        }
+        showError(message);
+      },
       configuring: () => showConfiguring("generic"),
     };
-  }, [showConfiguring, showError, showSuccessAndContinue]);
+  }, [showConfiguring, showError, showSuccessAndContinue, t]);
 
   // Route errors are English sentences written for whoever is reading them —
   // fine for the ones nobody can act on, wrong for the ones we know how to say
   // in the customer's language. A route that returns a `code` gets translated;
   // everything else falls through to the text it sent, as before.
   const TRANSLATED_ERROR_CODES: Record<string, string> = useMemo(
-    () => ({ local_ai_runtime_unavailable: "ai.localRuntimeUnavailable" }),
+    () => ({ local_ai_runtime_unavailable: "ai.localRuntimeUnavailable", ...CLAWAI_SLOT_ERROR_KEYS }),
     [],
   );
 
   const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
     const key = typeof data.code === "string" ? TRANSLATED_ERROR_CODES[data.code] : undefined;
-    if (key) return t(key);
+    if (key && typeof data.code === "string" && CLAWAI_SLOT_ERROR_KEYS[data.code]) {
+      // A pasted ClawBox AI token met the same refusal the device login can:
+      // the slot notice offers the removal under the message.
+      setClawaiSlotRefused(true);
+      setClawaiSlotRefreshKey((n) => n + 1);
+    }
+    if (key) return t(key, { profileId: typeof data.profileId === "string" ? data.profileId : "deepseek:default" });
     // The whole body, not `data.error`: `humanizeApiError` reads the sentence
     // out of whichever field carries it and answers `fallback` when none does,
     // so a shape this component has not met renders as the fallback rather
@@ -2502,6 +2552,17 @@ export default function AIModelsStep({
 
         {status && (
           <StatusMessage type={status.type} message={status.message} />
+        )}
+
+        {selected?.id === "clawai" && (embedded || clawaiSlotRefused) && (
+          <ClawaiSlotNotice
+            embedded={embedded}
+            refreshKey={clawaiSlotRefreshKey}
+            onRemoved={() => {
+              setClawaiSlotRefused(false);
+              setStatus({ type: "success", message: t("ai.clawaiSlot.removed") });
+            }}
+          />
         )}
 
         <div className="flex items-center gap-3 mt-5">
