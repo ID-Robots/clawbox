@@ -690,6 +690,18 @@ function ChromeDesktopInner() {
   // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin(undefined, ownerApis);
   const clawAiAuthenticated = clawboxLogin.loggedIn;
+  // "What's new in 4.3" (TASK-1059, TASK-1195): a dialog shown after the box
+  // lands on 4.3 until the owner dismisses it, which the box records for every
+  // browser. Asked again when the ClawBox AI tier changes, so an upgrade made
+  // in the portal drops the plan section without a reload.
+  const whatsNew = useWhatsNew(clawboxLogin.tier, ownerApis);
+  // The top-right notice cards — the ClawBox AI offer, an update, a Telegram
+  // request, a finished coding run — wait while the dialog is up, and until
+  // the box has said whether it will be: drawn beside it they ran under it on
+  // a short screen, and the offer was drawn a moment before the dialog came
+  // up over it. Their auto-hide clocks wait too, so each still gets its full
+  // time on screen once the dialog is closed.
+  const noticesHeld = ownerApiAccess === null || !whatsNew.settled || whatsNew.visible;
   // The kiosk bar's height while the x64 laptop's kiosk extension draws it
   // over this page, 0 on every other browser: top-anchored surfaces start
   // under it, and it is how this page knows it IS the kiosk.
@@ -741,7 +753,9 @@ function ChromeDesktopInner() {
     setShowClawAiOfferNotification(!clawboxLogin.loggedIn);
   }, [setupRequired, clawboxLogin.loading, clawboxLogin.loggedIn]);
 
-  const offerNoticeKeys = useMemo(() => (showClawAiOfferNotification ? ["offer"] : []), [showClawAiOfferNotification]);
+  // Queued behind the What's new dialog (see `noticesHeld`).
+  const offerNoticeUp = showClawAiOfferNotification && !noticesHeld;
+  const offerNoticeKeys = useMemo(() => (offerNoticeUp ? ["offer"] : []), [offerNoticeUp]);
   const hideOfferNotice = useCallback(() => setShowClawAiOfferNotification(false), []);
   useAutoHide(offerNoticeKeys, hideOfferNotice);
 
@@ -2491,7 +2505,10 @@ function ChromeDesktopInner() {
   const dismissCodingNotice = useCallback((runId: string) => {
     setCodingNotices(prev => prev.filter(n => n.runId !== runId));
   }, []);
-  const codingNoticeKeys = useMemo(() => codingNotices.map(n => n.runId), [codingNotices]);
+  const codingNoticeKeys = useMemo(
+    () => (noticesHeld ? [] : codingNotices.map(n => n.runId)),
+    [codingNotices, noticesHeld],
+  );
   useAutoHide(codingNoticeKeys, dismissCodingNotice);
 
 
@@ -2733,7 +2750,10 @@ function ChromeDesktopInner() {
     return () => { active = false; stop(); };
   }, [applyUpdateAvailable, ownerApis]);
 
-  const updateNoticeKeys = useMemo(() => (updateAvailable && !updateNoticeHidden ? ["update"] : []), [updateAvailable, updateNoticeHidden]);
+  const updateNoticeKeys = useMemo(
+    () => (updateAvailable && !updateNoticeHidden && !noticesHeld ? ["update"] : []),
+    [updateAvailable, updateNoticeHidden, noticesHeld],
+  );
   const hideUpdateNotice = useCallback(() => setUpdateNoticeHidden(true), []);
   useAutoHide(updateNoticeKeys, hideUpdateNotice);
 
@@ -2764,14 +2784,17 @@ function ChromeDesktopInner() {
     openAppRef.current("settings");
   }, []);
 
-  // "What's new in 4.3" (TASK-1059, TASK-1195): shown after the box lands on
-  // 4.3 until the owner dismisses it, which the box records for every browser. Asked again
-  // when the ClawBox AI tier changes, so an upgrade made in the portal drops
-  // the plan section without a reload. Like every card in the column, it leaves
-  // on its own after NOTICE_AUTO_HIDE_MS. That is not recorded, so it is back
-  // on the next load until it is dismissed.
-  const whatsNew = useWhatsNew(clawboxLogin.tier, ownerApis);
-  const whatsNewKeys = useMemo(() => (whatsNew.visible ? ["whats-new"] : []), [whatsNew.visible]);
+  // The What's new dialog leaves on its own after NOTICE_AUTO_HIDE_MS, as the
+  // cards did, so a box's own screen with nobody at it is not covered for
+  // good — but only while nobody has touched it: an owner paging through the
+  // slides keeps it until they close it. Leaving on its own is not recorded,
+  // so it is back on the next load until it is dismissed.
+  const [whatsNewEngaged, setWhatsNewEngaged] = useState(false);
+  const engageWhatsNew = useCallback(() => setWhatsNewEngaged(true), []);
+  const whatsNewKeys = useMemo(
+    () => (whatsNew.visible && !whatsNewEngaged ? ["whats-new"] : []),
+    [whatsNew.visible, whatsNewEngaged],
+  );
   useAutoHide(whatsNewKeys, whatsNew.hide);
 
   // The system update lives in Settings → System Update now; the notice's
@@ -2881,8 +2904,8 @@ function ChromeDesktopInner() {
   }, []);
 
   const pairingNoticeKeys = useMemo(
-    () => pairingRequests.map((r) => r.code).filter((code): code is string => Boolean(code)),
-    [pairingRequests],
+    () => (noticesHeld ? [] : pairingRequests.map((r) => r.code).filter((code): code is string => Boolean(code))),
+    [pairingRequests, noticesHeld],
   );
   const expirePairingNotice = useCallback((code: string) => {
     expiredPairCodesRef.current.add(code);
@@ -3227,13 +3250,13 @@ function ChromeDesktopInner() {
   // report where it is standing (a rect per pointer move of a drag is not a
   // price to pay while nothing is dodging it).
   //
-  // Every card in that column — an update to run, the release notes, a ClawBox
-  // AI offer, a Telegram pairing to approve, a coding run — is every signed-in
-  // person's business: they all get the owner's desktop.
-  const noticesUp = Boolean(
+  // Every card in that column — an update to run, a ClawBox AI offer, a
+  // Telegram pairing to approve, a coding run — is every signed-in person's
+  // business: they all get the owner's desktop. None of them is drawn while
+  // the What's new dialog is up (see `noticesHeld`).
+  const noticesUp = !noticesHeld && Boolean(
     (updateAvailable && !updateNoticeHidden)
-    || whatsNew.visible
-    || showClawAiOfferNotification
+    || offerNoticeUp
     || pairingRequests.length > 0
     || codingNotices.length > 0,
   );
@@ -3306,6 +3329,11 @@ function ChromeDesktopInner() {
       {ownerApis && <ScreenshotOverlay />}
       {deskScreens && <MonitorIdentifyOverlay screens={deskScreens} />}
       {ownerApis && <PowerApprovalPrompt />}
+      {/* "What's new in 4.3": a dialog over the desktop and the chat, with the
+          notice column held back while it is up. */}
+      {whatsNew.visible && whatsNew.state && (
+        <WhatsNewCard state={whatsNew.state} onDismiss={whatsNew.dismiss} onEngage={engageWhatsNew} />
+      )}
       {noticesUp && (
         <div
           className="desktop-notice-stack pointer-events-none fixed flex w-[320px] flex-col gap-3"
@@ -3375,11 +3403,7 @@ function ChromeDesktopInner() {
             );
           })()}
 
-          {whatsNew.visible && whatsNew.state && (
-            <WhatsNewCard state={whatsNew.state} onDismiss={whatsNew.dismiss} />
-          )}
-
-          {showClawAiOfferNotification && (
+          {offerNoticeUp && (
             <div
               className="rounded-xl bg-[var(--bg-elevated)] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
               role="status"

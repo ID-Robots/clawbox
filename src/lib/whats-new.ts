@@ -34,15 +34,60 @@ export const WHATS_NEW_RELEASE = "4.3";
  *
  * Two surfaces draw it: the desktop card, and the /updating screen's "What's
  * new" panel when the target release's own notes cannot be read (TASK-1205).
+ * The panel has room for the full `body`; the card is a carousel of one
+ * highlight per slide, so it shows the `summary` (one or two lines) under a
+ * screenshot of the feature itself, `image`, served from `public/`.
  */
 export const WHATS_NEW_HIGHLIGHTS = [
-  { icon: "screenshot_monitor", title: "whatsNew.screenshotTitle", body: "whatsNew.screenshotBody" },
-  { icon: "travel_explore", title: "whatsNew.sharedBrowserTitle", body: "whatsNew.sharedBrowserBody" },
-  { icon: "add_link", title: "whatsNew.publicLinksTitle", body: "whatsNew.publicLinksBody" },
-  { icon: "smart_toy", title: "whatsNew.grokTitle", body: "whatsNew.grokBody" },
-  { icon: "mic", title: "whatsNew.holdToTalkTitle", body: "whatsNew.holdToTalkBody" },
-  { icon: "account_tree", title: "whatsNew.agentChartTitle", body: "whatsNew.agentChartBody" },
-  { icon: "menu_book", title: "whatsNew.primeRadiantTitle", body: "whatsNew.primeRadiantBody" },
+  {
+    icon: "screenshot_monitor",
+    title: "whatsNew.screenshotTitle",
+    body: "whatsNew.screenshotBody",
+    summary: "whatsNew.screenshotSummary",
+    image: "/whats-new/4.3/screenshot.webp",
+  },
+  {
+    icon: "travel_explore",
+    title: "whatsNew.sharedBrowserTitle",
+    body: "whatsNew.sharedBrowserBody",
+    summary: "whatsNew.sharedBrowserSummary",
+    image: "/whats-new/4.3/agent-browser.webp",
+  },
+  {
+    icon: "add_link",
+    title: "whatsNew.publicLinksTitle",
+    body: "whatsNew.publicLinksBody",
+    summary: "whatsNew.publicLinksSummary",
+    image: "/whats-new/4.3/public-link.webp",
+  },
+  {
+    icon: "smart_toy",
+    title: "whatsNew.grokTitle",
+    body: "whatsNew.grokBody",
+    summary: "whatsNew.grokSummary",
+    image: "/whats-new/4.3/model-picker.webp",
+  },
+  {
+    icon: "mic",
+    title: "whatsNew.holdToTalkTitle",
+    body: "whatsNew.holdToTalkBody",
+    summary: "whatsNew.holdToTalkSummary",
+    image: "/whats-new/4.3/hold-to-talk.webp",
+  },
+  {
+    icon: "account_tree",
+    title: "whatsNew.agentChartTitle",
+    body: "whatsNew.agentChartBody",
+    summary: "whatsNew.agentChartSummary",
+    image: "/whats-new/4.3/agent-chart.webp",
+  },
+  {
+    icon: "menu_book",
+    title: "whatsNew.primeRadiantTitle",
+    body: "whatsNew.primeRadiantBody",
+    summary: "whatsNew.primeRadiantSummary",
+    image: "/whats-new/4.3/prime-radiant.webp",
+  },
 ] as const;
 
 /**

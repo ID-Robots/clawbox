@@ -1759,6 +1759,22 @@ export const bg: Record<string, string> = {
   "whatsNew.seePlans": "Вижте плановете",
   "whatsNew.gotIt": "Разбрах",
   "whatsNew.dismiss": "Затворете „Какво ново в 4.3“",
+  "whatsNew.screenshotSummary": "Заснемете целия екран, област или прозорец. Print Screen или Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary": "Асистентът вече използва браузъра на собствения работен плот на ClawBox. Влезте веднъж в „Браузър на агента“ и го гледайте как работи.",
+  "whatsNew.publicLinksSummary": "Щракнете с десния бутон върху приложение, създадено от Кодиращия агент, и изберете „Създай публичен линк“ – за определено време и с парола по желание.",
+  "whatsNew.grokSummary": "В OpenClaw настройте xAI Grok с API ключ или с вход чрез SuperGrok или X Premium. Повечето смени на модела вече не рестартират асистента.",
+  "whatsNew.holdToTalkSummary": "Задръжте бутона на микрофона в чата или F8, докато говорите, и пуснете, за да изпратите.",
+  "whatsNew.agentChartSummary": "Гледайте изпълненията на Кодиращия агент в жива диаграма и им пишете, докато работят.",
+  "whatsNew.primeRadiantSummary": "Ново приложение, което превръща документите ви в уики от факти, всеки със своя източник, и го подрежда всяка нощ.",
+  "whatsNew.slideLabel": "{current} от {total}",
+  "whatsNew.goToSlide": "Покажи акцент {number}",
+  "whatsNew.back": "Назад",
+  "whatsNew.next": "Напред",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "Работи на тази ClawBox.",
+  "localModels.chatBannerBody": "Първият отговор може да отнеме до минута, докато локалният модел се зареди. След това е по-бързо.",
+  "localModels.chatBannerDismiss": "Скрий тази бележка",
+  "localModels.chatLoading": "Зареждане на локалния модел…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "Потребители",

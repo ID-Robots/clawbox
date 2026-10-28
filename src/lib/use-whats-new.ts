@@ -5,11 +5,27 @@ import { isWhatsNewState, WHATS_NEW_RELEASE, type WhatsNewState } from "@/lib/wh
 
 export const WHATS_NEW_ENDPOINT = "/setup-api/whats-new";
 
+/**
+ * How long the desktop waits for the route before it stops holding its notice
+ * cards for the card. A route that never answers must not keep them away for
+ * good; if its answer lands later, the card still comes up, and the desktop
+ * puts the notices away again while it is up.
+ */
+export const WHATS_NEW_SETTLE_MS = 8_000;
+
 export interface WhatsNewCardState {
   /** The route's last answer, or null until it has given one. */
   state: WhatsNewState | null;
   /** Is the card on screen? */
   visible: boolean;
+  /**
+   * Has the route answered — or failed, or taken longer than
+   * {@link WHATS_NEW_SETTLE_MS} — so the card's fate for this page load is
+   * known? True at once when the hook is disabled. The desktop holds its
+   * notice cards until then, so the ClawBox AI offer is never drawn a moment
+   * before the card comes up over it.
+   */
+  settled: boolean;
   /** The owner closed it: gone for good, on every browser. */
   dismiss: () => void;
   /**
@@ -36,18 +52,26 @@ export function useWhatsNew(refreshKey?: unknown, enabled: boolean = true): What
   // flight when the owner dismissed (a refresh that left before the POST
   // landed) updates `state` but cannot put the card back.
   const [hidden, setHidden] = useState(false);
+  // Once the first answer is in, it stays in: a refresh on a tier change does
+  // not put the desktop's notices on hold again.
+  const [answered, setAnswered] = useState(false);
 
   useEffect(() => {
     if (!enabled) return;
     let active = true;
+    const giveUp = setTimeout(() => setAnswered(true), WHATS_NEW_SETTLE_MS);
     fetch(WHATS_NEW_ENDPOINT, { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data: unknown) => {
         if (!active || !isWhatsNewState(data)) return;
         setState(data);
       })
-      .catch(() => { /* no card this time; the next load asks again */ });
-    return () => { active = false; };
+      .catch(() => { /* no card this time; the next load asks again */ })
+      .finally(() => {
+        clearTimeout(giveUp);
+        if (active) setAnswered(true);
+      });
+    return () => { active = false; clearTimeout(giveUp); };
   }, [refreshKey, enabled]);
 
   const dismiss = useCallback(() => {
@@ -63,5 +87,5 @@ export function useWhatsNew(refreshKey?: unknown, enabled: boolean = true): What
 
   const hide = useCallback(() => setHidden(true), []);
 
-  return { state, visible: !hidden && state?.show === true, dismiss, hide };
+  return { state, visible: !hidden && state?.show === true, settled: !enabled || answered, dismiss, hide };
 }

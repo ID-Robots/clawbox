@@ -1773,6 +1773,22 @@ export const nl: Record<string, string> = {
   "whatsNew.seePlans": "Bekijk abonnementen",
   "whatsNew.gotIt": "Begrepen",
   "whatsNew.dismiss": "Sluit ‘Nieuw in 4.3’",
+  "whatsNew.screenshotSummary": "Leg het hele scherm, een gebied of een venster vast. Print Screen of Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary": "Je assistent gebruikt nu de browser op het eigen bureaublad van de ClawBox. Log één keer in via Agentbrowser en kijk hoe hij werkt.",
+  "whatsNew.publicLinksSummary": "Klik met de rechtermuisknop op een app die de codeeragent heeft gemaakt en kies Openbare link maken, voor een vaste tijd en met een optioneel wachtwoord.",
+  "whatsNew.grokSummary": "Op OpenClaw stel je xAI Grok in met een API-sleutel of een aanmelding met SuperGrok of X Premium. De meeste modelwissels herstarten de assistent niet meer.",
+  "whatsNew.holdToTalkSummary": "Houd de microfoonknop van de chat, of F8, ingedrukt terwijl je praat, en laat los om te versturen.",
+  "whatsNew.agentChartSummary": "Zie de runs van de codeeragent live aan het werk in een diagram, en stuur een run een bericht terwijl die bezig is.",
+  "whatsNew.primeRadiantSummary": "Een nieuwe app die je documenten omzet in een wiki van feiten, elk met de bron erbij, en die elke nacht opruimt.",
+  "whatsNew.slideLabel": "{current} van {total}",
+  "whatsNew.goToSlide": "Toon hoogtepunt {number}",
+  "whatsNew.back": "Terug",
+  "whatsNew.next": "Volgende",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "Draait op deze ClawBox.",
+  "localModels.chatBannerBody": "Het eerste antwoord kan tot een minuut duren terwijl het lokale model laadt. Daarna gaat het sneller.",
+  "localModels.chatBannerDismiss": "Deze melding verbergen",
+  "localModels.chatLoading": "Lokaal model laden…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "Gebruikers",

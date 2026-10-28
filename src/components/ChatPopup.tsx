@@ -576,6 +576,7 @@ import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
 import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
 import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
+import LocalAiChatBanner, { chatOnLocalAi, useLocalAiBannerDismissed, useLocalAiLoadingLabel } from '@/components/LocalAiChatBanner'
 import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
@@ -1240,8 +1241,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // turn so the line does not flicker through the dictionary, and replaced by
   // the harness's own status text the moment one arrives.
   const turnVerbRef = useRef<string | null>(null)
+  // Has this turn heard from the model yet — a token of the answer or a tool
+  // step? Until it has, a turn on Local AI says the model is loading rather
+  // than pick a verb (see `onLocalAi`). Latched for the turn, so a stream
+  // that is cleared between tool steps does not bring the words back.
+  const [turnHeardFrom, setTurnHeardFrom] = useState(false)
   useEffect(() => {
-    if (!sending) { setTurnStatus(null); setTurnStartedAt(0); return }
+    if (!sending) { setTurnStatus(null); setTurnStartedAt(0); setTurnHeardFrom(false); return }
     turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
     setTurnStartedAt(Date.now())
   }, [sending])
@@ -1258,6 +1264,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     })
   }, [])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
+  useEffect(() => {
+    if (sending && (streaming || toolCalls.length > 0)) setTurnHeardFrom(true)
+  }, [sending, streaming, toolCalls])
   // A delegated coding run outlives the tool call that started it, so this is
   // driven by the device's run record rather than the tool pills. Only probed
   // while the chat is open, and only polled while a run is actually in flight.
@@ -2776,6 +2785,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } =
     useHarnessAdapter(harnessWiring)
   useEffect(() => { adapterRef.current = adapter }, [adapter])
+  // Is this chat on Local AI — a model on this box itself (llama.cpp or
+  // Ollama)? Such a model is read into memory on the first reply after it was
+  // idle, so the chat says so: a note at the top (LocalAiChatBanner) and,
+  // until the turn's first token, "Loading the local model…" in place of a
+  // spinner verb.
+  const onLocalAi = harnessLoaded && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource)
+  const [localAiBannerDismissed, dismissLocalAiBanner] = useLocalAiBannerDismissed()
+  const localAiLoadingLabel = useLocalAiLoadingLabel()
   // The model each conversation's session is held to, by session key (the
   // adapter's `conversationModel`). Kept as state rather than read off the
   // adapter while rendering: it moves only when a turn comes back, a chat is
@@ -8405,6 +8422,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
       )}
 
+      {onLocalAi && !localAiBannerDismissed && (
+        <LocalAiChatBanner onDismiss={dismissLocalAiBanner} />
+      )}
+
       {/* Messages area — sits under the header bar in the flow, so it needs
           no clearance beyond its own breathing room.
 
@@ -8652,7 +8673,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
           >
             <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
-            <span>{turnStatus ?? (sending && turnVerbRef.current ? `${turnVerbRef.current}…` : t("chat.working"))}</span>
+            <span>{turnStatus ?? (
+              sending && onLocalAi && !turnHeardFrom ? localAiLoadingLabel
+              : sending && turnVerbRef.current ? `${turnVerbRef.current}…`
+              : t("chat.working")
+            )}</span>
             {sending && turnStartedAt > 0 && <TurnClock startedAt={turnStartedAt} />}
           </div>
         )}

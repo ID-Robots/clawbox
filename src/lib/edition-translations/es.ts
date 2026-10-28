@@ -1768,6 +1768,22 @@ export const es: Record<string, string> = {
   "whatsNew.seePlans": "Ver planes",
   "whatsNew.gotIt": "Entendido",
   "whatsNew.dismiss": "Cerrar «Novedades de la 4.3»",
+  "whatsNew.screenshotSummary": "Captura toda la pantalla, un área o una ventana. Impr Pant o Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary": "Tu asistente usa ahora el navegador del propio escritorio de la ClawBox. Inicia sesión una vez en Navegador del agente y míralo trabajar.",
+  "whatsNew.publicLinksSummary": "Haz clic derecho en una app que haya creado el agente de código y elige Crear enlace público, por un tiempo fijo y con contraseña opcional.",
+  "whatsNew.grokSummary": "En OpenClaw, configura xAI Grok con una clave de API o iniciando sesión con SuperGrok o X Premium. La mayoría de los cambios de modelo ya no reinician el asistente.",
+  "whatsNew.holdToTalkSummary": "Mantén pulsado el botón del micrófono del chat, o F8, mientras hablas, y suéltalo para enviar.",
+  "whatsNew.agentChartSummary": "Mira las ejecuciones del agente de código trabajando en un gráfico en vivo y escríbeles mientras trabajan.",
+  "whatsNew.primeRadiantSummary": "Una app nueva que convierte tus documentos en una wiki de datos, cada uno con su fuente, y la ordena cada noche.",
+  "whatsNew.slideLabel": "{current} de {total}",
+  "whatsNew.goToSlide": "Mostrar novedad {number}",
+  "whatsNew.back": "Atrás",
+  "whatsNew.next": "Siguiente",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "Funciona en esta ClawBox.",
+  "localModels.chatBannerBody": "La primera respuesta puede tardar hasta un minuto mientras se carga el modelo local. Después es más rápido.",
+  "localModels.chatBannerDismiss": "Ocultar este aviso",
+  "localModels.chatLoading": "Cargando el modelo local…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "Usuarios",

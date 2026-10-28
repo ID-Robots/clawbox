@@ -1773,6 +1773,22 @@ export const fr: Record<string, string> = {
   "whatsNew.seePlans": "Voir les plans",
   "whatsNew.gotIt": "Compris",
   "whatsNew.dismiss": "Fermer « Nouveautés de la 4.3 »",
+  "whatsNew.screenshotSummary": "Capturez tout l'écran, une zone ou une fenêtre. Impr. écran ou Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary": "Votre assistant utilise désormais le navigateur du bureau de la ClawBox. Connectez-vous une fois dans Navigateur de l'agent et regardez-le travailler.",
+  "whatsNew.publicLinksSummary": "Faites un clic droit sur une application créée par l'agent de code et choisissez Créer un lien public, pour une durée choisie et avec un mot de passe facultatif.",
+  "whatsNew.grokSummary": "Sous OpenClaw, configurez xAI Grok avec une clé API ou une connexion SuperGrok ou X Premium. La plupart des changements de modèle ne redémarrent plus l'assistant.",
+  "whatsNew.holdToTalkSummary": "Maintenez le bouton micro du chat, ou F8, pendant que vous parlez, et relâchez pour envoyer.",
+  "whatsNew.agentChartSummary": "Suivez les exécutions de l'agent de code sur un graphique en direct, et écrivez à une exécution pendant qu'elle travaille.",
+  "whatsNew.primeRadiantSummary": "Une nouvelle application qui fait de vos documents un wiki de faits, chacun avec sa source, et le range chaque nuit.",
+  "whatsNew.slideLabel": "{current} sur {total}",
+  "whatsNew.goToSlide": "Afficher la nouveauté {number}",
+  "whatsNew.back": "Retour",
+  "whatsNew.next": "Suivant",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "Tourne sur cette ClawBox.",
+  "localModels.chatBannerBody": "La première réponse peut prendre jusqu'à une minute, le temps que le modèle local se charge. Ensuite, c'est plus rapide.",
+  "localModels.chatBannerDismiss": "Masquer cette note",
+  "localModels.chatLoading": "Chargement du modèle local…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "Utilisateurs",

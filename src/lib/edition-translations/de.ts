@@ -1772,6 +1772,22 @@ export const de: Record<string, string> = {
   "whatsNew.seePlans": "Pläne ansehen",
   "whatsNew.gotIt": "Verstanden",
   "whatsNew.dismiss": "„Neu in 4.3“ schließen",
+  "whatsNew.screenshotSummary": "Den ganzen Bildschirm, einen Bereich oder ein Fenster aufnehmen. Druck-Taste oder Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary": "Ihr Assistent nutzt jetzt den Browser auf dem Desktop der ClawBox. Melden Sie sich einmal im Agent-Browser an und sehen Sie ihm bei der Arbeit zu.",
+  "whatsNew.publicLinksSummary": "Klicken Sie mit der rechten Maustaste auf eine App des Coding-Agents und wählen Sie „Öffentlichen Link erstellen“, befristet und auf Wunsch mit Passwort.",
+  "whatsNew.grokSummary": "Unter OpenClaw richten Sie xAI Grok mit einem API-Schlüssel oder einer Anmeldung mit SuperGrok oder X Premium ein. Die meisten Modellwechsel starten den Assistenten nicht mehr neu.",
+  "whatsNew.holdToTalkSummary": "Halten Sie die Mikrofon-Schaltfläche des Chats oder F8 gedrückt, während Sie sprechen, und lassen Sie zum Senden los.",
+  "whatsNew.agentChartSummary": "Sehen Sie die Läufe des Coding-Agents live in einem Diagramm arbeiten, und schreiben Sie einem Lauf, während er arbeitet.",
+  "whatsNew.primeRadiantSummary": "Eine neue App, die aus Ihren Dokumenten ein Wiki aus Tatsachen mit Quellenangabe macht und es jede Nacht aufräumt.",
+  "whatsNew.slideLabel": "{current} von {total}",
+  "whatsNew.goToSlide": "Highlight {number} zeigen",
+  "whatsNew.back": "Zurück",
+  "whatsNew.next": "Weiter",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "Läuft auf dieser ClawBox.",
+  "localModels.chatBannerBody": "Die erste Antwort kann bis zu einer Minute dauern, während das lokale Modell lädt. Danach geht es schneller.",
+  "localModels.chatBannerDismiss": "Hinweis ausblenden",
+  "localModels.chatLoading": "Lokales Modell wird geladen…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "Benutzer",
