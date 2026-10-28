@@ -38,6 +38,7 @@ import { appMemoryLimits } from "@/lib/box-memory-policy";
 import { runChild, type ChildResult } from "@/lib/child-run";
 import { isInside } from "@/lib/file-guard";
 import { APP_CPU_WEIGHT, APP_IO_WEIGHT } from "@/lib/app-server-start";
+import { scopeEnv } from "@/lib/coding-run-unit";
 
 /** How often the web server looks again, after the boot pass. */
 export const APP_CAPS_SWEEP_MS = 15 * 60_000;
@@ -64,9 +65,16 @@ export interface CapOptions {
 const childEnv = (): Record<string, string> => ({
   PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin",
   LANG: "C",
-  ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}),
-  ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}),
 });
+
+/**
+ * `systemctl --user` from the web server, which is a SYSTEM service whose
+ * environment has neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS (checked
+ * on the box, 2026-10-28): without the runtime dir every call fails and the
+ * pass is a silent no-op. `scopeEnv` derives `/run/user/<uid>`, the one thing
+ * systemctl needs to find the user bus — the same answer the run scopes use.
+ */
+const systemctlEnv = (): Record<string, string> => scopeEnv(childEnv());
 
 const realProc = {
   cwd: (pid: number) => fs.promises.readlink(`/proc/${pid}/cwd`).catch(() => null),
@@ -128,13 +136,13 @@ export async function capForeignAppServers(options: CapOptions = {}): Promise<st
       const unit = foreignUserServiceOf(await proc.cgroup(pid));
       if (!unit || seen.has(unit)) continue;
       seen.add(unit);
-      const shown = await run("systemctl", ["--user", "show", "-p", "MemoryMax", "--value", unit], { timeoutMs: 10_000, env: childEnv() });
+      const shown = await run("systemctl", ["--user", "show", "-p", "MemoryMax", "--value", unit], { timeoutMs: 10_000, env: systemctlEnv() });
       if (shown.code !== 0 || shown.stdout.trim() !== "infinity") continue;
       const limits = appMemoryLimits();
       const set = await run(
         "systemctl",
         ["--user", "set-property", unit, `MemoryHigh=${limits.high}`, `MemoryMax=${limits.max}`, `CPUWeight=${APP_CPU_WEIGHT}`, `IOWeight=${APP_IO_WEIGHT}`],
-        { timeoutMs: 10_000, env: childEnv() },
+        { timeoutMs: 10_000, env: systemctlEnv() },
       );
       if (set.code !== 0) {
         console.error(`[app-caps] ${unit} (app ${id}, port ${port}): set-property failed: ${(set.stderr || set.stdout).trim().slice(0, 200)}`);

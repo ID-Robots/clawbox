@@ -7,6 +7,7 @@
  * which units it asks systemd to cap, and on which it leaves alone.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -37,12 +38,14 @@ function registerApp(id: string, port: number, directory: string): void {
 /** A fake box: what `ss` and `systemctl` answer, what /proc says per pid, and every systemctl call made. */
 function fakeBox(input: { ss?: Record<number, ChildResult>; memoryMax?: Record<string, string>; proc: Record<number, { cwd: string; cgroup: string }>; setFails?: boolean }) {
   const calls: string[][] = [];
-  const run = async (bin: string, args: string[]): Promise<ChildResult> => {
+  const envs: Record<string, string>[] = [];
+  const run = async (bin: string, args: string[], opts: { env: Record<string, string> }): Promise<ChildResult> => {
     if (bin === "ss") {
       const port = Number(/sport = :(\d+)/.exec(args[args.length - 1])?.[1]);
       return input.ss?.[port] ?? ok("");
     }
     calls.push([bin, ...args]);
+    envs.push(opts.env);
     if (args[1] === "show") return ok((input.memoryMax?.[args[5]] ?? "infinity") + "\n");
     if (args[1] === "set-property") return input.setFails ? failed("Failed to set unit properties") : ok("");
     return failed();
@@ -51,7 +54,7 @@ function fakeBox(input: { ss?: Record<number, ChildResult>; memoryMax?: Record<s
     cwd: async (pid: number) => input.proc[pid]?.cwd ?? null,
     cgroup: async (pid: number) => input.proc[pid]?.cgroup ?? null,
   };
-  return { run, proc, calls, setCalls: () => calls.filter((c) => c[2] === "set-property") };
+  return { run, proc, calls, envs, setCalls: () => calls.filter((c) => c[2] === "set-property") };
 }
 
 beforeEach(() => {
@@ -90,6 +93,27 @@ describe("capForeignAppServers", () => {
       "systemctl", "--user", "set-property", "audiobook-player-app.service",
       `MemoryHigh=${limits.high}`, `MemoryMax=${limits.max}`, `CPUWeight=${APP_CPU_WEIGHT}`, `IOWeight=${APP_IO_WEIGHT}`,
     ]]);
+  });
+
+  it("hands systemctl a runtime dir even when the web server's environment has none", async () => {
+    // clawbox-setup.service is a SYSTEM service: its environment carries neither
+    // XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS, and `systemctl --user`
+    // without the runtime dir fails on every call.
+    const restore = saveEnv("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS");
+    delete process.env.XDG_RUNTIME_DIR;
+    delete process.env.DBUS_SESSION_BUS_ADDRESS;
+    try {
+      const dir = path.join(base, "audiobook-player");
+      registerApp("audiobook-player", 4240, dir);
+      const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
+
+      await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} });
+
+      expect(box.envs).toHaveLength(2);
+      for (const env of box.envs) expect(env.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+    } finally {
+      restore();
+    }
   });
 
   it("leaves a unit that already has a MemoryMax alone", async () => {
