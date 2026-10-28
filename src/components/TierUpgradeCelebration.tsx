@@ -14,26 +14,33 @@ import { useT } from "@/lib/i18n";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 import * as kv from "@/lib/client-kv";
 
-// Announces account-tier transitions:
-//   - upgrade (Free → Pro → Max): celebratory modal, shown once per tier
+// Announces account-PLAN transitions:
+//   - upgrade (Free → Pro → Max): celebratory modal, shown once per plan
 //   - downgrade to Free (paid → Free): informational "plan is now Free" modal
 //   - intermediate downgrade (Max → Pro): silent
 //
-// Backed by client-kv so a poll re-reporting the same tier doesn't reopen
-// the dialog, and so a later climb back to the same paid tier doesn't
+// The plan is `useClawboxLogin().plan` — the portal's plan verdict — and
+// NEVER the box's model tier. A Free sign-in stamps the box "flash", the same
+// stamp the Pro plan gets (both run DeepSeek V4 Flash), so a model tier read
+// as the plan greeted Free accounts with "Welcome to ClawBox Pro". A plan
+// that is not known yet (null) is neither a transition nor a baseline.
+//
+// Backed by client-kv so a poll re-reporting the same plan doesn't reopen
+// the dialog, and so a later climb back to the same paid plan doesn't
 // re-celebrate something the user already saw. A real cancel + resubscribe
 // flow *does* re-celebrate, because the downgrade resets the seen marker.
 
 const SEEN_KEY = "clawai_tier_seen";
 const FREE_SEEN_VALUE = "free";
 
-// Tier ordering. Keep aligned with normalizeClawboxAiTier on the server
-// (flash = Pro plan, pro = Max plan).
-const TIER_RANK: Record<string, number> = { flash: 1, pro: 2 };
+// Plan ordering, in the plan words `mapPortalPlanVerdict` answers with
+// (flash = Pro plan, pro = Max plan, free = unpaid). The seen marker stores
+// the same words, so a marker written by an earlier build still compares.
+const PLAN_RANK: Record<string, number> = { flash: 1, pro: 2 };
 
-function rankOf(tier: string | null | undefined): number {
-  if (!tier) return 0;
-  return TIER_RANK[tier] ?? 0;
+function rankOf(plan: string | null | undefined): number {
+  if (!plan) return 0;
+  return PLAN_RANK[plan] ?? 0;
 }
 
 type DialogState =
@@ -107,20 +114,27 @@ const CONTENT: Record<ContentKey, DialogContent> = {
   },
 };
 
-// Memoized: it takes no props — the tier comes from the shared login poll and
+// Memoized: it takes no props — the plan comes from the shared login poll and
 // the copy from the language context, both of which re-render it themselves —
 // so the desktop's own renders have nothing to tell it.
 export default memo(function TierUpgradeCelebration() {
   // A second call beside the page's own costs the box nothing: every mounted
   // useClawboxLogin() is answered by the one shared poll (it used to be a
   // second 30 s chain asking the status route the same question).
-  const { tier, loading } = useClawboxLogin();
+  const { plan, loading } = useClawboxLogin();
   const { t } = useT();
   const [dialog, dispatch] = useReducer(dialogReducer, null);
 
   useEffect(() => {
     if (loading) return;
+    // Not known — the portal has not answered for this account and nothing
+    // is on record. Announcing anything here would be a guess, in either
+    // direction: Pro to a Free account, or "your plan is now Free" to a
+    // subscriber whose portal is merely out of reach.
+    if (plan === null) return;
     const seen = kv.get(SEEN_KEY);
+    // The paid plan, or null for Free.
+    const tier = plan === "flash" || plan === "pro" ? plan : null;
     const currentSeenValue = tier ?? FREE_SEEN_VALUE;
 
     // First observation on this browser/device is a baseline, not a
@@ -148,7 +162,7 @@ export default memo(function TierUpgradeCelebration() {
     // sync `seen` so a later climb back to the same tier doesn't re-fire
     // the celebration the user already saw.
     if (seen !== currentSeenValue) kv.set(SEEN_KEY, currentSeenValue);
-  }, [tier, loading]);
+  }, [plan, loading]);
 
   if (!dialog) return null;
 

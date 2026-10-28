@@ -38,7 +38,7 @@ function json(body: unknown, status = 200) {
 }
 
 /** What the box's ClawBox AI account is, as /setup-api/ai-models/status says it. */
-type Account = "pro-plan" | "max-plan" | "free" | "not-connected" | "never-answers";
+type Account = "pro-plan" | "max-plan" | "free" | "free-on-flash" | "not-connected" | "never-answers";
 
 function stubAccount(account: Account) {
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
@@ -47,6 +47,11 @@ function stubAccount(account: Account) {
       // A poll that never answers is the loading face: the hook holds
       // `loading: true` until its first 2xx body.
       if (account === "never-answers") return new Promise<Response>(() => {});
+      // A Free sign-in as the box really reports it: the MODEL tier is "flash"
+      // (Free and Pro run the same model), the PLAN is Free.
+      if (account === "free-on-flash") {
+        return json({ clawaiConfigured: true, clawaiAccountTier: "flash", clawaiPlan: "free" });
+      }
       return json({
         clawaiConfigured: account !== "not-connected",
         clawaiAccountTier:
@@ -139,6 +144,15 @@ for (const wizard of WIZARDS) {
       expect(enable).toBeDisabled();
       expect(enable).toHaveAttribute("aria-disabled", "true");
       expect(enable).toHaveAttribute("title", t("paidGate.buttonBlocked"));
+    });
+
+    it("offers the upgrade to a Free account whose box runs the flash model", async () => {
+      stubAccount("free-on-flash");
+      wizard.render();
+
+      await waitFor(() =>
+        expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "upgrade"));
+      expect(screen.getByTestId(wizard.enableTestId)).toBeDisabled();
     });
 
     for (const account of ["pro-plan", "max-plan"] as const) {

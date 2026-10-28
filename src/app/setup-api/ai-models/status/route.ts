@@ -3,8 +3,11 @@ import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PLAN_UNPAID,
   CLAWBOX_AI_PRO_MODEL_ID,
+  normalizeClawboxAiPlanTier,
   normalizeClawboxAiTier,
+  type ClawboxAiPlanTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
@@ -24,7 +27,7 @@ import {
 // The portal's PLAN, written where the same two boot scripts can read it. The
 // tier stamp beside it is a device DEFAULT and may not be refused on — see
 // `clawai-plan-tier.ts` and TASK-744.
-import { clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
+import { CLAWAI_PLAN_TIER_KEY, clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
 
 export const dynamic = "force-dynamic";
 
@@ -217,6 +220,17 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
   // thrown away, and the badge went on saying "Connected · Pro" while every
   // turn came back "HTTP 403: Invalid token".
   let clawaiTokenRejected = false;
+  // The account's PLAN — what the owner pays for — as opposed to the tier
+  // above, which is the MODEL the box defaults to. The two are not the same
+  // fact: a Free sign-in stamps the box "flash" (Free and Pro run the same
+  // model, see `uiTierToDeviceTier`), so the device tier cannot tell Free from
+  // Pro, and a Max subscriber may run Flash. Read as the plan, that stamp put
+  // the "Welcome to ClawBox Pro" celebration in front of Free accounts and
+  // opened Pro-only screens to them. Everything that shows or gates on a PLAN
+  // reads this field: `mapPortalPlanVerdict`'s words — "free", "flash" (the Pro
+  // plan), "pro" (the Max plan) — or null for "not known". A box with no
+  // ClawBox AI account pays for nothing, which is an answer.
+  let clawaiPlan: ClawboxAiPlanTier | null = state.hasClawaiProfile ? null : CLAWBOX_AI_PLAN_UNPAID;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -237,6 +251,7 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
+        clawaiPlan = lookup.planVerdict;
         // A portal that answered but published no list is not "unknown": it is
         // an older portal build, and there the badge IS all the entitlement
         // there has ever been. Fill the list from it so nothing that used to
@@ -297,6 +312,16 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         if (clawaiTokenRejectedByPortal()) await persistClawaiCredentialRefusal();
       }
     }
+    // No verdict this poll — the portal was unreachable, refused the
+    // credential, answered in words this build cannot read, or there is no
+    // portal token to ask with: the plan the portal last reported for this
+    // credential. The credential writers record or delete it together with
+    // the credential, so it is never a previous account's. NEVER the device
+    // stamp, which says "flash" for a Free account; with nothing on record the
+    // plan is not known, and nothing may be celebrated or unlocked on it.
+    clawaiPlan ??= normalizeClawboxAiPlanTier(
+      await getConfigValue(CLAWAI_PLAN_TIER_KEY).catch(() => null),
+    );
   }
 
   // The badge-facing tier mirrors the account tier *only* when
@@ -315,6 +340,10 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     model: state.model,
     clawaiTier,
     clawaiAccountTier,
+    // The PLAN the account pays for ("free" / "flash" = Pro / "pro" = Max), or
+    // null when it is not known. The tiers above are MODEL defaults; the plan
+    // badge, the tier celebration and the paid-plan screens read this.
+    clawaiPlan,
     // Model ids the portal says this account may run, or null when it did not
     // say. The picker gates on this, never on the tier badge above.
     clawaiAllowedModels,
@@ -353,7 +382,9 @@ export async function GET() {
     return NextResponse.json(
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
-        clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
+        // `clawaiPlan: null` is "not known", never Free: a failed read must not
+        // tell a paying owner their plan just ended.
+        clawaiTier: null, clawaiAccountTier: null, clawaiPlan: null, clawaiAllowedModels: null,
         clawaiConfigured: false, clawaiTokenRejected: false, tierSource: "picker",
       },
       {

@@ -105,6 +105,57 @@ describe("useClawboxLogin", () => {
     expect(result.current.tier).toBeNull();
   });
 
+  // A Free sign-in stamps the box's MODEL tier "flash" — the same stamp the
+  // Pro plan gets — so the account tiers on the wire cannot say Free. The
+  // plan is `clawaiPlan`, and the hook's `tier` (every paid gate's input) and
+  // `plan` (the celebration's) both come from it.
+  it("reads a Free account as Free from clawaiPlan, not as Pro from its flash model tier", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "clawai",
+      clawaiTier: "flash",
+      clawaiAccountTier: "flash",
+      clawaiPlan: "free",
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBeNull();
+    expect(result.current.plan).toBe("free");
+  });
+
+  it("reads the paid plans from clawaiPlan: flash is Pro, pro is Max, whatever the model tier", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai",
+      // A Max subscriber whose box runs Flash.
+      clawaiAccountTier: "flash",
+      clawaiPlan: "pro",
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.tier).toBe("pro");
+    expect(result.current.plan).toBe("pro");
+  });
+
+  it("unlocks nothing on a plan that is not known, and says it is not known", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai",
+      clawaiAccountTier: "flash",
+      clawaiPlan: null,
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBeNull();
+    expect(result.current.plan).toBeNull();
+  });
+
   it("falls back to legacy provider-equality when the response omits clawaiConfigured", async () => {
     // Zero-downtime rollout: an old server build (or stale Next.js
     // route handler that hasn't reloaded yet) won't emit the new
@@ -121,6 +172,9 @@ describe("useClawboxLogin", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.loggedIn).toBe(true);
     expect(result.current.tier).toBe("flash");
+    // A pre-rollout server has no plan to give: nothing may be announced off
+    // the model tier it does give.
+    expect(result.current.plan).toBeNull();
   });
 
   it("does not flip out of loading on a non-2xx response, but still leaves loggedIn=false", async () => {
