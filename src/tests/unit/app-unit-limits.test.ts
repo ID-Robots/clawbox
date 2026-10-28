@@ -14,11 +14,13 @@ import path from "path";
 import { appMemoryLimits } from "@/lib/box-memory-policy";
 import { APP_CPU_WEIGHT, APP_IO_WEIGHT } from "@/lib/app-server-start";
 import { capForeignAppServers, foreignUserServiceOf } from "@/lib/app-unit-limits";
-import type { ChildResult } from "@/lib/child-run";
+import { resolveBin, type ChildResult } from "@/lib/child-run";
 
 const ok = (stdout: string): ChildResult => ({ code: 0, stdout, stderr: "", signal: null, timedOut: false, startFailed: false });
 const failed = (stderr = "no"): ChildResult => ({ code: 1, stdout: "", stderr, signal: null, timedOut: false, startFailed: false });
 
+/** Where the box's systemctl is: the pass hands runChild this absolute path, never the bare name. */
+const SYSTEMCTL = "/usr/bin/systemctl";
 const USER_UNIT = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/audiobook-player-app.service\n";
 const OWN_SCOPE = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/clawbox-app-todo-abc123.scope\n";
 const SYSTEM_UNIT = "0::/system.slice/clawbox-setup.service\n";
@@ -36,7 +38,7 @@ function registerApp(id: string, port: number, directory: string): void {
 }
 
 /** A fake box: what `ss` and `systemctl` answer, what /proc says per pid, and every systemctl call made. */
-function fakeBox(input: { ss?: Record<number, ChildResult>; memoryMax?: Record<string, string>; proc: Record<number, { cwd: string; cgroup: string }>; setFails?: boolean }) {
+function fakeBox(input: { ss?: Record<number, ChildResult>; memoryMax?: Record<string, string>; restart?: Record<string, string>; proc: Record<number, { cwd: string; cgroup: string }>; setFails?: boolean }) {
   const calls: string[][] = [];
   const envs: Record<string, string>[] = [];
   const run = async (bin: string, args: string[], opts: { env: Record<string, string> }): Promise<ChildResult> => {
@@ -46,7 +48,8 @@ function fakeBox(input: { ss?: Record<number, ChildResult>; memoryMax?: Record<s
     }
     calls.push([bin, ...args]);
     envs.push(opts.env);
-    if (args[1] === "show") return ok((input.memoryMax?.[args[5]] ?? "infinity") + "\n");
+    // `show -p MemoryMax -p Restart --value <unit>`: one line per property, in that order.
+    if (args[1] === "show") return ok((input.memoryMax?.[args[7]] ?? "infinity") + "\n" + (input.restart?.[args[7]] ?? "on-failure") + "\n");
     if (args[1] === "set-property") return input.setFails ? failed("Failed to set unit properties") : ok("");
     return failed();
   };
@@ -85,14 +88,78 @@ describe("capForeignAppServers", () => {
     registerApp("audiobook-player", 4240, dir);
     const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
 
-    const capped = await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} });
+    const capped = await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} });
 
     const limits = appMemoryLimits();
     expect(capped).toEqual(["audiobook-player-app.service"]);
     expect(box.setCalls()).toEqual([[
-      "systemctl", "--user", "set-property", "audiobook-player-app.service",
+      SYSTEMCTL, "--user", "set-property", "audiobook-player-app.service",
       `MemoryHigh=${limits.high}`, `MemoryMax=${limits.max}`, `CPUWeight=${APP_CPU_WEIGHT}`, `IOWeight=${APP_IO_WEIGHT}`,
     ]]);
+  });
+
+  it("starts systemctl by its absolute path, the only form runChild permits for it", async () => {
+    // The first pass shipped the bare name: runChild's allowlist has no
+    // "systemctl", every call came back "command not permitted", and the pass
+    // read the refusal as "already capped" — nothing was ever capped.
+    expect(resolveBin("systemctl")).toBeNull();
+    expect(resolveBin(SYSTEMCTL)).toBe(SYSTEMCTL);
+    const dir = path.join(base, "audiobook-player");
+    registerApp("audiobook-player", 4240, dir);
+    const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
+
+    await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} });
+
+    expect(box.calls.map((c) => c[0])).toEqual([SYSTEMCTL, SYSTEMCTL]);
+  });
+
+  it("resolves systemctl on the PATH itself when nothing is handed in, and gives the runner that path", async () => {
+    const restore = saveEnv("PATH");
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "app-caps-bin-"));
+    const shim = path.join(bin, "systemctl");
+    fs.writeFileSync(shim, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    process.env.PATH = bin;
+    try {
+      const dir = path.join(base, "audiobook-player");
+      registerApp("audiobook-player", 4240, dir);
+      const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
+
+      const capped = await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} });
+
+      expect(capped).toEqual(["audiobook-player-app.service"]);
+      expect(box.calls.map((c) => c[0])).toEqual([shim, shim]);
+    } finally {
+      restore();
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it("gives a unit with no Restart= MemoryHigh only, so the cap cannot leave it down", async () => {
+    // systemd's default. A MemoryMax would OOM-kill a unit already past it,
+    // and with nothing to bring it back the next pass finds no listener.
+    const dir = path.join(base, "audiobook-player");
+    registerApp("audiobook-player", 4240, dir);
+    const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, restart: { "audiobook-player-app.service": "no" }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
+
+    const capped = await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} });
+
+    const limits = appMemoryLimits();
+    expect(capped).toEqual(["audiobook-player-app.service"]);
+    expect(box.setCalls()).toEqual([[
+      SYSTEMCTL, "--user", "set-property", "audiobook-player-app.service",
+      `MemoryHigh=${limits.high}`, `CPUWeight=${APP_CPU_WEIGHT}`, `IOWeight=${APP_IO_WEIGHT}`,
+    ]]);
+  });
+
+  it("caps nothing, and says so, when systemctl cannot be found", async () => {
+    const dir = path.join(base, "audiobook-player");
+    registerApp("audiobook-player", 4240, dir);
+    const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
+
+    const capped = await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: null, env: {} });
+
+    expect(capped).toEqual([]);
+    expect(box.calls).toEqual([]);
   });
 
   it("hands systemctl a runtime dir even when the web server's environment has none", async () => {
@@ -107,7 +174,7 @@ describe("capForeignAppServers", () => {
       registerApp("audiobook-player", 4240, dir);
       const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
 
-      await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} });
+      await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} });
 
       expect(box.envs).toHaveLength(2);
       for (const env of box.envs) expect(env.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
@@ -125,7 +192,7 @@ describe("capForeignAppServers", () => {
       proc: { 501: { cwd: dir, cgroup: USER_UNIT } },
     });
 
-    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} })).toEqual([]);
+    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} })).toEqual([]);
     expect(box.setCalls()).toEqual([]);
   });
 
@@ -139,7 +206,7 @@ describe("capForeignAppServers", () => {
       proc: { 601: { cwd: todo, cgroup: OWN_SCOPE }, 602: { cwd: quake, cgroup: SYSTEM_UNIT } },
     });
 
-    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} })).toEqual([]);
+    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} })).toEqual([]);
     expect(box.calls).toEqual([]);
   });
 
@@ -148,7 +215,7 @@ describe("capForeignAppServers", () => {
     registerApp("audiobook-player", 4240, dir);
     const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: path.join(base, "elsewhere"), cgroup: USER_UNIT } } });
 
-    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} })).toEqual([]);
+    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} })).toEqual([]);
     expect(box.calls).toEqual([]);
   });
 
@@ -157,7 +224,7 @@ describe("capForeignAppServers", () => {
     registerApp("audiobook-player", 4240, dir);
     const box = fakeBox({ ss: { 4240: ok(ssRow(4240, 501)) }, proc: { 501: { cwd: dir, cgroup: USER_UNIT } } });
 
-    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: { CLAWBOX_APP_CAPS: "0" } })).toEqual([]);
+    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: { CLAWBOX_APP_CAPS: "0" } })).toEqual([]);
     expect(box.calls).toEqual([]);
   });
 
@@ -176,12 +243,12 @@ describe("capForeignAppServers", () => {
       setFails: true,
     });
 
-    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, env: {} })).toEqual([]);
+    expect(await capForeignAppServers({ webappsDir: webapps, run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} })).toEqual([]);
     expect(box.setCalls()).toHaveLength(1);
   });
 
   it("answers nothing when there is no webapps folder", async () => {
     const box = fakeBox({ proc: {} });
-    expect(await capForeignAppServers({ webappsDir: path.join(base, "missing"), run: box.run, proc: box.proc, env: {} })).toEqual([]);
+    expect(await capForeignAppServers({ webappsDir: path.join(base, "missing"), run: box.run, proc: box.proc, systemctl: SYSTEMCTL, env: {} })).toEqual([]);
   });
 });
