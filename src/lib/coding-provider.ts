@@ -39,6 +39,14 @@ export const DEFAULT_CODING_PROVIDER: CodingProvider = "clawbox-ai";
 
 /** The owner's default, in data/config.json. */
 export const CODING_AGENT_PROVIDER_CONFIG_KEY = "coding_agent_provider";
+/**
+ * The providers the owner CONNECTED to the coding agent (Settings → Coding
+ * agent → Connected providers, 2026-10-28): a team may run on several accounts
+ * at once, one per role. A record from before the list reads as the default
+ * provider alone (`CODING_AGENT_PROVIDER_CONFIG_KEY`), which is what every box
+ * ran on until then.
+ */
+export const CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY = "coding_agent_providers";
 
 /**
  * The owner's Anthropic API key, beside `clawai_token` in the same 0600
@@ -133,6 +141,13 @@ export function isCodingProvider(value: unknown): value is CodingProvider {
 /** A stored or inherited value read as a provider; anything else is the default. */
 export function codingProviderFrom(raw: unknown): CodingProvider {
   return isCodingProvider(raw) ? raw : DEFAULT_CODING_PROVIDER;
+}
+
+/** The connected providers off the record, in their stored order, unknown ids and repeats dropped; no usable list → the default provider alone. */
+export function connectedProvidersFrom(raw: unknown, fallback: CodingProvider): CodingProvider[] {
+  const out: CodingProvider[] = [];
+  if (Array.isArray(raw)) for (const id of raw) if (isCodingProvider(id) && !out.includes(id)) out.push(id);
+  return out.length > 0 ? out : [fallback];
 }
 
 /**

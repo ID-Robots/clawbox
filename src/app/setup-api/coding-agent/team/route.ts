@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
+import { slimTeam } from "@/lib/coding-agent-slim";
 import { getTeam, listTeams, startTeam } from "@/lib/coding-team";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
@@ -18,6 +19,13 @@ export const dynamic = "force-dynamic";
  *                                 written, cache read) — wall time, team messages
  *                                 sent/to the lead/to a sibling/undelivered) as of now
  * GET                           → { teams } — the recent boards, newest first
+ * GET ?slim=1                   → the same with every SETTLED board's log
+ *                                 emptied and its tasks' briefs cut short,
+ *                                 results and review notes dropped, `slim:
+ *                                 true` on it — the app's live poll, merged
+ *                                 over the boards it holds
+ *                                 (src/lib/coding-agent-slim.ts); a team at
+ *                                 work or queued is always whole
  * POST { goal, projectId | directory } → 202 { started: true, team }, or —
  *                                 while another team works — 202 { started:
  *                                 false, queued: true, team } with the board in
@@ -39,7 +47,9 @@ export async function GET(request: Request) {
   // The owner gate the run routes apply: the MCP bearer sees only the teams
   // it started. An owner's team, its goal and its log are the owner's.
   const owner = await hasPersonSession(request);
-  const id = new URL(request.url).searchParams.get("id");
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
+  const slim = url.searchParams.get("slim") === "1";
   if (id) {
     const team = getTeam(id);
     if (!team) return NextResponse.json({ error: "There is no coding team with that id.", kind: "not_found" }, { status: 404 });
@@ -48,7 +58,8 @@ export async function GET(request: Request) {
     }
     return NextResponse.json({ team });
   }
-  return NextResponse.json({ teams: listTeams().filter((t) => owner || t.source === "agent") });
+  const teams = listTeams().filter((t) => owner || t.source === "agent");
+  return NextResponse.json({ teams: slim ? teams.map((t) => slimTeam(t)) : teams });
 }
 
 export async function POST(request: Request) {

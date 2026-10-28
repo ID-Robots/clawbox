@@ -540,8 +540,8 @@ function turnsKnown(run: DiagramRun): boolean {
   return (run.numTurns ?? 0) > 0 || !isLive(run.status);
 }
 
-/** The chart's figures as chips and bars: how far the tasks are, what each role spent, how long it has been. */
-function DiagramFigures({ source, lookup }: { source: DiagramSource; lookup: (id: string) => DiagramRun | undefined }) {
+/** The chart's figures as chips and bars: how far the tasks are, what each role spent, how long it has been. Exported for the home's plain row of a lone run. */
+export function DiagramFigures({ source, lookup }: { source: DiagramSource; lookup: (id: string) => DiagramRun | undefined }) {
   const { t } = useT();
   // A live run's clock moves between the host's reads.
   const now = useSecondTicker(source.kind === "run" && isLive(source.run.status));

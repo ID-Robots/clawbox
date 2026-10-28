@@ -28,6 +28,7 @@ import os from "os";
 import type { CiFailure } from "@/lib/coding-ci";
 import { emptyTokenBreakdown, readTokenBreakdown, type TokenBreakdown } from "@/lib/coding-agent";
 import { CODING_PROVIDERS, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { isSettledTeamStatus, type TeamStatus } from "@/lib/coding-team-status";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
@@ -79,7 +80,7 @@ const DIGEST_LOG_LINES = 5;
  * by the box itself in the order asked once the teams ahead of it settle
  * (coding-team.ts startNextQueuedTeam). Neither working nor settled.
  */
-export type TeamStatus = "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+export type { TeamStatus };
 /**
  * `retired` is the lead's: a pending task it decided the goal no longer
  * needs. Terminal, and neither a failure nor a block — a task that waited on
@@ -1313,10 +1314,8 @@ export function allComplete(board: TeamBoard): boolean {
     && board.tasks.every((t) => t.status === "retired" || (t.status === "complete" && t.review?.verdict !== "rejected"));
 }
 
-/** Done, failed or stopped: nothing more happens to the team. */
-export function isSettledTeamStatus(status: TeamStatus): boolean {
-  return status === "done" || status === "failed" || status === "stopped";
-}
+/** Done, failed or stopped: nothing more happens to the team (src/lib/coding-team-status.ts, disk-free so the client can ask too). */
+export { isSettledTeamStatus };
 
 /** Tools that only look. */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"]);

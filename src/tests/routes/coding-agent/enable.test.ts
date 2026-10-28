@@ -617,6 +617,50 @@ describe("a team's model and effort per role", () => {
     expect(configSet).not.toHaveBeenCalled();
   });
 
+  it("saves the connected providers, moves the default onto the list, and puts a role pinned to a dropped account back on Default", async () => {
+    vi.mocked(configGet).mockImplementation(async (key: string) =>
+      key === "clawai_plan_tier" ? "flash"
+        : key === "coding_agent_provider" ? "anthropic"
+          : key === "coding_agent_role_models" ? { planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "high" }, bulk: { provider: "anthropic", model: "economy" }, worker: { provider: "clawbox-ai" } }
+            : undefined);
+    const res = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai"] } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_providers", ["clawbox-ai"]);
+    // The default provider was anthropic, which just left the list.
+    expect(configSet).toHaveBeenCalledWith("coding_agent_provider", "clawbox-ai");
+    // The planner loses its account AND the model only that account offered; bulk keeps its tier; the worker is untouched.
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { effort: "high" }, bulk: { model: "economy" }, worker: { provider: "clawbox-ai" } });
+  });
+
+  it("applies the list before the default, and refuses a default outside the resulting list before any write", async () => {
+    const both = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai", "anthropic"], provider: "anthropic" } }));
+    expect(both.status).toBe(200);
+    const order = vi.mocked(configSet).mock.calls.map(([key]) => key);
+    expect(order.indexOf("coding_agent_providers")).toBeLessThan(order.lastIndexOf("coding_agent_provider"));
+    expect(configSet).toHaveBeenCalledWith("coding_agent_provider", "anthropic");
+    vi.mocked(configSet).mockClear();
+
+    const outside = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai"], provider: "anthropic" } }));
+    expect(outside.status).toBe(400);
+    expect((await outside.json()).error).toMatch(/connected/);
+    expect(configSet).not.toHaveBeenCalled();
+
+    // A default alone must be connected too: the stored list (the default alone, on a record from before the list) does not carry it.
+    const alone = await POST(request({ cookie: ownerCookie(), body: { provider: "anthropic" } }));
+    expect(alone.status).toBe(400);
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty connected list and an unknown provider, before anything is written", async () => {
+    const empty = await POST(request({ cookie: ownerCookie(), body: { providers: [] } }));
+    expect(empty.status).toBe(400);
+    expect((await empty.json()).error).toMatch(/at least one provider/i);
+    const unknown = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai", "openai"] } }));
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).kind).toBe("invalid");
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
   it("saves a provider and a model per role, bulk work included", async () => {
     const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: {
       planner: { provider: "anthropic", model: "claude-fable-5-1" },

@@ -62,6 +62,20 @@ describe("GET", () => {
     expect((await res.json()).kind).toBe("not_found");
   });
 
+  it("answers a settled board slim on ?slim=1 — no log, its tasks' text gone — and a working one whole", async () => {
+    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted", notes: "fine", at: 1 } };
+    const done = { ...BOARD, id: "team-done00001", status: "done", log: [{ type: "note", message: "planned" }], tasks: [task] };
+    const working = { ...BOARD, id: "team-work00001", status: "working", log: [{ type: "note", message: "planned" }], tasks: [task] };
+    team.listTeams.mockReturnValue([done, working]);
+    const slim = await (await GET(req("team?slim=1"))).json();
+    expect(slim.teams[0]).toEqual({ ...done, slim: true, log: [], tasks: [{ ...task, result: null, review: { verdict: "accepted", notes: "", at: 1 } }] });
+    expect(slim.teams[1]).toEqual(working);
+    expect(await (await GET(req("team"))).json()).toEqual({ teams: [done, working] });
+    // One board by id is never slim.
+    team.getTeam.mockReturnValue(done);
+    expect(await (await GET(req("team?id=team-done00001&slim=1"))).json()).toEqual({ team: done });
+  });
+
   it("answers the board's shape and figures with it — what the bench reads", async () => {
     const metrics = { plannerRuns: 1, workerRuns: 2, reviewerRuns: 0, leadRuns: 1, tasksPlanned: 3, tasksAdded: 0, tasksRetired: 1, tasksAcceptedFirstTry: 2, tasksRejected: 0, tokensUsed: 42_000, wallMs: 90_000, messagesSent: 3, messagesToLead: 1, messagesToSibling: 2, messagesUndelivered: 0 };
     team.getTeam.mockReturnValueOnce({ ...BOARD, shape: { parallelism: 1, review: "final", rationale: "One file." }, dynamic: true, metrics });

@@ -68,6 +68,21 @@ describe("GET runs", () => {
     expect(listRuns).toHaveBeenCalledWith(30);
   });
 
+  it("answers a settled run slim on ?slim=1 and a live one whole; the default is untouched", async () => {
+    const settled = { ...RUN, progress: ["Read index.html"], progressAt: [1], resultText: "closing", pipeline: { phase: "done" }, allowRules: ["Bash(git *)"], deniedActions: ["rm"], denials: [{ tool: "Bash" }] };
+    const live = { ...settled, id: "run-live00001", status: "running" };
+    listRuns.mockReturnValue([settled, live]);
+    const slim = await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=30&artifacts=1&slim=1"))).json();
+    expect(slim.runs[0]).toEqual({ ...settled, transcriptPath: null, artifacts: [], slim: true, progress: [], progressAt: [], resultText: null, pipeline: null, allowRules: [], deniedActions: [], denials: [] });
+    expect(slim.runs[1]).toEqual({ ...live, transcriptPath: null, artifacts: [] });
+    // Without the flag every record is whole, as the mount read and the read after a run settles need it.
+    const whole = await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=30"))).json();
+    expect(whole.runs).toEqual([{ ...settled, transcriptPath: null }, { ...live, transcriptPath: null }]);
+    // One run by id is never slim: that is how a run page fills itself.
+    getRun.mockReturnValue(settled);
+    expect((await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab&slim=1"))).json()).run.progress).toEqual(["Read index.html"]);
+  });
+
   it("returns one run by id without waiting when wait is absent", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab"));
     expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null } });
