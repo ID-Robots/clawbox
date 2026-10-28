@@ -399,6 +399,162 @@ describe("WhatsNewCard", () => {
     expect(onDismiss).toHaveBeenCalledTimes(3);
   });
 
+  describe("the screenshot, full screen", () => {
+    const view = () => screen.getByTestId("whats-new-lightbox");
+    const viewImage = () => screen.getByTestId("whats-new-lightbox-image");
+    const open = () => fireEvent.click(screen.getByRole("button", { name: "View screenshot full screen" }));
+
+    it("every slide has an expand button in its screenshot's corner", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      for (let i = 0; i < WHATS_NEW_HIGHLIGHTS.length; i++) {
+        const expand = within(slide()).getByRole("button", { name: "View screenshot full screen" });
+        // In the picture's frame, over its top-right corner.
+        expect(expand.parentElement).toContainElement(within(slide()).getByTestId("whats-new-image"));
+        expect(expand.className).toMatch(/\babsolute\b.*\bright-2\b.*\btop-2\b/);
+        expect(expand).toHaveAttribute("aria-haspopup", "dialog");
+        if (i < WHATS_NEW_HIGHLIGHTS.length - 1) fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      }
+    });
+
+    it("opens the slide's screenshot at full resolution, named for the feature, with the focus on ✕", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      open();
+      const dialog = screen.getByRole("dialog", { name: `Screenshot: ${en[WHATS_NEW_HIGHLIGHTS[1].title]}` });
+      expect(dialog).toBe(view());
+      expect(dialog).toHaveAttribute("aria-modal", "true");
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
+      expect(viewImage()).toHaveAttribute("alt", en[WHATS_NEW_HIGHLIGHTS[1].title]);
+      expect(within(dialog).getByText("2 of 7", { exact: false })).toBeInTheDocument();
+      expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Close full screen" }));
+      // Drawn over the card: in the body, one layer above it.
+      expect(dialog.parentElement).toBe(document.body);
+      expect(Number(dialog.style.zIndex)).toBeGreaterThan(Number(screen.getByTestId("whats-new-backdrop").style.zIndex));
+      expect(dialog.className).toContain("main-screen-scrim");
+    });
+
+    it("a click on the screenshot itself opens it too", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      fireEvent.click(screen.getByTestId("whats-new-image"));
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[0].fullImage);
+    });
+
+    it("✕ closes it: the card stays, and the focus is back on the expand button", () => {
+      const onDismiss = vi.fn();
+      render(<WhatsNewCard state={MAX} onDismiss={onDismiss} />);
+      open();
+      fireEvent.click(screen.getByRole("button", { name: "Close full screen" }));
+      expect(screen.queryByTestId("whats-new-lightbox")).toBeNull();
+      expect(onDismiss).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog", { name: "What's new in 4.3" })).toBeInTheDocument();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "View screenshot full screen" }));
+    });
+
+    it("Escape closes the full-screen view, not the card; the next Escape closes the card", () => {
+      const onDismiss = vi.fn();
+      render(<WhatsNewCard state={MAX} onDismiss={onDismiss} />);
+      open();
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.queryByTestId("whats-new-lightbox")).toBeNull();
+      expect(onDismiss).not.toHaveBeenCalled();
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+    });
+
+    it("a click outside the picture, or on it, closes it; a click on a control does not", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      open();
+      fireEvent.click(view());
+      expect(screen.queryByTestId("whats-new-lightbox")).toBeNull();
+      open();
+      fireEvent.click(screen.getByRole("button", { name: "Next screenshot" }));
+      expect(view()).toBeInTheDocument();
+      fireEvent.click(viewImage());
+      expect(screen.queryByTestId("whats-new-lightbox")).toBeNull();
+    });
+
+    it("◀ ▶ and the arrow keys move to the previous or next feature's screenshot, and the card's slide follows", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      open();
+      const prev = () => screen.getByRole("button", { name: "Previous screenshot" });
+      const next = () => screen.getByRole("button", { name: "Next screenshot" });
+      expect(prev()).toBeDisabled();
+      fireEvent.click(next());
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[2].fullImage);
+      fireEvent.keyDown(window, { key: "ArrowLeft" });
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
+      expect(view()).toHaveAttribute("data-slide", "1");
+      // One step per key: the card's own handler stands aside while the view is up.
+      expect(slide()).toHaveAttribute("data-slide", "1");
+      for (let i = 1; i < WHATS_NEW_HIGHLIGHTS.length; i++) fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[6].fullImage);
+      expect(next()).toBeDisabled();
+      // Closing lands on the feature last looked at.
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(slide()).toHaveAttribute("data-slide", "6");
+    });
+
+    it("on a touch screen a swipe turns the picture without closing it, and a tap closes it", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      open();
+      fireEvent.touchStart(view(), { touches: [{ clientX: 300 }] });
+      fireEvent.touchEnd(view(), { changedTouches: [{ clientX: 180 }] });
+      fireEvent.click(view()); // the click a browser may send after the swipe
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
+      fireEvent.touchStart(view(), { touches: [{ clientX: 100 }] });
+      fireEvent.touchEnd(view(), { changedTouches: [{ clientX: 220 }] });
+      fireEvent.click(view());
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[0].fullImage);
+      // A tap: no travel, then the click.
+      fireEvent.touchStart(viewImage(), { touches: [{ clientX: 200 }] });
+      fireEvent.touchEnd(viewImage(), { changedTouches: [{ clientX: 204 }] });
+      fireEvent.click(viewImage());
+      expect(screen.queryByTestId("whats-new-lightbox")).toBeNull();
+    });
+
+    it("keeps Tab inside the view", () => {
+      render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
+      open();
+      const close = screen.getByRole("button", { name: "Close full screen" });
+      const next = screen.getByRole("button", { name: "Next screenshot" });
+      // On the first slide ◀ is disabled: ✕ and ▶ are the stops, and the
+      // focus wraps between them (jsdom has no native Tab between them).
+      expect(document.activeElement).toBe(close);
+      fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+      expect(document.activeElement).toBe(next);
+      fireEvent.keyDown(window, { key: "Tab" });
+      expect(document.activeElement).toBe(close);
+      // Focus that wandered behind the view is brought back into it.
+      screen.getByRole("button", { name: "Next" }).focus();
+      fireEvent.keyDown(window, { key: "Tab" });
+      expect(document.activeElement).toBe(close);
+    });
+
+    it("every full-resolution screenshot is a real WebP of at most 1920x1200, in 16:10, kept small", () => {
+      const seen = new Set<string>();
+      for (const { image, fullImage } of WHATS_NEW_HIGHLIGHTS) {
+        expect(fullImage, fullImage).toBe(image.replace(/\.webp$/, "-full.webp"));
+        expect(seen.has(fullImage)).toBe(false);
+        seen.add(fullImage);
+        const bytes = readFileSync(path.join(process.cwd(), "public", fullImage));
+        expect(bytes.subarray(0, 4).toString("latin1"), fullImage).toBe("RIFF");
+        expect(bytes.subarray(8, 12).toString("latin1"), fullImage).toBe("WEBP");
+        // A lossy VP8 frame: its size is in the key frame header.
+        expect(bytes.subarray(12, 16).toString("latin1"), fullImage).toBe("VP8 ");
+        const width = bytes.readUInt16LE(26) & 0x3fff;
+        const height = bytes.readUInt16LE(28) & 0x3fff;
+        expect(width, fullImage).toBeLessThanOrEqual(1920);
+        expect(height, fullImage).toBeLessThanOrEqual(1200);
+        // Larger than the slide's own 1024x640 picture, unless the capture was not.
+        expect(width, fullImage).toBeGreaterThan(1024);
+        expect(width / height, fullImage).toBeCloseTo(1.6, 2);
+        expect(bytes.length, `${fullImage} is ${bytes.length} bytes`).toBeLessThan(200 * 1024);
+      }
+    });
+  });
+
   describe.each(LANGUAGES.map((l) => l.code).filter((code) => code !== "en"))("in '%s'", (code) => {
     it("renders the locale's own copy and no raw keys", () => {
       locale = code;
@@ -412,6 +568,12 @@ describe("WhatsNewCard", () => {
         table["whatsNew.slideLabel"].replace("{current}", "1").replace("{total}", "7"),
       );
       expect(container.textContent).not.toMatch(/whatsNew\./);
+      fireEvent.click(screen.getByRole("button", { name: table["whatsNew.openFullscreen"] }));
+      const view = screen.getByRole("dialog", { name: table["whatsNew.fullscreenLabel"].replace("{title}", table[WHATS_NEW_HIGHLIGHTS[0].title]) });
+      expect(within(view).getByRole("button", { name: table["whatsNew.closeFullscreen"] })).toBeInTheDocument();
+      expect(within(view).getByRole("button", { name: table["whatsNew.nextScreenshot"] })).toBeInTheDocument();
+      expect(view.textContent).not.toMatch(/whatsNew\./);
+      fireEvent.click(within(view).getByRole("button", { name: table["whatsNew.closeFullscreen"] }));
       toLastSlide();
       expect(screen.getByText(table["whatsNew.planSwitchToOpenclaw"])).toBeInTheDocument();
       expect(container.textContent).not.toMatch(/whatsNew\./);
@@ -428,9 +590,15 @@ describe("WhatsNewCard", () => {
           expect(table[key], `${code} ${key}`).not.toBe(en[key]);
         }
       }
-      for (const key of ["whatsNew.back", "whatsNew.next", "whatsNew.goToSlide"]) {
+      for (const key of [
+        "whatsNew.back", "whatsNew.next", "whatsNew.goToSlide",
+        "whatsNew.openFullscreen", "whatsNew.fullscreenLabel", "whatsNew.closeFullscreen",
+        "whatsNew.previousScreenshot", "whatsNew.nextScreenshot",
+      ]) {
+        expect(table[key], `${code} ${key}`).toBeTruthy();
         expect(table[key], `${code} ${key}`).not.toBe(en[key]);
       }
+      expect(table["whatsNew.fullscreenLabel"]).toContain("{title}");
       expect(table["whatsNew.goToSlide"]).toContain("{number}");
       expect(table["whatsNew.slideLabel"]).toContain("{current}");
       expect(table["whatsNew.slideLabel"]).toContain("{total}");

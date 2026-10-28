@@ -1770,6 +1770,11 @@ export const bg: Record<string, string> = {
   "whatsNew.goToSlide": "Покажи акцент {number}",
   "whatsNew.back": "Назад",
   "whatsNew.next": "Напред",
+  "whatsNew.openFullscreen": "Вижте екранната снимка на цял екран",
+  "whatsNew.fullscreenLabel": "Екранна снимка: {title}",
+  "whatsNew.closeFullscreen": "Затворете цял екран",
+  "whatsNew.previousScreenshot": "Предишна екранна снимка",
+  "whatsNew.nextScreenshot": "Следваща екранна снимка",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "Работи на тази ClawBox.",
   "localModels.chatBannerBody": "Първият отговор може да отнеме до минута, докато локалният модел се зареди. След това е по-бързо.",

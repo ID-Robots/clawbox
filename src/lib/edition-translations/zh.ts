@@ -1792,6 +1792,11 @@ export const zh: Record<string, string> = {
   "whatsNew.goToSlide": "显示第 {number} 项新功能",
   "whatsNew.back": "上一步",
   "whatsNew.next": "下一步",
+  "whatsNew.openFullscreen": "全屏查看截图",
+  "whatsNew.fullscreenLabel": "截图：{title}",
+  "whatsNew.closeFullscreen": "关闭全屏",
+  "whatsNew.previousScreenshot": "上一张截图",
+  "whatsNew.nextScreenshot": "下一张截图",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "在这台 ClawBox 上运行。",
   "localModels.chatBannerBody": "本地模型加载时，第一条回复可能需要最多一分钟。之后会更快。",

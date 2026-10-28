@@ -126,3 +126,56 @@ test("the arrow keys turn the slides and Escape closes it", async ({ page }) => 
   expect(dismissals).toEqual([{ release: "4.3" }]);
   await expect(page.getByText(OFFER)).toBeVisible();
 });
+
+for (const size of [
+  { width: 1366, height: 768, touch: false },
+  { width: 375, height: 812, touch: true },
+]) {
+  test.describe(`the screenshot, full screen, at ${size.width}x${size.height}`, () => {
+    test.use({ viewport: { width: size.width, height: size.height }, hasTouch: size.touch, isMobile: size.touch });
+
+    test("opens at full resolution, fits the screen, turns with the arrows, and closes without closing the card", async ({ page }) => {
+      const dismissals = await openDesktop(page);
+      const card = page.getByRole("dialog", { name: "What's new in 4.3" });
+      await expect(card).toBeVisible();
+
+      await card.getByRole("button", { name: "View screenshot full screen" }).click();
+      const view = page.getByTestId("whats-new-lightbox");
+      await expect(view).toBeVisible();
+      await expect(view).toHaveAccessibleName("Screenshot: Screenshots, built in");
+      const image = view.getByTestId("whats-new-lightbox-image");
+      // The full-resolution file, loaded, and drawn whole inside the screen.
+      await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth)).toBeGreaterThan(1024);
+      const box = await image.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(size.width);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(size.height);
+      // Never drawn larger than the file is.
+      const natural = await image.evaluate((img: HTMLImageElement) => img.naturalWidth);
+      expect(box!.width).toBeLessThanOrEqual(natural + 1);
+
+      // The next feature's screenshot, by key; the previous one by its button.
+      await page.keyboard.press("ArrowRight");
+      await expect(image).toHaveAttribute("src", "/whats-new/4.3/agent-browser-full.webp");
+      await view.getByRole("button", { name: "Previous screenshot" }).click();
+      await expect(image).toHaveAttribute("src", "/whats-new/4.3/screenshot-full.webp");
+
+      // Escape closes the view, and only the view.
+      await page.keyboard.press("Escape");
+      await expect(view).toHaveCount(0);
+      await expect(card).toBeVisible();
+      expect(dismissals).toEqual([]);
+
+      // A click on the picture opens it; a click (or a tap) outside it closes it.
+      await card.getByTestId("whats-new-image").click();
+      await expect(view).toBeVisible();
+      if (size.touch) await page.touchscreen.tap(size.width / 2, 20);
+      else await page.mouse.click(10, size.height / 2);
+      await expect(view).toHaveCount(0);
+      await expect(card).toBeVisible();
+      expect(dismissals).toEqual([]);
+    });
+  });
+}

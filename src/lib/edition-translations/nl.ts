@@ -1784,6 +1784,11 @@ export const nl: Record<string, string> = {
   "whatsNew.goToSlide": "Toon hoogtepunt {number}",
   "whatsNew.back": "Terug",
   "whatsNew.next": "Volgende",
+  "whatsNew.openFullscreen": "Schermafbeelding op volledig scherm bekijken",
+  "whatsNew.fullscreenLabel": "Schermafbeelding: {title}",
+  "whatsNew.closeFullscreen": "Volledig scherm sluiten",
+  "whatsNew.previousScreenshot": "Vorige schermafbeelding",
+  "whatsNew.nextScreenshot": "Volgende schermafbeelding",
   // Chat while Local AI answers: the first-reply note and the waiting line.
   "localModels.chatBannerTitle": "Draait op deze ClawBox.",
   "localModels.chatBannerBody": "Het eerste antwoord kan tot een minuut duren terwijl het lokale model laadt. Daarna gaat het sneller.",
