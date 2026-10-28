@@ -4,7 +4,6 @@
  *
  *   <root>/vault/                 the git-backed wiki vault (memory-wiki, isolated mode)
  *   <root>/prime-radiant.sqlite   state: review queue, runs, costs, ingest jobs, claim registry
- *   <root>/core-context.json      the core block the owner's main agent reads (core-context-file.ts)
  *
  * `<root>` is `<box data dir>/prime-radiant`, or `PRIME_RADIANT_DIR` when set
  * (tests point it at a tmp dir). Both are read at CALL time, never captured at
@@ -30,15 +29,6 @@ export function vaultDir(): string {
 /** The state database sits beside the vault, never inside it (it is not versioned). */
 export function stateDbPath(): string {
   return path.join(primeRadiantRoot(), "prime-radiant.sqlite");
-}
-
-/**
- * The core block, beside the vault and outside it (it is derived, not
- * versioned). The ClawBox OpenClaw plugin `clawbox-prime-radiant-core` reads
- * this same path from inside the gateway, so a move here moves there too.
- */
-export function coreContextPath(): string {
-  return path.join(primeRadiantRoot(), "core-context.json");
 }
 
 /** Files and folders in the vault that are bookkeeping, not knowledge pages. */

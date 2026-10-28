@@ -7797,47 +7797,66 @@ else
   fi
 fi
 
-# ── Field cleanup: the retired clawbox-web-taint plugin ─────────────────────
+# ── Field cleanup: retired ClawBox plugins ──────────────────────────────────
 #
-# `clawbox-web-taint` (TASK-735) was a hook plugin that, once a turn had read
-# a web page, a search result or a mailbox, made every shell and spawner tool
-# in that turn raise an approval card in the chat. The owner's decision of
-# 2026-09-15 — "we want the coding agent to just work, no warnings and
-# pop-ups" — retired it: the plugin is gone from the checkout, nothing installs
-# it any more, and this block is what takes it off a box already in the field,
-# where an earlier boot copied it into ~/.openclaw/extensions and wrote
-# `plugins.entries.<id>.enabled: true`. Left there, the gateway keeps loading
-# the copy — the gate outlives its own removal — and once the copy is gone the
-# entry names a plugin that is not on disk, which the core's own doctor
-# reports as a box needing a repair for a plugin nobody wants back.
+# Hook plugins ClawBox once shipped and no longer does. An earlier boot copied
+# each into ~/.openclaw/extensions and wrote `plugins.entries.<id>.enabled:
+# true`; left there, the gateway keeps loading the copy — the plugin outlives
+# its own removal — and once the copy is gone the entry names a plugin that is
+# not on disk, which the core's own doctor reports as a box needing a repair
+# for a plugin nobody wants back. The plugins are gone from the checkout and
+# nothing installs them any more; this block is what takes them off a box
+# already in the field.
 #
-# Idempotent and cheap: one existence test on a directory that is absent on
-# every box after its first boot on this build, and one python read of
-# openclaw.json that writes only when the file still names the plugin. It
-# prints ONE line when something was removed and nothing otherwise, and — like
-# the MCP reconcile above — a failure costs one WARN line, never the boot: this
-# is an ExecStartPre under `set -euo pipefail`, so the `rm` and the python are
-# both under `if`, and a config that cannot be read is left exactly as it is
-# (the blocks above have already reported on it).
-CLAWBOX_RETIRED_PLUGIN_ID="clawbox-web-taint"
-CLAWBOX_RETIRED_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_RETIRED_PLUGIN_ID"
-CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED=0
-if [ -e "$CLAWBOX_RETIRED_PLUGIN_DST" ] || [ -L "$CLAWBOX_RETIRED_PLUGIN_DST" ]; then
-  if rm -rf "$CLAWBOX_RETIRED_PLUGIN_DST" 2>/dev/null; then
-    CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED=1
-  else
-    echo "  WARN: could not remove the retired $CLAWBOX_RETIRED_PLUGIN_ID plugin at $CLAWBOX_RETIRED_PLUGIN_DST — the gateway may still load it" >&2
+#   clawbox-web-taint           TASK-735's approval gate: once a turn had read
+#                               a web page, a search result or a mailbox, every
+#                               shell and spawner tool in that turn raised an
+#                               approval card in the chat. Retired by the
+#                               owner's decision of 2026-09-15 — "we want the
+#                               coding agent to just work, no warnings and
+#                               pop-ups".
+#   clawbox-prime-radiant-core  The Prime Radiant "core block": the wiki's
+#                               most-linked pages as system context in the
+#                               owner's main agent's every session, read from
+#                               <data>/prime-radiant/core-context.json. Retired
+#                               with that feature; its leftover file goes too
+#                               (after the plugins, below).
+#
+# HARNESS FIRST, AND WHY NOT ITS UNINSTALL. The pinned core's own remover,
+# `openclaw plugins uninstall <id>`, works from the core's install records,
+# and these copies have none: install_clawbox_hook_plugin placed them in the
+# extensions root and wrote the one config key, so undoing exactly that — the
+# folder and the key — is the whole removal. It would also cost a CLI cold
+# start on every boot, which the header of this file exists to avoid.
+#
+# Idempotent and cheap: one existence test per plugin on a directory that is
+# absent on every box after its first boot on this build, and one python read
+# of openclaw.json per plugin that writes only when the file still names it.
+# It prints ONE line per plugin it removed something of and nothing otherwise,
+# and — like the MCP reconcile above — a failure costs one WARN line, never the
+# boot: this is an ExecStartPre under `set -euo pipefail`, so the `rm` and the
+# python are both under `if`, and a config that cannot be read is left exactly
+# as it is (the blocks above have already reported on it).
+retire_clawbox_plugin() {
+  local plugin_id="$1"
+  local dst="$OPENCLAW_HOME_DIR/extensions/$plugin_id"
+  local dir_removed=0
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    if rm -rf "$dst" 2>/dev/null; then
+      dir_removed=1
+    else
+      echo "  WARN: could not remove the retired $plugin_id plugin at $dst — the gateway may still load it" >&2
+    fi
   fi
-fi
-if ! CLAWBOX_RETIRED_PLUGIN_ID="$CLAWBOX_RETIRED_PLUGIN_ID" \
-  CLAWBOX_RETIRED_PLUGIN_DST="$CLAWBOX_RETIRED_PLUGIN_DST" \
-  CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED="$CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED" \
-  python3 - "$OPENCLAW_CONFIG" <<'PY'
+  if ! CLAWBOX_RETIRED_PLUGIN_ID="$plugin_id" \
+    CLAWBOX_RETIRED_PLUGIN_DST="$dst" \
+    CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED="$dir_removed" \
+    python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
 plugin_id = os.environ["CLAWBOX_RETIRED_PLUGIN_ID"]
-# The one line this block prints names everything it took away, the directory
+# The one line printed for this plugin names everything it took away, the directory
 # the shell half removed included, so the journal says what changed in one
 # place.
 removed = []
@@ -7898,8 +7917,30 @@ except Exception:
     raise
 report()
 PY
-then
-  echo "  WARN: could not drop the retired $CLAWBOX_RETIRED_PLUGIN_ID plugin from $OPENCLAW_CONFIG — the gateway may still try to load it" >&2
+  then
+    echo "  WARN: could not drop the retired $plugin_id plugin from $OPENCLAW_CONFIG — the gateway may still try to load it" >&2
+  fi
+}
+retire_clawbox_plugin clawbox-web-taint
+retire_clawbox_plugin clawbox-prime-radiant-core
+
+# The core block's own file, which ClawBox wrote while the owner had the Prime
+# Radiant `context` setting on: derived from the vault, and read by nothing
+# now. Found where the retired plugin read it — `PRIME_RADIANT_DIR` when that
+# is an absolute path, else <ClawBox root>/data/prime-radiant — and removed,
+# not kept: the vault it was built from is the copy that matters. Silent when
+# there is none; a removal that fails is one WARN, never the boot.
+CLAWBOX_RETIRED_PR_DIR="$CLAWBOX_ROOT/data/prime-radiant"
+case "${PRIME_RADIANT_DIR:-}" in
+  /*) CLAWBOX_RETIRED_PR_DIR="$PRIME_RADIANT_DIR" ;;
+esac
+CLAWBOX_RETIRED_PR_BLOCK="$CLAWBOX_RETIRED_PR_DIR/core-context.json"
+if [ -f "$CLAWBOX_RETIRED_PR_BLOCK" ] || [ -L "$CLAWBOX_RETIRED_PR_BLOCK" ]; then
+  if rm -f "$CLAWBOX_RETIRED_PR_BLOCK" 2>/dev/null; then
+    echo "  Removed the retired Prime Radiant core block: $CLAWBOX_RETIRED_PR_BLOCK"
+  else
+    echo "  WARN: could not remove the retired Prime Radiant core block at $CLAWBOX_RETIRED_PR_BLOCK — nothing reads it any more" >&2
+  fi
 fi
 
 "${CLAWBOX_STEP:-:}" "email directive hook"
@@ -8717,51 +8758,6 @@ if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_USER_LANG_NODE" ]; t
     echo "  WARNING: the installed $CLAWBOX_USER_LANG_ID plugin did not load or did not register its hook — a ClawBox user's chat answers in the box's language rather than their own" >&2
   fi
 fi
-
-# ── The Prime Radiant core block ───────────────────────────────────────────
-#
-# The most-linked pages of the owner's Prime Radiant wiki, one line each, in
-# the owner's main agent's sessions (src/lib/prime-radiant/core-context.ts).
-# ClawBox writes the block to <data>/prime-radiant/core-context.json after
-# every nightly merge, and only while the owner has the Prime Radiant setting
-# `context.enabled` on (off by default); with no file the plugin adds nothing.
-#
-# HARNESS FIRST: the core's typed `before_prompt_build` hook, which runs on
-# every prompt build and returns `appendSystemContext` — a refreshed block
-# reaches the next turn with no gateway restart. Not a workspace file (cut at
-# `bootstrapMaxChars`, 20,000 by default, and the identity sync's and the
-# owner's to write) and not `agents.defaults.systemPromptSuffix` (removed
-# above on every boot). A non-bundled plugin's prompt hook needs the core's
-# `hooks.allowConversationAccess` grant, which the installer writes for this
-# plugin only. Installed on every box, like the others: the setting, not the
-# install, decides whether a block exists.
-CLAWBOX_PR_CORE_ID="clawbox-prime-radiant-core"
-CLAWBOX_PR_CORE_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_PR_CORE_ID"
-CLAWBOX_PR_CORE_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_PR_CORE_ID"
-CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 install_clawbox_hook_plugin "$CLAWBOX_PR_CORE_ID" "$CLAWBOX_PR_CORE_DST" \
-  "the owner's main agent does not get the Prime Radiant core block" \
-  "$CLAWBOX_PR_CORE_SRC/openclaw.plugin.json" \
-  "$CLAWBOX_PR_CORE_SRC/package.json" \
-  "$CLAWBOX_PR_CORE_SRC/index.mjs" \
-  "$CLAWBOX_PR_CORE_SRC/prime-radiant-core.mjs"
-
-# Cheap proof the installed copy loads and registers its hook, and that it
-# keeps the block out of a ClawBox user's chat — one `node` start, no CLI.
-CLAWBOX_PR_CORE_NODE="$(command -v node 2>/dev/null || true)"
-if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_PR_CORE_NODE" ]; then
-  if ! CLAWBOX_PR_CORE_DST="$CLAWBOX_PR_CORE_DST" "$CLAWBOX_PR_CORE_NODE" --input-type=module -e '
-    const dir = process.env.CLAWBOX_PR_CORE_DST;
-    const plugin = (await import(`${dir}/index.mjs`)).default;
-    const hooks = [];
-    plugin.register({ on: (name) => hooks.push(name), config: {} });
-    if (!hooks.includes("before_prompt_build")) throw new Error("no before_prompt_build hook");
-    const { isUserChatKey } = await import(`${dir}/prime-radiant-core.mjs`);
-    if (!isUserChatKey("agent:main:clawbox-user-alice")) throw new Error("a user chat would get the block");
-  ' 2>&1; then
-    echo "  WARNING: the installed $CLAWBOX_PR_CORE_ID plugin did not load or did not register its hook — the owner's main agent does not get the Prime Radiant core block" >&2
-  fi
-fi
-
 
 # ── What a backup can leave out ─────────────────────────────────────────────
 #

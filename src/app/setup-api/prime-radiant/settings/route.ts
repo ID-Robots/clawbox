@@ -7,10 +7,7 @@
  * nightly schedule; the Opus tier; the contradiction pass; the search index's
  * size limit; domains and their owners; the golden questions' nightly check;
  * the daily questions — how many an owner gets, each owner's language, and
- * whether the assistant may send them; the core block in the owner's main
- * agent's context), the defaults, the cost rates they price with, the core
- * block on disk and what it costs (`contextBlock`: pages, chars and an
- * estimate of the tokens it adds to every turn, or null), and which account
+ * whether the assistant may send them), the defaults, the cost rates they price with, and which account
  * the second opinion would use tonight (`opusSource`: `api_key`,
  * `subscription` or `none` — a read of the account pool and the `claude`
  * sign-in, never a model call). Never creates anything.
@@ -26,17 +23,11 @@
  * — whose tool asks for the owner's word first — except the cost rates and
  * the Opus model, which decide what the Opus cap measures, and
  * `verification.outbound`, whether the assistant may message the owners at
- * all (403 `owner_only` for the bearer). `context` — what Prime Radiant puts
- * in the owner's main agent's every session — is the OWNER's alone: neither
- * the bearer nor another signed-in user may change it (403 `owner_only`), and
- * a change rebuilds (or removes) the block before the answer.
- * Never another site.
+ * all (403 `owner_only` for the bearer). Never another site.
  */
-import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { DAILY_LANGUAGES, MAX_DAILY_PER_OWNER, MIN_DAILY_PER_OWNER } from "@/lib/prime-radiant/daily";
-import { readCoreContextFile, removeCoreContextFile, scheduleCoreContextRefresh } from "@/lib/prime-radiant/core-context-file";
 import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { nextRunAtMs, refresh } from "@/lib/prime-radiant/nightly-scheduler";
 import { detectOpusSource } from "@/lib/prime-radiant/opus-source";
@@ -45,8 +36,6 @@ import {
   defaultSettings,
   effectiveCostRates,
   MAX_COMPANY_CHARS,
-  MAX_CONTEXT_MAX_CHARS,
-  MAX_CONTEXT_PAGES,
   MAX_DOMAINS,
   MAX_STRUCTURE_ENRICH_TOP,
   MAX_STRUCTURE_MODEL_FALLBACK,
@@ -58,8 +47,6 @@ import {
   MAX_GOLDEN_MAX_QUESTIONS,
   MAX_OWNER_LANGUAGES,
   MIN_GOLDEN_MAX_QUESTIONS,
-  MIN_CONTEXT_MAX_CHARS,
-  MIN_CONTEXT_PAGES,
   MAX_SUMMARIES_CAP_USD,
   MAX_SUMMARIES_MAX_PAGES,
   MIN_INGEST_PARALLEL,
@@ -91,19 +78,9 @@ const LIMITS = {
   structureModelFallback: { min: 0, max: MAX_STRUCTURE_MODEL_FALLBACK },
   summariesMaxPages: { min: 0, max: MAX_SUMMARIES_MAX_PAGES },
   summariesCapUsd: { min: 0, max: MAX_SUMMARIES_CAP_USD },
-  contextPages: { min: MIN_CONTEXT_PAGES, max: MAX_CONTEXT_PAGES },
-  contextMaxChars: { min: MIN_CONTEXT_MAX_CHARS, max: MAX_CONTEXT_MAX_CHARS },
 };
 
 const OPUS_SOURCE_BUDGET_MS = 3_000;
-/** How long a save waits for the core block to follow it; past it the answer says what is on disk so far. */
-const CONTEXT_REFRESH_BUDGET_MS = 15_000;
-
-/** The core block on disk, measured — never its text, which the agent gets and the page has no use for. */
-function contextBlock() {
-  const block = readCoreContextFile();
-  return block ? { pages: block.pages, chars: block.chars, estTokens: block.estTokens, revision: block.revision, generatedAt: block.generatedAt } : null;
-}
 
 async function answer() {
   // Bounded: a pool or PATH read that stalls must not hold the page (or a save that already landed).
@@ -111,7 +88,7 @@ async function answer() {
     detectOpusSource().then((d) => d.source),
     new Promise<"none">((resolve) => setTimeout(() => resolve("none"), OPUS_SOURCE_BUDGET_MS).unref?.()),
   ]).catch(() => "none" as const);
-  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates(), contextBlock: contextBlock(), opusSource };
+  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates(), opusSource };
 }
 
 export async function GET(req: Request) {
@@ -140,10 +117,6 @@ export async function PUT(req: Request) {
   if (!gate.writer.person && (patch.verification === null || (patch.verification && patch.verification.outbound !== undefined))) {
     return fail("owner_only", "Only the owner can let the assistant send the daily questions.", 403);
   }
-  // What the owner's own agent starts every session with is the owner's to say: never the assistant's, nor another user's.
-  if (patch.context !== undefined && !(await hasOwnerSession(req))) {
-    return fail("owner_only", "Only the box owner can change what Prime Radiant puts in the assistant's context.", 403);
-  }
   const folders = patch.ingest?.folders;
   if (Array.isArray(folders)) {
     if (folders.length > MAX_INGEST_FOLDERS) return fail("invalid", `Choose at most ${MAX_INGEST_FOLDERS} folders.`, 400);
@@ -166,21 +139,6 @@ export async function PUT(req: Request) {
     return fail("write_failed", "The settings could not be saved.", 500);
   }
   await refresh().catch(() => undefined);
-  // The block follows the setting now, not at the next nightly merge: built when it goes on, removed when it goes off.
-  if (patch.context !== undefined) {
-    // Off takes the block away at once, not behind a refresh that may be running: the plugin reads the file every turn.
-    if (!saved.context.enabled) {
-      try {
-        removeCoreContextFile();
-      } catch (err) {
-        console.error("[prime-radiant] the core block could not be removed:", err instanceof Error ? err.message : err);
-      }
-    }
-    await Promise.race([
-      scheduleCoreContextRefresh(),
-      new Promise<void>((resolve) => setTimeout(resolve, CONTEXT_REFRESH_BUDGET_MS).unref?.()),
-    ]);
-  }
   // A new index size limit: the index re-plans to it in the background (filled up when raised, trimmed when lowered).
   if (saved.search.indexLimitMb !== limitBefore) {
     void import("@/lib/prime-radiant/shard-index").then((m) => m.vaultIndexLimitChanged()).catch((err) => {

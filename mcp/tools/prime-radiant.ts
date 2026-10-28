@@ -456,10 +456,10 @@ function mapOut(g: GraphBody, focus: string | undefined) {
     connections: edges.length,
     ...(g.truncated ? { truncated: true } : {}),
     domains: [...domains].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([domain, pages]) => ({ domain, pages })),
-    // By LINKS, as the core block ranks them (core-context.ts): a shared source
-    // or a related hint is a connection of the Map, not a link, and would put a
-    // page tied to one big document above the pages the wiki points at. A
-    // server without `links` is read the old way.
+    // By LINKS (`GraphNode.links`): a shared source or a related hint is a
+    // connection of the Map, not a link, and would put a page tied to one big
+    // document above the pages the wiki points at. A server without `links` is
+    // read the old way.
     most_connected: [...nodes]
       .sort((a, b) => (b.links ?? b.degree ?? 0) - (a.links ?? a.degree ?? 0) || (b.inbound ?? 0) - (a.inbound ?? 0) || (b.degree ?? 0) - (a.degree ?? 0))
       .slice(0, 10)

@@ -58,7 +58,7 @@ function block(): string {
   // every block inside the slice writes its own lines into the stderr this
   // suite asserts is empty, and each of them is another suite's subject. See
   // src/tests/unit/gateway-pre-start-web-taint-cleanup.test.ts.
-  const to = "# ── Field cleanup: the retired clawbox-web-taint plugin ";
+  const to = "# ── Field cleanup: retired ClawBox plugins ";
   const start = src.indexOf(from);
   const end = src.indexOf(to, start);
   if (start < 0 || end < 0) throw new Error("the path-guard install block is not in gateway-pre-start.sh");
