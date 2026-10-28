@@ -606,3 +606,38 @@ describe("ClawBox AI usage_limit refusals (TASK-1602)", () => {
     expect(text).toMatch(/rate-limiting this box/);
   });
 });
+
+// A 429 that states the account's limit as ZERO is not a throttle (xAI,
+// 2026-10: "Requests per Minute (actual/limit): 0/0" on grok-4.6, while Grok
+// 4.7 on the same account answered). "Wait a minute" cannot work there; the
+// owner is told the model is not available on this account and what does work.
+describe("describeChatFailure — a zero rate limit", () => {
+  const ZERO = "429 Too many requests for team T and model grok-4.6. Your team's rate limit is — Requests per Minute (actual/limit): 0/0.";
+  const context = { provider: "xai", model: "xai/grok-4.6", reason: "rate_limit" };
+
+  it("names the model, the account and both remedies instead of the throttle sentence", () => {
+    const text = describeChatFailure("⚠️ API rate limit reached.", { ...context, detail: `HTTP 429: ${ZERO}` });
+    expect(text).toBe(
+      "That message did not go through — grok-4.6 is not available on this xAI account: its rate limit is 0,"
+      + " so there is no API credit or quota for it yet. Pick another model in the header, or add credit at"
+      + " console.x.ai, then send it again.",
+    );
+    expect(text).not.toMatch(/rate-limiting this box/);
+  });
+
+  it("is said in the owner's language", () => {
+    const t = (key: string, params?: Record<string, string | number>) => {
+      let out = translations.de[key] ?? key;
+      for (const [k, v] of Object.entries(params ?? {})) out = out.replaceAll(`{${k}}`, String(v));
+      return out;
+    };
+    const text = describeChatFailure(ZERO, context, { t, locale: "de" });
+    expect(text).toContain("grok-4.6 ist für dieses xAI-Konto nicht verfügbar");
+    expect(text).toContain("console.x.ai");
+  });
+
+  it("keeps an ordinary 429 on the normal rate-limit sentence", () => {
+    const text = describeChatFailure("429 Too many requests. Requests per Minute (actual/limit): 61/60.", context);
+    expect(text).toMatch(/rate-limiting this box right now/);
+  });
+});

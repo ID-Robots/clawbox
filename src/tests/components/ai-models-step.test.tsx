@@ -605,7 +605,7 @@ describe("AIModelsStep variants", () => {
     });
     // The catalogue's cold-start default, bare: the configure route adds the
     // `xai/` prefix itself.
-    expect(sent.model).toBe("grok-4.6");
+    expect(sent.model).toBe("grok-4.7");
   });
 
   // xAI (Grok), Subscription tab: the core's own CLI runs the sign-in and the
@@ -697,7 +697,7 @@ describe("AIModelsStep variants", () => {
           provider: "xai",
           authMode: "subscription",
           scope: "primary",
-          model: "grok-4.6",
+          model: "grok-4.7",
         });
         // No credential rides the browser.
         expect(configureBodies()[0].apiKey).toBeUndefined();

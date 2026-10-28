@@ -234,6 +234,17 @@ export class RunFailureLedger {
   }
 
   /**
+   * What the run's frames have said so far, without settling anything: the
+   * provider and model of an attempt that is about to be retried, for the
+   * model fallback (src/lib/model-fallback-chat.ts), which acts mid-run.
+   */
+  peek(runId: unknown): ChatRunFailureContext | undefined {
+    const id = asText(runId);
+    const noted = id ? this.notes.get(id) : undefined;
+    return noted ? { ...noted.context } : undefined;
+  }
+
+  /**
    * Everything known about the run a `chat` ERROR frame ends: the notes taken
    * from its lifecycle frames under the facts the frame carries itself. The
    * run is remembered, so the gateway's second error frame for it answers the
