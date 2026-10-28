@@ -75,6 +75,11 @@ import {
 import { cleanVerifiedText, MAX_VERIFIED_TEXT, verifyClaim, type VerifyResult } from "./verify";
 import { addToIndex, DEFAULT_OWNER, pathFor, removeFromIndex } from "./writer";
 
+/** The list entries (`- …` / `* …` lines) an index text holds. */
+function countIndexEntries(text: string): number {
+  return text.split("\n").filter((line) => /^\s*[-*]\s/.test(line)).length;
+}
+
 export const MAX_TITLE_CHARS = 200;
 export const MAX_OWNER_CHARS = 80;
 export const MAX_SOURCES = 20;
@@ -1179,7 +1184,10 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
     let next = snapshot.indexBody;
     for (const f of froms) {
       const without = removeFromIndex(next, f.path);
-      indexLines += next.split("\n").length - without.split("\n").length;
+      // The ENTRIES that went, not the raw line difference: removing the last
+      // entry also drops the blank line that separated the list from the
+      // prose, and that is housekeeping, not a page that was listed.
+      indexLines += countIndexEntries(next) - countIndexEntries(without);
       next = without;
     }
     const r = rewriteLinks(next, retarget(INDEX_FILE));

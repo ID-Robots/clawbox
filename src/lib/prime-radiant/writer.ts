@@ -550,11 +550,19 @@ export function addToIndex(indexText: string | null, pages: ReadonlyArray<{ path
   return `${text}${text.endsWith("\n\n") ? "" : "\n"}${lines.join("\n")}\n`;
 }
 
-/** index.md without the list lines that link `path` (a deleted page). */
+/**
+ * index.md without the list lines that link `path` (a deleted page).
+ *
+ * Trailing blank lines go too: `addToIndex` puts one blank line between the
+ * prose and the first entry, and removing the last entry left that line, so
+ * a page created and deleted (the bench does this every run) grew the file
+ * by a blank line once instead of returning it byte for byte.
+ */
 export function removeFromIndex(indexText: string, path: string): string {
   const link = `[[${path.replace(/\.md$/, "")}]]`;
-  return indexText
+  const kept = indexText
     .split("\n")
     .filter((line) => !(/^\s*[-*]\s/.test(line) && line.includes(link)))
     .join("\n");
+  return kept.replace(/\n{2,}$/, "\n");
 }

@@ -14,6 +14,7 @@ import {
   WRITER_ITEMS_MARKER,
   WriterParseError,
   addToIndex,
+  removeFromIndex,
   buildPage,
   buildWriterPrompt,
   cleanDetails,
@@ -375,5 +376,15 @@ describe("index.md", () => {
     expect(once).toContain(indexLine("entities/acme.md", "Acme"));
     expect(addToIndex(once, [{ path: "entities/acme.md", title: "Acme" }])).toBe(once);
     expect(addToIndex(null, [{ path: "concepts/a.md", title: "A\nB" }])).toBe("# Index\n\n- [[concepts/a]] — A B\n");
+  });
+
+  it("a page added and removed again leaves index.md exactly as it was", () => {
+    for (const before of ["# Index\n", "# Index\n\nIntro.\n", "# Index\n\n- [[entities/acme]] — Acme\n"]) {
+      const added = addToIndex(before, [{ path: "concepts/bench.md", title: "Bench" }]);
+      expect(added).toContain("[[concepts/bench]]");
+      expect(removeFromIndex(added, "concepts/bench.md")).toBe(before);
+    }
+    // Only the entry goes; prose and the other entries keep their lines.
+    expect(removeFromIndex("# Index\n\n- [[a]] — A\n- [[b]] — B\n", "a.md")).toBe("# Index\n\n- [[b]] — B\n");
   });
 });
