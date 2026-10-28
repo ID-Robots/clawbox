@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_MARKDOWN_CHARS } from "@/lib/progress-card-markdown";
+import { retryWhileAgentStarting } from "@/lib/chat-gateway-starting";
 
 /**
  * The session's progress card, as the OpenClaw gateway serves it (TASK-896).
@@ -246,16 +247,25 @@ export function useGatewayProgressCard({
   const scopeKeyRef = useRef<string | null>(null);
   const liveRef = useRef({ request, sessionKey, enabled });
   const revisionRef = useRef<number | null>(null);
+  /** The read still waiting for a starting agent, if any. */
+  const waitRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     liveRef.current = { request, sessionKey, enabled };
   }, [request, sessionKey, enabled]);
+  useEffect(() => () => waitRef.current?.abort(), []);
 
   const refresh = useCallback(() => {
     const { request: send, sessionKey: key, enabled: on } = liveRef.current;
     if (!on || key === "") return;
     const sequence = ++sequenceRef.current;
-    send(PROGRESS_CARD_GET_METHOD, { sessionKey: key }).then(
+    // A read on a reconnect can come before the agent has finished starting;
+    // that refusal is waited out (bounded) instead of leaving the card unread
+    // until the agent next changes it. A newer read calls the wait off.
+    waitRef.current?.abort();
+    const waiting = new AbortController();
+    waitRef.current = waiting;
+    retryWhileAgentStarting(() => send(PROGRESS_CARD_GET_METHOD, { sessionKey: key }), { signal: waiting.signal }).then(
       (payload) => {
         if (sequence !== sequenceRef.current || liveRef.current.sessionKey !== key) return;
         const card = parseProgressCardResponse(payload);

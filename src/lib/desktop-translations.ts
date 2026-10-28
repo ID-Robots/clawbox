@@ -1103,6 +1103,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.effort.adaptive": "Adaptive",
     "chat.effort.none": "None",
     "chat.effort.ultra": "Ultra",
+    "chat.effort.starting": "Starting…",
+    "chat.effort.agentStartingSlow": "The assistant is still starting up. Your effort setting will be applied once it is ready.",
     "chat.thinkingOn": "Thinking on",
     "chat.thinkingOff": "Thinking off",
     "chat.thinkingPillOn": "On",

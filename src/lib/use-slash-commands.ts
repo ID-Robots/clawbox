@@ -10,6 +10,7 @@ import {
 } from '@/lib/chat-slash-commands'
 import type { HarnessAdapter, HarnessStatus } from '@/lib/harness/transport'
 import { isAgentSelectionRequired } from '@/lib/harness/openclaw-gateway-adapter'
+import { retryWhileAgentStarting } from '@/lib/chat-gateway-starting'
 
 /**
  * The composer's slash-command autocomplete, as one hook, so the mascot chat
@@ -219,8 +220,11 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     }
     let live = true
     let retry: ReturnType<typeof setTimeout> | undefined
-    adapter
-      .listCommands()
+    // Right after a restart the socket is back before the agent is, and the
+    // catalogue is the agent's: that refusal is waited out (bounded) rather
+    // than spending the short failure budget below on a few seconds of boot.
+    const waiting = new AbortController()
+    retryWhileAgentStarting(() => adapter.listCommands(), { signal: waiting.signal })
       .then((next) => {
         if (!live) return
         readAtRef.current = Date.now()
@@ -244,6 +248,7 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
       })
     return () => {
       live = false
+      waiting.abort()
       if (retry !== undefined) clearTimeout(retry)
     }
   }, [adapter, status, reload])
