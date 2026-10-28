@@ -19,6 +19,7 @@ import {
   loginSessionCookie,
 } from "./helpers/setup-api";
 import { READY_ACTION_TIMEOUT, waitForGatewayReady } from "./helpers/readiness";
+import { dismissWhatsNew, watchWhatsNew } from "./helpers/whats-new";
 
 test.use(READY_ACTION_TIMEOUT);
 
@@ -161,6 +162,7 @@ test.describe("chat round trip", () => {
     // The textbox only enables once the gateway session is up; wait on the
     // gateway's own health signal first so the UI waits below measure the UI.
     await waitForGatewayReady({ timeoutMs: 2 * 60_000, context: "chat UI round-trip" });
+    const whatsNew = watchWhatsNew(page);
     await page.goto("/");
 
     // Configuring a provider above flips the account tier, which makes the
@@ -179,6 +181,12 @@ test.describe("chat round trip", () => {
       await celebration.getByRole("button").first().click();
       await expect(celebration).toBeHidden({ timeout: 10_000 });
     }
+
+    // "What's new in 4.3" is a modal over the desktop and the chat on every
+    // 4.3 box until the owner dismisses it, a fresh install included; its
+    // backdrop takes the Send button's click (helpers/whats-new.ts). It sits
+    // a layer under the plan celebration, so it is closed after that one.
+    await dismissWhatsNew(page, whatsNew);
 
     // Before the gateway WS connects, the textbox shows
     // "Waiting for the Claw to wake up…" and is disabled. Once the gateway

@@ -39,6 +39,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { BASE_URL, dockerExec } from "./helpers/container";
 import { getStatus, loginSessionCookie, SETUP_PASSWORD } from "./helpers/setup-api";
+import { dismissWhatsNew, watchWhatsNew } from "./helpers/whats-new";
 
 const ROUTE = "/setup-api/anthropic/accounts";
 const DATA_DIR = "/home/clawbox/clawbox/data";
@@ -362,6 +363,7 @@ test.describe("Anthropic account pool (TASK-902)", () => {
 
 /** Sign in if needed, open Settings from the launcher and go to Providers, once its list has loaded. Answers the Settings window. */
 async function openProviders(page: Page) {
+  const whatsNew = watchWhatsNew(page);
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
   if (page.url().includes("/login")) {
     await page.fill('input[type="password"]', SETUP_PASSWORD);
@@ -371,6 +373,8 @@ async function openProviders(page: Page) {
     ]);
   }
   await expect(page.getByTestId("desktop-root")).toBeVisible({ timeout: 15_000 });
+  // "What's new in 4.3" covers the desktop until it is closed (helpers/whats-new.ts).
+  await dismissWhatsNew(page, whatsNew);
 
   // A prior spec's contextual chat prompt can sit above the desktop.
   const chatPopup = page.getByTestId("chat-popup");
