@@ -24,7 +24,13 @@
 
 import { readExplicitModelPicks, type ExplicitModelPicks } from "@/lib/explicit-model-pick";
 import { readUnavailableModelIds } from "@/lib/provider-model-availability";
-import { flagshipVersion, followsNewestModel, newestModelId, type NewestModelCandidate } from "@/lib/provider-newest-model";
+import {
+  flagshipVersion,
+  followsNewestModel,
+  newestModelId,
+  rankNewestFirst,
+  type NewestModelCandidate,
+} from "@/lib/provider-newest-model";
 import { readPrimaryModelRef, switchChatModelAutomatically } from "@/lib/automatic-model-switch";
 
 export interface FollowNewestDeps {
@@ -63,6 +69,14 @@ export async function followNewestModel(
   // recorded pick — an older build, the core's own picker. Left alone, unless
   // the account cannot run it, which no choice survives.
   if (!flagshipVersion(provider, current) && !unavailable.has(current)) return { moved: false, why: "not-a-flagship" };
+  // Only ever UP. A list that ranks the chat's own model at or above its newest
+  // row — an enumeration that came back short, or one that has not caught up
+  // with a release the chat is already on — is no reason to move it to an
+  // older model. A model this account was refused on is left whatever its rank.
+  if (!unavailable.has(current)) {
+    const row = (id: string): NewestModelCandidate => models.find((m) => m.id === id) ?? { id };
+    if (rankNewestFirst(provider, [row(newest), row(current)])[0].id !== newest) return { moved: false, why: "already-newest" };
+  }
   const to = `${prefix}${newest}`;
   if (!(await deps.switchModel(to))) return { moved: false, why: "switch-failed" };
   console.log(`[follow-newest] ${provider}: the chat followed the newest model, ${primary} -> ${to}`);
