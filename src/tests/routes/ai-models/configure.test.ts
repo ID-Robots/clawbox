@@ -3470,6 +3470,92 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(fetchMock.mock.calls.some(([url]) =>
         String(url).includes("/api/clawbox-ai/device-info"))).toBe(false);
     });
+
+    // The stale profile: a box linked to a Max account signs in to a DIFFERENT,
+    // Free account, and the desktop goes on showing the Max account. The status
+    // poll reads the token from openclaw.json, which this save commits LAST,
+    // while the badge and the plan used to be written to the store long before
+    // that. A poll in between asked the portal about the OLD token and wrote
+    // its tier and plan back over the new account's, and every later poll that
+    // could not reach the portal served them as this account's profile.
+    describe("a status poll that lands in the middle of a sign-in to a different account", () => {
+      const OLD = "claw_old_max_account";
+      const NEW = "claw_new_free_account";
+
+      it("leaves the new account's badge and plan on record, not the old account's", async () => {
+        const configStore = await import("@/lib/config-store");
+        const store: Record<string, unknown> = {
+          clawai_token: OLD,
+          clawai_tier: "pro",
+          clawai_plan_tier: "pro",
+        };
+        const put = (key: string, value: unknown) => {
+          if (value === undefined) delete store[key];
+          else store[key] = value;
+        };
+        mockGetAll.mockImplementation(async () => ({ ...store }));
+        vi.mocked(configStore.get).mockImplementation(async (key: string) => store[key]);
+        vi.mocked(configStore.set).mockImplementation(async (key: string, value: unknown) => put(key, value));
+        mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+          for (const [key, value] of Object.entries(entries)) put(key, value);
+        });
+
+        // openclaw.json as the status route reads it: the old token until this
+        // save's one write lands.
+        const linkedTo = (token: string) => ({
+          models: { providers: { deepseek: { apiKey: token } } },
+          auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        });
+        let openclawJson = linkedTo(OLD);
+        mockReadOpenClawConfig.mockImplementation(async () => openclawJson as never);
+        const realTransaction = vi.mocked(beginConfigWriteTransaction).getMockImplementation();
+        vi.mocked(beginConfigWriteTransaction).mockImplementation((label: string) => {
+          const tx = realTransaction!(label);
+          tx.commit = vi.fn(async () => {
+            openclawJson = linkedTo(NEW);
+          });
+          return tx;
+        });
+
+        let portalUp = true;
+        vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+          if (!String(input).includes("/api/clawbox-ai/device-info")) throw new Error("network disabled in tests");
+          if (!portalUp) throw new Error("portal unreachable");
+          const auth = new Headers(init?.headers).get("authorization");
+          const body = auth === `Bearer ${OLD}` ? { tier: "max" } : { tier: "free" };
+          return new Response(JSON.stringify(body), { status: 200 });
+        }));
+
+        const { GET: statusGet } = await import("@/app/setup-api/ai-models/status/route");
+        // The owner's desktop polls while the save runs: here, while the new
+        // credential is being pasted into the auth store.
+        let midSave: Record<string, unknown> | null = null;
+        vi.mocked(spawnOpenclawCli).mockImplementation(async (args: readonly string[]) => {
+          if (!midSave && args.includes("paste-api-key")) midSave = await (await statusGet()).json();
+          return "";
+        });
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: NEW,
+          authMode: "subscription",
+          clawaiTier: "flash",
+        }));
+
+        expect(res.status).toBe(200);
+        // The poll really did run mid-save, about the old token.
+        expect(midSave).toMatchObject({ clawaiConfigured: true, clawaiPlan: "pro" });
+        // The new account's facts, not the ones that poll brought back.
+        expect(store).toMatchObject({ clawai_token: NEW, clawai_tier: "flash", clawai_plan_tier: "free" });
+
+        // And what the desktop is shown next when the portal cannot be asked:
+        // the stored profile, which must be the account the box now holds.
+        (await import("@/lib/clawbox-ai-portal-tier"))._resetPortalTierCache();
+        portalUp = false;
+        const after = await (await statusGet()).json();
+        expect(after).toMatchObject({ clawaiConfigured: true, clawaiAccountTier: "flash", clawaiPlan: "free" });
+      });
+    });
   });
   // TASK-483: the last wizard step sat on "Almost ready" for about three
   // minutes on a real box. It was not a spinner problem — the route issued

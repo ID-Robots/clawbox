@@ -7,6 +7,7 @@ import {
   normalizeClawboxAiTier,
   type ClawboxAiPlanTier,
 } from "@/lib/clawbox-ai-models";
+import { onProvidersChanged } from "@/lib/ui-events";
 import { monotonicNow } from "@/lib/visible-interval";
 
 // Lightweight client hook for "is the device signed in to a ClawBox AI
@@ -170,6 +171,12 @@ interface Subscriber {
  * session window — and needs no exemption: what this feeds (the shield, the
  * paid gates, the tier badge) is state drawn on the desktop itself, re-read the
  * moment it is shown again, and nothing here acts on the screen meanwhile.
+ *
+ * And one signal: "the providers changed" (`onProvidersChanged`), which every
+ * configure success emits — the ClawBox AI sign-in among them — and Settings'
+ * model switch too. It is answered with a fresh ask at once. The account can
+ * have changed under it, and without this every surface went on showing the
+ * previous account's plan until the next tick, up to a full interval later.
  */
 const poll = {
   subscribers: new Set<Subscriber>(),
@@ -183,6 +190,8 @@ const poll = {
   inFlight: null as { seq: number; startedAt: number } | null,
   /** A tick fell due while the page was hidden; it is asked on the visible edge. */
   missed: false,
+  /** Stops listening for the provider signal; held while any hook is mounted. */
+  stopSignal: null as (() => void) | null,
 };
 
 function pageHidden(): boolean {
@@ -268,9 +277,26 @@ function onVisibilityChange(): void {
   void ask();
 }
 
+/**
+ * The providers changed: ask afresh now rather than on the next tick. Never
+ * joins an ask already out — that one may have been answered from before the
+ * change. Hidden, it waits for the visible edge like a tick would.
+ */
+function onProvidersSignal(): void {
+  if (poll.subscribers.size === 0) return;
+  if (pageHidden()) {
+    poll.missed = true;
+    return;
+  }
+  if (poll.timer) clearTimeout(poll.timer);
+  poll.timer = null;
+  void ask();
+}
+
 function subscribe(sub: Subscriber): () => void {
-  if (poll.subscribers.size === 0 && typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", onVisibilityChange);
+  if (poll.subscribers.size === 0) {
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
+    poll.stopSignal = onProvidersChanged(onProvidersSignal);
   }
   poll.subscribers.add(sub);
   // A hook that mounts is answered by an ask made for it, exactly as when
@@ -294,6 +320,8 @@ function subscribe(sub: Subscriber): () => void {
     poll.inFlight = null;
     poll.missed = false;
     poll.generation += 1;
+    poll.stopSignal?.();
+    poll.stopSignal = null;
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     }
