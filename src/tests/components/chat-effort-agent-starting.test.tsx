@@ -19,6 +19,7 @@ import { resetHarnessCache } from "@/lib/client-harness";
 import { gatewayFrameError } from "@/lib/chat-gateway-starting";
 import { HarnessError, type HarnessAdapter } from "@/lib/harness/transport";
 import { useSlashCommands } from "@/lib/use-slash-commands";
+import { useGatewayProgressCard } from "@/lib/chat-progress-card";
 
 // See test-timeout-hygiene.test.ts: a jsdom mount of ChatPopup costs seconds
 // under a full parallel run.
@@ -221,6 +222,23 @@ describe("the effort picker while the agent is starting", () => {
     noFaultShown();
   });
 
+  it("a push still waiting when the socket drops is pushed again by the next hello — quietly", async () => {
+    // A restart while the agent is still starting: the wait's next try meets a
+    // socket that is gone (the status stays 'connected' until the reconnect
+    // starts), then the new socket's agent is not ready either, then it is.
+    patchRefusals.push({ message: NOT_READY }, { message: NOT_READY });
+    await mountChat();
+    await picker("Starting…");
+
+    await act(async () => { sockets[0].close(); });
+    await waitFor(() => expect(sockets.length).toBeGreaterThan(1), { timeout: 8_000 });
+    await waitFor(() => expect(patches()).toHaveLength(3), { timeout: 8_000 });
+    await picker("Medium");
+    expect(patches().map(levelOf)).toEqual(["medium", "medium", "medium"]);
+    noFaultShown();
+    expect(screen.queryByText(/Not connected/)).toBeNull();
+  });
+
   it("shows Starting… from the moment the gateway drops until it is back", async () => {
     await mountChat();
     await picker("Medium");
@@ -256,6 +274,32 @@ describe("the slash-command catalogue while the agent is starting", () => {
       // Four refusals over ~15 s of boot, then the catalogue. The failure
       // budget alone (three tries over ~17 s) gave up before the agent was up.
       expect(listCommands).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("the progress card while the agent is starting", () => {
+  it("is read once the agent is ready, instead of staying unread until the agent next changes it", async () => {
+    vi.useFakeTimers();
+    try {
+      const card = {
+        sessionKey: "agent:main:main",
+        revision: 4,
+        updatedAt: 1_758_200_000_000,
+        markdown: "Tests are running.",
+        steps: [{ step: "Run focused verification", status: "in_progress" }],
+      };
+      let refusals = 2;
+      const request = vi.fn<(method: string, params: unknown) => Promise<unknown>>(async () => {
+        if (refusals > 0) { refusals -= 1; throw gatewayFrameError({ message: NOT_READY }); }
+        return { card };
+      });
+      const { result } = renderHook(() => useGatewayProgressCard({ request, sessionKey: "agent:main:main", enabled: true }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(result.current.card?.revision).toBe(4);
     } finally {
       vi.useRealTimers();
     }

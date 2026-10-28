@@ -2940,13 +2940,18 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         }])
         return
       }
+      const message = err instanceof Error ? err.message : 'unknown error'
+      // The socket went away under the push — a restart drops it, and the
+      // status only leaves 'connected' when the reconnect starts, so a push
+      // still waiting on the agent lands here. Not a failure of the change:
+      // the reset above makes the next hello push it again.
+      if (/\b(?:not connected|connection restarted)\b/i.test(message)) return
       // The gateway itself tells us the level to fall back to when a model
       // exposes no (or a narrower) reasoning control — e.g. local Gemma:
       //   thinkingLevel "high" is not supported for llamacpp/... (use off)
       // Honour that silently: snap to the suggested level and re-push it,
       // surfacing a plain note rather than a red failure banner (a residual
       // race, an external model change, or an API client can still reach here).
-      const message = err instanceof Error ? err.message : 'unknown error'
       const suggested = parseUnsupportedThinkingLevelError(message)
       if (suggested !== null) {
         if (headerProvider) {

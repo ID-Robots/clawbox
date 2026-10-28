@@ -284,8 +284,10 @@ describe("chat-reasoning", () => {
 
     it("is read through the catalogue by the pill, with the wire word as the floor", () => {
       expect(chat).toMatch(/tr\(`chat\.effort\.\$\{level\}`, THINKING_LEVEL_LABELS\[level\] \?\? level\)/);
+      // While the gateway or its agent is still starting the closed pill reads
+      // "Starting…" (worded through the catalogue too); otherwise the level.
       expect(chat).toMatch(
-        /triggerLabel=\{tr\(`chat\.effort\.\$\{effectiveThinkingLevel\}`/,
+        /triggerLabel=\{(?:effortStarting\s*\?\s*tr\('chat\.effort\.starting', 'Starting…'\)\s*:\s*)?tr\(`chat\.effort\.\$\{effectiveThinkingLevel\}`/,
       );
     });
   });
