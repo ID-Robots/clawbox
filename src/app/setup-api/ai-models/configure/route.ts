@@ -2509,6 +2509,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // primary and everything after the credential write — and it proves the
     // sign-in is in the store before it writes anything (step 1).
     const isXaiSignIn = provider === "xai" && authMode === "subscription";
+    // The ClawBox AI DEVICE LOGIN arrives as `authMode: "subscription"` too
+    // (`clawai/poll`), but what it hands over is the portal's API token — the
+    // credential the ClawBox AI token lane pastes. So it is stored the way that
+    // lane stores it, through `models auth paste-api-key`, which writes the auth
+    // store of the RUNNING gateway and asks it to reload. It used to take the
+    // OAuth lane instead: an OAuth bundle in the legacy file, `doctor --fix`
+    // with the gateway STOPPED to import it, and the restart after — a minute
+    // or two of dead chat, for a profile the paste in `configureClawboxAi`
+    // replaced with the API key a few steps later anyway.
+    const isClawaiDeviceLogin = isClawAI && authMode === "subscription";
     const isLocalScope = scope === "local";
     if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI && !isXaiSignIn)) {
       return NextResponse.json(
@@ -3295,9 +3305,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       if (!stored) {
         console.warn("[configure] could not read the auth store to confirm the xAI sign-in; saving anyway");
       }
-    } else if (authMode !== "subscription") {
+    } else if (authMode !== "subscription" || isClawaiDeviceLogin) {
       // Every API-key credential goes through `models auth paste-api-key`
-      // (stdin): on OpenClaw 2 a hand-written auth-profiles.json is a LEGACY
+      // (stdin), the ClawBox AI device login's portal token included (see
+      // `isClawaiDeviceLogin`): on OpenClaw 2 a hand-written
+      // auth-profiles.json is a LEGACY
       // store the gateway refuses to hydrate — AuthProfileMigrationRequired
       // killed it after every provider save until doctor ran. The CLI writes
       // the store of the running generation and the openclaw.json metadata
@@ -3354,6 +3366,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // legacy file and the old best-effort behavior.
       // The stop inside is unconditional; POST restores the unit if no later
       // step restarts it.
+      //
+      // WHY THIS LANE STILL STOPS THE GATEWAY when every other save is applied
+      // to the running one: the pinned core (2026.10.7) has no live way in for
+      // an OAuth credential obtained outside it. `models auth paste-token`
+      // stores a bare token with no refresh token (dead after its expiry),
+      // `models.authSetApiKey` takes API keys only, and `models auth login`
+      // runs the provider's own interactive flow. Its documented import for an
+      // access + refresh bundle is `doctor --fix` over the legacy file, and
+      // doctor beside a running or still-draining gateway finds a second owner
+      // of its state (`runOpenclawDoctorFix`). So the OAuth sign-ins —
+      // Claude's, ChatGPT's, Google's — keep the stop and the restart step 9
+      // issues for it; what makes that restart shorter is the pre-start's
+      // stamps (scripts/gateway-pre-start-stamps.py).
       gateway.state = "stopped-for-doctor";
       // WHAT KIND of doctor failure this was (TASK-741). It still FAILS — the
       // migration provably did not happen, and a legacy auth-profiles.json left
@@ -3490,10 +3515,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // than fixed).
       //
       // Claude's sign-in only: it is the profile this was measured on.
-      // The ClawBox AI device login runs this branch too (`clawai/poll` posts
-      // `authMode: "subscription"`) and is kept out by name, not only by the
-      // provider id it rides today: its credential is the CLI paste further
-      // down, which replaces whatever the id holds.
+      // The ClawBox AI device login no longer reaches this branch (it pastes,
+      // see `isClawaiDeviceLogin`); it stays excluded by name, not only by the
+      // provider id it rides today, so a future route back here cannot put an
+      // OAuth row where its CLI paste belongs.
       if (outcome === "completed" && oauthBundle && ocProvider === "anthropic" && !isClawAI) {
         const fingerprint = tokenFingerprint(oauthBundle.access);
         const expires = oauthBundle.expires;
@@ -3659,7 +3684,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         `auth.profiles.${config.profileKey}`,
         // Subscription → "oauth"; every key-based provider → "api_key". The old
         // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
-        JSON.stringify(authMode === "subscription"
+        // The ClawBox AI device login is key-based: it pasted an API key at
+        // step 1, and metadata saying `oauth` would contradict the store the
+        // running gateway reloads from until `configureClawboxAi` rewrote it.
+        JSON.stringify(authMode === "subscription" && !isClawaiDeviceLogin
           ? { provider: ocProvider, mode: "oauth" }
           : { provider: ocProvider, mode: "api_key" }),
         "--json",
@@ -4527,9 +4555,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //
     //    So the restart is kept for what still needs one, and nothing else:
     //      - the gateway was STOPPED above for the `doctor --fix` credential
-    //        migration (every subscription sign-in but xAI's); systemd does not
-    //        start a stopped unit by itself, and the ChatGPT sign-in's Codex
-    //        mirrors are regenerated by the boot script on that start;
+    //        migration (the OAuth sign-ins: Claude's, ChatGPT's, Google's — not
+    //        xAI's, which its plugin stores, and not the ClawBox AI device
+    //        login, which pastes an API key); systemd does not start a
+    //        stopped unit by itself, and the ChatGPT sign-in's Codex mirrors
+    //        are regenerated by the boot script on that start;
     //      - plugin code was installed (the ClawBox AI provider plugin);
     //      - a setting only a restart applies changed — `gateway.auth.*` when
     //        the token is rotated, and anything the core's reload table does not
