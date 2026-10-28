@@ -515,6 +515,7 @@ describe("/setup-api/chat/transcribe", () => {
     // and a failure is what the fall-through runs the next engine on. That
     // next engine is a two-minute whisper run on the box — for nobody.
     boxHasWhisper();
+    writePrimary("cloud");
     const caller = new AbortController();
     fetchMock.mockImplementation((_url: unknown, init: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
@@ -566,8 +567,22 @@ describe("/setup-api/chat/transcribe", () => {
       expect(body).toEqual({ ok: true, text: "from the cloud", engine: "cloud" });
     });
 
+    it("tries the box first when nothing is stored and its engine is installed", async () => {
+      // An unset preference is not a vote for the cloud on a box that can
+      // transcribe by itself — the same order channel voice notes get
+      // (stt-preference.ts), so the microphone and Telegram agree.
+      boxHasWhisper();
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "heard on the box" });
+
+      const body = await (await POST(audioRequest())).json();
+
+      expect(body).toEqual({ ok: true, text: "heard on the box", engine: "local" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("falls back to the box when the cloud fails", async () => {
       boxHasWhisper();
+      writePrimary("cloud");
       fetchMock.mockResolvedValue(jsonResponse({ error: "upstream down" }, 500));
       localStt.transcribe.mockResolvedValue({ ok: true, text: "from the box" });
 
@@ -605,6 +620,7 @@ describe("/setup-api/chat/transcribe", () => {
 
     it("reports the primary's failure when both fail — the cloud's here", async () => {
       boxHasWhisper();
+      writePrimary("cloud");
       fetchMock.mockResolvedValue(new Response("boom", { status: 500 }));
       localStt.transcribe.mockResolvedValue({ ok: false, error: "decoder crashed" });
 
@@ -709,6 +725,7 @@ describe("/setup-api/chat/transcribe", () => {
 
     it("falls back to the box on the exact 400 unsupported_audio, and logs why", async () => {
       boxHasWhisper();
+      writePrimary("cloud");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       fetchMock.mockResolvedValue(jsonResponse(UNSUPPORTED_AUDIO, 400));
       localStt.transcribe.mockResolvedValue({ ok: true, text: "Guten Tag vom Kasten." });
@@ -782,6 +799,7 @@ describe("/setup-api/chat/transcribe", () => {
       // Anything under the cloud leg can throw. It used to escape the engine
       // loop as a bare 500, and the box's engine was never asked.
       boxHasWhisper();
+      writePrimary("cloud");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       remux.audioForCloud.mockRejectedValue(new Error("claw_testtoken0000000000000000000 in a message"));
       localStt.transcribe.mockResolvedValue({ ok: true, text: "still heard" });

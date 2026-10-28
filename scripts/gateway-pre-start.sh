@@ -3604,6 +3604,50 @@ def _is_clawbox_audio_model(_entry):
     return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
 
 
+def _is_clawbox_cloud_audio_model(_entry):
+    """Is one row the ClawBox AI cloud row (as opposed to the on-box CLI row)?"""
+    return isinstance(_entry, dict) and _entry.get("type") != "cli" and _is_clawbox_audio_model(_entry)
+
+
+def _openai_signed_in_with_oauth(_cfg):
+    """Is the openai provider's credential a ChatGPT sign-in (an OAuth profile)?
+
+    The cloud row is `provider: "openai"` with our proxy as the endpoint, and
+    the pinned core refuses that pair for an OAuth credential: "Custom
+    endpoints and request overrides require an API-key profile" (OpenClaw
+    2026.10.7 docs/nodes/audio.md). On a real box that had moved to a ChatGPT
+    sign-in every Telegram voice note came back "OpenAI OAuth audio
+    transcription requires the official endpoint without custom request
+    overrides", and the repair below kept re-stamping the row at every start.
+    So with a sign-in like that this migration neither seeds the row nor keeps
+    it; src/lib/stt-channel.ts (`decideCloudSttBacking`) withholds it on the
+    same rule, and puts the box's own engine in its place.
+
+    Read from openclaw.json's `auth.profiles` — the provider field, else the
+    id's prefix, the rule `profileProviderId` in
+    src/lib/chatgpt-subscription.ts uses — so this block stays runnable on its
+    own (the unit tests run it extracted from the file).
+    """
+    _auth = _cfg.get("auth") if isinstance(_cfg, dict) else None
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    if not isinstance(_profiles, dict):
+        return False
+    for _id, _entry in _profiles.items():
+        if not isinstance(_entry, dict):
+            continue
+        _provider = _entry.get("provider")
+        if not (isinstance(_provider, str) and _provider.strip()):
+            _provider = str(_id).split(":")[0]
+        _mode = _entry.get("mode")
+        if (
+            _provider.strip().lower() == "openai"
+            and isinstance(_mode, str)
+            and _mode.strip().lower() == "oauth"
+        ):
+            return True
+    return False
+
+
 def _is_clawbox_audio_models(_models):
     """Could src/lib/stt-preference.ts have built this whole list?
 
@@ -3797,6 +3841,8 @@ if _clawai_openai_route_is_ours:
         _audio_models = _audio.get("models")
         _audio_models_move_in_flight = True
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
+    # Asked once: the seed and the repair below both stand down on it.
+    _audio_cloud_refused = _openai_signed_in_with_oauth(cfg)
     _audio_route_taken = bool(
         (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
         or (_audio_models is not None and not _is_clawbox_audio_models(_audio_models))
@@ -3815,7 +3861,20 @@ if _clawai_openai_route_is_ours:
                 else "tools.media.audio already names its own transcription route"
             )
         )
-    elif _audio_base_url != _clawai_proxy_base_url or _audio_models is None:
+    elif _audio_cloud_refused:
+        # Nothing seeded and no endpoint written: see
+        # `_openai_signed_in_with_oauth`. The withdrawal below takes back what
+        # an earlier boot wrote.
+        pass
+    elif _audio_models is None or (
+        # The endpoint only ever travels WITH the cloud row. A list Settings
+        # wrote without one — the box's own engine alone, because no ClawBox
+        # AI credential backs the cloud row (src/lib/stt-channel.ts) — has no
+        # row that reads it, and writing it back at every start would undo
+        # what Settings just took away.
+        _audio_base_url != _clawai_proxy_base_url
+        and any(_is_clawbox_cloud_audio_model(_row) for _row in _audio_models)
+    ):
         _audio["baseUrl"] = _clawai_proxy_base_url
         # Seed the list only where there is none. A list this migration
         # recognises is left exactly as Settings wrote it, order included.
@@ -3853,7 +3912,27 @@ if _clawai_openai_route_is_ours:
     # so a list the owner wrote is never touched; the ORDER is his speech-to-text
     # preference and is preserved row for row. Idempotent: a row that already
     # names the profile is left alone, so the next boot writes nothing.
-    if not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+    #
+    # WITHDRAWN instead of repaired once the openai credential is a ChatGPT
+    # sign-in: a profile re-stamped onto a row the core refuses is the row
+    # that answered every voice note on a real box with "requires the official
+    # endpoint". Only OUR rows and OUR endpoint go; the on-box CLI row stays,
+    # in its place, and is then the first thing a voice note tries.
+    if not _audio_route_taken and _audio_cloud_refused:
+        if isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+            _audio_kept = [_row for _row in _audio_models if not _is_clawbox_cloud_audio_model(_row)]
+            if len(_audio_kept) != len(_audio_models):
+                _audio_models[:] = _audio_kept
+                print(
+                    "  Withdrew the ClawBox AI transcription row: the openai credential is a"
+                    " ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
+                )
+                changed = True
+        if _audio_has_base_url and _same_endpoint(_audio_base_url, _clawai_proxy_base_url):
+            del _audio["baseUrl"]
+            print("  Removed the ClawBox AI transcription endpoint along with its row")
+            changed = True
+    elif not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
         _audio_repaired = False
         for _row in _audio_models:
             if not isinstance(_row, dict) or _row.get("type") == "cli":
@@ -9566,6 +9645,21 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     clawbox_agents_append "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_RULE_TEXT" \
       "Appended the system-actions rule to AGENTS.md" \
       "could not append the system-actions rule to AGENTS.md"
+
+    # WHAT TO SAY WHEN A VOICE NOTE COULD NOT BE HEARD. When every engine in
+    # `tools.media.models` fails, the core hands the turn on with a bounded
+    # model-visible marker in place of a transcript (OpenClaw 2026.10.7
+    # docs/nodes/media-understanding.md) and has no setting for what the reply
+    # says. Left to itself the model answered a Telegram voice note on a real
+    # box with "can't recognise audio, send text" — true, and no help to an
+    # owner whose box could transcribe after one install. So the rule names
+    # the two ways in, in the words Settings uses. Its own marker, so it lands
+    # on every box once, like the rule above.
+    CLAWBOX_AGENTS_VOICE_RULE="## Voice notes on this ClawBox"
+    printf -v CLAWBOX_AGENTS_VOICE_RULE_TEXT '\n\n%s\n\nA voice note or audio message that reaches you with no transcript (no `[Audio]` block, or a marker that the audio could not be transcribed) means speech-to-text is not available on this ClawBox right now. Do not just ask for text. Say that voice notes cannot be transcribed here yet, and how the owner turns it on: Settings -> Local AI -> Whisper -> Install (transcribes on the box itself), or connect ClawBox AI under Settings -> Providers for cloud transcription. Then answer anything they also typed, and offer to carry on in text meanwhile.\n' "$CLAWBOX_AGENTS_VOICE_RULE"
+    clawbox_agents_append "$CLAWBOX_AGENTS_VOICE_RULE" "$CLAWBOX_AGENTS_VOICE_RULE_TEXT" \
+      "Appended the voice-notes rule to AGENTS.md" \
+      "could not append the voice-notes rule to AGENTS.md"
   fi
 
   # --- clawbox language re-apply ---

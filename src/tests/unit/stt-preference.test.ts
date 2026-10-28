@@ -20,6 +20,13 @@ vi.mock("@/lib/harness/credentials", () => ({
   CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
   resolveClawaiToken: async () => token.value,
 }));
+// Whether the box has an engine of its own is the other half of the default:
+// with nothing stored, that engine goes first.
+const local = vi.hoisted(() => ({ installed: false }));
+vi.mock("@/lib/stt-local", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/stt-local")>()),
+  localSttInstalled: async () => ({ installed: local.installed, detail: "" }),
+}));
 
 type Lib = typeof import("@/lib/stt-preference");
 let lib: Lib;
@@ -42,6 +49,7 @@ beforeEach(async () => {
   process.env.HOME = HOME;
   store.clear();
   token.value = "claw_test";
+  local.installed = false;
   vi.resetModules();
   lib = await import("@/lib/stt-preference");
 });
@@ -94,6 +102,23 @@ describe("the stored primary", () => {
     expect(await lib.getSttPrimary()).toBe("cloud");
   });
 
+  /**
+   * A box with Whisper installed and no stored pick put the cloud first, so a
+   * cloud leg that could not answer cost every recording a refused round trip
+   * before the engine that could — and on a channel, where the cloud row had
+   * lost its credential, no transcript at all.
+   */
+  it("puts the box's own engine first when nothing is stored and it is installed", async () => {
+    local.installed = true;
+    expect(await lib.getSttPrimary()).toBe("local");
+  });
+
+  it("still honours a stored cloud pick on a box with its own engine", async () => {
+    local.installed = true;
+    store.set("stt_primary", "cloud");
+    expect(await lib.getSttPrimary()).toBe("cloud");
+  });
+
   it("only knows the two engines", () => {
     expect(lib.isSttEngine("cloud")).toBe(true);
     expect(lib.isSttEngine("local")).toBe(true);
@@ -104,16 +129,25 @@ describe("the stored primary", () => {
 
 describe("resolveSttPrimary", () => {
   it("is the stored pick while the box has a cloud credential", () => {
-    expect(lib.resolveSttPrimary("cloud", true)).toBe("cloud");
-    expect(lib.resolveSttPrimary("local", true)).toBe("local");
-    expect(lib.resolveSttPrimary(undefined, true)).toBe("cloud");
-    expect(lib.resolveSttPrimary("fastest", true)).toBe("cloud");
+    for (const localInstalled of [false, true]) {
+      expect(lib.resolveSttPrimary("cloud", true, localInstalled)).toBe("cloud");
+      expect(lib.resolveSttPrimary("local", true, localInstalled)).toBe("local");
+    }
+  });
+
+  it("with nothing stored, is the box's engine when it has one and the cloud when it has not", () => {
+    expect(lib.resolveSttPrimary(undefined, true, true)).toBe("local");
+    expect(lib.resolveSttPrimary("fastest", true, true)).toBe("local");
+    expect(lib.resolveSttPrimary(undefined, true, false)).toBe("cloud");
+    expect(lib.resolveSttPrimary("fastest", true, false)).toBe("cloud");
   });
 
   it("is the box itself with no credential, whatever the store says", () => {
-    expect(lib.resolveSttPrimary("cloud", false)).toBe("local");
-    expect(lib.resolveSttPrimary("local", false)).toBe("local");
-    expect(lib.resolveSttPrimary(undefined, false)).toBe("local");
+    for (const localInstalled of [false, true]) {
+      expect(lib.resolveSttPrimary("cloud", false, localInstalled)).toBe("local");
+      expect(lib.resolveSttPrimary("local", false, localInstalled)).toBe("local");
+      expect(lib.resolveSttPrimary(undefined, false, localInstalled)).toBe("local");
+    }
   });
 });
 
@@ -130,18 +164,30 @@ describe("buildAudioModels", () => {
   });
 
   it("is the cloud row alone when the box has no engine of its own", () => {
-    expect(lib.buildAudioModels(["cloud", "local"], false)).toEqual([CLOUD]);
-    expect(lib.buildAudioModels(["local", "cloud"], false)).toEqual([CLOUD]);
+    expect(lib.buildAudioModels(["cloud", "local"], false, true)).toEqual([CLOUD]);
+    expect(lib.buildAudioModels(["local", "cloud"], false, true)).toEqual([CLOUD]);
   });
 
   it("puts the on-box CLI row where the preference puts it", () => {
-    expect(lib.buildAudioModels(["cloud", "local"], true)).toEqual([CLOUD, LOCAL]);
-    expect(lib.buildAudioModels(["local", "cloud"], true)).toEqual([LOCAL, CLOUD]);
+    expect(lib.buildAudioModels(["cloud", "local"], true, true)).toEqual([CLOUD, LOCAL]);
+    expect(lib.buildAudioModels(["local", "cloud"], true, true)).toEqual([LOCAL, CLOUD]);
+  });
+
+  /**
+   * A cloud row whose credential is gone is not a fallback: the core resolves
+   * the openai provider's own credential for it, and a ChatGPT sign-in there
+   * is refused the proxy endpoint on every voice note, ahead of the engine on
+   * the box. So it is left out, in either order.
+   */
+  it("leaves the cloud row out when no ClawBox AI credential backs it", () => {
+    expect(lib.buildAudioModels(["cloud", "local"], true, false)).toEqual([LOCAL]);
+    expect(lib.buildAudioModels(["local", "cloud"], true, false)).toEqual([LOCAL]);
+    expect(lib.buildAudioModels(["cloud", "local"], false, false)).toEqual([]);
   });
 
   it("hands out fresh objects each time, so a caller editing one cannot change the next", () => {
-    const a = lib.buildAudioModels(["cloud", "local"], true);
+    const a = lib.buildAudioModels(["cloud", "local"], true, true);
     (a[1].args as string[]).push("--tainted");
-    expect(lib.buildAudioModels(["cloud", "local"], true)[1]).toEqual(LOCAL);
+    expect(lib.buildAudioModels(["cloud", "local"], true, true)[1]).toEqual(LOCAL);
   });
 });
