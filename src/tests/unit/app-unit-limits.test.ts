@@ -13,7 +13,7 @@ import os from "os";
 import path from "path";
 import { appMemoryLimits } from "@/lib/box-memory-policy";
 import { APP_CPU_WEIGHT, APP_IO_WEIGHT } from "@/lib/app-server-start";
-import { capForeignAppServers, foreignUserServiceOf } from "@/lib/app-unit-limits";
+import { capForeignAppServers, foreignUserServiceOf, showProperties } from "@/lib/app-unit-limits";
 import { resolveBin, type ChildResult } from "@/lib/child-run";
 
 const ok = (stdout: string): ChildResult => ({ code: 0, stdout, stderr: "", signal: null, timedOut: false, startFailed: false });
@@ -48,8 +48,8 @@ function fakeBox(input: { ss?: Record<number, ChildResult>; memoryMax?: Record<s
     }
     calls.push([bin, ...args]);
     envs.push(opts.env);
-    // `show -p MemoryMax -p Restart --value <unit>`: one line per property, in that order.
-    if (args[1] === "show") return ok((input.memoryMax?.[args[7]] ?? "infinity") + "\n" + (input.restart?.[args[7]] ?? "on-failure") + "\n");
+    // `show -p MemoryMax -p Restart <unit>`: `Name=value` lines in SYSTEMD'S order — Restart first, as the box prints it.
+    if (args[1] === "show") return ok(`Restart=${input.restart?.[args[6]] ?? "on-failure"}\nMemoryMax=${input.memoryMax?.[args[6]] ?? "infinity"}\n`);
     if (args[1] === "set-property") return input.setFails ? failed("Failed to set unit properties") : ok("");
     return failed();
   };
@@ -68,6 +68,16 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(base, { recursive: true, force: true });
+});
+
+describe("showProperties", () => {
+  it("reads `show` output by name, whatever order systemd prints it in", () => {
+    // The order the box prints for `-p MemoryMax -p Restart` — Restart first.
+    // Read positionally, "on-failure" became the MemoryMax and nothing was capped.
+    expect(showProperties("Restart=on-failure\nMemoryMax=infinity\n")).toEqual({ Restart: "on-failure", MemoryMax: "infinity" });
+    expect(showProperties("MemoryMax=2078277632\nRestart=no\n")).toEqual({ MemoryMax: "2078277632", Restart: "no" });
+    expect(showProperties("")).toEqual({});
+  });
 });
 
 describe("foreignUserServiceOf", () => {

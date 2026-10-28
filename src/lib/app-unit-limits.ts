@@ -97,6 +97,16 @@ export function foreignUserServiceOf(cgroup: string | null): string | null {
   return unit;
 }
 
+/** `systemctl show -p A -p B` output — `Name=value` lines in systemd's own order — as a map. */
+export function showProperties(stdout: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of stdout.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return out;
+}
+
 /** The pids of the loopback-reachable listeners on `port`, or null when `ss` could not say. */
 async function listenerPids(port: number, run: Runner): Promise<number[] | null> {
   const r = await run("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { timeoutMs: 5_000, env: childEnv() });
@@ -149,15 +159,19 @@ export async function capForeignAppServers(options: CapOptions = {}): Promise<st
       const unit = foreignUserServiceOf(await proc.cgroup(pid));
       if (!unit || seen.has(unit)) continue;
       seen.add(unit);
-      // Two properties in one call, answered one per line in this order.
-      const shown = await run(systemctl, ["--user", "show", "-p", "MemoryMax", "-p", "Restart", "--value", unit], { timeoutMs: 10_000, env: systemctlEnv() });
+      // Two properties in one call. NOT `--value`: systemd prints properties in
+      // ITS order, not the arguments' (Restart before MemoryMax on this box),
+      // and the pass that read line one as MemoryMax saw "on-failure", took it
+      // for a cap already set, and skipped every unit in silence (2026-10-28).
+      // Each line is `Name=value`, so they are read by name.
+      const shown = await run(systemctl, ["--user", "show", "-p", "MemoryMax", "-p", "Restart", unit], { timeoutMs: 10_000, env: systemctlEnv() });
       if (shown.code !== 0) {
         // Said out loud: a refusal that reads as "already capped" is how the
         // first pass hid for a whole update cycle.
         console.error(`[app-caps] ${unit} (app ${id}, port ${port}): systemctl show failed: ${(shown.stderr || shown.stdout).trim().slice(0, 200)}`);
         continue;
       }
-      const [memoryMax = "", restart = ""] = shown.stdout.split("\n").map((l) => l.trim());
+      const { MemoryMax: memoryMax = "", Restart: restart = "" } = showProperties(shown.stdout);
       if (memoryMax !== "infinity") continue;
       const limits = appMemoryLimits();
       // MemoryMax is a wall the kernel enforces by killing: a unit already past
