@@ -120,12 +120,14 @@ describe("applyModelOverrideToAllAgentSessions — skipUserTagged", () => {
     expect(after.already_matching.modelOverrideSource).toBe("user");
   });
 
-  it("normalises a stale reasoning effort the new model can't honour (deepseek high -> local Gemma off)", async () => {
+  it("does not carry a cloud reasoning effort onto local Gemma (deepseek high -> local Gemma off)", async () => {
     // The production bug: a session ran DeepSeek with a sticky
     // `thinkingLevel: "high"`, then the chat picker repointed it to the
-    // local llama.cpp Gemma model (which supports `off` only). Without
-    // normalising the sticky value here, the gateway rejects the next turn
-    // with `thinkingLevel "high" is not supported for llamacpp/… (use off)`.
+    // local llama.cpp Gemma model. When Gemma took `off` only, the gateway
+    // rejected the next turn with `thinkingLevel "high" is not supported for
+    // llamacpp/… (use off)`. It takes `high` now (thinking on demand), where
+    // High means thinking on every turn at about twice the answer time — so a
+    // level picked for the cloud model still starts the local one at Off.
     await seedSessions("main", {
       chat: {
         modelOverride: "deepseek-v4-flash",
@@ -144,8 +146,27 @@ describe("applyModelOverrideToAllAgentSessions — skipUserTagged", () => {
     const after = await readSessions("main");
     expect(after.chat.model).toBe("gemma4-e2b-it-q4_0");
     expect(after.chat.modelProvider).toBe("llamacpp");
-    // The stale high is folded down to the local model's only level.
+    // The stale high is folded down to the local model's default.
     expect(after.chat.thinkingLevel).toBe("off");
+  });
+
+  it("keeps the High an owner picked on local Gemma when the sweep re-points it there", async () => {
+    await seedSessions("main", {
+      chat: {
+        modelOverride: "gemma4-e2b-it-q4_0",
+        modelProvider: "llamacpp",
+        providerOverride: "llamacpp",
+        modelOverrideSource: "user",
+        thinkingLevel: "high",
+      },
+    });
+
+    await applyModelOverrideToAllAgentSessions(
+      { provider: "llamacpp", modelId: "gemma4-e2b-it-q4_0" },
+      { agentsDir },
+    );
+
+    expect((await readSessions("main")).chat.thinkingLevel).toBe("high");
   });
 
   it("leaves a reasoning effort the new provider still supports untouched (cloud -> cloud)", async () => {

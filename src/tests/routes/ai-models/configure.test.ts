@@ -1152,7 +1152,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     it("keeps a default the owner already chose", async () => {
       mockReadOpenClawConfig.mockResolvedValue({
         agents: { defaults: { models: { "llamacpp/gemma4-e2b-it-q4_0": { params: { thinking: "high" } } } } },
-      });
+      } as never);
       await configurePost(jsonRequest({ provider: "llamacpp" }));
       expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), THINKING_DEFAULT)).toBeUndefined();
       expect(localRow().reasoning).toBe(true);
