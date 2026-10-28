@@ -761,9 +761,11 @@ export function unitWorkingDirectory(value: string): string | null {
  * `~/.config/systemd/user/<app>-app.service` of its own (app-unit-limits.ts).
  * Ending only its process would not stop it: under `Restart=` systemd starts
  * it again from the same folder, and the port is taken again. The unit is the
- * app's only when its own `WorkingDirectory=` is in the app's folder; a unit
- * with merely one process there (an owner's shell service, a CI runner) is
- * never stopped whole. Never one of the box's own (`clawbox-*`).
+ * app's only when the unit ITSELF runs from the app's folder: its own
+ * `WorkingDirectory=` is there, or its main process is (an ExecStart that
+ * `cd`s into the folder first). A unit with merely one process there, its main
+ * one elsewhere (an owner's shell service, a CI runner), is never stopped
+ * whole. Never one of the box's own (`clawbox-*`).
  */
 async function appUserServiceOf(cgroup: string, real: string): Promise<string | null> {
   // On demand: app-unit-limits.ts imports this module.
@@ -772,12 +774,15 @@ async function appUserServiceOf(cgroup: string, real: string): Promise<string | 
   if (!unit) return null;
   const systemctl = await findSystemdTool("systemctl");
   if (!systemctl) return null;
-  const shown = await runChild(systemctl, ["--user", "show", "-p", "WorkingDirectory", "--", unit], { timeoutMs: 5_000, env: systemctlEnv() });
+  const shown = await runChild(systemctl, ["--user", "show", "-p", "WorkingDirectory", "-p", "MainPID", "--", unit], { timeoutMs: 5_000, env: systemctlEnv() });
   if (shown.code !== 0) return null;
-  const dir = unitWorkingDirectory(showProperties(shown.stdout).WorkingDirectory ?? "");
-  if (!dir) return null;
-  const realDir = await fs.promises.realpath(dir).catch(() => dir);
-  return isInside(realDir, real) ? unit : null;
+  const props = showProperties(shown.stdout);
+  const dir = unitWorkingDirectory(props.WorkingDirectory ?? "");
+  if (dir && isInside(await fs.promises.realpath(dir).catch(() => dir), real)) return unit;
+  const mainPid = Number(props.MainPID);
+  if (!Number.isInteger(mainPid) || mainPid <= 1 || mainPid === process.pid) return null;
+  const cwd = await processCwd(mainPid);
+  return cwd && isInside(cwd.path, real) ? unit : null;
 }
 
 /** The unit an app's server runs in, when stopping that unit is what stops the server. */
