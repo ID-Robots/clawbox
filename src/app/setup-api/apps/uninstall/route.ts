@@ -11,7 +11,7 @@ import { safeAppId, webappIconPath } from "@/lib/webapp-icon";
 import { disablePublicLink } from "@/lib/public-app-links";
 import { removeStoreInstalledFolder } from "@/lib/store-install-receipt";
 import { registeredServer } from "@/lib/app-proxy";
-import { stopServerApp } from "@/lib/app-server-start";
+import { disableUserUnits, stopServerApp } from "@/lib/app-server-start";
 
 export const dynamic = "force-dynamic";
 
@@ -189,10 +189,13 @@ export async function POST(req: Request) {
     // uninstall with nothing removed, so the owner keeps the entry to retry
     // from — the contract of the two refusals around it.
     let serverStopped = false;
+    // The app's own user `.service` units the stop went through: disabled
+    // below only if the app's folder is removed (a Store app), never for an
+    // app whose project stays.
+    let serverUnits: string[] = [];
     const server = await registeredServer(appId);
     if (server) {
-      // A user `.service` of the app's own is disabled too: its folder is going.
-      const stop = await stopServerApp(appId, server, { disableUnit: true });
+      const stop = await stopServerApp(appId, server);
       if (!stop.ok) {
         console.warn(`[uninstall] Could not stop the app's server: ${stop.detail}`);
         return NextResponse.json({
@@ -204,6 +207,7 @@ export async function POST(req: Request) {
         }, { status: 503 });
       }
       serverStopped = stop.stopped;
+      serverUnits = stop.units ?? [];
     }
 
     // What actually happened to the skill half, so the answer can say it.
@@ -278,6 +282,9 @@ export async function POST(req: Request) {
         skillRemoved,
       }, { status: 503 });
     }
+    // Its folder is gone: a unit of its own left enabled would start a server
+    // from nowhere at the next boot.
+    if (projectRemoved) await disableUserUnits(serverUnits);
 
     // Remove the deployed webapp, if this app is one. `webapp_create`,
     // `webapp_update` and `code_project_build` all deploy to

@@ -725,7 +725,7 @@ const STOP_PORT_WAIT_MS = 5_000;
 
 export type StopOutcome =
   /** `holder`: a listener on the port that is NOT the app's, left running (its pid; null when it is another user's). */
-  | { ok: true; stopped: boolean; holder: { pid: number | null } | null }
+  | { ok: true; stopped: boolean; holder: { pid: number | null } | null; units?: string[] }
   | { ok: false; detail: string };
 
 /** The process group a pid leads or belongs to, from /proc/<pid>/stat; null when it cannot be read. */
@@ -818,16 +818,27 @@ async function stopUserUnit(unit: string): Promise<void> {
 }
 
 /**
- * The app's own `.service` no longer starts at boot: its folder is going.
- * The unit file stays where its writer put it, outside the app's folder —
- * disabled, it does nothing. Best effort: a unit with no `[Install]` section,
- * or one enabled for every user, has nothing here to undo.
+ * The app's own `.service` units (`stopServerApp`'s `units`) no longer start
+ * at boot — for the uninstall, once the app's folder is GONE: a unit left
+ * enabled would start a server from a folder that is not there. Never while
+ * the folder stays (an app the agent built keeps its project), where the unit
+ * is still the owner's way to serve it. The unit file stays where its writer
+ * put it, outside the app's folder — disabled, it does nothing. Best effort,
+ * never throws: a unit with no `[Install]` section, or one enabled for every
+ * user, has nothing here to undo.
  */
-async function disableUserUnit(unit: string): Promise<void> {
-  const systemctl = await findSystemdTool("systemctl");
-  if (!systemctl) return;
-  const disabled = await runChild(systemctl, ["--user", "disable", "--", unit], { timeoutMs: 10_000, env: systemctlEnv() });
-  if (disabled.code !== 0) console.warn(`[apps] ${unit} could not be disabled: ${(disabled.stderr || disabled.stdout).trim().slice(0, 200)}`);
+export async function disableUserUnits(units: readonly string[]): Promise<void> {
+  if (units.length === 0) return;
+  try {
+    const systemctl = await findSystemdTool("systemctl");
+    if (!systemctl) return;
+    for (const unit of units) {
+      const disabled = await runChild(systemctl, ["--user", "disable", "--", unit], { timeoutMs: 10_000, env: systemctlEnv() });
+      if (disabled.code !== 0) console.warn(`[apps] ${unit} could not be disabled: ${(disabled.stderr || disabled.stdout).trim().slice(0, 200)}`);
+    }
+  } catch (err) {
+    console.warn(`[apps] The app's units could not be disabled: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function pidAlive(pid: number): boolean {
@@ -882,19 +893,16 @@ async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boo
  * for the port. A start of the same app still under way is waited for first:
  * it would bring the server up again behind the stop.
  *
- * `disableUnit`: the app is being removed, so its own `.service` is disabled
- * too, never to start at boot from a folder that is gone.
+ * `units`, present when there were any: the app's own `.service` units it
+ * stopped, still enabled — the uninstall disables them once the app's folder
+ * is gone (`disableUserUnits`).
  *
  * `ok: false` only when the app's server is still listening, or the box could
  * not tell: a caller about to remove the app's folder must not go on then.
  * A listener that is not the app's is left alone and named in `holder`.
  * Never throws.
  */
-export async function stopServerApp(
-  id: string,
-  where: { port: number; directory: string | null },
-  options: { disableUnit?: boolean } = {},
-): Promise<StopOutcome> {
+export async function stopServerApp(id: string, where: { port: number; directory: string | null }): Promise<StopOutcome> {
   const { port } = where;
   if (!APP_ID_RE.test(id) || !isProxyablePort(port)) return { ok: true, stopped: false, holder: null };
   try {
@@ -924,10 +932,8 @@ export async function stopServerApp(
 
     const owned = [...first.ours.values()];
     for (const scope of new Set(owned.map((p) => p.scope).filter((s): s is string => !!s))) await stopUserUnit(scope);
-    for (const unit of new Set(owned.map((p) => p.unit).filter((u): u is string => !!u))) {
-      await stopUserUnit(unit);
-      if (options.disableUnit) await disableUserUnit(unit);
-    }
+    const units = [...new Set(owned.map((p) => p.unit).filter((u): u is string => !!u))];
+    for (const unit of units) await stopUserUnit(unit);
     // Outside a unit, or one systemd could not be asked to stop.
     for (const pid of first.ours.keys()) {
       if (pidAlive(pid)) await endAppProcess(pid, id);
@@ -938,7 +944,7 @@ export async function stopServerApp(
       const now = await find();
       if (now && now.ours.size === 0) {
         forgetListenerVerdict(port);
-        return { ok: true, stopped: true, holder: now.holder };
+        return { ok: true, stopped: true, holder: now.holder, ...(units.length > 0 ? { units } : {}) };
       }
       if (Date.now() >= deadline) {
         const still = now ? ` (pid ${[...now.ours.keys()][0]})` : "";
