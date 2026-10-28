@@ -1,9 +1,10 @@
 /**
  * English copy for the desktop's "What's new in 4.3" card (TASK-1059, TASK-1195).
  *
- * The highlights are taken from RELEASE-NOTES-4.3.0.md, trimmed to fit a
- * 320 px card. They name only what the release shipped. When the release notes
- * change, change this too.
+ * The highlights are taken from RELEASE-NOTES-4.3.0.md. They name only what
+ * the release shipped. When the release notes change, change this too. Each
+ * has a full body (the /updating screen's panel) and a short summary (one
+ * slide of the desktop card).
  *
  * WHERE THE EDITIONS DIFFER: the plan section's edition-switch line. An
  * OpenClaw box can be switched to Hermes, and a Hermes box can be switched
@@ -36,6 +37,27 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.primeRadiantTitle": "Prime Radiant, a living wiki",
   "whatsNew.primeRadiantBody":
     "A new app that keeps a wiki for you. Point it at your documents and it writes a page for each one, listing the facts it found with where each came from and how sure it is. Every night it tidies the wiki, looks for facts that contradict each other, and asks you about anything it cannot settle alone.",
+
+  // The card's slides: one highlight each, under a screenshot of it, so each
+  // gets a one- or two-line summary. The bodies above stay whole for the
+  // /updating screen's panel, which has the room.
+  "whatsNew.screenshotSummary": "Capture the whole screen, an area or a window. Print Screen or Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary":
+    "Your assistant now uses the browser on the box's own desktop. Sign in once in Agent Browser and watch it work.",
+  "whatsNew.publicLinksSummary":
+    "Right-click an app the Coding Agent built and choose Create public link, for a set time and with an optional password.",
+  "whatsNew.grokSummary":
+    "On OpenClaw, set up xAI Grok with an API key or a SuperGrok or X Premium sign-in. Most model changes no longer restart the assistant.",
+  "whatsNew.holdToTalkSummary": "Hold the chat's microphone button, or F8, while you speak, and let go to send.",
+  "whatsNew.agentChartSummary":
+    "Watch the Coding Agent's runs at work on a live chart, and message a run while it works.",
+  "whatsNew.primeRadiantSummary":
+    "A new app that turns your documents into a wiki of facts, each with its source, and tidies it every night.",
+  // The carousel's controls. {current} and {total} are slide numbers.
+  "whatsNew.slideLabel": "{current} of {total}",
+  "whatsNew.goToSlide": "Show highlight {number}",
+  "whatsNew.back": "Back",
+  "whatsNew.next": "Next",
 
   "whatsNew.readMore": "Read what's new in 4.3",
 

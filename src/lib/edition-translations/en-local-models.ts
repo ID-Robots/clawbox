@@ -131,4 +131,13 @@ export const localModelsEn: Record<string, string> = {
   "localModels.embed.present": "{model} is on this box ({size}).",
   "localModels.embed.missing": "{model} is not on this box.",
   "localModels.embed.again": "Download again",
+
+  // === Chat while Local AI answers ===
+  // The note at the top of the chat, until the owner closes it, and the
+  // status line's words while the turn waits for its first token: a local
+  // model is loaded into memory on the first reply, which can take a minute.
+  "localModels.chatBannerTitle": "Running on this box.",
+  "localModels.chatBannerBody": "The first reply can take up to a minute while the local model loads. After that it's faster.",
+  "localModels.chatBannerDismiss": "Dismiss this note",
+  "localModels.chatLoading": "Loading the local model…",
 };

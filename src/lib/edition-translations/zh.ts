@@ -1781,6 +1781,22 @@ export const zh: Record<string, string> = {
   "whatsNew.seePlans": "查看计划",
   "whatsNew.gotIt": "知道了",
   "whatsNew.dismiss": "关闭“4.3 新功能”",
+  "whatsNew.screenshotSummary": "截取整个屏幕、一个区域或一个窗口。按 Print Screen 或 Ctrl+Shift+S。",
+  "whatsNew.sharedBrowserSummary": "助手现在使用 ClawBox 自己桌面上的浏览器。在“助手浏览器”中登录一次，就能看着它工作。",
+  "whatsNew.publicLinksSummary": "右键点击编程助手构建的应用，选择“创建公开链接”，可设定有效期，也可设置密码。",
+  "whatsNew.grokSummary": "在 OpenClaw 上，可以用 API 密钥或 SuperGrok、X Premium 订阅登录来设置 xAI Grok。大多数模型切换不再重启助手。",
+  "whatsNew.holdToTalkSummary": "说话时按住聊天的麦克风按钮或 F8，松开即发送。",
+  "whatsNew.agentChartSummary": "在实时图表上查看编程助手的运行情况，并在运行进行时给它发消息。",
+  "whatsNew.primeRadiantSummary": "一个把你的文档整理成事实维基的新应用，每条事实都附出处，并在每天夜里整理一遍。",
+  "whatsNew.slideLabel": "第 {current} / {total} 页",
+  "whatsNew.goToSlide": "显示第 {number} 项新功能",
+  "whatsNew.back": "上一步",
+  "whatsNew.next": "下一步",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "在这台 ClawBox 上运行。",
+  "localModels.chatBannerBody": "本地模型加载时，第一条回复可能需要最多一分钟。之后会更快。",
+  "localModels.chatBannerDismiss": "关闭此提示",
+  "localModels.chatLoading": "正在加载本地模型…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "用户",

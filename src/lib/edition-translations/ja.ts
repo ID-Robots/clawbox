@@ -1773,6 +1773,22 @@ export const ja: Record<string, string> = {
   "whatsNew.seePlans": "プランを見る",
   "whatsNew.gotIt": "了解",
   "whatsNew.dismiss": "「4.3 の新機能」を閉じる",
+  "whatsNew.screenshotSummary": "画面全体、範囲、またはウィンドウを撮影できます。Print Screen または Ctrl+Shift+S。",
+  "whatsNew.sharedBrowserSummary": "アシスタントは ClawBox 自身のデスクトップのブラウザーを使うようになりました。「エージェントブラウザ」で一度サインインすれば、作業の様子を見られます。",
+  "whatsNew.publicLinksSummary": "コーディングエージェントが作ったアプリを右クリックし、「公開リンクを作成」を選びます。期間を決め、パスワードも設定できます。",
+  "whatsNew.grokSummary": "OpenClaw では、API キー、または SuperGrok か X Premium でのサインインで xAI Grok を設定できます。ほとんどのモデル変更でアシスタントは再起動しなくなりました。",
+  "whatsNew.holdToTalkSummary": "チャットのマイクボタンか F8 を押したまま話し、離すと送信されます。",
+  "whatsNew.agentChartSummary": "コーディングエージェントの実行をライブチャートで見ながら、作業中の実行にメッセージを送れます。",
+  "whatsNew.primeRadiantSummary": "文書を事実のウィキにまとめる新しいアプリです。事実ごとに出典を示し、毎晩ウィキを整理します。",
+  "whatsNew.slideLabel": "{current} / {total}",
+  "whatsNew.goToSlide": "新機能 {number} を表示",
+  "whatsNew.back": "戻る",
+  "whatsNew.next": "次へ",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "この ClawBox 上で動作しています。",
+  "localModels.chatBannerBody": "ローカルモデルの読み込み中は、最初の返信に最大 1 分ほどかかることがあります。その後は速くなります。",
+  "localModels.chatBannerDismiss": "このお知らせを閉じる",
+  "localModels.chatLoading": "ローカルモデルを読み込み中…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "ユーザー",

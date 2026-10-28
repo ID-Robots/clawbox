@@ -1769,6 +1769,22 @@ export const sv: Record<string, string> = {
   "whatsNew.seePlans": "Se planer",
   "whatsNew.gotIt": "Uppfattat",
   "whatsNew.dismiss": "Stäng ”Nytt i 4.3”",
+  "whatsNew.screenshotSummary": "Fånga hela skärmen, ett område eller ett fönster. Print Screen eller Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary": "Din assistent använder nu webbläsaren på ClawBoxens eget skrivbord. Logga in en gång i Agentwebbläsare och se den arbeta.",
+  "whatsNew.publicLinksSummary": "Högerklicka på en app som kodagenten har byggt och välj Skapa offentlig länk, för en bestämd tid och med valfritt lösenord.",
+  "whatsNew.grokSummary": "På OpenClaw ställer du in xAI Grok med en API-nyckel eller en inloggning med SuperGrok eller X Premium. De flesta modellbyten startar inte längre om assistenten.",
+  "whatsNew.holdToTalkSummary": "Håll ned chattens mikrofonknapp, eller F8, medan du pratar, och släpp för att skicka.",
+  "whatsNew.agentChartSummary": "Se kodagentens körningar arbeta i ett livediagram, och skriv till en körning medan den arbetar.",
+  "whatsNew.primeRadiantSummary": "En ny app som gör dina dokument till en wiki med uppgifter, var och en med sin källa, och städar den varje natt.",
+  "whatsNew.slideLabel": "{current} av {total}",
+  "whatsNew.goToSlide": "Visa nyhet {number}",
+  "whatsNew.back": "Tillbaka",
+  "whatsNew.next": "Nästa",
+  // Chat while Local AI answers: the first-reply note and the waiting line.
+  "localModels.chatBannerTitle": "Körs på den här ClawBoxen.",
+  "localModels.chatBannerBody": "Det första svaret kan ta upp till en minut medan den lokala modellen laddas. Sedan går det snabbare.",
+  "localModels.chatBannerDismiss": "Dölj den här notisen",
+  "localModels.chatLoading": "Laddar den lokala modellen…",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
   "settings.users": "Användare",
