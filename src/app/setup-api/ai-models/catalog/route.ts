@@ -18,6 +18,8 @@ import {
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
 import { forgetProviderEnumeration, recordProviderEnumeration } from "@/lib/provider-runnable";
+import { followsNewestModel, newestModelId, rankNewestFirst } from "@/lib/provider-newest-model";
+import { readUnavailableModelIds } from "@/lib/provider-model-availability";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 
 export const dynamic = "force-dynamic";
@@ -981,6 +983,14 @@ function buildPayload(
     // that route accepts.
     merged = merged.map((m) => ({ ...m, availableOnSubscription: true }));
   }
+  // A provider whose default FOLLOWS the newest model (xAI; see
+  // src/lib/provider-newest-model.ts) is ranked by the provider's own version
+  // and answers its newest flagship, ahead of the harness's `default` tag: the
+  // tag is the core manifest's curated default, which is frozen at the core's
+  // release while the enumeration (`--refresh`, below) already lists what the
+  // provider shipped since. Every other provider keeps the rule underneath.
+  const followsNewest = followsNewestModel(provider);
+  if (followsNewest) merged = rankNewestFirst(provider, merged);
   // The BOX's answer first. `openclaw models list` tags one row `default` per
   // provider, and preferring the curated default over it is the same defect
   // this change exists to fix, pointed at the default instead of the list: on a
@@ -989,11 +999,13 @@ function buildPayload(
   // that tags nothing and for the curated cold-start rows, which carry no tag
   // at all — one table, the same one the picker renders.
   const fallbackDefault = getProviderCatalog(provider)?.defaultModelId;
-  const defaultModelId = merged.find((m) => m.isDefault)?.id
+  const defaultModelId = (followsNewest ? newestModelId(provider, merged) : null)
+    ?? merged.find((m) => m.isDefault)?.id
     ?? merged.find((m) => m.id === fallbackDefault)?.id
     ?? merged[0]?.id
     ?? fallbackDefault
     ?? "";
+  if (followsNewest) merged = withNewestHint(merged, defaultModelId);
   return {
     provider,
     models: merged,
@@ -1001,6 +1013,51 @@ function buildPayload(
     allowCustom: ALLOW_CUSTOM_BY_PROVIDER[provider] ?? true,
     fetchedAt,
   };
+}
+
+/** The curated hint a newest-following provider's default row carries. */
+const NEWEST_DEFAULT_HINT = "Default. Newest flagship.";
+
+/**
+ * The "Default" hint on the row that IS the default, and on no other.
+ *
+ * The curated hints are written for the list as it shipped — `grok-4.7` says
+ * "Default. Newest flagship." — and `hintFor` copies them onto live rows by id.
+ * For a provider whose default moves, the day the provider ships a newer model
+ * that copy would describe an old row as the newest and leave the new default
+ * unlabelled. Every other curated hint ("Previous generation.") still holds.
+ */
+function withNewestHint(models: CatalogModel[], defaultModelId: string): CatalogModel[] {
+  return models.map((m) => {
+    if (m.id === defaultModelId) return { ...m, hint: NEWEST_DEFAULT_HINT };
+    if (!m.hint?.startsWith("Default")) return m;
+    const rest = { ...m };
+    delete rest.hint;
+    return rest;
+  });
+}
+
+/**
+ * The payload without the models THIS ACCOUNT was refused on — a 429 stating a
+ * limit of zero, a model the provider no longer serves — while their mark lasts
+ * (src/lib/provider-model-availability.ts).
+ *
+ * At SERVE time, like `withoutRetiredModels` and for its reason: the cache file
+ * is the box's enumeration, which the mark does not change, and the mark
+ * expires on its own. The default is re-resolved past the hidden rows, and the
+ * list is never emptied — an account refused on everything is shown what the
+ * box has, so the next refusal can say why.
+ */
+async function withoutUnavailableModels(payload: CatalogResponse): Promise<CatalogResponse> {
+  if (!followsNewestModel(payload.provider)) return payload;
+  const unavailable = await readUnavailableModelIds(payload.provider).catch(() => new Set<string>());
+  if (unavailable.size === 0) return payload;
+  const models = payload.models.filter((m) => !unavailable.has(m.id));
+  if (models.length === 0 || models.length === payload.models.length) return payload;
+  const defaultModelId = models.some((m) => m.id === payload.defaultModelId)
+    ? payload.defaultModelId
+    : (newestModelId(payload.provider, models) ?? models[0].id);
+  return { ...payload, models: withNewestHint(models, defaultModelId), defaultModelId };
 }
 
 /**
@@ -1221,7 +1278,20 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
 
 function fetchOpenclawCatalogOnce(provider: string, timeoutMs: number): Promise<CatalogFetchResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(openclawBin(), ["models", "list", "--provider", provider, "--all", "--json"], {
+    const args = ["models", "list", "--provider", provider, "--all", "--json"];
+    // `--refresh` for a provider whose default follows the newest model: it
+    // makes the core acquire the provider's inventory before listing (pinned
+    // 2026.10.7, docs/cli/models: "Use `--refresh` to acquire provider
+    // inventory before listing") — for xAI that is the plugin's own live
+    // discovery, GET api.x.ai/v1/models with the box's stored credential, API
+    // key and sign-in alike, which accepts ids its manifest does not know yet.
+    // Without it a running gateway answers its saved rows and refreshes only
+    // once they expire, so a model the provider shipped today could wait a
+    // refresh interval to show. A failed refresh still lists the published rows
+    // (same page), so the flag cannot empty a catalogue. Other providers are
+    // asked exactly as before.
+    if (followsNewestModel(provider)) args.push("--refresh");
+    const child = spawn(openclawBin(), args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
@@ -1549,6 +1619,19 @@ export function refreshInBackground(
       `[catalog] refreshed ${provider}: ${models.length} models`
       + (surfaceIds ? ` (${surfaceIds.size} on the subscription surface)` : ""),
     );
+    // A provider whose default follows the newest model moves a chat that took
+    // the default onto a model the provider has just shipped — never one the
+    // owner picked (src/lib/provider-follow-newest.ts). Past the generation
+    // guard above, so a pre-change enumeration moves nothing; detached, so the
+    // publish never waits on a model switch; and loaded only for such a
+    // provider, because the switch pulls in the chat-model route.
+    if (followsNewestModel(provider)) {
+      void import("@/lib/provider-follow-newest")
+        .then(({ followNewestModelOnBox }) => followNewestModelOnBox(provider, payload.models))
+        .catch((err: unknown) => {
+          console.warn(`[catalog] ${provider}: follow-newest did not run:`, err instanceof Error ? err.message : err);
+        });
+    }
   };
 
   /**
@@ -1835,7 +1918,7 @@ export async function GET(req: NextRequest) {
         ? { warming: true }
         : {}),
     };
-    return NextResponse.json(withoutRetiredModels(payload), { headers: noStore() });
+    return NextResponse.json(await withoutUnavailableModels(withoutRetiredModels(payload)), { headers: noStore() });
   }
 
   // Nothing cached yet — the first picker open after a restart. Serve the
@@ -1845,5 +1928,5 @@ export async function GET(req: NextRequest) {
     ...buildFallbackPayload(provider),
     ...(enumerating ? { warming: true } : {}),
   };
-  return NextResponse.json(withoutRetiredModels(payload), { headers: noStore() });
+  return NextResponse.json(await withoutUnavailableModels(withoutRetiredModels(payload)), { headers: noStore() });
 }

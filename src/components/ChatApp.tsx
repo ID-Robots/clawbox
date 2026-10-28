@@ -17,6 +17,7 @@ import {
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
+import { describeModelFallback, ModelFallbackWatch, reportModelFallback, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -502,6 +503,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // as it was, on the next account — only when the failed run IS that turn,
   // and only for words, never for attachments.
   const turnsRef = useRef(new TurnLedger())
+  // Runs stuck on a model this account cannot run, reported to the box once
+  // each (lib/model-fallback-chat.ts) — and the "Stopped." a box-made stop owes.
+  const fallbackWatchRef = useRef(new ModelFallbackWatch())
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -1007,6 +1011,23 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       }))
     }
 
+    // A turn stuck on a model this account cannot run — a 429 stating a limit
+    // of zero, retried for a minute by the core, or a model the provider no
+    // longer offers: the box confirms it, moves the chat to the next newest
+    // model and sends the turn again; the chat says what happened, once.
+    const reportModelFallbackFor = (signal: ModelFallbackSignal) => {
+      const forKey = sessionKeyRef.current
+      fallbackWatchRef.current.begin(signal.runId)
+      void reportModelFallback({ ...signal, sessionKey: forKey || null, message: turnsRef.current.resendable(signal.runId) })
+        .then((answer) => {
+          const owesStop = fallbackWatchRef.current.settle(signal.runId, answer)
+          if (sessionKeyRef.current !== forKey) return
+          const line = describeModelFallback(answer, failureWordsRef.current)
+          if (line) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
+          else if (owesStop) setMessages(prev => [...prev, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
+        })
+    }
+
     const onMessage = (event: MessageEvent) => {
       let data: Record<string, unknown>
       try { data = JSON.parse(String(event.data)) } catch { return }
@@ -1051,6 +1072,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           if (payload.stream === 'tool') {
             applyToolEvent(payload.data as Record<string, unknown> | undefined)
           }
+          const stuck = fallbackWatchRef.current.fromAgentFrame(payload, runFailureRef.current.peek(payload.runId))
+          if (stuck) reportModelFallbackFor(stuck)
           return
         }
 
@@ -1227,7 +1250,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
             }
             // Say that the reply was stopped: a question with nothing under
             // it read as an answer that got lost (2026-10-13 smoke test).
-            if (state === 'aborted') setMessages(msgs => [...msgs, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
+            // Not for a run the BOX stopped to move it off a model this account
+            // cannot run: the fallback's own line says what happened instead.
+            if (state === 'aborted' && !fallbackWatchRef.current.holdStop(payload.runId)) setMessages(msgs => [...msgs, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
@@ -1252,6 +1277,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
                 // Said in the conversation it happened in, or not at all.
                 if (line && sessionKeyRef.current === forKey) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
               })
+              // A model the provider no longer offers to this account: the box
+              // moves the chat to the next newest one and sends the turn again.
+              const notOffered = fallbackWatchRef.current.fromChatError(settledError?.runId ?? payload.runId, failureContext, payload.errorMessage)
+              if (notOffered) reportModelFallbackFor(notOffered)
             }
           }
         }

@@ -15,6 +15,7 @@ import { anthropicAccountsEn } from "@/lib/edition-translations/en-anthropic-acc
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
 import { usersEn } from "@/lib/edition-translations/en-users";
 import { dbMaintenanceEn } from "@/lib/edition-translations/en-db-maintenance";
+import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -83,6 +84,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // why the assistant paused for it. An owner who cannot read "skipped — the
   // assistant was busy" cannot tell a skipped night from a broken one.
   { name: "Agent databases card", matches: (k) => k.startsWith("dbMaintenance.") },
+  // The chat's line when a model cannot run on the owner's account — a rate
+  // limit of zero, a model the provider dropped — and which model the chat was
+  // moved to. The one thing that explains why the reply came from another model.
+  { name: "Model availability lines", matches: (k) => k.startsWith("chat.modelUnavailable") },
 ];
 
 /**
@@ -165,6 +170,7 @@ describe("edition-translations (TASK-458)", () => {
       // Multi-user ClawBox OS (TASK-1256): Settings → Users, the login picker, the tray.
       ["usersEn", usersEn, (k) => k in usersEn && (k.startsWith("users.") || k === "settings.users" || k.startsWith("login.") || k.startsWith("tray."))],
       ["dbMaintenanceEn", dbMaintenanceEn, (k) => k.startsWith("dbMaintenance.")],
+      ["modelAvailabilityEn", modelAvailabilityEn, (k) => k.startsWith("chat.modelUnavailable")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

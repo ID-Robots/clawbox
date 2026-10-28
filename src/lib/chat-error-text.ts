@@ -26,6 +26,8 @@ import {
   type ClawaiAllowanceKind,
 } from "@/lib/clawai-allowance";
 import { PORTAL_CREDITS_URL, type ClawaiUsage } from "@/lib/clawai-usage";
+import { creditConsoleFor, statesZeroRateLimit } from "@/lib/zero-quota";
+import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 
 /**
  * The failure OpenClaw reports when the session file changes under a running
@@ -185,6 +187,11 @@ function providerLabel(provider: string | undefined): string {
   // answered Object's own function — printed into the sentence as its source.
   const known = Object.hasOwn(PROVIDER_LABELS, id) ? PROVIDER_LABELS[id] : undefined;
   return known ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/** The provider's name as the customer knows it — for the other chat lines that name one. */
+export function providerDisplayName(provider: string | undefined): string {
+  return providerLabel(provider);
 }
 
 /** The provider segment of a `provider/model` reference, when it has one. */
@@ -504,7 +511,7 @@ function sayWith(words: ChatFailureWords | undefined): Say {
   // provider above it, ignores the params) — the English floor covers both.
   return (key, params) => {
     const hit = words?.t(key, params);
-    let out = hit && hit !== key ? hit : ALLOWANCE_EN[key];
+    let out = hit && hit !== key ? hit : (ALLOWANCE_EN[key] ?? modelAvailabilityEn[key]);
     for (const [name, value] of Object.entries(params ?? {})) out = out.replaceAll(`{${name}}`, String(value));
     return out;
   };
@@ -569,6 +576,22 @@ function allowanceSentence(raw: string, words: ChatFailureWords | undefined): st
 }
 
 /**
+ * The model this chat is on is not available on the owner's account at all:
+ * its rate limit is zero. Names the model and the provider when the gateway
+ * said which, and the two remedies that work — another model, or credit where
+ * that provider takes it.
+ */
+function zeroQuotaSentence(context: ChatRunFailureContext | undefined, words: ChatFailureWords | undefined): string {
+  const providerId = context?.provider ?? providerFromRef(context?.model);
+  const provider = providerLabel(providerId);
+  return sayWith(words)("chat.modelUnavailableNoQuota", {
+    model: modelLabel(context?.model),
+    provider,
+    console: creditConsoleFor(providerId) ?? provider,
+  });
+}
+
+/**
  * Customer-facing text for a chat turn that ended in `state: "error"`.
  *
  * Always returns something. A silent failure — a turn that just stops with no
@@ -600,6 +623,12 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   // the provider's detail line when the gateway's own sentence is the generic one.
   const allowance = allowanceSentence(evidence, words);
   if (allowance) return allowance;
+  // A 429 that states the account's limit as ZERO, ahead of the rate limit it
+  // also is: "wait a minute and send it again" is the advice that cannot work
+  // here, however long the owner waits (src/lib/zero-quota.ts). Read off the
+  // same evidence — the provider's words reach this function when the core
+  // passes a short refusal through, and on the Hermes path.
+  if (statesZeroRateLimit(evidence)) return zeroQuotaSentence(context, words);
   // Before the sanitizer: the raw rate-limit wording would itself pass the leak
   // rules ("API rate limit reached…" carries no path or handle), so without
   // this the customer would get that bare operator line instead of the calm,

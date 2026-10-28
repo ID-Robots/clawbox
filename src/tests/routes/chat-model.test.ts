@@ -1111,7 +1111,7 @@ describe("/setup-api/chat/model", () => {
     const row = body.options.find((option: { provider: string | null }) => option.provider === "xai");
     expect(row).toMatchObject({
       label: "xAI Grok",
-      model: "xai/grok-4.6",
+      model: "xai/grok-4.7",
       available: true,
       isLocal: false,
       settingsSection: "ai",

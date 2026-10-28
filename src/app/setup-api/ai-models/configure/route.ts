@@ -140,7 +140,10 @@ import {
   EXPLICIT_MODEL_PICKS_KEY,
   decideClawboxAiModelId,
   explicitPicksFrom,
+  picksWithoutProvider,
 } from "@/lib/explicit-model-pick";
+import { followsNewestModel } from "@/lib/provider-newest-model";
+import { forgetUnavailableModels, readNewestModelId } from "@/lib/provider-model-availability";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -2853,6 +2856,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // The picks map minus the ClawBox AI entry, when this save links a DIFFERENT
     // ClawBox AI account. Written in the same batch as the new token below.
     let clawaiPicksToStore: Record<string, string> | null = null;
+    // A provider whose earlier pick this save drops: the owner saved the
+    // newest-model default (see `followsNewestModel` below).
+    let providerPickToForget: string | null = null;
 
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
@@ -2983,6 +2989,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // Never let model selection break sign-in.
         console.warn("[configure] codex entitlement probe failed:", err);
       }
+    } else if (!normalizedModel && followsNewestModel(ocProvider)) {
+      // No model named, on a provider whose default follows its newest model
+      // (src/lib/provider-newest-model.ts): the newest this box has enumerated
+      // and this account has not been refused on, rather than the cold-start
+      // constant `PROVIDERS` carries — that one stays as the answer when there
+      // is no enumeration to read yet.
+      const newest = await readNewestModelId(ocProvider).catch(() => null);
+      if (newest) config.defaultModel = `${ocProvider}/${newest}`;
     } else if (normalizedModel) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
@@ -3017,6 +3031,21 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // overwrite a choice — and the marker holds the LAST choice, whichever
         // provider it was about.
         explicitPickToRecord = config.defaultModel;
+        // Except the default itself, for a provider whose default follows its
+        // newest model. The wizard and Settings ALWAYS send a model — the
+        // picker's preselection, which is the catalogue's default — so a save
+        // that left it alone is indistinguishable from a choice on the wire.
+        // Recorded, it would pin the box to today's newest and the box would
+        // never follow the next one (src/lib/provider-follow-newest.ts). So the
+        // newest is read as "the default", and the provider's earlier pick is
+        // dropped in the same batch: the owner has just gone back to it.
+        if (followsNewestModel(targetProvider)) {
+          const newest = await readNewestModelId(targetProvider).catch(() => null);
+          if (newest && newest === requestedModel) {
+            explicitPickToRecord = null;
+            providerPickToForget = targetProvider;
+          }
+        }
       }
     }
 
@@ -3978,6 +4007,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         }
       }
     } else {
+      // The picks map without the provider whose newest-model default this save
+      // landed on, or null when it held no pick for it — nothing to write then.
+      const picksAfterDefaultSave = providerPickToForget
+        ? picksWithoutProvider(
+          clawaiPicksToStore ?? explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]),
+          providerPickToForget,
+        )
+        : null;
       await setMany({
         ai_model_configured: true,
         ai_model_provider: ocProvider,
@@ -4001,9 +4038,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
               [normalizeProviderId(ocProvider) ?? ocProvider]: explicitPickToRecord,
             },
           }
-          : clawaiPicksToStore
-            ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
-            : {}),
+          : picksAfterDefaultSave
+            ? { [EXPLICIT_MODEL_PICKS_KEY]: picksAfterDefaultSave }
+            : clawaiPicksToStore
+              ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
+              : {}),
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
@@ -4455,6 +4494,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     backoff it recorded describe a box that no longer exists. A client's
     //     `?refresh=1` cannot count it; only a write can.
     notifyProviderSetChanged(ocProvider);
+    //     And the models this account was refused on are asked again: a save of
+    //     the credential is what an owner does after adding credit, and a mark
+    //     would otherwise keep the model out of the picker for the rest of its
+    //     day (src/lib/provider-model-availability.ts). Fail-soft bookkeeping.
+    if (followsNewestModel(ocProvider)) await forgetUnavailableModels(ocProvider);
 
     // 8d. Did this save flip `models.mode`? Then every recorded model COUNT was
     //     taken under a rule that no longer holds — under `replace` the core

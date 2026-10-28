@@ -44,6 +44,7 @@ import {
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { readNewestModelRefs } from "@/lib/provider-model-availability";
 import { GatewayWsUnavailableError, gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import {
@@ -253,7 +254,15 @@ function canonicalChatModel(model: string): string {
     : model;
 }
 
-function defaultModelForProvider(provider: string | null): string | null {
+function defaultModelForProvider(
+  provider: string | null,
+  // `provider/<id>` for each provider whose default follows the newest model
+  // (src/lib/provider-newest-model.ts), read off the box's own enumeration once
+  // per state load. Ahead of the table, whose entry for such a provider is only
+  // the cold-start answer — and this row's model is what
+  // `POST /setup-api/providers/default` writes as the primary.
+  newestRefs?: ReadonlyMap<string, string>,
+): string | null {
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   // The ChatGPT subscription is written under `openai/` — see
@@ -262,7 +271,8 @@ function defaultModelForProvider(provider: string | null): string | null {
   if (isLegacyChatgptProvider(normalized)) {
     return chatgptModelRef(chatgptDefaultModelId());
   }
-  return DEFAULT_PROVIDER_MODELS[normalized]
+  return newestRefs?.get(normalized)
+    ?? DEFAULT_PROVIDER_MODELS[normalized]
     ?? DEFAULT_PROVIDER_MODELS[normalizeProvider(provider) ?? ""]
     ?? null;
 }
@@ -591,11 +601,12 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
  * on a slow gateway, cost the connect and method deadlines twice over.
  */
 async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean } = {}) {
-  const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels] = await Promise.all([
+  const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels, newestRefs] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
     read.gatewayLevels === false ? new Map<string, string[]>() : readGatewayThinkingLevels(),
+    readNewestModelRefs().catch(() => new Map<string, string>()),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
   // Subscription-only providers, computed ONCE: the row attribution below and
@@ -767,7 +778,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
     } else {
-      model = defaultModelForProvider(rawProvider);
+      model = defaultModelForProvider(rawProvider, newestRefs);
     }
 
     if (model) rememberPrimaryOption(model, rawProvider);
@@ -781,7 +792,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // row and writes it to `agents.defaults.model.primary`, so the mismatch is
   // not display-only.
   if (primaryProvider && primaryProvider !== "ollama" && primaryProvider !== "llamacpp") {
-    const model = defaultModelForProvider(primaryProvider);
+    const model = defaultModelForProvider(primaryProvider, newestRefs);
     if (model) rememberPrimaryOption(model, primaryProvider);
   }
 
