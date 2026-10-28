@@ -59,7 +59,7 @@ import VNCApp from "./VNCApp";
 import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
 import CodingTeamCard, { isTeamActive, type TeamView } from "./CodingTeamCard";
-import { mergeSlimRuns, mergeSlimTeams } from "@/lib/coding-agent-slim";
+import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
 import CodingRunNotesCard from "./CodingRunNotesCard";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
@@ -713,6 +713,16 @@ export default function CodingAgentApp() {
 
   /** Reads still on their way, by reader — what a tick of the live poll checks before starting another. */
   const readsOut = useRef<Record<Reader, number>>({ status: 0, runs: 0, github: 0, projects: 0, teams: 0 });
+  // What the window holds, for a tick to compare its slim answer against: a
+  // run or a team that settled since the last read has final text the slim
+  // record does not carry, and the tick asks for a whole read at once.
+  const runsRef = useRef<Run[]>([]);
+  const teamsRef = useRef<TeamView[]>([]);
+  useEffect(() => { runsRef.current = runs; }, [runs]);
+  useEffect(() => { teamsRef.current = teams; }, [teams]);
+  const settleReadDue = useRef(false);
+  /** Bumped by a tick that saw something settle; the effect below answers it with a whole read. */
+  const [settleReadAsked, setSettleReadAsked] = useState(0);
   /** When the GitHub read was last started, by any caller, on `monotonicNow()`'s clock. */
   const githubAskedAt = useRef(Number.NEGATIVE_INFINITY);
 
@@ -753,6 +763,7 @@ export default function CodingAgentApp() {
       if (!r.ok) return;
       const data = await r.json() as { runs?: Run[] };
       const next = Array.isArray(data.runs) ? data.runs : [];
+      if (tick && runsSettledSinceHeld(runsRef.current, next).length > 0) settleReadDue.current = true;
       setRuns((prev) => (tick ? mergeSlimRuns(prev, next) : next));
     }));
     const githubDue = !tick || monotonicNow() - githubAskedAt.current >= GITHUB_LIVE_POLL_MS;
@@ -782,7 +793,9 @@ export default function CodingAgentApp() {
       if (!r.ok) return;
       const data = await r.json().catch(() => null) as { teams?: TeamView[] } | null;
       const next = data?.teams;
-      if (Array.isArray(next)) setTeams((prev) => (tick ? mergeSlimTeams(prev, next) : next));
+      if (!Array.isArray(next)) return;
+      if (tick && teamsSettledSinceHeld(teamsRef.current, next).length > 0) settleReadDue.current = true;
+      setTeams((prev) => (tick ? mergeSlimTeams(prev, next) : next));
     }));
     try {
       // The status read is the one whose failure is the page's failure; the
@@ -794,9 +807,19 @@ export default function CodingAgentApp() {
     } finally {
       setLoading(false);
     }
+    // A tick that saw a run or a team settle reads everything whole at once
+    // (not a tick, so nothing slim): the record's final text, the folder's
+    // new commit, the follow-up run. The poll's own settle read (below) only
+    // comes when the LAST live thing settles. Asked through state rather
+    // than a call: this function cannot name itself inside its own body.
+    if (tick && settleReadDue.current) {
+      settleReadDue.current = false;
+      setSettleReadAsked((n) => n + 1);
+    }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (settleReadAsked > 0) void load(); }, [settleReadAsked, load]);
 
   /**
    * The Open button of a project row and page: the desktop window when the

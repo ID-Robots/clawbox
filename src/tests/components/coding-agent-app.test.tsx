@@ -2951,6 +2951,40 @@ describe("the live poll", () => {
     expect(screen.getByText(/Wrote the toggle into index\.html/)).toBeInTheDocument();
   });
 
+  it("reads everything whole at once when a tick brings a held live run back settled", async () => {
+    // Two runs live; one settles while the other keeps the poll ticking. Its
+    // final progress lines are not in the slim tick, so the app reads whole
+    // right away rather than at the poll's end (which the other run holds off).
+    const ending = { ...RUN, id: "run-ending001", status: "running", completedAt: null, summary: null, progress: ["Writing"] };
+    stubFetch({ enabled: true, readiness: READY }, [ending, LIVE], { projects: [PROJECT] });
+    const whole = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    let settled = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/runs?") && url.includes("slim=1")) {
+        return json({ runs: [settled ? { ...ending, status: "completed", completedAt: Date.now(), summary: "done", progress: [], slim: true } : ending, LIVE] });
+      }
+      if (url.startsWith("/setup-api/coding-agent/runs?") && settled) {
+        return json({ runs: [{ ...ending, status: "completed", completedAt: Date.now(), summary: "done", progress: ["Writing", "Wrote done.txt"] }, LIVE] });
+      }
+      return whole(input, init);
+    }));
+    render(<CodingAgentApp />);
+    await advance(50);
+    const wholeReads = () => vi.mocked(globalThis.fetch).mock.calls.map(([i]) => i.toString()).filter((u) => u.startsWith("/setup-api/coding-agent/runs?limit=30") && !u.includes("slim=1")).length;
+    expect(wholeReads()).toBe(1);
+    // A tick with nothing settling reads slim only.
+    await advance(5_100);
+    expect(wholeReads()).toBe(1);
+    // The run settles; the next tick sees it and a whole read follows at once.
+    settled = true;
+    await advance(5_100);
+    expect(wholeReads()).toBe(2);
+    // And it is not asked for again by the tick after that.
+    await advance(5_100);
+    expect(wholeReads()).toBe(2);
+  });
+
   it("keeps GitHub's minute on the box's own clock when its wall clock steps back", async () => {
     // The box has no RTC and its clock steps at NTP sync. Timed on the wall
     // clock, a step back an hour stopped the live poll re-reading GitHub for

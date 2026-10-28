@@ -403,7 +403,6 @@ import { CONTEXT_CAP_WINDOW, type CodingDiet, DEFAULT_DIET, LEGACY_DIET, looksVi
 import {
   applyRoleModelsPatch,
   CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
-  isRoleModelId,
   MODEL_ROLES,
   modelRoleOf,
   relativeModelCost,
@@ -4098,20 +4097,23 @@ export async function setConnectedProviders(raw: unknown): Promise<{ providers: 
   const current = codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
   if (!providers.includes(current)) await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, providers[0]);
   const roles = await getRoleModels();
-  const resetRoles: ModelRole[] = [];
-  const patch: Record<string, { provider: string; model?: string }> = {};
-  for (const role of MODEL_ROLES) {
+  const resetRoles = MODEL_ROLES.filter((role) => {
     const pinned = roles[role]?.provider;
-    if (!pinned || providers.includes(pinned)) continue;
-    resetRoles.push(role);
-    const model = roles[role]?.model;
-    patch[role] = model !== undefined && !isRoleModelId(pinned, model) ? { provider: ROLE_AUTO } : { provider: ROLE_AUTO, model: ROLE_AUTO };
-  }
+    return pinned !== undefined && !providers.includes(pinned);
+  });
   if (resetRoles.length > 0) {
-    const next = applyRoleModelsPatch(roles, patch);
+    // `applyRoleModelsPatch` owns the rule: a provider put back to Default
+    // takes with it a model only that provider offered, and leaves a tier.
+    const next = applyRoleModelsPatch(roles, Object.fromEntries(resetRoles.map((role) => [role, { provider: ROLE_AUTO }])));
     if (next.ok) await configSet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY, next.value);
   }
   return { providers, resetRoles };
+}
+
+/** The connected providers as stored (the default provider alone on a record from before the list). */
+export async function getConnectedProviders(): Promise<CodingProvider[]> {
+  const config = await configGetAll();
+  return connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]));
 }
 
 /**

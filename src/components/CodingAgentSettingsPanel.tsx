@@ -866,6 +866,23 @@ export default function CodingAgentSettingsPanel(_props: {
                         {t("codingAgent.providers.connected")}
                       </span>
                     )}
+                    {/* Which connected account a solo run, and a role left on
+                        Default, runs on: the stored default provider, chosen
+                        here now that the "Runs on" choice is gone. */}
+                    {connected && (
+                      <button
+                        type="button"
+                        onClick={() => void saveSetting({ provider: id }, "providers", t("codingAgent.providerFailed"))}
+                        disabled={saving || status?.provider === id}
+                        aria-pressed={status?.provider === id}
+                        data-testid={`coding-agent-provider-default-${id}`}
+                        className={status?.provider === id
+                          ? "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40"
+                          : "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20 hover:text-[var(--text-primary)]"}
+                      >
+                        {status?.provider === id ? t("codingAgent.providers.default") : t("codingAgent.providers.makeDefault")}
+                      </button>
+                    )}
                     <span className="ml-auto" />
                     {connected ? (
                       <button

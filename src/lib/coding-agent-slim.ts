@@ -19,7 +19,15 @@
  * text was read in full on mount (or by the read after it settled, which is
  * never a tick), so a slim tick cannot take it away, while what a settled
  * record can still change — its pull request's checks, a leftover listener,
- * its artifacts — is taken from the tick.
+ * its artifacts — is taken from the tick. The merge takes the held text ONLY
+ * when the held record had already settled: a record the app held LIVE that
+ * a tick brings back settled and slim has final text the app never read (the
+ * last live copy's progress lines are not the final ones), so the tick's slim
+ * record is taken as it is and `runsSettledSinceHeld` / `teamsSettledSinceHeld`
+ * name it, which is the app's cue to read whole again at once — a team at
+ * work, another live run or a pull request waiting on its checks can keep the
+ * poll ticking past that moment, so the settle read cannot be left to the
+ * poll's end.
  *
  * Emptied, not deleted: every field keeps its type, so a slim record the app
  * does not yet hold (a team that settled between two ticks) still draws — a
@@ -29,6 +37,7 @@
  * Pure: no fs, no React, shared by the routes and the component.
  */
 import { isSettled, type CodingRunStatus } from "./coding-agent-status";
+import { isSettledTeamStatus, type TeamStatus } from "./coding-team-status";
 
 /** The run fields a slim read empties on a settled run. */
 export interface RunSlimFields {
@@ -43,11 +52,6 @@ export interface RunSlimFields {
 
 export type SlimmableRun = RunSlimFields & { id: string; status: CodingRunStatus; slim?: boolean };
 
-/** The settled team statuses, as coding-team-board.ts `isSettledTeamStatus` has them (that module reads the disk, so this one does not import it). */
-export function isSettledTeamStatus(status: string): boolean {
-  return status === "done" || status === "failed" || status === "stopped";
-}
-
 export interface TeamTaskSlimFields {
   task_id: string;
   task_description: string;
@@ -57,7 +61,7 @@ export interface TeamTaskSlimFields {
 
 export type SlimmableTeam = {
   id: string;
-  status: string;
+  status: TeamStatus;
   log: unknown[];
   tasks: TeamTaskSlimFields[];
   slim?: boolean;
@@ -97,16 +101,32 @@ export function slimTeam<T extends SlimmableTeam>(team: T): T {
   };
 }
 
+/** The ids a tick brings back settled that the app held unsettled (live, paused, drafted, queued): their final text is still to be read. */
+function newlySettled<T extends { id: string }>(held: readonly T[], incoming: readonly T[], settled: (x: T) => boolean): string[] {
+  const byId = new Map(held.map((x) => [x.id, x]));
+  return incoming.filter((x) => settled(x) && byId.has(x.id) && !settled(byId.get(x.id)!)).map((x) => x.id);
+}
+
+export function runsSettledSinceHeld<T extends { id: string; status: CodingRunStatus }>(held: readonly T[], incoming: readonly T[]): string[] {
+  return newlySettled(held, incoming, (run) => isSettled(run.status));
+}
+
+export function teamsSettledSinceHeld<T extends { id: string; status: TeamStatus }>(held: readonly T[], incoming: readonly T[]): string[] {
+  return newlySettled(held, incoming, (team) => isSettledTeamStatus(team.status));
+}
+
 /**
- * The run list after a tick: a slim record over a held full one keeps the
- * held text; everything else comes from the tick. The list's order and
- * membership are the tick's — a run that left the list leaves the app too.
+ * The run list after a tick: a slim record over a held SETTLED full one keeps
+ * the held text; everything else comes from the tick — a record the app held
+ * live included, whose final text the next whole read brings. The list's
+ * order and membership are the tick's: a run that left the list leaves the
+ * app too.
  */
 export function mergeSlimRuns<T extends SlimmableRun>(held: readonly T[], incoming: readonly T[]): T[] {
   const byId = new Map(held.map((run) => [run.id, run]));
   return incoming.map((run) => {
     const prev = byId.get(run.id);
-    if (!run.slim || !prev || prev.slim) return run;
+    if (!run.slim || !prev || prev.slim || !isSettled(prev.status)) return run;
     const merged: T = { ...run, progress: prev.progress, slim: false };
     if ("progressAt" in prev) merged.progressAt = prev.progressAt;
     if ("resultText" in prev) merged.resultText = prev.resultText;
@@ -118,12 +138,12 @@ export function mergeSlimRuns<T extends SlimmableRun>(held: readonly T[], incomi
   });
 }
 
-/** The team list after a tick, on the same rule: a slim board over a held full one keeps the held log and task text. */
+/** The team list after a tick, on the same rule: a slim board over a held SETTLED full one keeps the held log and task text. */
 export function mergeSlimTeams<T extends SlimmableTeam>(held: readonly T[], incoming: readonly T[]): T[] {
   const byId = new Map(held.map((team) => [team.id, team]));
   return incoming.map((team) => {
     const prev = byId.get(team.id);
-    if (!team.slim || !prev || prev.slim) return team;
+    if (!team.slim || !prev || prev.slim || !isSettledTeamStatus(prev.status)) return team;
     const prevTasks = new Map(prev.tasks.map((task) => [task.task_id, task]));
     return {
       ...team,

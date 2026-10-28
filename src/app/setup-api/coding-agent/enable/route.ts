@@ -16,6 +16,7 @@ import {
   MIN_MAX_PARALLEL_RUNS,
   setCodingAgentEnabled,
   setCodingGitAuthor,
+  getConnectedProviders,
   setCodingProvider,
   setConnectedProviders,
   checkRoleModelsPatch,
@@ -93,7 +94,10 @@ function forbidden() {
  * owner CONNECTED to the coding agent (the whole list each time; never empty:
  * the last one cannot be disconnected). The default provider follows the list
  * when it was dropped from it, and a team role pinned to a provider that left
- * the list goes back to its default — `setConnectedProviders`.
+ * the list goes back to its default — `setConnectedProviders`. In a body that
+ * carries both, `providers` is applied FIRST and a `provider` outside the
+ * resulting list is refused (400) before anything is written, never silently
+ * overwritten.
  * POST { roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?,
  * effort? } } } → what a coding team's roles run on (src/lib/coding-role-models.ts).
  * `provider` is "clawbox-ai" or "anthropic"; `model` is "standard", "economy"
@@ -354,6 +358,15 @@ export async function POST(request: Request) {
     // The per-role choices, checked whole before any setter runs, like the
     // rest — and inside the try because the check reads what is stored: a
     // model named alone runs on the role's stored provider.
+    if (hasProvider && hasProviders) {
+      const list = fields.providers as unknown[];
+      if (!list.includes(fields.provider)) {
+        return NextResponse.json({ error: `The default provider must be one of the connected ones: ${list.map(String).join(", ")}.`, kind: "invalid" }, { status: 400 });
+      }
+    }
+    if (hasProvider && !hasProviders && !(await getConnectedProviders()).includes(fields.provider as never)) {
+      return NextResponse.json({ error: "The default provider must be a connected one. Connect it first.", kind: "invalid" }, { status: 400 });
+    }
     const roleModelsRefusal = hasRoleModels ? await checkRoleModelsPatch(fields.roleModels) : null;
     if (roleModelsRefusal) {
       return NextResponse.json({ error: roleModelsRefusal, kind: "invalid" }, { status: 400 });
@@ -411,13 +424,14 @@ export async function POST(request: Request) {
       const saved = await setRoleModels(fields.roleModels);
       console.error(`[coding-agent] team role models set by the owner: ${JSON.stringify(saved)}`);
     }
-    if (hasProvider) {
-      const saved = await setCodingProvider(fields.provider as string);
-      console.error(`[coding-agent] runs will be paid for by ${saved}, by the owner's choice`);
-    }
+    // The list first, the default second: the default must be on the list.
     if (hasProviders) {
       const saved = await setConnectedProviders(fields.providers);
       console.error(`[coding-agent] connected providers set to ${saved.providers.join(", ")} by the owner${saved.resetRoles.length ? ` (back on their default: ${saved.resetRoles.join(", ")})` : ""}`);
+    }
+    if (hasProvider) {
+      const saved = await setCodingProvider(fields.provider as string);
+      console.error(`[coding-agent] runs will be paid for by ${saved}, by the owner's choice`);
     }
     if (hasTurns) {
       const saved = await setMaxTurns(fields.maxTurns);

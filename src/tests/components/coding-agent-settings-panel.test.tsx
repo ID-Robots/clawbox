@@ -258,6 +258,7 @@ function stubFetch(
       }
       // The route's own rules for the connected set: never empty, the default
       // follows it, and a role pinned to an account that left goes back to Default.
+      if (typeof body.provider === "string") provider = body.provider;
       if (Array.isArray(body.providers)) {
         const next = body.providers as string[];
         if (next.length === 0) return json({ error: "At least one provider must stay connected: runs need an account to start on.", kind: "invalid" }, 400);
@@ -1465,6 +1466,27 @@ describe("the connected providers", () => {
     } finally {
       window.removeEventListener("clawbox:open-app", onOpen);
     }
+  });
+
+  it("marks the default account on its row and makes another connected one the default on a click", async () => {
+    stubFetch({ enabled: true, readiness: { ...READY, providers: [{ id: "clawbox-ai", ready: true, problems: [] }, { id: "anthropic", ready: true, problems: [] }] } }, {
+      providers: ["clawbox-ai", "anthropic"],
+      provider: "clawbox-ai",
+      connectedProviders: ["clawbox-ai", "anthropic"],
+    });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-providers");
+    const current = screen.getByTestId("coding-agent-provider-default-clawbox-ai");
+    expect(current).toHaveAttribute("aria-pressed", "true");
+    expect(current).toBeDisabled();
+    expect(current).toHaveTextContent(t("codingAgent.providers.default"));
+    const other = screen.getByTestId("coding-agent-provider-default-anthropic");
+    expect(other).toHaveAttribute("aria-pressed", "false");
+    expect(other).toHaveTextContent(t("codingAgent.providers.makeDefault"));
+    fireEvent.click(other);
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { provider: "anthropic" } }));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-provider-default-anthropic")).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.getByTestId("coding-agent-provider-default-clawbox-ai")).toHaveAttribute("aria-pressed", "false");
   });
 
   it("greys Connect for an account that is not set up, and says why in the readiness check's words", async () => {

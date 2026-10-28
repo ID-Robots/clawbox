@@ -4,7 +4,8 @@
  * record the app already holds; a live one is never touched.
  */
 import { describe, expect, it } from "vitest";
-import { isSettledTeamStatus, mergeSlimRuns, mergeSlimTeams, SLIM_TASK_DESCRIPTION_CHARS, slimRun, slimTeam } from "@/lib/coding-agent-slim";
+import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, SLIM_TASK_DESCRIPTION_CHARS, slimRun, slimTeam, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
+import { isSettledTeamStatus } from "@/lib/coding-team-status";
 
 const SETTLED = {
   id: "run-k3x9q2ab",
@@ -24,7 +25,7 @@ const LIVE = { ...SETTLED, id: "run-live00001", status: "running" as const };
 
 const TEAM = {
   id: "team-abcd1234",
-  status: "done",
+  status: "done" as const,
   goal: "Ship it",
   log: [{ type: "note", message: "planned" }],
   tasks: [
@@ -69,12 +70,12 @@ describe("slimTeam", () => {
   });
 
   it("sends a team at work or queued whole", () => {
-    for (const status of ["queued", "planning", "working", "reviewing"]) {
+    for (const status of ["queued", "planning", "working", "reviewing"] as const) {
       const team = { ...TEAM, status };
       expect(slimTeam(team)).toBe(team);
       expect(isSettledTeamStatus(status)).toBe(false);
     }
-    for (const status of ["done", "failed", "stopped"]) expect(isSettledTeamStatus(status)).toBe(true);
+    for (const status of ["done", "failed", "stopped"] as const) expect(isSettledTeamStatus(status)).toBe(true);
   });
 });
 
@@ -96,6 +97,26 @@ describe("mergeSlimRuns", () => {
     expect(mergeSlimRuns([SETTLED], [LIVE])).toEqual([LIVE]);
   });
 
+  it("never lays a slim record over a held LIVE one, and names the run that settled since", () => {
+    // The last live copy's progress lines are not the final ones: a run the
+    // app held live that a tick brings back settled and slim must come
+    // through as the slim record (empty, slim: true), for the whole read
+    // the app then asks for — not as the live copy frozen under slim: false.
+    const liveHeld = { ...SETTLED, status: "running" as const, progress: ["Read index.html"] };
+    const settledSlim = slimRun(SETTLED);
+    const [out] = mergeSlimRuns([liveHeld], [settledSlim]);
+    expect(out).toBe(settledSlim);
+    expect(out.slim).toBe(true);
+    expect(runsSettledSinceHeld([liveHeld], [settledSlim])).toEqual([SETTLED.id]);
+    // Held settled already, or new to the app: nothing to read again.
+    expect(runsSettledSinceHeld([SETTLED], [settledSlim])).toEqual([]);
+    expect(runsSettledSinceHeld([], [settledSlim])).toEqual([]);
+    // A paused run is held too: not settled, so the same rule.
+    const pausedHeld = { ...liveHeld, status: "paused" as const };
+    expect(mergeSlimRuns([pausedHeld], [settledSlim])[0]).toBe(settledSlim);
+    expect(runsSettledSinceHeld([pausedHeld], [settledSlim])).toEqual([SETTLED.id]);
+  });
+
   it("keeps the tick's order and membership", () => {
     const other = { ...SETTLED, id: "run-other0001" };
     const out = mergeSlimRuns([SETTLED, other], [slimRun(other)]);
@@ -109,6 +130,17 @@ describe("mergeSlimTeams", () => {
     const tick = { ...slimTeam(TEAM), status: "done", goal: "Ship it" };
     const [merged] = mergeSlimTeams([TEAM], [tick]);
     expect(merged).toEqual({ ...TEAM, slim: false });
+  });
+
+  it("never lays a slim board over a held board at work, and names the team that settled since", () => {
+    const working = { ...TEAM, status: "working" as const, log: [{ type: "note", message: "half way" }] };
+    const doneSlim = slimTeam(TEAM);
+    const [out] = mergeSlimTeams([working], [doneSlim]);
+    expect(out).toBe(doneSlim);
+    expect(out.log).toEqual([]);
+    expect(teamsSettledSinceHeld([working], [doneSlim])).toEqual([TEAM.id]);
+    expect(teamsSettledSinceHeld([TEAM], [doneSlim])).toEqual([]);
+    expect(teamsSettledSinceHeld([{ ...TEAM, status: "queued" as const }], [{ ...TEAM, status: "working" as const }])).toEqual([]);
   });
 
   it("takes a task the held board did not have from the tick, and a full board as it is", () => {

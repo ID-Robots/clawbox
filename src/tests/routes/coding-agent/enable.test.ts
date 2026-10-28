@@ -632,6 +632,25 @@ describe("a team's model and effort per role", () => {
     expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { effort: "high" }, bulk: { model: "economy" }, worker: { provider: "clawbox-ai" } });
   });
 
+  it("applies the list before the default, and refuses a default outside the resulting list before any write", async () => {
+    const both = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai", "anthropic"], provider: "anthropic" } }));
+    expect(both.status).toBe(200);
+    const order = vi.mocked(configSet).mock.calls.map(([key]) => key);
+    expect(order.indexOf("coding_agent_providers")).toBeLessThan(order.lastIndexOf("coding_agent_provider"));
+    expect(configSet).toHaveBeenCalledWith("coding_agent_provider", "anthropic");
+    vi.mocked(configSet).mockClear();
+
+    const outside = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai"], provider: "anthropic" } }));
+    expect(outside.status).toBe(400);
+    expect((await outside.json()).error).toMatch(/connected/);
+    expect(configSet).not.toHaveBeenCalled();
+
+    // A default alone must be connected too: the stored list (the default alone, on a record from before the list) does not carry it.
+    const alone = await POST(request({ cookie: ownerCookie(), body: { provider: "anthropic" } }));
+    expect(alone.status).toBe(400);
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
   it("refuses an empty connected list and an unknown provider, before anything is written", async () => {
     const empty = await POST(request({ cookie: ownerCookie(), body: { providers: [] } }));
     expect(empty.status).toBe(400);
