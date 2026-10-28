@@ -17,6 +17,7 @@ import {
   setCodingAgentEnabled,
   setCodingGitAuthor,
   setCodingProvider,
+  setConnectedProviders,
   checkRoleModelsPatch,
   setDefaultDirectory,
   setEffort,
@@ -88,6 +89,11 @@ function forbidden() {
  * POST { teamDynamic: boolean } → may a coding team's lead add or retire tasks
  * while the team runs (one short read-only run after each worker settles).
  * OFF when absent; a team reads it when it starts.
+ * POST { providers: ["clawbox-ai" | "anthropic", …] } → the providers the
+ * owner CONNECTED to the coding agent (the whole list each time; never empty:
+ * the last one cannot be disconnected). The default provider follows the list
+ * when it was dropped from it, and a team role pinned to a provider that left
+ * the list goes back to its default — `setConnectedProviders`.
  * POST { roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?,
  * effort? } } } → what a coding team's roles run on (src/lib/coding-role-models.ts).
  * `provider` is "clawbox-ai" or "anthropic"; `model` is "standard", "economy"
@@ -212,6 +218,7 @@ export async function POST(request: Request) {
     setupComplete?: unknown;
     clearHarnessFault?: unknown;
     provider?: unknown;
+    providers?: unknown;
     gitAuthorName?: unknown;
     gitAuthorEmail?: unknown;
     historyRetention?: unknown;
@@ -236,6 +243,7 @@ export async function POST(request: Request) {
   const clearsFault = fields.clearHarnessFault === true;
   const hasEffort = typeof fields.effort === "string";
   const hasProvider = typeof fields.provider === "string";
+  const hasProviders = Array.isArray(fields.providers);
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
   const hasTokens = "tokenLimit" in fields
@@ -262,7 +270,7 @@ export async function POST(request: Request) {
   const hasRoleModels = "roleModels" in fields;
   // The token diet: presence decides, and a wrong shape is refused below, whole.
   const hasDiet = "diet" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !hasDiet && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !hasDiet && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -372,7 +380,7 @@ export async function POST(request: Request) {
     // tools plus the DEFAULT provider's credential, so switching to an account
     // nobody has connected takes the family away exactly as switching the
     // agent off does.
-    const before = hasEnabled || clearsFault || hasProvider
+    const before = hasEnabled || clearsFault || hasProvider || hasProviders
       ? await getCodingAgentStatus()
       : null;
     if (hasDirectory) {
@@ -406,6 +414,10 @@ export async function POST(request: Request) {
     if (hasProvider) {
       const saved = await setCodingProvider(fields.provider as string);
       console.error(`[coding-agent] runs will be paid for by ${saved}, by the owner's choice`);
+    }
+    if (hasProviders) {
+      const saved = await setConnectedProviders(fields.providers);
+      console.error(`[coding-agent] connected providers set to ${saved.providers.join(", ")} by the owner${saved.resetRoles.length ? ` (back on their default: ${saved.resetRoles.join(", ")})` : ""}`);
     }
     if (hasTurns) {
       const saved = await setMaxTurns(fields.maxTurns);

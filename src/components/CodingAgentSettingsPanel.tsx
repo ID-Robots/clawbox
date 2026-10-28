@@ -2,15 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { notifyCodingAgentChanged } from "@/lib/ui-events";
-import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, ECONOMY_MODELS } from "@/lib/coding-provider";
+import { dispatchOpenSettingsSection, notifyCodingAgentChanged } from "@/lib/ui-events";
+import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 import {
   MODEL_ROLES,
   ROLE_AUTO,
   ROLE_AUTO_FOLLOWS,
   ROLE_DEFAULTS,
   ROLE_MODEL_TIERS,
-  relativeModelCost,
   roleModelOptions,
   type ModelRole,
 } from "@/lib/coding-role-models";
@@ -173,6 +172,8 @@ export interface AgentStatus {
    *  picker is simply not drawn there. */
   provider?: CodingProviderId;
   providers?: CodingProviderId[];
+  /** The providers the owner connected (a subset of `providers`, never empty). Optional: a server from before the list answers without it, and the default provider reads as the one connected. */
+  connectedProviders?: CodingProviderId[];
   subagents: boolean;
   maxTurns: number;
   minMaxTurns: number;
@@ -249,23 +250,10 @@ export interface RoleModelMapEntry {
  * one decision on screen, as they are one pair in the runner: "auto", a tier
  * on the team's own account ("standard", "economy"), or "provider/model".
  */
-const ROLE_MODEL_SEP = "/";
-
-function roleModelValue(entry: RoleModelsViewEntry): string {
-  const provider = entry.provider ?? ROLE_AUTO;
-  return provider === ROLE_AUTO ? entry.model : `${provider}${ROLE_MODEL_SEP}${entry.model}`;
-}
-
-/**
- * What a select value saves: BOTH halves, always — so a tier picked after a
- * pinned model puts the role back on the team's own account, and "auto" is
- * every model half back to the default. The route checks the pair whole.
- */
-function roleModelPatch(value: string): { provider: string; model: string } {
-  const at = value.indexOf(ROLE_MODEL_SEP);
-  if (at < 0) return { provider: ROLE_AUTO, model: value };
-  return { provider: value.slice(0, at), model: value.slice(at + 1) };
-}
+/** A provider Settings → Providers can set up that NO coding runner in this tree can run on yet: listed so the owner sees it, greyed. */
+const PROVIDERS_WITHOUT_RUNNER: readonly { id: string; nameKey: string }[] = [
+  { id: "openai", nameKey: "codingAgent.providerName.openai" },
+];
 
 /** What a role's row says the role IS, where its name alone does not: the planner is the lead too, and bulk work needs its examples. */
 const ROLE_HINT_KEY: Partial<Record<ModelRole, string>> = {
@@ -375,6 +363,8 @@ export default function CodingAgentSettingsPanel(_props: {
   /** Setting writes queued or in flight. Every setting control is disabled
    *  while this is above zero, so no second write can be started by hand. */
   const [pendingWrites, setPendingWrites] = useState(0);
+  /** The roles a disconnect put back on their default, named under the providers until the next change. */
+  const [rolesReset, setRolesReset] = useState<{ roles: ModelRole[]; provider: CodingProviderId } | null>(null);
   const [error, setError] = useState<{ slot: ErrorSlot; message: string } | null>(null);
   // Sign-out is two taps, like clearing history. The offer is taken back on
   // its own after CONFIRM_MS: an armed red button found minutes later is a
@@ -749,8 +739,21 @@ export default function CodingAgentSettingsPanel(_props: {
   // `readiness.problems` beside the default account's, and in no account's
   // own list — so they are what the top list has that none of those has.
   const roleProviders: CodingProviderId[] = status?.providers?.length ? [...status.providers] : [...CODING_PROVIDERS];
+  // The accounts a role may be pinned to: the ones the owner connected. A
+  // server from before the list answers without it — its default provider is
+  // then the one connected, which is exactly what it ran on.
+  const connectedProviders: CodingProviderId[] = status?.connectedProviders?.length
+    ? status.connectedProviders.filter((id) => roleProviders.includes(id))
+    : status?.provider ? [status.provider] : roleProviders;
   const providerVerdicts = readiness?.providers ?? [];
-  const unreadyProviders = providerVerdicts.filter((v) => !v.ready && roleProviders.includes(v.id));
+  const unreadyProviders = providerVerdicts.filter((v) => !v.ready && connectedProviders.includes(v.id));
+  /** Disconnect an account, and say which roles the box put back on their default because they were pinned to it. */
+  const disconnectProvider = async (id: CodingProviderId) => {
+    const pinned = MODEL_ROLES.filter((role) => status?.roleModels?.[role]?.provider === id);
+    const after = await saveSetting({ providers: connectedProviders.filter((p) => p !== id) }, "providers", t("codingAgent.providerFailed"));
+    const reset = after ? pinned.filter((role) => after.roleModels?.[role]?.provider === ROLE_AUTO) : [];
+    setRolesReset(reset.length > 0 ? { roles: reset, provider: id } : null);
+  };
   const sharedProblems = (readiness?.problems ?? []).filter((p) => !providerVerdicts.some((v) => v.problems.includes(p)));
   const providerName = (id: CodingProviderId) => t(CODING_PROVIDER_NAME_KEY[id]);
   /** The refusal shown in one slot, if that is where it belongs. */
@@ -838,44 +841,91 @@ export default function CodingAgentSettingsPanel(_props: {
             allowed on purpose — the owner may pick it and then paste the key
             below — so this says what is missing instead of refusing, and the
             run route is what actually holds the line. */}
-        {(status?.providers?.length ?? 0) > 1 && (
-          <div className="mt-4">
-            {/* A span with an id, not a <label>: a label names ONE control
-                and this names a group of buttons, so a screen reader was told
-                nothing. role="group" + aria-labelledby is the pairing that
-                actually announces "Runs on" before the options. */}
-            <span id="coding-agent-provider-label" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.providerLabel")}
-            </span>
-            <div
-              className={`${SEGMENTED_TRACK} mt-1.5`}
-              data-testid="coding-agent-provider"
-              role="group"
-              aria-labelledby="coding-agent-provider-label"
-            >
+        {(status?.providers?.length ?? 0) > 0 && (
+          <div className="mt-4" data-testid="coding-agent-providers">
+            <div className="flex items-center gap-1.5">
+              <span id="coding-agent-provider-label" className="text-xs font-medium text-[var(--text-secondary)]">
+                {t("codingAgent.providerLabel")}
+              </span>
+              <HelpTip text={t("codingAgent.providers.hint")} label={t("codingAgent.providerLabel")} testId="coding-agent-providers-help" />
+            </div>
+            <ul className="mt-1.5 space-y-1.5" role="group" aria-labelledby="coding-agent-provider-label" data-testid="coding-agent-provider">
               {(status?.providers ?? []).map((id) => {
-                const active = status?.provider === id;
+                const connected = connectedProviders.includes(id);
+                const verdict = providerVerdicts.find((v) => v.id === id);
+                // Set up = its own credential is there. The box's shared
+                // problems (the harness, the wrapper) stop every account alike
+                // and are said at the top; they do not grey one account.
+                const setUp = !verdict || verdict.problems.length === 0;
+                const last = connected && connectedProviders.length === 1;
                 return (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => void saveSetting({ provider: id }, "provider", t("codingAgent.providerFailed"))}
-                    disabled={saving}
-                    aria-pressed={active}
-                    data-testid={`coding-agent-provider-${id}`}
-                    className={active ? SEGMENT_ON : SEGMENT_OFF}
-                  >
-                    {t(CODING_PROVIDER_NAME_KEY[id])}
-                  </button>
+                  <li key={id} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-provider-${id}`} data-connected={connected}>
+                    <span className="text-xs text-[var(--text-primary)] min-w-[7rem]">{t(CODING_PROVIDER_NAME_KEY[id])}</span>
+                    {connected && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-emerald-300 border-emerald-400/40" data-testid={`coding-agent-provider-${id}-connected`}>
+                        {t("codingAgent.providers.connected")}
+                      </span>
+                    )}
+                    <span className="ml-auto" />
+                    {connected ? (
+                      <button
+                        type="button"
+                        onClick={() => void disconnectProvider(id)}
+                        disabled={saving || last}
+                        title={last ? t("codingAgent.providers.lastOne") : undefined}
+                        data-testid={`coding-agent-provider-disconnect-${id}`}
+                        className={BTN_SECONDARY}
+                      >
+                        {t("codingAgent.providers.disconnect")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void saveSetting({ providers: [...connectedProviders, id] }, "providers", t("codingAgent.providerFailed"))}
+                        disabled={saving || !setUp}
+                        data-testid={`coding-agent-provider-connect-${id}`}
+                        className={BTN_SECONDARY}
+                      >
+                        {t("codingAgent.providers.connect")}
+                      </button>
+                    )}
+                    {!setUp && verdict && (
+                      <p className="w-full text-[11px] text-amber-400 leading-relaxed" data-testid={`coding-agent-provider-${id}-not-set-up`}>
+                        {t("codingAgent.providers.notSetUp", { provider: t(CODING_PROVIDER_NAME_KEY[id]), reason: verdict.problems.join(" ") })}
+                      </p>
+                    )}
+                  </li>
                 );
               })}
-            </div>
-            {/* An EXPLICIT false only: a server that predates the field sends
-                nothing, and a box whose Anthropic access is perfectly fine
-                must not be told it is missing by a `!undefined`. */}
-            {status?.provider === "anthropic" && status?.readiness?.anthropicConnected === false && (
-              <p className="mt-1.5 text-[11px] text-amber-400" data-testid="coding-agent-provider-unconnected">
-                {t("codingAgent.providerNotConnected")}
+              {/* Set up in Settings → Providers, perhaps, but nothing here can
+                  run a coding run on it: the runner is Claude Code, which
+                  speaks the Anthropic API only. Listed greyed, so the owner
+                  is not left wondering where ChatGPT went. */}
+              {PROVIDERS_WITHOUT_RUNNER.map(({ id, nameKey }) => (
+                <li key={id} className="flex flex-wrap items-center gap-x-2 gap-y-1 opacity-60" data-testid={`coding-agent-provider-${id}`} data-connected="false" data-runner="none">
+                  <span className="text-xs text-[var(--text-primary)] min-w-[7rem]">{t(nameKey)}</span>
+                  <span className="ml-auto" />
+                  <button type="button" disabled data-testid={`coding-agent-provider-connect-${id}`} className={BTN_SECONDARY}>
+                    {t("codingAgent.providers.connect")}
+                  </button>
+                  <p className="w-full text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid={`coding-agent-provider-${id}-no-runner`}>
+                    {t("codingAgent.providers.noRunner")}
+                  </p>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => dispatchOpenSettingsSection("ai")}
+              data-testid="coding-agent-providers-setup"
+              className={`${BTN_SECONDARY} mt-2`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">tune</span>
+              {t("codingAgent.providers.setUp")}
+            </button>
+            {rolesReset && (
+              <p className="mt-1.5 text-[11px] text-amber-400" data-testid="coding-agent-providers-roles-reset">
+                {t("codingAgent.providers.rolesReset", { roles: rolesReset.roles.map((role) => t(`codingAgent.roleModels.${role}`)).join(", "), provider: t(CODING_PROVIDER_NAME_KEY[rolesReset.provider]) })}
               </p>
             )}
           </div>
@@ -1341,14 +1391,16 @@ export default function CodingAgentSettingsPanel(_props: {
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.roleModelsLabel")}</span>
                   <HelpTip
-                    text={t("codingAgent.roleModelsHint", { anthropic: ECONOMY_MODELS.anthropic, clawbox: ECONOMY_MODELS["clawbox-ai"] })}
+                    text={t("codingAgent.roleModelsHint")}
                     label={t("codingAgent.roleModelsLabel")}
                     testId="coding-agent-role-models-help"
                   />
                 </div>
-                {/* One row per role whose two selects share the width and wrap
-                    under the name in a narrow window — a fixed width cut the
-                    labels off ("Default (cheaper mo…"), and German's run longer. */}
+                {/* One row per role: the account, the model there, the effort.
+                    Three selects that share the width and wrap under the
+                    name in a narrow window. No price beside any of them (the
+                    owner's ruling, 2026-10-28): the planner keeps its own
+                    reckoning server-side, the screen says what runs where. */}
                 <div className="mt-1.5 space-y-2.5">
                   {MODEL_ROLES.filter((role) => status.roleModels![role]).map((role) => {
                     const current = status.roleModels![role]!;
@@ -1359,8 +1411,13 @@ export default function CodingAgentSettingsPanel(_props: {
                     const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
                       ? status.effortLevels
                       : [...status.effortLevels, current.effort as Effort];
-                    const value = roleModelValue(current);
                     const pinned = current.provider && current.provider !== ROLE_AUTO ? current.provider : null;
+                    // A pinned account that is no longer connected (or that
+                    // this build does not know) still reads back as itself —
+                    // greyed, with the word — rather than as a blank select.
+                    const strayProvider = pinned && !connectedProviders.includes(pinned) ? pinned : null;
+                    const offered = pinned ? roleModelOptions(pinned) : [];
+                    const strayModel = pinned && current.model !== ROLE_AUTO && !offered.includes(current.model) && !(ROLE_MODEL_TIERS as readonly string[]).includes(current.model) ? current.model : null;
                     const resolved = status.roleModelMap?.[role];
                     const hint = ROLE_HINT_KEY[role];
                     const about = [
@@ -1371,64 +1428,57 @@ export default function CodingAgentSettingsPanel(_props: {
                           provider: providerName(resolved.provider),
                         })
                         : null,
-                      resolved && resolved.relativeCost !== null ? t("codingAgent.roleModelCost", { n: resolved.relativeCost }) : null,
                     ].filter(Boolean).join(" · ");
                     return (
                       <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
                         <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
                         <select
-                          value={value}
+                          value={current.provider}
+                          disabled={saving}
+                          aria-label={t("codingAgent.roleProviderFor", { role: roleName })}
+                          data-testid={`coding-agent-role-${role}-provider`}
+                          // A new account drops a model only the old one
+                          // offered (the route does that on its own); a tier
+                          // or Auto rides along.
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { provider: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
+                        >
+                          <option value={ROLE_AUTO}>{followsWorkers ? t("codingAgent.roleAutoAsWorkers") : t("codingAgent.roleProvider.auto")}</option>
+                          {connectedProviders.map((p) => (
+                            <option key={p} value={p}>{providerName(p)}</option>
+                          ))}
+                          {strayProvider && (
+                            <option value={strayProvider}>{t("codingAgent.roleProvider.notConnected", { provider: providerName(strayProvider) })}</option>
+                          )}
+                        </select>
+                        <select
+                          value={current.model}
                           disabled={saving}
                           aria-label={t("codingAgent.roleModelFor", { role: roleName })}
                           data-testid={`coding-agent-role-${role}-model`}
-                          onChange={(e) => void saveSetting({ roleModels: { [role]: roleModelPatch(e.target.value) } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
-                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[11rem]`}
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
                         >
                           <option value={ROLE_AUTO}>
                             {followsWorkers
                               ? t("codingAgent.roleAutoAsWorkers")
-                              : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
+                              : pinned
+                                ? t("codingAgent.roleModel.autoForProvider")
+                                : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
                           </option>
-                          <optgroup label={t("codingAgent.roleModelTierGroup")}>
-                            {ROLE_MODEL_TIERS.map((tier) => (
-                              <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
-                            ))}
-                          </optgroup>
-                          {/* A group per account, its models priced against
-                              the plan's flash tier. An account that cannot
-                              run now keeps its group — the owner sees what it
-                              would offer — with every choice in it disabled;
-                              why is said under the rows. */}
-                          {roleProviders.map((p) => {
-                            const off = unreadyProviders.some((v) => v.id === p);
-                            const ids = roleModelOptions(p);
-                            // A pair this list has no row for — an account on
-                            // its default model, or a tier there — still reads
-                            // back as itself instead of as a blank select.
-                            const stray = pinned === p && !ids.includes(current.model) ? current.model : null;
-                            return (
-                              <optgroup
-                                key={p}
-                                label={off ? t("codingAgent.roleProviderGroupNotReady", { provider: providerName(p) }) : providerName(p)}
-                                data-provider={p}
-                              >
-                                {stray !== null && (
-                                  <option value={value} disabled={off}>
-                                    {t(stray === "economy" ? "codingAgent.roleModel.economy" : "codingAgent.roleModel.providerDefault")}
-                                  </option>
-                                )}
-                                {ids.map((id) => {
-                                  const cost = relativeModelCost(p, id);
-                                  const name = codingModelName(id);
-                                  return (
-                                    <option key={id} value={`${p}${ROLE_MODEL_SEP}${id}`} disabled={off}>
-                                      {cost === null ? name : t("codingAgent.roleModel.withCost", { model: name, n: cost })}
-                                    </option>
-                                  );
-                                })}
-                              </optgroup>
-                            );
-                          })}
+                          {/* On the team's own account the older two choices
+                              stand; pinned to an account, that account's
+                              models. */}
+                          {!pinned && ROLE_MODEL_TIERS.map((tier) => (
+                            <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
+                          ))}
+                          {pinned && (ROLE_MODEL_TIERS as readonly string[]).includes(current.model) && (
+                            <option value={current.model}>{t(`codingAgent.roleModel.${current.model}`)}</option>
+                          )}
+                          {offered.map((id) => (
+                            <option key={id} value={id}>{codingModelName(id)}</option>
+                          ))}
+                          {strayModel && <option value={strayModel}>{codingModelName(strayModel)}</option>}
                         </select>
                         <select
                           value={current.effort}
@@ -1436,7 +1486,7 @@ export default function CodingAgentSettingsPanel(_props: {
                           aria-label={t("codingAgent.roleEffortFor", { role: roleName })}
                           data-testid={`coding-agent-role-${role}-effort`}
                           onChange={(e) => void saveSetting({ roleModels: { [role]: { effort: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
-                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[13rem]`}
+                          className={`text-base sm:text-xs ${FIELD} w-[9.5rem]`}
                         >
                           <option value={ROLE_AUTO}>
                             {followsWorkers
@@ -1449,9 +1499,9 @@ export default function CodingAgentSettingsPanel(_props: {
                             <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
                           ))}
                         </select>
-                        {/* What the role is, what it starts on right now and
-                            what that costs — the answer the runner gives,
-                            so "Default" is never a mystery. */}
+                        {/* What the role is and what it starts on right now —
+                            the answer the runner gives, so "Default" is never
+                            a mystery. */}
                         {about && (
                           <p className="w-full text-[10px] text-[var(--text-muted)] leading-relaxed" data-testid={`coding-agent-role-${role}-about`}>
                             {about}
@@ -1466,9 +1516,9 @@ export default function CodingAgentSettingsPanel(_props: {
                     );
                   })}
                 </div>
-                {/* Why an account's choices are disabled, once per account
-                    rather than once per row: its own missing pieces, and the
-                    box's, in the readiness check's own words. */}
+                {/* Why a connected account cannot run right now, once per
+                    account rather than once per row: its own missing pieces,
+                    and the box's, in the readiness check's own words. */}
                 {unreadyProviders.length > 0 && (
                   <ul className="mt-2 space-y-0.5" data-testid="coding-agent-role-providers-unready">
                     {unreadyProviders.map((v) => {
@@ -1483,9 +1533,6 @@ export default function CodingAgentSettingsPanel(_props: {
                     })}
                   </ul>
                 )}
-                <p className="mt-2 text-[10px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-role-models-cost">
-                  {t("codingAgent.roleModelsCostNote", { model: codingModelName(ECONOMY_MODELS["clawbox-ai"]) })}
-                </p>
               </div>
             )}
           </div>

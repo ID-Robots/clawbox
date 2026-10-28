@@ -116,11 +116,25 @@ export const codingAgentEn: Record<string, string> = {
   // WHICH ACCOUNT PAYS for a run: the box's own ClawBox AI plan, or the
   // owner's Anthropic access. The two provider names are product names and
   // stay as they are in every locale; everything around them is translated.
-  "codingAgent.providerLabel": "Runs on",
+  "codingAgent.providerLabel": "Connected providers",
   "codingAgent.providerName.clawboxAi": "ClawBox AI",
   "codingAgent.providerName.anthropic": "Anthropic",
+  "codingAgent.providerName.openai": "OpenAI (ChatGPT)",
+  "codingAgent.providers.hint": "A team can run on several accounts at once. Connect the ones Settings → Providers has set up, then pick an account, a model and an effort per role below.",
+  "codingAgent.providers.connect": "Connect",
+  "codingAgent.providers.disconnect": "Disconnect",
+  "codingAgent.providers.connected": "Connected",
+  "codingAgent.providers.noRunner": "Coding runs need a runner for this provider; not available yet.",
+  "codingAgent.providers.setUp": "Set up providers",
+  "codingAgent.providers.notSetUp": "{provider} is not set up yet: {reason}",
+  "codingAgent.providers.lastOne": "The last connected provider stays: runs need an account to start on.",
+  "codingAgent.providers.rolesReset": "{roles}: back on Default, because {provider} was disconnected.",
+  "codingAgent.roleProviderFor": "Account for {role}",
+  "codingAgent.roleProvider.auto": "Default (the team's own account)",
+  "codingAgent.roleProvider.notConnected": "{provider} (not connected)",
+  "codingAgent.roleModel.autoForProvider": "Default model",
   "codingAgent.providerNotConnected": "Your Anthropic account is not connected yet, so runs cannot start. Add a key below, or sign in with `claude` in the Terminal app.",
-  "codingAgent.providerFailed": "Could not change which account runs are paid for by.",
+  "codingAgent.providerFailed": "Could not change the connected providers.",
   "codingAgent.anthropicTitle": "Anthropic account",
   "codingAgent.anthropicOff": "not connected",
   // While the first read is in flight, or after one that failed. NOT "not
@@ -587,7 +601,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.teamDynamicHint": "After each worker finishes, the team's planner may add or retire tasks \u2014 each look is one more paid run.",
   "codingAgent.teamDynamicFailed": "Could not change the team lead setting.",
   "codingAgent.roleModelsLabel": "Models per team role",
-  "codingAgent.roleModelsHint": "By default the planner and reviewers use a cheaper model ({anthropic} on Anthropic, {clawbox} on ClawBox AI); workers use yours.",
+  "codingAgent.roleModelsHint": "Which account, model and effort each role of a team runs on. Default lets the box choose for the role: the planner and reviewers read and judge, workers write the code.",
   "codingAgent.roleModels.planner": "Planner",
   "codingAgent.roleModels.worker": "Workers",
   "codingAgent.roleModels.reviewer": "Reviewers",
@@ -609,14 +623,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.roleAutoAsWorkers": "Default (as the workers)",
   "codingAgent.roleModelTierGroup": "On the team's own account",
   "codingAgent.roleModel.providerDefault": "Its default model",
-  "codingAgent.roleModel.withCost": "{model} — about {n}× the cost",
   "codingAgent.roleModelNow": "Now: {model} on {provider}",
   "codingAgent.roleModelPlanDecides": "the plan's model",
-  "codingAgent.roleModelCost": "about {n}× the cost",
   "codingAgent.roleModelCannotStart": "This role's runs cannot start until {provider} is ready.",
   "codingAgent.roleProviderGroupNotReady": "{provider} (not ready)",
   "codingAgent.roleProviderNotReady": "{provider} is not ready, so its models cannot be chosen: {reason}",
-  "codingAgent.roleModelsCostNote": "Costs are per token, compared with {model} (1×).",
   // A run's model, said with the account it ran on and — on a team run — the
   // role it was chosen for: the timeline's first step, the run's figures and
   // a teammate's row. One word per role, singular.

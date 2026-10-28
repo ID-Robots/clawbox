@@ -617,6 +617,31 @@ describe("a team's model and effort per role", () => {
     expect(configSet).not.toHaveBeenCalled();
   });
 
+  it("saves the connected providers, moves the default onto the list, and puts a role pinned to a dropped account back on Default", async () => {
+    vi.mocked(configGet).mockImplementation(async (key: string) =>
+      key === "clawai_plan_tier" ? "flash"
+        : key === "coding_agent_provider" ? "anthropic"
+          : key === "coding_agent_role_models" ? { planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "high" }, bulk: { provider: "anthropic", model: "economy" }, worker: { provider: "clawbox-ai" } }
+            : undefined);
+    const res = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai"] } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_providers", ["clawbox-ai"]);
+    // The default provider was anthropic, which just left the list.
+    expect(configSet).toHaveBeenCalledWith("coding_agent_provider", "clawbox-ai");
+    // The planner loses its account AND the model only that account offered; bulk keeps its tier; the worker is untouched.
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { effort: "high" }, bulk: { model: "economy" }, worker: { provider: "clawbox-ai" } });
+  });
+
+  it("refuses an empty connected list and an unknown provider, before anything is written", async () => {
+    const empty = await POST(request({ cookie: ownerCookie(), body: { providers: [] } }));
+    expect(empty.status).toBe(400);
+    expect((await empty.json()).error).toMatch(/at least one provider/i);
+    const unknown = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai", "openai"] } }));
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).kind).toBe("invalid");
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
   it("saves a provider and a model per role, bulk work included", async () => {
     const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: {
       planner: { provider: "anthropic", model: "claude-fable-5-1" },

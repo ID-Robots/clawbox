@@ -157,10 +157,12 @@ import { memAvailableMb } from "@/lib/mem-available";
 import { processStore } from "@/lib/process-store";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import {
+  CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY,
   CODING_AGENT_PROVIDER_CONFIG_KEY,
   CODING_PROVIDERS,
   DEFAULT_CODING_PROVIDER,
   codingProviderFrom,
+  connectedProvidersFrom,
   defaultModelForProvider,
   isCodingProvider,
   isRecordableModel,
@@ -401,10 +403,12 @@ import { CONTEXT_CAP_WINDOW, type CodingDiet, DEFAULT_DIET, LEGACY_DIET, looksVi
 import {
   applyRoleModelsPatch,
   CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
+  isRoleModelId,
   MODEL_ROLES,
   modelRoleOf,
   relativeModelCost,
   resolveRoleRun,
+  ROLE_AUTO,
   roleModelsFrom,
   roleModelsView,
   type ModelRole,
@@ -2431,6 +2435,8 @@ export interface CodingAgentStatus {
   provider: CodingProvider;
   /** The providers this build knows, for the picker. */
   providers: readonly CodingProvider[];
+  /** The providers the owner connected to the coding agent (a subset of `providers`, never empty): what a team's roles may be pinned to. */
+  connectedProviders: CodingProvider[];
   /** How hard a run thinks per turn. */
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
@@ -4071,6 +4077,44 @@ export async function setCodingProvider(provider: string): Promise<CodingProvide
 }
 
 /**
+ * The owner's CONNECTED providers (Settings → Coding agent → Connected
+ * providers): the accounts a team's roles may run on. Never empty — a run
+ * nobody names an account for needs one — so the last one cannot be
+ * disconnected. The default provider follows the list when it was dropped
+ * from it, and a role pinned to a provider that left the list goes back to
+ * its default (provider and, with it, a model only that provider offers), so
+ * no team starts on an account the owner just disconnected; `resetRoles`
+ * names them for the screen.
+ */
+export async function setConnectedProviders(raw: unknown): Promise<{ providers: CodingProvider[]; resetRoles: ModelRole[] }> {
+  if (!Array.isArray(raw) || raw.some((id) => !isCodingProvider(id))) {
+    throw new CodingAgentError("invalid", `providers must be a list of: ${CODING_PROVIDERS.join(", ")}.`);
+  }
+  const providers = connectedProvidersFrom(raw, DEFAULT_CODING_PROVIDER);
+  if (raw.length === 0) {
+    throw new CodingAgentError("invalid", "At least one provider must stay connected: runs need an account to start on.");
+  }
+  await configSet(CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY, providers);
+  const current = codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
+  if (!providers.includes(current)) await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, providers[0]);
+  const roles = await getRoleModels();
+  const resetRoles: ModelRole[] = [];
+  const patch: Record<string, { provider: string; model?: string }> = {};
+  for (const role of MODEL_ROLES) {
+    const pinned = roles[role]?.provider;
+    if (!pinned || providers.includes(pinned)) continue;
+    resetRoles.push(role);
+    const model = roles[role]?.model;
+    patch[role] = model !== undefined && !isRoleModelId(pinned, model) ? { provider: ROLE_AUTO } : { provider: ROLE_AUTO, model: ROLE_AUTO };
+  }
+  if (resetRoles.length > 0) {
+    const next = applyRoleModelsPatch(roles, patch);
+    if (next.ok) await configSet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY, next.value);
+  }
+  return { providers, resetRoles };
+}
+
+/**
  * The shape a stored model id may have. Not the OFFERED list — see below —
  * but a floor, because this value is handed to the CLI through an environment
  * variable and the file it comes from is the only thing vouching for it.
@@ -4203,6 +4247,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     maxTaskChars: MAX_TASK_CHARS,
     provider,
     providers: CODING_PROVIDERS,
+    connectedProviders: connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider),
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with
