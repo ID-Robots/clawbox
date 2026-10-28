@@ -33,6 +33,7 @@ const runner = vi.hoisted(() => ({
   teamSpawnSlot: vi.fn(),
   suiteSandbox: vi.fn(),
   teamRoleModelMap: vi.fn(),
+  getMaxParallelRuns: vi.fn(),
 }));
 /** How many runs a team may have going at once: the box's own number unless a case says otherwise (read on every use, reset before each case). */
 const teamSlots = vi.hoisted(() => ({ value: null as number | null }));
@@ -185,6 +186,8 @@ beforeEach(async () => {
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/site", projectId: null });
   // Every role ready on the box's own provider: the host's readiness probe is not the fixture.
   runner.teamRoleModelMap.mockImplementation(async () => roleMap());
+  // The owner's limit on runs at once: roomy, so a team's own shape is what bounds it, unless a case says otherwise.
+  runner.getMaxParallelRuns.mockResolvedValue(16);
   // The project's own suite runs through `env` instead of `setpriv`, which a
   // test runner cannot use; only a case with a suite on disk ever asks.
   runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: ["PYTHONDONTWRITEBYTECODE=1"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
@@ -1065,6 +1068,61 @@ describe("a team that shares the box", () => {
     expect(done.status).toBe("stopped");
     expect(starts).toHaveLength(0);
     expect(done.slotWaits).toBeUndefined();
+  });
+
+  it("keeps no more tasks in flight than the owner's limit: a settled worker's reviewer keeps its seat, and each worker's CPU share is that limit", async () => {
+    // Three independent tasks, a team shaped for three, a box set to two at once.
+    runner.getMaxParallelRuns.mockResolvedValue(2);
+    waitsBeforeSettle = 6;
+    outcomes = [
+      { summary: shaped({ parallelism: 3, review: "each", rationale: "" }, JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Write styles.css", files_hint: ["styles.css"] },
+        { task_description: "Write about.html", files_hint: ["about.html"] },
+      ])) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "about done", filesTouched: ["about.html"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    expect(workers).toHaveLength(3);
+    // Sized for the two that can go together, not the three the shape asked for.
+    expect(workers.map((w) => w.cpuShare)).toEqual([2, 2, 2]);
+    // Two side by side, never a third worker beside them.
+    const live = Object.entries(liveWorkersAtStart).filter(([id]) => roleOf(runs.get(id)!) === "worker").map(([, n]) => n);
+    expect(Math.max(...live)).toBe(1);
+    // The third task's worker went only once a task left — after its review, not into its reviewer's seat.
+    const order = starts.map((s) => `${roleOf(s)}:${(s.team as { taskId: string | null }).taskId}`);
+    expect(order.indexOf("worker:t3")).toBeGreaterThan(Math.min(order.indexOf("reviewer:t1"), order.indexOf("reviewer:t2")));
+  });
+
+  it("keeps a wait's moving reason on the live board without rewriting the board file on every look", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    // The memory guard's figure moves on each look, as MemAvailable does.
+    let looks = 0;
+    const tight = (n: number) => `Not enough free memory for another run beside the 1 going (${900 + n} MB free, 1200 MB needed).`;
+    let free = false;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }) => {
+      if (who.role !== "planner" || free) return { ok: true };
+      looks += 1;
+      return { ok: false, wait: true, reason: tight(looks) };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const file = path.join(root, "data", "coding-team", `${board.id}.json`);
+    const live = await boardWhen(board.id, () => looks >= 3);
+    // The live board — what coding_team_status reads for a team at work — has the latest reason…
+    expect(live.slotWaits?.[0].reason).toBe(tight(looks));
+    // …and the file, written once when the wait began, still has the first.
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8")) as { slotWaits?: Array<{ reason: string }> };
+    expect(onDisk.slotWaits?.map((w) => w.reason)).toEqual([tight(1)]);
+    free = true;
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.log.filter((e) => e.type === "note" && /before the planner starts/.test(e.message))).toHaveLength(1);
+    expect((JSON.parse(fs.readFileSync(file, "utf8")) as { slotWaits?: unknown }).slotWaits).toBeUndefined();
   });
 
   it("makes its FIRST worker wait for room too, and puts a worker the spawn refused for room back unstarted — no alert, no failed task", async () => {

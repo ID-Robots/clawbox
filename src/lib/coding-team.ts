@@ -67,6 +67,7 @@ import fs from "fs";
 import path from "@/lib/runtime-path";
 import {
   CodingAgentError,
+  getMaxParallelRuns,
   getRun,
   getTeamDynamic,
   harnessStateDir,
@@ -921,7 +922,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
         bus.send(SYSTEM, { type: "note", text: battery ? "The box is on battery: one worker at a time until it is plugged in again." : "The box is plugged in again: workers run side by side as planned." });
       }
       onBattery = battery;
-      const slots = teamWorkerCap(plannedSlots, onBattery);
+      // Never more tasks in flight than the owner lets runs go at once, read
+      // again each round: each task in flight holds one run at a time (its
+      // worker, then its reviewer), so a task whose worker just settled keeps
+      // the seat its reviewer needs — the team's next worker cannot take it —
+      // and a worker's CPU share is for the runs that can really go together.
+      const slots = Math.min(teamWorkerCap(plannedSlots, onBattery), await getMaxParallelRuns());
       team.workerSlots = slots;
       const ready = readyTasks(board).filter((t) => !inFlight.has(t.task_id));
       let waitingForRoom = false;
@@ -1784,7 +1790,10 @@ function slotWaitName(who: Pick<SlotWait, "role" | "taskId">): string {
 /**
  * On the board: `who` waits for a free slot on the box, and why — what
  * coding_team_status says for a team that waits, rather than a failure. One
- * note when the wait begins; a new reason only updates the entry.
+ * note when the wait begins, and the board written then. A new reason only
+ * updates the entry on the live board, which is what a live team is read
+ * from: the memory guard's figure moves on nearly every look, and a board
+ * file rewritten every few seconds of a long wait buys nothing.
  */
 function noteSlotWait(team: LiveTeam, who: Pick<SlotWait, "role" | "taskId">, reason: string): void {
   const { board, bus } = team;
@@ -1792,14 +1801,13 @@ function noteSlotWait(team: LiveTeam, who: Pick<SlotWait, "role" | "taskId">, re
   if (team.stopRequested || isSettledTeamStatus(board.status)) return;
   const waits = board.slotWaits ?? [];
   const at = waits.findIndex((w) => w.role === who.role && w.taskId === who.taskId);
-  if (at >= 0 && waits[at].reason === reason) return;
   if (at >= 0) {
     waits[at] = { ...waits[at], reason };
-  } else {
-    waits.push({ role: who.role, taskId: who.taskId, reason, since: Date.now() });
-    bus.send(SYSTEM, { type: "note", ...(who.taskId ? { task_id: who.taskId } : {}), text: `Waiting for a free slot on the box before ${slotWaitName(who)} starts: ${reason}` });
+    return;
   }
+  waits.push({ role: who.role, taskId: who.taskId, reason, since: Date.now() });
   board.slotWaits = waits;
+  bus.send(SYSTEM, { type: "note", ...(who.taskId ? { task_id: who.taskId } : {}), text: `Waiting for a free slot on the box before ${slotWaitName(who)} starts: ${reason}` });
   saveBoard(board);
 }
 
