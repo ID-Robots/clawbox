@@ -14,12 +14,15 @@ import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 
 const config = vi.hoisted(() => ({
   read: vi.fn(),
+  /** The strict reader; answers what `read` does unless a test says otherwise. */
+  strict: vi.fn(),
   batch: vi.fn(),
   unset: vi.fn(),
   absent: vi.fn(),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => config.read(...a),
+  readConfigStrict: (...a: unknown[]) => config.strict(...a),
   runOpenclawConfigSetBatch: (...a: unknown[]) => config.batch(...a),
   runOpenclawConfigUnset: (...a: unknown[]) => config.unset(...a),
   openclawIsAbsent: () => config.absent(),
@@ -97,6 +100,7 @@ function writtenModels(): unknown[] {
 beforeEach(async () => {
   vi.resetModules();
   config.read.mockReset().mockResolvedValue({});
+  config.strict.mockReset().mockImplementation((...a: unknown[]) => config.read(...a));
   config.batch.mockReset().mockResolvedValue(undefined);
   config.unset.mockReset().mockResolvedValue(undefined);
   config.absent.mockReset().mockReturnValue(false);
@@ -274,6 +278,43 @@ describe("reconcileChannelAudio — boot, a Whisper install, a provider save", (
     config.absent.mockReturnValue(true);
     expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(false);
     expect(config.read).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The pass nobody asked for runs at every boot and after every provider
+   * save. An owner who pointed transcription at their own server or service
+   * keeps it, as gateway-pre-start.sh has always let them.
+   */
+  it("leaves an owner's own transcription route alone", async () => {
+    const deepgram = { provider: "deepgram", model: "nova-3", capabilities: ["audio"] };
+    config.read.mockResolvedValue({ tools: { media: { models: [deepgram] } } });
+    expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(false);
+    config.read.mockResolvedValue({ tools: { media: { audio: { baseUrl: "https://whisper.lan/v1" }, models: [CLOUD] } } });
+    expect(await lib.reconcileChannelAudio({ trigger: "provider" })).toBe(false);
+    expect(config.batch).not.toHaveBeenCalled();
+    expect(config.unset).not.toHaveBeenCalled();
+  });
+
+  it("still takes back a list it wrote, in the older shape without the profile too", async () => {
+    const legacy = { provider: "openai", model: "gpt-4o-mini-transcribe", capabilities: ["audio"] };
+    config.read.mockResolvedValue({ tools: { media: { audio: { baseUrl: PROXY }, models: [legacy] } } });
+    expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(true);
+    expect(writtenModels().some(isLocal)).toBe(true);
+  });
+
+  it("an owner's own engine pick in Settings still writes over a route that is not ours", async () => {
+    const deepgram = { provider: "deepgram", model: "nova-3", capabilities: ["audio"] };
+    config.read.mockResolvedValue({ tools: { media: { models: [deepgram] } } });
+    expect(await lib.syncChannelAudio(["local", "cloud"], true)).toBe(true);
+  });
+
+  it("writes nothing over a config it could not read", async () => {
+    // `readConfig` answers `{}` for it, as it does on a box, and a list rebuilt
+    // from that drops every row that is not an audio row of ours.
+    config.read.mockResolvedValue({});
+    config.strict.mockRejectedValue(new Error("Unexpected end of JSON input"));
+    await expect(lib.reconcileChannelAudio({ trigger: "boot" })).rejects.toThrow();
+    expect(config.batch).not.toHaveBeenCalled();
   });
 
   it("writes nothing when channels already hear the way the box would", async () => {

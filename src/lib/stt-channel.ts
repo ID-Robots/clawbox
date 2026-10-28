@@ -26,6 +26,7 @@ import {
 import {
   openclawIsAbsent,
   readConfig,
+  readConfigStrict,
   runOpenclawConfigSetBatch,
   runOpenclawConfigUnset,
   type OpenClawConfig,
@@ -38,6 +39,7 @@ import {
   resolveSttPrimary,
   sttEngineOrder,
   TRANSCRIBE_AUTH_PROFILE,
+  TRANSCRIBE_MODEL,
   type SttEngine,
 } from "@/lib/stt-preference";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
@@ -161,6 +163,41 @@ function isOurAudioEndpoint(url: unknown): boolean {
   return trim(url) === trim(CLAWBOX_AI_PROXY_URL);
 }
 
+/** The on-box client, matched by name as gateway-pre-start.sh matches it: HOME is the script's to resolve. */
+const STT_CLIENT_SCRIPT = "stt-client.py";
+
+/**
+ * Could ClawBox have written this audio row? The cloud row in either shape a
+ * box carries (with the profile, or the older one without), or a CLI row
+ * running the workspace's `stt-client.py` — the rule `_is_clawbox_audio_model`
+ * in gateway-pre-start.sh applies, so the two agree on whose list it is.
+ */
+function isClawboxAudioRow(row: unknown): boolean {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+  const { capabilities, ...rest } = row as Record<string, unknown>;
+  if (capabilities !== undefined && !isDeepStrictEqual(capabilities, ["audio"]) && !isDeepStrictEqual(capabilities, [])) {
+    return false;
+  }
+  if (rest.type === "cli") {
+    const named = [rest.command, ...(Array.isArray(rest.args) ? rest.args : [])];
+    return named.some((value) => typeof value === "string" && value.endsWith(STT_CLIENT_SCRIPT));
+  }
+  return isDeepStrictEqual(rest, { provider: "openai", model: TRANSCRIBE_MODEL, profile: TRANSCRIBE_AUTH_PROFILE })
+    || isDeepStrictEqual(rest, { provider: "openai", model: TRANSCRIBE_MODEL });
+}
+
+export interface SyncChannelAudioOptions {
+  /**
+   * Stand down on a route ClawBox did not write: an audio row it does not
+   * recognise, or an endpoint that is not its proxy. For the passes nobody
+   * asked for (boot, a provider save, a Whisper install), which must not
+   * overwrite an owner's own transcription setup — a LAN Whisper server, a
+   * Deepgram key — the way gateway-pre-start.sh never does either. An owner's
+   * engine pick in Settings still writes the list as it always did.
+   */
+  onlyOurRoute?: boolean;
+}
+
 /**
  * One writer of the audio list at a time. The Settings route, a Whisper
  * install, a provider save, the cloud-defaults applier and the boot pass can
@@ -188,11 +225,14 @@ const withChannelAudio = createSerialLock();
 export async function syncChannelAudio(
   order: readonly SttEngine[],
   localInstalled: boolean,
+  options: SyncChannelAudioOptions = {},
 ): Promise<boolean> {
   return await withChannelAudio(async () => {
-    const config = await readConfig();
-    const cloud = await readCloudSttBacking(config);
-    const models = buildAudioModels(order, localInstalled, cloud.usable);
+    // STRICT: `readConfig` answers `{}` for a file it could not read — one
+    // caught half-written by a concurrent `config set`, which a pass right
+    // after a provider save or a gateway start can meet — and a list rebuilt
+    // from `{}` drops every row that is not ours to write.
+    const config = await readConfigStrict();
     // OpenClaw 2: the endpoint stays under tools.media.audio, but the model
     // list lives in the SHARED tools.media.models — one list for every media
     // capability, so rows that are not ours to order (no capabilities, or
@@ -205,10 +245,19 @@ export async function syncChannelAudio(
       const caps = (row as { capabilities?: unknown }).capabilities;
       return Array.isArray(caps) && caps.includes("audio");
     };
+    const baseUrl = media?.audio?.baseUrl;
+    if (options.onlyOurRoute) {
+      const hasEndpoint = typeof baseUrl === "string" && baseUrl.trim() !== "";
+      if (!existing.filter(isAudioRow).every(isClawboxAudioRow) || (hasEndpoint && !isOurAudioEndpoint(baseUrl))) {
+        console.warn("[stt-channel] channel voice notes left alone: tools.media names the owner's own transcription route");
+        return false;
+      }
+    }
+    const cloud = await readCloudSttBacking(config);
+    const models = buildAudioModels(order, localInstalled, cloud.usable);
     const foreign = existing.filter((row) => !isAudioRow(row));
     const merged = [...foreign, ...models];
     const listInForce = isDeepStrictEqual(existing.filter(isAudioRow), models);
-    const baseUrl = media?.audio?.baseUrl;
     if (cloud.usable) {
       if (baseUrl === CLAWBOX_AI_PROXY_URL && listInForce) return false;
       await runOpenclawConfigSetBatch([
@@ -272,7 +321,7 @@ export async function reconcileChannelAudio(options: ReconcileChannelAudioOption
     localSttInstalled(),
   ]);
   const order = sttEngineOrder(resolveSttPrimary(stored, token !== null, local.installed));
-  const wrote = await syncChannelAudio(order, local.installed);
+  const wrote = await syncChannelAudio(order, local.installed, { onlyOurRoute: true });
   if (wrote) {
     console.warn(
       `[stt-channel] channel voice notes re-aligned with the transcription preference (${options.trigger}); the box's own engine is ${local.installed ? "installed" : "not installed"}`,

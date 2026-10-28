@@ -25,6 +25,7 @@ const store = vi.hoisted(() => new Map<string, unknown>());
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => readConfigMock(...a),
+  readConfigStrict: (...a: unknown[]) => readConfigMock(...a),
   runOpenclawConfigSetBatch: (...a: unknown[]) => batchMock(...a),
   runOpenclawConfigUnset: (...a: unknown[]) => unsetMock(...a),
   restartGateway: (...a: unknown[]) => restartMock(...a),
