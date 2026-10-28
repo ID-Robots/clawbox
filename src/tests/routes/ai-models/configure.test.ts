@@ -1125,6 +1125,40 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
   });
 
+  describe("OpenClaw's Tool Search follows the on-device primary", () => {
+    it("turns it off in the batch that makes the on-device model the primary", async () => {
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+        .map((call) => call[0] as string[][])
+        .find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      expect(batch).toContainEqual(["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(batch).toContainEqual(["tools.toolSearch", JSON.stringify({ enabled: false }), "--json"]);
+      expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalledWith("tools.toolSearch");
+    });
+
+    it("gives a cloud primary OpenClaw's default back when ClawBox had turned it off", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({ tools: { toolSearch: { enabled: false } } });
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith("tools.toolSearch");
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "tools.toolSearch")).toBeUndefined();
+    });
+
+    it("writes nothing for a local save that leaves the cloud primary in place", async () => {
+      mockGetAll.mockResolvedValue({ ai_model_configured: true, ai_model_provider: "openai" });
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", scope: "local" }));
+
+      expect(res.status).toBe(200);
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "tools.toolSearch")).toBeUndefined();
+      expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalledWith("tools.toolSearch");
+    });
+  });
+
   it("keeps local AI as fallback-only when a primary AI provider is already configured", async () => {
     mockGetAll.mockResolvedValue({
       ai_model_configured: true,

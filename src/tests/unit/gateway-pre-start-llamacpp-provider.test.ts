@@ -140,7 +140,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(p.api).toBe("openai-completions");
     expect(p.apiKey).toBe(TOKEN);
     expect(p.models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
-    expect(p.models?.[0]?.contextWindow).toBe(131072);
+    // DEFAULT_LLAMACPP_CONTEXT_WINDOW / DEFAULT_LLAMACPP_MAX_TOKENS in src/lib/llamacpp.ts.
+    expect(p.models?.[0]?.contextWindow).toBe(32768);
+    expect(p.models?.[0]?.maxTokens).toBe(8192);
   });
 
   it("uses the configured x64 UI port for the local proxy", () => {
@@ -219,15 +221,15 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     writeToken(TOKEN);
     const big = migrate(
       { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
-      { LLAMACPP_CONTEXT_WINDOW: "32768" },
+      { LLAMACPP_CONTEXT_WINDOW: "65536" },
     );
-    expect(llamacppProvider(big.cfg).models?.[0]?.contextWindow).toBe(32768);
+    expect(llamacppProvider(big.cfg).models?.[0]?.contextWindow).toBe(65536);
 
     const tooSmall = migrate(
       { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
       { LLAMACPP_CONTEXT_WINDOW: "128" },
     );
-    expect(llamacppProvider(tooSmall.cfg).models?.[0]?.contextWindow).toBe(131072);
+    expect(llamacppProvider(tooSmall.cfg).models?.[0]?.contextWindow).toBe(32768);
   });
 
   // Writing the entry without the bearer would trade "Unknown model" for a 401
@@ -608,12 +610,19 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     );
     expect(llamacppProvider(explicit.cfg).models?.[0]?.maxTokens).toBe(2048);
 
-    // Unusable value falls back to the context window, as getLlamaCppMaxTokens does.
+    // Unusable value falls back to the default cap, as getLlamaCppMaxTokens does.
     const junk = migrate(
       { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
       { LLAMACPP_CONTEXT_WINDOW: "32768", LLAMACPP_MAX_TOKENS: "nope" },
     );
-    expect(llamacppProvider(junk.cfg).models?.[0]?.maxTokens).toBe(32768);
+    expect(llamacppProvider(junk.cfg).models?.[0]?.maxTokens).toBe(8192);
+
+    // Never more than the window itself.
+    const huge = migrate(
+      { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
+      { LLAMACPP_CONTEXT_WINDOW: "16384", LLAMACPP_MAX_TOKENS: "131072" },
+    );
+    expect(llamacppProvider(huge.cfg).models?.[0]?.maxTokens).toBe(16384);
   });
 
   it("accepts the numeric spellings the TypeScript side accepts", () => {
@@ -862,6 +871,13 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — a doubled local-model pro
 
   const PROXY = "http://127.0.0.1/setup-api/local-ai/llamacpp/v1";
 
+  /**
+   * The box these configs were saved on: its llama-server ran the 131072 window
+   * the rows below claim, so the window reconciliation has nothing to do and
+   * each case sees the prefix heal alone.
+   */
+  const SERVER_131K = { LLAMACPP_CONTEXT_WINDOW: "131072", LLAMACPP_MAX_TOKENS: "131072" };
+
   /** Exactly what the unfixed route wrote for { provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" }. */
   function doubledSave(): Config {
     return {
@@ -897,7 +913,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — a doubled local-model pro
 
   it("heals the saved shape into one OpenClaw can re-materialize", () => {
     writeToken(TOKEN);
-    const { cfg, changed, log } = migrate(doubledSave());
+    const { cfg, changed, log } = migrate(doubledSave(), SERVER_131K);
 
     expect(changed).toBe(true);
     const defaults = defaultsOf(cfg);
@@ -936,7 +952,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — a doubled local-model pro
       { id: "gemma4-e2b-it-q4_0", name: "Gemma 4 E2B", contextWindow: 65536 },
       ...(llamacpp.models ?? []),
     ];
-    const { cfg: healed } = migrate(cfg);
+    const { cfg: healed } = migrate(cfg, SERVER_131K);
 
     expect(provider(healed, "llamacpp").models).toEqual([
       { id: "gemma4-e2b-it-q4_0", name: "Gemma 4 E2B", contextWindow: 65536 },
@@ -1062,5 +1078,87 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — a doubled local-model pro
 
     expect(primaryOf(cfg)).toBe("llamacpp/gemma4-e2b-it-q4_0");
     expect(llamacppProvider(cfg).models?.map((row) => row.id)).toEqual(["gemma4-e2b-it-q4_0"]);
+  });
+});
+
+describe.skipIf(!hasPython3)("gateway-pre-start.sh — the llamacpp row's window vs the server's", () => {
+  // ai-models/configure writes a row's window once, when Local AI is turned on;
+  // install.sh later moves .env from 131072 to 32768, llama-server restarts at
+  // the new size, and a row still claiming 131072 has OpenClaw size prompts for
+  // a window the server does not have.
+  const PROXY = "http://127.0.0.1/setup-api/local-ai/llamacpp/v1";
+
+  function shipped(row: Record<string, unknown>, baseUrl = PROXY): Config {
+    return {
+      models: { providers: { llamacpp: { baseUrl, api: "openai-completions", apiKey: TOKEN, models: [{ id: "gemma4-e2b-it-q4_0", name: "gemma4-e2b-it-q4_0", ...row }] } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    };
+  }
+
+  it("shrinks a row that claims the old 131072 window to the one the server runs", () => {
+    writeToken(TOKEN);
+    writeEnvFile("LLAMACPP_CONTEXT_WINDOW=32768\nLLAMACPP_MAX_TOKENS=8192\n");
+    const { cfg, changed, log } = migrate(shipped({ contextWindow: 131072, maxTokens: 131072 }));
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]).toMatchObject({ contextWindow: 32768, maxTokens: 8192 });
+    expect(log).toContain("Resized models.providers.llamacpp row(s) gemma4-e2b-it-q4_0");
+    expect(log).not.toContain(TOKEN);
+  });
+
+  it("does the same on a box with no .env tuning, from the shipped defaults", () => {
+    writeToken(TOKEN);
+    const { cfg } = migrate(shipped({ contextWindow: 131072, maxTokens: 131072 }));
+    expect(llamacppProvider(cfg).models?.[0]).toMatchObject({ contextWindow: 32768, maxTokens: 8192 });
+  });
+
+  it("is idempotent", () => {
+    writeToken(TOKEN);
+    const first = migrate(shipped({ contextWindow: 131072, maxTokens: 131072 }));
+    const second = migrate(first.cfg);
+    expect(second.changed).toBe(false);
+    expect(second.cfg).toEqual(first.cfg);
+    expect(second.log).not.toContain("Resized");
+  });
+
+  it("leaves a row that claims less than the server alone", () => {
+    writeToken(TOKEN);
+    const saved = shipped({ contextWindow: 16384, maxTokens: 4096 });
+    const { cfg, changed } = migrate(saved, { LLAMACPP_CONTEXT_WINDOW: "32768" });
+    expect(changed).toBe(false);
+    expect(cfg).toEqual(saved);
+  });
+
+  it("caps an answer budget larger than the row's own window", () => {
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate(shipped({ contextWindow: 16384, maxTokens: 131072 }));
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]).toMatchObject({ contextWindow: 16384, maxTokens: 8192 });
+  });
+
+  it("follows an operator's larger .env window instead of shrinking to the default", () => {
+    writeToken(TOKEN);
+    const saved = shipped({ contextWindow: 65536, maxTokens: 65536 });
+    writeEnvFile("LLAMACPP_CONTEXT_WINDOW=65536\n");
+    const { cfg, changed } = migrate(saved);
+    expect(changed).toBe(false);
+    expect(cfg).toEqual(saved);
+  });
+
+  it("does not touch an entry that points at another server, or a row with its own endpoint", () => {
+    writeToken(TOKEN);
+    const foreign = shipped({ contextWindow: 131072, maxTokens: 131072 }, "http://127.0.0.1:9000/v1");
+    expect(migrate(foreign).cfg).toEqual(foreign);
+
+    const ownRow = shipped({ contextWindow: 131072, maxTokens: 131072, baseUrl: "http://127.0.0.1:9000/v1" });
+    expect(migrate(ownRow).cfg).toEqual(ownRow);
+  });
+
+  it("leaves a row that states no window to OpenClaw", () => {
+    writeToken(TOKEN);
+    const saved = shipped({});
+    const { cfg, changed } = migrate(saved);
+    expect(changed).toBe(false);
+    expect(cfg).toEqual(saved);
   });
 });

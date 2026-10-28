@@ -103,6 +103,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
@@ -3675,6 +3676,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // (src/lib/provider-plugin-ops.ts).
       baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
       baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
+      // Tool Search off while the primary is the on-device model, in the batch
+      // that puts it there (src/lib/local-tool-search.ts).
+      baseOps.push(...(await localToolSearchArmOps(configBeforeSave, config.defaultModel)));
       // The reference is `openai/<id>` for both OpenAI auth modes; this entry
       // is what says the turn belongs to the ChatGPT account and runs on the
       // Codex app-server — the key the core itself keeps when it migrates a
@@ -3861,6 +3865,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       },
       () => runConfigSetBatch(baseOps),
     );
+    // A cloud primary written above: OpenClaw's own Tool Search back, as it ships.
+    let toolSearchWarning: string | undefined;
+    if (primaryIdx !== -1 && localToolSearchDisarmNeeded(configBeforeSave, config.defaultModel)) {
+      toolSearchWarning = await disarmLocalToolSearch("AI Config");
+    }
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
@@ -4706,7 +4715,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const sessionSweepWarning = sessionSweepFailed
       ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
       : undefined;
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, sessionSweepWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, toolSearchWarning, hermesWarning, sessionSweepWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({

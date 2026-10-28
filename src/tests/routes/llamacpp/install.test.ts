@@ -309,9 +309,10 @@ describe("POST /setup-api/llamacpp/install", () => {
         detached: true,
       })
     );
-    // The trailing "0" is the ctx-size argument, which tells llama-server
-    // to load the full trained context window from the model metadata.
-    expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("0");
+    // The trailing argument is the ctx-size: the same window OpenClaw's row is
+    // told (DEFAULT_LLAMACPP_CONTEXT_WINDOW), no longer "0" — the model's
+    // trained 128k, which the row never claimed.
+    expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("32768");
     expect(mockConfigureAiModel).toHaveBeenCalled();
     expect(text).toContain("Starting preinstalled Gemma 4");
     expect(text).toContain("Returning it to standby");

@@ -57,10 +57,18 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(async () => {}),
   runOpenclawConfigSet: vi.fn(async () => {}),
   runOpenclawConfigSetBatch: vi.fn(async () => {}),
+  runOpenclawConfigUnset: vi.fn(async () => {}),
+}));
+// Tool Search follows the on-device primary only on a 2026.10+ core
+// (src/lib/local-tool-search.ts); an unknown core writes nothing.
+const coreAtLeastMock = vi.fn(async () => false);
+vi.mock("@/lib/openclaw-core-generation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-core-generation")>()),
+  installedOpenclawCoreAtLeast: (...args: unknown[]) => coreAtLeastMock(...(args as [])),
 }));
 
 import { get, setMany } from "@/lib/config-store";
-import { restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { readConfig, restartGateway, runOpenclawConfigSetBatch, runOpenclawConfigUnset } from "@/lib/openclaw-config";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
@@ -365,5 +373,65 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
       expect(body.code).toBeUndefined();
       expect(body.error).toBe(UNKNOWN_MODEL);
     });
+  });
+});
+
+describe("POST /setup-api/local-ai/exclusive — OpenClaw's Tool Search follows the local primary", () => {
+  const TOOL_SEARCH_OFF = ["tools.toolSearch", JSON.stringify({ enabled: false }), "--json"];
+  let POST: (request: Request) => Promise<Response>;
+  let store: Record<string, unknown>;
+  const toggle = (enabled: boolean) => POST(new Request("http://localhost/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }));
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    coreAtLeastMock.mockReset().mockResolvedValue(true);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+    vi.mocked(readConfig).mockReset().mockResolvedValue({ agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } } } as never);
+    store = { local_ai_model: "llamacpp/gemma4-e2b-it-q4_0" };
+    vi.mocked(get).mockImplementation(async (key: string) => store[key]);
+    vi.mocked(restartGateway).mockResolvedValue(undefined);
+    POST = (await import("@/app/setup-api/local-ai/exclusive/route")).POST;
+  });
+
+  it("turns Tool Search off in the batch that makes the local model the primary", async () => {
+    const response = await toggle(true);
+    expect(response.status).toBe(200);
+    const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0];
+    expect(batch).toContainEqual(["agents.defaults.model.primary", JSON.stringify("llamacpp/gemma4-e2b-it-q4_0"), "--json"]);
+    expect(batch).toContainEqual(TOOL_SEARCH_OFF);
+  });
+
+  it("gives the restored cloud primary OpenClaw's default back", async () => {
+    store = { ...store, local_only_mode: true, local_only_saved_primary: "deepseek/deepseek-v4-flash" };
+    vi.mocked(readConfig).mockResolvedValue({
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      tools: { toolSearch: { enabled: false } },
+    } as never);
+
+    const body = await (await toggle(false)).json();
+
+    expect(body.enabled).toBe(false);
+    expect(runOpenclawConfigUnset).toHaveBeenCalledWith("tools.toolSearch");
+    expect(vi.mocked(runOpenclawConfigUnset).mock.invocationCallOrder[0])
+      .toBeGreaterThan(vi.mocked(runOpenclawConfigSetBatch).mock.invocationCallOrder[0]);
+  });
+
+  it("leaves it off when nothing could be restored and the box stays on the local model", async () => {
+    store = { ...store, local_only_mode: true };
+    vi.mocked(readConfig).mockResolvedValue({ tools: { toolSearch: { enabled: false } } } as never);
+    await toggle(false);
+    expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+  });
+
+  it("never touches an owner's own setting", async () => {
+    vi.mocked(readConfig).mockResolvedValue({ tools: { toolSearch: false } } as never);
+    await toggle(true);
+    expect(vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0]).not.toContainEqual(TOOL_SEARCH_OFF);
   });
 });

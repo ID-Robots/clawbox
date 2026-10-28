@@ -2248,6 +2248,8 @@ export interface OpenClawConfig {
   };
   tools?: {
     profile?: string;
+    /** OpenClaw's Tool Search; unset means on. Off while the primary is on the device (src/lib/local-tool-search.ts). */
+    toolSearch?: boolean | { enabled?: boolean; mode?: string; [key: string]: unknown };
     web?: { search?: { enabled?: boolean } };
     // Media understanding — the surface a channel voice note is transcribed
     // through. Not a models[] row: it has its own endpoint and its own ordered
