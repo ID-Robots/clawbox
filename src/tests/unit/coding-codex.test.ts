@@ -86,10 +86,10 @@ describe("the argv", () => {
   it("hands the run's MCP servers over as config, in TOML", () => {
     const args = buildCodexArgs({
       ...BASE,
-      mcpServers: { clawbox: { command: "/home/u/.bun/bin/bun", args: ["run", "/srv/mcp/clawbox-mcp.ts"], env: { CLAWBOX_MCP_PROFILE: "browser", CLAWBOX_RUN_DIR: "/srv/p" } } },
+      mcpServers: { clawbox: { command: "/opt/bun/bin/bun", args: ["run", "/srv/mcp/clawbox-mcp.ts"], env: { CLAWBOX_MCP_PROFILE: "browser", CLAWBOX_RUN_DIR: "/srv/p" } } },
     });
     expect(override(args, "mcp_servers.clawbox")).toBe(
-      '{ command = "/home/u/.bun/bin/bun", args = ["run", "/srv/mcp/clawbox-mcp.ts"], env = { CLAWBOX_MCP_PROFILE = "browser", CLAWBOX_RUN_DIR = "/srv/p" } }',
+      '{ command = "/opt/bun/bin/bun", args = ["run", "/srv/mcp/clawbox-mcp.ts"], env = { CLAWBOX_MCP_PROFILE = "browser", CLAWBOX_RUN_DIR = "/srv/p" } }',
     );
     expect(codexConfigOverrides(BASE).some((o) => o.startsWith("mcp_servers."))).toBe(false);
   });
