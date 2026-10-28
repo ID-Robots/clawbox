@@ -25,8 +25,15 @@
 
 import type { ChatRunFailureContext, ChatFailureWords } from "@/lib/chat-error-text";
 import { providerDisplayName } from "@/lib/chat-error-text";
+import type { ChatNoticeActions } from "@/lib/chat-history-cache";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 import { followsNewestModel } from "@/lib/provider-newest-model";
+import {
+  CHAT_MODEL_STATE_EVENT,
+  dispatchOpenSettingsSection,
+  onStandaloneAppPage,
+  standaloneSettingsHref,
+} from "@/lib/ui-events";
 import { creditConsoleFor } from "@/lib/zero-quota";
 
 /** The route's answer (src/lib/provider-model-fallback.ts `ModelFallbackOutcome`). */
@@ -42,6 +49,10 @@ export interface ModelFallbackAnswer {
   switched?: boolean;
   resent?: boolean;
   news?: boolean;
+  /** No model of the provider runs on this account right now: the box stopped instead of moving the chat. */
+  accountExhausted?: boolean;
+  /** Another provider the box can chat with, for the one-click switch. */
+  alternative?: { model: string; label: string; provider: string | null } | null;
 }
 
 /** A run worth reporting, as read off its frames. */
@@ -194,22 +205,49 @@ export async function reportModelFallback(input: ModelFallbackReportInput): Prom
   }
 }
 
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
 /**
- * The line the chat adds: why the model cannot run on this account, what the
- * box did about it, and — for a zero limit — how to get the model back. Null
- * when the box did not act.
+ * One of this feature's sentences in the owner's language, with the English
+ * table under it — `t` answers the key itself for a key it does not know.
  */
-export function describeModelFallback(answer: ModelFallbackAnswer | null, words: Pick<ChatFailureWords, "t">): string | null {
+export function modelAvailabilityText(t: Translate | undefined, key: string, params: Record<string, string> = {}): string {
+  const hit = t?.(key, params);
+  let out = hit && hit !== key ? hit : (modelAvailabilityEn[key] ?? "");
+  for (const [name, value] of Object.entries(params)) out = out.replaceAll(`{${name}}`, value);
+  return out;
+}
+
+/** What the chat adds for an answer: the line, drawn calm, and the buttons under it. */
+export interface ModelFallbackNotice {
+  text: string;
+  variant: "notice";
+  actions?: ChatNoticeActions;
+}
+
+/**
+ * The note the chat adds: why the model cannot run on this account, what the
+ * box did about it, and how to get going again. Calm, never red: the owner's
+ * account has no quota for a model, which is a fact about the account and not
+ * a fault of the box. Null when the box did not act.
+ *
+ * When NO model of the provider runs on the account (`accountExhausted`) it is
+ * one sentence for the provider, not a model-by-model account, with Settings →
+ * Providers and — when the box has one set up — a switch to another provider.
+ */
+export function modelFallbackNotice(answer: ModelFallbackAnswer | null, words: Pick<ChatFailureWords, "t">): ModelFallbackNotice | null {
   if (!answer?.handled) return null;
-  const say = (key: string, params: Record<string, string>): string => {
-    const hit = words.t(key, params);
-    let out = hit && hit !== key ? hit : (modelAvailabilityEn[key] ?? "");
-    for (const [name, value] of Object.entries(params)) out = out.replaceAll(`{${name}}`, value);
-    return out;
-  };
+  const say = (key: string, params: Record<string, string>): string => modelAvailabilityText(words.t, key, params);
   const provider = providerDisplayName(answer.provider);
-  const model = answer.modelLabel || answer.model || "";
+  const creditConsole = creditConsoleFor(answer.provider);
   const fallback = answer.fallbackLabel || answer.fallbackModel || "";
+  const actions: ChatNoticeActions | undefined = fallback
+    ? undefined
+    : { openProviders: true, ...(answer.alternative?.model ? { switchTo: answer.alternative } : {}) };
+  if (answer.accountExhausted && !fallback) {
+    return { text: say("chat.modelUnavailableAccountNoQuota", { provider, console: creditConsole ?? provider }), variant: "notice", actions };
+  }
+  const model = answer.modelLabel || answer.model || "";
   const parts = [
     say(answer.kind === "not_found" ? "chat.modelUnavailableNotFound" : "chat.modelUnavailableZeroQuota", { model, provider }),
   ];
@@ -217,9 +255,47 @@ export function describeModelFallback(answer: ModelFallbackAnswer | null, words:
   else if (answer.pending) parts.push(say("chat.modelUnavailableSwitching", { fallback }));
   else if (!answer.switched) parts.push(say("chat.modelUnavailablePick", { fallback }));
   else parts.push(say(answer.resent ? "chat.modelUnavailableResent" : "chat.modelUnavailableSwitched", { fallback }));
-  const creditConsole = creditConsoleFor(answer.provider);
   if (answer.kind !== "not_found" && creditConsole) {
     parts.push(say("chat.modelUnavailableAddCredit", { model, console: creditConsole }));
   }
-  return parts.filter(Boolean).join(" ");
+  return { text: parts.filter(Boolean).join(" "), variant: "notice", ...(actions ? { actions } : {}) };
+}
+
+/** The note's words alone — for a surface that has nowhere to put the buttons. */
+export function describeModelFallback(answer: ModelFallbackAnswer | null, words: Pick<ChatFailureWords, "t">): string | null {
+  return modelFallbackNotice(answer, words)?.text ?? null;
+}
+
+/**
+ * The notice's "Settings → Providers": the Settings window on its Providers
+ * section — or, on the standalone `/app/<id>` page a phone lands on, where no
+ * desktop listens for the open, that page's own Settings address.
+ */
+export function openProvidersSettings(): void {
+  if (typeof window === "undefined") return;
+  if (onStandaloneAppPage()) window.location.assign(standaloneSettingsHref("ai"));
+  else dispatchOpenSettingsSection("ai");
+}
+
+/**
+ * The notice's one-click switch, for a surface without the header picker's own
+ * switch: the same request the picker sends — the owner's choice, so not
+ * `automatic` — then the signal every picker on the page re-reads its state on.
+ * A 502 carrying a warning is a switch that landed while the gateway settles.
+ */
+export async function switchChatToProvider(target: { model: string; provider: string | null }): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch("/setup-api/chat/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: target.model, ...(target.provider ? { provider: target.provider } : {}) }),
+    });
+    const data = await res.json().catch(() => ({})) as { error?: unknown; warning?: unknown };
+    const landed = res.ok || (res.status === 502 && typeof data.warning === "string" && data.warning !== "");
+    if (!landed) return { ok: false, error: typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}` };
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }

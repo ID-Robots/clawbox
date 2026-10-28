@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import ChatApp from "@/components/ChatApp";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { OPEN_SETTINGS_SECTION_EVENT } from "@/lib/ui-events";
 
 // Both surfaces mount the fake gateway handshake, the history restore and the
 // transcript in jsdom; see test-timeout-hygiene.test.ts for the per-file ceiling.
@@ -30,6 +31,22 @@ const FALLBACK_LINE =
   "Grok 4.6 is not available on this xAI account — its rate limit is 0 (no API credit or quota for it yet)."
   + " Switched the chat to Grok 4.7 and sent your message again."
   + " To use Grok 4.6, add credit at console.x.ai.";
+
+/** The test box, 2026-10: the account's xAI quota ran out — every Grok model answers 0/0. */
+const NO_QUOTA_LINE =
+  "Your xAI account has no API quota right now (xAI sets it by your spend). Add credit at console.x.ai, or switch provider.";
+const EXHAUSTED = {
+  handled: true, kind: "zero_quota", provider: "xai", model: "grok-4.7", modelLabel: "Grok 4.7",
+  fallbackModel: null, fallbackLabel: null, switched: false, resent: false, news: true,
+  accountExhausted: true, alternative: { model: "openai/gpt-5.5", label: "ChatGPT", provider: "openai-codex" },
+};
+
+/** Every inline colour from `el` up to the transcript: what the bubble is drawn in. */
+function coloursAround(el: HTMLElement): string[] {
+  const out: string[] = [];
+  for (let node: HTMLElement | null = el; node; node = node.parentElement) if (node.style?.color) out.push(node.style.color);
+  return out;
+}
 
 let histories: Record<string, unknown[]> = {};
 const sent: Array<Record<string, unknown>> = [];
@@ -215,6 +232,58 @@ describe.each([
     await act(async () => { release(); await new Promise((r) => setTimeout(r, 20)); });
 
     await waitFor(() => expect(bubbles(STOPPED)).toHaveLength(1));
+  });
+
+  it("says ONCE, calmly, that the account has no API quota when no model of the provider is left — with Settings → Providers and a one-click switch", async () => {
+    fallbackAnswer = { body: EXHAUSTED, release: Promise.resolve() };
+    await mount(surface);
+    const { runId, sessionKey } = await sendPrompt();
+
+    await attemptFailed(runId, sessionKey, "xai", "grok-4.7");
+    await retrying(runId, sessionKey);
+    await waitFor(() => expect(fallbackReports()).toHaveLength(1));
+    await aborted(runId, sessionKey);
+
+    const line = await screen.findByText(NO_QUOTA_LINE);
+    expect(bubbles(NO_QUOTA_LINE)).toHaveLength(1);
+    // Calm blue, never the red of an error.
+    const colours = coloursAround(line);
+    expect(colours[0]).toBe("rgb(191, 219, 254)");
+    expect(colours).not.toContain("rgb(239, 68, 68)");
+    expect(colours).not.toContain("rgb(252, 165, 165)");
+    expect(bubbles(STOPPED)).toHaveLength(0);
+    expect(document.body.textContent ?? "").not.toMatch(/is not available on this xAI account|Switched the chat to Grok/);
+
+    // Settings → Providers opens the Settings window on its Providers section.
+    const opened: string[] = [];
+    const onOpen = (event: Event) => opened.push(String((event as CustomEvent<{ section?: string }>).detail?.section));
+    window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpen);
+    fireEvent.click(screen.getByTestId("chat-notice-providers"));
+    window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpen);
+    expect(screen.getByTestId("chat-notice-providers").textContent).toBe("Settings → Providers");
+    expect(opened).toEqual(["ai"]);
+
+    // The one-click switch sends the picker's own request for the other provider.
+    const switchButton = screen.getByTestId("chat-notice-switch");
+    expect(switchButton.textContent).toBe("Switch to ChatGPT");
+    await act(async () => { fireEvent.click(switchButton); await new Promise((r) => setTimeout(r, 20)); });
+    const switches = vi.mocked(fetch).mock.calls
+      .filter(([input, init]) => String(input).includes("/setup-api/chat/model") && (init as RequestInit | undefined)?.method === "POST")
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
+    expect(switches).toEqual([{ model: "openai/gpt-5.5", provider: "openai-codex" }]);
+  });
+
+  it("draws the failed turn's zero-quota sentence calm too, when the provider's words reach the chat", async () => {
+    await mount(surface);
+    const { runId, sessionKey } = await sendPrompt();
+    await push("chat", {
+      runId,
+      sessionKey,
+      state: "error",
+      errorMessage: "429 Too many requests for team T and model grok-4.7. Your team's rate limit is — Requests per Minute (actual/limit): 0/0.",
+    });
+    const line = await screen.findByText(/That message did not go through — .* its rate limit is 0/);
+    expect(coloursAround(line)[0]).toBe("rgb(191, 219, 254)");
   });
 
   it("costs nothing for a provider whose models do not fall back", async () => {

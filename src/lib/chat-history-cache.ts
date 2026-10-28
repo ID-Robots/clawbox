@@ -57,7 +57,21 @@ export interface ChatMessage {
   provider?: string;
   // On a `system` row only. "stopped" marks where the owner pressed Stop: the
   // row is worded by the chat (`chat.stopped`) and drawn neutral, not red.
-  variant?: "success" | "error" | "stopped";
+  // "notice" is a fact about the owner's account the box cannot fix — a
+  // provider with no API quota right now — drawn calm, not red.
+  variant?: "success" | "error" | "stopped" | "notice";
+  // On a "notice" row only: what the owner can do about it in one click.
+  actions?: ChatNoticeActions;
+}
+
+/**
+ * The buttons under a notice: open Settings → Providers, and switch the chat
+ * to another provider the box has set up (the picker row's model, name and
+ * provider id, as `/setup-api/chat/model` takes them).
+ */
+export interface ChatNoticeActions {
+  openProviders?: boolean;
+  switchTo?: { model: string; label: string; provider: string | null };
 }
 
 /** The gateway suffixes its stored copy by role; the client holds the bare run id. */

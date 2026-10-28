@@ -32,6 +32,7 @@ import {
   oauthRefreshFenceState,
   putGatewayOAuthProfile,
   readGatewayAuthProfile,
+  readGatewayProviderSecret,
   type GatewayAuthStoreKind,
   type GatewayOAuthBundle,
 } from "@/lib/openclaw-auth-store";
@@ -931,5 +932,48 @@ describe("the suite's own floor under the store", () => {
     const body = source.slice(source.indexOf("export function gatewayAuthPaths()"), source.indexOf("export function tokenFingerprint"));
     const read = [...body.matchAll(/process\.env\.([A-Z_]+)/g)].map((m) => m[1]).filter((name) => name !== "HOME");
     expect([...new Set(read)].sort()).toEqual(["CLAWBOX_OPENCLAW_HOME", "OPENCLAW_AGENTS_DIR", "OPENCLAW_HOME", "OPENCLAW_STATE_DIR"]);
+  });
+});
+
+describe("readGatewayProviderSecret — the one read that hands a credential out, for the model probe", () => {
+  const XAI_KEY = "xai-FAKE-a-pasted-key";
+  const XAI_ACCESS = "xai-FAKE-a-sign-in-access";
+  const xaiProfiles = (extra: Record<string, unknown> = {}) => ({
+    version: 1,
+    profiles: {
+      ...OTHERS,
+      "xai:default": { type: "api_key", provider: "xai", key: XAI_KEY },
+      "xai:signin": { type: "oauth", provider: "xai", access: XAI_ACCESS, refresh: "xai-FAKE-refresh", expires: EXPIRES },
+      ...extra,
+    },
+  });
+
+  for (const kind of ["shared", "agent"] as const) {
+    it(`answers the profile core tries first for the provider, from the ${kind} store`, () => {
+      STORES[kind].build(xaiProfiles(), { version: 1, order: { xai: ["xai:signin", "xai:default"] } });
+      expect(readGatewayProviderSecret("xai", paths, 1_000)).toBe(XAI_ACCESS);
+      // With no stored order, the store's own order: the pasted key comes first.
+      fs.rmSync(STORES[kind].file(), { force: true });
+      STORES[kind].build(xaiProfiles(), { version: 1 });
+      expect(readGatewayProviderSecret("xai", paths, 1_000)).toBe(XAI_KEY);
+    });
+  }
+
+  it("passes over a fence and an expired sign-in to the next profile that can be spent", () => {
+    STORES.shared.build(
+      xaiProfiles({ "xai:signin": { ...fence({ failed: true }), provider: "xai" }, "xai:old": { type: "oauth", provider: "xai", access: "xai-FAKE-old", refresh: "r", expires: 500 } }),
+      { version: 1, order: { xai: ["xai:signin", "xai:old", "xai:default"] } },
+    );
+    expect(readGatewayProviderSecret("xai", paths, 1_000)).toBe(XAI_KEY);
+  });
+
+  it("answers null when there is nothing it could spend: another provider's, a keyRef, no store, a store it cannot read", () => {
+    STORES.shared.build({ version: 1, profiles: { ...OTHERS, "xai:default": { type: "api_key", provider: "xai", keyRef: { source: "env", id: "XAI_API_KEY" } } } });
+    expect(readGatewayProviderSecret("xai", paths)).toBeNull();
+    expect(readGatewayProviderSecret("xai", { agentsDir: path.join(home, "none"), sharedDb: path.join(home, "none.sqlite") })).toBeNull();
+    fs.rmSync(paths.sharedDb, { force: true });
+    fs.mkdirSync(path.dirname(paths.sharedDb), { recursive: true });
+    fs.writeFileSync(paths.sharedDb, GARBAGE);
+    expect(readGatewayProviderSecret("xai", paths)).toBeNull();
   });
 });

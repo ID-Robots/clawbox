@@ -592,6 +592,21 @@ function zeroQuotaSentence(context: ChatRunFailureContext | undefined, words: Ch
 }
 
 /**
+ * Is `describeChatFailure`'s sentence for this failure the zero-quota one? That
+ * sentence is a fact about the owner's account — the provider gives it no API
+ * quota for the model right now — not a fault, and the chat draws it as a calm
+ * notice rather than a red error. The same tests in the same order as there.
+ */
+export function isAccountQuotaFailure(raw: unknown, context?: ChatRunFailureContext): boolean {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
+  if (!evidence || isSessionTakeover(text)) return false;
+  if (missingCredential(requestedAttempt(text) ?? evidence)) return false;
+  if (allowanceSentence(evidence, undefined)) return false;
+  return statesZeroRateLimit(evidence);
+}
+
+/**
  * Customer-facing text for a chat turn that ended in `state: "error"`.
  *
  * Always returns something. A silent failure — a turn that just stops with no
