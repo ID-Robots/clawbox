@@ -218,6 +218,9 @@ vi.mock("@/lib/llamacpp", () => ({
   // Real impl defaults to `getLlamaCppContextWindow()` when the env var is unset.
   getLlamaCppMaxTokens: vi.fn().mockReturnValue(131072),
   getLlamaCppProxyBaseUrl: vi.fn().mockReturnValue(LLAMACPP_PROXY_BASE_URL),
+  // The real declaration: the row a 2026.10+ core gets (src/lib/llamacpp.ts).
+  LLAMACPP_REASONING_COMPAT: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+  llamaCppThinkingDefaultOp: (ref: string) => [`agents.defaults.models[${JSON.stringify(ref)}].params.thinking`, "off"],
 }));
 
 vi.mock("@/lib/local-ai-runtime", () => ({
@@ -1122,6 +1125,50 @@ describe("POST /setup-api/ai-models/configure", () => {
       const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
       expect(commands).toContain("config set models.mode merge");
       expect(vi.mocked(forgetProviderEnumerations)).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the on-device model's thinking: per request, off unless asked", () => {
+    const THINKING_DEFAULT = 'agents.defaults.models["llamacpp/gemma4-e2b-it-q4_0"].params.thinking';
+    const localRow = () => {
+      const call = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.llamacpp");
+      return JSON.parse(call?.value || "{}").models?.[0] ?? {};
+    };
+
+    it("declares binary reasoning on the row and makes off the model's own default", async () => {
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      expect(localRow()).toMatchObject({
+        reasoning: true,
+        compat: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+      });
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+        .map((call) => call[0] as string[][])
+        .find((ops) => ops.some((op) => op[0] === "models.providers.llamacpp"));
+      expect(batch).toContainEqual([THINKING_DEFAULT, "off"]);
+    });
+
+    it("keeps a default the owner already chose", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({
+        agents: { defaults: { models: { "llamacpp/gemma4-e2b-it-q4_0": { params: { thinking: "high" } } } } },
+      });
+      await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), THINKING_DEFAULT)).toBeUndefined();
+      expect(localRow().reasoning).toBe(true);
+    });
+
+    it("hands an older core the row it knows, and no default for a level it cannot take", async () => {
+      const { installedOpenclawCoreAtLeast } = await import("@/lib/openclaw-core-generation");
+      vi.mocked(installedOpenclawCoreAtLeast).mockResolvedValue(false);
+      try {
+        await configurePost(jsonRequest({ provider: "llamacpp" }));
+        expect(localRow().reasoning).toBe(false);
+        expect(localRow().compat).toBeUndefined();
+        expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), THINKING_DEFAULT)).toBeUndefined();
+      } finally {
+        vi.mocked(installedOpenclawCoreAtLeast).mockResolvedValue(true);
+      }
     });
   });
 

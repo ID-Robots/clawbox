@@ -18,14 +18,23 @@ import {
 
 describe("chat-reasoning", () => {
   describe("getProviderReasoningConfig", () => {
-    it("returns off-only for local Gemma (llamacpp) so the header hides the picker", () => {
+    it("offers local Gemma (llamacpp) Off and High, starting at Off", () => {
+      // Its row declares binary reasoning (LLAMACPP_REASONING_COMPAT): every
+      // enabled level clamps to `high`, so a graded ladder would offer three
+      // settings that do the same thing. Off is the default — thinking about
+      // doubles the answer time on this hardware.
       const cfg = getProviderReasoningConfig("llamacpp");
-      // Gemma exposes no reasoning-effort control; the gateway rejects any
-      // thinkingLevel other than `off`. Off-only (length 1) is what makes the
-      // chat header drop the effort dropdown instead of erroring on select.
+      expect(cfg.levels).toEqual(["off", "high"]);
+      expect(cfg.default).toBe("off");
+    });
+
+    it("hides the picker for local Gemma on a box whose row still takes off only", () => {
+      // A row from before the declaration: the gateway publishes `off` alone
+      // and would reject anything else, so off-only (length 1) is what makes
+      // the chat header drop the dropdown instead of erroring on select.
+      const cfg = getProviderReasoningConfig("llamacpp", "llamacpp/gemma4-e2b-it-q4_0", ["off"]);
       expect(cfg.levels).toEqual(["off"]);
       expect(cfg.default).toBe("off");
-      expect(cfg.levels.length).toBe(1);
     });
 
     it("exposes a uniform off/low/medium/high ladder for every cloud provider", () => {
@@ -153,9 +162,12 @@ describe("chat-reasoning", () => {
     });
 
     it("clamps an unsupported level to the provider default", () => {
-      // Local Gemma (llamacpp) supports `off` only.
-      expect(resolveWireThinkingLevel("llamacpp", "high")).toBe("off");
+      // Local Gemma (llamacpp) takes off and high only.
       expect(resolveWireThinkingLevel("llamacpp", "medium")).toBe("off");
+      expect(resolveWireThinkingLevel("llamacpp", "low")).toBe("off");
+      expect(resolveWireThinkingLevel("llamacpp", "high")).toBe("high");
+      // ...and `off` alone where the gateway says its row takes nothing else.
+      expect(resolveWireThinkingLevel("llamacpp", "high", "llamacpp/gemma4-e2b-it-q4_0", ["off"])).toBe("off");
     });
 
     it("holds (returns null) while the active provider is still unknown", () => {
@@ -176,10 +188,13 @@ describe("chat-reasoning", () => {
       // After the switch to local Gemma, both the state-snap path and the
       // wire-clamp path independently yield `off` — so even if the header
       // state lags a render behind, the wire value is already safe.
+      // The state snaps to local Gemma's OWN default — a cloud `high` is never
+      // inherited by a model where High doubles the answer time.
       const localCfg = getProviderReasoningConfig("llamacpp");
       const snapped = readPersistedThinkingLevel("llamacpp", localCfg); // no persisted choice
       expect(snapped).toBe("off");
-      expect(resolveWireThinkingLevel("llamacpp", "high")).toBe("off");
+      // And where the box's row takes `off` only, the wire clamp folds it too.
+      expect(resolveWireThinkingLevel("llamacpp", "high", "llamacpp/gemma4-e2b-it-q4_0", ["off"])).toBe("off");
     });
 
     it("never returns a level the resolved provider rejects", () => {

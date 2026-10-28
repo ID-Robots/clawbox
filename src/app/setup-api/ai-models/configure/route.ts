@@ -72,6 +72,8 @@ import {
   getLlamaCppContextWindow,
   getLlamaCppMaxTokens,
   getLlamaCppProxyBaseUrl,
+  LLAMACPP_REASONING_COMPAT,
+  llamaCppThinkingDefaultOp,
 } from "@/lib/llamacpp";
 import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
@@ -4247,6 +4249,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
       const modelName = config.defaultModel.replace(/^llamacpp\//, "");
+      // Thinking per request, off unless asked (LLAMACPP_REASONING_COMPAT) —
+      // keys of a 2026.10+ core; an older or unreadable one gets the old row.
+      const localReasoning = await installedOpenclawCoreAtLeast(2026, 10);
       const providerDef = JSON.stringify({
         baseUrl: getLlamaCppProxyBaseUrl(),
         api: "openai-completions",
@@ -4254,16 +4259,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         models: [{
           id: modelName,
           name: modelName,
-          reasoning: false,
+          reasoning: localReasoning,
+          ...(localReasoning ? { compat: LLAMACPP_REASONING_COMPAT } : {}),
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: llamaCppContextWindow,
           maxTokens: llamaCppMaxTokens,
         }],
       });
+      // A reasoning row defaults to `medium` in the core: `off` is the model's
+      // own default unless the owner already set one.
+      const thinkingDefault = (configBeforeSave?.agents?.defaults as { models?: Record<string, { params?: { thinking?: unknown } }> } | undefined)
+        ?.models?.[`llamacpp/${modelName}`]?.params?.thinking;
       await runConfigSetBatch([
         ["models.providers.llamacpp", providerDef, "--json"],
         ["models.mode", isLocalScope ? "merge" : "replace"],
+        ...(localReasoning && thinkingDefault === undefined ? [llamaCppThinkingDefaultOp(`llamacpp/${modelName}`)] : []),
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);

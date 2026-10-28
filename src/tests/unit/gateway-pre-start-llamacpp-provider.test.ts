@@ -66,6 +66,7 @@ const TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 /** Tuning the block reads from the environment; never inherited (see migrate). */
 const AMBIENT_KEYS = [
+  "CLAWBOX_OPENCLAW_2026_10",
   "LLAMACPP_CONTEXT_WINDOW",
   "LLAMACPP_MAX_TOKENS",
   "CLAWBOX_LOCAL_AI_PROXY_BASE_URL",
@@ -99,6 +100,8 @@ function migrate(cfg: Config, env: Record<string, string> = {}): { cfg: Config; 
     "cfg = json.load(open(sys.argv[1]))",
     'agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})',
     "changed = False",
+    // Bound upstream exactly as the real script binds it (from the bash block).
+    'CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"',
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
@@ -1160,5 +1163,78 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — the llamacpp row's window
     const { cfg, changed } = migrate(saved);
     expect(changed).toBe(false);
     expect(cfg).toEqual(saved);
+  });
+});
+
+describe.skipIf(!hasPython3)("gateway-pre-start.sh — thinking on the on-device model, per request", () => {
+  // The row declares binary reasoning and the model's own default is `off`
+  // (LLAMACPP_REASONING_COMPAT in src/lib/llamacpp.ts): OpenClaw then sends a
+  // reasoning effort only when a chat or a message asks, and the ClawBox proxy
+  // turns it into llama-server's enable_thinking. Keys of a 2026.10+ core.
+  const PROXY = "http://127.0.0.1/setup-api/local-ai/llamacpp/v1";
+  const CORE_2026_10 = { CLAWBOX_OPENCLAW_2026_10: "1" };
+  const COMPAT = { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } };
+  const REF = "llamacpp/gemma4-e2b-it-q4_0";
+
+  function shipped(row: Record<string, unknown> = {}, defaults: Record<string, unknown> = {}): Config {
+    return {
+      models: { providers: { llamacpp: { baseUrl: PROXY, api: "openai-completions", apiKey: TOKEN, models: [{
+        id: "gemma4-e2b-it-q4_0", name: "gemma4-e2b-it-q4_0", reasoning: false, contextWindow: 32768, maxTokens: 8192, ...row,
+      }] } } },
+      agents: { defaults: { model: { primary: REF }, ...defaults } },
+    };
+  }
+  const thinkingDefault = (cfg: Config) =>
+    ((cfg.agents as { defaults?: { models?: Record<string, { params?: { thinking?: unknown } }> } }).defaults?.models?.[REF]?.params?.thinking);
+
+  it("upgrades the row ClawBox wrote before and makes off the model's default", () => {
+    writeToken(TOKEN);
+    const { cfg, changed, log } = migrate(shipped(), CORE_2026_10);
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]).toMatchObject({ reasoning: true, compat: COMPAT });
+    expect(thinkingDefault(cfg)).toBe("off");
+    expect(log).toContain("Thinking on demand for models.providers.llamacpp row(s) gemma4-e2b-it-q4_0");
+  });
+
+  it("registers a repaired row with the declaration already on it", () => {
+    writeToken(TOKEN);
+    const { cfg } = migrate({ models: { providers: {} }, agents: { defaults: { model: { primary: REF } } } }, CORE_2026_10);
+    expect(llamacppProvider(cfg).models?.[0]).toMatchObject({ reasoning: true, compat: COMPAT });
+    expect(thinkingDefault(cfg)).toBe("off");
+  });
+
+  it("is idempotent", () => {
+    writeToken(TOKEN);
+    const first = migrate(shipped(), CORE_2026_10);
+    const second = migrate(first.cfg, CORE_2026_10);
+    expect(second.changed).toBe(false);
+    expect(second.cfg).toEqual(first.cfg);
+  });
+
+  it("keeps an owner's default, an owner's compat and an alias already there", () => {
+    writeToken(TOKEN);
+    const saved = shipped(
+      { reasoning: true, compat: { supportedReasoningEfforts: ["low", "high"] } },
+      { models: { [REF]: { alias: "local", params: { thinking: "high", temperature: 0.2 } } } },
+    );
+    const { cfg, changed } = migrate(saved, CORE_2026_10);
+    expect(changed).toBe(false);
+    expect(cfg).toEqual(saved);
+  });
+
+  it("hands an older core the row it knows", () => {
+    writeToken(TOKEN);
+    const saved = shipped();
+    expect(migrate(saved).cfg).toEqual(saved);
+    const repaired = migrate({ models: { providers: {} }, agents: { defaults: { model: { primary: REF } } } });
+    expect(llamacppProvider(repaired.cfg).models?.[0]).toMatchObject({ reasoning: false });
+    expect(llamacppProvider(repaired.cfg).models?.[0]).not.toHaveProperty("compat");
+  });
+
+  it("does not touch an entry that points at another server", () => {
+    writeToken(TOKEN);
+    const saved = shipped();
+    ((saved.models as { providers: Record<string, ProviderDef> }).providers.llamacpp).baseUrl = "http://127.0.0.1:9000/v1";
+    expect(migrate(saved, CORE_2026_10).cfg).toEqual(saved);
   });
 });

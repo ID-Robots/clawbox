@@ -64,6 +64,36 @@ export const SUPERSEDED_LLAMACPP_CONTEXT_WINDOW = 131072;
 export const SUPERSEDED_LLAMACPP_MAX_TOKENS = 131072;
 export const SUPERSEDED_LLAMACPP_CACHE_TYPE = "q4_0";
 
+/**
+ * Thinking on the on-device model: off unless a request asks for it.
+ *
+ * llama-server reads `chat_template_kwargs.enable_thinking` per request, and
+ * the ClawBox proxy sets it from an OpenAI-style `reasoning_effort`
+ * (src/lib/local-ai-thinking.ts). OpenClaw sends that field only for a row that
+ * declares `reasoning: true`; this compat makes it binary — every enabled level
+ * clamps to `high`, `off` is sent as `none` — because the model has no graded
+ * effort. And a reasoning row's default would be `medium`, so the row is
+ * written together with an `off` default for the model (llamaCppThinkingDefaultOp),
+ * which a session or one message (`/think high`) overrides.
+ *
+ * Measured on an 8 GB Jetson (reports/clawbox/local-ai/BENCHMARK.md): on ten
+ * everyday tasks thinking roughly doubled the median answer time for no real
+ * gain; on six multi-step questions it fixed one of two the model got wrong,
+ * at 5-9 s more per answer. So: off by default, on for the hard ones.
+ *
+ * Keys of OpenClaw 2026.10+; an older core gets the old row (reasoning: false).
+ * Keep in step with `_LLAMACPP_REASONING_COMPAT` in scripts/gateway-pre-start.sh.
+ */
+export const LLAMACPP_REASONING_COMPAT = Object.freeze({
+  supportedReasoningEfforts: Object.freeze(["none", "high"]),
+  reasoningEffortMap: Object.freeze({ off: "none" }),
+});
+
+/** The config-set entry that makes `off` the on-device model's own default thinking level. */
+export function llamaCppThinkingDefaultOp(modelRef: string): string[] {
+  return [`agents.defaults.models[${JSON.stringify(modelRef)}].params.thinking`, "off"];
+}
+
 export interface LlamaCppRecommendedModel {
   id: string;
   label: string;

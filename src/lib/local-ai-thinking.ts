@@ -37,6 +37,13 @@
  * this proxy (`providers.clawlocal.base_url`). The proxy is the one place we
  * control the outgoing request body.
  *
+ * OPENCLAW TOO. The OpenClaw edition's llamacpp row declares binary reasoning
+ * (LLAMACPP_REASONING_COMPAT in src/lib/llamacpp.ts), so the gateway sends
+ * `reasoning_effort` — `high` when a chat or one message asks to think, `none`
+ * otherwise — and it is translated here exactly as Hermes' is. Verified on a box
+ * through the gateway: the same question took 6.9 s at the default and 13.6 s
+ * with `--thinking high`, and only the second got it right.
+ *
  * THE OTHER BACKEND. Everything above is llama.cpp. Ollama is the opposite in
  * every respect — it READS `reasoning_effort`, it knows the same eight words,
  * and it rejects all but one of them outright on a model that cannot think.

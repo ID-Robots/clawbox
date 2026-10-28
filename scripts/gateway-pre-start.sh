@@ -1641,6 +1641,15 @@ def _llamacpp_int(_raw, _minimum, _default):
 _ctx = _llamacpp_int(_llamacpp_setting("LLAMACPP_CONTEXT_WINDOW"), 16384, 32768)
 _max_tokens = min(_llamacpp_int(_llamacpp_setting("LLAMACPP_MAX_TOKENS"), 1, 8192), _ctx)
 
+# Thinking on the on-device model: per request, off unless asked. The row
+# declares binary reasoning (every enabled level clamps to `high`, `off` is sent
+# as `none`, which the ClawBox proxy turns into enable_thinking) and the model's
+# own default is `off`, because a reasoning row otherwise defaults to `medium`.
+# Keys of a 2026.10+ core. Keep in step with LLAMACPP_REASONING_COMPAT in
+# src/lib/llamacpp.ts.
+_LLAMACPP_REASONING_COMPAT = {"supportedReasoningEfforts": ["none", "high"], "reasoningEffortMap": {"off": "none"}}
+_llamacpp_reasoning = bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False))
+
 if _wants_llamacpp and _llamacpp_gaps and not _llamacpp_model_ids:
     print(
         "  Skipped llamacpp provider repair: "
@@ -1717,15 +1726,16 @@ elif _wants_llamacpp and _llamacpp_gaps:
         ).rstrip("/")
         _repaired_entry = dict(_llamacpp_entry) if isinstance(_llamacpp_entry, dict) else {}
         if "models" in _llamacpp_gaps:
-            _repaired_entry["models"] = _llamacpp_rows + [{
+            _repaired_entry["models"] = _llamacpp_rows + [dict({
                 "id": _mid,
                 "name": _mid,
-                "reasoning": False,
+                "reasoning": _llamacpp_reasoning,
                 "input": ["text"],
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 "contextWindow": _ctx,
                 "maxTokens": _max_tokens,
-            } for _mid in _llamacpp_missing_ids]
+            }, **({"compat": json.loads(json.dumps(_LLAMACPP_REASONING_COMPAT))} if _llamacpp_reasoning else {}))
+                for _mid in _llamacpp_missing_ids]
         # The bearer we are about to write is PROVIDER-WIDE. OpenClaw resolves a
         # row's endpoint as `model.baseUrl ?? provider.baseUrl` and has no
         # per-model credential slot, so completing this entry while a row keeps
@@ -1881,6 +1891,57 @@ if (
             + str(_max_tokens)
             + ")"
         )
+
+    # The same rows, thinking per request (see _LLAMACPP_REASONING_COMPAT): a
+    # row in the shape ClawBox wrote before — `reasoning: false`, no compat —
+    # takes the declaration, and every reasoning row's model gets an `off`
+    # default unless one is set. An owner's own compat is left as it is.
+    if _llamacpp_reasoning:
+        _lc_thinking = []
+        _lc_defaults_models = None
+        for _row in _lc_entry_now["models"]:
+            if not isinstance(_row, dict) or not isinstance(_row.get("id"), str) or not _row["id"].strip():
+                continue
+            if isinstance(_row.get("baseUrl"), str) and _row["baseUrl"].strip():
+                continue
+            if _row.get("reasoning") is False and "compat" not in _row:
+                _row["reasoning"] = True
+                _row["compat"] = json.loads(json.dumps(_LLAMACPP_REASONING_COMPAT))
+                _lc_thinking.append(_row["id"])
+            if _row.get("reasoning") is not True:
+                continue
+            _agents_now = cfg.get("agents")
+            _defaults_now = _agents_now.get("defaults") if isinstance(_agents_now, dict) else None
+            if not isinstance(_defaults_now, dict):
+                continue
+            _lc_defaults_models = _defaults_now.get("models")
+            if _lc_defaults_models is None:
+                _lc_defaults_models = {}
+                _defaults_now["models"] = _lc_defaults_models
+            if not isinstance(_lc_defaults_models, dict):
+                continue
+            _ref = "llamacpp/" + _row["id"].strip()
+            _entry = _lc_defaults_models.get(_ref)
+            if _entry is None:
+                _entry = {}
+                _lc_defaults_models[_ref] = _entry
+            if not isinstance(_entry, dict):
+                continue
+            _params = _entry.get("params")
+            if _params is None:
+                _params = {}
+                _entry["params"] = _params
+            if isinstance(_params, dict) and "thinking" not in _params:
+                _params["thinking"] = "off"
+                if _row["id"] not in _lc_thinking:
+                    _lc_thinking.append(_row["id"])
+        if _lc_thinking:
+            changed = True
+            print(
+                "  Thinking on demand for models.providers.llamacpp row(s) "
+                + ", ".join(_lc_thinking)
+                + ": off by default, on when a chat or a message asks for it"
+            )
 
 # Reconciliation: models.providers.{llamacpp,ollama}.apiKey vs data/.local-ai-token.
 #
@@ -4369,6 +4430,47 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
         changed = True
 # --- end memory index defaults ---
 
+# Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
+#
+# Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
+# rule src/lib/local-tool-search.ts applies when a route moves the primary,
+# applied here on every boot for a box that was already on the local model
+# before this shipped and for the migrations above, which move the primary
+# themselves. The ~2B on-device model cannot drive tool_search/tool_call (it
+# sent tool_call with no id and claimed success), and the core's switch is
+# global, so it follows the primary. ClawBox writes {"enabled": false} and
+# removes only that exact value: an owner's own setting is never touched.
+# After every migration that moves the primary, so it sees the one they left
+# (only the DeepSeek V4 row defaults below follow, and they never move it).
+_LOCAL_TOOL_SEARCH_OFF = {"enabled": False}
+_ts_agents = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+_ts_defaults = _ts_agents.get("defaults") if isinstance(_ts_agents.get("defaults"), dict) else {}
+_ts_model = _ts_defaults.get("model")
+_ts_primary = _ts_model if isinstance(_ts_model, str) else (
+    _ts_model.get("primary") if isinstance(_ts_model, dict) else None
+)
+_ts_on_device = isinstance(_ts_primary, str) and _ts_primary.strip().startswith("llamacpp/")
+_ts_tools = cfg.get("tools")
+_ts_value = _ts_tools.get("toolSearch") if isinstance(_ts_tools, dict) else None
+_ts_ours = (
+    isinstance(_ts_value, dict)
+    and list(_ts_value.keys()) == ["enabled"]
+    and _ts_value["enabled"] is False
+)
+if _ts_on_device and (_ts_tools is None or (isinstance(_ts_tools, dict) and "toolSearch" not in _ts_tools)):
+    # 2026.10+ only: a key an older core's strict schema could refuse.
+    if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
+        if _ts_tools is None:
+            _ts_tools = {}
+            cfg["tools"] = _ts_tools
+        _ts_tools["toolSearch"] = dict(_LOCAL_TOOL_SEARCH_OFF)
+        changed = True
+        print("  Turned OpenClaw's Tool Search off: the primary is the on-device model, which needs its few tools as direct schemas")
+elif not _ts_on_device and _ts_ours:
+    del _ts_tools["toolSearch"]
+    changed = True
+    print("  Restored OpenClaw's Tool Search default: the primary is no longer the on-device model")
+
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:
@@ -4432,46 +4534,6 @@ if isinstance(ds_models, list):
         if not isinstance(model.get("input"), list) or not model.get("input"):
             model["input"] = ["text"]
             changed = True
-
-# Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
-#
-# Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
-# rule src/lib/local-tool-search.ts applies when a route moves the primary,
-# applied here on every boot for a box that was already on the local model
-# before this shipped and for the migrations above, which move the primary
-# themselves. The ~2B on-device model cannot drive tool_search/tool_call (it
-# sent tool_call with no id and claimed success), and the core's switch is
-# global, so it follows the primary. ClawBox writes {"enabled": false} and
-# removes only that exact value: an owner's own setting is never touched.
-# Last in the pass, so it sees the primary every migration above left.
-_LOCAL_TOOL_SEARCH_OFF = {"enabled": False}
-_ts_agents = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
-_ts_defaults = _ts_agents.get("defaults") if isinstance(_ts_agents.get("defaults"), dict) else {}
-_ts_model = _ts_defaults.get("model")
-_ts_primary = _ts_model if isinstance(_ts_model, str) else (
-    _ts_model.get("primary") if isinstance(_ts_model, dict) else None
-)
-_ts_on_device = isinstance(_ts_primary, str) and _ts_primary.strip().startswith("llamacpp/")
-_ts_tools = cfg.get("tools")
-_ts_value = _ts_tools.get("toolSearch") if isinstance(_ts_tools, dict) else None
-_ts_ours = (
-    isinstance(_ts_value, dict)
-    and list(_ts_value.keys()) == ["enabled"]
-    and _ts_value["enabled"] is False
-)
-if _ts_on_device and (_ts_tools is None or (isinstance(_ts_tools, dict) and "toolSearch" not in _ts_tools)):
-    # 2026.10+ only: a key an older core's strict schema could refuse.
-    if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
-        if _ts_tools is None:
-            _ts_tools = {}
-            cfg["tools"] = _ts_tools
-        _ts_tools["toolSearch"] = dict(_LOCAL_TOOL_SEARCH_OFF)
-        changed = True
-        print("  Turned OpenClaw's Tool Search off: the primary is the on-device model, which needs its few tools as direct schemas")
-elif not _ts_on_device and _ts_ours:
-    del _ts_tools["toolSearch"]
-    changed = True
-    print("  Restored OpenClaw's Tool Search default: the primary is no longer the on-device model")
 
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written

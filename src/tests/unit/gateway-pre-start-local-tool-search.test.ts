@@ -20,7 +20,7 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 function region(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const start = src.indexOf("# Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.");
-  const end = src.indexOf("\nif changed:\n", start);
+  const end = src.indexOf("\nif isinstance(ds_models, list):\n", start);
   if (start < 0 || end < 0) throw new Error("Tool Search reconciliation not found in gateway-pre-start.sh");
   return src.slice(start, end);
 }
