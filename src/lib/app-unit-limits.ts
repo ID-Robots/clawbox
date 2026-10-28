@@ -38,7 +38,7 @@ import { appMemoryLimits } from "@/lib/box-memory-policy";
 import { runChild, type ChildResult } from "@/lib/child-run";
 import { isInside } from "@/lib/file-guard";
 import { APP_CPU_WEIGHT, APP_IO_WEIGHT } from "@/lib/app-server-start";
-import { scopeEnv } from "@/lib/coding-run-unit";
+import { findSystemdTool, scopeEnv } from "@/lib/coding-run-unit";
 
 /** How often the web server looks again, after the boot pass. */
 export const APP_CAPS_SWEEP_MS = 15 * 60_000;
@@ -60,6 +60,8 @@ export interface CapOptions {
   proc?: { cwd(pid: number): Promise<string | null>; cgroup(pid: number): Promise<string | null> };
   /** A test's environment, instead of the process's. */
   env?: Record<string, string | undefined>;
+  /** A test's systemctl, instead of the one `findSystemdTool` resolves. */
+  systemctl?: string | null;
 }
 
 const childEnv = (): Record<string, string> => ({
@@ -111,6 +113,17 @@ async function listenerPids(port: number, run: Runner): Promise<number[] | null>
 export async function capForeignAppServers(options: CapOptions = {}): Promise<string[]> {
   const env = options.env ?? process.env;
   if (env.CLAWBOX_APP_CAPS === "0") return [];
+  // By its ABSOLUTE path: `runChild` starts an allowlisted bare name or an
+  // absolute path to a program, and "systemctl" is neither — the first pass
+  // shipped the bare name and every call came back "command not permitted",
+  // which the pass read as "not infinity" and skipped in silence (the box
+  // stayed 4.3 GB into one app, 2026-10-28). Resolved the way the run scopes
+  // resolve systemd-run, so a test can shim it and a box without it skips.
+  const systemctl = options.systemctl === undefined ? await findSystemdTool("systemctl") : options.systemctl;
+  if (!systemctl) {
+    console.warn("[app-caps] systemctl is not on the web server's search path; the app server units stay uncapped");
+    return [];
+  }
   const dir = options.webappsDir ?? path.join(DATA_DIR, "webapps");
   const run = options.run ?? runChild;
   const proc = options.proc ?? realProc;
@@ -136,11 +149,17 @@ export async function capForeignAppServers(options: CapOptions = {}): Promise<st
       const unit = foreignUserServiceOf(await proc.cgroup(pid));
       if (!unit || seen.has(unit)) continue;
       seen.add(unit);
-      const shown = await run("systemctl", ["--user", "show", "-p", "MemoryMax", "--value", unit], { timeoutMs: 10_000, env: systemctlEnv() });
-      if (shown.code !== 0 || shown.stdout.trim() !== "infinity") continue;
+      const shown = await run(systemctl, ["--user", "show", "-p", "MemoryMax", "--value", unit], { timeoutMs: 10_000, env: systemctlEnv() });
+      if (shown.code !== 0) {
+        // Said out loud: a refusal that reads as "already capped" is how the
+        // first pass hid for a whole update cycle.
+        console.error(`[app-caps] ${unit} (app ${id}, port ${port}): systemctl show failed: ${(shown.stderr || shown.stdout).trim().slice(0, 200)}`);
+        continue;
+      }
+      if (shown.stdout.trim() !== "infinity") continue;
       const limits = appMemoryLimits();
       const set = await run(
-        "systemctl",
+        systemctl,
         ["--user", "set-property", unit, `MemoryHigh=${limits.high}`, `MemoryMax=${limits.max}`, `CPUWeight=${APP_CPU_WEIGHT}`, `IOWeight=${APP_IO_WEIGHT}`],
         { timeoutMs: 10_000, env: systemctlEnv() },
       );
