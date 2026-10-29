@@ -588,6 +588,14 @@ export interface StartServerAppInput {
 const inFlight = new Map<string, Promise<StartOutcome>>();
 
 /**
+ * The process groups this web server made for app starts — each start's
+ * detached child leads one — while their leader lives. `stopServerApp` ends a
+ * whole group only when the box made it: a server a coding run started can
+ * share a group with the run's agent.
+ */
+const startedGroups = new Set<number>();
+
+/**
  * Run the manifest's `start` command in the project folder and wait for the
  * project's own listener on the manifest's port. One start per app at a time:
  * a second caller gets the first one's answer. Never throws.
@@ -647,6 +655,11 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
       // server that had already stopped.
       child.once("error", () => { gone = true; });
       child.once("exit", (code) => { gone = true; exited = code; });
+      const group = child.pid;
+      if (typeof group === "number") {
+        startedGroups.add(group);
+        child.once("exit", () => { startedGroups.delete(group); });
+      }
     } finally {
       await log.close().catch(() => undefined);
     }
@@ -724,6 +737,10 @@ async function processGroupOf(pid: number): Promise<number | null> {
   return Number.isInteger(pgid) && pgid > 1 ? pgid : null;
 }
 
+async function appScopeOfPid(pid: number, id: string): Promise<string | null> {
+  return appScopeOf(await fs.promises.readFile(`/proc/${pid}/cgroup`, "utf-8").catch(() => ""), id);
+}
+
 /**
  * Is this process the app's own server? Proven, never assumed from the port
  * (a manifest can name any port, the gateway's included):
@@ -735,8 +752,7 @@ async function processGroupOf(pid: number): Promise<number | null> {
  */
 async function appProcess(pid: number, id: string, real: string | null): Promise<{ scope: string | null } | null> {
   if (pid === process.pid) return null;
-  const cgroup = await fs.promises.readFile(`/proc/${pid}/cgroup`, "utf-8").catch(() => "");
-  const scope = appScopeOf(cgroup, id);
+  const scope = await appScopeOfPid(pid, id);
   if (scope) return { scope };
   if (!real) return null;
   const cwd = await processCwd(pid);
@@ -762,14 +778,17 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Ended by its process group when the group is the app's, by itself otherwise; asked first, then made to. */
-async function endAppProcess(pid: number, id: string, real: string | null): Promise<void> {
+/** Ended by its process group when the box made that group, by itself otherwise; asked first, then made to. */
+async function endAppProcess(pid: number, id: string): Promise<void> {
   const group = await processGroupOf(pid);
   const ownGroup = await processGroupOf(process.pid);
-  // Never the web server's own group; and a group whose leader is not the
-  // app's too is somebody else's (a shell that started the server among other
-  // things), so only the server itself is ended then.
-  if (group && group !== ownGroup && group !== process.pid && (group === pid || (await appProcess(group, id, real)))) {
+  // Never the web server's own group, and never a group the box did not make:
+  // a server a coding run started can share its group with the run's agent,
+  // whose working directory is in the project folder too. The group is the
+  // server's own when it leads it, the box's when a start of this web server
+  // made it or its leader is in the app's scope; otherwise only the server
+  // itself is ended.
+  if (group && group !== ownGroup && group !== process.pid && (group === pid || startedGroups.has(group) || (await appScopeOfPid(group, id)))) {
     await endProcessGroup(group);
     return;
   }
@@ -837,7 +856,7 @@ export async function stopServerApp(id: string, where: { port: number; directory
     for (const scope of new Set([...first.ours.values()].filter((s): s is string => !!s))) await stopAppScope(scope);
     // Outside a scope, or one systemd could not be asked to stop.
     for (const pid of first.ours.keys()) {
-      if (pidAlive(pid)) await endAppProcess(pid, id, real);
+      if (pidAlive(pid)) await endAppProcess(pid, id);
     }
 
     const deadline = Date.now() + STOP_PORT_WAIT_MS;
