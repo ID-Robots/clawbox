@@ -442,6 +442,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.adviceSingleRun": "The plan had one task, so it ran as one ordinary run — the cheapest shape. For a goal like this, a single run is the cheaper choice next time.",
   "codingAgent.team.adviceOneTask": "The plan has one task: a single run would have been cheaper than a team.",
   "codingAgent.team.adviceOverlap": "{n}% of the files this plan's tasks touch are shared with another task, so they cannot run side by side: a single run would likely have been cheaper.",
+  "codingAgent.team.adviceOverlapRun": "{n}% of the files this plan's tasks touch are shared with another task, so the plan ran as one ordinary run instead of a team — the cheaper shape for it.",
   "codingAgent.createNewProject": "Create app",
   "codingAgent.projectRuns": "Runs",
   "codingAgent.otherRuns": "Other runs",

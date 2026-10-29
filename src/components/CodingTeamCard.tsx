@@ -513,13 +513,15 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
             </p>
           )}
           {/* Whether a single run would have been cheaper: a one-task plan ran as
-              one run, and tasks whose files mostly overlap only queue on each other. */}
+              one run, and so did a plan whose tasks' files mostly overlap. */}
           {(team.singleRun || team.advice) && (
             <p className="mt-1.5 text-[11px] text-sky-200/90 flex items-start gap-1.5" data-testid="coding-team-advice" data-reason={team.singleRun ? "single_run" : team.advice?.reason}>
               <span className="material-symbols-rounded align-[-2px] shrink-0" style={{ fontSize: 14 }} aria-hidden="true">lightbulb</span>
               <span>
                 {team.singleRun
-                  ? t("codingAgent.team.adviceSingleRun")
+                  ? team.advice?.reason === "overlap"
+                    ? t("codingAgent.team.adviceOverlapRun", { n: team.advice.overlap })
+                    : t("codingAgent.team.adviceSingleRun")
                   : team.advice?.reason === "one_task"
                     ? t("codingAgent.team.adviceOneTask")
                     : t("codingAgent.team.adviceOverlap", { n: team.advice?.overlap ?? 0 })}

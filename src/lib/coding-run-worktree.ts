@@ -39,7 +39,7 @@
 import fs from "fs";
 import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
-import { excludeWorktrees, gitIn, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { excludeWorktrees, forkBase, gitIn, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
 
@@ -111,7 +111,8 @@ export { runBranchName };
 
 /**
  * Give this run a worktree and a branch of its own, forked from whatever the
- * project checkout is on now.
+ * project checkout is on now — unless that is a coding team's branch, which
+ * a team leaves checked out: then from the project's base (`forkBase`).
  *
  * `protectedRoot` is the ClawBox checkout — never branched, never forked.
  */
@@ -168,8 +169,10 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
     const seeded = await gitIn(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, reason: "failed", detail: failureDetail(seeded, "Making the first commit") };
   }
-  const current = await gitIn(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const base = ok(current) && out(current) && out(current) !== "HEAD" ? out(current) : "main";
+  // Never a coding team's branch a team left checked out (`forkBase`).
+  const fork = await forkBase(dir);
+  if (!fork.ok) return { ok: false, reason: "failed", detail: fork.detail };
+  const base = fork.base;
   const branch = runBranchName(runId);
   const target = runWorktreePath(dir, runId);
   try {
@@ -177,7 +180,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   } catch (err) {
     return { ok: false, reason: "failed", detail: `Could not make the worktrees folder: ${err instanceof Error ? err.message : String(err)}` };
   }
-  const added = await gitIn(dir, ["worktree", "add", "-b", branch, target, base]);
+  const added = await gitIn(dir, ["worktree", "add", ...(fork.from ? ["--no-track", "-b", branch, target, fork.from] : ["-b", branch, target, base])]);
   if (!ok(added)) return { ok: false, reason: "failed", detail: failureDetail(added, `Making a worktree for ${runId}`) };
   await excludeWorktrees(dir);
   linkSharedNodeModules(dir, target);

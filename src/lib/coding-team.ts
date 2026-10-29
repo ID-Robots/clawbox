@@ -24,8 +24,11 @@
  * read-only actions alone are a NOTE, and the task stays clean — as are the
  * ones on the project's own path that the runner answered with a retry hint
  * at the worker's worktree; a look into the harness's state never is); after
- * MAX_ALERTS the team stops (a reviewer that could not start is alerted but
- * not counted; one that waits for room is neither). A failed task fails the
+ * MAX_ALERTS the team stops — unless every task is accepted by then. Not
+ * counted, though alerted: a reviewer that could not start, a merge
+ * conflict, a refused action (each already a rejection, offered once more);
+ * a reviewer waiting for room is neither. Strays outside a task's files and
+ * reviewers that give no verdict count. A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
  * re-posted once. A worker's branch that comes home empty has what the
  * worker left uncommitted in its worktree committed first; still empty while
@@ -67,7 +70,9 @@ import fs from "fs";
 import path from "@/lib/runtime-path";
 import {
   CodingAgentError,
+  getAutoPr,
   getMaxParallelRuns,
+  getPrBodyIncludesTask,
   getRun,
   getTeamDynamic,
   harnessStateDir,
@@ -111,10 +116,11 @@ import {
 import { buildCommitMessage } from "@/lib/coding-git";
 import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
-import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, type Verdict } from "@/lib/coding-team-reviewer";
+import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, NOT_REVIEWED, parseVerdict, ranNothing, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, shellReviewerTask, testEvidence, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { ciFailureLine, ciFixNotes, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, readPullRequest } from "@/lib/coding-pr";
+import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/coding-review";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
@@ -220,7 +226,10 @@ interface LiveTeam {
    * Alerts that do not count toward MAX_ALERTS: a reviewer that could not
    * start is a review missed, not the team's work going wrong. Two of them
    * and one real alert failed a team whose every deliverable was on disk
-   * (bench, 2026-09-22).
+   * (bench, 2026-09-22). Nor do a merge conflict and a refused action: each
+   * is already a rejection offered once more, and two conflicts and one
+   * refused command stopped a team whose integration worker had every
+   * check green (night run, 2026-10-29).
    */
   uncountedAlerts: number;
   /**
@@ -739,6 +748,15 @@ export function _resetCodingTeamStateForTests(): void {
 
 // ─── The loop ────────────────────────────────────────────────────────────────
 
+/**
+ * The base the team whose branch this is forked from, as its board recorded
+ * it: where a new team forks when it finds that branch still checked out
+ * (`forkBase`), never from the branch itself.
+ */
+function recordedTeamBase(branch: string): string | null {
+  return listBoards().find((b) => b.branch === branch)?.base ?? null;
+}
+
 
 async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const { board, bus } = team;
@@ -828,17 +846,15 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // Text over its bound was cut, not refused: one note says so — never an alert.
   if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
 
-  // ONE task is one run's worth of work: it runs as one ordinary run, not
-  // inside the team's branch, worktree and reviewer machinery around it.
-  if (plan.tasks.length === 1 && board.tasks.length === 1) {
-    await runAsSingleRun(team, board.tasks[0], source);
-    return;
-  }
-  // Tasks that mostly touch the same files would only queue on each other: the
-  // team goes on, and the card and coding_team_status say a run was cheaper.
+  // ONE task is one run's worth of work, and so are tasks that mostly touch the
+  // same files (`teamAdvice`): side by side they only conflict and queue on
+  // each other — and saying so after the run helped nobody (night run,
+  // 2026-10-29: 93-96% overlap on every team). Either runs as one ordinary run,
+  // not inside the team's branch, worktree and reviewer machinery around it.
   const advice = teamAdvice(board);
-  if (advice?.reason === "overlap") {
-    bus.send(SYSTEM, { type: "note", text: `${advice.overlap}% of the files this plan's tasks name are named by another task too: they cannot run side by side, and a single run would likely have been cheaper.` });
+  if ((plan.tasks.length === 1 && board.tasks.length === 1) || advice?.reason === "overlap") {
+    await runAsSingleRun(team, board.tasks, source, advice?.reason === "overlap" ? advice.overlap : null);
+    return;
   }
 
   // The team's own branch in a folder project: workers get worktrees off it
@@ -846,7 +862,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // ClawBox checkout under rules of its own, so its workers work in place,
   // one at a time, as v0 did.
   if (!board.projectId) {
-    const branched = await ensureTeamBranch(board.directory, board.id);
+    const branched = await ensureTeamBranch(board.directory, board.id, recordedTeamBase);
     if (!branched.ok) {
       setTeamStatus(board, SYSTEM, "failed", branched.detail);
       saveBoard(board);
@@ -892,9 +908,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // orchestrator, never a worker — and the rounds its red CI sends tasks back
   // through the loop for, bounded by MAX_TEAM_CI_ROUNDS. A team in place (no
   // branch of its own) has nothing to open one from.
-  const wantsPr = Boolean(board.branch) && goalWantsPullRequest(board.goal);
+  const asksPr = goalWantsPullRequest(board.goal);
   // Asked for, and there is no branch to open one from: said once, not skipped in silence.
-  if (!board.branch && goalWantsPullRequest(board.goal)) {
+  if (!board.branch && asksPr) {
     bus.send(SYSTEM, { type: "note", text: "The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project." });
   }
   for (;;) {
@@ -903,7 +919,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     suiteRounds = 0;
     while (!team.stopRequested) {
       const counted = board.alerts - team.uncountedAlerts;
-      if (counted >= MAX_ALERTS) {
+      // A team whose every task is accepted has nothing left to go wrong:
+      // it goes on to its suite, review and verdict, whatever the count.
+      if (counted >= MAX_ALERTS && !allComplete(board)) {
         setTeamStatus(board, SYSTEM, "failed", `Stopped after ${counted} alerts.`);
         saveBoard(board);
         break;
@@ -1015,10 +1033,15 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       }
     }
 
-    // 4. The pull request the goal asks for: only once every task is
-    //    accepted, the suite is green and the final review passed.
-    if (!wantsPr || !allComplete(board)) break;
-    const pr = await teamPullRequest(team);
+    // 4. The pull request the goal asks for — or, the way a single run
+    //    publishes its work, the one the owner's pull-request switch asks
+    //    for (read now, as a single run reads it when its own opens): workers
+    //    never push, and a finished team left its work on a local branch
+    //    (night run, 2026-10-29). Only once every task is accepted, the suite
+    //    is green and the final review passed.
+    if (!board.branch || !allComplete(board)) break;
+    if (!asksPr && !board.pr && !(await getAutoPr())) break;
+    const pr = await teamPullRequest(team, asksPr);
     if (pr === null || team.stopRequested) return;
     if (pr.kind === "reoffered") {
       if (board.dynamic) leadAfter.push(...pr.tasks);
@@ -1027,6 +1050,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       continue;
     }
     if (pr.kind === "failed") {
+      // Published because the switch is on, not because the goal asked: what
+      // became of it is said, and the team's accepted work is still done.
+      if (!asksPr) {
+        bus.send(SYSTEM, { type: "note", text: `${pr.detail} The work stays on ${board.branch}.` });
+        break;
+      }
       setTeamStatus(board, SYSTEM, "failed", pr.detail);
       saveBoard(board);
       return;
@@ -1051,7 +1080,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
 }
 
 /**
- * A plan of ONE task, run as what it is: one ordinary run in the project —
+ * A plan of ONE task — or of tasks that mostly touch the same files
+ * (`overlap`, the share `teamAdvice` measured) — run as what it is: one
+ * ordinary run in the project —
  * its own worktree and branch, the owner's review pass, deliverable check and
  * pull request, exactly as if the assistant had asked for a single run —
  * rather than the team's branch, a worker's worktree and a reviewer run around
@@ -1064,21 +1095,25 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
  * as a worker waits for room, up to the run budget — never fail for being
  * asked at a busy moment.
  */
-async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunSource): Promise<void> {
+async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source: CodingRunSource, overlap: number | null): Promise<void> {
   const { board, bus } = team;
+  const [first] = tasks;
+  const what = tasks.length === 1 ? "the plan's one task" : "the plan's tasks";
   board.singleRun = true;
-  bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: "The plan has one task, so it runs as one ordinary run — no team branch, worktree or reviewer run around it; the run settles the owner's usual way." });
+  bus.send(SYSTEM, overlap === null
+    ? { type: "note", task_id: first.task_id, text: "The plan has one task, so it runs as one ordinary run — no team branch, worktree or reviewer run around it; the run settles the owner's usual way." }
+    : { type: "note", text: `${overlap}% of the files this plan's tasks name are named by another task too: side by side they would only conflict, so its ${tasks.length} tasks run as one ordinary run, in order — no team branch, worktrees or reviewer runs around it; the run settles the owner's usual way.` });
   setTeamStatus(board, SYSTEM, "working");
   saveBoard(board);
 
   let run: CodingRun | null = null;
   const waitingSince = Date.now();
-  const who = { role: "worker" as const, taskId: task.task_id };
+  const who = { role: "worker" as const, taskId: first.task_id };
   while (!run) {
     if (team.stopRequested) return;
     try {
       run = await startRun({
-        task: singleRunTask(board, task),
+        task: singleRunTask(board, tasks),
         projectId: board.projectId,
         directory: board.directory,
         source,
@@ -1090,29 +1125,31 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
         await sleep(SLOT_WAIT_MS);
         continue;
       }
-      setTeamStatus(board, SYSTEM, "failed", `The run for the plan's one task could not start: ${err instanceof Error ? err.message : String(err)}`);
+      setTeamStatus(board, SYSTEM, "failed", `The run for ${what} could not start: ${err instanceof Error ? err.message : String(err)}`);
       saveBoard(board);
       return;
     }
   }
   clearSlotWait(team, who);
   const me = worker(run.id);
-  bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
-  board.runs.push(castRef(run, "worker", task.task_id));
+  for (const task of tasks) bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
+  board.runs.push(castRef(run, "worker", first.task_id));
   saveBoard(board);
-  bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
+  for (const task of tasks) bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
 
   const settled = await settle(team, run.id);
   if (team.stopRequested) return;
   const ok = settled?.status === "completed";
   const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
-  bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
-  bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
-  if (ok) {
-    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "accepted", notes: "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on." });
+  for (const task of tasks) {
+    bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
+    bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
+    if (ok) {
+      bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "accepted", notes: "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on." });
+    }
   }
   if (allComplete(board)) setTeamStatus(board, SYSTEM, "done");
-  else setTeamStatus(board, SYSTEM, "failed", `The run for the plan's one task did not finish: ${settled?.error ?? settled?.status ?? "no run"}.`);
+  else setTeamStatus(board, SYSTEM, "failed", `The run for ${what} did not finish: ${settled?.error ?? settled?.status ?? "no run"}.`);
   saveBoard(board);
 }
 
@@ -1280,6 +1317,9 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
           if (!merged.ok) {
             mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
             result = `${result}\n\n${mergeRefusal}`;
+            // Workers side by side touch the same lines: a conflict is offered
+            // again from the merged state, not the team going wrong.
+            if (merged.conflict) team.uncountedAlerts += 1;
             bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `${merged.conflict ? "Merge conflict" : "Merge failed"} for ${task.task_id} (${run.id}): ${firstLine(merged.detail, 200)}` });
           } else if (!diffed.length) {
             // Nothing written, nothing left behind: a legitimate no-change
@@ -1352,6 +1392,9 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
         bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what}: ${named}`, read_only_refusals: n });
       } else {
         refusedWrite = true;
+        // Refused is stopped: the task is rejected and offered once more,
+        // and the refusal itself never counts toward the ceiling.
+        team.uncountedAlerts += 1;
         const named = [...others.map((d) => d.text), ...hinted.map((d) => d.text)].slice(0, 3).join("; ");
         bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
       }
@@ -1413,8 +1456,10 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
 async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string }, starting: ReadonlySet<string>): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
   const { board, bus } = team;
   const role: RunTeam = { id: board.id, role: "reviewer", taskId: task.task_id };
-  // `resumeOf` names the reviewer run whose own session a re-ask continues (verdictOf).
-  const start = async (resumeOf: string | null): Promise<CodingRun | { reason: string; wait: boolean }> => {
+  // `resumeOf` names the reviewer run whose own session a re-ask continues
+  // (verdictOf); `shell` is the review offered once more with a shell, in a
+  // throwaway worktree of the merged work, after a first one that ran nothing.
+  const start = async (resumeOf: string | null, shell?: { folder: string; said: string }): Promise<CodingRun | { reason: string; wait: boolean }> => {
     // The orchestrator's own look first, as for a worker; the spawn asks
     // again, and a refusal there that is still about room is the same wait.
     // The reservations are read on every ask: a launch lands while we wait.
@@ -1422,30 +1467,33 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     if (!room.ok) return room;
     // The reviewer works in the project, on the merged work: a path the worker
     // wrote in its worktree — gone by now — is said in the project instead.
-    const here = (text: string) => toFolderPaths(text, board.directory, board.directory);
+    const here = (text: string) => toFolderPaths(text, board.directory, shell?.folder ?? board.directory);
+    const review = () => reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, report: here(work.report), goal: board.goal });
+    const brief = shell ? withRepoMap(SHELL_REVIEWER_BRIEF, board, shell.folder) : withRepoMap(REVIEWER_BRIEF, board, null);
+    const readOnly = shell ? {} : { readOnly: true };
     try {
       return await startRun(resumeOf
-        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, readOnly: true, extraBrief: withRepoMap(REVIEWER_BRIEF, board, null) }
+        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, ...readOnly, extraBrief: brief }
         : {
-          task: reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, report: here(work.report), goal: board.goal }),
-          projectId: board.projectId,
-          directory: board.directory,
+          task: shell ? shellReviewerTask(review(), shell.said) : review(),
+          projectId: shell ? null : board.projectId,
+          directory: shell?.folder ?? board.directory,
           source,
           team: role,
-          readOnly: true,
-          extraBrief: withRepoMap(REVIEWER_BRIEF, board, null),
+          ...readOnly,
+          extraBrief: brief,
         });
     } catch (err) {
       return { reason: err instanceof Error ? err.message : String(err), wait: err instanceof CodingAgentError && err.wait };
     }
   };
   // A started run, or why none could start; null once the team is stopped.
-  const launch = async (resumeOf: string | null): Promise<CodingRun | { reason: string } | null> => {
+  const launch = async (resumeOf: string | null, shell?: { folder: string; said: string }): Promise<CodingRun | { reason: string } | null> => {
     const waitingSince = Date.now();
     try {
       for (;;) {
         if (team.stopRequested) return null;
-        const started = await start(resumeOf);
+        const started = await start(resumeOf, shell);
         if ("id" in started) return started;
         if (!started.wait) return { reason: started.reason };
         if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
@@ -1487,7 +1535,74 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: answer.alert });
     return { verdict: "accepted", notes: `Accepted by rule: ${answer.reason}` };
   }
-  return answer.verdict;
+  // A verdict that says it ran nothing is not a review (night run, 2026-10-29:
+  // "Static review only: no git, Biome or Jest could be run" was an
+  // acceptance). Offered ONCE more with a shell, in a throwaway worktree of the
+  // merged work; nothing run then either, a rejection stands, and an acceptance
+  // needs the worker's own test evidence — labelled NOT REVIEWED — or the task
+  // goes back.
+  const first = answer.verdict;
+  if (!ranNothing(first.notes)) return first;
+  bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Not reviewed: the reviewer of ${task.task_id} (${run.id}) could not run git or the tests — it said ${answerHead(first.notes)}.${board.branch ? " Offering the review once more, with a shell in a checkout of the merged work." : ""}` });
+  const second = board.branch ? await reviewWithShell(team, task, first.notes, launch) : null;
+  if (team.stopRequested) return { verdict: "accepted", notes: "The team was stopped during the review." };
+  if (!underReview(board, task.task_id)) return dropped;
+  if (second && !ranNothing(second.notes)) return second;
+  // A rejection said what is wrong, run or not: the worker's own word never overrules it.
+  const last = second ?? first;
+  if (last.verdict === "rejected") return { verdict: "rejected", notes: `${NOT_REVIEWED}: ${last.notes}` };
+  const evidence = testEvidence(work.report);
+  if (evidence) return { verdict: "accepted", notes: `${NOT_REVIEWED}: accepted on the worker's own test evidence ("${evidence}"); no reviewer could run git or the tests.` };
+  return { verdict: "rejected", notes: `${NOT_REVIEWED}: no reviewer could run git or the tests, and the worker's report shows no test run. Do the task again, run its tests and quote their result in your final message.` };
+}
+
+/**
+ * The review offered once more, WITH a shell: a reviewer run that is not
+ * read-only, in a throwaway worktree of the team's branch as it stands, where
+ * it can run git and the task's checks — removed afterwards with its branch,
+ * nothing of it merged. Its verdict, or null when it could not be had (said on
+ * the board) or the team was stopped.
+ */
+async function reviewWithShell(
+  team: LiveTeam,
+  task: TeamTask,
+  said: string,
+  launch: (resumeOf: string | null, shell?: { folder: string; said: string }) => Promise<CodingRun | { reason: string } | null>,
+): Promise<Verdict | null> {
+  const { board, bus } = team;
+  const made = await addWorkerWorktree(board.directory, board.id, `review-${task.task_id}`, task.attempts);
+  if (!made.ok) {
+    bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `No checkout for the second review of ${task.task_id}: ${firstLine(made.detail, 200)}` });
+    return null;
+  }
+  const shell = { folder: made.path, said };
+  try {
+    const run = await launch(null, shell);
+    if (run === null) return null;
+    if (!("id" in run)) {
+      bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `The second review of ${task.task_id} could not start: ${firstLine(run.reason, 200)}` });
+      return null;
+    }
+    const row = board.tasks.find((t) => t.task_id === task.task_id);
+    if (row) row.reviewRunId = run.id;
+    board.runs.push(castRef(run, "reviewer", task.task_id));
+    saveBoard(board);
+    const settled = await settle(team, run.id);
+    if (team.stopRequested || !underReview(board, task.task_id)) return null;
+    if (settled?.status !== "completed") {
+      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The second reviewer of ${task.task_id} (${run.id}) ended ${settled?.status ?? "without a record"}.` });
+      return null;
+    }
+    const answer = await verdictOf(team, settled, `The second reviewer of ${task.task_id}`, task.task_id, (id) => launch(id, shell));
+    if (answer === null) return null;
+    if (!answer.ok) {
+      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: answer.alert });
+      return null;
+    }
+    return answer.verdict;
+  } finally {
+    await removeWorktree(board.directory, made.path, { dropBranch: made.branch });
+  }
 }
 
 /**
@@ -1966,14 +2081,22 @@ function withRepoMap(brief: string, board: TeamBoard, folder: string | null): st
 /**
  * The task of the ONE run a one-task plan becomes: the owner's goal in their
  * own words — it is the whole of the work — and the planner's description of
- * it after, when it says more. Cut at the run route's cap from the end.
+ * it after, when it says more. A plan of tasks that mostly touch the same
+ * files becomes one run too, and its tasks are listed in order after the goal.
+ * Cut at the run route's cap from the end.
  */
-export function singleRunTask(board: TeamBoard, task: TeamTask): string {
+export function singleRunTask(board: TeamBoard, tasks: readonly TeamTask[]): string {
   const goal = board.goal.trim();
-  const planned = task.task_description.trim();
   const parts = [goal];
-  if (planned && planned !== goal) parts.push(`The team's planner wrote it up as: ${planned}`);
-  if (task.files_hint.length) parts.push(`Files it is expected to touch: ${task.files_hint.join(", ")}`);
+  if (tasks.length === 1) {
+    const [task] = tasks;
+    const planned = task.task_description.trim();
+    if (planned && planned !== goal) parts.push(`The team's planner wrote it up as: ${planned}`);
+    if (task.files_hint.length) parts.push(`Files it is expected to touch: ${task.files_hint.join(", ")}`);
+  } else {
+    const steps = tasks.map((t, i) => `${i + 1}. ${t.task_description.trim()}${t.files_hint.length ? ` (files: ${t.files_hint.join(", ")})` : ""}`);
+    parts.push(`The team's planner split it into ${tasks.length} parts that touch the same files, so they are all yours, in this one run, in this order:\n${steps.join("\n")}`);
+  }
   const text = parts.join("\n\n");
   return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
 }
@@ -2202,7 +2325,8 @@ export function _setTeamPrTimingForTests(pollMs: number, maxWaitMs: number): voi
 }
 
 /**
- * The pull request the team's goal asks for (`goalWantsPullRequest`) — the
+ * The pull request the team's goal asks for (`goalWantsPullRequest`, `asked`)
+ * or the owner's pull-request switch publishes, as it does a single run's — the
  * ORCHESTRATOR's, never a worker's (a team's runs are refused every merge and
  * push: TEAM_MERGE_DENYLIST, the hook's merge guard). Reached only once every
  * task is accepted, the suite gate is green and the final review passed.
@@ -2224,10 +2348,10 @@ export function _setTeamPrTimingForTests(pollMs: number, maxWaitMs: number): voi
  *
  * Null once the team was stopped.
  */
-async function teamPullRequest(team: LiveTeam): Promise<{ kind: "done" } | { kind: "reoffered"; tasks: string[] } | { kind: "failed"; detail: string } | null> {
+async function teamPullRequest(team: LiveTeam, asked: boolean): Promise<{ kind: "done" } | { kind: "reoffered"; tasks: string[] } | { kind: "failed"; detail: string } | null> {
   const { board, bus } = team;
   if (!board.branch || !board.base) return { kind: "done" };
-  setTeamStatus(board, SYSTEM, "reviewing", board.pr ? `Pushing the fixes to pull request #${board.pr.number}` : "Opening the pull request the goal asks for");
+  setTeamStatus(board, SYSTEM, "reviewing", board.pr ? `Pushing the fixes to pull request #${board.pr.number}` : asked ? "Opening the pull request the goal asks for" : "Publishing the team's branch as a pull request");
   saveBoard(board);
   const record = (pr: TeamPr, note: string): TeamPr => {
     bus.send(SYSTEM, { type: "pr", pr, note });
@@ -2235,9 +2359,9 @@ async function teamPullRequest(team: LiveTeam): Promise<{ kind: "done" } | { kin
   };
   let pr: TeamPr;
   if (!board.pr) {
-    const opened = await openPullRequest({ directory: board.directory, branch: board.branch, base: board.base, title: teamPrTitle(board), body: teamPrBody(board) });
+    const opened = await openPullRequest({ directory: board.directory, branch: board.branch, base: board.base, title: teamPrTitle(board), body: teamPrBody(board, await getPrBodyIncludesTask()) });
     if (team.stopRequested) return null;
-    if (!opened.ok) return { kind: "failed", detail: `The goal asks for a pull request, and it could not be opened: ${opened.detail}` };
+    if (!opened.ok) return { kind: "failed", detail: asked ? `The goal asks for a pull request, and it could not be opened: ${opened.detail}` : `The team's pull request could not be opened: ${opened.detail}` };
     const now = Date.now();
     pr = record({
       number: opened.number, url: opened.url, branch: board.branch, base: board.base, phase: "checks",
@@ -2355,15 +2479,19 @@ function teamPrTitle(board: TeamBoard): string {
   return `Coding team: ${firstLine(board.goal, 72)}`;
 }
 
-/** What the pull request says: the goal, each task and what came of it — redacted again where it is published (openPullRequest). */
-function teamPrBody(board: TeamBoard): string {
+/**
+ * What the pull request says: the goal, each task and what came of it —
+ * redacted again where it is published (openPullRequest). The owner's "none"
+ * for what a pull request carries of the task (`getPrBodyIncludesTask`, as a
+ * single run's) leaves out the goal and the tasks' descriptions, its words.
+ */
+function teamPrBody(board: TeamBoard, taskMode: PrBodyTaskMode): string {
+  const withTask = taskMode !== "none";
   const tasks = board.tasks
     .filter((t) => t.status === "complete")
-    .map((t) => `- ${t.task_id}: ${firstLine(t.task_description, 160)}${t.result ? ` — ${firstLine(t.result, 200)}` : ""}`);
+    .map((t) => `- ${t.task_id}${withTask ? `: ${firstLine(t.task_description, 160)}` : ""}${t.result ? ` — ${firstLine(t.result, 200)}` : ""}`);
   return [
-    `Opened by ClawBox's coding team \`${board.id}\` for this goal:`,
-    "",
-    `> ${firstLine(board.goal, 600)}`,
+    ...(withTask ? [`Opened by ClawBox's coding team \`${board.id}\` for this goal:`, "", `> ${firstLine(board.goal, 600)}`] : [`Opened by ClawBox's coding team \`${board.id}\`.`]),
     "",
     "Tasks, each accepted:",
     ...tasks,

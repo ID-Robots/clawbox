@@ -1884,6 +1884,7 @@ const table: Record<string, string> = {
   "codingAgent.team.addedByLead": "由负责人添加",
   "codingAgent.team.adviceOneTask": "计划只有一个任务：单次运行会比团队更便宜。",
   "codingAgent.team.adviceOverlap": "此计划各任务涉及的文件中有 {n}% 与其他任务重叠，因此无法并行：单次运行很可能更便宜。",
+  "codingAgent.team.adviceOverlapRun": "此计划的任务所涉及的文件中有 {n}% 与其他任务共享，因此该计划作为一次普通运行完成，而不是团队——这对它来说更便宜。",
   "codingAgent.team.adviceSingleRun": "计划只有一个任务，所以它作为一次普通运行完成——这是最省钱的方式。像这样的目标，下次选择单次运行更便宜。",
   "codingAgent.team.after": "在 {ids} 之后",
   "codingAgent.team.alerts": "{n} 条警报",
