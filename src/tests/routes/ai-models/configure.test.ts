@@ -3481,14 +3481,25 @@ describe("POST /setup-api/ai-models/configure", () => {
     describe("a status poll that lands in the middle of a sign-in to a different account", () => {
       const OLD = "claw_old_max_account";
       const NEW = "claw_new_free_account";
+      const signIn = () => jsonRequest({
+        provider: "clawai",
+        apiKey: NEW,
+        authMode: "subscription",
+        clawaiTier: "flash",
+      });
 
-      it("leaves the new account's badge and plan on record, not the old account's", async () => {
+      let store: Record<string, unknown>;
+      let portalUp: boolean;
+      let commitFails: boolean;
+      let statusGet: () => Promise<Response>;
+      // Implementations this block replaces on mocks the whole file shares.
+      // `vi.clearAllMocks` in the outer hooks clears calls, not implementations,
+      // so they are put back below rather than left to the next case.
+      let realTransaction: ((label: string) => ReturnType<typeof beginConfigWriteTransaction>) | undefined;
+
+      beforeEach(async () => {
         const configStore = await import("@/lib/config-store");
-        const store: Record<string, unknown> = {
-          clawai_token: OLD,
-          clawai_tier: "pro",
-          clawai_plan_tier: "pro",
-        };
+        store = { clawai_token: OLD, clawai_tier: "pro", clawai_plan_tier: "pro" };
         const put = (key: string, value: unknown) => {
           if (value === undefined) delete store[key];
           else store[key] = value;
@@ -3508,16 +3519,18 @@ describe("POST /setup-api/ai-models/configure", () => {
         });
         let openclawJson = linkedTo(OLD);
         mockReadOpenClawConfig.mockImplementation(async () => openclawJson as never);
-        const realTransaction = vi.mocked(beginConfigWriteTransaction).getMockImplementation();
+        commitFails = false;
+        realTransaction = vi.mocked(beginConfigWriteTransaction).getMockImplementation();
         vi.mocked(beginConfigWriteTransaction).mockImplementation((label: string) => {
           const tx = realTransaction!(label);
           tx.commit = vi.fn(async () => {
+            if (commitFails) throw new Error("config.patch refused");
             openclawJson = linkedTo(NEW);
           });
           return tx;
         });
 
-        let portalUp = true;
+        portalUp = true;
         vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
           if (!String(input).includes("/api/clawbox-ai/device-info")) throw new Error("network disabled in tests");
           if (!portalUp) throw new Error("portal unreachable");
@@ -3526,7 +3539,18 @@ describe("POST /setup-api/ai-models/configure", () => {
           return new Response(JSON.stringify(body), { status: 200 });
         }));
 
-        const { GET: statusGet } = await import("@/app/setup-api/ai-models/status/route");
+        statusGet = (await import("@/app/setup-api/ai-models/status/route")).GET;
+      });
+
+      afterEach(async () => {
+        const configStore = await import("@/lib/config-store");
+        vi.mocked(configStore.get).mockImplementation(async () => undefined);
+        vi.mocked(configStore.set).mockImplementation(async () => {});
+        vi.mocked(spawnOpenclawCli).mockResolvedValue("");
+        if (realTransaction) vi.mocked(beginConfigWriteTransaction).mockImplementation(realTransaction);
+      });
+
+      it("leaves the new account's badge and plan on record, not the old account's", async () => {
         // The owner's desktop polls while the save runs: here, while the new
         // credential is being pasted into the auth store.
         let midSave: Record<string, unknown> | null = null;
@@ -3535,12 +3559,7 @@ describe("POST /setup-api/ai-models/configure", () => {
           return "";
         });
 
-        const res = await configurePost(jsonRequest({
-          provider: "clawai",
-          apiKey: NEW,
-          authMode: "subscription",
-          clawaiTier: "flash",
-        }));
+        const res = await configurePost(signIn());
 
         expect(res.status).toBe(200);
         // The poll really did run mid-save, about the old token.
@@ -3554,6 +3573,25 @@ describe("POST /setup-api/ai-models/configure", () => {
         portalUp = false;
         const after = await (await statusGet()).json();
         expect(after).toMatchObject({ clawaiConfigured: true, clawaiAccountTier: "flash", clawaiPlan: "free" });
+      });
+
+      it("retires the old account's plan on the retry of a sign-in whose openclaw.json write failed", async () => {
+        // The first attempt stores the new token (step 6) and then fails at the
+        // commit, so openclaw.json still runs the old account. The retry finds
+        // the new token already on record — and if it took that for "the same
+        // account", a portal outage would leave the old Max plan standing as
+        // the new account's profile.
+        portalUp = false;
+        commitFails = true;
+        expect((await configurePost(signIn())).status).not.toBe(200);
+        expect(store).toMatchObject({ clawai_token: NEW, clawai_plan_tier: "pro" });
+
+        commitFails = false;
+        expect((await configurePost(signIn())).status).toBe(200);
+
+        expect(store.clawai_plan_tier).toBeUndefined();
+        const after = await (await statusGet()).json();
+        expect(after).toMatchObject({ clawaiConfigured: true, clawaiAccountTier: "flash", clawaiPlan: null });
       });
     });
   });

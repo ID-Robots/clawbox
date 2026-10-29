@@ -3917,7 +3917,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // cannot vouch for either, so a plan sitting there belongs to nobody this
     // save knows about and goes with the rest. Deleting a key that is not there
     // is a no-op; leaving one that outlived its account is not.
-    const clawaiPlanIsForAnotherAccount = isClawAI && previousClawaiToken !== clawboxAiToken;
+    //
+    // The token openclaw.json RAN counts too: it is the one the status poll
+    // asks the portal about. A sign-in whose commit failed has already stored
+    // the new token in step 6 while openclaw.json kept the old one, and its
+    // retry would otherwise read as a save on the same account and keep the
+    // previous account's plan.
+    const runningClawaiToken = configBeforeSave?.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
+    const clawaiPlanIsForAnotherAccount = isClawAI && (
+      previousClawaiToken !== clawboxAiToken
+      || (typeof runningClawaiToken === "string"
+        && runningClawaiToken.startsWith("claw_")
+        && runningClawaiToken !== clawboxAiToken)
+    );
     const clawaiPlanForStore = isClawAI && (portalPlan || clawaiPlanIsForAnotherAccount)
       ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) }
       : {};
