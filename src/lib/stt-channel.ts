@@ -40,6 +40,7 @@ import {
   sttEngineOrder,
   TRANSCRIBE_AUTH_PROFILE,
   TRANSCRIBE_MODEL,
+  transcribeProfileProblem,
   type SttEngine,
 } from "@/lib/stt-preference";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
@@ -48,9 +49,9 @@ import type { AuthProfileEntries } from "@/lib/subscription-surface";
 export type CloudSttUnavailable =
   /** No ClawBox AI token on this box — never linked, or signed out. */
   | "not_linked"
-  /** The profile the row names is not in the store the gateway resolves. */
+  /** The profile the row names is not recorded in openclaw.json, or not in the store the gateway resolves. */
   | "profile_missing"
-  /** It is there, but as an OAuth or token profile, or a dead refresh fence. */
+  /** It is there, but recorded or stored as OAuth, stored as a token, or a dead refresh fence. */
   | "profile_not_api_key"
   /** It holds a key that is not this box's ClawBox AI token. */
   | "profile_stale"
@@ -112,17 +113,23 @@ const UNAVAILABLE_SENTENCE: Record<CloudSttUnavailable, string> = {
  *    that is not done here, and the box's own engine carries channel voice
  *    notes instead.
  *
- * Asked of the store the gateway resolves (openclaw-auth-store.ts). Where there
- * is none, or it could not be read this time, openclaw.json's record of the
- * profile is the evidence that is left: a transient read failure must not drop
- * a working row, and a record that is not there says the profile was never
- * written.
+ * Asked of openclaw.json's record of the profile first — it has to say a key
+ * ({@link transcribeProfileProblem}), the rule gateway-pre-start.sh applies to
+ * the same field — and then of the store the gateway resolves
+ * (openclaw-auth-store.ts). A store that could not be read this time leaves the
+ * record as the evidence: a transient read failure must not drop a working row.
  */
 export function decideCloudSttBacking(facts: CloudSttFacts): CloudSttBacking {
   const { token, bound, openai, profiles } = facts;
   // A raw DeepSeek key in the same slot is the OWNER's credential, and the
   // proxy is not where it may be sent.
   if (token === null || !isClawboxAiToken(token)) return unusable("not_linked");
+  // openclaw.json's record first, whatever the store says: it is the one
+  // piece of evidence gateway-pre-start.sh can read too, and the two must
+  // refuse the same rows or each boot undoes the other. A stale `mode: "oauth"`
+  // row here is the box this card was found on.
+  const recorded = transcribeProfileProblem(profiles);
+  if (recorded !== null) return unusable(recorded);
   if (bound.kind === "present") {
     if (bound.type !== "api_key" || bound.fenced) return unusable("profile_not_api_key");
     // A key behind a SecretRef has no fingerprint here; only a key that is
@@ -132,11 +139,6 @@ export function decideCloudSttBacking(facts: CloudSttFacts): CloudSttBacking {
     }
   } else if (bound.kind === "absent") {
     return unusable("profile_missing");
-  } else {
-    const recorded = profiles?.[TRANSCRIBE_AUTH_PROFILE];
-    if (!recorded) return unusable("profile_missing");
-    const mode = recorded.mode?.trim().toLowerCase();
-    if (mode && mode !== "api_key" && mode !== "api-key") return unusable("profile_not_api_key");
   }
   const oauthInStore = openai.kind === "present" && openai.profiles.some((profile) => profile.type === "oauth");
   if (oauthInStore || hasChatgptOauthProfile(profiles)) return unusable("openai_oauth");

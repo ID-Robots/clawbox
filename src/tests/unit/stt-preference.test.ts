@@ -191,3 +191,64 @@ describe("buildAudioModels", () => {
     expect(lib.buildAudioModels(["cloud", "local"], true, true)[1]).toEqual(LOCAL);
   });
 });
+
+/**
+ * The credential half of the cloud row's rule, shared by the channel list
+ * (stt-channel.ts) and the chat microphone, and mirrored by
+ * gateway-pre-start.sh. A ClawBox AI sign-in records `deepseek:default` in
+ * openclaw.json as a key; a release that signed in by subscription recorded
+ * it as OAuth, and the core then refused our endpoint on every voice note.
+ */
+describe("transcribeProfileProblem", () => {
+  const record = (mode?: string) => ({ "deepseek:default": { provider: "deepseek", ...(mode === undefined ? {} : { mode }) } });
+
+  it("accepts the profile only when it is recorded as a key", () => {
+    expect(lib.transcribeProfileProblem(record("api_key"))).toBeNull();
+    expect(lib.transcribeProfileProblem(record("api-key"))).toBeNull();
+    expect(lib.transcribeProfileProblem(record("token"))).toBeNull();
+  });
+
+  it("refuses a stale OAuth row, and a row with no mode", () => {
+    expect(lib.transcribeProfileProblem(record("oauth"))).toBe("profile_not_api_key");
+    expect(lib.transcribeProfileProblem(record())).toBe("profile_not_api_key");
+  });
+
+  it("refuses a box that records no such profile", () => {
+    expect(lib.transcribeProfileProblem(undefined)).toBe("profile_missing");
+    expect(lib.transcribeProfileProblem({ "openai:default": { provider: "openai", mode: "api_key" } })).toBe("profile_missing");
+  });
+
+  it("leaves the cloud row out of a box with Whisper and a stale OAuth profile — the on-box engine alone, first", () => {
+    const primary = lib.resolveSttPrimary(undefined, true, true);
+    const backed = lib.transcribeProfileProblem(record("oauth")) === null;
+    expect(lib.buildAudioModels(lib.sttEngineOrder(primary), true, backed)).toEqual([LOCAL]);
+  });
+});
+
+describe("cloudTranscribeProblem — the chat microphone's half", () => {
+  const TOKEN = "claw_test";
+  const config = (mode: string | null, apiKey: string = TOKEN) => ({
+    models: { providers: { deepseek: { apiKey } } },
+    ...(mode === null ? {} : { auth: { profiles: { "deepseek:default": { provider: "deepseek", mode } } } }),
+  });
+
+  it("uses a ClawBox AI sign-in recorded as a key", () => {
+    expect(lib.cloudTranscribeProblem(TOKEN, config("api_key"))).toBeNull();
+  });
+
+  it("refuses the sign-in left over as OAuth, as the channel row does", () => {
+    expect(lib.cloudTranscribeProblem(TOKEN, config("oauth"))).toBe("profile_not_api_key");
+    expect(lib.cloudTranscribeProblem(TOKEN, config(null))).toBe("profile_missing");
+  });
+
+  it("never sends an owner's own DeepSeek key to the proxy", () => {
+    expect(lib.cloudTranscribeProblem("sk-owner-deepseek-key", config("api_key", "sk-owner-deepseek-key"))).toBe("not_linked");
+    expect(lib.cloudTranscribeProblem(null, config("api_key"))).toBe("not_linked");
+  });
+
+  it("asks nothing of openclaw.json for a token the Hermes store holds", () => {
+    expect(lib.cloudTranscribeProblem(TOKEN, null)).toBeNull();
+    // A dual box whose openclaw.json holds no ClawBox AI token of its own.
+    expect(lib.cloudTranscribeProblem(TOKEN, { auth: { profiles: {} } })).toBeNull();
+  });
+});

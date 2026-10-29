@@ -107,10 +107,13 @@ function localRow(): Record<string, unknown> {
   return models.find((m) => m.type === "cli")!;
 }
 
+/** What every ClawBox AI sign-in records in openclaw.json beside the token: the profile, as a key. */
+const LINKED_AUTH = { auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } } };
+
 beforeEach(() => {
   vi.resetModules();
   store.clear();
-  readConfigMock.mockReset().mockResolvedValue({});
+  readConfigMock.mockReset().mockResolvedValue({ ...LINKED_AUTH });
   batchMock.mockReset().mockResolvedValue(undefined);
   unsetMock.mockReset().mockResolvedValue(undefined);
   restartMock.mockReset().mockResolvedValue(undefined);
@@ -161,6 +164,23 @@ describe("GET /setup-api/stt", () => {
     const body = await (await GET()).json();
     expect(body.chain).toEqual(["cloud", "local"]);
     expect(body.channels).toEqual({ supportedOnEdition: true, chain: ["local"], cloudUnavailable: "openai_oauth" });
+  });
+
+  /**
+   * A ClawBox AI sign-in left over as an OAuth profile is refused by BOTH
+   * surfaces (`cloudTranscribeProblem`): the microphone uploads nothing to the
+   * proxy and the channel row is left out, so neither chain may list the cloud.
+   */
+  it("leaves the cloud out of both chains for a ClawBox AI sign-in left over as an OAuth profile", async () => {
+    store.set("stt_primary", "cloud");
+    readConfigMock.mockResolvedValue({
+      models: { providers: { deepseek: { apiKey: "claw_token" } } },
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } },
+    });
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.chain).toEqual(["local"]);
+    expect(body.channels).toEqual({ supportedOnEdition: true, chain: ["local"], cloudUnavailable: "profile_not_api_key" });
   });
 
   it("never spawns the openclaw CLI or bounces the gateway just to render the panel", async () => {
@@ -375,7 +395,7 @@ describe("POST /setup-api/stt — the write", () => {
    */
   it("never writes the openai row with our endpoint once the openai credential is a ChatGPT sign-in", async () => {
     openaiAuthMock.mockReturnValue(CHATGPT_SIGNED_IN);
-    readConfigMock.mockResolvedValue({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } });
+    readConfigMock.mockResolvedValue({ ...LINKED_AUTH, tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } });
     const { POST } = await route();
     const res = await POST(post({ primary: "cloud" }));
     expect(res.status).toBe(200);
@@ -397,6 +417,26 @@ describe("POST /setup-api/stt — the write", () => {
     expect(unsetMock).toHaveBeenCalledWith("tools.media.audio.baseUrl");
   });
 
+  /**
+   * The box this card was found on: a ClawBox AI sign-in from a release that
+   * signed in by subscription left `deepseek:default` recorded as OAuth, the
+   * core took the row's bearer for an OAuth credential, and every Telegram
+   * voice note was refused while Whisper sat installed beside it.
+   */
+  it("drops the cloud row for a ClawBox AI sign-in left over as an OAuth profile, whatever the store holds", async () => {
+    readConfigMock.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } },
+      tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } },
+    });
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(200);
+    const written = batchMock.mock.calls.flatMap(([ops]) => ops as string[][]);
+    expect(written.map(([key]) => key)).toEqual(["tools.media.models"]);
+    expect(JSON.parse(written[0][1])).toEqual([expect.objectContaining({ type: "cli" })]);
+    expect(unsetMock).toHaveBeenCalledWith("tools.media.audio.baseUrl");
+  });
+
   it("leaves the on-box row out when that engine is not installed", async () => {
     localInstalledMock.mockResolvedValue(MISSING);
     const { POST } = await route();
@@ -408,6 +448,7 @@ describe("POST /setup-api/stt — the write", () => {
     // Key order differs from what the route would write; the comparison is
     // by content, because the CLI is free to serialise the file as it likes.
     readConfigMock.mockResolvedValue({
+      ...LINKED_AUTH,
       tools: {
         media: {
           audio: { baseUrl: PROXY },

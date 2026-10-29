@@ -74,9 +74,16 @@ const CHATGPT = {
   order: null,
   failures: {},
 };
+/** What every ClawBox AI sign-in records beside the store, in openclaw.json's `auth.profiles`. */
+const LINKED = { "deepseek:default": { provider: "deepseek", mode: "api_key" } };
+/** An openclaw.json on a box signed in to ClawBox AI, with whatever else the fixture holds. */
+function linked(cfg: Record<string, unknown> = {}): Record<string, unknown> {
+  const profiles = (cfg.auth as { profiles?: Record<string, unknown> } | undefined)?.profiles;
+  return { ...cfg, auth: { profiles: { ...LINKED, ...profiles } } };
+}
 
 function facts(over: Partial<Parameters<Lib["decideCloudSttBacking"]>[0]> = {}) {
-  return { token: "claw_token", bound: BACKED, openai: NO_OPENAI, profiles: undefined, ...over };
+  return { token: "claw_token", bound: BACKED, openai: NO_OPENAI, profiles: LINKED, ...over };
 }
 
 /** Every key the writes touched, in order: sets by path, unsets as `-path`. */
@@ -99,7 +106,7 @@ function writtenModels(): unknown[] {
 
 beforeEach(async () => {
   vi.resetModules();
-  config.read.mockReset().mockResolvedValue({});
+  config.read.mockReset().mockResolvedValue(linked());
   config.strict.mockReset().mockImplementation((...a: unknown[]) => config.read(...a));
   config.batch.mockReset().mockResolvedValue(undefined);
   config.unset.mockReset().mockResolvedValue(undefined);
@@ -149,7 +156,7 @@ describe("decideCloudSttBacking — does a ClawBox AI credential back the cloud 
   it("never pairs the openai row and our endpoint with a ChatGPT sign-in, in the store or the config", () => {
     expect(lib.decideCloudSttBacking(facts({ openai: CHATGPT })).reason).toBe("openai_oauth");
     expect(
-      lib.decideCloudSttBacking(facts({ profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } })).reason,
+      lib.decideCloudSttBacking(facts({ profiles: { ...LINKED, "openai:chatgpt": { provider: "openai", mode: "oauth" } } })).reason,
     ).toBe("openai_oauth");
   });
 
@@ -165,10 +172,27 @@ describe("decideCloudSttBacking — does a ClawBox AI credential back the cloud 
       lib.decideCloudSttBacking(facts({ bound: unreadable, profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } })),
     ).toEqual({ usable: true, reason: null });
     // ...but a profile nothing ever recorded is not there.
-    expect(lib.decideCloudSttBacking(facts({ bound: { kind: "no-store" } })).reason).toBe("profile_missing");
+    expect(lib.decideCloudSttBacking(facts({ bound: { kind: "no-store" }, profiles: undefined })).reason).toBe("profile_missing");
     expect(
       lib.decideCloudSttBacking(facts({ bound: unreadable, profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } })).reason,
     ).toBe("profile_not_api_key");
+  });
+
+  /**
+   * The box this card was found on: a ClawBox AI sign-in from a release that
+   * signed in by subscription left `deepseek:default` recorded as OAuth. The
+   * core took the row's bearer for an OAuth credential and refused our
+   * endpoint on every voice note. gateway-pre-start.sh can read only this
+   * record, so the store's opinion cannot outvote it — or each boot would undo
+   * the other.
+   */
+  it("does not when openclaw.json records the profile as OAuth, whatever the store holds", () => {
+    const stale = { "deepseek:default": { provider: "deepseek", mode: "oauth" } };
+    expect(lib.decideCloudSttBacking(facts({ profiles: stale }))).toEqual({ usable: false, reason: "profile_not_api_key" });
+  });
+
+  it("does not when openclaw.json records no such profile at all", () => {
+    expect(lib.decideCloudSttBacking(facts({ profiles: {} })).reason).toBe("profile_missing");
   });
 });
 
@@ -184,12 +208,24 @@ describe("syncChannelAudio", () => {
   /** The box this was found on, as its openclaw.json read. */
   it("takes the cloud row and our endpoint off a box signed in with ChatGPT, and puts Whisper in", async () => {
     auth.openai.mockReturnValue(CHATGPT);
-    config.read.mockResolvedValue({
+    config.read.mockResolvedValue(linked({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } },
+    }));
+    expect(await lib.syncChannelAudio(["cloud", "local"], true)).toBe(true);
+    // The list first, then the endpoint; never the endpoint written back.
+    expect(written()).toEqual(["tools.media.models", "-tools.media.audio.baseUrl"]);
+    const models = writtenModels();
+    expect(models).toHaveLength(1);
+    expect(isLocal(models[0])).toBe(true);
+  });
+
+  it("takes the cloud row off a box whose ClawBox AI profile is a stale OAuth row, Whisper first in its place", async () => {
+    config.read.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } },
       tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } },
     });
     expect(await lib.syncChannelAudio(["cloud", "local"], true)).toBe(true);
-    // The list first, then the endpoint; never the endpoint written back.
     expect(written()).toEqual(["tools.media.models", "-tools.media.audio.baseUrl"]);
     const models = writtenModels();
     expect(models).toHaveLength(1);
@@ -243,7 +279,7 @@ describe("syncChannelAudio", () => {
 
 describe("reconcileChannelAudio — boot, a Whisper install, a provider save", () => {
   it("puts the installed engine into the list, first, on a box with no stored pick", async () => {
-    config.read.mockResolvedValue({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } });
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
     expect(await lib.reconcileChannelAudio({ trigger: "whisper-install" })).toBe(true);
     const models = writtenModels();
     expect(isLocal(models[0])).toBe(true);
@@ -321,7 +357,7 @@ describe("reconcileChannelAudio — boot, a Whisper install, a provider save", (
     store.set("stt_primary", "local");
     await lib.reconcileChannelAudio({ trigger: "boot" });
     const settled = writtenModels();
-    config.read.mockResolvedValue({ tools: { media: { audio: { baseUrl: PROXY }, models: settled } } });
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: settled } } }));
     config.batch.mockClear();
     expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(false);
     expect(config.batch).not.toHaveBeenCalled();

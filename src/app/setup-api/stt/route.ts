@@ -3,13 +3,14 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
-import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, openclawIsAbsent, readConfig, restartGateway } from "@/lib/openclaw-config";
 import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { readCloudSttBacking, syncChannelAudio } from "@/lib/stt-channel";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
 import {
+  cloudTranscribeProblem,
   isSttEngine,
   readStoredSttPrimary,
   resolveSttPrimary,
@@ -57,6 +58,10 @@ async function status() {
   // fetching it a second time. Same verdict either way.
   const primary = resolveSttPrimary(stored, cloudConfigured, local.installed);
   const order = sttEngineOrder(primary);
+  // What the microphone's cloud leg will actually send to the proxy: the rule
+  // the transcribe route asks before it uploads anything.
+  const micCloud = token !== null
+    && cloudTranscribeProblem(token, openclawIsAbsent() ? null : await readConfig()) === null;
   return {
     primary,
     engines: {
@@ -66,7 +71,7 @@ async function status() {
     // The engines this box can actually use, in the order it tries them. An
     // unlinked cloud or an uninstalled whisper is shown under `engines`, not
     // listed here as a step that will silently do nothing.
-    chain: order.filter((engine) => (engine === "cloud" ? cloudConfigured : local.installed)),
+    chain: order.filter((engine) => (engine === "cloud" ? micCloud : local.installed)),
     // The ACTIVE harness, not the edition — the same rule /setup-api/tts uses
     // and for the same reason: on a licensed dual box switched to Hermes,
     // `openclawIsAbsent()` is false while the gateway that serves channels is
@@ -80,10 +85,11 @@ async function status() {
 
 /**
  * What a channel voice note tries, in the same order as the microphone, and —
- * when the cloud is not in it — why. The two chains differ only by the cloud
- * row: the microphone sends the token to the proxy itself, while a channel
- * goes through the gateway's credential for the row, which a ClawBox AI token
- * alone does not guarantee (see `readCloudSttBacking`).
+ * when the cloud is not in it — why. Both need a ClawBox AI sign-in whose
+ * profile is recorded as a key (`cloudTranscribeProblem`); past that the two
+ * chains differ only by the cloud row: the microphone sends the token to the
+ * proxy itself, while a channel goes through the gateway's credential for the
+ * row, which the token alone does not guarantee (see `readCloudSttBacking`).
  */
 async function channelStatus(order: SttEngine[], localInstalled: boolean) {
   const cloud = await readCloudSttBacking();

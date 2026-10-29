@@ -93,7 +93,11 @@ function boxHasWhisper(): void {
  * which points at the fixture rather than at the rename that caused it.
  */
 function linkedConfig(token = "claw_testtoken0000000000000000000") {
-  return { models: { providers: { [CLAWBOX_AI_PROVIDER]: { baseUrl: "https://clawbox.com/api/ai", apiKey: token } } } };
+  return {
+    models: { providers: { [CLAWBOX_AI_PROVIDER]: { baseUrl: "https://clawbox.com/api/ai", apiKey: token } } },
+    // What every ClawBox AI sign-in records beside the token: the profile, as a key.
+    auth: { profiles: { [`${CLAWBOX_AI_PROVIDER}:default`]: { provider: CLAWBOX_AI_PROVIDER, mode: "api_key" } } },
+  };
 }
 
 function request(body: BodyInit | null, contentType?: string): NextRequest {
@@ -594,6 +598,50 @@ describe("/setup-api/chat/transcribe", () => {
       const [bytes, name] = localStt.transcribe.mock.calls[0];
       expect(Buffer.from(bytes).equals(AUDIO)).toBe(true);
       expect(name).toBe("voice-note.webm");
+    });
+
+    /**
+     * The channel row's rule, applied to the microphone too (stt-preference.ts
+     * `cloudTranscribeProblem`): a ClawBox AI sign-in left over as an OAuth
+     * profile is what made every Telegram voice note fail, and the two
+     * surfaces must agree on whether this box can transcribe in the cloud.
+     */
+    it("uploads nothing with a ClawBox AI sign-in left over as OAuth, and the box answers", async () => {
+      boxHasWhisper();
+      writePrimary("cloud");
+      writeConfig({
+        ...linkedConfig(),
+        auth: { profiles: { [`${CLAWBOX_AI_PROVIDER}:default`]: { provider: CLAWBOX_AI_PROVIDER, mode: "oauth" } } },
+      });
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "from the box" });
+
+      const res = await POST(audioRequest());
+
+      expect(await res.json()).toEqual({ ok: true, text: "from the box", engine: "local" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("says to sign in to ClawBox AI again when that sign-in is all there is", async () => {
+      writeConfig({
+        ...linkedConfig(),
+        auth: { profiles: { [`${CLAWBOX_AI_PROVIDER}:default`]: { provider: CLAWBOX_AI_PROVIDER, mode: "oauth" } } },
+      });
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toMatch(/Sign in to ClawBox AI again/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("never sends an owner's own DeepSeek key to the ClawBox AI proxy", async () => {
+      writeConfig(linkedConfig("sk-owner-deepseek-key-0000000000"));
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toMatch(/not linked to ClawBox AI/);
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it("tries the box first when the owner put it first, and never calls out", async () => {
