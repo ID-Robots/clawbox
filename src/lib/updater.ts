@@ -699,6 +699,14 @@ interface UpdateStepDef {
    * being "completed" on a box that has no OpenClaw.
    */
   applies?: () => boolean;
+  /**
+   * A root step asked first, with the gateway left running, that either does
+   * this step's work on its fast path or changes nothing (see
+   * rootStepTookFastPath). Only the full update's `openclaw_install` has one:
+   * the OpenClaw-only update is the owner's repair, and it always runs the
+   * full step.
+   */
+  fastPathStep?: string;
 }
 
 /** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
@@ -3944,6 +3952,9 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // Keyed on the binary, not the edition: there is nothing to install where
     // no `openclaw` ships. (Hermes today; the two predicates can diverge.)
     applies: () => !openclawIsAbsent(),
+    // An update that does not move the pin usually has nothing for this step
+    // to do; install.sh says so before the gateway is touched.
+    fastPathStep: "openclaw_install_fast",
   },
   {
     id: "openclaw_patch",
@@ -4151,6 +4162,51 @@ async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number):
       throw err;
     }
   });
+}
+
+/**
+ * install.sh's own line for a fast path that ran, as the journal carries it.
+ * ANCHORED to the start of the line: the fast-only step prints no doctor or npm
+ * transcript, but a line that merely quotes this one is not this box taking it.
+ */
+const OPENCLAW_FAST_PATH_LINE = /^OpenClaw refresh: fast path\b/;
+
+/**
+ * Ask a root step's fast variant first, with the gateway left running, and say
+ * whether it took the fast path.
+ *
+ * The update's `openclaw_install` runs with the gateway quiesced — masked,
+ * stopped, restarted afterwards — which costs minutes and the owner's chat even
+ * when the core is already at the pin. A quiesced gateway also fails one of the
+ * facts install.sh's fast path rests on, so that path can only be asked for
+ * BEFORE the quiesce, by `openclaw_install_fast`: it takes the fast path when
+ * every fact holds and otherwise changes nothing. Anything but its own
+ * "fast path" line — a full-path answer, a runner that does not know the step,
+ * a failure, a journal that cannot be read — answers false, and the caller
+ * runs the full step exactly as before.
+ */
+async function rootStepTookFastPath(stepId: string, timeoutMs: number): Promise<boolean> {
+  const startedAt = Date.now();
+  showRunningStepDetail("Checking whether OpenClaw is already up to date");
+  try {
+    await execAsRoot(stepId, timeoutMs);
+  } catch (err) {
+    // Never start the quiesced full step beside a check that is still running.
+    if (err instanceof BudgetOverrunError) await waitForRootStepToSettle(stepId);
+    console.warn(
+      `[Updater] ${stepId} did not answer (${err instanceof Error ? err.message : String(err)}) — running the full step`,
+    );
+    return false;
+  } finally {
+    showRunningStepDetail(undefined);
+  }
+  await collectRootStepWarnings(stepId, startedAt);
+  const journal = await readRootStepJournal(stepId, startedAt);
+  const fast = journal.split(/\r?\n/).some((line) => OPENCLAW_FAST_PATH_LINE.test(line.trim()));
+  console.log(fast
+    ? `[Updater] ${stepId}: OpenClaw is already current — fast path taken, gateway left running`
+    : `[Updater] ${stepId}: the full step is needed — running it with the gateway quiesced`);
+  return fast;
 }
 
 /**
@@ -6088,7 +6144,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
             : step.id === "openclaw_install"
               ? await applianceOpenclawInstallTimeoutMs()
               : step.timeoutMs;
-        if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
+        if (step.fastPathStep && !desktopIntegration && !gatewayIsAbsent()
+          && await rootStepTookFastPath(step.fastPathStep, timeoutMs)) {
+          // Done, with the gateway never stopped: nothing to recover.
+        } else if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {
           await execAsRoot(step.id, timeoutMs);

@@ -679,6 +679,11 @@ PROVISION_STATUS_FILE="${CLAWBOX_PROVISION_STATUS_FILE:-/etc/clawbox/provision-s
 # step_validate_services. Exported to that script rather than defaulted twice,
 # so the writer and the reader cannot drift onto two different paths.
 TTS_STATUS_FILE="${CLAWBOX_TTS_STATUS_FILE:-/etc/clawbox/tts-status}"
+# The OpenClaw target step_openclaw_install's FULL path last finished for —
+# core in place, doctor's migration complete, plugin refresh run. Its fast path
+# trusts nothing else as "the migration already ran"; see
+# openclaw_refresh_fast_path_check.
+OPENCLAW_REFRESH_MARKER="${CLAWBOX_OPENCLAW_REFRESH_MARKER:-/etc/clawbox/openclaw-refresh}"
 # Identifies THIS run. Stamped into the marker and printed on stdout, so a
 # reader holding both can tell whose verdict it is looking at.
 PROVISION_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)-$$"
@@ -6565,6 +6570,232 @@ remove_shadowing_system_openclaw() {
   return 0
 }
 
+# ── step_openclaw_install's fast path ───────────────────────────────────────
+# The full path stops the gateway, runs `doctor --fix`, force-reinstalls every
+# external plugin and starts the gateway again: one to three minutes, with chat
+# down throughout — and on most updates it changes nothing, because the pin
+# did not move. The fast path returns BEFORE the stop, and only on positive
+# evidence that the full path has nothing to do:
+#   1. the core answers the target (the caller's own check, made first);
+#   2. the plugins ClawBox manages are at the version the full path would
+#      install, and the core's plugin list reports nothing broken, orphaned or
+#      waiting for consent;
+#   3. the marker says the full path last FINISHED for this very target;
+#   4. the gateway is running and listening.
+# A check that cannot answer is doubt, and doubt is the full path, unchanged.
+# Returns 0 for the fast path; otherwise 1, with OPENCLAW_REFRESH_WHY saying
+# which fact was missing. The order is cheapest first: the plugin list is a
+# CLI cold start and is asked last.
+openclaw_refresh_fast_path_check() {
+  local target="$1" recorded state active sub verdict
+  OPENCLAW_REFRESH_WHY=""
+  if [ "${CLAWBOX_FORCE_OPENCLAW_REFRESH:-0}" = 1 ]; then
+    OPENCLAW_REFRESH_WHY="CLAWBOX_FORCE_OPENCLAW_REFRESH=1 asks for it"
+    return 1
+  fi
+  # Inside step_openclaw_setup the config writes that follow were built for a
+  # stopped gateway, and that step starts it again only at its end.
+  if [ "${_oc_defer_gateway_start:-0}" = 1 ]; then
+    OPENCLAW_REFRESH_WHY="the composite openclaw_setup step configures OpenClaw next, with the gateway stopped"
+    return 1
+  fi
+  if ! has_openclaw_harness; then
+    OPENCLAW_REFRESH_WHY="this box runs no OpenClaw gateway (edition ${CLAWBOX_EDITION:-unknown})"
+    return 1
+  fi
+  recorded="$(sed -n 's/^target=//p' "${OPENCLAW_REFRESH_MARKER:-}" 2>/dev/null | head -n 1 || true)"
+  if [ "$recorded" != "$target" ]; then
+    OPENCLAW_REFRESH_WHY="no full refresh has finished for $target; the last on record is ${recorded:-none}"
+    return 1
+  fi
+  # Running, not merely active-ish: `activating` is a pre-start or a crash
+  # loop, and a gateway the updater stopped for this step is `inactive`.
+  state="$(systemctl show clawbox-gateway.service -p ActiveState -p SubState 2>/dev/null || true)"
+  active="$(printf '%s\n' "$state" | sed -n 's/^ActiveState=//p')"
+  sub="$(printf '%s\n' "$state" | sed -n 's/^SubState=//p')"
+  if [ "$active" != active ] || [ "$sub" != running ]; then
+    OPENCLAW_REFRESH_WHY="the gateway is ${active:-unknown}/${sub:-unknown}, not active/running"
+    return 1
+  fi
+  # A gateway that refuses readiness (legacy state, a plugin awaiting consent)
+  # stays `active` for ever and never binds its port.
+  if ! gateway_port_listening; then
+    OPENCLAW_REFRESH_WHY="the gateway is running but not listening on port ${GATEWAY_PORT:-18789}"
+    return 1
+  fi
+  # The core's own inventory, read by the same rules the refresh below uses
+  # (`origin: bundled` ships with the core; ids normalised the same way). A
+  # ClawBox plugin from the @openclaw scope must be at the target, as the
+  # refresh would pin it; clawbox-email-directives must match the copy in the
+  # checkout it is installed from. Plugins the owner installed are not
+  # version-checked — the core did not move, so the refresh has nothing to
+  # line them up with — but any plugin that lost its payload, reports an error
+  # or waits for consent is doubt, and so is a repair ClawBox has on record.
+  # No clock on the ask (the owner's rule for this file): the refresh below
+  # asks the same CLI the same way.
+  verdict="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
+    | python3 -c '
+import json, os, sys
+
+target, repairs_path, email_pkg = sys.argv[1:4]
+MANAGED = {"codex", "deepseek", "discord", "whatsapp", "clawbox-email-directives"}
+PROBLEMS = ("requires capability consent", "payload verification failed", "plugin not installed")
+
+
+def doubt(reason):
+    print(reason)
+    sys.exit(0)
+
+
+def canonical(name):
+    for prefix in ("@openclaw/", "openclaw-"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name[:-len("-provider")] if name.endswith("-provider") else name
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def manifest(path):
+    try:
+        data = read_json(path)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def payload_root(plugin):
+    root = plugin.get("rootDir")
+    if isinstance(root, str) and root:
+        return root
+    source = plugin.get("source")
+    if isinstance(source, str) and source:
+        parent = os.path.dirname(source)
+        return os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
+    return ""
+
+
+def check_diagnostics(node):
+    if isinstance(node, dict):
+        entries = node.get("diagnostics")
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            message = str(entry.get("message") or "")
+            level = str(entry.get("level") or "").lower()
+            if level == "error" or any(p in message.lower() for p in PROBLEMS):
+                doubt("the core reports for %s: %s" % (entry.get("pluginId") or "a plugin", message[:160]))
+        for value in node.values():
+            check_diagnostics(value)
+    elif isinstance(node, list):
+        for value in node:
+            check_diagnostics(value)
+
+
+try:
+    repairs = read_json(repairs_path)
+except FileNotFoundError:
+    repairs = {}
+except Exception:
+    doubt("the plugin repairs on record (%s) could not be read" % repairs_path)
+if not isinstance(repairs, dict):
+    doubt("the plugin repairs on record (%s) could not be read" % repairs_path)
+if repairs:
+    doubt("a plugin repair is still open (%s)" % ", ".join(sorted(str(k) for k in repairs)))
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    doubt("the core plugin list could not be read")
+plugins = data.get("plugins") if isinstance(data, dict) else data
+if not isinstance(plugins, list):
+    doubt("the core plugin list carries no plugins array")
+check_diagnostics(data)
+
+for plugin in plugins:
+    if not isinstance(plugin, dict) or not isinstance(plugin.get("id"), str) or not plugin.get("id"):
+        doubt("the core plugin list has an entry with no id")
+    pid = plugin["id"]
+    if str(plugin.get("status") or "").lower() == "error" or plugin.get("error"):
+        doubt("plugin %s is in an error state (%s)" % (pid, str(plugin.get("error") or "status error")[:160]))
+    if plugin.get("origin") == "bundled":
+        continue
+    root = payload_root(plugin)
+    if not root:
+        doubt("plugin %s has no payload on record (orphaned by an earlier core)" % pid)
+    if not os.path.exists(root):
+        doubt("plugin %s payload is gone (%s)" % (pid, root))
+    key = canonical(pid)
+    if key not in MANAGED:
+        continue
+    deps = plugin.get("dependencyStatus")
+    if isinstance(deps, dict) and deps.get("requiredInstalled") is False:
+        doubt("plugin %s is missing a required dependency" % pid)
+    pkg = manifest(os.path.join(root, "package.json"))
+    if pkg is None:
+        doubt("plugin %s has no readable package.json under %s" % (pid, root))
+    name = pkg.get("name") if isinstance(pkg.get("name"), str) else ""
+    if name.startswith("@openclaw/"):
+        want = target
+    elif key == "clawbox-email-directives":
+        shipped = manifest(email_pkg)
+        if shipped is None or not isinstance(shipped.get("version"), str):
+            doubt("the checkout copy of clawbox-email-directives (%s) could not be read" % email_pkg)
+        want = shipped["version"]
+    else:
+        doubt("plugin %s comes from %s, not a package ClawBox pins" % (pid, name or "an unnamed package"))
+    if pkg.get("version") != want:
+        doubt("plugin %s is at %s, the refresh would install %s" % (pid, pkg.get("version") or "no version", want))
+print("ok")
+' "$target" "${PROJECT_DIR:-}/data/plugin-repair.json" \
+      "${PROJECT_DIR:-}/scripts/openclaw-plugins/clawbox-email-directives/package.json" 2>/dev/null || true)"
+  if [ "$verdict" != ok ]; then
+    OPENCLAW_REFRESH_WHY="${verdict:-the plugin check could not run}"
+    return 1
+  fi
+  OPENCLAW_REFRESH_WHY="the core, the plugins ClawBox manages and the last full refresh are all at $target, and the gateway is serving"
+  return 0
+}
+
+# Dropped as the full path begins and written once it has finished, so a full
+# path cut short anywhere — a failed doctor, a refused core, a box that lost
+# power — leaves no record and the next run takes the full path again.
+openclaw_refresh_marker_clear() {
+  [ -n "${OPENCLAW_REFRESH_MARKER:-}" ] || return 0
+  rm -f "$OPENCLAW_REFRESH_MARKER" \
+    || echo "  WARN: could not remove $OPENCLAW_REFRESH_MARKER; an unfinished refresh may still read as finished" >&2
+  return 0
+}
+
+openclaw_refresh_marker_write() {
+  local marker="${OPENCLAW_REFRESH_MARKER:-}"
+  [ -n "$marker" ] || return 0
+  if mkdir -p "$(dirname "$marker")" 2>/dev/null \
+    && printf 'target=%s\nfinished=%s\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" >"$marker.tmp" 2>/dev/null \
+    && mv -f "$marker.tmp" "$marker" 2>/dev/null; then
+    echo "  Recorded a finished OpenClaw refresh for $1"
+  else
+    rm -f "$marker.tmp" 2>/dev/null || true
+    echo "  WARN: could not record the finished OpenClaw refresh in $marker; the next run takes the full path again" >&2
+  fi
+  return 0
+}
+
+# The updater's half of the fast path. It runs the update's `openclaw_install`
+# with the gateway quiesced, and a quiesced gateway can never pass check 4 —
+# so it asks this step first, with the gateway left running: the fast path if
+# it holds, otherwise NOTHING changes (no stop, no install, no doctor) and the
+# updater goes on to the quiesced full step. A runner that does not know this
+# step refuses it, and the updater reads that as "full path" too.
+step_openclaw_install_fast() {
+  local OPENCLAW_REFRESH_FAST_ONLY=1
+  step_openclaw_install
+}
+
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
@@ -6622,6 +6853,7 @@ step_openclaw_install() {
   local TARGET="${PINNED:-$OPENCLAW_VERSION}"
   local CORE_NEEDS_INSTALL=1
   local _oc_gateway_stopped=0
+  local _oc_core_why="no OpenClaw core is installed at $OPENCLAW_BIN"
 
   # Keep this guard inside the OpenClaw step too, not only in apt_update:
   # update retries can start from this step, and EVERY Node 22 — not just the
@@ -6644,8 +6876,26 @@ step_openclaw_install() {
     if [ "$INSTALLED_VER" = "$TARGET" ]; then
       echo "  OpenClaw core is already at $TARGET; skipping npm install"
       CORE_NEEDS_INSTALL=0
+    else
+      _oc_core_why="the core on the box answers ${INSTALLED_VER:-nothing}, not $TARGET"
     fi
   fi
+  # ONE line says which path runs and why — the updater reads the fast one off
+  # the journal (`OpenClaw refresh: fast path`), and anything else is the full.
+  if [ "$CORE_NEEDS_INSTALL" -eq 0 ] && openclaw_refresh_fast_path_check "$TARGET"; then
+    # The core is in place, so the second-core cleanup is as safe here as on
+    # the full path below.
+    remove_shadowing_system_openclaw
+    echo "  OpenClaw refresh: fast path ($OPENCLAW_REFRESH_WHY) — no gateway stop, no doctor, no plugin reinstall"
+    return 0
+  fi
+  [ "$CORE_NEEDS_INSTALL" -eq 0 ] || OPENCLAW_REFRESH_WHY="$_oc_core_why"
+  if [ "${OPENCLAW_REFRESH_FAST_ONLY:-0}" = 1 ]; then
+    echo "  OpenClaw refresh: full path needed (${OPENCLAW_REFRESH_WHY:-the fast-path check could not run}) — nothing changed here; the updater runs it with the gateway quiesced"
+    return 0
+  fi
+  echo "  OpenClaw refresh: full path (${OPENCLAW_REFRESH_WHY:-the fast-path check could not run})"
+  openclaw_refresh_marker_clear
   stop_openclaw_gateways_for_migration || return 1
   _oc_gateway_stopped=1
   if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
@@ -6904,6 +7154,11 @@ for p in d.get("plugins", []):
   else
     echo "  No external plugins to refresh"
   fi
+  # The full path has finished: the core is at the target and, on OpenClaw 2,
+  # doctor's migration completed (an incomplete one returned above). A refresh
+  # that only WARNed does not hold the record back — the fast path asks the
+  # plugin list itself every time.
+  openclaw_refresh_marker_write "$TARGET"
   # Standalone installs restore only after plugin refresh. The composite setup
   # step owns restoration after its remaining patch/config/voice operations.
   # `_oc_gateway_stopped` is set whether or not a gateway was running, so the
@@ -12867,6 +13122,10 @@ DISPATCH_STEPS=(
   embed_model
   chromium_install google_chrome_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
+  # The updater's first ask of an update's OpenClaw step, with the gateway still
+  # up: the fast path of openclaw_install or no change at all — never more than
+  # openclaw_install itself may do. No parenthesis here either.
+  openclaw_install_fast
   # The Local AI tab's two engine installs, since 2026-09-15: Kokoro and
   # faster-whisper are opt-in now, and these are the only two steps that
   # install either. On WEB_ROOT_STEPS, never on the UI/MCP list. No

@@ -169,6 +169,10 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     shellFunction("openclaw_db_maintenance"),
     shellFunction("openclaw_migration_disk_preflight"),
     shellFunction("openclaw_record_migration_verdict"),
+    // The fast path and its marker have a suite of their own
+    // (install-openclaw-fast-path.test.ts); every case here is a full path.
+    'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: full path"; return 1; }',
+    "openclaw_refresh_marker_clear() { :; }",
     // The plugin refresh after the migration is not this suite's: cut there.
     shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
     "step_openclaw_install",

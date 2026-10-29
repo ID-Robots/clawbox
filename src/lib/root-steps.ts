@@ -79,6 +79,11 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "ollama_install",
   "openclaw_config",
   "openclaw_install",
+  // The updater asks this before an update's openclaw_install, with the gateway
+  // still running: install.sh takes the step's fast path when everything is
+  // already at the pin, and otherwise changes nothing. A strict subset of
+  // openclaw_install, which is on this list already — no new capability.
+  "openclaw_install_fast",
   "openclaw_patch",
   "openclaw_setup",
   "openclaw_tts",

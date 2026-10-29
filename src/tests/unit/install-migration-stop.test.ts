@@ -111,6 +111,16 @@ ctl() {
 ${fn("stop_openclaw_unit_for_migration")}
 ${fn("stop_openclaw_gateways_for_migration")}
 ${fn("openclaw_migration_complete")}
+# Lifted, with the marker in this case's own directory: no case here has a
+# finished refresh on record, so every one is the full path — which is what
+# these cases pin. The fast path has its own suite
+# (install-openclaw-fast-path.test.ts).
+OPENCLAW_REFRESH_MARKER="${dir}/openclaw-refresh"
+PROJECT_DIR="${dir}/checkout"
+gateway_port_listening() { return 1; }
+${fn("openclaw_refresh_fast_path_check")}
+${fn("openclaw_refresh_marker_clear")}
+${fn("openclaw_refresh_marker_write")}
 ${fn("recover_parked_openclaw_core")}
 ${fn("promote_staged_openclaw_core")}
 # Stubbed, never lifted: the step calls it with no arguments, which means the
@@ -129,7 +139,12 @@ else
   step_openclaw_install
 fi
 `, "test"], { encoding: "utf8", env: { ...process.env, SCENARIO: scenario, ...extraEnv } });
-  return { ...result, events: existsSync(path.join(dir, "events")) ? readFileSync(path.join(dir, "events"), "utf8").trim().split("\n") : [] };
+  const marker = path.join(dir, "openclaw-refresh");
+  return {
+    ...result,
+    events: existsSync(path.join(dir, "events")) ? readFileSync(path.join(dir, "events"), "utf8").trim().split("\n") : [],
+    marker: existsSync(marker) ? readFileSync(marker, "utf8") : null,
+  };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -148,6 +163,9 @@ describe("OpenClaw stopped-writer prerequisite", () => {
       const r = run(scenario);
       expect(r.stdout, r.stderr).toContain("DOCTOR_CALLED");
       expect(r.status).toBe(1); // The sentinel doctor's failure propagates.
+      // An incomplete migration never records a finished refresh, so the next
+      // run cannot take the fast path over it.
+      expect(r.marker).toBeNull();
       if (scenario === "absent") expect(r.stderr).not.toContain(" stop ");
       if (scenario === "manager-absent") expect(r.stderr).not.toContain("CTL user");
     });
@@ -170,6 +188,13 @@ describe("OpenClaw stopped-writer prerequisite", () => {
       else expect(r.stdout).toContain("DOCTOR_CALLED");
       if (scenario.endsWith("replacement")) expect(r.stdout).toContain("NPM_CALLED");
       else expect(r.stdout).not.toContain("NPM_CALLED");
+      // The step says which path it took and why, and a full path that
+      // finished records the target it finished for.
+      const target = scenario.startsWith("v1-") ? "2026.7.1" : "2026.8.1";
+      expect(r.stdout).toContain(scenario.endsWith("replacement")
+        ? `OpenClaw refresh: full path (the core on the box answers ${scenario.startsWith("v1-") ? "2026.7.0" : "2026.7.1"}, not ${target})`
+        : `OpenClaw refresh: full path (no full refresh has finished for ${target}; the last on record is none)`);
+      expect(r.marker).toMatch(new RegExp(`^target=${target.replace(/\./g, "\\.")}\\n`));
     });
   }
 

@@ -131,6 +131,11 @@ const AMBIENT = [
   // (install-openclaw-migration-preflight.test.ts); here they pass.
   "openclaw_migration_disk_preflight() { return 0; }",
   "openclaw_record_migration_verdict() { :; }",
+  // The fast path and its marker have a suite of their own
+  // (install-openclaw-fast-path.test.ts); every case here is a full path.
+  'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: full path"; return 1; }',
+  "openclaw_refresh_marker_clear() { :; }",
+  "openclaw_refresh_marker_write() { :; }",
   "wait_for_apt() { :; }",
   "ensure_clawbox_bashrc_path() { :; }",
   "ensure_openclaw_node_engine() { :; }",
