@@ -41,6 +41,7 @@ import { ApiError } from "../../../mcp/lib/errors";
 import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
 import { MAX_SECRETS } from "../../../src/lib/project-secrets-shape";
+import { OPENAI_MODELS } from "../../../src/lib/coding-provider";
 import { capText } from "../../../mcp/lib/guard";
 
 // `coding_secret_list` registers under the same switch: it is about what a
@@ -570,11 +571,14 @@ describe("coding_agent_run — provider and model", () => {
     const shape = harness().get("coding_agent_run").shape as Record<string, { safeParse: (v: unknown) => { success: boolean } }>;
     expect(shape.provider.safeParse("anthropic").success).toBe(true);
     expect(shape.provider.safeParse("clawbox-ai").success).toBe(true);
-    expect(shape.provider.safeParse("openai").success).toBe(false);
+    expect(shape.provider.safeParse("openai").success).toBe(true);
+    expect(shape.provider.safeParse("mistral").success).toBe(false);
     // The new default and the one it replaced: a follow-up run re-states the
     // model of the run it continues, so both have to survive the enum.
     expect(shape.model.safeParse("claude-opus-5-5").success).toBe(true);
     expect(shape.model.safeParse("claude-opus-5").success).toBe(true);
+    // Every OpenAI model the Codex runner offers, and nothing it does not.
+    for (const model of OPENAI_MODELS) expect(shape.model.safeParse(model).success, model).toBe(true);
     expect(shape.model.safeParse("gpt-5").success).toBe(false);
     // Both optional: omitting them means the owner's default.
     expect(shape.provider.safeParse(undefined).success).toBe(true);
@@ -604,6 +608,22 @@ describe("coding_agent_run — provider and model", () => {
     expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", model: "claude-opus-5" });
   });
 
+  it("passes an OpenAI run and its model to the device", async () => {
+    apiPost.mockResolvedValue({ started: true, run: RUN });
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "openai", model: "gpt-5.6-luna" });
+    expect(out.isError).toBe(false);
+    expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", provider: "openai", model: "gpt-5.6-luna" });
+  });
+
+  it("refuses an Anthropic model on OpenAI without calling the device", async () => {
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "openai", model: "claude-opus-5-5" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/Unknown model for openai/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
   it("refuses a model named for ClawBox AI without calling the device", async () => {
     const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "clawbox-ai", model: "claude-opus-5" });
     expect(out.isError).toBe(true);
@@ -619,6 +639,15 @@ describe("coding_agent_run — provider and model", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toMatch(/owner's anthropic account/i);
+  });
+
+  it("says when a run was on the owner's OpenAI account, by the company's name", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, provider: "openai", requestedModel: "gpt-6-astra", model: "gpt-6-astra" } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/owner's OpenAI account/);
+    expect(out.text).toMatch(/model gpt-6-astra/);
   });
 
   it("says nothing about the account for an ordinary ClawBox AI run", async () => {
