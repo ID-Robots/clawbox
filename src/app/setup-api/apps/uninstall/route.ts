@@ -191,7 +191,8 @@ export async function POST(req: Request) {
     let serverStopped = false;
     const server = await registeredServer(appId);
     if (server) {
-      const stop = await stopServerApp(appId, server);
+      // A user `.service` of the app's own is disabled too: its folder is going.
+      const stop = await stopServerApp(appId, server, { disableUnit: true });
       if (!stop.ok) {
         console.warn(`[uninstall] Could not stop the app's server: ${stop.detail}`);
         return NextResponse.json({

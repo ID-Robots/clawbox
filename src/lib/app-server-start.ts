@@ -741,32 +741,93 @@ async function appScopeOfPid(pid: number, id: string): Promise<string | null> {
   return appScopeOf(await fs.promises.readFile(`/proc/${pid}/cgroup`, "utf-8").catch(() => ""), id);
 }
 
+/** `systemctl --user` from the web server, a system service: `scopeEnv` names the user bus (app-unit-limits.ts says why). */
+const systemctlEnv = (): Record<string, string> => scopeEnv({ PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" });
+
+/**
+ * The folder a `WorkingDirectory=` read back from `systemctl show` names, or
+ * null when it names none. systemd prints `!` in front of one that may be
+ * missing and `~` for the home folder. Exported for its test.
+ */
+export function unitWorkingDirectory(value: string): string | null {
+  const dir = value.trim().replace(/^!/, "");
+  if (dir === "~") return os.homedir();
+  return path.isAbsolute(dir) ? path.resolve(dir) : null;
+}
+
+/**
+ * The user `.service` an app's server runs in when that unit is the app's: the
+ * agent sometimes serves a registered app from a
+ * `~/.config/systemd/user/<app>-app.service` of its own (app-unit-limits.ts).
+ * Ending only its process would not stop it: under `Restart=` systemd starts
+ * it again from the same folder, and the port is taken again. The unit is the
+ * app's only when its own `WorkingDirectory=` is in the app's folder; a unit
+ * with merely one process there (an owner's shell service, a CI runner) is
+ * never stopped whole. Never one of the box's own (`clawbox-*`).
+ */
+async function appUserServiceOf(cgroup: string, real: string): Promise<string | null> {
+  // On demand: app-unit-limits.ts imports this module.
+  const { foreignUserServiceOf, showProperties } = await import("@/lib/app-unit-limits");
+  const unit = foreignUserServiceOf(cgroup);
+  if (!unit) return null;
+  const systemctl = await findSystemdTool("systemctl");
+  if (!systemctl) return null;
+  const shown = await runChild(systemctl, ["--user", "show", "-p", "WorkingDirectory", "--", unit], { timeoutMs: 5_000, env: systemctlEnv() });
+  if (shown.code !== 0) return null;
+  const dir = unitWorkingDirectory(showProperties(shown.stdout).WorkingDirectory ?? "");
+  if (!dir) return null;
+  const realDir = await fs.promises.realpath(dir).catch(() => dir);
+  return isInside(realDir, real) ? unit : null;
+}
+
+/** The unit an app's server runs in, when stopping that unit is what stops the server. */
+interface AppProcess {
+  /** `clawbox-app-<id>-<stamp>.scope`: the box's own start. */
+  scope: string | null;
+  /** The app's own user `.service` (`appUserServiceOf`). */
+  unit: string | null;
+}
+
 /**
  * Is this process the app's own server? Proven, never assumed from the port
  * (a manifest can name any port, the gateway's included):
  *  - it runs in the scope the box starts this app in (`appScopeOf`), or
  *  - its working directory is in the app's folder — or WAS, in a folder of
  *    that name since removed (`processCwd` reads the kernel's "(deleted)").
- * The scope, when it is in one. Null when it is not the app's, and always for
- * the web server itself.
+ * Null when it is not the app's, and always for the web server itself.
  */
-async function appProcess(pid: number, id: string, real: string | null): Promise<{ scope: string | null } | null> {
+async function appProcess(pid: number, id: string, real: string | null): Promise<AppProcess | null> {
   if (pid === process.pid) return null;
-  const scope = await appScopeOfPid(pid, id);
-  if (scope) return { scope };
+  const cgroup = await fs.promises.readFile(`/proc/${pid}/cgroup`, "utf-8").catch(() => "");
+  const scope = appScopeOf(cgroup, id);
+  if (scope) return { scope, unit: null };
   if (!real) return null;
   const cwd = await processCwd(pid);
-  return cwd && isInside(cwd.path, real) ? { scope: null } : null;
+  if (!cwd || !isInside(cwd.path, real)) return null;
+  return { scope: null, unit: await appUserServiceOf(cgroup, real) };
 }
 
-/** systemd's own stop for the scope, bounded: a server that will not go on SIGTERM is killed instead. */
-async function stopAppScope(scope: string): Promise<void> {
+/** systemd's own stop for the unit, bounded: a server that will not go on SIGTERM is killed instead. */
+async function stopUserUnit(unit: string): Promise<void> {
   const systemctl = await findSystemdTool("systemctl");
   if (!systemctl) return;
-  const env = scopeEnv({ PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin" });
-  const stop = await runChild(systemctl, ["--user", "stop", scope], { timeoutMs: SCOPE_STOP_TIMEOUT_MS, env });
+  const env = systemctlEnv();
+  const stop = await runChild(systemctl, ["--user", "stop", "--", unit], { timeoutMs: SCOPE_STOP_TIMEOUT_MS, env });
   if (stop.code === 0) return;
-  await runChild(systemctl, ["--user", "kill", "--signal=SIGKILL", scope], { timeoutMs: 5_000, env });
+  await runChild(systemctl, ["--user", "kill", "--signal=SIGKILL", "--", unit], { timeoutMs: 5_000, env });
+}
+
+/**
+ * The app's own `.service` no longer starts at boot: its folder is going.
+ * The unit file stays where its writer put it, outside the app's folder —
+ * disabled, it does nothing. Best effort: a unit with no `[Install]` section,
+ * or one enabled for every user, has nothing here to undo.
+ */
+async function disableUserUnit(unit: string): Promise<void> {
+  const systemctl = await findSystemdTool("systemctl");
+  if (!systemctl) return;
+  const disabled = await runChild(systemctl, ["--user", "disable", "--", unit], { timeoutMs: 10_000, env: systemctlEnv() });
+  if (disabled.code !== 0) console.warn(`[apps] ${unit} could not be disabled: ${(disabled.stderr || disabled.stdout).trim().slice(0, 200)}`);
 }
 
 function pidAlive(pid: number): boolean {
@@ -813,19 +874,27 @@ async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boo
 
 /**
  * Stop the server an app runs on `port` — only one that is provably this
- * app's (`appProcess`), never whatever holds the port. Its scope goes with
- * systemd's own `systemctl --user stop`; a server outside a scope (a box with
+ * app's (`appProcess`), never whatever holds the port. Its scope — or the
+ * app's own user `.service`, whose `Restart=` would bring it back — goes with
+ * systemd's own `systemctl --user stop`; a server outside a unit (a box with
  * no user manager, a run's own) by its process group. Answers once none of
  * the app's is listening any more, and forgets the proxy's cached verdict
  * for the port. A start of the same app still under way is waited for first:
  * it would bring the server up again behind the stop.
+ *
+ * `disableUnit`: the app is being removed, so its own `.service` is disabled
+ * too, never to start at boot from a folder that is gone.
  *
  * `ok: false` only when the app's server is still listening, or the box could
  * not tell: a caller about to remove the app's folder must not go on then.
  * A listener that is not the app's is left alone and named in `holder`.
  * Never throws.
  */
-export async function stopServerApp(id: string, where: { port: number; directory: string | null }): Promise<StopOutcome> {
+export async function stopServerApp(
+  id: string,
+  where: { port: number; directory: string | null },
+  options: { disableUnit?: boolean } = {},
+): Promise<StopOutcome> {
   const { port } = where;
   if (!APP_ID_RE.test(id) || !isProxyablePort(port)) return { ok: true, stopped: false, holder: null };
   try {
@@ -839,11 +908,11 @@ export async function stopServerApp(id: string, where: { port: number; directory
     const find = async () => {
       const found = await portListeners(port);
       if (!found) return null;
-      const ours = new Map<number, string | null>();
+      const ours = new Map<number, AppProcess>();
       let holder: { pid: number | null } | null = found.listening && found.pids.length === 0 ? { pid: null } : null;
       for (const pid of found.pids) {
         const own = await appProcess(pid, id, real);
-        if (own) ours.set(pid, own.scope);
+        if (own) ours.set(pid, own);
         else holder ??= { pid };
       }
       return { ours, holder };
@@ -853,8 +922,13 @@ export async function stopServerApp(id: string, where: { port: number; directory
     if (!first) return { ok: false, detail: `The box could not tell who is listening on port ${port} (the socket listing failed).` };
     if (first.ours.size === 0) return { ok: true, stopped: false, holder: first.holder };
 
-    for (const scope of new Set([...first.ours.values()].filter((s): s is string => !!s))) await stopAppScope(scope);
-    // Outside a scope, or one systemd could not be asked to stop.
+    const owned = [...first.ours.values()];
+    for (const scope of new Set(owned.map((p) => p.scope).filter((s): s is string => !!s))) await stopUserUnit(scope);
+    for (const unit of new Set(owned.map((p) => p.unit).filter((u): u is string => !!u))) {
+      await stopUserUnit(unit);
+      if (options.disableUnit) await disableUserUnit(unit);
+    }
+    // Outside a unit, or one systemd could not be asked to stop.
     for (const pid of first.ours.keys()) {
       if (pidAlive(pid)) await endAppProcess(pid, id);
     }
