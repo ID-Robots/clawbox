@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
-import { hasX64DesktopIntegration, hasX64Install, X64_INSTALL_FILE } from "@/lib/x64-integration";
+import { desktopCoreStepIsNoop, hasX64DesktopIntegration, hasX64Install, X64_INSTALL_FILE } from "@/lib/x64-integration";
 
 vi.mock("fs", async (original) => {
   const actual = await original<typeof import("fs")>();
@@ -9,6 +9,7 @@ vi.mock("fs", async (original) => {
     default: {
       ...actual,
       openSync: vi.fn(), fstatSync: vi.fn(), readFileSync: vi.fn(), closeSync: vi.fn(),
+      lstatSync: vi.fn(), readdirSync: vi.fn(),
     },
   };
 });
@@ -156,5 +157,103 @@ describe("X64_DESKTOP_CORE_STEP_TIMEOUT_MS", () => {
     const { X64_DESKTOP_CORE_STEP_TIMEOUT_MS } = await import("@/lib/x64-integration");
     expect(X64_DESKTOP_CORE_STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(30 * 60_000);
     expect(X64_DESKTOP_CORE_STEP_TIMEOUT_MS).toBeLessThan(7_200_000);
+  });
+});
+
+/**
+ * Issue #1269: the desktop adapter's `openclaw_install` stops the owner's
+ * gateway before it looks whether the core needs replacing. The updater asks
+ * this check first and leaves the gateway alone only when the step would have
+ * changed nothing; every doubt runs the adapter's step as before.
+ */
+describe("desktopCoreStepIsNoop", () => {
+  const PREFIX = "/home/fixture/.npm-global";
+  const HOME = "/home/fixture";
+  const PIN = "/var/lib/clawbox/root-exec-mirror/config/openclaw-target.txt";
+  const PKG = `${PREFIX}/lib/node_modules/openclaw/package.json`;
+  const ENV = `INSTALL_USER=fixture\nINSTALL_UID=1000\nINSTALL_HOME=${HOME}\nPROJECT_DIR=/fixture/clawbox\nNODE_DIR=/opt/node/bin\nNPM_PREFIX=${PREFIX}\n`;
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+
+  function host({ env = ENV, pin = "2026.10.7\n" as string | null, installed = '{"name":"openclaw","version":"2026.10.7"}' as string | null,
+    present = [] as string[], points = null as string[] | Error | null, lstatError = {} as Record<string, string> } = {}) {
+    vi.mocked(fs.openSync).mockReturnValue(42);
+    vi.mocked(fs.fstatSync).mockReturnValue({
+      /** The root-owned 0644 file build-package.py writes. */
+      isFile() { return true; },
+      uid: 0, mode: 0o100644, size: 200,
+    } as ReturnType<typeof fs.fstatSync>);
+    vi.mocked(fs.readFileSync).mockImplementation(((file: unknown) => {
+      if (file === 42) return env;
+      if (file === PIN && pin !== null) return pin;
+      if (file === PKG && installed !== null) return installed;
+      throw errno("ENOENT");
+    }) as typeof fs.readFileSync);
+    vi.mocked(fs.lstatSync).mockImplementation(((p: unknown) => {
+      if (lstatError[String(p)]) throw errno(lstatError[String(p)]);
+      if (present.includes(String(p))) return {} as ReturnType<typeof fs.lstatSync>;
+      throw errno("ENOENT");
+    }) as typeof fs.lstatSync);
+    vi.mocked(fs.readdirSync).mockImplementation((() => {
+      if (points instanceof Error) throw points;
+      if (points === null) throw errno("ENOENT");
+      return points;
+    }) as unknown as typeof fs.readdirSync);
+  }
+  afterEach(() => vi.resetAllMocks());
+
+  it("answers a no-op at the pin with nothing to recover, from the files the adapter itself reads", () => {
+    host();
+    expect(desktopCoreStepIsNoop()).toEqual({ noop: true, version: "2026.10.7" });
+    const reads = vi.mocked(fs.readFileSync).mock.calls.map(([file]) => file);
+    expect(reads).toEqual([42, PIN, PKG]);
+    expect(fs.closeSync).toHaveBeenCalledWith(42);
+  });
+
+  it("reads shlex-quoted paths the way build-package.py writes them", () => {
+    host({ env: ENV.replace(`INSTALL_HOME=${HOME}`, `INSTALL_HOME='${HOME}'`).replace(`NPM_PREFIX=${PREFIX}`, `NPM_PREFIX='${PREFIX}'`) });
+    expect(desktopCoreStepIsNoop()).toEqual({ noop: true, version: "2026.10.7" });
+  });
+
+  it.each([
+    ["the pin moved", { installed: '{"version":"2026.10.3"}' }, "OpenClaw 2026.10.3 is installed and the pin is 2026.10.7"],
+    ["no installed core", { installed: null }, "the installed OpenClaw core could not be read"],
+    ["a core without a version", { installed: '{"name":"openclaw"}' }, "OpenClaw (unknown) is installed"],
+    ["an unreadable pin", { pin: null }, "the pinned OpenClaw version could not be read"],
+    ["a pin that is not a version", { pin: "latest\n" }, "not a version"],
+    ["a stage left behind", { present: [`${PREFIX}/.openclaw-stage`] }, ".openclaw-stage"],
+    ["a replacement still pending", { present: [`${PREFIX}/.openclaw-migration-pending`] }, ".openclaw-migration-pending"],
+    ["a leftover that cannot be inspected", { lstatError: { [`${PREFIX}/.openclaw-stage`]: "EACCES" } }, ".openclaw-stage"],
+    ["links set aside by a cut-short swap", {
+      points: ["20261021T153440Z-2026.10.3-to-2026.10.7"],
+      present: [`${HOME}/backups/openclaw-core-update/20261021T153440Z-2026.10.3-to-2026.10.7/set-aside-links.txt`],
+    }, "links set aside"],
+    ["unreadable recovery points", { points: errno("EACCES") }, "recovery points could not be read"],
+    ["an owner core patch", { present: [`${HOME}/bin/openclaw-patch-memory-maintenance`] }, "openclaw-patch-memory-maintenance"],
+    ["no NPM_PREFIX", { env: ENV.replace(`NPM_PREFIX=${PREFIX}\n`, "") }, "names no plain NPM_PREFIX and INSTALL_HOME"],
+    ["a shell expression for a path", { env: ENV.replace(`NPM_PREFIX=${PREFIX}`, "NPM_PREFIX=$(touch /tmp/never)") }, "names no plain"],
+    ["a relative path", { env: ENV.replace(`INSTALL_HOME=${HOME}`, "INSTALL_HOME=home/fixture") }, "names no plain"],
+  ])("runs the adapter's step for %s", (_label, setup, reason) => {
+    host(setup as Parameters<typeof host>[0]);
+    const answer = desktopCoreStepIsNoop();
+    expect(answer.noop).toBe(false);
+    expect(answer.noop === false && answer.reason).toContain(reason);
+  });
+
+  it("keeps recovery points that hold no set-aside links out of the way", () => {
+    host({ points: ["20261021T153440Z-2026.10.3-to-2026.10.7"] });
+    expect(desktopCoreStepIsNoop()).toEqual({ noop: true, version: "2026.10.7" });
+  });
+
+  it("is never a no-op without the integration file, and refuses one a non-root account could write", () => {
+    host();
+    vi.mocked(fs.openSync).mockImplementation(() => { throw errno("ENOENT"); });
+    expect(desktopCoreStepIsNoop()).toEqual({ noop: false, reason: "no x64 integration file" });
+    host();
+    vi.mocked(fs.fstatSync).mockReturnValue({
+      /** A file the owner could have edited. */
+      isFile() { return true; },
+      uid: 1000, mode: 0o100644, size: 200,
+    } as ReturnType<typeof fs.fstatSync>);
+    expect(() => desktopCoreStepIsNoop()).toThrow("root-owned file");
   });
 });
