@@ -8797,14 +8797,14 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         state.outcome = {
           status: "failed",
           resumable: true,
-          error: `Stopped after ${run.numTurns || run.maxTurns} steps without finishing. Resume it with a narrower task, raise the step limit, or split the work.`,
+          error: `Stopped at the step limit (${run.numTurns || run.maxTurns} of ${run.maxTurns}) without finishing. Press Continue to carry on in the same session with a fresh limit, or split the work.`,
         };
         break;
       case "error_max_budget_usd":
         state.outcome = {
           status: "failed",
           resumable: true,
-          error: "Stopped at the cost ceiling for one run. Resume it with a narrower task, or split the work.",
+          error: "Stopped at the cost ceiling for one run without finishing. Press Continue to carry on in the same session, or split the work.",
         };
         break;
       default: {

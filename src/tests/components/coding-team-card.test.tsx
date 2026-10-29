@@ -2,8 +2,11 @@
  * The coding team's card on the project page (src/components/CodingTeamCard.tsx):
  * the goal form while no team works here, the board — status, tasks, workers,
  * results, verdicts, alerts — the audit log on request, Stop while a team
- * works, and the poll that follows it.
+ * works. The card reads no list of its own: the host hands its teams in (the
+ * app's list, filtered to the card's scope) and re-reads them when Stop
+ * answers; the one read the card makes is a settled board the list sent slim.
  */
+import { useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
@@ -45,11 +48,25 @@ const WORKING: TeamView = {
 
 let posts: { url: string; body: unknown }[];
 let teams: TeamView[];
+/** The whole copy of a board the list sent slim, as `GET team?id=` answers it. */
+let whole: Record<string, TeamView>;
+
+/** The host: holds the card's teams the way the app does — its list on this scope — and re-reads them when the card says something changed. */
+function Card(props: Omit<ComponentProps<typeof CodingTeamCard>, "teams" | "onChanged">) {
+  const mine = () => teams.filter((x) => x.directory === DIR);
+  const [shown, setShown] = useState(mine);
+  return <CodingTeamCard {...props} teams={shown} onChanged={() => setShown(mine())} />;
+}
 
 function stub() {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
+    if (url.startsWith("/setup-api/coding-agent/team?id=")) {
+      const id = decodeURIComponent(url.slice("/setup-api/coding-agent/team?id=".length));
+      const team = whole[id] ?? teams.find((x) => x.id === id);
+      return team ? json({ team }) : json({ error: "There is no coding team with that id." }, 404);
+    }
     if (url === "/setup-api/coding-agent/team" && init?.method === "POST") {
       const body = JSON.parse(String(init.body));
       posts.push({ url, body });
@@ -62,18 +79,17 @@ function stub() {
       teams = teams.map((x) => ({ ...x, status: "stopped" as const }));
       return json({ team: teams[0] });
     }
-    if (url.startsWith("/setup-api/coding-agent/team")) return json({ teams });
     return json({ error: "unexpected" }, 404);
   }));
 }
 
-beforeEach(() => { teams = []; });
+beforeEach(() => { teams = []; whole = {}; });
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("with no team yet", () => {
   it("draws the team's shape — three workers and a reviewer — beside the words", async () => {
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} onPlan={() => {}} />);
+    render(<Card onOpenRun={() => {}} onPlan={() => {}} />);
     const card = await screen.findByTestId("coding-team-card");
     const tree = within(card).getByTestId("coding-team-tree");
     expect(tree).toHaveAttribute("data-workers", "3");
@@ -88,7 +104,7 @@ describe("with no team yet", () => {
   it("offers to plan the team in the chat, and hands over on a click", async () => {
     stub();
     const onPlan = vi.fn();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} onPlan={onPlan} />);
+    render(<Card onOpenRun={vi.fn()} onPlan={onPlan} />);
     await screen.findByTestId("coding-team-form");
     expect(screen.queryByTestId("coding-team-board")).toBeNull();
     // No textarea, and no goal line with no team to have one: the goal is
@@ -102,7 +118,7 @@ describe("with no team yet", () => {
 
   it("shows nothing to press on a page with no chat to hand to", async () => {
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} />);
     await screen.findByTestId("coding-team-card");
     expect(screen.queryByTestId("coding-team-form")).toBeNull();
     expect(screen.queryByTestId("coding-team-plan")).toBeNull();
@@ -122,7 +138,7 @@ describe("with a team working here", () => {
         { id: "run-00000003", role: "worker", taskId: "t2" },
       ],
     }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     const chart = await screen.findByTestId("coding-team-diagram");
     // The chart replaced the tree: four agents stated, four nodes drawn.
     expect(screen.queryByTestId("coding-team-tree")).toBeNull();
@@ -150,7 +166,7 @@ describe("with a team working here", () => {
     }];
     stub();
     const onOpenRun = vi.fn();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={onOpenRun} onPlan={vi.fn()} />);
+    render(<Card onOpenRun={onOpenRun} onPlan={vi.fn()} />);
     const branch = await screen.findByTestId("coding-team-branch");
     expect(branch).toHaveTextContent(t("codingAgent.team.branch", { branch: "clawbox/team-k3x9q2ab", base: "master" }));
     expect(within(screen.getByTestId("coding-team-details")).getByTestId("coding-team-branch")).toBe(branch);
@@ -163,7 +179,7 @@ describe("with a team working here", () => {
     teams = [WORKING, { ...WORKING, id: "team-older0001", status: "done", directory: DIR }, { ...WORKING, id: "team-elsewhere", directory: "/other" }];
     stub();
     const onOpenRun = vi.fn();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={onOpenRun} onPlan={vi.fn()} />);
+    render(<Card onOpenRun={onOpenRun} onPlan={vi.fn()} />);
     const board = await screen.findByTestId("coding-team-board");
     expect(board).toHaveAttribute("data-team-id", "team-k3x9q2ab");
     expect(screen.getByTestId("coding-team-status")).toHaveTextContent(t("codingAgent.team.status.working"));
@@ -202,27 +218,34 @@ describe("with a team working here", () => {
     expect(await screen.findByTestId("coding-team-form")).toBeInTheDocument();
   });
 
-  it("follows the team while it works, and stops asking once it settled", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+  it("reads no list of its own: a team at work is drawn from what the host hands in, with not one GET", async () => {
     teams = [WORKING];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} />);
     await screen.findByTestId("coding-team-board");
-    const reads = () => vi.mocked(fetch).mock.calls.filter(([u, i]) => String(u) === "/setup-api/coding-agent/team" && !i?.method).length;
-    const before = reads();
-    teams = [{ ...WORKING, status: "done", tasks: WORKING.tasks.map((x) => ({ ...x, status: "complete" as const })) }];
-    await vi.advanceTimersByTimeAsync(5_100);
-    expect(reads()).toBe(before + 1);
+    expect(screen.getByTestId("coding-team-status")).toHaveTextContent(t("codingAgent.team.status.working"));
+    expect(vi.mocked(fetch).mock.calls.filter(([, i]) => !i?.method)).toHaveLength(0);
+  });
+
+  it("reads a settled board the list sent slim once, whole, by id — the log and the tasks' text come from that copy", async () => {
+    const done: TeamView = { ...WORKING, status: "done", slim: true, log: [], tasks: WORKING.tasks.map((x) => ({ ...x, result: null, review: x.review && { ...x.review, notes: "" } })) };
+    teams = [done];
+    whole = { [done.id]: { ...WORKING, status: "done" } };
+    stub();
+    render(<Card onOpenRun={vi.fn()} />);
     expect(await screen.findByTestId("coding-team-status")).toHaveTextContent(t("codingAgent.team.status.done"));
-    const settled = reads();
-    await vi.advanceTimersByTimeAsync(11_000);
-    expect(reads()).toBe(settled);
+    const reads = () => vi.mocked(fetch).mock.calls.filter(([, i]) => !i?.method).map(([u]) => String(u));
+    await waitFor(() => expect(reads()).toEqual([`/setup-api/coding-agent/team?id=${done.id}`]));
+    expect(await screen.findByText("Built index.html; open it.")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-team-log-toggle"));
+    expect(screen.getByTestId("coding-team-log")).toHaveTextContent("owner Team created");
+    expect(reads()).toHaveLength(1);
   });
 
   it("shows why a team failed", async () => {
     teams = [{ ...WORKING, status: "failed", error: "Stopped after 3 alerts." }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} onPlan={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} onPlan={vi.fn()} />);
     expect(await screen.findByTestId("coding-team-reason")).toHaveTextContent("Stopped after 3 alerts.");
     expect(screen.getByTestId("coding-team-form")).toBeInTheDocument();
   });
@@ -238,7 +261,7 @@ describe("what the team's runs said", () => {
   it("shows the messages on the board itself, whole, with whom each went to and whether it arrived", async () => {
     stub();
     teams = [{ ...WORKING, log: [...WORKING.log, ...MESSAGES] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     const list = await screen.findByTestId("coding-team-messages");
     expect(list).toHaveTextContent(t("codingAgent.team.messagesTitle", { n: 3 }));
     const rows = within(list).getAllByTestId("coding-team-message");
@@ -258,7 +281,7 @@ describe("what the team's runs said", () => {
   it("draws a message the same way in the log, and every other entry as before", async () => {
     stub();
     teams = [{ ...WORKING, log: [...WORKING.log, MESSAGES[0]] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     fireEvent.click(await screen.findByTestId("coding-team-log-toggle"));
     const log = screen.getByTestId("coding-team-log");
     expect(log).toHaveTextContent("Team created");
@@ -269,7 +292,7 @@ describe("what the team's runs said", () => {
   it("puts what was said to the lead in its own inbox, above the messages: who, which task, the words whole", async () => {
     stub();
     teams = [{ ...WORKING, log: [...WORKING.log, { ...MESSAGES[0], task_id: "t2" }, MESSAGES[1], MESSAGES[2]] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     const inbox = await screen.findByTestId("coding-team-inbox");
     expect(inbox).toHaveTextContent(t("codingAgent.team.inboxTitle", { n: 1 }));
     const rows = within(inbox).getAllByTestId("coding-team-inbox-message");
@@ -285,7 +308,7 @@ describe("what the team's runs said", () => {
     stub();
     const asks = Array.from({ length: 7 }, (_, i) => ({ ...MESSAGES[0], ts: 1_700_000_010_000 + i, payload: { from: "run-00000003", to: "lead", text: `ask ${i + 1}` } }));
     teams = [{ ...WORKING, log: [...WORKING.log, ...asks] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     const inbox = await screen.findByTestId("coding-team-inbox");
     expect(inbox).toHaveTextContent(t("codingAgent.team.inboxTitle", { n: 7 }));
     const rows = within(inbox).getAllByTestId("coding-team-inbox-message");
@@ -295,7 +318,7 @@ describe("what the team's runs said", () => {
   it("has no inbox while nothing was said to the lead", async () => {
     stub();
     teams = [{ ...WORKING, log: [...WORKING.log, MESSAGES[1], MESSAGES[2]] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     expect(await screen.findByTestId("coding-team-messages")).toBeInTheDocument();
     expect(screen.queryByTestId("coding-team-inbox")).toBeNull();
   });
@@ -303,7 +326,7 @@ describe("what the team's runs said", () => {
   it("has no messages section while nobody has said anything, and ignores a message entry it cannot read", async () => {
     stub();
     teams = [{ ...WORKING, log: [...WORKING.log, { ts: 1, actor: { kind: "worker", id: "run-00000003" }, type: "message", message: "worker run-00000003 → the lead: hi" }] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     await screen.findByTestId("coding-team-board");
     expect(screen.queryByTestId("coding-team-messages")).toBeNull();
     expect(screen.queryByTestId("coding-team-inbox")).toBeNull();
@@ -318,7 +341,7 @@ describe("what the team's runs said", () => {
     // …and one whose payload does not read back: drawn as its line, like any other note.
     const unreadable = { ...unreached, ts: 1_700_000_021_000, message: "a note with a broken payload", payload: { undelivered: { code: "SETTLED", from: "<b>x</b>", role: "worker", to: "sibling", toRunId: "run-00000002" } } };
     teams = [{ ...WORKING, log: [...WORKING.log, unreached, unreadable] }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     await screen.findByTestId("coding-team-board");
     // Not one of the team's messages: nothing was said to anybody.
     expect(screen.queryByTestId("coding-team-messages")).toBeNull();
@@ -366,7 +389,7 @@ describe("a team with a lead, a retired task and a final review (TASK-1099)", ()
   it("shows a retired task, the lead's own task and the final review, and no line of figures beside the chart", async () => {
     teams = [SHAPED];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} onPlan={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} onPlan={vi.fn()} />);
     await screen.findByTestId("coding-team-board");
     // The shape, the figures and the roll-call were the chart said again in
     // words; the chart is the one place they are drawn now.
@@ -397,7 +420,7 @@ describe("a team with a lead, a retired task and a final review (TASK-1099)", ()
   it("draws the planner alone while it plans, and no final review yet", async () => {
     teams = [{ ...WORKING, status: "planning", tasks: [], metrics: { ...METRICS, workerRuns: 0, leadRuns: 0 } }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} />);
     await screen.findByTestId("coding-team-board");
     expect(screen.queryByTestId("coding-team-final-review")).toBeNull();
     // The planner is the one agent yet, and it is at work; no lead has had a turn.
@@ -411,7 +434,7 @@ describe("a team with a lead, a retired task and a final review (TASK-1099)", ()
   it("shows a rejected final review with its notes", async () => {
     teams = [{ ...SHAPED, status: "failed", error: "The final review rejected the merged work: app.js never loads.", finalReview: { verdict: "rejected", notes: "app.js never loads.", at: 5 } }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} />);
     const final = await screen.findByTestId("coding-team-final-review");
     expect(final).toHaveAttribute("data-verdict", "rejected");
     expect(final).toHaveTextContent("app.js never loads.");
@@ -429,7 +452,7 @@ describe("dependency gating and holds on the board", () => {
       ],
     }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     // t1 is finished but not reviewed yet: t2 waits for it to be ACCEPTED.
     expect(await screen.findByTestId("coding-team-waiting-t2")).toHaveTextContent("Waiting for t1 to be accepted");
     expect(screen.getByTestId("coding-team-held-t2")).toHaveTextContent("Held — t1 was reopened");
@@ -443,7 +466,7 @@ describe("a team waiting in the queue", () => {
     const queued: TeamView = { ...WORKING, id: "team-queued01", goal: "Then build the reports", status: "queued", queuePosition: 1, tasks: [], log: [], alerts: 0, plannerRunId: null, createdAt: Date.now() };
     teams = [queued, WORKING];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     expect(await screen.findByTestId("coding-team-status")).toHaveTextContent("Working");
     const row = await screen.findByTestId("coding-team-queued-team-queued01");
     expect(row).toHaveTextContent("Queued");
@@ -456,7 +479,7 @@ describe("a team waiting in the queue", () => {
   it("shows a queued team on its own with its place and a Cancel, not a Stop", async () => {
     teams = [{ ...WORKING, status: "queued", queuePosition: 2, tasks: [], log: [], alerts: 0, plannerRunId: null }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     expect(await screen.findByTestId("coding-team-status")).toHaveTextContent("Queued");
     expect(screen.getByTestId("coding-team-queue-position")).toHaveTextContent("#2 in line");
     expect(screen.queryByTestId("coding-team-stop")).toBeNull();
@@ -473,7 +496,7 @@ describe("the team's pull request", () => {
       pr: { number: 41, url: "https://github.com/o/r/pull/41", branch: "clawbox/team-k3x9q2ab", base: "main", phase: "failed_checks", checks: { total: 2, passed: 1, failed: 1, pending: 0 }, merge: true, ciRounds: 1, failure: { tests: ["app.test.js > submits"], checks: ["test"] }, detail: null },
     }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     const pr = await screen.findByTestId("coding-team-pr");
     expect(pr).toHaveAttribute("data-phase", "failed_checks");
     expect(pr).toHaveTextContent("Team pull request #41");
@@ -499,7 +522,7 @@ describe("whether a single run was cheaper", () => {
       tasks: WORKING.tasks.map((x) => ({ ...x, status: "complete" as const, review: { verdict: "accepted" as const, notes: "", at: 1 } })),
     }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} />);
     const advice = await screen.findByTestId("coding-team-advice");
     expect(advice).toHaveAttribute("data-reason", "overlap");
     expect(advice).toHaveTextContent(t("codingAgent.team.adviceOverlap", { n: 83 }));
@@ -515,7 +538,7 @@ describe("whether a single run was cheaper", () => {
   it("says a one-task plan — or an overlapping one — ran as one run, and says nothing for a plan that split well or a server that predates it", async () => {
     teams = [{ ...WORKING, status: "done", singleRun: true, advice: { reason: "one_task", overlap: 100 }, tasks: [{ ...WORKING.tasks[0] }] }];
     stub();
-    const { unmount } = render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    const { unmount } = render(<Card onOpenRun={vi.fn()} />);
     const advice = await screen.findByTestId("coding-team-advice");
     expect(advice).toHaveAttribute("data-reason", "single_run");
     expect(advice).toHaveTextContent(t("codingAgent.team.adviceSingleRun"));
@@ -524,7 +547,7 @@ describe("whether a single run was cheaper", () => {
     // A plan whose tasks mostly touch the same files ran as one run too: said with its share, never as "one task".
     teams = [{ ...WORKING, status: "done", singleRun: true, advice: { reason: "overlap", overlap: 96 } }];
     stub();
-    const overlap = render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    const overlap = render(<Card onOpenRun={vi.fn()} />);
     const ran = await screen.findByTestId("coding-team-advice");
     expect(ran).toHaveAttribute("data-reason", "single_run");
     expect(ran).toHaveTextContent(t("codingAgent.team.adviceOverlapRun", { n: 96 }));
@@ -532,7 +555,7 @@ describe("whether a single run was cheaper", () => {
 
     teams = [{ ...WORKING, advice: null, metrics: { ...METRICS, tokensByRole: undefined } }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<Card onOpenRun={vi.fn()} />);
     await screen.findByTestId("coding-team-board");
     expect(screen.queryByTestId("coding-team-advice")).toBeNull();
   });
@@ -554,7 +577,7 @@ describe("tokens by account", () => {
   it("adds up each account's runs, largest first, right beside the tokens by role", async () => {
     stub();
     teams = [{ ...WORKING, runs: RUNS }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     const chip = await screen.findByTestId("coding-agent-diagram-provider-tokens");
     expect(chip).toHaveTextContent(split("Anthropic 152k · ClawBox AI 11k"));
     // Beside, not elsewhere: the same row of figures as the split by role.
@@ -568,14 +591,14 @@ describe("tokens by account", () => {
       runs: RUNS.map(({ id, role, taskId, tokens }) => ({ id, role, taskId, tokens })),
       metrics: { plannerRuns: 1, workerRuns: 2, reviewerRuns: 0, leadRuns: 0, tasksPlanned: 2, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 1, tasksRejected: 0, tokensUsed: 163_000, tokensByProvider: { "clawbox-ai": 163_000 }, wallMs: 60_000 },
     }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     expect(await screen.findByTestId("coding-agent-diagram-provider-tokens")).toHaveTextContent(split("ClawBox AI 163k"));
   });
 
   it("draws no split for a team from before the field", async () => {
     stub();
     teams = [{ ...WORKING, runs: RUNS.map(({ id, role, taskId, tokens }) => ({ id, role, taskId, tokens })) }];
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    render(<Card onOpenRun={() => {}} />);
     await screen.findByTestId("coding-agent-diagram-tokens");
     expect(screen.queryByTestId("coding-agent-diagram-provider-tokens")).toBeNull();
   });

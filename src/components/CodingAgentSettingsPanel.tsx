@@ -336,16 +336,10 @@ export function devicePollSeconds(raw: unknown): number {
 // role so the many call sites below read unchanged.
 const SMALL_BUTTON = BTN_SECONDARY;
 
-// Accepted and unused: the app still passes `onOpenHistory`, from when the Run
-// history card carried an "Open run history" button. That button went with the
-// owner's "delete useless UI" — the rail's Run history entry opens the same
-// page — and the prop is kept in the type so the host needs no edit; nothing
-// here reads it. (`onReset` and `onStatus` were declared here too and never
-// passed by anyone; both are gone.)
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- accepted for the host, read by nothing
-export default function CodingAgentSettingsPanel(_props: {
-  onOpenHistory?: () => void;
-}) {
+// No props: the Run history card's "Open run history" button went with the
+// owner's "delete useless UI" (the rail's Run history entry opens the same
+// page), and `onOpenHistory`, `onReset` and `onStatus` went with it.
+export default function CodingAgentSettingsPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [github, setGithub] = useState<GitHubState | null>(null);

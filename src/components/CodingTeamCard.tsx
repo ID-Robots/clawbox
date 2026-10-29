@@ -5,14 +5,15 @@
  * agent (src/lib/coding-team.ts). The owner hands the team a goal; the
  * card then shows the shared board — the plan the planner posted, each
  * task's status, worker and result, the reviewer's verdict, the alerts the
- * guardrails raised — and the audit log under it, and follows the team
- * while it works. One team at a time on the box, so the form folds away
+ * guardrails raised — and the audit log under it. The teams come from the
+ * host's own list (the app reads `/team` on its runs' beat, slim on a tick),
+ * so the card asks the box for nothing but one whole copy of a settled board
+ * the list sent slim. One team at a time on the box, so the form folds away
  * while one is in flight and Stop takes its place.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { setVisibleInterval } from "@/lib/visible-interval";
 import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
 import CodingTeamTree from "./CodingTeamTree";
 import CodingAgentDiagram, { DiagramDetails, type DiagramRun } from "./CodingAgentDiagram";
@@ -188,11 +189,15 @@ export interface TeamView {
   error: string | null;
   createdAt: number;
   updatedAt: number;
+  /** A settled board the list sent with its log and its tasks' text emptied (`?slim=1`, src/lib/coding-agent-slim.ts). */
+  slim?: boolean;
 }
 
 interface Props {
-  directory: string;
-  projectId: string | null;
+  /** The teams on this card's scope — the host's list, filtered to the project (or folder) the card is on. */
+  teams: TeamView[];
+  /** Stop answered: the host re-reads its list, which is what this card draws. */
+  onChanged: () => void;
   /** Open a run's page — the planner's or a worker's. */
   onOpenRun: (runId: string) => void;
   /**
@@ -210,7 +215,6 @@ interface Props {
   runs?: DiagramRun[];
 }
 
-const POLL_MS = 5000;
 const LOG_SHOWN = 30;
 /** The newest team messages shown on the board itself, outside the log. */
 const MESSAGES_SHOWN = 5;
@@ -274,64 +278,48 @@ function isQueuedTeam(status: TeamView["status"]): boolean {
   return status === "queued";
 }
 
-export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan, runs }: Props) {
+export default function CodingTeamCard({ teams, onChanged, onOpenRun, onPlan, runs }: Props) {
   const { t } = useT();
-  const [teams, setTeams] = useState<TeamView[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
-  // One token per read: a response that started for the previous project
-  // (or before an unmount) must not paint over the current one — and one
-  // per SCOPE (the project this card is on), so a Start or a Stop that was
-  // still in flight when the scope changed neither paints nor invalidates
-  // the new scope's reads. The page remounts the card per project, so the
-  // scope guard is belt and braces; it costs nothing to be sure.
-  const request = useRef(0);
-  const scope = useRef(0);
-
-  const load = useCallback(async () => {
-    const mine = ++request.current;
-    try {
-      const res = await fetch("/setup-api/coding-agent/team", { cache: "no-store" });
-      const data = await res.json().catch(() => null) as { teams?: TeamView[] } | null;
-      if (!res.ok || !data?.teams) return;
-      if (mine !== request.current) return;
-      setTeams(data.teams.filter((x) => (projectId ? x.projectId === projectId : x.directory === directory)));
-    } catch {
-      /* the card simply shows what it last read */
-    }
-  }, [directory, projectId]);
-
-  useEffect(() => {
-    scope.current++;
-    // The first read of the board happens here: the card has no other
-    // moment to ask, and the answer is one render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-    return () => { request.current++; scope.current++; };
-  }, [load]);
+  // The whole copy of a settled board the list sent slim, by id — read once
+  // per board, since a settled board's log and tasks never change again.
+  const [whole, setWhole] = useState<Record<string, TeamView>>({});
+  const asked = useRef(new Set<string>());
 
   // The team at work first: one asked for after it waits in the queue, and is
   // newer, but the board the owner follows is the one moving.
-  const team = teams.find((x) => isActive(x.status)) ?? teams[0] ?? null;
+  const listed = teams.find((x) => isActive(x.status)) ?? teams[0] ?? null;
+  const team = listed && listed.slim && whole[listed.id]
+    ? { ...listed, log: whole[listed.id].log, tasks: whole[listed.id].tasks, slim: false }
+    : listed;
   const active = team ? isActive(team.status) : false;
   const queuedHere = teams
     .filter((x) => isQueuedTeam(x.status) && x.id !== team?.id)
     .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
-  const following = active || (team !== null && isQueuedTeam(team.status)) || queuedHere.length > 0;
 
-  // Follow a team while it works, or while one waits for its turn — and not
-  // while nobody can see the page (visible-interval.ts): coming back is a
-  // read of its own.
+  const wanted = listed && listed.slim ? listed.id : null;
   useEffect(() => {
-    if (!following) return;
-    return setVisibleInterval(() => { void load(); }, POLL_MS);
-  }, [following, load]);
+    if (!wanted || asked.current.has(wanted)) return;
+    asked.current.add(wanted);
+    let gone = false;
+    void (async () => {
+      try {
+        const res = await fetch(`/setup-api/coding-agent/team?id=${encodeURIComponent(wanted)}`, { cache: "no-store" });
+        const data = await res.json().catch(() => null) as { team?: TeamView } | null;
+        if (!res.ok || !data?.team || gone) return;
+        setWhole((prev) => ({ ...prev, [wanted]: data.team! }));
+      } catch {
+        /* the card draws the slim board: the status, the chart, no log */
+      }
+    })();
+    return () => { gone = true; };
+  }, [wanted]);
 
   /** Stop the team at work, or — for a queued one — take it out of the queue: the same route, the owner's alone for a queue. */
   const stop = async (target: TeamView | null = team) => {
     if (!target) return;
-    const startedIn = scope.current;
     setBusy(true);
     setError(null);
     try {
@@ -342,11 +330,9 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
-      if (startedIn !== scope.current) return;
-      request.current++;
-      setTeams((prev) => prev.map((x) => (x.id === data.team!.id ? data.team! : x)));
+      onChanged();
     } catch (err) {
-      if (startedIn === scope.current) setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
+      setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
     } finally {
       setBusy(false);
     }
@@ -442,7 +428,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           source={{ kind: "team", team }}
           runOf={runOf}
           onOpenRun={onOpenRun}
-          onChanged={() => { void load(); }}
+          onChanged={onChanged}
           refreshKey={team.updatedAt}
           testId="coding-team-diagram"
           bare

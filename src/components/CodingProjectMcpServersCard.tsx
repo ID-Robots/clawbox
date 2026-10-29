@@ -36,7 +36,11 @@ interface Answer {
   unreadable: string[];
 }
 
-export default function CodingProjectMcpServersCard({ project }: { project: string }) {
+export default function CodingProjectMcpServersCard({ project, onTicked }: {
+  project: string;
+  /** Told how many servers are ticked after every read and save — the host carries the count on its Setup tab. */
+  onTicked?: (n: number) => void;
+}) {
   const tr = useTr();
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [busy, setBusy] = useState(false);
@@ -109,6 +113,9 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
   };
 
   const ticked = answer?.selected.length ?? 0;
+  useEffect(() => {
+    if (answer) onTicked?.(answer.selected.length);
+  }, [answer, onTicked]);
   const label = (option: Option) => option.kind === "clawbox" ? tr("codingAgent.mcpServers.clawboxReadOnly", "ClawBox read-only tools") : option.id;
   const detail = (option: Option): string => {
     if (option.kind === "clawbox") {

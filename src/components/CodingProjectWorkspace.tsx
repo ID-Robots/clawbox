@@ -29,8 +29,9 @@ import { languageForFile } from "@/lib/code-language";
 import { dispatchOpenApp } from "@/lib/ui-events";
 import { CARD_SURFACE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { timeAgo } from "./clawkeep-ui";
+import { setVisibleInterval } from "@/lib/visible-interval";
 
-export type WorkspaceTab = "files" | "changes" | "runs" | "team";
+export type WorkspaceTab = "files" | "changes" | "runs" | "team" | "setup";
 
 interface Props {
   /** `projectId=<id>` for a code project, `directory=<abs>` for a folder —
@@ -54,6 +55,15 @@ interface Props {
   runsLive?: boolean;
   /** The coding team's card, as a tab. Absent: no tab. */
   team?: ReactNode;
+  /**
+   * The project's SETUP — its run notes and MCP servers — rendered only
+   * while the tab is open, not hidden: each card reads the box on mount, and
+   * on every project page that was two GETs for cards most visits never
+   * unfolded. Absent on a host without one (a run's own page).
+   */
+  setup?: ReactNode;
+  /** How many MCP servers the project's runs start with, once its card has read them; null until then. */
+  setupCount?: number | null;
 }
 
 /** How often the change list is re-read while a run is writing. */
@@ -67,7 +77,7 @@ const STATUS_GLYPH: Record<ChangeStatus, { letter: string; className: string }> 
   conflict: { letter: "!", className: "text-red-400" },
 };
 
-export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, filesDirectory, runs, runsCount = 0, runsLive = false, team }: Props) {
+export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, filesDirectory, runs, runsCount = 0, runsLive = false, team, setup, setupCount = null }: Props) {
   const { t } = useT();
   // The project page opens on its TEAM — the agents at work, which is what
   // the owner opens a project to see (2026-10-12: "Coding team needs to be
@@ -147,6 +157,22 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">difference</span>
           {t("codingAgent.changesTab")}
         </button>
+        {setup && (
+          <button
+            type="button"
+            role="tab"
+            id="coding-agent-workspace-tab-setup"
+            aria-selected={tab === "setup"}
+            aria-controls="coding-agent-workspace-pane-setup"
+            onClick={() => setTab("setup")}
+            data-testid="coding-agent-workspace-setup"
+            className={tabClass("setup")}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">tune</span>
+            {t("codingAgent.setupTab")}
+            {setupCount !== null && <span className="text-[var(--text-muted)] font-normal" data-testid="coding-agent-workspace-setup-count">({setupCount})</span>}
+          </button>
+        )}
       </div>
       {/* Both panes stay mounted: a tree that was opened three folders deep
           would otherwise fold every time the owner glanced at the diff. */}
@@ -164,6 +190,11 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
       {team && (
         <div role="tabpanel" id="coding-agent-workspace-pane-team" aria-labelledby="coding-agent-workspace-tab-team" hidden={tab !== "team"} className={fill ? "flex-1 min-h-0 overflow-y-auto" : undefined}>
           {team}
+        </div>
+      )}
+      {setup && tab === "setup" && (
+        <div role="tabpanel" id="coding-agent-workspace-pane-setup" aria-labelledby="coding-agent-workspace-tab-setup" className={fill ? "flex-1 min-h-0 overflow-y-auto" : undefined}>
+          {setup}
         </div>
       )}
     </div>
@@ -465,11 +496,11 @@ function ChangesPane({ query, live, initialRef, active, paneClass, fill }: { que
   // three more spawns on a Jetson.
   useEffect(() => { if (active) void load(); }, [active, load]);
 
-  // A run in flight writes as it goes; the list follows while it is on screen.
+  // A run in flight writes as it goes; the list follows while it is on screen
+  // — and not while nobody can see the page (visible-interval.ts).
   useEffect(() => {
     if (!live || !active || ref) return;
-    const id = setInterval(() => { void load(); }, LIVE_POLL_MS);
-    return () => clearInterval(id);
+    return setVisibleInterval(() => { void load(); }, LIVE_POLL_MS);
   }, [live, active, ref, load]);
 
   // A settled run's commit arrives after the page opened on the working tree.

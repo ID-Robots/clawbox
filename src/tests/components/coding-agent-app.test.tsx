@@ -1217,13 +1217,17 @@ describe("CodingAgentApp", () => {
       });
     });
 
-    it("embeds the live terminal on a running run's page in place of the activity log, and keeps the log once it settled", async () => {
+    it("embeds the live terminal on a running run's page once its tab is picked, and keeps the log once it settled", async () => {
       const live = { ...RUN, status: "running", completedAt: null, summary: null, transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", progress: ["$ npm test"] };
       stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });
       const { unmount } = render(<CodingAgentApp />);
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
       await screen.findByTestId("coding-agent-run-page");
+      // Not mounted until asked for: a PTY and a tail on every live run page
+      // was the cost, and most pages never open it.
+      expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
+      fireEvent.click(screen.getByTestId("coding-agent-live-tab-terminal"));
       const terminal = await screen.findByTestId("coding-agent-run-terminal");
       expect(within(terminal).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
       // The timeline sits ABOVE the summary while the run works too, live.
@@ -2221,8 +2225,9 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(working.textContent).not.toContain(t("codingAgent.tokensWord"));
     expect(screen.getByTestId("coding-agent-stat-tokens").textContent).toBe("332k");
     expect(within(working).getByRole("img", { name: t("codingAgent.chatBusy") })).toBeInTheDocument();
-    // Only one pane shows: the terminal is mounted but hidden, the browser not mounted.
-    expect(screen.getByTestId("coding-agent-run-terminal").closest("[role=tabpanel]")).toHaveAttribute("hidden");
+    // Only one pane shows: neither the terminal nor the browser is mounted
+    // until its tab is picked.
+    expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
     expect(screen.queryByTestId("coding-agent-browser-preview")).toBeNull();
     expect(screen.queryByTestId("coding-agent-live-row")).toBeNull();
     // The terminal tab: the transcript, and Open in Terminal beside the tabs.
@@ -2232,7 +2237,10 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(within(screen.getByTestId("coding-agent-run-terminal")).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
     expect(screen.getByTestId("coding-agent-run-terminal-open")).toBeInTheDocument();
     // The browser tab: a view-only picture, and Open VNC opens the VNC app.
+    // The terminal, once picked, stays mounted and hidden: it typed its
+    // command once, and a remount would tail from the top.
     fireEvent.click(screen.getByTestId("coding-agent-live-tab-browser"));
+    expect(screen.getByTestId("coding-agent-run-terminal").closest("[role=tabpanel]")).toHaveAttribute("hidden");
     const preview = screen.getByTestId("coding-agent-browser-preview");
     const screenMock = within(preview).getByTestId("vnc-mock");
     expect(screenMock).toHaveAttribute("data-view-only", "true");
@@ -3064,5 +3072,98 @@ describe("publishing a ClawBox app to the Store", () => {
     expect(publish).toHaveAccessibleName(translations.en["codingAgent.publishFor"].replace("{name}", "My Site"));
     fireEvent.click(publish);
     expect(await screen.findByTestId("store-publish-dialog")).toBeInTheDocument();
+  });
+});
+
+/**
+ * A run that hit a ceiling — the step limit, the cost ceiling — settles
+ * failed AND resumable: the session did real work and ran out of room. The
+ * page offers Continue, a continuation of the run through the same POST the
+ * Fix CI card makes, and draws the steps against the ceiling they hit.
+ */
+describe("a run that hit a ceiling", () => {
+  const CEILING = {
+    ...RUN,
+    id: "run-ceiling01",
+    status: "failed",
+    resumable: true,
+    numTurns: 200,
+    maxTurns: 200,
+    summary: null,
+    error: "Stopped at the step limit (200 of 200) without finishing. Press Continue to carry on in the same session with a fresh limit, or split the work.",
+  };
+
+  async function openRun(id: string) {
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${id}`));
+    return screen.findByTestId("coding-agent-run-page");
+  }
+
+  it("draws the steps against the ceiling and offers Continue, which starts a continuation of the run", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [CEILING], { projects: [SITE_PROJECT] });
+    const real = globalThis.fetch as typeof fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/coding-agent/run" && init?.method === "POST") {
+        posts.push({ url: "/setup-api/coding-agent/run", body: JSON.parse(String(init.body)) });
+        return json({ run: { ...CEILING, id: "run-ceiling02", status: "running", completedAt: null, error: null, numTurns: 0 } });
+      }
+      return real(input, init);
+    }));
+    const page = await openRun(CEILING.id);
+    expect(within(page).getByTestId("coding-agent-stat-steps").textContent).toContain("200 / 200");
+    expect(within(page).getByTestId("coding-agent-run-error")).toHaveTextContent("Press Continue");
+    // Continue, and no Stop: the run is settled.
+    const button = within(page).getByTestId(`coding-agent-continue-${CEILING.id}`);
+    expect(button).toHaveTextContent(translations.en["codingAgent.continueRun"]);
+    expect(within(page).queryByTestId(`coding-agent-stop-${CEILING.id}`)).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
+    const body = posts.find((p) => p.url === "/setup-api/coding-agent/run")?.body as Record<string, unknown>;
+    expect(body).toMatchObject({ resumeRunId: CEILING.id });
+    expect(typeof body.task).toBe("string");
+    expect(body).not.toHaveProperty("fixCi");
+  });
+
+  it("offers nothing to a failure the session cannot take", async () => {
+    const dead = { ...CEILING, id: "run-ceiling03", resumable: false, numTurns: 12, error: "Claude Code reported an error." };
+    stubFetch({ enabled: true, readiness: READY }, [dead], { projects: [SITE_PROJECT] });
+    const page = await openRun(dead.id);
+    expect(within(page).queryByTestId(`coding-agent-continue-${dead.id}`)).toBeNull();
+    expect(within(page).getByTestId("coding-agent-stat-steps").textContent).toContain("12 / 200");
+  });
+});
+
+/**
+ * The project's Setup tab: its run notes and MCP servers, two cards that each
+ * read the box on mount — so they are rendered only while the tab is open,
+ * not hidden, and the count the servers card read rides on the tab.
+ */
+describe("the project's Setup tab", () => {
+  it("reads the run notes and the MCP servers only once the tab is opened, and carries the ticked count on it", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    const real = globalThis.fetch as typeof fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/mcp-servers?")) {
+        return json({ selected: ["clawbox", "github"], options: [{ id: "clawbox", kind: "clawbox", usable: true }, { id: "github", kind: "harness", harness: "openclaw", transport: "stdio", usable: true }], unreadable: [] });
+      }
+      if (url.startsWith("/setup-api/coding-agent/run-notes?")) return json({ notes: "", maxChars: 4000, file: "/home/clawbox/Projects/site/.clawbox/run-notes.md" });
+      return real(input, init);
+    }));
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    const urls = () => vi.mocked(globalThis.fetch).mock.calls.map(([input]) => input.toString());
+    expect(urls().some((u) => u.includes("/run-notes") || u.includes("/mcp-servers"))).toBe(false);
+    expect(screen.queryByTestId("coding-agent-project-setup")).toBeNull();
+    const tab = screen.getByTestId("coding-agent-workspace-setup");
+    expect(tab).toHaveTextContent(translations.en["codingAgent.setupTab"]);
+    expect(screen.getAllByRole("tab").at(-1)).toBe(tab);
+    fireEvent.click(tab);
+    await screen.findByTestId("coding-agent-project-setup");
+    await waitFor(() => expect(urls().some((u) => u.includes("/run-notes?"))).toBe(true));
+    await waitFor(() => expect(urls().some((u) => u.includes("/mcp-servers?"))).toBe(true));
+    expect(await screen.findByTestId("coding-agent-workspace-setup-count")).toHaveTextContent("(2)");
   });
 });
