@@ -5131,4 +5131,150 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect((await res.json()).warning ?? "").not.toContain("is in no model list");
     });
   });
+
+  // An older ClawBox stored the device login as an OAuth bundle at ClawBox
+  // AI's own id, and the pinned core refuses to paste an API key over a
+  // sign-in: "The API-key profile belongs to another sign-in". Every later
+  // ClawBox AI connect then failed, from the wizard and from Settings. The slot
+  // is this route's alone, so it is taken over with the core's own logout —
+  // and a slot that still holds the sign-in is never answered as a success.
+  describe("a stale sign-in in ClawBox AI's credential slot", () => {
+    const SLOT = "deepseek:default";
+    const REFUSAL = "The API-key profile belongs to another sign-in.";
+    const oauthRow = {
+      kind: "present", store: "shared", type: "oauth", fingerprint: null, refreshFingerprint: null,
+      expires: 1, fenced: false, fence: null, storeUpdatedAtMs: 1,
+    } as GatewayAuthProfileRead;
+    const keyRow = { ...oauthRow, type: "api_key" } as GatewayAuthProfileRead;
+
+    const cliCalls = () => vi.mocked(spawnOpenclawCli).mock.calls.map(([args]) => (args as string[]).join(" "));
+    const logoutCalls = () => cliCalls().filter((call) => call.startsWith(`models auth logout ${SLOT}`));
+    const pasteCalls = () => cliCalls().filter((call) => call.includes("paste-api-key") && call.includes(SLOT));
+
+    /**
+     * The pinned core, as far as this slot goes: the paste refuses while the
+     * store holds a sign-in at the id, and logout empties it. `heldBy` is what
+     * the store holds before the save; `readerSees` is whether the in-process
+     * reader can see it (a roster agent's store is invisible to it).
+     */
+    function seedCore({ readerSees = true, logoutWorks = true, configSays = true } = {}) {
+      let signedIn = true;
+      vi.mocked(readGatewayAuthProfile).mockImplementation(() =>
+        (readerSees && signedIn ? oauthRow : keyRow));
+      // The openclaw.json half of the stale sign-in, as the box carries it
+      // until logout drops it and the paste rewrites it.
+      mockReadOpenClawConfig.mockImplementation(async () => (configSays
+        ? { auth: { profiles: { [SLOT]: { provider: "deepseek", mode: signedIn ? "oauth" : "api_key" } } } }
+        : {}));
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[]) => {
+        const call = args.join(" ");
+        if (call.startsWith(`models auth logout ${SLOT}`)) {
+          if (logoutWorks) signedIn = false;
+          return "";
+        }
+        if (call.includes("paste-api-key") && call.includes(SLOT) && signedIn) throw new Error(REFUSAL);
+        return "";
+      });
+    }
+
+    afterEach(() => {
+      vi.mocked(readGatewayAuthProfile).mockReset();
+      vi.mocked(spawnOpenclawCli).mockReset().mockResolvedValue("");
+    });
+
+    it("takes the slot over natively and connects the device login", async () => {
+      seedCore();
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+        authMode: "subscription",
+        clawaiTier: "flash",
+      }));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).success).toBe(true);
+      expect(logoutCalls()).toEqual([`models auth logout ${SLOT} --yes`]);
+      // Logout first, then the paste that now lands.
+      const calls = cliCalls();
+      expect(calls.indexOf(logoutCalls()[0])).toBeLessThan(calls.indexOf(pasteCalls()[0]));
+      expect(pasteStdin(SLOT)).toContain("claw_token_abc");
+      // And the metadata is stamped as the API key it now is.
+      expect(findConfigSet(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        `auth.profiles.${SLOT}`,
+      )?.value).toBe(JSON.stringify({ provider: "deepseek", mode: "api_key" }));
+    });
+
+    it("takes it over from the pasted-token lane too", async () => {
+      seedCore();
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc" }));
+
+      expect(res.status).toBe(200);
+      expect(logoutCalls()).toHaveLength(1);
+    });
+
+    it("takes it over when only the paste's refusal names the sign-in", async () => {
+      // The store the paste writes is one the in-process reader cannot see,
+      // and openclaw.json carries nothing either: the refusal is the evidence.
+      seedCore({ readerSees: false, configSays: false });
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+
+      expect(res.status).toBe(200);
+      expect(logoutCalls()).toHaveLength(1);
+      expect(pasteCalls().length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("answers a sentence, never success, when the sign-in cannot be removed", async () => {
+      seedCore({ logoutWorks: false });
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.success).toBeUndefined();
+      expect(body.code).toBe("clawai_slot_held");
+      expect(body.error).toContain(`openclaw models auth logout ${SLOT}`);
+      expect(body.error).not.toContain("check your credentials");
+      expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ ai_model_configured: true }));
+    });
+
+    it("never answers success over a paste that exited 0 and left the sign-in", async () => {
+      // A refusal printed on stderr with exit 0 reads as a landed paste; the
+      // store read after it is what tells the two apart. The reader is blind
+      // until then, so nothing is taken over before the paste.
+      let reads = 0;
+      vi.mocked(readGatewayAuthProfile).mockImplementation(() => (reads++ === 0 ? keyRow : oauthRow));
+      vi.mocked(spawnOpenclawCli).mockResolvedValue("");
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("clawai_slot_held");
+    });
+
+    it("leaves a slot that already holds an API key alone", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({
+        auth: { profiles: { [SLOT]: { provider: "deepseek", mode: "api_key" } } },
+      });
+      vi.mocked(readGatewayAuthProfile).mockReturnValue(keyRow);
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+
+      expect(res.status).toBe(200);
+      expect(logoutCalls()).toEqual([]);
+    });
+
+    it("never takes over another provider's sign-in", async () => {
+      // Anthropic keeps its guard: a key over its sign-in is refused, not
+      // logged out (the sign-in is the owner's, not ClawBox's).
+      mockReadOpenClawConfig.mockResolvedValue({});
+      vi.mocked(readGatewayAuthProfile).mockReturnValue(oauthRow);
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[]) =>
+        (args.join(" ") === "models auth list --json"
+          ? JSON.stringify({ profiles: [{ id: "anthropic:default", provider: "anthropic", type: "oauth" }] })
+          : ""));
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+
+      expect(res.status).toBe(409);
+      expect(cliCalls().some((call) => call.startsWith("models auth logout"))).toBe(false);
+    });
+  });
 });
