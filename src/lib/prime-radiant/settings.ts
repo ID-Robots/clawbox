@@ -97,18 +97,6 @@ export const MAX_SUMMARIES_MAX_PAGES = 2000;
 export const DEFAULT_SUMMARIES_CAP_USD = 0.25;
 export const MAX_SUMMARIES_CAP_USD = 100;
 
-/**
- * The core block (core-context.ts): the `n` most-linked pages, title and
- * summary, in every new session of the owner's main agent, never longer than
- * `maxChars`. Off by default, and only the owner turns it on.
- */
-export const DEFAULT_CONTEXT_PAGES = 100;
-export const MIN_CONTEXT_PAGES = 1;
-export const MAX_CONTEXT_PAGES = 300;
-export const DEFAULT_CONTEXT_MAX_CHARS = 30_000;
-export const MIN_CONTEXT_MAX_CHARS = 2_000;
-export const MAX_CONTEXT_MAX_CHARS = 60_000;
-
 export interface IngestSettings {
   /**
    * Folder-name patterns never walked into. A stored list that is a default
@@ -169,15 +157,6 @@ export interface SummariesSettings {
   capUsd: number;
 }
 
-export interface ContextSettings {
-  /** Put the core block in the owner's main agent's sessions. */
-  enabled: boolean;
-  /** Pages the block lists at most, the most linked first. */
-  n: number;
-  /** The block's length at most, characters (it stops at a whole page). */
-  maxChars: number;
-}
-
 export interface DomainSetting {
   /** Lowercase kebab, as a page's `domain`. */
   name: string;
@@ -220,7 +199,6 @@ export interface PrimeRadiantSettings {
   search: SearchSettings;
   structure: StructureSettings;
   summaries: SummariesSettings;
-  context: ContextSettings;
   domains: DomainSetting[];
   golden: GoldenSettings;
   verification: VerificationSettings;
@@ -236,7 +214,6 @@ export function defaultSettings(): PrimeRadiantSettings {
     search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
     structure: { enabled: true, company: "", enrichTop: DEFAULT_STRUCTURE_ENRICH_TOP, modelFallback: DEFAULT_STRUCTURE_MODEL_FALLBACK },
     summaries: { enabled: true, maxPages: DEFAULT_SUMMARIES_MAX_PAGES, capUsd: DEFAULT_SUMMARIES_CAP_USD },
-    context: { enabled: false, n: DEFAULT_CONTEXT_PAGES, maxChars: DEFAULT_CONTEXT_MAX_CHARS },
     domains: [],
     golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
     verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
@@ -392,17 +369,6 @@ const FIELDS = {
         : { ok: false, error: `summaries.maxPages must be a whole number from 0 to ${MAX_SUMMARIES_MAX_PAGES}.` },
     capUsd: (v: unknown) => readNumber(v, 0, MAX_SUMMARIES_CAP_USD, "summaries.capUsd"),
   },
-  context: {
-    enabled: (v: unknown) => readBool(v, "context.enabled"),
-    n: (v: unknown): Read<number> =>
-      typeof v === "number" && Number.isInteger(v) && v >= MIN_CONTEXT_PAGES && v <= MAX_CONTEXT_PAGES
-        ? { ok: true, value: v }
-        : { ok: false, error: `context.n must be a whole number from ${MIN_CONTEXT_PAGES} to ${MAX_CONTEXT_PAGES}.` },
-    maxChars: (v: unknown): Read<number> =>
-      typeof v === "number" && Number.isInteger(v) && v >= MIN_CONTEXT_MAX_CHARS && v <= MAX_CONTEXT_MAX_CHARS
-        ? { ok: true, value: v }
-        : { ok: false, error: `context.maxChars must be a whole number from ${MIN_CONTEXT_MAX_CHARS} to ${MAX_CONTEXT_MAX_CHARS}.` },
-  },
 } as const;
 
 type SectionName = keyof typeof FIELDS;
@@ -472,7 +438,6 @@ export interface SettingsPatch {
   search?: { indexLimitMb?: unknown } | null;
   structure?: { enabled?: unknown; company?: unknown; enrichTop?: unknown; modelFallback?: unknown } | null;
   summaries?: { enabled?: unknown; maxPages?: unknown; capUsd?: unknown } | null;
-  context?: { enabled?: unknown; n?: unknown; maxChars?: unknown } | null;
   domains?: unknown;
   golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
   verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
@@ -489,7 +454,6 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   verification: Object.keys(FIELDS.verification),
   structure: Object.keys(FIELDS.structure),
   summaries: Object.keys(FIELDS.summaries),
-  context: Object.keys(FIELDS.context),
 };
 
 /** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */
