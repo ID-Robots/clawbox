@@ -52,6 +52,16 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => {
   return { ...actual, ...runner };
 });
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
+// The notices, mocked: the finish notice is coding-agent-notify.test.ts's to
+// test, and a real one would reach the owner's own Telegram from a test.
+vi.mock("@/lib/coding-agent-notify", () => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn(async () => undefined),
+  announceAnthropicLimit: vi.fn(async () => undefined),
+}));
+// The gateway link a settled team's chat line goes over, mocked: a real one
+// would post into the owner's chat from a test.
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()), gatewayWsChatSendMain: vi.fn(async () => ({ sessionKey: "main" })) }));
 vi.mock("@/lib/coding-run-cpu", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-run-cpu")>();
   return { ...actual, onBatteryPower: vi.fn(async () => false) };

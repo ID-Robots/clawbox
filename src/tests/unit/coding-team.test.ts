@@ -83,6 +83,20 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-pr")>();
   return { ...actual, openPullRequest: github.openPullRequest, readPullRequest: github.readPullRequest, mergePullRequest: github.mergePullRequest, markPullRequestReady: github.markPullRequestReady };
 });
+// The notices, mocked: ONE team notice per settle is what is under test, not
+// the owner-notice ring or Telegram (coding-agent-notify.test.ts has those).
+const notify = vi.hoisted(() => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn(async () => undefined),
+  announceAnthropicLimit: vi.fn(async () => undefined),
+}));
+vi.mock("@/lib/coding-agent-notify", () => notify);
+// The edition and the gateway link the settle's chat line goes over: an
+// OpenClaw box unless a case says Hermes, and a gateway that takes the line.
+const harness = vi.hoisted(() => ({ getActiveHarness: vi.fn(async () => "openclaw" as const) }));
+vi.mock("@/lib/harness", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/harness")>()), ...harness }));
+const gateway = vi.hoisted(() => ({ gatewayWsChatSendMain: vi.fn(async () => ({ sessionKey: "main" })) }));
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()), ...gateway }));
 vi.mock("@/lib/coding-review", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-review")>();
   return { ...actual, pushBranch: github.pushBranch, readReviewSnapshot: github.readReviewSnapshot, readFailedCheckLogs: github.readFailedCheckLogs };
@@ -1813,6 +1827,62 @@ describe("a team that works", () => {
   });
 });
 
+describe("the settle notice", () => {
+  it("tells the owner ONCE when the team is done, and the assistant's chat on OpenClaw — a fixed line, never the error", async () => {
+    outcomes = [{ summary: PLAN }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done", branch: `clawbox/${board.id}` });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    const [line, opts] = gateway.gatewayWsChatSendMain.mock.calls[0] as unknown as [string, { idempotencyKey: string; timeoutMs: number }];
+    expect(line).toBe(`[Coding team ${board.id}] finished: done — 2 of 2 tasks done, on branch clawbox/${board.id}. Read coding_team_status for the result and tell the user.`);
+    expect(opts.timeoutMs).toBe(team.OWNER_AGENT_TIMEOUT_MS);
+    expect(opts.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("says a failed team failed — the counts, not the reason — and a Hermes box gets no chat line", async () => {
+    harness.getActiveHarness.mockResolvedValue("hermes" as never);
+    outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
+    // The chat line is OpenClaw's: Hermes gives the box no way into its chat.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+    harness.getActiveHarness.mockResolvedValue("openclaw" as never);
+  });
+
+  it("waits for the team with waitForTeam — at once when told not to wait, and answered settled once it is", async () => {
+    outcomes = [{ summary: PLAN }];
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementation(async (id: string) => {
+      const run = runs.get(id)!;
+      if (id === "run-00000001") { Object.assign(run, { status: "completed", summary: PLAN }); return run; }
+      await new Promise<void>((r) => { release = r; });
+      Object.assign(run, { status: "completed", completedAt: Date.now(), summary: "done" });
+      return run;
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    for (let i = 0; i < 100 && !runs.has("run-00000002"); i++) await new Promise((r) => setTimeout(r, 5));
+    expect((await team.waitForTeam(board.id, 0))?.status).toBe("working");
+    const waiting = team.waitForTeam(board.id, 5_000);
+    release();
+    // The worker, then its reviewer, then the next task: every run after the first is let go as it comes.
+    const letGo = setInterval(() => release(), 5);
+    try {
+      const settled = await waiting;
+      expect(settled?.status).toBe("done");
+    } finally {
+      clearInterval(letGo);
+    }
+    expect(await team.waitForTeam("team-nope0000", 1)).toBeNull();
+  });
+});
+
 describe("the gates", () => {
   it("refuses while the switch is off and an empty goal, and QUEUES a second team at once", async () => {
     runner.isCodingAgentEnabled.mockResolvedValueOnce(false);
@@ -1854,6 +1924,9 @@ describe("the gates", () => {
     const done = await finished(board.id);
     expect(done.status).toBe("stopped");
     expect(team.activeTeamId()).toBeNull();
+    // The owner hears of the stop once, as a team notice.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
   });
 
   it("settles a team the web server restarted under as failed, on the next read", async () => {
@@ -3028,6 +3101,9 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
     expect(plumbing.addWorkerWorktree).not.toHaveBeenCalled();
     expect(done.branch).toBeNull();
     expect(done.singleRun).toBe(true);
+    // The run settled the owner's usual way, with its own card: no second notice for the team — the chat still hears.
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam).not.toHaveBeenCalled();
     expect(done.advice).toEqual({ reason: "one_task", overlap: 100 });
     expect(done.tasks[0]).toMatchObject({ status: "complete", assigned_to: "run-00000002", result: "Fixed the typo in README.md.", review: { verdict: "accepted" } });
     expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/one task, so it runs as one ordinary run/)]));

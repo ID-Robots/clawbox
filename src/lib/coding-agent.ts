@@ -12516,7 +12516,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // "Coding agent finished run-x" now would be exactly the claim the pipeline
   // exists to stop making. `settlePipelineRun` sends it when the pipeline is
   // actually over.
-  if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
+  //
+  // A TEAM's run sends none either: the owner hears once, when the team
+  // settles (coding-team.ts `announceTeamSettled`), not once per planner,
+  // worker and reviewer.
+  if (run.status !== "paused" && !run.team && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
     });

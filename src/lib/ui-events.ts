@@ -336,7 +336,7 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
   return [
     `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
     `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
-    "Tell me when it is running, and check on it later with coding_team_status; when it is done, summarise what each task did and what was verified.",
+    "Tell me when it is running, and do not poll it — ClawBox tells me when it finishes; then read coding_team_status and summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
   ].join("\n");
 }

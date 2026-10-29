@@ -1010,7 +1010,13 @@ several parts; `coding_agent_run` is still the tool for one focused change.
 and result — and for a pending one what it is waiting for, or why it was
 held — the alerts, the team's branch, its pull request, `agents` (planner,
 workers, reviewers, total — who worked), and what to tell the user; `log: 1`
-adds the last lines of the audit log. A task starts only once every
+adds the last lines of the audit log, and `wait_seconds` blocks until the
+team settles (up to two minutes, like `coding_agent_status`) for a user who
+asked to wait. Otherwise the assistant does NOT poll: the box tells the owner
+ONCE when a team settles — a desktop notice and the Telegram message, never
+one per member run — and on OpenClaw posts `[Coding team <id>] finished` into
+the main chat; a Hermes box has no way into its chat, so there the tool says
+to look again only when the user asks. A task starts only once every
 `depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
 reopened after a dependent started HOLDS the dependent — its worker stopped
 or its result set aside — said on the board, and it runs again on the new

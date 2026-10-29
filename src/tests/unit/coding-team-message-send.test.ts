@@ -58,6 +58,13 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
     changedFiles: vi.fn(async () => []),
   };
 });
+// The notices, mocked: the finish notice is coding-agent-notify.test.ts's to
+// test, and a real one would reach the owner's own Telegram from a test.
+vi.mock("@/lib/coding-agent-notify", () => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn(async () => undefined),
+  announceAnthropicLimit: vi.fn(async () => undefined),
+}));
 const harness = vi.hoisted(() => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/harness")>()), ...harness }));
 // The gateway link, mocked: the one call the owner_agent path makes. The

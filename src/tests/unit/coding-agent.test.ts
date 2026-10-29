@@ -707,9 +707,12 @@ describe("a run", () => {
 
     // A coding team's run is the box's too: its worker text is built to
     // TEAM_TASK_CHARS, past the typed limit, and starts.
+    announce.mockClear();
     const worker = await lib.startRun({ task: "w".repeat(lib.TEAM_TASK_CHARS), projectId: "site", source: "owner", team: { id: "team-abcdefgh", role: "worker", taskId: "t1" } });
     expect(worker.task).toHaveLength(lib.TEAM_TASK_CHARS);
     expect((await finished(worker.id)).status).toBe("completed");
+    // And it sends no finish notice of its own: the owner hears once, when the TEAM settles.
+    expect(announce).not.toHaveBeenCalled();
   });
 
   it("does not report a run finished on a result event alone — the process must exit", async () => {

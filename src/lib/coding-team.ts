@@ -84,6 +84,7 @@ import {
   isCodingAgentEnabled,
   MAX_TASK_CHARS,
   MAX_TEAM_WORKERS,
+  MAX_WAIT_MS,
   noteTeamMessageSent,
   queueRunMessage,
   readTokenBreakdown,
@@ -101,6 +102,7 @@ import {
   type RunTeam,
   type TeamRoleModelMap,
 } from "@/lib/coding-agent";
+import { announceCodingTeam } from "@/lib/coding-agent-notify";
 import { isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
@@ -414,12 +416,55 @@ function launchTeam(board: TeamBoard): void {
     })
     .finally(() => {
       // Kept in the map only while it works; a settled team is read from disk.
-      if (isSettledStatus(board.status)) live.delete(board.id);
+      if (isSettledStatus(board.status)) {
+        live.delete(board.id);
+        announceTeamSettled(board);
+      }
       // The box is free: the queue's next team, in its turn.
       void startNextQueuedTeam().catch((err) => {
         console.error("[coding-team] could not start the next queued team:", err instanceof Error ? err.message : err);
       });
     });
+}
+
+/**
+ * The owner hears ONCE when a team ends — done, failed or stopped. Its member
+ * runs send no notice of their own (coding-agent.ts skips the run notice
+ * while `run.team` is set): a team of five used to put five run cards on the
+ * desktop and say nothing about the team. On OpenClaw the assistant hears
+ * too, one line in the main chat, so it need not poll `coding_team_status`
+ * or build itself a watcher. A single-run team's run has no `team` and
+ * settled the owner's usual way, with its own card, so the team sends only
+ * the chat line. Best-effort, like every notice: one that does not arrive
+ * changes nothing on the board.
+ */
+function announceTeamSettled(board: TeamBoard): void {
+  if (!board.singleRun) {
+    void announceCodingTeam(board).catch((err: unknown) => {
+      console.error("[coding-team] notice failed:", err instanceof Error ? err.message : err);
+    });
+  }
+  void postTeamFinishedToOwnerAgent(board).catch((err: unknown) => {
+    console.error(`[coding-team] the chat was not told that ${board.id} finished:`, err instanceof Error ? err.message : err);
+  });
+}
+
+/**
+ * `[Coding team <id>] finished` in the box's main chat — OpenClaw only, over
+ * the gateway link a run's `team_message` to the assistant takes
+ * (`postToOwnerAgent`). A fixed template: the status, the task counts and
+ * the branch; never `board.error`, which carries a model's words.
+ */
+async function postTeamFinishedToOwnerAgent(board: TeamBoard): Promise<void> {
+  const { getActiveHarness } = await import("@/lib/harness");
+  if ((await getActiveHarness()) !== "openclaw") return;
+  const tasks = board.tasks.filter((t) => t.status !== "retired");
+  const done = tasks.filter((t) => t.status === "complete").length;
+  const gateway = await import("@/lib/openclaw-gateway-ws");
+  await gateway.gatewayWsChatSendMain(
+    `[Coding team ${board.id}] finished: ${board.status} — ${done} of ${tasks.length} task${tasks.length === 1 ? "" : "s"} done${board.branch ? `, on branch ${board.branch}` : ""}. Read coding_team_status for the result and tell the user.`,
+    { idempotencyKey: randomUUID(), timeoutMs: OWNER_AGENT_TIMEOUT_MS },
+  );
 }
 
 /** The queued boards in the order they start in: the order they were asked for. */
@@ -507,6 +552,20 @@ export function getTeam(id: string): TeamView | null {
   const board = loadBoard(id);
   if (!board) return null;
   return snapshot(settleOrphan(board));
+}
+
+/**
+ * The team as `getTeam` answers it, once it has settled or `timeoutMs`
+ * (capped at `MAX_WAIT_MS`) has passed — what `GET ?id=&wait=` and the
+ * assistant's `coding_team_status` `wait_seconds` block on instead of polling.
+ * A team that is not at work in this process (queued, or settled) is
+ * answered at once.
+ */
+export async function waitForTeam(id: string, timeoutMs: number): Promise<TeamView | null> {
+  const team = TEAM_ID_RE.test(id) ? live.get(id) : undefined;
+  const ms = Math.max(0, Math.min(timeoutMs, MAX_WAIT_MS));
+  if (team && ms > 0) await Promise.race([team.done, sleep(ms)]);
+  return getTeam(id);
 }
 
 export function listTeams(limit = 20): TeamView[] {

@@ -24,7 +24,7 @@
 import { basename } from "path";
 import { apiGet, apiPost, apiTry } from "../lib/api";
 import { ApiError, classifyError, redact, ToolError, type ErrorRule, type ToolErrorCode } from "../lib/errors";
-import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
+import { json, LIST_MAX_CHARS, text, type Ed, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zOptText, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
@@ -1776,7 +1776,21 @@ function slotWaitName(wait: { role: string; taskId: string | null }): string {
   return wait.role === "lead" ? `the lead after ${wait.taskId}` : `the ${wait.role} of ${wait.taskId}`;
 }
 
-function describeTeam(team: TeamPayload, withLog: boolean): string {
+/**
+ * What the assistant does while a team works: NOTHING, until the box speaks.
+ * The box tells the owner when a team settles (a desktop notice, Telegram)
+ * and, on OpenClaw, posts `[Coding team <id>] finished` into this chat; a
+ * Hermes box has no way into its chat, so there the owner's notice is the
+ * word and the assistant looks again only when asked. The old "check again
+ * later" taught the assistant to poll — and once to build itself a cron
+ * watcher per team.
+ */
+const TEAM_SETTLE_WORD: Record<Ed, string> = {
+  openclaw: "ClawBox posts in this chat when the team finishes; do not poll it or schedule a watcher.",
+  hermes: "ClawBox tells the user on the desktop when the team finishes; do not poll it or schedule a watcher — look again only when they ask.",
+};
+
+function describeTeam(team: TeamPayload, withLog: boolean, edition: Ed): string {
   const parts: string[] = [];
   const waits = team.status === "queued" ? [] : (team.slotWaits ?? []);
   parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${waits.length ? " — waiting for a free slot" : ""}${team.error ? ` — ${team.error}` : ""}`);
@@ -1854,11 +1868,11 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     }
   }
   if (team.status === "queued") {
-    parts.push("Queued: the ClawBox starts it by itself when the team ahead of it finishes, and only the owner can cancel it. Tell the user and stop; check again later with coding_team_status.");
+    parts.push(`Queued: the ClawBox starts it by itself when the team ahead of it finishes, and only the owner can cancel it. Tell the user and stop. ${TEAM_SETTLE_WORD[edition]}`);
   } else if ((team.status === "planning" || team.status === "working" || team.status === "reviewing") && waits.length) {
-    parts.push("Waiting for a free slot: the box is busy with other runs, and the team goes on by itself as they finish. Tell the user and stop; do not start it again — check later with coding_team_status.");
+    parts.push(`Waiting for a free slot: the box is busy with other runs, and the team goes on by itself as they finish. Tell the user and stop; do not start it again. ${TEAM_SETTLE_WORD[edition]}`);
   } else if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
-    parts.push("Still working. Tell the user and stop; check again later with coding_team_status.");
+    parts.push(`Still working. Tell the user and stop. ${TEAM_SETTLE_WORD[edition]}`);
   } else if (team.status === "done") {
     parts.push("Every task is complete and accepted. Summarise the task results for the user, naming the files.");
   } else if (team.status === "failed") {
@@ -1867,7 +1881,7 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   return parts.join("\n");
 }
 
-export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent">): void {
+export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent" | "edition">): void {
   if (!ctx.codingAgent) return;
 
   reg.tool(
@@ -1910,20 +1924,21 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         + (advice
           ? `${advice} `
           : "If the plan comes back with one task it runs as one ordinary run, and coding_team_status says so — and says when a single run would have been cheaper. ")
-        + "Tell the user it is running and stop — check on it later with coding_team_status.",
+        + `Tell the user it is running and stop. ${TEAM_SETTLE_WORD[ctx.edition]} Its result is in coding_team_status.`,
       );
     },
   );
 
   reg.tool(
     "coding_team_status",
-    "Check a coding team started by coding_team_run: the plan, each task's status, worker and result, the alerts, and — once finished — what to tell the user. Leave team_id out to list recent teams.",
+    "Check a coding team started by coding_team_run: the plan, each task's status, worker and result, the alerts, and — once finished — what to tell the user. It answers at once; set wait_seconds ONLY when the user asked you to wait with them — ClawBox posts when the team finishes, so never poll. Leave team_id out to list recent teams.",
     {
       team_id: zOptText(40, "The team id, e.g. \"team-k3x9q2ab\". Leave it out to list recent teams."),
       log: zInt(0, 1, 0, "1 to include the last lines of the team's audit log."),
+      wait_seconds: zInt(0, MAX_WAIT_SECONDS, 0, "How long to wait for the team to finish before answering. 0 answers at once."),
     },
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: STATUS_OUTPUT_CHARS },
-    async ({ team_id, log }: { team_id?: string; log: number }) => {
+    async ({ team_id, log, wait_seconds }: { team_id?: string; log: number; wait_seconds: number }) => {
       if (!team_id) {
         const data = await apiGet<{ teams?: TeamPayload[] }>("/setup-api/coding-agent/team", { timeoutMs: 15_000 });
         const teams = data.teams ?? [];
@@ -1945,7 +1960,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       }
       let data: { team?: TeamPayload };
       try {
-        data = await apiGet<{ team?: TeamPayload }>("/setup-api/coding-agent/team", { query: { id: team_id }, timeoutMs: 15_000 });
+        data = await apiGet<{ team?: TeamPayload }>("/setup-api/coding-agent/team", { query: { id: team_id, wait: wait_seconds }, timeoutMs: wait_seconds * 1_000 + 15_000 });
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
           throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");
@@ -1953,7 +1968,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         throw err;
       }
       if (!data.team) throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");
-      return text(describeTeam(data.team, log === 1));
+      return text(describeTeam(data.team, log === 1, ctx.edition));
     },
   );
 
@@ -1973,7 +1988,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         throw err;
       }
       const team = data.team;
-      return text(team ? `Team ${team.id} is ${team.status}. ${describeTeam(team, false)}` : `Asked the ClawBox to stop team ${team_id}.`);
+      return text(team ? `Team ${team.id} is ${team.status}. ${describeTeam(team, false, ctx.edition)}` : `Asked the ClawBox to stop team ${team_id}.`);
     },
   );
 }
