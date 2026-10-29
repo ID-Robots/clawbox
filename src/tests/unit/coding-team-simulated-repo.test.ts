@@ -41,6 +41,7 @@ const runner = vi.hoisted(() => ({
   isCodingAgentEnabled: vi.fn(),
   getTeamDynamic: vi.fn(),
   getAutoPr: vi.fn(),
+  getPrBodyIncludesTask: vi.fn(),
   teamSpawnSlot: vi.fn(),
   suiteSandbox: vi.fn(),
   teamRoleModelMap: vi.fn(),
@@ -170,6 +171,8 @@ beforeEach(async () => {
   runner.getTeamDynamic.mockResolvedValue(false);
   // The owner's pull-request switch: off unless a case turns it on.
   runner.getAutoPr.mockResolvedValue(false);
+  // How much of the task a pull request carries: the box's default unless a case says otherwise.
+  runner.getPrBodyIncludesTask.mockResolvedValue("summary");
   runner.resolveWorkingDirectory.mockImplementation(async () => ({ directory: repo, projectId: null }));
   // Every role ready on the box's own provider.
   runner.teamRoleModelMap.mockImplementation(async () => {
@@ -364,6 +367,25 @@ describe("D3: the reviewer gate and the team's pull request", () => {
     expect(t2.review?.verdict).toBe("accepted");
   });
 
+  it("never turns a reviewer's rejection into an acceptance on the worker's word, when no reviewer could run anything", async () => {
+    const REJECTED = JSON.stringify({ verdict: "rejected", notes: "src/keyboard.js still exports -1. Static review only: no git could be run." });
+    script = {
+      "planner#1": plan(PLAN),
+      "t1#1": { summary: `↑ flies forward. ${testScriptSays()}`, writes: { "src/keyboard.js": "export const up = -1; // unchanged\n" } },
+      "t1#2": { summary: `↑ flies forward now. ${testScriptSays()}`, writes: { "src/keyboard.js": "export const up = 1;\n" } },
+      "t2#1": { summary: `spec updated. ${testScriptSays()}`, writes: { "spec/keyboard.spec.js": "expect(up).toBe(1);\n" } },
+      "review:t1#1": { summary: REJECTED },
+      "review:t1#2": { summary: REJECTED },
+    };
+    const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard", source: "agent" })).id);
+    expect(done.status).toBe("done");
+    const t1 = done.tasks[0];
+    // The rejection stood, labelled; the redo was reviewed again and accepted.
+    expect(t1.attempts).toBe(2);
+    expect(messages(done)).toEqual(expect.arrayContaining([expect.stringMatching(/^Task t1 rejected: NOT REVIEWED: src\/keyboard\.js still exports -1/)]));
+    expect(t1.review?.verdict).toBe("accepted");
+  });
+
   it("publishes the team's branch as one pull request when every task is accepted, the way a single run does — and none when pull requests are off", async () => {
     script = {
       "planner#1": plan(PLAN),
@@ -389,6 +411,22 @@ describe("D3: the reviewer gate and the team's pull request", () => {
     expect(off.status).toBe("done");
     expect(github.openPullRequest).not.toHaveBeenCalled();
     expect(off.pr).toBeNull();
+  });
+
+  it("keeps the goal out of the published pull request when the owner keeps the task out of pull requests, as a single run's", async () => {
+    script = {
+      "planner#1": plan(PLAN),
+      "t1#1": { summary: "↑ flies forward", writes: { "src/keyboard.js": "export const up = 1;\n" } },
+      "t2#1": { summary: "spec updated", writes: { "spec/keyboard.spec.js": "expect(up).toBe(1);\n" } },
+    };
+    runner.getAutoPr.mockResolvedValue(true);
+    runner.getPrBodyIncludesTask.mockResolvedValue("none");
+    const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard for the private customer build", source: "agent" })).id);
+    expect(done.status).toBe("done");
+    const body = String(github.openPullRequest.mock.calls[0][0].body);
+    expect(body).not.toContain("private customer build");
+    expect(body).not.toContain("Make ↑ fly forward");
+    expect(body).toContain("- t1 — ↑ flies forward");
   });
 });
 

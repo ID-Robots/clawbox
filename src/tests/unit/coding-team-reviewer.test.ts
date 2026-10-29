@@ -142,6 +142,12 @@ describe("a verdict that ran nothing, and the worker's own evidence", () => {
     expect(testEvidence("Changed src/keyboard.js.")).toBeNull();
     expect(testEvidence("Tests: 3 passed, 1 failed.")).toBeNull();
     expect(testEvidence("I could not run the tests, but they should pass.")).toBeNull();
+    // Nothing ran, or nothing was run yet: never evidence.
+    expect(testEvidence("Ran npm test: 0 passing.")).toBeNull();
+    expect(testEvidence("Tests: 0 passed, 0 total.")).toBeNull();
+    expect(testEvidence("No tests found, build passed.")).toBeNull();
+    expect(testEvidence("The tests should pass once this is merged.")).toBeNull();
+    expect(testEvidence("Tests: 0 failed, 12 passed.")).toBe("Tests: 0 failed, 12 passed.");
   });
 
   it("asks the second review with a shell, quoting what the first one said, inside the run route's cap", () => {

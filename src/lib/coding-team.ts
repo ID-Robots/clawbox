@@ -72,6 +72,7 @@ import {
   CodingAgentError,
   getAutoPr,
   getMaxParallelRuns,
+  getPrBodyIncludesTask,
   getRun,
   getTeamDynamic,
   harnessStateDir,
@@ -119,6 +120,7 @@ import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, N
 import { runProjectSuite, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { ciFailureLine, ciFixNotes, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, readPullRequest } from "@/lib/coding-pr";
+import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/coding-review";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
@@ -1536,8 +1538,9 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
   // A verdict that says it ran nothing is not a review (night run, 2026-10-29:
   // "Static review only: no git, Biome or Jest could be run" was an
   // acceptance). Offered ONCE more with a shell, in a throwaway worktree of the
-  // merged work; nothing run then either, the worker's own test evidence is
-  // the only way in — labelled NOT REVIEWED — and without it the task goes back.
+  // merged work; nothing run then either, a rejection stands, and an acceptance
+  // needs the worker's own test evidence — labelled NOT REVIEWED — or the task
+  // goes back.
   const first = answer.verdict;
   if (!ranNothing(first.notes)) return first;
   bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Not reviewed: the reviewer of ${task.task_id} (${run.id}) could not run git or the tests — it said ${answerHead(first.notes)}.${board.branch ? " Offering the review once more, with a shell in a checkout of the merged work." : ""}` });
@@ -1545,6 +1548,9 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
   if (team.stopRequested) return { verdict: "accepted", notes: "The team was stopped during the review." };
   if (!underReview(board, task.task_id)) return dropped;
   if (second && !ranNothing(second.notes)) return second;
+  // A rejection said what is wrong, run or not: the worker's own word never overrules it.
+  const last = second ?? first;
+  if (last.verdict === "rejected") return { verdict: "rejected", notes: `${NOT_REVIEWED}: ${last.notes}` };
   const evidence = testEvidence(work.report);
   if (evidence) return { verdict: "accepted", notes: `${NOT_REVIEWED}: accepted on the worker's own test evidence ("${evidence}"); no reviewer could run git or the tests.` };
   return { verdict: "rejected", notes: `${NOT_REVIEWED}: no reviewer could run git or the tests, and the worker's report shows no test run. Do the task again, run its tests and quote their result in your final message.` };
@@ -2353,7 +2359,7 @@ async function teamPullRequest(team: LiveTeam, asked: boolean): Promise<{ kind: 
   };
   let pr: TeamPr;
   if (!board.pr) {
-    const opened = await openPullRequest({ directory: board.directory, branch: board.branch, base: board.base, title: teamPrTitle(board), body: teamPrBody(board) });
+    const opened = await openPullRequest({ directory: board.directory, branch: board.branch, base: board.base, title: teamPrTitle(board), body: teamPrBody(board, await getPrBodyIncludesTask()) });
     if (team.stopRequested) return null;
     if (!opened.ok) return { kind: "failed", detail: asked ? `The goal asks for a pull request, and it could not be opened: ${opened.detail}` : `The team's pull request could not be opened: ${opened.detail}` };
     const now = Date.now();
@@ -2473,15 +2479,19 @@ function teamPrTitle(board: TeamBoard): string {
   return `Coding team: ${firstLine(board.goal, 72)}`;
 }
 
-/** What the pull request says: the goal, each task and what came of it — redacted again where it is published (openPullRequest). */
-function teamPrBody(board: TeamBoard): string {
+/**
+ * What the pull request says: the goal, each task and what came of it —
+ * redacted again where it is published (openPullRequest). The owner's "none"
+ * for what a pull request carries of the task (`getPrBodyIncludesTask`, as a
+ * single run's) leaves out the goal and the tasks' descriptions, its words.
+ */
+function teamPrBody(board: TeamBoard, taskMode: PrBodyTaskMode): string {
+  const withTask = taskMode !== "none";
   const tasks = board.tasks
     .filter((t) => t.status === "complete")
-    .map((t) => `- ${t.task_id}: ${firstLine(t.task_description, 160)}${t.result ? ` — ${firstLine(t.result, 200)}` : ""}`);
+    .map((t) => `- ${t.task_id}${withTask ? `: ${firstLine(t.task_description, 160)}` : ""}${t.result ? ` — ${firstLine(t.result, 200)}` : ""}`);
   return [
-    `Opened by ClawBox's coding team \`${board.id}\` for this goal:`,
-    "",
-    `> ${firstLine(board.goal, 600)}`,
+    ...(withTask ? [`Opened by ClawBox's coding team \`${board.id}\` for this goal:`, "", `> ${firstLine(board.goal, 600)}`] : [`Opened by ClawBox's coding team \`${board.id}\`.`]),
     "",
     "Tasks, each accepted:",
     ...tasks,
