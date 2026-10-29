@@ -102,18 +102,54 @@ export function workerBranchName(teamId: string, taskId: string, attempt: number
   return `clawbox/${teamId}-${taskId}-${attempt}`;
 }
 
+/** A coding team's own branch or one of its workers' (`clawbox/team-<id>…`): never a base anything forks from. */
+export const TEAM_BRANCH_RE = /^clawbox\/team-[a-z0-9]{8}(?:-.+)?$/;
+
 /**
- * The team's own branch, forked from what the checkout is on and CHECKED
- * OUT in the main checkout, so every merge lands on it and the project
+ * What a new team or run forks from: the branch the checkout is on — unless
+ * that is a coding team's own branch. A team leaves the checkout on its branch
+ * (`ensureTeamBranch`), and one that failed leaves its fixes there: a team
+ * restarted in the same folder forked from it, carried the old fixes, rebuilt
+ * them anyway, and its merges conflicted with themselves (night run,
+ * 2026-10-29). The base is then the one that team recorded (`recordedBase`,
+ * followed back past teams that forked from teams), else the remote's default
+ * branch, else main, master or develop, whichever exists. `from` is the start
+ * point, null for HEAD.
+ */
+export async function forkBase(dir: string, recordedBase: (branch: string) => string | null = () => null): Promise<{ ok: true; base: string; from: string | null } | { ok: false; detail: string }> {
+  const current = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const on = ok(current) && out(current) && out(current) !== "HEAD" ? out(current) : null;
+  if (!on || !TEAM_BRANCH_RE.test(on)) return { ok: true, base: on ?? "main", from: null };
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  let recorded: string | null = on;
+  while (recorded && TEAM_BRANCH_RE.test(recorded) && !seen.has(recorded)) {
+    seen.add(recorded);
+    recorded = recordedBase(recorded);
+  }
+  if (recorded && !TEAM_BRANCH_RE.test(recorded)) candidates.push(recorded);
+  const remoteHead = await git(dir, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  if (ok(remoteHead) && out(remoteHead).startsWith("origin/")) candidates.push(out(remoteHead).slice("origin/".length));
+  candidates.push("main", "master", "develop");
+  for (const name of candidates) {
+    if (ok(await git(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]))) return { ok: true, base: name, from: name };
+    if (ok(await git(dir, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]))) return { ok: true, base: name, from: `origin/${name}` };
+  }
+  return { ok: false, detail: `The checkout is on ${on}, a coding team's branch, and no base branch (main, master, develop or the remote's default) was found to fork from. Check out the project's base branch first.` };
+}
+
+/**
+ * The team's own branch, forked from the project's base (`forkBase`) and
+ * CHECKED OUT in the main checkout, so every merge lands on it and the project
  * page's Create PR has the base to compare against. A repository with no
  * commits gets an empty first one, for the same reason startRunBranch does:
  * `checkout -b` on an unborn HEAD renames it rather than forking.
  */
-export function ensureTeamBranch(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
-  return withDirLock(dir, () => ensureTeamBranchNow(dir, teamId));
+export function ensureTeamBranch(dir: string, teamId: string, recordedBase?: (branch: string) => string | null): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+  return withDirLock(dir, () => ensureTeamBranchNow(dir, teamId, recordedBase));
 }
 
-async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+async function ensureTeamBranchNow(dir: string, teamId: string, recordedBase?: (branch: string) => string | null): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
   const inside = await git(dir, ["rev-parse", "--is-inside-work-tree"]);
   if (!ok(inside)) return { ok: false, detail: failureDetail(inside, "Reading the git repository", "Make the folder a git repository first.") };
   const head = await git(dir, ["rev-parse", "--verify", "HEAD"]);
@@ -123,13 +159,13 @@ async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: t
     const seeded = await git(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, detail: failureDetail(seeded, "Making the first commit") };
   }
-  const current = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const base = ok(current) && out(current) && out(current) !== "HEAD" ? out(current) : "main";
+  const fork = await forkBase(dir, recordedBase);
+  if (!fork.ok) return fork;
   const branch = teamBranchName(teamId);
-  const made = await git(dir, ["checkout", "-b", branch]);
+  const made = await git(dir, fork.from ? ["checkout", "--no-track", "-b", branch, fork.from] : ["checkout", "-b", branch]);
   if (!ok(made)) return { ok: false, detail: failureDetail(made, `Creating the team branch ${branch}`) };
   await excludeWorktrees(dir);
-  return { ok: true, branch, base };
+  return { ok: true, branch, base: fork.base };
 }
 
 /**

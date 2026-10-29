@@ -65,6 +65,19 @@ describe("a run's worktree", () => {
     expect(fs.readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8")).toContain("/.clawbox/");
   });
 
+  it("never forks a coding team's branch a team left checked out: it forks the project's base, and leaves the checkout where it is", async () => {
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    fs.writeFileSync(path.join(dir, "fix.js"), "the failed team's fix\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "old team fix");
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-ccccdddd", protectedRoot: PROTECTED });
+    expect(made).toMatchObject({ ok: true, branch: "clawbox/run-ccccdddd", base: "master" });
+    if (!made.ok) return;
+    expect(git(made.path, "rev-parse", "HEAD")).toBe(git(dir, "rev-parse", "master"));
+    expect(fs.existsSync(path.join(made.path, "fix.js"))).toBe(false);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+  });
+
   it("gives two runs of one project trees that cannot see each other's half-written files", async () => {
     const a = await addRunWorktree({ projectDir: dir, runId: "run-aaaaaaaa", protectedRoot: PROTECTED });
     const b = await addRunWorktree({ projectDir: dir, runId: "run-bbbbbbbb", protectedRoot: PROTECTED });

@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { MAX_TASK_CHARS } from "@/lib/coding-agent";
-import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE } from "@/lib/coding-team-reviewer";
+import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, ranNothing, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE, SHELL_REVIEWER_BRIEF, shellReviewerTask, testEvidence } from "@/lib/coding-team-reviewer";
 
 describe("parseVerdict", () => {
   it("reads a bare object, a fenced one, and one buried in prose", () => {
@@ -116,5 +116,47 @@ describe("the reviewer's brief and task", () => {
     const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(MAX_TASK_CHARS * 2), goal: "g" });
     expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
     expect(long.endsWith("…")).toBe(true);
+  });
+});
+
+describe("a verdict that ran nothing, and the worker's own evidence", () => {
+  it("knows a reviewer that could not run git or the tests, whatever it ruled — and never one that did", () => {
+    for (const notes of [
+      "Static review only: no git, Biome or Jest could be run.",
+      "I could not run the tests in this read-only session; the diff reads right.",
+      "Unable to execute git here, so judged by reading the files.",
+      "The Jest suite could not be run.",
+      "No shell, so the tests were not run.",
+    ]) expect(ranNothing(notes), notes).toBe(true);
+    for (const notes of [
+      "",
+      "Ran git diff develop and sh test.sh: 3 passing.",
+      "Looks right; the build passes.",
+      "The worker could not find the file at first but fixed it.",
+    ]) expect(ranNothing(notes), notes).toBe(false);
+  });
+
+  it("finds the sentence of a worker's report that says its checks passed — never one that failed or never ran", () => {
+    expect(testEvidence("↑ flies forward. keyboard.spec.js: 3 passing")).toBe("keyboard.spec.js: 3 passing");
+    expect(testEvidence("Done.\nBiome, Jest, build and Playwright all green.")).toBe("Biome, Jest, build and Playwright all green.");
+    expect(testEvidence("Changed src/keyboard.js.")).toBeNull();
+    expect(testEvidence("Tests: 3 passed, 1 failed.")).toBeNull();
+    expect(testEvidence("I could not run the tests, but they should pass.")).toBeNull();
+    // Nothing ran, or nothing was run yet: never evidence.
+    expect(testEvidence("Ran npm test: 0 passing.")).toBeNull();
+    expect(testEvidence("Tests: 0 passed, 0 total.")).toBeNull();
+    expect(testEvidence("No tests found, build passed.")).toBeNull();
+    expect(testEvidence("The tests should pass once this is merged.")).toBeNull();
+    expect(testEvidence("Tests: 0 failed, 12 passed.")).toBe("Tests: 0 failed, 12 passed.");
+  });
+
+  it("asks the second review with a shell, quoting what the first one said, inside the run route's cap", () => {
+    const review = reviewerTask({ taskId: "t1", description: "Fix it", files: ["a.js"], report: "done", goal: "g" });
+    const text = shellReviewerTask(review, "Static review only: no git could be run.");
+    expect(text.startsWith('The first review of this task ran nothing — it said: "Static review only: no git could be run."')).toBe(true);
+    expect(text).toContain("Review task t1: Fix it");
+    expect(shellReviewerTask("x".repeat(MAX_TASK_CHARS), "n").length).toBe(MAX_TASK_CHARS);
+    expect(SHELL_REVIEWER_BRIEF).toContain("you have a shell");
+    expect(SHELL_REVIEWER_BRIEF).not.toContain("Change NOTHING");
   });
 });

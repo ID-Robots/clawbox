@@ -512,7 +512,7 @@ describe("whether a single run was cheaper", () => {
     expect(screen.queryByTestId("coding-team-repo-map")).toBeNull();
   });
 
-  it("says a one-task plan ran as one run, and says nothing for a plan that split well or a server that predates it", async () => {
+  it("says a one-task plan — or an overlapping one — ran as one run, and says nothing for a plan that split well or a server that predates it", async () => {
     teams = [{ ...WORKING, status: "done", singleRun: true, advice: { reason: "one_task", overlap: 100 }, tasks: [{ ...WORKING.tasks[0] }] }];
     stub();
     const { unmount } = render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
@@ -520,6 +520,15 @@ describe("whether a single run was cheaper", () => {
     expect(advice).toHaveAttribute("data-reason", "single_run");
     expect(advice).toHaveTextContent(t("codingAgent.team.adviceSingleRun"));
     unmount();
+
+    // A plan whose tasks mostly touch the same files ran as one run too: said with its share, never as "one task".
+    teams = [{ ...WORKING, status: "done", singleRun: true, advice: { reason: "overlap", overlap: 96 } }];
+    stub();
+    const overlap = render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    const ran = await screen.findByTestId("coding-team-advice");
+    expect(ran).toHaveAttribute("data-reason", "single_run");
+    expect(ran).toHaveTextContent(t("codingAgent.team.adviceOverlapRun", { n: 96 }));
+    overlap.unmount();
 
     teams = [{ ...WORKING, advice: null, metrics: { ...METRICS, tokensByRole: undefined } }];
     stub();
