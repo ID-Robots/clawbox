@@ -32,7 +32,8 @@ const readTelegramAllowFrom = vi.hoisted(() => vi.fn());
 const readConfigStrict = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom, readConfigStrict }));
 
-import { announceAnthropicLimit, announceCodingAgent, buildAnnouncement, buildAnthropicLimitNotice } from "@/lib/coding-agent-notify";
+import { announceAnthropicLimit, announceCodingAgent, announceCodingTeam, buildAnnouncement, buildAnthropicLimitNotice, buildTeamAnnouncement } from "@/lib/coding-agent-notify";
+import type { TeamBoard } from "@/lib/coding-team-board";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
@@ -116,6 +117,27 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
   };
 }
 
+/** A settled team's board — only the fields the notice may read, so a new read shows up here as a type error. */
+function board(over: Partial<TeamBoard> = {}): TeamBoard {
+  const partial: Pick<TeamBoard, "id" | "goal" | "projectId" | "status" | "branch" | "pr" | "error" | "tasks"> = {
+    id: "team-k3x9q2ab",
+    goal: SECRET_TASK,
+    projectId: "site",
+    status: "done",
+    branch: "clawbox/team-k3x9q2ab",
+    pr: null,
+    error: "The final review rejected the merged work: it wrote sk-live-DO-NOT-LEAK into config.js",
+    tasks: [
+      { task_id: "t1", task_description: SECRET_TASK, status: "complete", result: SECRET_SUMMARY },
+      { task_id: "t2", task_description: SECRET_TASK, status: "complete", result: SECRET_SUMMARY },
+      { task_id: "t3", task_description: SECRET_TASK, status: "failed", result: SECRET_SUMMARY },
+      { task_id: "t4", task_description: SECRET_TASK, status: "retired", result: null },
+    ] as unknown as TeamBoard["tasks"],
+    ...over,
+  };
+  return partial as TeamBoard;
+}
+
 /** The one entry the notice appended to the owner-notice ring. */
 function ringEntry(): Record<string, unknown> {
   expect(kvSet).toHaveBeenCalledTimes(1);
@@ -164,6 +186,52 @@ describe("the text", () => {
     expect(buildAnnouncement(run({ status: "completed" }))).toMatch(/open the Coding Agent app/);
     expect(buildAnnouncement(run({ status: "failed" }))).toMatch(/did not finish/);
     expect(buildAnnouncement(run({ status: "stopped" }))).toMatch(/was stopped/);
+  });
+});
+
+describe("a team's text", () => {
+  it("is a template with the team id, the counts and the branch — never the goal, a task, a result or the error", () => {
+    for (const status of ["done", "failed", "stopped"] as const) {
+      const text = buildTeamAnnouncement(board({ status }));
+      expect(text).toContain("team-k3x9q2ab");
+      expect(text).toContain('project "site"');
+      // t4 is retired: not a task the team owed.
+      expect(text).toContain("2 of 3 tasks done, 1 failed, on branch clawbox/team-k3x9q2ab");
+      expect(text).not.toContain("DO-NOT-LEAK");
+      expect(text).not.toContain("config.js");
+      expect(text).not.toContain("final review");
+    }
+    expect(buildTeamAnnouncement(board({ status: "done" }))).toMatch(/^Coding team team-k3x9q2ab finished .*open the Coding Agent app/);
+    expect(buildTeamAnnouncement(board({ status: "failed" }))).toMatch(/did not finish/);
+    expect(buildTeamAnnouncement(board({ status: "stopped" }))).toMatch(/was stopped/);
+  });
+
+  it("names the pull request when the box opened one, and says nothing of a branch an in-place team has none of", () => {
+    expect(buildTeamAnnouncement(board({ pr: { number: 12 } as TeamBoard["pr"] }))).toContain("on branch clawbox/team-k3x9q2ab, pull request #12");
+    expect(buildTeamAnnouncement(board({ branch: null, projectId: null }))).toContain("in its folder (2 of 3 tasks done, 1 failed).");
+  });
+
+  it("goes to the desktop as the plain notice named after the team, and to Telegram, with the same template", async () => {
+    readTelegramAllowFrom.mockResolvedValue(["12345"]);
+    readConfigStrict.mockResolvedValue({ channels: { telegram: { botToken: "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" } } });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await announceCodingTeam(board());
+    const payload = ringEntry();
+    expect(payload.type).toBe("notify");
+    expect(payload.id).toBe("coding-team:team-k3x9q2ab");
+    expect(payload.message).toBe(buildTeamAnnouncement(board()));
+    expect(String(payload.message).length).toBeLessThanOrEqual(280);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const sent = JSON.stringify(fetchMock.mock.calls[0]);
+    expect(sent).toContain("Coding team team-k3x9q2ab finished");
+    expect(sent).not.toContain("DO-NOT-LEAK");
+  });
+
+  it("never throws: a ring that cannot be written and a Telegram that will not answer cost only the notice", async () => {
+    kvSet.mockImplementation(() => { throw new Error("disk full"); });
+    readTelegramAllowFrom.mockRejectedValue(new Error("no config"));
+    await expect(announceCodingTeam(board())).resolves.toBeUndefined();
   });
 });
 

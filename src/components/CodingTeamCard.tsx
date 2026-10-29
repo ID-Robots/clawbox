@@ -36,9 +36,10 @@ export interface TeamTaskView {
   origin?: "plan" | "lead";
   /** Why it is back to pending: a dependency it started on was reopened (coding-team-board.ts holdTask). Absent from an older server. */
   hold?: { dependency: string; reason: string; was: "in_progress" | "complete"; at: number } | null;
-  /** How many of its attempts were held, or re-offered for red CI, rather than judged. Absent from an older server. */
+  /** How many of its attempts were held, re-offered for red CI, or re-offered after the team stopped a worker past its budget, rather than judged. Absent from an older server. */
   holds?: number;
   ciReoffers?: number;
+  budgetReoffers?: number;
 }
 
 /** One run's part in the team — the board's cast list (coding-team-board.ts TeamRunRef). */

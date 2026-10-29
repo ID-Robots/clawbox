@@ -174,10 +174,15 @@ export function ciFixNotes(failure: CiFailure, opts: { push: boolean; excerptCha
 /**
  * Does a team's goal ask for a pull request? Its words, not a guess: "open a
  * PR", "a pull request", or a merge — which needs one. A team whose goal says
- * nothing of it leaves its work on the team's branch, as every team did.
+ * nothing of it leaves its work on the team's branch, as every team did —
+ * and so does one whose goal REFUSES it: "do not open a PR", "no pull
+ * request", read fail-closed the way `goalWantsMerge` reads its negators
+ * (a live goal's "Do not open a PR" used to count as asking for one).
  */
 export function goalWantsPullRequest(goal: string): boolean {
-  return /\bpull[\s-]?requests?\b/i.test(goal) || /\bPRs?\b/.test(goal) || goalWantsMerge(goal);
+  if (goalWantsMerge(goal)) return true;
+  if (!/\bpull[\s-]?requests?\b/i.test(goal) && !/\bPRs?\b/.test(goal)) return false;
+  return !/\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(goal);
 }
 
 /**

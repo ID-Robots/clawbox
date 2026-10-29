@@ -988,7 +988,8 @@ team's branch, up to `MAX_TEAM_WORKERS` (3) while the box has the memory,
 each merged home as it settles; a merge git cannot do alone is aborted and
 the task offered once more from the merged state; a code project keeps one
 worker at a time, in place), a **reviewer** (the v0 rule first — a refused
-action or a stray file rejects without a model — then a read-only run on
+write rejects without a model; a file outside the task's hint is a note the
+reviewer is told of — then a read-only run on
 the merged work that answers `{verdict, notes}`; a reviewer that gives no
 verdict is an alert and an acceptance by rule, never a silent pass), all on
 a **shared blackboard**
@@ -996,8 +997,11 @@ a **shared blackboard**
 may not send — only the planner posts tasks, only the assigned worker moves
 one or submits a result, only the reviewer rules, only the owner stops — and
 logs every accepted message and every refusal (the audit trail). A worker
-that hit a permission denial or strayed outside its files raises an ALERT;
-three alerts stop the team. A reviewer the box has no room for yet waits
+refused a WRITE raises an ALERT (a refused read, or a file beside the
+task's hinted files, is a note); three alerts stop the team. A live worker
+has no wall clock — its idle timeout and the owner's ceilings bound it; one
+paused for an hour with nobody resuming it is stopped and its task offered
+once more. A reviewer the box has no room for yet waits
 for room rather than being skipped; one that cannot start at all (another
 run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans
@@ -1006,14 +1010,21 @@ several parts; `coding_agent_run` is still the tool for one focused change.
 and result — and for a pending one what it is waiting for, or why it was
 held — the alerts, the team's branch, its pull request, `agents` (planner,
 workers, reviewers, total — who worked), and what to tell the user; `log: 1`
-adds the last lines of the audit log. A task starts only once every
+adds the last lines of the audit log, and `wait_seconds` blocks until the
+team settles (up to two minutes, like `coding_agent_status`) for a user who
+asked to wait. Otherwise the assistant does NOT poll: the box tells the owner
+ONCE when a team settles — a desktop notice and the Telegram message, never
+one per member run — and on OpenClaw posts `[Coding team <id>] finished` into
+the main chat; a Hermes box has no way into its chat, so there the tool says
+to look again only when the user asks. A task starts only once every
 `depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
 reopened after a dependent started HOLDS the dependent — its worker stopped
 or its result set aside — said on the board, and it runs again on the new
 merged state. A team's runs never merge or push (`gh pr merge`, `gh api`,
-`git push` are refused to them); when the goal asks for a pull request the
-ORCHESTRATOR opens it once every task is accepted, the suite is green and the
-final review passed, re-offers the tasks a red CI points at (two rounds at
+`git push` are refused to them); when the goal asks for a pull request (and
+never when it says not to: "do not open a PR" is honoured as "do not merge"
+is) the ORCHESTRATOR opens it once every task is accepted, the suite is green
+and the final review passed, re-offers the tasks a red CI points at (two rounds at
 most) and merges only when the goal asks and every check passes. A second
 team is QUEUED behind the one working (`queue_position` in the list; the
 owner alone cancels one) and starts by itself, after a restart too. Every agent is a coding run, so the sandbox and

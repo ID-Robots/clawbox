@@ -3,8 +3,8 @@
  * that is not what the reviewer said is never repaired into one.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_TASK_CHARS } from "@/lib/coding-agent";
-import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, ranNothing, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE, SHELL_REVIEWER_BRIEF, shellReviewerTask, testEvidence } from "@/lib/coding-team-reviewer";
+import { TEAM_TASK_CHARS } from "@/lib/coding-agent";
+import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE, SHELL_REVIEWER_BRIEF } from "@/lib/coding-team-reviewer";
 
 describe("parseVerdict", () => {
   it("reads a bare object, a fenced one, and one buried in prose", () => {
@@ -107,56 +107,39 @@ describe("the reviewer's brief and task", () => {
     expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "", goal: "g" })).toContain("changed no files");
   });
 
-  it("names only so many changed files and counts the rest, and never exceeds the run route's cap", () => {
+  it("names only so many changed files and counts the rest, and never exceeds the team's cap", () => {
     const files = Array.from({ length: MAX_REVIEW_FILES + 15 }, (_, i) => `src/file-${i}.ts`);
     const text = reviewerTask({ taskId: "t3", description: "d", files, report: "r", goal: "g" });
     expect(text).toContain(`- src/file-${MAX_REVIEW_FILES - 1}.ts`);
     expect(text).not.toContain(`- src/file-${MAX_REVIEW_FILES}.ts`);
     expect(text).toContain("… and 15 more");
-    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(MAX_TASK_CHARS * 2), goal: "g" });
-    expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(TEAM_TASK_CHARS * 2), goal: "g" });
+    expect(long.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(long.endsWith("…")).toBe(true);
   });
 });
 
-describe("a verdict that ran nothing, and the worker's own evidence", () => {
-  it("knows a reviewer that could not run git or the tests, whatever it ruled — and never one that did", () => {
-    for (const notes of [
-      "Static review only: no git, Biome or Jest could be run.",
-      "I could not run the tests in this read-only session; the diff reads right.",
-      "Unable to execute git here, so judged by reading the files.",
-      "The Jest suite could not be run.",
-      "No shell, so the tests were not run.",
-    ]) expect(ranNothing(notes), notes).toBe(true);
-    for (const notes of [
-      "",
-      "Ran git diff develop and sh test.sh: 3 passing.",
-      "Looks right; the build passes.",
-      "The worker could not find the file at first but fixed it.",
-    ]) expect(ranNothing(notes), notes).toBe(false);
-  });
-
-  it("finds the sentence of a worker's report that says its checks passed — never one that failed or never ran", () => {
-    expect(testEvidence("↑ flies forward. keyboard.spec.js: 3 passing")).toBe("keyboard.spec.js: 3 passing");
-    expect(testEvidence("Done.\nBiome, Jest, build and Playwright all green.")).toBe("Biome, Jest, build and Playwright all green.");
-    expect(testEvidence("Changed src/keyboard.js.")).toBeNull();
-    expect(testEvidence("Tests: 3 passed, 1 failed.")).toBeNull();
-    expect(testEvidence("I could not run the tests, but they should pass.")).toBeNull();
-    // Nothing ran, or nothing was run yet: never evidence.
-    expect(testEvidence("Ran npm test: 0 passing.")).toBeNull();
-    expect(testEvidence("Tests: 0 passed, 0 total.")).toBeNull();
-    expect(testEvidence("No tests found, build passed.")).toBeNull();
-    expect(testEvidence("The tests should pass once this is merged.")).toBeNull();
-    expect(testEvidence("Tests: 0 failed, 12 passed.")).toBe("Tests: 0 failed, 12 passed.");
-  });
-
-  it("asks the second review with a shell, quoting what the first one said, inside the run route's cap", () => {
-    const review = reviewerTask({ taskId: "t1", description: "Fix it", files: ["a.js"], report: "done", goal: "g" });
-    const text = shellReviewerTask(review, "Static review only: no git could be run.");
-    expect(text.startsWith('The first review of this task ran nothing — it said: "Static review only: no git could be run."')).toBe(true);
-    expect(text).toContain("Review task t1: Fix it");
-    expect(shellReviewerTask("x".repeat(MAX_TASK_CHARS), "n").length).toBe(MAX_TASK_CHARS);
-    expect(SHELL_REVIEWER_BRIEF).toContain("you have a shell");
+describe("the shell reviewer — the first review on a team with a branch", () => {
+  it("has a shell, is told to run the checks and to link or install node_modules, and may write nothing that is kept", () => {
+    expect(SHELL_REVIEWER_BRIEF).toContain("with a shell");
+    expect(SHELL_REVIEWER_BRIEF).toMatch(/run the checks the task's own verification names/);
+    expect(SHELL_REVIEWER_BRIEF).toContain("ln -s <project>/node_modules node_modules");
+    expect(SHELL_REVIEWER_BRIEF).toContain("nothing written in this folder is kept");
     expect(SHELL_REVIEWER_BRIEF).not.toContain("Change NOTHING");
+    expect(SHELL_REVIEWER_BRIEF).toContain("The verdict object is the LAST thing you write");
+    // The read-only brief stays for a team in place, where the project is the only checkout.
+    expect(REVIEWER_BRIEF).toMatch(/Change NOTHING/);
+  });
+
+  it("names its checkout, the branch and the project whose node_modules it may link, in the task text", () => {
+    const text = reviewerTask({
+      taskId: "t1", description: "Fix it", files: ["a.js"], report: "done", goal: "g",
+      checkout: { folder: "/p/.clawbox/worktrees/review-t1-1", project: "/p", branch: "clawbox/team-1", base: "develop" },
+    });
+    expect(text).toContain("Review task t1: Fix it");
+    expect(text).toContain("Your folder: /p/.clawbox/worktrees/review-t1-1 — a throwaway checkout of the team's branch clawbox/team-1, forked from develop. The project itself is at /p; if the checks need its dependencies, link them (ln -s /p/node_modules node_modules) or install them here.");
+    // Without a base, none is named; without a checkout (in place), no folder line at all.
+    expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "r", goal: "g", checkout: { folder: "/w", project: "/p", branch: "b", base: null } })).toContain("branch b. The project");
+    expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "r", goal: "g" })).not.toContain("Your folder:");
   });
 });

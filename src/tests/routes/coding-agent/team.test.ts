@@ -12,6 +12,7 @@ const team = vi.hoisted(() => ({
   cancelQueuedTeam: vi.fn(),
   getTeam: vi.fn(),
   listTeams: vi.fn(),
+  waitForTeam: vi.fn(),
 }));
 vi.mock("@/lib/coding-team", () => team);
 const requireSession = vi.hoisted(() => vi.fn());
@@ -60,6 +61,20 @@ describe("GET", () => {
     const res = await GET(req("team?id=team-nope0000"));
     expect(res.status).toBe(404);
     expect((await res.json()).kind).toBe("not_found");
+  });
+
+  it("holds ?id=&wait= open on waitForTeam, seconds capped at MAX_WAIT_MS, and reads at once without it", async () => {
+    const { MAX_WAIT_MS } = await import("@/lib/coding-agent");
+    team.waitForTeam.mockResolvedValue({ ...BOARD, status: "done" });
+    expect(await (await GET(req("team?id=team-abcd1234&wait=30"))).json()).toEqual({ team: { ...BOARD, status: "done" } });
+    expect(team.waitForTeam).toHaveBeenCalledWith("team-abcd1234", 30_000);
+    await GET(req("team?id=team-abcd1234&wait=9999"));
+    expect(team.waitForTeam).toHaveBeenLastCalledWith("team-abcd1234", MAX_WAIT_MS);
+    team.waitForTeam.mockClear();
+    await GET(req("team?id=team-abcd1234&wait=0"));
+    await GET(req("team?id=team-abcd1234&wait=nope"));
+    expect(team.waitForTeam).not.toHaveBeenCalled();
+    expect(team.getTeam).toHaveBeenCalled();
   });
 
   it("answers a settled board slim on ?slim=1 — no log, its tasks' text gone — and a working one whole", async () => {

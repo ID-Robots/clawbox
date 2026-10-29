@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
+import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS } from "@/lib/coding-agent";
 import { slimTeam } from "@/lib/coding-agent-slim";
-import { getTeam, listTeams, startTeam } from "@/lib/coding-team";
+import { getTeam, listTeams, startTeam, waitForTeam } from "@/lib/coding-team";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
@@ -18,6 +18,11 @@ export const dynamic = "force-dynamic";
  *                                 provider and by kind (input, output, cache
  *                                 written, cache read) — wall time, team messages
  *                                 sent/to the lead/to a sibling/undelivered) as of now
+ * GET ?id=<team-id>&wait=<seconds> → the same, held open until the team settles
+ *                                 or `wait` elapses (capped at MAX_WAIT_MS), the
+ *                                 way the runs route does; the box tells the
+ *                                 owner (and, on OpenClaw, the assistant's chat)
+ *                                 when a team settles, so nothing need poll this
  * GET                           → { teams } — the recent boards, newest first
  * GET ?slim=1                   → the same with every SETTLED board's log
  *                                 emptied and its tasks' briefs cut short,
@@ -51,7 +56,9 @@ export async function GET(request: Request) {
   const id = url.searchParams.get("id");
   const slim = url.searchParams.get("slim") === "1";
   if (id) {
-    const team = getTeam(id);
+    const waitRaw = Number(url.searchParams.get("wait") ?? "0");
+    const waitMs = Number.isFinite(waitRaw) ? Math.max(0, Math.min(waitRaw, MAX_WAIT_MS / 1000)) * 1000 : 0;
+    const team = waitMs > 0 ? await waitForTeam(id, waitMs) : getTeam(id);
     if (!team) return NextResponse.json({ error: "There is no coding team with that id.", kind: "not_found" }, { status: 404 });
     if (!owner && team.source === "owner") {
       return NextResponse.json({ error: "That team was started by the owner; only the owner can read it.", kind: "owner_only" }, { status: 403 });

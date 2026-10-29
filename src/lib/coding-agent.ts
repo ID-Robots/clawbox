@@ -977,6 +977,17 @@ export const MAX_TASK_CHARS = 4_000;
  * never the reason a follow-up does not start.
  */
 export const MAX_BOX_TASK_CHARS = 32_000;
+/**
+ * The ceiling the coding TEAM's own task texts are built to — a worker's, a
+ * reviewer's, the lead's (`workerTask`, `reviewerTask`,
+ * `finalReviewerTask`, `leadTask`). Box-written like a review round, so
+ * MAX_TASK_CHARS does not apply; built to THIS rather than MAX_BOX_TASK_CHARS
+ * because the text is a brief, not a log. At the typed 4,000 a team's
+ * worker got its goal cut mid-sentence with no files hint, no rejection
+ * reason and no teammates behind it (5 of 6 task descriptions, 7 of 8
+ * worker texts of one live team); the hint's absence then cost it a stray.
+ */
+export const TEAM_TASK_CHARS = 12_000;
 export const MAX_DIRECTORY_CHARS = 512;
 
 /**
@@ -6000,11 +6011,12 @@ export const RUN_ID_RE = ARTIFACT_RUN_ID_RE;
  * Did the BOX write this task, rather than a person typing it?
  *
  * True for the follow-ups the runner starts itself — the review pass, a
- * review-loop round. Those fields are internal: no route
+ * review-loop round — and for every run of a coding team, whose task texts
+ * the team builds to TEAM_TASK_CHARS. Those fields are internal: no route
  * passes them through from a request body, so a typed task cannot claim this.
  */
-function isBoxWrittenTask(input: Pick<StartRunInput, "reviewOf" | "reviewLoopOf">): boolean {
-  return typeof input.reviewOf === "string" || typeof input.reviewLoopOf === "string";
+function isBoxWrittenTask(input: Pick<StartRunInput, "reviewOf" | "reviewLoopOf" | "team">): boolean {
+  return typeof input.reviewOf === "string" || typeof input.reviewLoopOf === "string" || (input.team !== undefined && input.team !== null);
 }
 
 const BOX_TASK_CLIPPED = "\n…(truncated)";
@@ -12504,7 +12516,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // "Coding agent finished run-x" now would be exactly the claim the pipeline
   // exists to stop making. `settlePipelineRun` sends it when the pipeline is
   // actually over.
-  if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
+  //
+  // A TEAM's run sends none either: the owner hears once, when the team
+  // settles (coding-team.ts `announceTeamSettled`), not once per planner,
+  // worker and reviewer.
+  if (run.status !== "paused" && !run.team && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
     });

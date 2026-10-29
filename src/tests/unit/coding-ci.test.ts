@@ -121,6 +121,13 @@ describe("what a team's goal asks for", () => {
     ["Open a pull request and never, whatever the checks say, merge it", true, false],
     // …but not one in another clause, nor a word that only starts like one.
     ["Notify the team. Open a PR and merge it when CI is green", true, true],
+    // A goal that REFUSES a pull request asks for none (a live team's "Do not
+    // open a PR" used to open one).
+    ["Build the invoice app. Do not open a PR; leave the work on the branch", false, false],
+    ["Add dark mode, no pull request", false, false],
+    ["Refactor the parser without a PR", false, false],
+    ["Don't open a pull request, I will", false, false],
+    ["Do not touch the README. Open a PR when done", true, false],
   ])("%s → PR %s, merge %s", (goal, pr, merge) => {
     expect(goalWantsPullRequest(goal)).toBe(pr);
     expect(goalWantsMerge(goal)).toBe(merge);
