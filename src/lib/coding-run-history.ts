@@ -664,7 +664,7 @@ const SLIM_CHUNK = 1 << 20;
  * Never throws: a log kept whole is disk, not a lost run.
  */
 function dropProgressLines(file: string): void {
-  const tmp = `${file}.slim`;
+  const tmp = untraced(`${file}.slim`);
   let src: number | null = null;
   let dst: number | null = null;
   try {

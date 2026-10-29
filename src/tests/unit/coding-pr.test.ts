@@ -405,15 +405,15 @@ describe("the pull request across the owner's gestures", () => {
     github.startRunBranch.mockResolvedValueOnce({
       ok: false,
       reason: "not_repository_root",
-      root: "/home/owner/Projects",
-      detail: "This folder is part of the repository at /home/owner/Projects rather than being one, so no branch is made there and there is no pull request to open.",
+      root: "/srv/projects",
+      detail: "This folder is part of the repository at /srv/projects rather than being one, so no branch is made there and there is no pull request to open.",
     });
     commitRunWork.mockResolvedValue({ committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." });
     installFakeWrapper(finishingBody());
     const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
     expect(started.pr).toBeNull();
     const feed = started.progress.join("\n");
-    expect(feed).toContain("Part of the repository at /home/owner/Projects, not a repository of its own: no branch is made there and there is no pull request to open");
+    expect(feed).toContain("Part of the repository at /srv/projects, not a repository of its own: no branch is made there and there is no pull request to open");
     expect(feed).not.toMatch(/No pull request/);
     // Said once: the worktree step and the branch step answer the same fact.
     expect(started.progress.filter((line) => line.startsWith("Part of the repository at ")).length).toBe(1);
@@ -431,7 +431,7 @@ describe("the pull request across the owner's gestures", () => {
       path.join(root, "data", "config.json"),
       JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_generate_images: false, coding_agent_auto_pr: true, coding_agent_review_rounds: 0, coding_agent_review_pass: true }),
     );
-    github.startRunBranch.mockResolvedValueOnce({ ok: false, reason: "not_repository_root", root: "/home/owner/Projects", detail: "part of the repository at /home/owner/Projects" });
+    github.startRunBranch.mockResolvedValueOnce({ ok: false, reason: "not_repository_root", root: "/srv/projects", detail: "part of the repository at /srv/projects" });
     commitRunWork.mockResolvedValue({ committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." });
     installFakeWrapper(finishingBody());
     const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
