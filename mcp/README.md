@@ -1011,9 +1011,10 @@ adds the last lines of the audit log. A task starts only once every
 reopened after a dependent started HOLDS the dependent — its worker stopped
 or its result set aside — said on the board, and it runs again on the new
 merged state. A team's runs never merge or push (`gh pr merge`, `gh api`,
-`git push` are refused to them); when the goal asks for a pull request the
-ORCHESTRATOR opens it once every task is accepted, the suite is green and the
-final review passed, re-offers the tasks a red CI points at (two rounds at
+`git push` are refused to them); when the goal asks for a pull request (and
+never when it says not to: "do not open a PR" is honoured as "do not merge"
+is) the ORCHESTRATOR opens it once every task is accepted, the suite is green
+and the final review passed, re-offers the tasks a red CI points at (two rounds at
 most) and merges only when the goal asks and every check passes. A second
 team is QUEUED behind the one working (`queue_position` in the list; the
 owner alone cancels one) and starts by itself, after a restart too. Every agent is a coding run, so the sandbox and

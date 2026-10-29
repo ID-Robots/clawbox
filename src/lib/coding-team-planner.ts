@@ -25,7 +25,7 @@
  * what every role runs on and roughly what it costs (`teamModelsBrief`).
  */
 
-import { MAX_TASK_CHARS, MAX_TEAM_WORKERS, type TeamRoleModelMap } from "@/lib/coding-agent";
+import { MAX_TEAM_WORKERS, TEAM_TASK_CHARS, type TeamRoleModelMap } from "@/lib/coding-agent";
 import type { CodingProvider } from "@/lib/coding-provider";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import {
@@ -64,8 +64,8 @@ export interface PlannedTask {
 
 /** How a task is written: the planner's rules, and the lead's when it adds one. */
 const TASK_RULES = [
-  "Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets.",
-  `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters. Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
+  "Each task_description must stand on its own: say what to build or change, in which files, how the worker verifies it, and every constraint of the goal that bears on it (what to leave alone, whether to commit, what not to open) — it is the whole brief that worker gets. A worker sees only the HEAD of a long goal after its own task, so a rule that lives only in the goal's tail never reaches it.",
+  `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks). Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
   "A task that verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer: its worker starts from the work merged so far, and a task it does not wait for may not be there yet.",
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
@@ -75,7 +75,7 @@ const TASK_RULES = [
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
-  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
+  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"}]}. The rationale is at most ${MAX_RATIONALE_CHARS} characters; longer text is cut.`,
   `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",
   ...TASK_RULES,
@@ -162,7 +162,7 @@ export function replanTask(goal: string, previous: string | null | undefined, re
     quoted ? `This is what you answered:\n${quoted.length > REPLAN_QUOTE_CHARS ? `${quoted.slice(0, REPLAN_QUOTE_CHARS - 1)}…` : quoted}` : "You answered nothing.",
     "Answer again with ONLY the JSON plan described in your brief — the object with its shape and its tasks array — no prose before or after it. Read the folder again only if you must.",
   ].join("\n\n");
-  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+  return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
 
 /**
@@ -404,7 +404,7 @@ export const REPLAN_BRIEF = [
   "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one or more workers have just finished their tasks. You decide ONE thing: does the rest of the plan still fit the goal?",
   "Read what you need, but change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"add": [task, ...], "retire": ["t4", ...], "note": string}. Every field is optional; {} means the plan stands, and that is the usual answer — change the plan only for a concrete reason.',
-  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"} with a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks), for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
+  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"}, for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
   `retire: tasks still PENDING that the goal no longer needs — a finished task already did that work, or it turned out to be unnecessary. At most ${MAX_LEAD_RETIRES} over the whole team; a task a worker has started cannot be retired.`,
   `note: why, in one line of at most ${MAX_LEAD_NOTE_CHARS} characters, for the team's log.`,
   "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is listed in full under \"Messages to the lead since your last turn:\", and older messages are among the latest lines of the board you are given: weigh them, and act on them only through add or retire.",
@@ -541,7 +541,7 @@ function leadInbox(board: TeamBoard, maxChars: number): string {
  * The lead's task text: every task of the batch that settled since its last
  * turn and how, each one's result, what it may still change, the goal, the
  * messages sent to the lead since its last turn, and the board's digest in
- * whatever room is left — all inside the run route's cap. One settled task's
+ * whatever room is left — all inside TEAM_TASK_CHARS. One settled task's
  * result is shown as it always was; several share the room the rest leaves.
  */
 export function leadTask(board: TeamBoard, settledTaskIds: readonly string[], ctx: ReplanContext): string {
@@ -560,19 +560,19 @@ export function leadTask(board: TeamBoard, settledTaskIds: readonly string[], ct
   ];
   const inbox = leadInbox(board, MAX_LEAD_INBOX_CHARS);
   const fixed = [...settled.map((s) => `${s.line}\n\n${RESULT_LABEL}`), ...tail, inbox].join("\n\n").length;
-  const each = Math.max(LEAD_MIN_RESULT_CHARS, Math.min(LEAD_RESULT_CHARS, Math.floor((MAX_TASK_CHARS - fixed) / Math.max(1, settled.length))));
+  const each = Math.max(LEAD_MIN_RESULT_CHARS, Math.min(LEAD_RESULT_CHARS, Math.floor((TEAM_TASK_CHARS - fixed) / Math.max(1, settled.length))));
   const head = [
     ...settled.flatMap((s) => [s.line, `${RESULT_LABEL}${s.result ? clip(s.result, each) : "(none)"}`]),
     ...tail,
   ].join("\n\n");
   // The inbox after the head, cut to the room the head leaves — oldest
   // messages first — so the final cut never takes the newest.
-  const box = leadInbox(board, Math.min(MAX_LEAD_INBOX_CHARS, MAX_TASK_CHARS - head.length - 2));
+  const box = leadInbox(board, Math.min(MAX_LEAD_INBOX_CHARS, TEAM_TASK_CHARS - head.length - 2));
   const withInbox = box ? `${head}\n\n${box}` : head;
   const label = "\n\nThe board (every other task, then the latest alerts and messages):\n";
-  const digest = boardDigest(board, settledTaskIds, Math.min(MAX_DIGEST_CHARS, MAX_TASK_CHARS - withInbox.length - label.length));
+  const digest = boardDigest(board, settledTaskIds, Math.min(MAX_DIGEST_CHARS, TEAM_TASK_CHARS - withInbox.length - label.length));
   const text = digest ? `${withInbox}${label}${digest}` : withInbox;
-  return clip(text, MAX_TASK_CHARS);
+  return clip(text, TEAM_TASK_CHARS);
 }
 
 export interface Replan {

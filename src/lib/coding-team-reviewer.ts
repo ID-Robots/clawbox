@@ -13,7 +13,7 @@
  * for once more, in the reviewer's own session (`REVIEWER_NUDGE`, TASK-1323).
  */
 
-import { MAX_TASK_CHARS } from "@/lib/coding-agent";
+import { TEAM_TASK_CHARS } from "@/lib/coding-agent";
 
 export interface Verdict {
   verdict: "accepted" | "rejected";
@@ -72,7 +72,7 @@ export const SHELL_REVIEWER_BRIEF = [
 /** The task text of that second review: why it is asked, then the review as the first one had it. */
 export function shellReviewerTask(review: string, firstNotes: string): string {
   const text = `The first review of this task ran nothing — it said: ${answerHead(firstNotes)}. This folder is a checkout of the merged work, with a shell: run git and the task's checks yourself.\n\n${review}`;
-  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+  return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
 
 /**
@@ -123,7 +123,7 @@ export const MAX_REVIEW_FILES = 40;
 /** How much of the goal the final reviewer is quoted; the board's digest takes the room after it. */
 const FINAL_GOAL_CHARS = 1_200;
 
-/** The reviewer's task text: the task, what changed, what the worker said — inside the run route's cap. */
+/** The reviewer's task text: the task, what changed, what the worker said — inside TEAM_TASK_CHARS. */
 export function reviewerTask(input: { taskId: string; description: string; files: string[]; report: string; goal: string }): string {
   const named = input.files.slice(0, MAX_REVIEW_FILES);
   const more = input.files.length - named.length;
@@ -133,25 +133,25 @@ export function reviewerTask(input: { taskId: string; description: string; files
     input.files.length ? `Files the worker changed:\n${named.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- … and ${more} more` : ""}` : "The worker's branch changed no files.",
     `The worker's report:\n${input.report.trim() || "(none)"}`,
   ].join("\n\n");
-  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+  return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
 
 /**
  * The final reviewer's task text: the goal, where the work is, the files the
  * tasks were given, the project's own tests when the harness ran them green,
- * and the board — each task and what its worker reported — inside the run
- * route's cap. `digest` is built for the room this leaves
+ * and the board — each task and what its worker reported — inside
+ * TEAM_TASK_CHARS. `digest` is built for the room this leaves
  * (`finalReviewRoom`).
  */
 export function finalReviewerTask(input: { goal: string; branch: string | null; base: string | null; files: string[]; tests?: string | null; digest: string }): string {
   const text = [...finalReviewHead(input), `The board — every task, what its worker reported, the latest alerts:\n${input.digest.trim() || "(empty)"}`].join("\n\n");
-  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+  return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
 
 /** How many characters the final reviewer's task text leaves for the board's digest. */
 export function finalReviewRoom(input: { goal: string; branch: string | null; base: string | null; files: string[]; tests?: string | null }): number {
   const head = finalReviewHead(input).join("\n\n");
-  return Math.max(0, MAX_TASK_CHARS - head.length - "\n\nThe board — every task, what its worker reported, the latest alerts:\n".length);
+  return Math.max(0, TEAM_TASK_CHARS - head.length - "\n\nThe board — every task, what its worker reported, the latest alerts:\n".length);
 }
 
 function finalReviewHead(input: { goal: string; branch: string | null; base: string | null; files: string[]; tests?: string | null }): string[] {

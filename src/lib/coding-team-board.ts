@@ -49,7 +49,13 @@ export const MAX_TEAM_TASKS = 8;
 /** The audit log keeps this many entries; the oldest fall off. */
 export const MAX_LOG_ENTRIES = 400;
 export const MAX_GOAL_CHARS = 4_000;
-export const MAX_TASK_DESCRIPTION_CHARS = 2_000;
+/**
+ * A task description is the WHOLE brief its worker gets (TASK_RULES): the
+ * verify and commit steps and the goal's constraints live in it. At 2,000, 5
+ * of 6 descriptions of one live team were cut before their verify step;
+ * `workerTask` builds the worker's text to TEAM_TASK_CHARS, so this fits.
+ */
+export const MAX_TASK_DESCRIPTION_CHARS = 6_000;
 export const MAX_RESULT_CHARS = 6_000;
 /** The lead (the `coding_team_dynamic` switch) may add this many tasks over a team's whole life… */
 export const MAX_LEAD_ADDS = 3;

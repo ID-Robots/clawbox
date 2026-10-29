@@ -87,6 +87,7 @@ import {
   startRun,
   stopRun,
   suiteSandbox,
+  TEAM_TASK_CHARS,
   teamRoleModelMap,
   teamSpawnSlot,
   waitForRun,
@@ -2103,12 +2104,29 @@ export function singleRunTask(board: TeamBoard, tasks: readonly TeamTask[]): str
 
 /** Heads the board's digest in a worker's task text. */
 const DIGEST_LABEL = "\n\nThe team's board — every other task, then the latest alerts and messages:\n";
+/** Heads the goal in a worker's task text. */
+const GOAL_LABEL = "Team goal: ";
+/**
+ * The least of the goal a worker is shown, however much the rest of its text
+ * takes: the goal's head says what the team is for; its tail is the
+ * planner's to carry into the task description (TASK_RULES).
+ */
+const WORKER_GOAL_FLOOR_CHARS = 800;
 
 /**
- * One worker's task text: its own task, the goal, where to work, why a
- * previous attempt was rejected — and the whole board, compact
- * (`boardDigest`), in whatever room that leaves inside the run route's cap.
- * `folder` is the worker's own worktree, when it has one.
+ * One worker's task text: its own task, where to work, the goal, the files
+ * it is expected to touch, why a previous attempt was rejected, who else is
+ * at work — and the whole board, compact (`boardDigest`), in whatever room
+ * that leaves inside TEAM_TASK_CHARS. `folder` is the worker's own
+ * worktree, when it has one.
+ *
+ * The goal is budgeted the way the digest is: the task line, the folder
+ * line, the files hint, a rejection, a hold and the teammates are reserved
+ * FIRST and the goal takes what they leave, down to WORKER_GOAL_FLOOR_CHARS.
+ * Cut from the end at the typed 4,000 instead, 7 of 8 worker texts of one
+ * live team ended inside the pasted goal: no files hint (the worktree
+ * containment then punished the stray), no rejection reason on a retry, no
+ * run ids for `team_message`.
  *
  * A worker in a worktree is told that folder as its ONLY one, and the
  * project folder is never named to it: every path in the text — the goal's,
@@ -2132,12 +2150,8 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
   if (own) {
     parts.push(`Your folder: ${own} — your own working copy of the project, and the ONLY folder you work in. Read and write there and nowhere else; the files below are given with their full path in it.`);
   }
-  parts.push(`Team goal: ${here(board.goal)}`);
-  if (task.files_hint.length) {
-    const files = own ? task.files_hint.map((f) => hintInFolder(f, board.directory, own)) : task.files_hint;
-    parts.push(`Files this task is expected to touch: ${files.join(", ")}`);
-  }
-  const head = parts.join("\n\n");
+  const files = own ? task.files_hint.map((f) => hintInFolder(f, board.directory, own)) : task.files_hint;
+  const hint = files.length ? `Files this task is expected to touch: ${files.join(", ")}` : "";
   const rejected = task.attempts > 0 && task.review?.verdict === "rejected" ? `\n\nA previous attempt was rejected: ${here(task.review.notes)}` : "";
   // Held (`holdTask`): the attempt before this one stood on a dependency that
   // was reopened since — said with what became of it, so this attempt builds
@@ -2147,18 +2161,27 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
     : "";
   // Who else is at work, by the run id `team_message` needs: the one way a
   // worker learns which run to tell when it is blocked on a sibling's part.
-  // LAST, because the text is cut at MAX_TASK_CHARS from the end: a list a
+  // LAST, because the text is cut at TEAM_TASK_CHARS from the end: a list a
   // NOT_IN_TEAM refusal can also give must never push out a retry's reason.
   const working = board.tasks
     .filter((t) => t.task_id !== task.task_id && t.status === "in_progress" && t.assigned_to)
     .map((t) => `- ${t.assigned_to} on ${t.task_id}: ${firstLine(here(t.task_description), TEAMMATE_QUOTE_CHARS)}`);
   const teammates = working.length ? `\n\nTeammates at work now (reach one with team_message, to="sibling"):\n${working.join("\n")}` : "";
+  // The goal takes the room everything that must reach the worker leaves,
+  // never less than its floor; said in the worker's folder it can grow, so
+  // it is cut after the rewrite.
+  const reserved = [...parts, GOAL_LABEL, ...(hint ? [hint] : [])].join("\n\n").length + rejected.length + held.length + teammates.length;
+  const goalRoom = Math.max(WORKER_GOAL_FLOOR_CHARS, TEAM_TASK_CHARS - reserved);
+  const goal = here(board.goal);
+  parts.push(`${GOAL_LABEL}${goal.length > goalRoom ? `${goal.slice(0, goalRoom - 1)}…` : goal}`);
+  if (hint) parts.push(hint);
+  const head = parts.join("\n\n");
   // The board's digest takes the room the rest leaves, so it never pushes a
   // retry's reason or the teammates' run ids out of the text. Said in the
   // worker's folder it can grow (a worktree path is longer than the
   // project's): built once more for the room the growth leaves, and cut
   // only if that is still over.
-  const room = MAX_TASK_CHARS - head.length - DIGEST_LABEL.length - rejected.length - held.length - teammates.length;
+  const room = TEAM_TASK_CHARS - head.length - DIGEST_LABEL.length - rejected.length - held.length - teammates.length;
   let digest = room > 0 ? here(boardDigest(board, task.task_id, Math.min(MAX_DIGEST_CHARS, room))) : "";
   if (digest.length > room && room > 0) {
     const smaller = room - (digest.length - room);
@@ -2166,7 +2189,7 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
     if (digest.length > room) digest = `${digest.slice(0, room - 1)}…`;
   }
   let text = `${head}${digest ? `${DIGEST_LABEL}${digest}` : ""}${rejected}${held}${teammates}`;
-  if (text.length > MAX_TASK_CHARS) text = `${text.slice(0, MAX_TASK_CHARS - 1)}…`;
+  if (text.length > TEAM_TASK_CHARS) text = `${text.slice(0, TEAM_TASK_CHARS - 1)}…`;
   return text;
 }
 

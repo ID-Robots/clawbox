@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
-import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
+import { MAX_TEAM_WORKERS, TEAM_TASK_CHARS } from "@/lib/coding-agent";
 import type { TeamRoleModelMap } from "@/lib/coding-agent";
 import { clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, readTaskRole, REPLAN_BRIEF, replanContext, replanTask, teamModelsBrief, withTeamModels, type ReplanContext } from "@/lib/coding-team-planner";
 
@@ -145,15 +145,15 @@ describe("teamModelsBrief — the role/model map the planner and the lead are gi
 });
 
 describe("replanTask", () => {
-  it("quotes the answer that was not a plan, bounded, and stays inside the run route's cap", () => {
+  it("quotes the answer that was not a plan, bounded, and stays inside the team's cap", () => {
     const text = replanTask("Build it", "Sure! Here is my thinking…", "no JSON array");
     expect(text).toContain("Goal: Build it");
     expect(text).toContain("no JSON array");
     expect(text).toContain("Sure! Here is my thinking…");
     expect(text).toContain("ONLY the JSON plan");
     expect(replanTask("Build it", null, "empty")).toContain("You answered nothing.");
-    const long = replanTask("g".repeat(MAX_TASK_CHARS * 2), "y".repeat(MAX_TASK_CHARS), "r");
-    expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    const long = replanTask("g".repeat(TEAM_TASK_CHARS * 2), "y".repeat(TEAM_TASK_CHARS), "r");
+    expect(long.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(long.endsWith("…")).toBe(true);
   });
 });
@@ -167,9 +167,9 @@ it("never mistakes a truncated outer plan's nested depends_on array for the plan
 it("accepts a full plan above the display-summary limit, a description over its bound cut to it", () => {
   const tasks = Array.from({ length: 5 }, () => ({ task_description: "x".repeat(1800), depends_on: [] }));
   expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: true });
-  tasks[2].task_description = "x".repeat(2001);
-  expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: true, clipped: [{ task_id: "t3", field: "task_description", from: 2001, to: 2000 }] });
-  expect(PLANNER_BRIEF).toContain("2000");
+  tasks[2].task_description = "x".repeat(MAX_TASK_DESCRIPTION_CHARS + 1);
+  expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: true, clipped: [{ task_id: "t3", field: "task_description", from: MAX_TASK_DESCRIPTION_CHARS + 1, to: MAX_TASK_DESCRIPTION_CHARS }] });
+  expect(PLANNER_BRIEF).toContain(String(MAX_TASK_DESCRIPTION_CHARS));
   expect(PLANNER_BRIEF).toContain("parallel");
 });
 
@@ -180,11 +180,14 @@ const prose = (n: number) => {
   return `${text.slice(0, n - 1)}z`;
 };
 
+/** A task description this far over its bound. */
+const OVER = MAX_TASK_DESCRIPTION_CHARS + 313;
+
 describe("a plan with text over its bound — cut at a sentence, never refused", () => {
-  it("cuts a 2313-character task_description at its last sentence inside the bound, and names it", () => {
+  it("cuts a task_description 313 characters over the bound at its last sentence inside it, and names it", () => {
     // Seen on the box: a plan refused for this, and its re-ask refused for
     // 2570, left a team with no task at all.
-    const long = prose(2313);
+    const long = prose(OVER);
     const out = parsePlan(JSON.stringify([
       { task_description: "Scaffold index.html", files_hint: ["index.html"] },
       { task_description: "Write styles.css", files_hint: ["styles.css"] },
@@ -198,22 +201,22 @@ describe("a plan with text over its bound — cut at a sentence, never refused",
     expect(cut.endsWith("renders.")).toBe(true);
     expect(long.startsWith(cut)).toBe(true);
     expect(out.tasks[2]).toMatchObject({ depends_on: ["t1", "t2"], files_hint: ["app.js"] });
-    expect(out.clipped).toEqual([{ task_id: "t3", field: "task_description", from: 2313, to: cut.length }]);
-    expect(clippedNote(out.clipped!)).toBe(`Task t3's description was cut from 2313 to ${cut.length} characters.`);
+    expect(out.clipped).toEqual([{ task_id: "t3", field: "task_description", from: OVER, to: cut.length }]);
+    expect(clippedNote(out.clipped!)).toBe(`Task t3's description was cut from ${OVER} to ${cut.length} characters.`);
   });
 
   it("cuts at a line break when the text has no sentence end, and hard, marked, when it has neither", () => {
-    const lines = Array.from({ length: 80 }, (_, i) => `- step ${i + 1}: wire part ${i + 1} of the form`).join("\n");
+    const lines = Array.from({ length: Math.ceil(MAX_TASK_DESCRIPTION_CHARS / 20) }, (_, i) => `- step ${i + 1}: wire part ${i + 1} of the form`).join("\n");
     const byLine = parsePlan(JSON.stringify([{ task_description: lines }]));
     expect(byLine.ok).toBe(true);
     if (!byLine.ok) return;
     const cut = byLine.tasks[0].task_description;
     expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
     expect(lines.startsWith(`${cut}\n`)).toBe(true);
-    const hard = parsePlan(JSON.stringify([{ task_description: "x".repeat(2313) }]));
-    expect(hard).toMatchObject({ ok: true, tasks: [{ task_description: `${"x".repeat(MAX_TASK_DESCRIPTION_CHARS - 1)}…` }], clipped: [{ task_id: "t1", from: 2313, to: MAX_TASK_DESCRIPTION_CHARS }] });
+    const hard = parsePlan(JSON.stringify([{ task_description: "x".repeat(OVER) }]));
+    expect(hard).toMatchObject({ ok: true, tasks: [{ task_description: `${"x".repeat(MAX_TASK_DESCRIPTION_CHARS - 1)}…` }], clipped: [{ task_id: "t1", from: OVER, to: MAX_TASK_DESCRIPTION_CHARS }] });
     // A sentence end in the first half only would throw most of the task away: cut hard instead.
-    const early = `Short opener. ${"y".repeat(2300)}`;
+    const early = `Short opener. ${"y".repeat(MAX_TASK_DESCRIPTION_CHARS + 300)}`;
     const out = parsePlan(JSON.stringify([{ task_description: early }]));
     expect(out.ok && out.tasks[0].task_description).toBe(`${early.slice(0, MAX_TASK_DESCRIPTION_CHARS - 1)}…`);
   });
@@ -235,29 +238,31 @@ describe("a plan with text over its bound — cut at a sentence, never refused",
   it("cuts every over-long field of one answer, and one note line names them all", () => {
     const out = parsePlan(JSON.stringify({
       shape: { parallelism: 1, review: "final", rationale: "r".repeat(201) },
-      tasks: [{ task_description: prose(2541) }, { task_description: "fine" }, { task_description: prose(2013) }],
+      tasks: [{ task_description: prose(MAX_TASK_DESCRIPTION_CHARS + 541) }, { task_description: "fine" }, { task_description: prose(MAX_TASK_DESCRIPTION_CHARS + 13) }],
     }));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.clipped?.map((c) => [c.task_id, c.from])).toEqual([[null, 201], ["t1", 2541], ["t3", 2013]]);
+    expect(out.clipped?.map((c) => [c.task_id, c.from])).toEqual([[null, 201], ["t1", MAX_TASK_DESCRIPTION_CHARS + 541], ["t3", MAX_TASK_DESCRIPTION_CHARS + 13]]);
     expect(out.tasks[1].task_description).toBe("fine");
     const note = clippedNote(out.clipped!);
     expect(note).not.toContain("\n");
-    expect(note).toMatch(/^The shape's rationale was cut from 201 to 200 characters\. Task t1's description was cut from 2541 to \d+ characters\. Task t3's description was cut from 2013 to \d+ characters\.$/);
+    expect(note).toMatch(new RegExp(`^The shape's rationale was cut from 201 to 200 characters\\. Task t1's description was cut from ${MAX_TASK_DESCRIPTION_CHARS + 541} to \\d+ characters\\. Task t3's description was cut from ${MAX_TASK_DESCRIPTION_CHARS + 13} to \\d+ characters\\.$`));
   });
 
   it("names nothing clipped when nothing was, and still refuses a plan with a real fault beside a long task", () => {
     expect(parsePlan(JSON.stringify([{ task_description: "y".repeat(MAX_TASK_DESCRIPTION_CHARS) }]))).not.toHaveProperty("clipped");
-    expect(parsePlan(JSON.stringify([{ task_description: prose(2313) }, { task_description: "b", depends_on: ["t9"] }]))).toMatchObject({ ok: false, reason: "Task t2 depends on t9, which is not another task in the plan." });
+    expect(parsePlan(JSON.stringify([{ task_description: prose(OVER) }, { task_description: "b", depends_on: ["t9"] }]))).toMatchObject({ ok: false, reason: "Task t2 depends on t9, which is not another task in the plan." });
   });
 
-  it("tells the planner and the lead the bound beside the JSON they answer, and to split a task that needs more", () => {
+  it("tells the planner and the lead the bound ONCE each, to split a task that needs more, and that a worker sees only the goal's head", () => {
+    const rule = `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks).`;
+    for (const brief of [PLANNER_BRIEF, REPLAN_BRIEF]) {
+      expect(brief).toContain(rule);
+      expect(brief.split(String(MAX_TASK_DESCRIPTION_CHARS))).toHaveLength(2);
+      expect(brief).toContain("A worker sees only the HEAD of a long goal after its own task");
+    }
     const planJson = PLANNER_BRIEF.slice(PLANNER_BRIEF.indexOf("Answer with ONLY"), PLANNER_BRIEF.indexOf("Tasks are numbered"));
-    expect(planJson).toContain(`Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most 200`);
-    expect(planJson).toContain("If a task needs more than that, split it into two tasks.");
-    const leadJson = REPLAN_BRIEF.slice(REPLAN_BRIEF.indexOf("add: new tasks"), REPLAN_BRIEF.indexOf("retire: tasks"));
-    expect(leadJson).toContain(`a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters`);
-    expect(leadJson).toContain("if a task needs more than that, split it into two tasks");
+    expect(planJson).toContain("The rationale is at most 200 characters; longer text is cut.");
   });
 });
 
@@ -460,8 +465,8 @@ describe("parseReplan — the lead's answer", () => {
   });
 
   it("cuts an added task's description over its bound at a sentence, keeping the rest of the answer", () => {
-    // Seen on the box: a lead's 2110-character add was refused, and the plan stayed as it was.
-    const long = prose(2110);
+    // Seen on the box: a lead's add 110 characters over the bound was refused, and the plan stayed as it was.
+    const long = prose(MAX_TASK_DESCRIPTION_CHARS + 110);
     const out = parseReplan(JSON.stringify({ add: [task(long, { depends_on: ["t1"] })], retire: ["t2"], note: "t1 found a gap" }), ctxOf(["complete", "pending"]));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -469,7 +474,7 @@ describe("parseReplan — the lead's answer", () => {
     expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
     expect(cut.endsWith("renders.")).toBe(true);
     expect(out).toMatchObject({ retire: ["t2"], note: "t1 found a gap", add: [{ depends_on: ["t1"], files_hint: ["x.ts"] }] });
-    expect(out.clipped).toEqual([{ task_id: "t3", field: "task_description", from: 2110, to: cut.length }]);
+    expect(out.clipped).toEqual([{ task_id: "t3", field: "task_description", from: MAX_TASK_DESCRIPTION_CHARS + 110, to: cut.length }]);
   });
 });
 
@@ -525,7 +530,7 @@ describe("the lead's view and words", () => {
     for (let i = 0; i < 6; i++) postTask(board, { kind: "planner" }, { task_description: `Task number ${i + 1} ${"d".repeat(1_500)}` });
     Object.assign(board.tasks[0], { status: "complete", result: `Did it. ${"r".repeat(5_000)}`, review: { verdict: "accepted", notes: "", at: 1 } });
     const text = leadTask(board, ["t1"], replanContext(board));
-    expect(text.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(text).toMatch(/^Task t1 just settled \(complete, accepted\): Task number 1/);
     expect(text).toContain("Its worker's result:\nDid it.");
     // Six on the board: two more fit under MAX_TEAM_TASKS, whatever the lead's own budget.
@@ -656,7 +661,7 @@ describe("leadTask — the lead's batch and its inbox", () => {
     ]);
     board.goal = "g".repeat(3_000);
     const text = leadTask(board, ["t1", "t2", "t3"], replanContext(board));
-    expect(text.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     for (const n of [1, 2, 3]) expect(text).toContain(`Its worker's result:\nResult ${n} rrr`);
     expect(text).toContain("pending now: t4");
     expect(text).toContain("Team goal: ggg");
@@ -692,7 +697,7 @@ describe("leadTask — the lead's batch and its inbox", () => {
     expect(inbox).toMatch(/^Messages to the lead since your last turn:\n\(\d older messages left out\)\n- /);
     expect(inbox).toContain("Message 8: ");
     expect(inbox).not.toContain("Message 1: ");
-    expect(text.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
   });
 
   it("reads a board from before the inbox — no lastLeadAt — as a lead that has read nothing yet, and says when there is nothing", () => {

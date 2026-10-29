@@ -343,12 +343,13 @@ function prose(n: number): string {
 
 describe("a plan with text over its bound", () => {
   it("is cut, not refused: the team goes on from the first answer, with one note on the log and no alert", async () => {
+    const { MAX_TASK_DESCRIPTION_CHARS } = await import("@/lib/coding-team-board");
     outcomes = [
       { summary: JSON.stringify({
         shape: { parallelism: 1, review: "final", rationale: `${"One page, then its script. ".repeat(8).slice(0, 204)}z` },
         tasks: [
           { task_description: "Scaffold index.html", files_hint: ["index.html"] },
-          { task_description: prose(2313), depends_on: ["t1"], files_hint: ["app.js"] },
+          { task_description: prose(MAX_TASK_DESCRIPTION_CHARS + 313), depends_on: ["t1"], files_hint: ["app.js"] },
         ],
       }) },
       { summary: "index done", filesTouched: ["index.html"] },
@@ -361,15 +362,16 @@ describe("a plan with text over its bound", () => {
     expect(done.alerts).toBe(0);
     expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
     const cut = done.tasks[1].task_description;
-    expect(cut.length).toBeLessThanOrEqual(2000);
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
     expect(cut.endsWith("renders.")).toBe(true);
     expect(done.shape!.rationale.length).toBeLessThanOrEqual(200);
     const notes = done.log.filter((e) => e.type === "note");
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toMatchObject({ actor: { kind: "system" }, message: `The shape's rationale was cut from 205 to ${done.shape!.rationale.length} characters. Task t2's description was cut from 2313 to ${cut.length} characters.` });
+    expect(notes[0]).toMatchObject({ actor: { kind: "system" }, message: `The shape's rationale was cut from 205 to ${done.shape!.rationale.length} characters. Task t2's description was cut from ${MAX_TASK_DESCRIPTION_CHARS + 313} to ${cut.length} characters.` });
   });
 
   it("from the lead is cut too: the task is added, with a note and no alert", async () => {
+    const { MAX_TASK_DESCRIPTION_CHARS } = await import("@/lib/coding-team-board");
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [
       { summary: PLAN },
@@ -377,14 +379,14 @@ describe("a plan with text over its bound", () => {
       { summary: "app", filesTouched: ["app.js"] },
       { summary: "favicon", filesTouched: ["favicon.ico"] },
     ];
-    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: prose(2110), depends_on: ["t1"], files_hint: ["favicon.ico"] }], note: "t1 found no favicon" }) }];
+    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: prose(MAX_TASK_DESCRIPTION_CHARS + 110), depends_on: ["t1"], files_hint: ["favicon.ico"] }], note: "t1 found no favicon" }) }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.tasks[2]).toMatchObject({ task_id: "t3", origin: "lead", status: "complete" });
     const cut = done.tasks[2].task_description;
-    expect(cut.length).toBeLessThanOrEqual(2000);
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
     expect(done.alerts).toBe(0);
-    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([`Task t3's description was cut from 2110 to ${cut.length} characters.`]);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([`Task t3's description was cut from ${MAX_TASK_DESCRIPTION_CHARS + 110} to ${cut.length} characters.`]);
   });
 });
 
@@ -1880,15 +1882,30 @@ describe("the words", () => {
     expect(String(reviewer.task)).not.toContain(".clawbox/worktrees");
   });
 
-  it("keeps the worker's folder when a long goal pushes the task text past its cut", async () => {
-    const { createBoard, postTask, MAX_GOAL_CHARS } = await import("@/lib/coding-team-board");
-    const { MAX_TASK_CHARS } = await import("@/lib/coding-agent");
-    // A goal at the limit a team accepts, and a long task under it.
+  it("keeps the worker's folder, files hint, rejection and teammates when the goal is long: the goal is cut, down to its floor, never them", async () => {
+    const { createBoard, postTask, MAX_GOAL_CHARS, MAX_TASK_DESCRIPTION_CHARS } = await import("@/lib/coding-team-board");
+    const { TEAM_TASK_CHARS, MAX_TASK_CHARS } = await import("@/lib/coding-agent");
+    // A goal at the limit a team accepts, and a task at ITS limit: past the typed cap by themselves.
     const board = createBoard({ goal: "g".repeat(MAX_GOAL_CHARS), projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
-    const task = postTask(board, { kind: "planner" }, { task_description: "d".repeat(1_500), files_hint: ["styles.css"] });
+    const task = postTask(board, { kind: "planner" }, { task_description: "d".repeat(MAX_TASK_DESCRIPTION_CHARS), files_hint: ["styles.css"] });
+    const sibling = postTask(board, { kind: "planner" }, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    Object.assign(sibling, { status: "in_progress", assigned_to: "run-bbbbbbbb" });
+    Object.assign(task, { attempts: 1, review: { verdict: "rejected", notes: `Missing: ${"n".repeat(1_900)}`, at: 1 } });
     const text = team.workerTask(board, task, "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
-    expect(text.length).toBe(MAX_TASK_CHARS);
+    expect(text.length).toBeGreaterThan(MAX_TASK_CHARS);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(text).toContain("Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+    expect(text).toContain("Files this task is expected to touch: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/styles.css");
+    expect(text).toContain(`A previous attempt was rejected: Missing: ${"n".repeat(1_900)}`);
+    expect(text).toContain("- run-bbbbbbbb on t2: Wire app.js");
+    // The goal gave way — to no less than its floor.
+    expect(text).toMatch(/Team goal: g{799,}…\n/);
+    expect(text).not.toContain("g".repeat(MAX_GOAL_CHARS));
+    // Room to spare: the whole goal, and the rest still there.
+    const short = postTask(board, { kind: "planner" }, { task_description: "Add the footer", files_hint: ["footer.css"] });
+    const whole = team.workerTask(board, short, "/home/clawbox/Projects/site/.clawbox/worktrees/t3-1");
+    expect(whole).toContain(`Team goal: ${"g".repeat(MAX_GOAL_CHARS)}`);
+    expect(whole).toContain("- run-bbbbbbbb on t2: Wire app.js");
   });
 
   it("names files outside a task's hint, folders included, and nothing when there is no hint", () => {

@@ -3,7 +3,7 @@
  * that is not what the reviewer said is never repaired into one.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_TASK_CHARS } from "@/lib/coding-agent";
+import { TEAM_TASK_CHARS } from "@/lib/coding-agent";
 import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, ranNothing, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE, SHELL_REVIEWER_BRIEF, shellReviewerTask, testEvidence } from "@/lib/coding-team-reviewer";
 
 describe("parseVerdict", () => {
@@ -107,14 +107,14 @@ describe("the reviewer's brief and task", () => {
     expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "", goal: "g" })).toContain("changed no files");
   });
 
-  it("names only so many changed files and counts the rest, and never exceeds the run route's cap", () => {
+  it("names only so many changed files and counts the rest, and never exceeds the team's cap", () => {
     const files = Array.from({ length: MAX_REVIEW_FILES + 15 }, (_, i) => `src/file-${i}.ts`);
     const text = reviewerTask({ taskId: "t3", description: "d", files, report: "r", goal: "g" });
     expect(text).toContain(`- src/file-${MAX_REVIEW_FILES - 1}.ts`);
     expect(text).not.toContain(`- src/file-${MAX_REVIEW_FILES}.ts`);
     expect(text).toContain("… and 15 more");
-    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(MAX_TASK_CHARS * 2), goal: "g" });
-    expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(TEAM_TASK_CHARS * 2), goal: "g" });
+    expect(long.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(long.endsWith("…")).toBe(true);
   });
 });
@@ -150,12 +150,12 @@ describe("a verdict that ran nothing, and the worker's own evidence", () => {
     expect(testEvidence("Tests: 0 failed, 12 passed.")).toBe("Tests: 0 failed, 12 passed.");
   });
 
-  it("asks the second review with a shell, quoting what the first one said, inside the run route's cap", () => {
+  it("asks the second review with a shell, quoting what the first one said, inside the team's cap", () => {
     const review = reviewerTask({ taskId: "t1", description: "Fix it", files: ["a.js"], report: "done", goal: "g" });
     const text = shellReviewerTask(review, "Static review only: no git could be run.");
     expect(text.startsWith('The first review of this task ran nothing — it said: "Static review only: no git could be run."')).toBe(true);
     expect(text).toContain("Review task t1: Fix it");
-    expect(shellReviewerTask("x".repeat(MAX_TASK_CHARS), "n").length).toBe(MAX_TASK_CHARS);
+    expect(shellReviewerTask("x".repeat(TEAM_TASK_CHARS), "n").length).toBe(TEAM_TASK_CHARS);
     expect(SHELL_REVIEWER_BRIEF).toContain("you have a shell");
     expect(SHELL_REVIEWER_BRIEF).not.toContain("Change NOTHING");
   });

@@ -1872,9 +1872,9 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
 
   reg.tool(
     "coding_team_run",
-    "Hand a LARGER goal with several INDEPENDENT parts to a coding team: a planner splits it, workers do the tasks in separate sessions, a reviewer checks each. Prefer ONE coding_agent_run, which is cheaper, for one focused change or parts that edit mostly the same files; a one-task plan runs as one run anyway. Works in the background in ONE folder; follow it with coding_team_status.",
+    "Hand a LARGER goal with several INDEPENDENT parts to a coding team: a planner splits it, workers do the tasks, a reviewer checks each. Prefer ONE coding_agent_run (cheaper) for one focused change or parts that edit mostly the same files; a one-task plan runs as one run anyway. Workers commit in ONE folder, never open a PR or merge: the box does if the goal asks. Follow it with coding_team_status.",
     {
-      goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole: the outcome and any constraints, not a task list. The planner writes the tasks."),
+      goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole: the outcome and its constraints (a PR or not), not a task list."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
     },
