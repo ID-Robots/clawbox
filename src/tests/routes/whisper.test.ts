@@ -42,7 +42,12 @@ const primary = { value: "cloud" as string };
 const setPrimary = vi.fn(async (..._a: unknown[]) => {});
 const cleared = vi.fn(async (..._a: unknown[]) => {});
 const gatewayRestart = vi.fn(async () => {});
-vi.mock("@/lib/stt-channel", () => ({ syncChannelAudio: (...a: unknown[]) => sync(...a) }));
+/** What an engine install wires the new engine into channel voice notes with. */
+const reconcile = vi.fn(async (..._a: unknown[]) => true);
+vi.mock("@/lib/stt-channel", () => ({
+  syncChannelAudio: (...a: unknown[]) => sync(...a),
+  reconcileChannelAudio: (...a: unknown[]) => reconcile(...a),
+}));
 vi.mock("@/lib/stt-preference", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/stt-preference")>()),
   getSttPrimary: async () => primary.value,
@@ -327,6 +332,7 @@ describe("POST /setup-api/whisper — the fetcher's environment", () => {
 describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
   beforeEach(() => {
     followMock.mockReset();
+    reconcile.mockReset().mockResolvedValue(true);
     state.installed = false;
   });
 
@@ -358,11 +364,47 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     expect(restarted).not.toHaveBeenCalled();
   });
 
+  /**
+   * The install built the engine, enabled the unit and said "installed", and
+   * channel voice notes went on walking a list without it — on the box this
+   * was found on, a list whose only row the gateway refused. The new engine is
+   * wired in before the closing success, with a fresh import probe, and
+   * without a gateway restart (`tools` hot-applies on the pinned core).
+   */
+  it("puts the engine it just installed into channel voice notes before it says installed", async () => {
+    const order: string[] = [];
+    followMock.mockResolvedValue({ ok: true });
+    reconcile.mockImplementation(async () => { order.push("wired"); return true; });
+    const { POST } = await load();
+    const out = await readStream(await POST(post({ action: "install-engine" })));
+    order.push("answered");
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith({ trigger: "whisper-install", freshProbe: true });
+    expect(order).toEqual(["wired", "answered"]);
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+    expect(gatewayRestart).not.toHaveBeenCalled();
+  });
+
+  it("still reports a landed install as installed when the wiring could not be written, and says when it will be", async () => {
+    followMock.mockResolvedValue({ ok: true });
+    reconcile.mockRejectedValue(new Error("ConfigMutationConflictError"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await load();
+    const out = await readStream(await POST(post({ action: "install-engine" })));
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+    expect(out.map((l) => l.status)).toContain(
+      "Channel voice notes could not be switched to it yet — they will be at the next restart.",
+    );
+    warn.mockRestore();
+  });
+
   it("closes with the step's error when it failed", async () => {
     followMock.mockResolvedValue({ ok: false, error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
     const { POST } = await load();
     const out = await readStream(await POST(post({ action: "install-engine" })));
     expect(out[out.length - 1]).toEqual({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
+    // An engine that did not land is not wired into anything.
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("refuses an engine install that would not fit before anything starts, and a later one with room proceeds", async () => {

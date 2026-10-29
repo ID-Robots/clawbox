@@ -346,6 +346,7 @@ describe("applyClawaiCloudDefaults", () => {
 describe("readCloudDefaultsStatus", () => {
   it("says where each capability runs, where it should, and why not", async () => {
     entitlement.mockResolvedValue("flash");
+    store.set("stt_primary", "cloud");
     const status = await readCloudDefaultsStatus();
     expect(status).toMatchObject({
       linked: true,
@@ -384,6 +385,18 @@ describe("readCloudDefaultsStatus", () => {
       ownerChoice: false,
       reason: "not_linked",
     });
+  });
+
+  it("reports a linked box with Whisper and no stored pick as hearing on the box until the default moves it", async () => {
+    // Nothing stored puts the box's own engine first (stt-preference.ts), so
+    // the card says so — and the move the default is about to make is a real
+    // one, recorded as such.
+    const status = await readCloudDefaultsStatus();
+    expect(status.capabilities.stt).toMatchObject({ source: "local", target: "cloud", ownerChoice: false });
+
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("stt");
+    expect(store.get("stt_primary")).toBe("cloud");
   });
 
   it("puts the edition that indexes on the box on the cloud too, where it used to say 'edition'", async () => {
