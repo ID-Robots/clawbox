@@ -456,7 +456,7 @@ import {
   type RunMessageDelivery,
   type RunMessageVia,
 } from "@/lib/coding-run-messages";
-import { ciFailureLine, ciFixNotes, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
+import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import {
   clearReceipts,
   ensureRunInbox,
@@ -13841,7 +13841,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // in the same folder, on the branch its own pull request is already open
     // from, and a second branch under it would take the fixes away from that
     // pull request.
-    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
+    // A task that refuses a pull request ("do not open a PR") gets none, whatever
+    // the owner's auto-PR switch says: the switch is the default for a task that
+    // says nothing (goalRefusesPullRequest, shared with the team's goal).
+    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && !goalRefusesPullRequest(run.task) && (await getAutoPr())) {
       if (run.worktree) {
         // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
         // already forked it, off the project's own branch, and the run is

@@ -126,7 +126,7 @@ import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, ha
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, SUITE_GATE_TIMEOUT_MS, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
-import { ciFailureLine, ciFixNotes, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
+import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, readPullRequest } from "@/lib/coding-pr";
 import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/coding-review";
@@ -1138,7 +1138,15 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     //    (night run, 2026-10-29). Only once every task is accepted, the suite
     //    is green and the final review passed.
     if (!board.branch || !allComplete(board)) break;
-    if (!asksPr && !board.pr && !(await getAutoPr())) break;
+    if (!asksPr && !board.pr) {
+      // The owner's auto-PR switch is the default for a goal that says nothing;
+      // a goal that refuses a pull request has said it, whatever the switch.
+      if (goalRefusesPullRequest(board.goal)) {
+        bus.send(SYSTEM, { type: "note", text: `The goal asks for no pull request, so none is opened: the work stays on ${board.branch}.` });
+        break;
+      }
+      if (!(await getAutoPr())) break;
+    }
     const pr = await teamPullRequest(team, asksPr);
     if (pr === null || team.stopRequested) return;
     if (pr.kind === "reoffered") {

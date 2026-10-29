@@ -179,6 +179,18 @@ export function ciFixNotes(failure: CiFailure, opts: { push: boolean; excerptCha
  * request", read fail-closed the way `goalWantsMerge` reads its negators
  * (a live goal's "Do not open a PR" used to count as asking for one).
  */
+/**
+ * Does a team's goal (or a run's task) REFUSE a pull request — "do not open a
+ * PR", "no pull request", "without a PR"? A refusal outranks the owner's
+ * auto-PR switch: the switch is the default for a goal that says nothing, and
+ * a goal that says no has said it (a live team's "Do not open a pull request"
+ * was published under auto-PR, 2026-10-30).
+ */
+export function goalRefusesPullRequest(goal: string): boolean {
+  if (!/\bpull[\s-]?requests?\b/i.test(goal) && !/\bPRs?\b/.test(goal)) return false;
+  return /\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(goal);
+}
+
 export function goalWantsPullRequest(goal: string): boolean {
   if (goalWantsMerge(goal)) return true;
   if (!/\bpull[\s-]?requests?\b/i.test(goal) && !/\bPRs?\b/.test(goal)) return false;
