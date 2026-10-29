@@ -59,6 +59,20 @@ describe("VoiceTunnelDialog", () => {
     expect(navigate).toHaveBeenCalledWith("https://lively-crab.trycloudflare.com/");
   });
 
+  it("takes the owner to the page they are on, not the tunnel's root (TASK-2058)", async () => {
+    window.history.pushState({}, "", "/apps/chat?tab=2#voice");
+    try {
+      stubPortalStatus({ tunnel: { installed: true, service: "active", url: "https://lively-crab.trycloudflare.com" } });
+      const { navigate } = renderDialog();
+
+      fireEvent.click(await screen.findByTestId("voice-tunnel-go"));
+
+      expect(navigate).toHaveBeenCalledWith("https://lively-crab.trycloudflare.com/apps/chat?tab=2#voice");
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
   it("says the tunnel is off and names the setting, with no dead link", async () => {
     stubPortalStatus({ tunnel: { installed: true, service: "inactive", url: null } });
     renderDialog();
