@@ -24,6 +24,8 @@ vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // GET decorates its rows with the gateway's thinking levels; no gateway here.
+  gatewayIsAbsent: vi.fn(() => true),
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
@@ -125,6 +127,7 @@ async function postSource(POST: (r: Request) => Promise<Response>, source: strin
  * `option.model`, i.e. door two, from a button that says "make this default".
  */
 describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
+  let GET: () => Promise<Response>;
   let POST: (request: Request) => Promise<Response>;
 
   beforeEach(async () => {
@@ -151,7 +154,7 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
     vi.mocked(readConfig).mockResolvedValue(codexSubscriptionBox([OFF_SURFACE]) as never);
     vi.mocked(fsp.readFile).mockRejectedValue(new Error("ENOENT") as never);
 
-    POST = (await import("@/app/setup-api/chat/model/route")).POST;
+    ({ GET, POST } = await import("@/app/setup-api/chat/model/route"));
   });
 
   /** Nothing was written and the gateway was not bounced. */
@@ -231,6 +234,90 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
       `openai/${ON_SURFACE}`,
+    ]);
+  });
+
+  // TASK-2055. This box's config store still names `openai` (the beforeEach
+  // fixture) — the provider hint the picker builds a row from. On its own it
+  // built an available "OpenAI GPT" row, the API-key one, on a box whose only
+  // OpenAI credential is the ChatGPT sign-in: a row every pick on was refused.
+  it("offers no OpenAI API-key row on a box signed in with ChatGPT only", async () => {
+    const body = await (await GET()).json();
+
+    const providers = body.options.map((option: { provider: string | null }) => option.provider);
+    expect(providers).toContain("codex");
+    expect(providers).not.toContain("openai");
+  });
+
+  it("still offers both OpenAI rows on a box holding the API key too", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      ...codexSubscriptionBox([ON_SURFACE]),
+      auth: {
+        profiles: {
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const rows = body.options.filter((option: { available: boolean; isLocal: boolean }) => option.available && !option.isLocal);
+    expect(rows.map((option: { provider: string }) => option.provider).sort()).toEqual(["codex", "openai"]);
+  });
+
+  it.each([ON_SURFACE, OFF_SURFACE])(
+    "refuses %s picked on the OpenAI API-key row of a keyless box, naming what is missing",
+    async (modelId) => {
+      // From a tab that still shows the row. A model the subscription runs was
+      // moved onto the ChatGPT account without a word; any other was refused
+      // as "requires OpenAI API-key mode" — a mode the owner had picked.
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: `openai/${modelId}`, provider: "openai" }),
+      }));
+
+      expect(response.status).toBe(400);
+      const refusal = await response.json();
+      expect(refusal).toMatchObject({ kind: "provider_credential_missing", provider: "openai" });
+      expect(refusal.error).toContain("OpenAI GPT needs an OpenAI API key");
+      expect(refusal.error).toContain("signed in with ChatGPT only");
+      expect(refusal.error).toContain("OpenAI Codex row");
+      expectNoSideEffects();
+    },
+  );
+
+  it("refuses an OpenAI pick on a box with no OpenAI credential at all, saying so", async () => {
+    // Was "gpt-5.5 requires OpenAI API-key mode. ChatGPT subscription auth
+    // supports … GPT-5.5 …" — a sentence that refuses a model it lists.
+    vi.mocked(readConfig).mockResolvedValue({
+      ...codexSubscriptionBox([ON_SURFACE]),
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+    } as never);
+
+    const response = await postModel(POST, `openai/${ON_SURFACE}`);
+
+    expect(response.status).toBe(400);
+    const refusal = await response.json();
+    expect(refusal).toMatchObject({ kind: "provider_credential_missing", provider: "openai" });
+    expect(refusal.error).toContain("OpenAI GPT is not connected on this box");
+    expectNoSideEffects();
+  });
+
+  it("still routes a keyless pick on the ChatGPT row through the subscription", async () => {
+    vi.mocked(readConfig).mockResolvedValue(codexSubscriptionBox([ON_SURFACE]) as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: `openai/${ON_SURFACE}`, provider: "codex" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      `agents.defaults.models["openai/${ON_SURFACE}"].agentRuntime.id`,
+      "codex",
     ]);
   });
 

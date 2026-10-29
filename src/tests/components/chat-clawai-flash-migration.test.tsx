@@ -327,5 +327,11 @@ describe("a migration that lost the config-mutation race", () => {
 
     expect(occurrences("Selected AI provider is not configured")).toBe(1);
     expect(document.body.textContent).not.toContain(BUSY_COPY);
+    // Says the chat did NOT move, and to what, before the route's reason
+    // (TASK-2055) — a bare "Error:" left the owner guessing.
+    expect(document.body.textContent).toContain(
+      "Could not switch the chat to DeepSeek V4 Flash. Selected AI provider is not configured",
+    );
+    expect(document.body.textContent).not.toContain("Error: Selected AI provider");
   });
 });
