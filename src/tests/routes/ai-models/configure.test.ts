@@ -2564,7 +2564,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.6");
+    expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.7");
     expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
     // No `models.providers.xai` at all — routing is the plugin's.
     expect(commands.some((command) => command.includes("models.providers.xai"))).toBe(false);
@@ -2651,7 +2651,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
       expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"oauth"} --json');
-      expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.6");
+      expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.7");
       expect(commands.some((command) => command.includes("models.providers.xai"))).toBe(false);
       expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
         ai_model_configured: true,

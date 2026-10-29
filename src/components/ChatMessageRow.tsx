@@ -11,6 +11,7 @@ import { splitEmailRefs, streamingEmailRefsText } from '@/lib/chat-email-refs'
 import { EmailCard } from '@/lib/chat-email'
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
+import ChatNoticeActions from '@/components/ChatNoticeActions'
 import { samePlainData } from '@/lib/same-plain-data'
 
 // ── One bubble of the mascot chat's transcript ──
@@ -31,7 +32,7 @@ import { samePlainData } from '@/lib/same-plain-data'
 // exactly where it was.
 
 /** The popup's message: the stored one, plus the colour of a system notice. */
-export type ChatRowMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped' }
+export type ChatRowMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped' | 'notice' }
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -57,6 +58,10 @@ export interface ChatMessageRowProps {
   cloudSpoken: readonly string[]
   /** Clip URLs the browser would not start on its own. Same rule. */
   autoplayBlocked: readonly string[]
+  /** A notice's "Settings → Providers". Stable, like the other callbacks. */
+  onOpenProviders?: () => void
+  /** A notice's one-click switch to another provider. Stable. */
+  onSwitchTo?: (target: { model: string; label: string; provider: string | null }) => void
 }
 
 // Messages are compared by VALUE: a history reconcile rebuilds EVERY message
@@ -82,9 +87,12 @@ function sameRowProps(prev: ChatMessageRowProps, next: ChatMessageRowProps): boo
 }
 
 function ChatMessageRowImpl({
-  msg, longKey, expanded, onToggleExpand, served, t, onPreview, onOpenEmail, cloudSpoken, autoplayBlocked,
+  msg, longKey, expanded, onToggleExpand, served, t, onPreview, onOpenEmail, cloudSpoken, autoplayBlocked, onOpenProviders, onSwitchTo,
 }: ChatMessageRowProps) {
   const isSuccess = msg.variant === 'success';
+  // A fact about the owner's account (no API quota right now), not a fault:
+  // calm blue, never the red of an error.
+  const isNotice = msg.role === 'system' && msg.variant === 'notice';
   // Where the owner pressed Stop. Not a verdict, so neither green nor red, and
   // worded here rather than stored: the marker a box replays from its
   // transcript has to read in the language the chat is in NOW.
@@ -130,8 +138,8 @@ function ChatMessageRowImpl({
         padding: '6px 12px',
         borderRadius: 10,
         background: 'rgba(255,255,255,0.02)',
-        border: `1px solid ${isStopped ? 'rgba(255,255,255,0.12)' : isSuccess ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.3)'}`,
-        color: isStopped ? 'rgba(255,255,255,0.55)' : isSuccess ? '#86efac' : '#fca5a5',
+        border: `1px solid ${isStopped ? 'rgba(255,255,255,0.12)' : isSuccess ? 'rgba(34,197,94,0.25)' : isNotice ? 'rgba(147,197,253,0.3)' : 'rgba(239,68,68,0.3)'}`,
+        color: isStopped ? 'rgba(255,255,255,0.55)' : isSuccess ? '#86efac' : isNotice ? '#bfdbfe' : '#fca5a5',
         fontSize: 12.5,
         lineHeight: 1.45,
         wordBreak: 'break-word',
@@ -201,6 +209,7 @@ function ChatMessageRowImpl({
           </div>
         )}
         {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
+        {isNotice && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {isLongUser && (
           <button
             type="button"

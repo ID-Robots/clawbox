@@ -64,17 +64,19 @@ describe("provider-models", () => {
       expect(catalog?.defaultModelId).toBe("claude-opus-5-5");
     });
 
-    // xAI (Grok): the cold-start list is the two ids the core's bundled xai
-    // plugin leads its manifest with, and the default is the first of them.
+    // xAI (Grok): the cold-start list is the three ids the core's bundled xai
+    // plugin leads its manifest with, and the default is its curated default,
+    // Grok 4.7 (core 2026.10.7). 4.6 and 4.5 stay: xAI still serves both.
     it("carries an xai catalogue whose default is a row it lists", () => {
       const catalog = getProviderCatalog("xai");
       expect(catalog?.provider).toBe("xai");
-      expect(catalog?.defaultModelId).toBe("grok-4.6");
-      expect(catalog?.models.map((m) => m.id)).toEqual(["grok-4.6", "grok-4.5"]);
+      expect(catalog?.defaultModelId).toBe("grok-4.7");
+      expect(catalog?.models.map((m) => m.id)).toEqual(["grok-4.7", "grok-4.6", "grok-4.5"]);
       expect(catalog?.allowCustom).toBe(true);
       expect(
         (catalog?.models ?? []).filter((m) => m.hint?.startsWith("Default")).map((m) => m.id),
-      ).toEqual(["grok-4.6"]);
+      ).toEqual(["grok-4.7"]);
+      expect(catalog?.models[0]).toMatchObject({ id: "grok-4.7", label: "Grok 4.7" });
       // The live-catalogue gate and the curated table have to agree, or the
       // picker asks the route for a provider it then calls unknown.
       expect(isCatalogProvider("xai")).toBe(true);

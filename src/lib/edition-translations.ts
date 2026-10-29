@@ -13,6 +13,7 @@ import { anthropicAccountsEn } from "./edition-translations/en-anthropic-account
 import { whatsNewEn } from "./edition-translations/en-whats-new";
 import { usersEn } from "./edition-translations/en-users";
 import { dbMaintenanceEn } from "./edition-translations/en-db-maintenance";
+import { modelAvailabilityEn } from "./edition-translations/en-model-availability";
 import { bg } from "./edition-translations/bg";
 import { de } from "./edition-translations/de";
 import { es } from "./edition-translations/es";
@@ -69,6 +70,7 @@ export const editionEn: Record<string, string> = {
   ...whatsNewEn,
   ...usersEn,
   ...dbMaintenanceEn,
+  ...modelAvailabilityEn,
 };
 
 const overrides: Record<Exclude<Locale, "en">, Record<string, string>> = {
