@@ -4133,9 +4133,14 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   // In the SHARED half, not a provider's: a harness that could not get a model
   // to answer is not a fact about which account was going to pay, and a box in
   // that state cannot run on either.
+  //
+  // Except for Codex: only a Claude Code run records a fault (finishRun), so
+  // it is a fact about Claude Code's harness, and an `openai` run is judged
+  // without it below.
   const fault: HarnessFault | null = parseHarnessFault(faultRaw) ?? parseHarnessFault(liveHarnessFault);
   const harnessHealthy = fault === null;
-  if (fault) shared.push(harnessFaultProblem(fault));
+  const faultProblem = fault ? harnessFaultProblem(fault) : null;
+  if (faultProblem) shared.push(faultProblem);
   const credentialProblem = (id: CodingProvider): string[] => {
     if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
     if (id === "openai") {
@@ -4157,7 +4162,7 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     const own = runsOnCodex(id)
       ? credentialProblem(id)
       : [...(claudeShared ? [] : claudeProblems), ...credentialProblem(id)];
-    const blocking = runsOnCodex(id) ? shared.filter((m) => !claudeProblems.includes(m)) : shared;
+    const blocking = runsOnCodex(id) ? shared.filter((m) => !claudeProblems.includes(m) && m !== faultProblem) : shared;
     return {
       id,
       ready: blocking.length === 0 && own.length === 0,
@@ -7327,10 +7332,14 @@ async function prepareRunMcp(run: CodingRun, project: string | null): Promise<vo
   // secret), the harness servers and their credentials do not — and the feed
   // says which, rather than leaving the owner to wonder where a tool went.
   if (runsOnCodex(run.provider)) {
-    const unavailable = Object.keys(plan.servers);
+    const harness = Object.keys(plan.servers);
+    // One line for everything ticked this run will not have: the harness
+    // servers, and the ones the box could not find at all (said below for a
+    // Claude run).
+    const unavailable = [...harness, ...plan.missing];
     if (unavailable.length > 0) pushProgress(run, RUNNER_STEP.mcpServersMissing(unavailable.map(mcpEntryLabel)));
     if (!plan.readOnlyTools) return;
-    plan = { ...plan, servers: {}, names: plan.names.filter((n) => !unavailable.includes(n)), secrets: [], allowedTools: [], disallowedTools: [] };
+    plan = { ...plan, servers: {}, names: plan.names.filter((n) => !harness.includes(n)), missing: [], secrets: [], allowedTools: [], disallowedTools: [] };
   }
   if (plan.names.length > 0) {
     runMcpPlan.set(run.id, plan);

@@ -605,6 +605,18 @@ describe("readiness, per provider", () => {
     expect(noCli.codexInstalled).toBe(false);
   });
 
+  it("never holds an OpenAI run back for a fault only Claude Code's harness can have", async () => {
+    // A fault is recorded by a Claude Code run that could not get a model to
+    // answer; Codex never records one. It still holds every Claude provider.
+    getOpenAIConnection.mockResolvedValue(OPENAI_VIA_CHATGPT);
+    const out = await readiness({ clawai_token: "tok", [CODING_AGENT_PROVIDER_CONFIG_KEY]: "openai", coding_agent_harness_fault: { at: Date.now() } });
+    expect(out.harnessHealthy).toBe(false);
+    const byId = Object.fromEntries(out.providers.map((p) => [p.id, p]));
+    expect(byId["clawbox-ai"].ready).toBe(false);
+    expect(byId.openai.problems).toEqual([]);
+    if (out.capabilityDropAvailable) expect(byId.openai.ready).toBe(true);
+  });
+
   it("never holds an OpenAI run back for Claude Code's own missing pieces", async () => {
     // Whether Claude Code is on this machine is the machine's business; what
     // is pinned is that NO Claude Code sentence is ever an OpenAI problem, and

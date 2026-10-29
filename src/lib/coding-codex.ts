@@ -75,16 +75,16 @@ function isOpenAIModel(model: string): model is OpenAIModel {
  * The four fixed levels and `max` carry the same name on both CLIs and pass
  * through, lowered to the most the model accepts: asking a model for an effort
  * it does not offer is a refused request, not a softer one. `ultracode` is Claude
- * Code's orchestration mode on top of xhigh, and Codex has no Workflow tool for
- * its fan-out half; its "think as hard as it can" half is the model's top
- * level (`ultra` where the model has it). Anything unrecognised reads as the
- * box's default, xhigh.
+ * Code's orchestration mode ON TOP OF xhigh (EFFORT_LEVELS in coding-agent.ts):
+ * Codex has no Workflow tool for its fan-out half, so what is left is its
+ * thinking level, xhigh — never Codex's own `ultra`, which no Claude run's
+ * level reaches. Anything unrecognised reads as the box's default, xhigh.
  */
 export function codexReasoningEffort(effort: string, model: string | null): CodexReasoningEffort {
   const allowed = model && isOpenAIModel(model) ? CODEX_MODEL_EFFORTS[model] : COMMON_EFFORTS;
-  const top = allowed[allowed.length - 1];
-  if (effort === "ultracode") return top;
-  const wanted = (CODEX_REASONING_EFFORTS as readonly string[]).includes(effort) ? (effort as CodexReasoningEffort) : "xhigh";
+  const level = effort === "ultracode" ? "xhigh" : effort;
+  // Only the box's own levels: `ultra` is Codex's word, and no box setting names it.
+  const wanted = (CODEX_REASONING_EFFORTS as readonly string[]).includes(level) && level !== "ultra" ? (level as CodexReasoningEffort) : "xhigh";
   if (allowed.includes(wanted)) return wanted;
   // Lower, never higher: a level the model lacks is answered with the nearest
   // one beneath it, so a run never thinks harder (and costs more) than asked.
