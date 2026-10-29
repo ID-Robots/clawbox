@@ -82,13 +82,30 @@ export interface RoleModelChoice {
 
 export type RoleModels = Partial<Record<ModelRole, RoleModelChoice>>;
 
-/** What a role gets with nothing stored: its tier, and the effort it never goes above (null: the owner's). */
-export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { model: RoleModelTier; effortCap: RoleEffort | null }>> = {
-  planner: { model: "economy", effortCap: "xhigh" },
-  worker: { model: "standard", effortCap: null },
-  reviewer: { model: "economy", effortCap: "xhigh" },
-  bulk: { model: "standard", effortCap: null },
+/**
+ * What a role gets with nothing stored: its tier, the effort it never goes
+ * above and the steps it never gets more of (null: the owner's).
+ *
+ * The two caps hold even against a stored per-role effort: a planner or a
+ * reviewer reads and answers, and ultracode's fan-out (coding-agent.ts,
+ * WORKFLOW_TOOL) has nothing to orchestrate for a run that writes nothing —
+ * measured on the owner's box, a planner stored on ultracode spent 5.7M tokens
+ * reading one folder. The step cap is the same thought: a reader's answer is
+ * a page, not a project, and the owner's ceiling (up to 2,000) is sized for
+ * the worker that writes one.
+ */
+export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { model: RoleModelTier; effortCap: RoleEffort | null; turnsCap: number | null }>> = {
+  planner: { model: "economy", effortCap: "xhigh", turnsCap: 100 },
+  worker: { model: "standard", effortCap: null, turnsCap: null },
+  reviewer: { model: "economy", effortCap: "xhigh", turnsCap: 100 },
+  bulk: { model: "standard", effortCap: null, turnsCap: null },
 };
+
+/** The steps a role's run gets: the owner's ceiling, or the role's cap where it has one. */
+export function roleMaxTurns(role: ModelRole, ownerMaxTurns: number): number {
+  const cap = ROLE_DEFAULTS[role].turnsCap;
+  return cap === null ? ownerMaxTurns : Math.min(ownerMaxTurns, cap);
+}
 
 /**
  * A role whose unset halves are another role's: a bulk task with nothing
@@ -366,8 +383,11 @@ export function resolveRoleRun(
     tier = "standard";
   }
 
+  // The cap holds against a stored effort too (see ROLE_DEFAULTS): the
+  // owner's choice can lower a planner or a reviewer, never lift it past xhigh.
   const cap = ROLE_DEFAULTS[effortRole].effortCap;
-  const effort = stored[effortRole]?.effort ?? (cap ? weakerEffort(ownerEffort, cap) : ownerEffort);
+  const chosen = stored[effortRole]?.effort ?? ownerEffort;
+  const effort = cap ? weakerEffort(chosen, cap) : chosen;
   return { provider, model, effort, tier, auto };
 }
 

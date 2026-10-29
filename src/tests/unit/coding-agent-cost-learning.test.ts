@@ -160,7 +160,8 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
   it("starts a planner on the plan's flash tier at no more than xhigh, and a worker on the owner's own", async () => {
     makePlainProject("plain");
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
-    expect(planner).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "xhigh" });
+    // A reader's steps are capped at 100 (ROLE_DEFAULTS.turnsCap), under the owner's 200.
+    expect(planner).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "xhigh", maxTurns: 100 });
     await finished(planner.id);
     // What the harness was actually handed, and what the record keeps after a reload.
     expect(handed(planner.id, "model")).toBe("deepseek-v4-flash");
@@ -169,7 +170,7 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
 
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     // The owner's own: the plan picks the model, and the effort is the box's default.
-    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "xhigh" });
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "xhigh", maxTurns: 200 });
     await finished(worker.id);
     expect(handed(worker.id, "model")).toBe("");
 
@@ -189,7 +190,8 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
     expect(planner).toMatchObject({ requestedModel: "deepseek-v4-flash", effort: "low" });
     await finished(planner.id);
     const reviewer = await lib.startRun({ task: "review", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "reviewer", taskId: "t1" } });
-    expect(reviewer).toMatchObject({ requestedModel: null, effort: "max" });
+    // The owner's model choice stands; the effort is held at the reader's cap (ROLE_DEFAULTS.effortCap).
+    expect(reviewer).toMatchObject({ requestedModel: null, effort: "xhigh" });
     await finished(reviewer.id);
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     expect(worker).toMatchObject({ requestedModel: "deepseek-v4-flash", effort: "low" });
@@ -201,6 +203,24 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
     const run = await lib.startRun({ task: "build it", directory: "plain", source: "owner" });
     expect(run).toMatchObject({ requestedModel: null, effort: "xhigh" });
     await finished(run.id);
+  });
+
+  it("never starts a read-only run on ultracode, whatever the owner's setting or role choice says", async () => {
+    // Ultracode is xhigh plus the Workflow fan-out, and a run with no shell
+    // has nothing to fan out: the clamp in startRun lands on the record and
+    // on the harness's command line. A writing run keeps the owner's mode.
+    makePlainProject("plain");
+    writeConfig({ coding_agent_effort: "ultracode", coding_agent_max_turns: 2000, coding_agent_role_models: { planner: { effort: "ultracode" } } });
+    const reader = await lib.startRun({ task: "look", directory: "plain", source: "owner", readOnly: true });
+    expect(reader).toMatchObject({ effort: "xhigh", maxTurns: 2000 });
+    await finished(reader.id);
+    expect(handed(reader.id, "argv")).not.toMatch(/ultracode|Workflow/);
+    const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
+    expect(planner).toMatchObject({ effort: "xhigh", maxTurns: 100 });
+    await finished(planner.id);
+    const writer = await lib.startRun({ task: "build it", directory: "plain", source: "owner" });
+    expect(writer).toMatchObject({ effort: "ultracode", maxTurns: 2000 });
+    await finished(writer.id);
   });
 
   it("answers the choices in the status, `auto` on a box that never chose, and saves an edit", async () => {

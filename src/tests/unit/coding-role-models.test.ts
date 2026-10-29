@@ -20,6 +20,7 @@ import {
   ROLE_AUTO_FOLLOWS,
   ROLE_DEFAULTS,
   ROLE_EFFORT_LEVELS,
+  roleMaxTurns,
   roleModelOptions,
   roleModelsFrom,
   roleModelsView,
@@ -192,10 +193,44 @@ describe("the defaults — a box that never chose", () => {
   });
 
   it("says so in the table the panel draws from", () => {
-    expect(ROLE_DEFAULTS.planner).toEqual({ model: "economy", effortCap: "xhigh" });
-    expect(ROLE_DEFAULTS.reviewer).toEqual({ model: "economy", effortCap: "xhigh" });
-    expect(ROLE_DEFAULTS.worker).toEqual({ model: "standard", effortCap: null });
+    expect(ROLE_DEFAULTS.planner).toEqual({ model: "economy", effortCap: "xhigh", turnsCap: 100 });
+    expect(ROLE_DEFAULTS.reviewer).toEqual({ model: "economy", effortCap: "xhigh", turnsCap: 100 });
+    expect(ROLE_DEFAULTS.worker).toEqual({ model: "standard", effortCap: null, turnsCap: null });
     expect(ROLE_DEFAULTS.bulk).toEqual(ROLE_DEFAULTS.worker);
+  });
+});
+
+describe("the caps on a role that reads", () => {
+  it("holds a planner and a reviewer at xhigh even when the owner stored more", () => {
+    // Ultracode is xhigh plus the Workflow fan-out, and a reader has nothing
+    // to fan out; `max` is the same money for the same page of answer.
+    for (const role of ["planner", "reviewer"] as const) {
+      for (const effort of ["ultracode", "max"] as const) {
+        expect(resolveRoleRun(role, "clawbox-ai", null, "ultracode", { [role]: { effort } }).effort).toBe("xhigh");
+        expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "low", { [role]: { effort } }).effort).toBe("xhigh");
+      }
+      // The cap is a ceiling, never a floor: a lower stored choice stands.
+      expect(resolveRoleRun(role, "clawbox-ai", null, "ultracode", { [role]: { effort: "medium" } }).effort).toBe("medium");
+    }
+  });
+
+  it("leaves a worker, and bulk work following it, on whatever the owner stored", () => {
+    expect(resolveRoleRun("worker", "clawbox-ai", null, "low", { worker: { effort: "ultracode" } }).effort).toBe("ultracode");
+    expect(resolveRoleRun("bulk", "clawbox-ai", null, "low", { worker: { effort: "ultracode" } }).effort).toBe("ultracode");
+    expect(resolveRoleRun("bulk", "clawbox-ai", null, "low", { bulk: { effort: "max" } }).effort).toBe("max");
+  });
+
+  it("caps a planner's and a reviewer's steps at 100, and lets the owner's ceiling stand below it", () => {
+    for (const role of ["planner", "reviewer"] as const) {
+      expect(roleMaxTurns(role, 2000)).toBe(100);
+      expect(roleMaxTurns(role, 200)).toBe(100);
+      expect(roleMaxTurns(role, 40)).toBe(40);
+    }
+    // The owner's ceiling is sized for the roles that write.
+    for (const role of ["worker", "bulk"] as const) {
+      expect(roleMaxTurns(role, 2000)).toBe(2000);
+      expect(roleMaxTurns(role, 40)).toBe(40);
+    }
   });
 });
 
@@ -218,7 +253,8 @@ describe("old settings — the tier-only shape a box may already hold", () => {
     const stored = roleModelsFrom(OLD);
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "xhigh", auto: false });
     expect(resolveRoleRun("planner", "clawbox-ai", null, "ultracode", stored)).toEqual({ provider: "clawbox-ai", tier: "standard", model: null, effort: "xhigh", auto: false });
-    expect(resolveRoleRun("reviewer", "clawbox-ai", null, "low", stored)).toEqual({ provider: "clawbox-ai", tier: "economy", model: "deepseek-v4-flash", effort: "max", auto: true });
+    // The one change since: a stored `max` for a reader is held at the cap.
+    expect(resolveRoleRun("reviewer", "clawbox-ai", null, "low", stored)).toEqual({ provider: "clawbox-ai", tier: "economy", model: "deepseek-v4-flash", effort: "xhigh", auto: true });
     expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "low", auto: false });
   });
 

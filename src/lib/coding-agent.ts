@@ -432,6 +432,7 @@ import {
   relativeModelCost,
   resolveRoleRun,
   ROLE_AUTO,
+  roleMaxTurns,
   roleModelsFrom,
   roleModelsView,
   type ModelRole,
@@ -1411,12 +1412,24 @@ export const HELPER_MODEL: Readonly<Record<CodingProvider, string>> = {
   openai: "gpt-5.6-luna",
 };
 
-/** The `--agents` payload for a run on this provider. */
-export function subagentDefinitionsFor(provider: CodingProvider): Record<string, unknown> {
+/** The helpers that run a command: a read-only run has no shell to hand them. */
+const SHELL_HELPERS: ReadonlySet<string> = new Set(["tester", "workflow-subagent"]);
+
+/**
+ * The `--agents` payload for a run on this provider. A read-only run gets no
+ * tester and no workflow-subagent: both carry Bash, which the run itself does
+ * not have (READ_ONLY_TOOLS), and three read-only team runs sent the tester
+ * anyway before this. The two no-Bash decoys (`general-purpose`, `claude`)
+ * stay: they exist to catch a name the brief cannot stop a model from typing.
+ */
+export function subagentDefinitionsFor(provider: CodingProvider, opts: { readOnly?: boolean } = {}): Record<string, unknown> {
   const model = HELPER_MODEL[provider] ?? HELPER_MODEL[DEFAULT_CODING_PROVIDER];
-  if (model === HELPER_MODEL["clawbox-ai"]) return SUBAGENT_DEFINITIONS;
+  const definitions = opts.readOnly
+    ? Object.fromEntries(Object.entries(SUBAGENT_DEFINITIONS).filter(([name]) => !SHELL_HELPERS.has(name)))
+    : SUBAGENT_DEFINITIONS;
+  if (model === HELPER_MODEL["clawbox-ai"]) return definitions;
   return Object.fromEntries(
-    Object.entries(SUBAGENT_DEFINITIONS).map(([name, def]) => [name, { ...def, model }]),
+    Object.entries(definitions).map(([name, def]) => [name, { ...def, model }]),
   );
 }
 
@@ -6395,7 +6408,7 @@ const HEADLESS_BRIEF_TEMPLATE = [
   "For live web verification, start your app as a background child in this working folder and use browser_open on http://127.0.0.1:PORT (an unprivileged port). Only a listener owned by this run is allowed; other local services stay blocked. `node \"$CLAWBOX_PREVIEW\" --ttl 900` does this for you when the project has no server of its own — it builds, serves the folder on an ephemeral loopback port and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim. Stop test servers when finished; Team workers have their remaining process group cleaned up automatically.",
   "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open its live app with browser_open, or use browser_view_local for a standalone HTML file and read the description of what actually renders before you report done.",
   "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
-  "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
+  "You have a limited number of steps: each reply you send spends one step, however many tool calls it carries, so put independent calls in one message. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
   // Bench run run-droy3ws4 (2026-09-03) COPIED its checker into the evidence
   // folder and left the original in the project: the grep patterns inside it
   // ("TODO", "lorem ipsum") and the synopses it checked for then counted as
@@ -6509,7 +6522,7 @@ export const PR_DRAFT_BRIEF =
 export const READ_ONLY_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob and the read-only helper agents, no shell, no browser and no way to write — do not try to edit, create or run anything; your ANSWER is your final message.",
-  "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps and every tool call spends one.",
+  "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps: each reply you send spends one step, however many tool calls it carries, so put independent calls in one message.",
   "The task text may carry copy-paste artifacts; read past them. Your final message is delivered to the party that started you and is read by a program as well as a person: answer in exactly the form the task asks for, with nothing before or after it.",
 ].join(" ");
 
@@ -6965,6 +6978,11 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
     opts.readOnly
       ? READ_ONLY_BRIEF
       : (opts.effort === ULTRACODE_EFFORT ? `${headless} ${ULTRACODE_BRIEF}` : headless),
+    // The ceiling itself, so "a limited number of steps" is a figure the model
+    // can budget against. Appended, never written into the briefs above: the
+    // constants are compared byte for byte, and a caller without a ceiling
+    // (the contract tests) gets the brief unchanged.
+    ...(typeof opts.maxTurns === "number" ? [`This run has ${opts.maxTurns} steps.`] : []),
     // Only for the run that HAS the tool: a brief that described a picture
     // tool to a run without one would spend steps on a call that is not there.
     // A read-only run holds no media tool either (runMcpTools is skipped for
@@ -7036,7 +7054,10 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // credentials, which is why it is not inline. The strict flag above
     // stays: still nothing the owner did not tick for THIS project.
     if (mcp) args.push("--mcp-config", mcp.configFile);
-    else if (visual || opts.run.team) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual }));
+    // A read-only run holds none of the visual tools either: its server
+    // registers only what is left (a team's `team_message`), so no browser
+    // profile starts and no media allowance is handed to a run that reads.
+    else if (visual || opts.run.team) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual: visual && !opts.readOnly }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
@@ -7053,7 +7074,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
   // Per provider: the helper models named in the definitions are the cheap
   // tier of the account that answers, and the two accounts do not share a
   // model name between them (see HELPER_MODEL).
-  args.push("--agents", JSON.stringify(subagentDefinitionsFor(opts.provider ?? DEFAULT_CODING_PROVIDER)));
+  args.push("--agents", JSON.stringify(subagentDefinitionsFor(opts.provider ?? DEFAULT_CODING_PROVIDER, { readOnly: opts.readOnly === true })));
   {
     // "Bash(*)" — allow EVERY command — rather than withholding the lists.
     // Withholding grants nothing: in headless -p mode the allow-list is what
@@ -7065,7 +7086,9 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // The Workflow tool is listed AND pre-approved under ultracode: listed
     // alone it is refused headlessly (see WORKFLOW_TOOL).
     // A read-only run has no Bash to approve and no browser to drive: it
-    // reads, and the helpers it delegates to read.
+    // reads, and the helpers it delegates to read. Nor the Workflow tool:
+    // startRun never leaves such a run on ultracode, and a resume of a record
+    // from before that clamp must not be handed the fan-out either.
     // `Read(//tmp/**)`: a run may READ what it put in /tmp — the HTML it
     // curled out of its own server, a build log — without a permission
     // prompt it cannot answer in headless mode. Reads only, and only there:
@@ -7091,7 +7114,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // the read-only ClawBox tools by name, a harness server as a whole or by
     // the tools its own filter names.
     const mcpAllowed = mcp ? [...(mcp.readOnlyTools ? MCP_READ_ONLY_TOOLS : []), ...mcp.allowedTools] : [];
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT && !opts.readOnly ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -12712,11 +12735,14 @@ export function buildCodexRunArgs(opts: RunArgsOptions & { model: string; readOn
     // not have; its thinking half is the reasoning effort (codexReasoningEffort).
     effort: opts.effort === ULTRACODE_EFFORT ? "xhigh" : opts.effort,
     noHelpers: true,
+    // `codex exec` takes no step ceiling (buildCodexArgs), so the brief must
+    // not promise one: "This run has N steps." is a Claude run's sentence.
+    maxTurns: undefined,
   });
   const run = opts.run;
   const mcpServers: Record<string, CodexMcpServer> = {};
   if (run && !opts.readOnly && (visual || run.team || opts.readOnlyTools)) {
-    mcpServers.clawbox = runClawboxServer(run, { visual, readOnlyTools: opts.readOnlyTools === true });
+    mcpServers.clawbox = runClawboxServer(run, { visual: visual && !opts.readOnly, readOnlyTools: opts.readOnlyTools === true });
   } else if (run && opts.readOnly && run.team) {
     // A read-only team run still speaks to its team (MCP_TEAM_TOOL).
     mcpServers.clawbox = runClawboxServer(run, { visual: false, readOnlyTools: false });
@@ -13754,11 +13780,19 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (modelRole) {
       const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRoleModels());
       settings.effort = role.effort;
+      // A reading role's step cap (ROLE_DEFAULTS.turnsCap): the owner's
+      // ceiling is sized for the worker that writes.
+      settings.maxTurns = roleMaxTurns(modelRole, settings.maxTurns);
       if (!inherited) {
         settings.provider = role.provider;
         settings.model = role.model;
       }
     }
+    // A run that may only read never runs on ultracode: the mode is xhigh plus
+    // the Workflow fan-out, and a run with no shell has nothing to fan out
+    // (buildRunArgs hands it no Workflow tool). The thinking half stays. The
+    // shell reviewer is not read-only and keeps whatever its role resolved.
+    if (input.readOnly === true && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
     // that run's account and folder — the automatic review pass and every
