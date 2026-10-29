@@ -635,8 +635,10 @@ describe("a run", () => {
     makeProject("site");
     const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
     expect(first.status).toBe("failed");
-    // "steps" in the owner's words; the number is the run's own ceiling.
-    expect(first.error).toMatch(/60 steps/);
+    // "step limit" in the owner's words, the turns taken against the run's
+    // own ceiling, and the way on (the Continue action) named.
+    expect(first.error).toMatch(/step limit \(60 of \d+\)/);
+    expect(first.error).toMatch(/Continue/);
     expect(first.sessionId).toBe("sess-abc-123");
 
     installFakeWrapper(HAPPY_BODY);
