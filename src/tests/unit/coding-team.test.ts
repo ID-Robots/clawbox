@@ -87,7 +87,7 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => {
 // the owner-notice ring or Telegram (coding-agent-notify.test.ts has those).
 const notify = vi.hoisted(() => ({
   announceCodingAgent: vi.fn(async () => undefined),
-  announceCodingTeam: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn<(board: import("@/lib/coding-team-board").TeamBoard) => Promise<undefined>>(async () => undefined),
   announceAnthropicLimit: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/coding-agent-notify", () => notify);

@@ -440,8 +440,9 @@ describe("how a worker learns whom it can reach", () => {
     }
     const retry = board.tasks[2];
     Object.assign(retry, { attempts: 1, review: { verdict: "rejected", notes: "The badge still counts removed items.", at: 1 } });
+    const { TEAM_TASK_CHARS } = await import("@/lib/coding-agent");
     const text = team.workerTask(board, retry);
-    expect(text.length).toBeLessThanOrEqual(4_000);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(text).toContain("A previous attempt was rejected: The badge still counts removed items.");
     expect(text).toContain("run-aaaaaaaa on t1");
   });

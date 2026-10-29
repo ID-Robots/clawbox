@@ -533,7 +533,7 @@ describe("teamMetrics", () => {
     ];
     const task = (id: string, extra: Partial<import("@/lib/coding-team-board").TeamTask>) => ({
       task_id: id, task_description: id, assigned_to: null, status: "pending" as const, result: null, depends_on: [], files_hint: [], review: null,
-      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, ciReoffers: 0, created_at: 1, updated_at: 1, ...extra,
+      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, ciReoffers: 0, budgetReoffers: 0, created_at: 1, updated_at: 1, ...extra,
     });
     b.tasks = [
       task("t1", { status: "complete", attempts: 1, review: { verdict: "accepted", notes: "", at: 1 } }),
