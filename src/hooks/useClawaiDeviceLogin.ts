@@ -15,10 +15,10 @@ import { humanizeApiError } from "@/lib/api-error-message";
  * then answers with a device-made code, so a request still open after this is
  * one nothing will answer — and the button it holds says "Connecting…" forever.
  */
-export const CLAWAI_START_TIMEOUT_MS = 30_000;
+const CLAWAI_START_TIMEOUT_MS = 30_000;
 
 /** One poll tick's bound. The route gives the portal 15 s; a tick past this is retried. */
-export const CLAWAI_POLL_REQUEST_TIMEOUT_MS = 30_000;
+const CLAWAI_POLL_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * The whole poll's bound, from the code being shown: the code's 15-minute life,
@@ -26,7 +26,7 @@ export const CLAWAI_POLL_REQUEST_TIMEOUT_MS = 30_000;
  * has ended by then, so a flow still polling is one whose answers are not
  * arriving — it ends in an error the owner can act on, never in a spinner.
  */
-export const CLAWAI_POLL_CEILING_MS = 20 * 60_000;
+const CLAWAI_POLL_CEILING_MS = 20 * 60_000;
 
 const START_TIMED_OUT = "Failed: ClawBox AI did not answer in time. Check the device's internet connection and try again.";
 const POLL_TIMED_OUT = "Failed: the ClawBox AI sign-in did not finish in time. Request a new code and try again.";

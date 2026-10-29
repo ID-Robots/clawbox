@@ -1,12 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import {
-  CLAWAI_POLL_CEILING_MS,
-  CLAWAI_POLL_REQUEST_TIMEOUT_MS,
-  CLAWAI_START_TIMEOUT_MS,
-  useClawaiDeviceLogin,
-} from "@/hooks/useClawaiDeviceLogin";
+import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
 
 /**
  * The ClawBox AI sign-in must end, whatever the box does or does not answer.
@@ -18,6 +13,16 @@ import {
  * good. Every request now has a deadline and the poll has a ceiling, and each
  * ends in a "Failed: …" sentence the host renders.
  */
+
+// The bounds as a contract, not as the hook's constants. `/clawai/start` and
+// each poll give the portal 15 s, so a request must be allowed longer than
+// that and must not outlive a minute. The code lives 15 minutes and the
+// finaliser has 3 more, so the poll may not give up before 18 minutes and must
+// have given up by 25.
+const SERVER_WAIT_MS = 16_000;
+const REQUEST_BOUND_MS = 60_000;
+const FLOW_FLOOR_MS = 18 * 60_000;
+const FLOW_BOUND_MS = 25 * 60_000;
 
 const realFetch = globalThis.fetch;
 
@@ -61,15 +66,15 @@ describe("the ClawBox AI device login never spins forever", () => {
     }) as unknown as typeof fetch;
     const { hook, onError, onBusyChange } = mount();
 
-    let started!: Promise<void>;
-    act(() => { started = hook.result.current.start(); });
+    // Not awaited: a kick-off with no deadline never settles, and the
+    // assertions below are what must say so.
+    act(() => { void hook.result.current.start(); });
     expect(onBusyChange).toHaveBeenLastCalledWith(true);
 
-    await advance(CLAWAI_START_TIMEOUT_MS - 1);
+    await advance(SERVER_WAIT_MS);
     expect(onError).not.toHaveBeenCalled();
 
-    await advance(1);
-    await act(async () => { await started; });
+    await advance(REQUEST_BOUND_MS - SERVER_WAIT_MS);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toMatch(/^Failed: /);
     expect(onBusyChange).toHaveBeenLastCalledWith(false);
@@ -83,7 +88,7 @@ describe("the ClawBox AI device login never spins forever", () => {
 
     act(() => { void hook.result.current.start(); });
     act(() => { hook.result.current.stop(); });
-    await advance(CLAWAI_START_TIMEOUT_MS * 2);
+    await advance(REQUEST_BOUND_MS * 2);
 
     expect(onError).not.toHaveBeenCalled();
   });
@@ -103,11 +108,16 @@ describe("the ClawBox AI device login never spins forever", () => {
     expect(hook.result.current.deviceCode).toBe("ABCD-1234");
 
     // A hung tick is a blip, not a verdict: the next one goes out.
-    await advance(1000 + CLAWAI_POLL_REQUEST_TIMEOUT_MS + 1000);
-    expect(polls).toBe(2);
+    await advance(1000 + REQUEST_BOUND_MS + 1000);
+    expect(polls).toBeGreaterThanOrEqual(2);
     expect(onError).not.toHaveBeenCalled();
 
-    await advance(CLAWAI_POLL_CEILING_MS);
+    // Not before every server-side state could have ended…
+    await advance(FLOW_FLOOR_MS - (REQUEST_BOUND_MS + 2000));
+    expect(onError).not.toHaveBeenCalled();
+
+    // …and for certain after.
+    await advance(FLOW_BOUND_MS - FLOW_FLOOR_MS);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toMatch(/^Failed: /);
     expect(onBusyChange).toHaveBeenLastCalledWith(false);
@@ -116,7 +126,7 @@ describe("the ClawBox AI device login never spins forever", () => {
 
     // And it stays stopped.
     const after = polls;
-    await advance(CLAWAI_POLL_REQUEST_TIMEOUT_MS * 4);
+    await advance(REQUEST_BOUND_MS * 4);
     expect(polls).toBe(after);
   });
 
@@ -127,7 +137,7 @@ describe("the ClawBox AI device login never spins forever", () => {
     const { hook, onError } = mount();
 
     await act(async () => { await hook.result.current.start(); });
-    await advance(CLAWAI_POLL_CEILING_MS + 10_000);
+    await advance(FLOW_BOUND_MS);
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toMatch(/^Failed: /);
