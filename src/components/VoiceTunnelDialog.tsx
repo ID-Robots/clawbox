@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
-import { fetchTunnelDestination, type TunnelDestination } from "@/lib/voice-tunnel";
+import { fetchTunnelDestination, tunnelPageUrl, type TunnelDestination } from "@/lib/voice-tunnel";
 
 /**
  * The popup behind the chat microphone on an insecure origin (TASK-470).
@@ -17,7 +17,8 @@ import { fetchTunnelDestination, type TunnelDestination } from "@/lib/voice-tunn
  * state at the moment the popup opens — never hardcoded, never cached,
  * because Quick Tunnel hostnames change on every restart. When the tunnel is
  * not running, the popup says so and points at the setting that starts it;
- * offering a dead link would be worse than the message it replaces.
+ * offering a dead link would be worse than the message it replaces. The link
+ * opens the page the owner is on, not the tunnel's root (TASK-2058).
  */
 export default function VoiceTunnelDialog({
   open,
@@ -103,7 +104,7 @@ export default function VoiceTunnelDialog({
           {destination?.kind === "ready" && (
             <button
               type="button"
-              onClick={() => navigate(destination.url)}
+              onClick={() => navigate(tunnelPageUrl(destination.url, window.location))}
               data-testid="voice-tunnel-go"
               style={{
                 padding: "7px 14px", borderRadius: 9, fontSize: 12.5, cursor: "pointer",

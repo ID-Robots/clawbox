@@ -210,29 +210,62 @@ describe("chat voice status row", () => {
    */
   it("says the connection is the problem, not the browser, on a LAN origin", async () => {
     setSecureContext(false);
-    const panel = await openVoiceStatus();
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
 
-    await waitFor(() =>
-      expect(panel.textContent).toContain(translations.en["chat.voice.insecureContext"]),
-    );
-    expect(panel.textContent).not.toContain(translations.en["chat.voice.unsupported"]);
-    // The remedy has to be in the sentence — an accurate diagnosis the owner
-    // cannot act on is no better than the wrong one. And it must be a remedy
-    // that WORKS: Remote Desktop is served from this same insecure origin and
-    // carries no audio, so naming it sent the owner somewhere the mic still
-    // cannot open (TASK-511). The paths voice actually ships on are the
-    // box's Remote Access tunnel and Telegram voice messages.
+    // TASK-2058: said BEFORE anyone clicks, as a calm note — not as the red
+    // error line a mic click used to paint over a box with nothing wrong.
+    const notice = await screen.findByTestId("voice-secure-notice");
+    expect(notice).toHaveAttribute("role", "note");
+    expect(notice.textContent).not.toContain(translations.en["chat.voice.unsupported"]);
+    // …and READABLE: it wraps, so the half of the sentence with the remedy in
+    // it is never ellipsised away.
+    const line = notice.querySelectorAll("span")[1] as HTMLElement | undefined;
+    expect(line?.style.whiteSpace).toBe("normal");
+
+    // The remedy has to be in the button's own reason too — an accurate
+    // diagnosis the owner cannot act on is no better than the wrong one. And
+    // it must be a remedy that WORKS: Remote Desktop is served from this same
+    // insecure origin and carries no audio, so naming it sent the owner
+    // somewhere the mic still cannot open (TASK-511). The paths voice actually
+    // ships on are the box's Remote Access tunnel and Telegram voice messages.
     expect(translations.en["chat.voice.insecureContext"]).toContain("Remote Access");
     expect(translations.en["chat.voice.insecureContext"]).toContain("Telegram");
     expect(translations.en["chat.voice.insecureContext"]).not.toContain("Remote Desktop");
+    expect(translations.en["chat.voice.secureNotice.off"]).toContain("Remote Access");
+  });
 
-    // …and it has to be READABLE. The row is one ellipsised line while a
-    // capture is live, which on a real box cut this sentence off at "Open
-    // this ClawBox…" — the half with the fix in it. Errors wrap.
-    const line = panel.querySelector("span");
-    expect(line).not.toBeNull();
-    expect((line as HTMLElement).style.whiteSpace).toBe("normal");
-    expect((line as HTMLElement).style.textOverflow).not.toBe("ellipsis");
+  it("answers a mic click on a LAN origin without the red error line", async () => {
+    setSecureContext(false);
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const record = await screen.findByTestId("voice-record");
+    await waitFor(() => expect(record).not.toBeDisabled());
+
+    fireEvent.click(record);
+
+    await screen.findByTestId("voice-tunnel-dialog");
+    expect(screen.queryByTestId("voice-status")).toBeNull();
+  });
+
+  it("keeps the note dismissed once the owner dismisses it", async () => {
+    setSecureContext(false);
+    const { unmount } = render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+
+    fireEvent.click(await screen.findByTestId("voice-secure-notice-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("voice-secure-notice")).toBeNull());
+    unmount();
+
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    await screen.findByTestId("voice-record");
+    expect(screen.queryByTestId("voice-secure-notice")).toBeNull();
+  });
+
+  it("shows no note on a secure origin", async () => {
+    setSecureContext(true);
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const record = await screen.findByTestId("voice-record");
+    await waitFor(() => expect(record).not.toBeDisabled());
+
+    expect(screen.queryByTestId("voice-secure-notice")).toBeNull();
   });
 
   it("labels the mic button with the reason before anyone clicks it", async () => {
@@ -264,11 +297,14 @@ describe("chat voice status row", () => {
   /**
    * Yanko's TASK-470 decision (2026-08-22 19:34): the insecure origin gets a
    * "notification and popup that redirects to the cloudflare tunnel". The
-   * status-row line above is the notification; this is the popup.
+   * note above is the notification; this is the popup.
    */
   it("opens the tunnel popup from a mic click on a LAN origin", async () => {
     setSecureContext(false);
-    await openVoiceStatus();
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const record = await screen.findByTestId("voice-record");
+    await waitFor(() => expect(record).not.toBeDisabled());
+    fireEvent.click(record);
 
     const dialog = await screen.findByTestId("voice-tunnel-dialog");
     expect(dialog.getAttribute("aria-label")).toBe(translations.en["chat.voice.tunnel.title"]);
