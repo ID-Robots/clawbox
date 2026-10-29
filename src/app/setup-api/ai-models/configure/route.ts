@@ -63,6 +63,7 @@ import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
 import {
   CLAWAI_PLAN_TIER_KEY,
   clawaiPlanTierForStore,
+  noteClawaiCredentialReplaced,
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
@@ -3920,6 +3921,12 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const clawaiPlanForStore = isClawAI && (portalPlan || clawaiPlanIsForAnotherAccount)
       ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) }
       : {};
+    // The badge and the plan as ONE entry set, the pair both boot scripts read.
+    // A cloud save records it after `configWrites.commit()` — see there.
+    const clawaiAccountStamps = {
+      ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+      ...clawaiPlanForStore,
+    };
     // The coding agent's three tools — `coding_agent_run`, `_status`, `_stop` —
     // are registered CONDITIONALLY by the ClawBox MCP server, from a probe it
     // makes ONCE while it boots; it is then a long-lived stdio child of the
@@ -4011,12 +4018,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ai_model_provider: ocProvider,
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
-        ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
-        // The PLAN beside the badge, in the SAME batch so the pair the boot
-        // scripts read cannot come apart — see `clawaiPlanForStore` above for
-        // when it is written, when it is retired, and when the key is left
-        // exactly as it is.
-        ...clawaiPlanForStore,
+        // NOT the badge and the plan: `clawaiAccountStamps` is written after
+        // the openclaw.json commit below, for the reason given there.
+        //
         // The owner named a model in this save (TASK-713), or this save linked a
         // different ClawBox AI account and the previous owner's pick goes with
         // it. Either way in the SAME batch as the other facts about the save, so
@@ -4450,6 +4454,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // applies once — or, when it cannot, one write at a time inside the same
     // boundaries, as before. A failure no boundary takes is this save's 500.
     await configWrites.commit();
+    // The ClawBox AI badge and plan are recorded HERE, once openclaw.json —
+    // where the status poll reads the credential from — holds the token they
+    // describe. Recorded in step 6 they were on file seconds before that token
+    // was, and a status poll in between asked the portal about the PREVIOUS
+    // account's token and wrote its tier and plan back over them: after a
+    // sign-in to another account the desktop went on showing the old
+    // account's profile whenever the portal could not be asked. The
+    // generation bump refuses the writes of a poll still out about that token
+    // (it read the token before this commit); what such a poll wrote earlier,
+    // the batch below overwrites.
+    if (isClawAI && !isLocalScope) {
+      if (clawaiPlanIsForAnotherAccount) noteClawaiCredentialReplaced();
+      await setMany(clawaiAccountStamps);
+    }
     // Through the gateway, the CLI's catalogue check did not run on a primary
     // this save changed. The list is then the only opinion there is.
     const primaryBeforeSave = (configBeforeSave?.agents?.defaults as { model?: unknown } | undefined)?.model;

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
+import { notifyProvidersChanged, PROVIDER_SIGNAL_DEBOUNCE_MS } from "@/lib/ui-events";
 
 const realFetch = globalThis.fetch;
 
@@ -587,6 +588,51 @@ describe("useClawboxLogin — one shared poll", () => {
     expect(statusCalls()).toBe(1);
     // The tick armed before the trip is still the next one.
     await advance(20_000);
+    expect(statusCalls()).toBe(2);
+  });
+
+  it("asks at once when the providers change — a sign-in shows the new account, not the previous one", async () => {
+    vi.useFakeTimers();
+    let plan = "pro";
+    globalThis.fetch = vi.fn(async () => jsonResponse({
+      provider: "clawai", clawaiConfigured: true, clawaiPlan: plan,
+    })) as unknown as typeof fetch;
+
+    const { result, unmount } = renderHook(() => [useClawboxLogin(30_000), useClawboxLogin(30_000)] as const);
+    await flush();
+    expect(result.current[0].plan).toBe("pro");
+    expect(statusCalls()).toBe(1);
+
+    // The ClawBox AI sign-in landed on another, Free account, and the configure
+    // success said so — every surface is answered now, not on the next tick.
+    plan = "free";
+    notifyProvidersChanged();
+    await advance(PROVIDER_SIGNAL_DEBOUNCE_MS);
+    expect(statusCalls()).toBe(2);
+    expect(result.current[0].plan).toBe("free");
+    expect(result.current[1].plan).toBe("free");
+
+    // The cadence restarts from that ask, and the last hook out stops listening.
+    await advance(30_000);
+    expect(statusCalls()).toBe(3);
+    unmount();
+    notifyProvidersChanged();
+    await advance(60_000);
+    expect(statusCalls()).toBe(3);
+  });
+
+  it("waits for the visible edge when the providers change while the page is hidden", async () => {
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: "clawai" })) as unknown as typeof fetch;
+
+    renderHook(() => useClawboxLogin(30_000));
+    await flush();
+    setVisibility("hidden");
+    notifyProvidersChanged();
+    await advance(PROVIDER_SIGNAL_DEBOUNCE_MS);
+    expect(statusCalls()).toBe(1);
+    setVisibility("visible");
+    await flush();
     expect(statusCalls()).toBe(2);
   });
 });

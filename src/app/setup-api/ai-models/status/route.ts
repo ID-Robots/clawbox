@@ -193,7 +193,7 @@ async function resolveHermesAiState(): Promise<ResolvedAiState> {
  * paths so the ClawBox AI tier/portal-reconcile logic can never drift between
  * them.
  */
-async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse> {
+async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: number): Promise<NextResponse> {
   const normalizedProvider = normalizeProvider(state.provider);
 
   // ClawBox AI account entitlement is independent of which provider is
@@ -244,10 +244,10 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       // NEW credential can both land inside that window — see
       // `clearPersistedClawaiCredentialRefusal`.
       const askedAt = Date.now();
-      // The credential counter as it stands NOW, for the plan write below. Same
-      // window and same hazard as `askedAt` above: the portal takes up to four
-      // seconds and the box can be re-linked inside that time.
-      const askedAtGeneration = clawaiPlanGeneration();
+      // `askedAtGeneration` is the credential counter for the stamp writes
+      // below. Same window and same hazard as `askedAt` above: the portal takes
+      // up to four seconds and the box can be re-linked inside that time. Taken
+      // by `GET` BEFORE the token was read — see there.
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
@@ -370,6 +370,13 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
 export async function GET() {
   try {
+    // The credential counter, taken BEFORE the token is read. A sign-in bumps
+    // it once the new token is in place, so a poll that read the previous
+    // token always holds an older count and its tier and plan writes are
+    // refused. Taken after the read, a bump landing between the two would be
+    // in this poll's count and the previous account's profile would be
+    // recorded over the new one's.
+    const askedAtGeneration = clawaiPlanGeneration();
     // Resolve from whichever config the active harness actually uses. A Hermes
     // device has no OpenClaw config at all, so reading only openclaw.json there
     // reported "no ClawBox AI" for a signed-in box.
@@ -377,7 +384,7 @@ export async function GET() {
     const state = harness === "hermes"
       ? await resolveHermesAiState()
       : await resolveOpenclawAiState();
-    return await buildStatusResponse(state);
+    return await buildStatusResponse(state, askedAtGeneration);
   } catch {
     return NextResponse.json(
       {

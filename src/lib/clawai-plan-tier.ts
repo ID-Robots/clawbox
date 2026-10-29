@@ -245,6 +245,9 @@ export async function persistClawaiPlanTier(
   try {
     const next = clawaiPlanTierForStore(portalPlan);
     if (normalizeClawboxAiPlanTier(await get(CLAWAI_PLAN_TIER_KEY)) === (next ?? null)) return;
+    // Asked again after the read: a re-link can land in that await, and its
+    // writer records the new account's plan the moment it bumps the counter.
+    if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return;
     await set(CLAWAI_PLAN_TIER_KEY, next);
   } catch {
     // See the docblock. The next poll writes it again.
