@@ -99,6 +99,8 @@ export interface RunWorktreeRefused {
   ok: false;
   reason: NoWorktreeReason;
   detail: string;
+  /** On `not_repository_root`: the repository the folder turned out to be part of. */
+  root?: string;
 }
 
 /** `<project>/.clawbox/worktrees/<runId>` — the path, without touching the disk. */
@@ -155,6 +157,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
     return {
       ok: false,
       reason: "not_repository_root",
+      root,
       detail: `This folder is part of the repository at ${root} rather than being one, so a worktree of it would be a different folder.`,
     };
   }

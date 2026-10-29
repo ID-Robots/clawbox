@@ -224,6 +224,7 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.tokenLimit, "tokenLimit"],
     [RUNNER_STEP.resuming, "resuming"],
     [RUNNER_STEP.noRepository, "noRepository"],
+    [RUNNER_STEP.notRepositoryRoot("/home/owner/Projects"), "notRepositoryRoot"],
     [RUNNER_STEP.merged, "merged"],
     [RUNNER_STEP.providerSilent, "providerSilent"],
     [RUNNER_STEP.paused, "paused"],

@@ -10423,6 +10423,11 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // A team's worker is reviewed by the team's own reviewer, on the merged work.
   if (finished.team) return "skipped";
   if (finished.filesTouched.length === 0) return "skipped";
+  // The settle's own commit of this work failed (the folder belongs to another
+  // repository, git refusing): the box has already said it cannot keep what a
+  // pass would review, and the pass would resume into the same wall — 36 of
+  // them did on the owner's box.
+  if (finished.commitError) return "skipped";
   // The switch as it stood when THIS run started — the same decision its
   // brief was written from — never the switch as it stands now.
   if (!finished.reviewPass) return "skipped";
@@ -13320,6 +13325,9 @@ async function attachRunWorktree(run: CodingRun, projectDir: string): Promise<vo
     .catch((err: unknown) => ({ ok: false as const, reason: "failed" as const, detail: err instanceof Error ? err.message : String(err) }));
   if (!made.ok) {
     if (made.reason === "failed") pushProgress(run, RUNNER_STEP.worktreeKept(`it could not be made — ${made.detail}`));
+    // A folder inside a repository that is not its own: said here, once. The
+    // branch step that follows answers the same reason and does not repeat it.
+    else if (made.reason === "not_repository_root" && made.root) pushProgress(run, RUNNER_STEP.notRepositoryRoot(made.root));
     return;
   }
   run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false, branchRemoved: false, result: null };
@@ -13870,6 +13878,16 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
           // red line at the top of every fresh-folder run in bench cycle 1.
           run.pr = null;
           pushProgress(run, RUNNER_STEP.noRepository);
+        } else if (!branched.ok && branched.reason === "not_repository_root") {
+          // The same fact from the other side: the folder is part of a
+          // repository that is not its own, so there is no branch to make and
+          // no pull request to imply. `pr: null` keeps the deliverable gate
+          // from holding the run to a pull request the box can never open —
+          // `pr.phase: "failed"` did, and every such run ended gave_up. Said
+          // once: attachRunWorktree has usually already written this line.
+          run.pr = null;
+          const line = RUNNER_STEP.notRepositoryRoot(branched.root);
+          if (!run.progress.includes(line)) pushProgress(run, line);
         } else if (branched.ok) {
           run.pr = {
             phase: "opening",

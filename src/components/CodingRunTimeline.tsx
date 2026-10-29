@@ -63,6 +63,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   reattached: "codingAgent.stepReattached",
   startingFresh: "codingAgent.stepStartingFresh",
   noRepository: "codingAgent.stepNoRepository",
+  notRepositoryRoot: "codingAgent.stepNotRepositoryRoot",
   worktree: "codingAgent.stepWorktree",
   worktreeMerged: "codingAgent.stepWorktreeMerged",
   worktreeRemoved: "codingAgent.stepWorktreeRemoved",

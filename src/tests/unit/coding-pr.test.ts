@@ -393,6 +393,53 @@ describe("the pull request across the owner's gestures", () => {
     expect(github.openPullRequest).not.toHaveBeenCalled();
   });
 
+  it("starts a run in a folder inside another repository with no pull request, never branches that repository, and settles completed", async () => {
+    // 39 of 44 live runs on the owner's box (2026-10-29) ended gave_up: the
+    // project folders sit under ~/Projects, which has a .git of its own, so
+    // the branch step forked the PARENT and the settle refused the commit as
+    // foreign_repo — and `pr.phase: "failed"` plus the refused commit held
+    // the run to a pull request the box could never open.
+    github.startRunBranch.mockResolvedValueOnce({
+      ok: false,
+      reason: "not_repository_root",
+      root: "/home/owner/Projects",
+      detail: "This folder is part of the repository at /home/owner/Projects rather than being one, so no branch is made there and there is no pull request to open.",
+    });
+    commitRunWork.mockResolvedValue({ committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." });
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    expect(started.pr).toBeNull();
+    const feed = started.progress.join("\n");
+    expect(feed).toContain("Part of the repository at /home/owner/Projects, not a repository of its own: no branch is made there and there is no pull request to open");
+    expect(feed).not.toMatch(/No pull request/);
+    // Said once: the worktree step and the branch step answer the same fact.
+    expect(started.progress.filter((line) => line.startsWith("Part of the repository at ")).length).toBe(1);
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.pr).toBeNull();
+    expect(done.commitError).toMatch(/another git repository/);
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("starts no review pass over work the settle could not commit", async () => {
+    // 36 review passes (250M tokens) on the owner's box went over runs whose
+    // commit the box had already refused; each resumed into the same wall.
+    fs.writeFileSync(
+      path.join(root, "data", "config.json"),
+      JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_generate_images: false, coding_agent_auto_pr: true, coding_agent_review_rounds: 0, coding_agent_review_pass: true }),
+    );
+    github.startRunBranch.mockResolvedValueOnce({ ok: false, reason: "not_repository_root", root: "/home/owner/Projects", detail: "part of the repository at /home/owner/Projects" });
+    commitRunWork.mockResolvedValue({ committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." });
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.reviewPass).toBe(true);
+    // Once the commit attempt is over (the moment a pass would start), the run is still alone.
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Not committed/); }, { timeout: 10_000 });
+    expect(lib.listRuns().length).toBe(1);
+  });
+
   it("still reports a branch that could not be made for any other reason", async () => {
     github.startRunBranch.mockResolvedValueOnce({ ok: false, detail: "Pushing the branch was refused." });
     installFakeWrapper(finishingBody());
