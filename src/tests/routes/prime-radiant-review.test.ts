@@ -263,7 +263,7 @@ describe("history, diff, revert", () => {
 describe("settings", () => {
   it("exposes every section, saves a patch, validates folders and refuses a bad field whole", async () => {
     const get = await (await settingsGET(req("GET", "/settings"))).json();
-    expect(Object.keys(get.settings).sort()).toEqual(["context", "contradictions", "costRates", "domains", "golden", "ingest", "nightly", "opus", "search", "structure", "summaries", "verification"]);
+    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "opus", "search", "structure", "summaries", "verification"]);
     expect(get.limits.summariesMaxPages).toEqual({ min: 0, max: 2000 });
     expect(get.defaults.summaries).toEqual({ enabled: true, maxPages: 150, capUsd: 0.25 });
     expect(get.limits.opusCapUsd).toEqual({ min: 0.01, max: 1000 });
@@ -297,6 +297,33 @@ describe("settings", () => {
       expect((await res.json()).code).toBe("invalid");
     }
     expect((await (await settingsGET(req("GET", "/settings"))).json()).settings.nightly.time).toBe("02:15");
+  });
+
+  it("loads a file that still has the retired context section, and refuses a patch that names it", async () => {
+    // A box that had the core block switched on before it was removed.
+    fs.mkdirSync(root, { recursive: true });
+    const file = path.join(root, "settings.json");
+    fs.writeFileSync(file, JSON.stringify({ context: { enabled: true, n: 50, maxChars: 4000 }, nightly: { time: "04:30" } }));
+    const get = await settingsGET(req("GET", "/settings"));
+    expect(get.status).toBe(200);
+    const body = await get.json();
+    expect(body.settings).not.toHaveProperty("context");
+    expect(body.defaults).not.toHaveProperty("context");
+    expect(body).not.toHaveProperty("contextBlock");
+    expect(body.settings.nightly.time).toBe("04:30");
+
+    const before = fs.readFileSync(file, "utf8");
+    for (const bad of [{ context: { enabled: true } }, { context: null }, { nightly: { time: "05:00" }, context: { n: 10 } }]) {
+      const res = await settingsPUT(req("PUT", "/settings", bad));
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(await res.json()).toMatchObject({ code: "invalid", error: "Unknown setting: context." });
+    }
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+
+    // Any other save still works on that file.
+    const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "05:00" } }));
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).settings.nightly.time).toBe("05:00");
   });
 });
 

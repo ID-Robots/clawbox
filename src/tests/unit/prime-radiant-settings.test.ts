@@ -120,6 +120,34 @@ describe("writeSettings", () => {
   });
 });
 
+describe("a file from before the core block was retired", () => {
+  // `context` was the Prime Radiant core block's section ({ enabled, n, maxChars }).
+  const OLD = { context: { enabled: true, n: 50, maxChars: 4000 }, nightly: { time: "04:30" }, summaries: { maxPages: 10 } };
+
+  it("reads as any file with a key it does not own: no error, no context, the rest in force", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify(OLD));
+    const s = readSettings();
+    expect(s).not.toHaveProperty("context");
+    expect(defaultSettings()).not.toHaveProperty("context");
+    expect(s).toEqual({ ...defaultSettings(), nightly: { enabled: true, time: "04:30" }, summaries: { ...defaultSettings().summaries, maxPages: 10 } });
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("refuses a patch that names context as an unknown section, and saves the others over such a file", () => {
+    for (const body of [{ context: { enabled: true } }, { context: { n: 10, maxChars: 2000 } }, { context: null }, { nightly: { time: "05:00" }, context: {} }]) {
+      expect(() => readSettingsPatch(body), JSON.stringify(body)).toThrow(new SettingsError("Unknown setting: context."));
+    }
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify(OLD));
+    const saved = writeSettings(readSettingsPatch({ nightly: { time: "05:00" } }));
+    expect(saved.nightly.time).toBe("05:00");
+    expect(saved).not.toHaveProperty("context");
+  });
+});
+
 describe("the search index size limit", () => {
   it("is 160 MB by default, from 32 to 4,096, whole MB, and is what the index budgets in bytes", () => {
     expect([DEFAULT_SEARCH_INDEX_LIMIT_MB, MIN_SEARCH_INDEX_LIMIT_MB, MAX_SEARCH_INDEX_LIMIT_MB]).toEqual([160, 32, 4096]);
