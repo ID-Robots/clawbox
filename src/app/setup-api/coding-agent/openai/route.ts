@@ -72,6 +72,52 @@ export async function GET(request: Request) {
 
 const LOGIN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+function missingSignInId() {
+  return NextResponse.json({ error: "A sign-in id is required.", kind: "invalid" }, { status: 400 });
+}
+
+function signInId(id: unknown): string | null {
+  return typeof id === "string" && LOGIN_ID_RE.test(id) ? id : null;
+}
+
+async function beginSignIn() {
+  const login = await startCodexLogin();
+  console.error(`[coding-agent] a ChatGPT sign-in for coding runs was started by the owner (${login.status})`);
+  return payload({ login });
+}
+
+async function pollSignIn(id: unknown) {
+  const loginId = signInId(id);
+  if (!loginId) return missingSignInId();
+  const login = readCodexLogin(loginId);
+  if (!login) return NextResponse.json({ error: "That sign-in is no longer running. Start it again.", kind: "not_found" }, { status: 404 });
+  return payload({ login });
+}
+
+async function endSignIn(id: unknown) {
+  const loginId = signInId(id);
+  if (!loginId) return missingSignInId();
+  cancelCodexLogin(loginId);
+  return payload({ login: readCodexLogin(loginId) });
+}
+
+/**
+ * The sign-in verbs by name. A table rather than a chain of comparisons on the
+ * posted `action`: the owner and same-origin checks above are what guard these,
+ * and the name only picks which one runs, so the dispatch reads as just that.
+ */
+const SIGN_IN_VERBS: Record<string, (id: unknown) => Promise<NextResponse>> = {
+  "login-start": beginSignIn,
+  "login-poll": pollSignIn,
+  "login-cancel": endSignIn,
+};
+
+function signInVerb(action: unknown, id: unknown) {
+  const verb = typeof action === "string" && Object.hasOwn(SIGN_IN_VERBS, action) ? SIGN_IN_VERBS[action] : undefined;
+  if (!verb) return NextResponse.json({ error: "Unknown action.", kind: "invalid" }, { status: 400 });
+  return verb(id);
+}
+
 /**
  * POST, one of:
  *   { apiKey }                         save the owner's key (checked live first)
@@ -99,26 +145,7 @@ export async function POST(request: Request) {
   }
   const { apiKey: raw, action, id } = body as { apiKey?: unknown; action?: unknown; id?: unknown };
 
-  if (action !== undefined) {
-    if (action === "login-start") {
-      const login = await startCodexLogin();
-      console.error(`[coding-agent] a ChatGPT sign-in for coding runs was started by the owner (${login.status})`);
-      return payload({ login });
-    }
-    if (action !== "login-poll" && action !== "login-cancel") {
-      return NextResponse.json({ error: "Unknown action.", kind: "invalid" }, { status: 400 });
-    }
-    if (typeof id !== "string" || !LOGIN_ID_RE.test(id)) {
-      return NextResponse.json({ error: "A sign-in id is required.", kind: "invalid" }, { status: 400 });
-    }
-    if (action === "login-cancel") {
-      cancelCodexLogin(id);
-      return payload({ login: readCodexLogin(id) });
-    }
-    const login = readCodexLogin(id);
-    if (!login) return NextResponse.json({ error: "That sign-in is no longer running. Start it again.", kind: "not_found" }, { status: 404 });
-    return payload({ login });
-  }
+  if (action !== undefined) return signInVerb(action, id);
 
   if (typeof raw !== "string" || raw.trim() === "") {
     return NextResponse.json({ error: "An API key is required.", kind: "invalid" }, { status: 400 });
