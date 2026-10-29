@@ -26,6 +26,7 @@ import {
 } from "@/lib/gateway-hot-apply";
 import { CONFIG_BUSY_ERROR_CODE, isConfigMutationConflict } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { clawboxAiNonChatModelReason, isClawboxAiNonChatModelRef } from "@/lib/clawbox-ai-models";
 
@@ -441,6 +442,9 @@ export async function POST(request: Request) {
       await setConfigBatch([
         ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
         ["agents.defaults.model.fallbacks", "[]", "--json"],
+        // Tool Search off while the primary is the on-device model
+        // (src/lib/local-tool-search.ts), in the batch that puts it there.
+        ...(await localToolSearchArmOps(config, localModel)),
       ]);
       settlement = await settleConfigWrite({ before: config, after: await readConfig(), baseline, label: "local-only" });
 
@@ -544,6 +548,13 @@ export async function POST(request: Request) {
         );
         if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
       }
+      // Back on a cloud primary: OpenClaw's own Tool Search back, as it ships.
+      // Only when the primary did move — with no restorable primary the box
+      // stays on the local model, and so does the setting.
+      if (restorablePrimary && localToolSearchDisarmNeeded(configBefore, restorablePrimary)) {
+        const toolSearchWarning = await disarmLocalToolSearch("local-only");
+        if (toolSearchWarning) warnings.push(toolSearchWarning);
+      }
       // Before the sessions go back: a session is patched to a model the
       // running gateway has to know, and the restored primary's plugin may have
       // just been switched on in that batch.
@@ -570,6 +581,7 @@ export async function POST(request: Request) {
           await setConfigBatch([
             ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
             ["agents.defaults.model.fallbacks", "[]", "--json"],
+            ...(await localToolSearchArmOps(await readConfig(), localModel)),
           ]);
         } else {
           console.error("[local-only] restore incomplete and no local model recorded; the primary stays on the saved provider");

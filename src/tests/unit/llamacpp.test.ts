@@ -65,12 +65,14 @@ describe("llamacpp config helpers", () => {
     expect(mod.getDefaultLlamaCppModel()).toBe("custom-gemma-q4");
   });
 
-  it("defaults to Gemma 4's full llama.cpp context window and higher output cap", async () => {
+  it("defaults to a 32k window, started and announced alike, with 8k answers", async () => {
     const mod = await import("@/lib/llamacpp");
 
-    expect(mod.getLlamaCppContextWindow()).toBe(131072);
-    expect(mod.getLlamaCppServerContextSize()).toBe(0);
-    expect(mod.getLlamaCppMaxTokens()).toBe(131072);
+    expect(mod.getLlamaCppContextWindow()).toBe(32768);
+    // The server is started with the window OpenClaw is told — not 0, which
+    // meant the model's trained 128k while OpenClaw believed the default.
+    expect(mod.getLlamaCppServerContextSize()).toBe(32768);
+    expect(mod.getLlamaCppMaxTokens()).toBe(8192);
   });
 
   it("respects explicit llama.cpp context and output overrides", async () => {
@@ -81,6 +83,21 @@ describe("llamacpp config helpers", () => {
     expect(mod.getLlamaCppContextWindow()).toBe(65536);
     expect(mod.getLlamaCppServerContextSize()).toBe(65536);
     expect(mod.getLlamaCppMaxTokens()).toBe(12000);
+  });
+
+  it("never lets the answer budget outgrow the window, and falls back on junk", async () => {
+    process.env.LLAMACPP_CONTEXT_WINDOW = "16384";
+    process.env.LLAMACPP_MAX_TOKENS = "131072";
+    let mod = await import("@/lib/llamacpp");
+    expect(mod.getLlamaCppMaxTokens()).toBe(16384);
+
+    vi.resetModules();
+    process.env.LLAMACPP_CONTEXT_WINDOW = "128";
+    process.env.LLAMACPP_MAX_TOKENS = "nope";
+    mod = await import("@/lib/llamacpp");
+    expect(mod.getLlamaCppContextWindow()).toBe(32768);
+    expect(mod.getLlamaCppServerContextSize()).toBe(32768);
+    expect(mod.getLlamaCppMaxTokens()).toBe(8192);
   });
 
   it("infers the auto-start alias from the configured primary model", async () => {

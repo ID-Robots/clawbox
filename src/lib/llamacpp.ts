@@ -35,7 +35,65 @@ export const DEFAULT_LLAMACPP_HF_FILE = "gemma-4-E2B_q4_0-it.gguf";
  */
 export const SUPERSEDED_LLAMACPP_HF_REPO = "gguf-org/gemma-4-e2b-it-gguf";
 export const SUPERSEDED_LLAMACPP_HF_FILE = "gemma-4-e2b-it-edited-q4_0.gguf";
-const DEFAULT_LLAMACPP_CONTEXT_WINDOW = 131072;
+
+/**
+ * How big a window llama-server runs, what OpenClaw is told the window is, and
+ * the longest answer it may ask for. Keep in step with install.sh,
+ * install-x64.sh, scripts/start-llamacpp.sh and the llamacpp block of
+ * scripts/gateway-pre-start.sh — src/tests/unit/llamacpp-launch-defaults.test.ts
+ * fails if they disagree.
+ *
+ * 32k with a q8_0 KV cache replaced 131k with q4_0. Measured on an 8 GB Jetson
+ * (reports/clawbox/local-ai/BENCHMARK.md): the lean local prompt is ~1.3k tokens
+ * and the full OpenClaw one ~13.4k, so a 131k window only ever held empty cache;
+ * the same ten tasks passed at the same speed either way, with more of the box's
+ * memory left over at 32k. 8192 output tokens is a whole one-file web app — at
+ * 131072 a page-writing turn ran past 8,000 tokens and into the agent timeout —
+ * and it matches the 25% of the window OpenClaw keeps free before it compacts.
+ */
+export const DEFAULT_LLAMACPP_CONTEXT_WINDOW = 32768;
+export const DEFAULT_LLAMACPP_MAX_TOKENS = 8192;
+export const DEFAULT_LLAMACPP_CACHE_TYPE = "q8_0";
+
+/**
+ * The values the launch shipped with before the change above. Only used to
+ * recognise a device still on them: install.sh writes them into .env, and
+ * `ensure_env_setting` never overwrites an existing key, so install.sh migrates
+ * exactly these values and leaves any other choice an operator made alone.
+ */
+export const SUPERSEDED_LLAMACPP_CONTEXT_WINDOW = 131072;
+export const SUPERSEDED_LLAMACPP_MAX_TOKENS = 131072;
+export const SUPERSEDED_LLAMACPP_CACHE_TYPE = "q4_0";
+
+/**
+ * Thinking on the on-device model: off unless a request asks for it.
+ *
+ * llama-server reads `chat_template_kwargs.enable_thinking` per request, and
+ * the ClawBox proxy sets it from an OpenAI-style `reasoning_effort`
+ * (src/lib/local-ai-thinking.ts). OpenClaw sends that field only for a row that
+ * declares `reasoning: true`; this compat makes it binary — every enabled level
+ * clamps to `high`, `off` is sent as `none` — because the model has no graded
+ * effort. And a reasoning row's default would be `medium`, so the row is
+ * written together with an `off` default for the model (llamaCppThinkingDefaultOp),
+ * which a session or one message (`/think high`) overrides.
+ *
+ * Measured on an 8 GB Jetson (reports/clawbox/local-ai/BENCHMARK.md): on ten
+ * everyday tasks thinking roughly doubled the median answer time for no real
+ * gain; on six multi-step questions it fixed one of two the model got wrong,
+ * at 5-9 s more per answer. So: off by default, on for the hard ones.
+ *
+ * Keys of OpenClaw 2026.10+; an older core gets the old row (reasoning: false).
+ * Keep in step with `_LLAMACPP_REASONING_COMPAT` in scripts/gateway-pre-start.sh.
+ */
+export const LLAMACPP_REASONING_COMPAT = Object.freeze({
+  supportedReasoningEfforts: Object.freeze(["none", "high"]),
+  reasoningEffortMap: Object.freeze({ off: "none" }),
+});
+
+/** The config-set entry that makes `off` the on-device model's own default thinking level. */
+export function llamaCppThinkingDefaultOp(modelRef: string): string[] {
+  return [`agents.defaults.models[${JSON.stringify(modelRef)}].params.thinking`, "off"];
+}
 
 export interface LlamaCppRecommendedModel {
   id: string;
@@ -96,19 +154,22 @@ export function getLlamaCppContextWindow(): number {
 }
 
 /**
- * Return the explicit llama.cpp server context size. A value of 0 is
- * intentional here and means "let llama-server load the trained context size
- * from the model" rather than forcing an app-level cap.
+ * The `--ctx-size` llama-server is started with: the same number OpenClaw is
+ * told (getLlamaCppContextWindow). It used to be 0 when the variable was unset
+ * — "the model's trained size", 128k for Gemma 4 — while OpenClaw was told the
+ * default, so the two only agreed by coincidence.
  */
 export function getLlamaCppServerContextSize(): number {
-  const value = Number(process.env.LLAMACPP_CONTEXT_WINDOW);
-  return Number.isFinite(value) && value >= 16384 ? Math.floor(value) : 0;
+  return getLlamaCppContextWindow();
 }
 
-export function getLlamaCppMaxTokens(): number | undefined {
+/**
+ * The longest answer OpenClaw may ask for, never more than the window itself.
+ */
+export function getLlamaCppMaxTokens(): number {
+  const contextWindow = getLlamaCppContextWindow();
   const raw = process.env.LLAMACPP_MAX_TOKENS?.trim();
-  if (!raw) return getLlamaCppContextWindow();
-
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : getLlamaCppContextWindow();
+  const value = raw ? Number(raw) : DEFAULT_LLAMACPP_MAX_TOKENS;
+  const maxTokens = Number.isFinite(value) && value >= 1 ? Math.floor(value) : DEFAULT_LLAMACPP_MAX_TOKENS;
+  return Math.min(maxTokens, contextWindow);
 }

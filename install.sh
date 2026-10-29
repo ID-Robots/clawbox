@@ -8667,10 +8667,18 @@ step_directories_permissions() {
   # ~5x faster on this hardware, "on" is the only way this model gets
   # weekday arithmetic right. Restart clawbox-llamacpp after changing it.
   ensure_env_setting "$ENV_FILE" "LLAMACPP_REASONING" "off"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
+  # 32k window, q8_0 KV cache, 8k answers (src/lib/llamacpp.ts says why).
+  # Only the exact values this file used to write are moved, so a device keeps
+  # any size an operator chose. Keep in step with src/lib/llamacpp.ts —
+  # src/tests/unit/llamacpp-launch-defaults.test.ts fails if they disagree.
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
   # The memory-search embedder (config/clawbox-embed.service). Keep in step
   # with src/lib/embed-server.ts and scripts/start-embed-server.sh —
   # src/tests/unit/embed-server-pin.test.ts fails if they disagree.

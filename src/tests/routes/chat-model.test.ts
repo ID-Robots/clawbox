@@ -80,6 +80,14 @@ vi.mock("@/lib/openclaw-config", () => ({
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Tool Search follows the on-device primary only on a 2026.10+ core
+// (src/lib/local-tool-search.ts). An unknown core — every case here but the
+// ones that say otherwise — writes nothing, which is how they ran before.
+const coreAtLeastMock = vi.fn(async () => false);
+vi.mock("@/lib/openclaw-core-generation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-core-generation")>()),
+  installedOpenclawCoreAtLeast: (...args: unknown[]) => coreAtLeastMock(...(args as [])),
+}));
 vi.mock("@/lib/sqlite-store", () => ({
   sqliteGet: vi.fn(),
   sqliteSet: vi.fn(),
@@ -434,6 +442,67 @@ describe("/setup-api/chat/model", () => {
       ([args]) => Array.isArray(args) && String(args[0]).includes("agentRuntime"),
     );
     expect(armed).toBe(false);
+  });
+
+  describe("OpenClaw's Tool Search follows the on-device primary", () => {
+    const TOOL_SEARCH_OFF = ["tools.toolSearch", JSON.stringify({ enabled: false }), "--json"];
+    const pick = (model: string) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    }));
+
+    beforeEach(() => {
+      coreAtLeastMock.mockReset().mockResolvedValue(true);
+      vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+    });
+
+    it("turns it off in the batch that makes the local model the primary", async () => {
+      const calls: string[][][] = [];
+      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => { calls.push(ops as string[][]); });
+
+      const response = await pick("llamacpp/gemma4-e2b-it-q4_0");
+
+      expect(response.status).toBe(200);
+      const batch = calls.find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      expect(batch).toContainEqual(["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(batch).toContainEqual(TOOL_SEARCH_OFF);
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    });
+
+    it("gives a cloud pick OpenClaw's default back when ClawBox had turned it off", async () => {
+      vi.mocked(readConfigStrict).mockResolvedValue({ tools: { toolSearch: { enabled: false } } } as never);
+
+      const response = await pick("deepseek/deepseek-v4-flash");
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith("tools.toolSearch");
+      const armed = vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => Array.isArray(args) && args[0] === "tools.toolSearch");
+      expect(armed).toBe(false);
+    });
+
+    it("never touches an owner's own setting", async () => {
+      vi.mocked(readConfigStrict).mockResolvedValue({ tools: { toolSearch: false } } as never);
+      await pick("deepseek/deepseek-v4-flash");
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+
+      vi.mocked(readConfigStrict).mockResolvedValue({ tools: { toolSearch: { mode: "directory" } } } as never);
+      await pick("llamacpp/gemma4-e2b-it-q4_0");
+      const armed = vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => Array.isArray(args) && args[0] === "tools.toolSearch");
+      expect(armed).toBe(false);
+    });
+
+    it("carries a failed restore in the answer instead of claiming the default is back", async () => {
+      vi.mocked(readConfigStrict).mockResolvedValue({ tools: { toolSearch: { enabled: false } } } as never);
+      vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("config busy"));
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const body = await (await pick("deepseek/deepseek-v4-flash")).json();
+        expect(body.warning).toMatch(/Tool Search is still off/);
+      } finally {
+        err.mockRestore();
+      }
+    });
   });
 
   it("switches back to Flash from a legacy stored primary provider model", async () => {

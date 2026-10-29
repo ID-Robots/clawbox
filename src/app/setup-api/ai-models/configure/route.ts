@@ -73,6 +73,8 @@ import {
   getLlamaCppContextWindow,
   getLlamaCppMaxTokens,
   getLlamaCppProxyBaseUrl,
+  LLAMACPP_REASONING_COMPAT,
+  llamaCppThinkingDefaultOp,
 } from "@/lib/llamacpp";
 import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
@@ -104,6 +106,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
@@ -3846,6 +3849,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // (src/lib/provider-plugin-ops.ts).
       baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
       baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
+      // Tool Search off while the primary is the on-device model, in the batch
+      // that puts it there (src/lib/local-tool-search.ts).
+      baseOps.push(...(await localToolSearchArmOps(configBeforeSave, config.defaultModel)));
       // The reference is `openai/<id>` for both OpenAI auth modes; this entry
       // is what says the turn belongs to the ChatGPT account and runs on the
       // Codex app-server — the key the core itself keeps when it migrates a
@@ -4032,6 +4038,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       },
       () => runConfigSetBatch(baseOps),
     );
+    // A cloud primary written above: OpenClaw's own Tool Search back, as it ships.
+    let toolSearchWarning: string | undefined;
+    if (primaryIdx !== -1 && localToolSearchDisarmNeeded(configBeforeSave, config.defaultModel)) {
+      toolSearchWarning = await disarmLocalToolSearch("AI Config");
+    }
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
@@ -4424,6 +4435,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
       const modelName = config.defaultModel.replace(/^llamacpp\//, "");
+      // Thinking per request, off unless asked (LLAMACPP_REASONING_COMPAT) —
+      // keys of a 2026.10+ core; an older or unreadable one gets the old row.
+      const localReasoning = await installedOpenclawCoreAtLeast(2026, 10);
       const providerDef = JSON.stringify({
         baseUrl: getLlamaCppProxyBaseUrl(),
         api: "openai-completions",
@@ -4431,16 +4445,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         models: [{
           id: modelName,
           name: modelName,
-          reasoning: false,
+          reasoning: localReasoning,
+          ...(localReasoning ? { compat: LLAMACPP_REASONING_COMPAT } : {}),
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: llamaCppContextWindow,
           maxTokens: llamaCppMaxTokens,
         }],
       });
+      // A reasoning row defaults to `medium` in the core: `off` is the model's
+      // own default unless the owner already set one.
+      const thinkingDefault = (configBeforeSave?.agents?.defaults as { models?: Record<string, { params?: { thinking?: unknown } }> } | undefined)
+        ?.models?.[`llamacpp/${modelName}`]?.params?.thinking;
       await runConfigSetBatch([
         ["models.providers.llamacpp", providerDef, "--json"],
         ["models.mode", isLocalScope ? "merge" : "replace"],
+        ...(localReasoning && thinkingDefault === undefined ? [llamaCppThinkingDefaultOp(`llamacpp/${modelName}`)] : []),
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
@@ -4914,7 +4934,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const sessionSweepWarning = sessionSweepFailed
       ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
       : undefined;
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, sessionSweepWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, toolSearchWarning, hermesWarning, sessionSweepWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({
