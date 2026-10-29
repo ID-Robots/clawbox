@@ -40,6 +40,7 @@ import {
 import {
   DISABLED_PROVIDERS_KEY,
   claudeSignInFenced,
+  credentialedProviders,
   normalizeProviderId,
   parseDisabledProviders,
   providerRowRunnable,
@@ -76,7 +77,6 @@ import {
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
   isCodexSupportedModelId,
-  isKeyModeProfile,
   offSurfaceClaudeModelMessage,
   offSurfaceCodexModelMessage,
   readSubscriptionSurfaceIds,
@@ -301,10 +301,15 @@ function subscriptionProvidersForUi(profiles: AuthProfileEntries): string[] {
   return providers;
 }
 
-function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
-  return Object.entries(config.auth?.profiles ?? {}).some(
-    ([key, entry]) => isKeyModeProfile(entry) && profileProviderId(key, entry) === CHATGPT_PROVIDER,
-  );
+/**
+ * An OpenAI API key — a non-OAuth `openai` profile, or a real key under
+ * `models.providers.openai` (never the claw_ token ClawBox AI's images ride
+ * there on). Asked of {@link credentialedProviders}, the reader the picker's
+ * rows are filtered by, so a request is routed on the API key exactly when the
+ * `openai` row is offered.
+ */
+function hasOpenAiApiKey(config: OpenClawConfig): boolean {
+  return credentialedProviders(config, normalizeProvider).has(CHATGPT_PROVIDER);
 }
 
 /**
@@ -329,7 +334,7 @@ async function readOpenAiCredentials(
   const config = await getConfig();
   const profiles = config?.auth?.profiles;
   return {
-    hasApiKey: !!config && hasOpenAiApiKeyProfile(config),
+    hasApiKey: !!config && hasOpenAiApiKey(config),
     hasChatgptSignIn: hasChatgptOauthProfile(profiles),
     hasStaleChatgptProfile: hasLegacyChatgptProfile(profiles),
   };
@@ -373,6 +378,67 @@ function refuseDeadSignIn(option: ChatModelOption): NextResponse {
     },
     { status: 409 },
   );
+}
+
+/**
+ * The 400 for a pick on a provider row this box holds no credential for, or
+ * null when it holds one (or the pick is local, or malformed — the validators
+ * further down answer that). TASK-2055: the picker offered such rows and the
+ * refusal was "Selected AI provider is not configured", or for the OpenAI
+ * row on a ChatGPT-only box "<model> requires OpenAI API-key mode" — neither
+ * names the provider, nor what the box is missing.
+ *
+ * Decided on the ROW the pick stands on, because the two OpenAI rows share the
+ * `openai/<id>` namespace: the row the picker named, else the one the
+ * reference resolves to on this box's OpenAI credentials — the same fallback
+ * `resolveChatgptPick` routes by. Asked of {@link credentialedProviders}, the
+ * reader the rows were filtered by, so an offered row is never refused here.
+ *
+ * Not the answer for a sign-in that exists and cannot be used: a stale
+ * ChatGPT one is `refuseStaleChatgptProfile`'s 409, a fenced Claude one
+ * `refuseDeadSignIn`'s — both hold a credential and need a re-sign-in.
+ */
+function refuseMissingCredential(
+  model: string | null,
+  pickedUiProvider: string | null,
+  credentialed: Set<string>,
+  openAi: OpenAiCredentials,
+): NextResponse | null {
+  if (!model || isLocalModel(model)) return null;
+  const parsed = parseModelSlug(model);
+  const modelProvider = normalizeProvider(parsed?.provider);
+  if (!modelProvider) return null;
+  const openAiRef = modelProvider === CHATGPT_PROVIDER || isLegacyChatgptProvider(modelProvider);
+  const pickedOpenAiRow = pickedUiProvider === CHATGPT_PROVIDER || pickedUiProvider === CHATGPT_UI_PROVIDER;
+  const row = openAiRef && pickedOpenAiRow
+    ? pickedUiProvider
+    : isLegacyChatgptProvider(modelProvider)
+      || (modelProvider === CHATGPT_PROVIDER && !openAi.hasApiKey
+        && (openAi.hasChatgptSignIn || openAi.hasStaleChatgptProfile))
+      ? CHATGPT_UI_PROVIDER
+      : modelProvider;
+  if (row === CHATGPT_UI_PROVIDER) {
+    if (openAi.hasChatgptSignIn || openAi.hasStaleChatgptProfile) return null;
+  } else if (credentialed.has(row)) {
+    return null;
+  }
+  const label = labelForProvider(row, row);
+  const apiRow = labelForProvider(CHATGPT_PROVIDER, CHATGPT_PROVIDER);
+  const chatgptRow = labelForProvider(CHATGPT_UI_PROVIDER, CHATGPT_UI_PROVIDER);
+  let error: string;
+  if (row === CHATGPT_PROVIDER && openAi.hasChatgptSignIn) {
+    error = `${label} needs an OpenAI API key, and this box has none — it is signed in with ChatGPT only. `
+      + `Pick the model on the ${chatgptRow} row, or add an OpenAI API key in Settings.`;
+  } else if (row === CHATGPT_UI_PROVIDER) {
+    error = `${label} needs a ChatGPT sign-in, and this box has none. `
+      + (openAi.hasApiKey
+        ? `Pick the model on the ${apiRow} row, which uses this box's API key, or sign in with ChatGPT in Settings.`
+        : "Sign in with ChatGPT in Settings, then pick the model.");
+  } else {
+    error = `${label} is not connected on this box — it has no API key or sign-in for it. `
+      + `Connect ${label} in Settings, then pick the model.`;
+  }
+  return NextResponse.json({ error, kind: "provider_credential_missing", provider: row }, { status: 400 });
 }
 
 /**
@@ -611,7 +677,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // (src/lib/chatgpt-subscription.ts). Without the second half, a dual-
   // credential box flipped its header pill from ChatGPT to OpenAI on the very
   // next poll after the owner picked ChatGPT.
-  const chatgptSubscriptionOnly = hasChatgptOauthProfile(authProfiles) && !hasOpenAiApiKeyProfile(openclawConfig);
+  const chatgptSubscriptionOnly = hasChatgptOauthProfile(authProfiles) && !hasOpenAiApiKey(openclawConfig);
   const uiProviderForModel = (model: string | null | undefined): string | null => {
     const provider = normalizeProviderFromModel(model);
     if (provider !== CHATGPT_PROVIDER) return provider;
@@ -784,6 +850,28 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   if (primaryProvider && primaryProvider !== "ollama" && primaryProvider !== "llamacpp") {
     const model = defaultModelForProvider(primaryProvider);
     if (model) rememberPrimaryOption(model, primaryProvider);
+  }
+
+  // Only a row the box holds a credential for is offered (TASK-2055). Three of
+  // the calls above build a row from a MODEL — the live primary, the remembered
+  // one, the config store's provider hint — and none of them asks whether the
+  // box can authenticate to it: a ChatGPT-only box was offered "OpenAI GPT"
+  // (the API-key row) off a stored `openai` hint, and every pick on it was
+  // refused. Decided by the reader the Providers strip asks, so the two agree.
+  //
+  // The provider the box is RUNNING stays, greyed: the header pill names its
+  // model, and a list without it shows a model that is in no list. Greyed with
+  // no reason flag reads "Set up in Settings", which is the next step. The
+  // ChatGPT and Claude rows a dead sign-in greys are judged just below.
+  const credentialed = credentialedProviders(openclawConfig, normalizeProvider);
+  const runningProvider = activeModel && !isLocalModel(activeModel) ? uiProviderForModel(activeModel) : null;
+  for (const [provider, option] of configuredPrimaryOptions) {
+    if (credentialed.has(provider)) continue;
+    if (provider === runningProvider) {
+      configuredPrimaryOptions.set(provider, { ...option, available: false });
+    } else {
+      configuredPrimaryOptions.delete(provider);
+    }
   }
 
   // A ChatGPT sign-in OpenClaw 2 cannot use (filed as `codex:default` by an
@@ -1162,6 +1250,13 @@ export async function POST(request: Request) {
       return surfaceIds;
     };
     const openAiCredentials = await readOpenAiCredentials(getAuthConfig);
+    // Null when openclaw.json could not be read: "not connected" would then be
+    // a claim about a file nobody saw, and the row checks below already
+    // refuse in their own words.
+    const credentialed = preloadedConfig ? credentialedProviders(preloadedConfig, normalizeProvider) : null;
+    const missingCredential = (model: string | null) => credentialed
+      ? refuseMissingCredential(model, pickedUiProvider, credentialed, openAiCredentials)
+      : null;
 
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
@@ -1197,6 +1292,10 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
+        // Before the ChatGPT routing just below: a keyless box would otherwise
+        // move a pick made on the API-key row onto the ChatGPT account.
+        const uncredentialed = missingCredential(requestedModel);
+        if (uncredentialed) return uncredentialed;
         let effectiveModel = canonicalChatModel(requestedModel);
         let effectiveProvider = normalizeProvider(parsed.provider) === "clawai" ? "deepseek" : parsed.provider;
         const effectiveModelId = parsed.modelId;
@@ -1360,6 +1459,10 @@ export async function POST(request: Request) {
       }
 
       targetModel = body.source === "primary" ? state.primary.model : state.local.model;
+      // The remembered primary can be the greyed row of a provider the box
+      // runs on and holds no credential for.
+      const uncredentialed = missingCredential(targetModel);
+      if (uncredentialed) return uncredentialed;
     }
 
     if (!targetModel) {
