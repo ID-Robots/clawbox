@@ -435,6 +435,49 @@ describe("spawning", () => {
     expect(fs.existsSync(streamLog(started.id))).toBe(false);
   });
 
+  it("records a leftover when the scope still has something in it after the group has gone, and keeps the unit for Kill", async () => {
+    // A Chromium a run started puts itself in a process group of its own, so
+    // the pgid answered "gone" while clawbox-run-run-eagbnk6g-….scope stayed
+    // active for 42 hours with fifteen chrome processes in it, the record
+    // saying leftover: false (2026-10-29). The scope is the question.
+    installSystemdRun();
+    installSystemctl("active");
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
+    installWrapper(`echo '${RESULT}'\nexit 0`);
+    const started = await lib.startRun({ task: "Build it", directory: path.join(home, "Projects", "site"), source: "owner" });
+    const settled = await lib.waitForRun(started.id, 25_000);
+    expect(settled?.status).toBe("completed");
+    expect(settled?.pgid).toBeNull();
+    // The unit is still on the record, and systemd is asked a moment later.
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.leftover).toBe(true), { timeout: 10_000 });
+    const run = lib.getRun(started.id);
+    expect(run?.unit).toMatch(new RegExp(`^clawbox-run-${started.id}-[a-z0-9]+\\.scope$`));
+    expect(run?.progress.join(" ")).toMatch(/still running/i);
+    expect(shimCalls(systemctlLog()).join("\n")).toContain(`--user is-active ${run?.unit}`);
+    // ...so the owner's Kill has a name to stop.
+    const killed = lib.killRunLeftovers(started.id);
+    expect(killed.leftover).toBe(false);
+    expect(killed.unit).toBeNull();
+    await vi.waitFor(
+      () => expect(shimCalls(systemctlLog()).join("\n")).toContain(`--user stop ${run?.unit}`),
+      { timeout: 5_000 },
+    );
+  });
+
+  it("forgets the unit of a run that finished with its scope empty", async () => {
+    installSystemdRun();
+    installSystemctl("inactive");
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
+    installWrapper(`echo '${RESULT}'\nexit 0`);
+    const started = await lib.startRun({ task: "Build it", directory: path.join(home, "Projects", "site"), source: "owner" });
+    const settled = await lib.waitForRun(started.id, 25_000);
+    expect(settled?.status).toBe("completed");
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.unit).toBeNull(), { timeout: 10_000 });
+    const run = lib.getRun(started.id);
+    expect(run?.leftover).toBe(false);
+    expect(run?.pgid).toBeNull();
+  });
+
   it("falls back to a plain child when this user has no systemd manager", async () => {
     installSystemdRun();
     withoutUserManager();

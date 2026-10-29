@@ -647,6 +647,63 @@ export function archiveIndex(): ArchiveEntry[] {
 }
 
 /**
+ * The harness's `thinking_tokens` progress events: one line every few
+ * milliseconds while a model reasons, read live for the idle clock and the
+ * run's reasoning count (coding-agent.ts handleEvent) and worth nothing
+ * afterwards — 99.4% of a worker's stream log on the owner's box (12.4 MB,
+ * 53,014 lines in 12.5 minutes, 2026-10-29).
+ */
+const PROGRESS_LINE_RE = /"subtype"\s*:\s*"thinking_tokens"/;
+const SLIM_CHUNK = 1 << 20;
+
+/**
+ * Rewrite an archived stream log without its progress lines. The live log is
+ * the harness's OWN stdout — it writes the file, the web server only tails
+ * it — so the lines can go only once the harness has exited, which the
+ * archive move is. A chunk at a time: a long run's log is tens of megabytes.
+ * Never throws: a log kept whole is disk, not a lost run.
+ */
+function dropProgressLines(file: string): void {
+  const tmp = `${file}.slim`;
+  let src: number | null = null;
+  let dst: number | null = null;
+  try {
+    src = fs.openSync(file, "r");
+    dst = fs.openSync(tmp, "w", 0o600);
+    const buf = Buffer.allocUnsafe(SLIM_CHUNK);
+    let carry = "";
+    let dropped = 0;
+    for (;;) {
+      const read = fs.readSync(src, buf, 0, SLIM_CHUNK, null);
+      if (read <= 0) break;
+      const lines = (carry + buf.toString("utf-8", 0, read)).split("\n");
+      carry = lines.pop() ?? "";
+      const kept = lines.filter((line) => !PROGRESS_LINE_RE.test(line));
+      dropped += lines.length - kept.length;
+      if (kept.length) fs.writeSync(dst, `${kept.join("\n")}\n`);
+    }
+    if (carry && !PROGRESS_LINE_RE.test(carry)) fs.writeSync(dst, carry);
+    fs.closeSync(src);
+    src = null;
+    fs.closeSync(dst);
+    dst = null;
+    if (dropped === 0) {
+      fs.rmSync(tmp, { force: true });
+      return;
+    }
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.error("[coding-agent] could not slim the archived stream log:", err instanceof Error ? err.message : err);
+    for (const fd of [src, dst]) {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch { /* already closed */ }
+      }
+    }
+    try { fs.rmSync(tmp, { force: true }); } catch { /* nothing to undo */ }
+  }
+}
+
+/**
  * Move a run that is leaving the live list into the archive.
  *
  * The RECORD is written first, into a staging folder: once it is there nothing
@@ -679,6 +736,7 @@ export function archiveRun(record: HistoryRecord, sources: ArchiveSources, reaso
   const evidenceMoved = moveInto(sources.evidenceDir, path.join(staging, ARCHIVE_EVIDENCE_DIR));
   const inputsMoved = moveInto(sources.inputsDir, path.join(staging, ARCHIVE_INPUTS_DIR));
   const streamMoved = moveInto(sources.streamLog, path.join(staging, ARCHIVE_STREAM));
+  if (streamMoved) dropProgressLines(path.join(staging, ARCHIVE_STREAM));
   moveInto(sources.stderrLog, path.join(staging, ARCHIVE_STDERR));
   const transcriptCopied = copyRegular(sources.transcript, path.join(staging, ARCHIVE_TRANSCRIPT));
 

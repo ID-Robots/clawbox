@@ -2750,3 +2750,14 @@ it("preserves a final result beyond the display summary for machine consumers an
   expect(done.summary).toHaveLength(6000);
   expect(done.resultText).toBe(full);
 });
+
+it("keeps no second copy of a result the summary already holds whole", async () => {
+  readyDevice();
+  makeProject("site");
+  installFakeWrapper(`echo '${INIT}'\necho '${JSON.stringify({ type: "result", subtype: "success", result: "Done: two files.", num_turns: 1 })}'\nexit 0`);
+  const run = await lib.startRun({ task: "Plan it", projectId: "site", source: "agent" });
+  const done = await finished(run.id);
+  expect(done.summary).toBe("Done: two files.");
+  // Readers take `resultText ?? summary`; a copy was a fifth of every flush.
+  expect(done.resultText).toBeNull();
+});

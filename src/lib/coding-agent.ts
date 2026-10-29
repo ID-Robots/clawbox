@@ -146,6 +146,7 @@ import {
   classifyHarnessFailure,
   harnessFaultMessage,
   harnessFaultProblem,
+  modelAnswered,
   parseHarnessFault,
 } from "@/lib/coding-harness-fault";
 // The runner writes its fixed lines from this table so the surfaces that draw
@@ -366,7 +367,7 @@ import {
   type RunAttempt,
 } from "@/lib/coding-deliverable";
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
-import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
+import { commitRunWork, headCommitShort, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import {
   CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
   CODING_AGENT_GIT_NAME_CONFIG_KEY,
@@ -1243,6 +1244,8 @@ const SETTLE_DRAIN_DELAY_MS = 250;
  * init now — so the unit is the only thing that can say the run is over.
  */
 const UNIT_POLL_MS = 3_000;
+/** How long after a natural settle the run's scope is asked whether anything escaped into it — see noteScopeLeftover. */
+const SCOPE_LEFTOVER_CHECK_MS = 1_500;
 
 /**
  * The run is spawned through this, not directly, so it starts with an empty
@@ -1683,7 +1686,13 @@ export interface CodingRun {
   accountSwitches: AccountSwitch[];
   /** The run's final message: what changed, how to verify, what is left. */
   summary: string | null;
-  /** Full final result for machine consumers; never parse the clipped display summary. */
+  /**
+   * Full final result for machine consumers; never parse the clipped display
+   * summary. Set only when the result is LONGER than `summary` holds
+   * (MAX_SUMMARY_CHARS): a copy of a result the summary already carries whole
+   * was a fifth of every flush of the runs file. Readers take
+   * `resultText ?? summary`.
+   */
   resultText?: string | null;
   /** Actual Workflow children; legacy subagent counters count containers. */
   workflowTelemetry?: WorkflowTelemetry;
@@ -1897,6 +1906,15 @@ export interface CodingRun {
   subagentsTotal: number;
   /** The commit this run's work was recorded as, when it changed anything. */
   commit: string | null;
+  /**
+   * The folder's HEAD when the run first spawned — `git log -1 --format=%h`,
+   * the spelling `newestCommitSince` answers in — or null where there was no
+   * commit to name. `noteOwnCommit` ignores an answer equal to it: with that
+   * helper's minute of clock slack, a worktree forked or a team's base merged
+   * seconds before the spawn had 29 of 52 read-only runs on the owner's box
+   * recorded as having "committed themselves" — as the base commit.
+   */
+  headAtStart: string | null;
   /** How many of each kind — explorer, tester, reviewer. */
   subagentsByType: Record<string, number>;
   /** Every model that did work for this run, main and sub-agents alike. */
@@ -4672,6 +4690,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsByType: (raw.subagentsByType && typeof raw.subagentsByType === "object")
       ? (raw.subagentsByType as Record<string, number>) : {},
     commit: typeof raw.commit === "string" ? raw.commit : null,
+    headAtStart: typeof (raw as { headAtStart?: unknown }).headAtStart === "string" ? (raw as { headAtStart: string }).headAtStart : null,
     modelsUsed: Array.isArray(raw.modelsUsed)
       ? raw.modelsUsed.filter((m): m is string => typeof m === "string") : [],
     maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
@@ -4980,7 +4999,9 @@ function writeAll(list: CodingRun[]): void {
   if (store.signature !== null && fileSignature() !== store.signature) keepSettledRecords(list);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = untraced(`${RUNS_PATH}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
+  // Compact: the file is rewritten every few seconds while a run streams, and
+  // nothing reads it by eye — the indentation was a fifth of every flush.
+  fs.writeFileSync(tmp, JSON.stringify(list), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);
   } catch {
@@ -5898,7 +5919,6 @@ export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ??
   // reason written above: it holds a resumable session, so it is not "finished"
   // either. The folder exception applies to it unchanged — `resumeRun` refuses a
   // run whose folder is gone, so such a record can neither go on nor finish.
-  const heldOn = (r: CodingRun) => holdsResumableSession(r.status) && (isLive(r.status) || folderPresent(r.directory));
   // ONE decision per run, used for both the record and its evidence folder:
   // judged twice, a folder that came or went between the two looks would
   // drop a record and keep its artifacts, or the other way round.
@@ -7802,9 +7822,15 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
     // hand to anybody. Forget it here for the same reason reconcileAfterRestart
     // forgets it across a restart: a record that keeps a recycled pid would let
     // the Kill button signal a stranger's process group in this run's name.
-    // The scope goes with it: nothing is in it, so `--collect` has taken it.
     run.pgid = null;
-    run.unit = null;
+    // The scope is a separate question, and the unit stays until it answers:
+    // a Chromium a run started puts itself in a process group of its own, so
+    // the group was "gone" while clawbox-run-run-eagbnk6g-….scope stayed
+    // active for 42 hours with fifteen chrome processes in it, the record
+    // saying leftover: false (2026-10-29). A unit name is never handed to
+    // anybody else, so keeping it costs nothing, and it is what
+    // killRunLeftovers stops.
+    if (run.unit) noteScopeLeftover(run, run.unit);
     return;
   }
   run.leftover = false;
@@ -7816,6 +7842,33 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   }
   run.pgid = null;
   run.unit = null;
+}
+
+/**
+ * Ask systemd, a moment after the settle, whether the run's scope still has
+ * anything in it. A moment, because `--collect` removes an emptied scope only
+ * once systemd has noticed the cgroup empty, which is not the instant the
+ * harness exited. Up: the run has a leftover, said on its timeline, and the
+ * unit stays on the record for the Kill button. Gone, or systemd cannot be
+ * asked: the unit is forgotten, as reconcileAfterRestart forgets one at boot.
+ * Held in the settle work, so a reset waits for it.
+ */
+function noteScopeLeftover(run: CodingRun, unit: string): void {
+  trackSettleWork((async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, SCOPE_LEFTOVER_CHECK_MS).unref());
+    // The owner's Kill, or a resume, may have moved on meanwhile.
+    if (run.unit !== unit || isLive(run.status)) return;
+    const up = await unitActive(unit).catch(() => null);
+    if (up === true) {
+      if (!run.leftover) {
+        run.leftover = true;
+        pushProgress(run, RUNNER_STEP.leftoverRunning);
+      }
+    } else {
+      run.unit = null;
+    }
+    persist(true);
+  })());
 }
 
 /**
@@ -8859,7 +8912,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     const text = typeof event.result === "string" ? redactForRun(run.id, event.result).trim() : "";
     if (text) {
       run.summary = text.slice(0, MAX_SUMMARY_CHARS);
-      run.resultText = text;
+      run.resultText = text.length > MAX_SUMMARY_CHARS ? text : null;
     }
     switch (event.subtype) {
       case "success":
@@ -9030,7 +9083,7 @@ function handleCodexEvent(run: CodingRun, state: LiveRun, event: unknown): void 
         const text = state.codexLastMessage ? redactForRun(run.id, state.codexLastMessage).trim() : "";
         if (text) {
           run.summary = text.slice(0, MAX_SUMMARY_CHARS);
-          run.resultText = text;
+          run.resultText = text.length > MAX_SUMMARY_CHARS ? text : null;
         }
         state.outcome = { status: "completed", error: null, resumable: false };
         break;
@@ -9088,6 +9141,9 @@ export function isTransientFailure(error: string | null): boolean {
  * attempt is over, so what must follow the commit can wait for it.
  */
 async function recordRunWork(run: CodingRun): Promise<void> {
+  // A read-only run changed nothing and commits nothing: the only commit the
+  // folder's log could answer with is somebody else's.
+  if (run.readOnly) return;
   // No file the tools confirmed — but a run that wrote through its shell and
   // committed there has a commit of its own to record all the same.
   if (run.filesTouched.length === 0) {
@@ -9135,7 +9191,9 @@ async function recordRunWork(run: CodingRun): Promise<void> {
 async function noteOwnCommit(run: CodingRun): Promise<void> {
   try {
     const own = await newestCommitSince(run.directory, run.startedAt);
-    if (!own || own === run.commit) return;
+    // Equal to where the folder stood at the spawn: not the run's (see
+    // CodingRun.headAtStart).
+    if (!own || own === run.commit || own === run.headAtStart) return;
     run.commit = own;
     run.commitError = null;
     pushProgress(run, RUNNER_STEP.committedByRun(own));
@@ -11579,12 +11637,33 @@ export function resumePipelines(): void {
 const ULTRACODE_REFUSED = /Ultracode needs dynamic workflows|Ultracode runs at xhigh effort, which is restricted/i;
 
 /** The wrapper's own diagnostics, minus its start-up banner. */
-function stderrTail(stderr: string): string {
+function stderrTail(stderr: string, dropModelWarning = false): string {
   const lines = stderr
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l && !/^claude-ds: ClawBox AI \(/.test(l));
+    .filter((l) => l && !/^claude-ds: ClawBox AI \(/.test(l) && !(dropModelWarning && MODEL_WARNING_LINE_RE.test(l)));
   return lines.slice(-4).join(" ").slice(0, MAX_ERROR_CHARS);
+}
+
+/** The CLI's warning about the model string, printed at start and true of a run that then works for hours. */
+const MODEL_WARNING_LINE_RE = /^\[claude-code:unrecognized_model\]/;
+
+/**
+ * The failure of a run the model HAD answered, when the harness died with no
+ * result: what ended it, not what it warned about. run-1phttv83 (exit 143
+ * after 12.3M tokens, its work committed) carried
+ * '[claude-code:unrecognized_model] {…}' as its whole error. That line is
+ * dropped from the tail HERE only: before the first answer it stays, because
+ * HARNESS_FAULT_RE and TRANSIENT_FAILURE_RE read it (classifyHarnessFailure,
+ * and the one automatic retry).
+ */
+function endedAfterAnswer(exitCode: number | null, tokens: number, tail: string): string {
+  const killed = exitCode === null || exitCode > 128;
+  const spent = `after ${Math.max(0, tokens).toLocaleString("en-US")} tokens`;
+  const lead = killed
+    ? `Claude Code was killed (exit ${exitCode ?? "signal"}) ${spent}.`
+    : `Claude Code exited with code ${exitCode} ${spent} without reporting a result.`;
+  return (tail ? `${lead} ${tail}` : lead).slice(0, MAX_ERROR_CHARS);
 }
 
 /**
@@ -12193,7 +12272,12 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
           // xhigh. Name the way out rather than echo its /config advice, which
           // the owner cannot follow from the app.
           ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
-          : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+          : modelAnswered({ tokensUsed: run.tokensUsed - state.tokensAtSpawn, sawModelAnswer: state.sawModelAnswer })
+            // A model answered this spawn, so the harness could get one to:
+            // the error is what ended it, with the CLI's model warning left
+            // out of the tail (endedAfterAnswer).
+            ? endedAfterAnswer(exitCode, run.tokensUsed - state.tokensAtSpawn, redactForRun(run.id, stderrTail(state.stderr, true)))
+            : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
     }
     // An `openai` run OpenAI turned away for a usage limit or a refused
     // credential, said in the owner's terms. The limit is remembered, so the
@@ -14029,6 +14113,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
+    // Where the folder stood as the run began — see CodingRun.headAtStart.
+    run.headAtStart = await headCommitShort(run.directory);
     // A start refused between here and the insert never reaches a settle, so it
     // gives back what it was just handed: the values out of memory, and the
     // one-run copies it claimed back out of the store.
@@ -14382,6 +14468,7 @@ function newRunRecord(fields: {
     subagentsByType: {},
     modelsUsed: [],
     commit: null,
+    headAtStart: null,
     maxTurns: fields.settings.maxTurns,
     tokensUsed: 0,
     tokenBreakdown: emptyTokenBreakdown(),
@@ -14537,15 +14624,32 @@ function folderPresent(directory: string): boolean {
   }
 }
 
-/** The oldest run that is history — see isHeld for what is not, and
+/**
+ * A run the trim and the owner's Clear both leave alone: it holds a resumable
+ * session (`holdsResumableSession` — the held three and `gave_up`, whose card
+ * offers Resume) AND can still go on — live, or its folder still there.
+ * `resumeRun` and `startDraftRun` refuse a run whose folder is gone, so such a
+ * record can neither go on nor finish, and kept it was immortal: past the
+ * rail's newest dozen it was listed nowhere (the review pass paused in a
+ * folder the owner had deleted, 2026-09-06; 22 of the 40 gave_up records on
+ * the owner's box named folders that no longer existed, 2026-10-29). A LIVE
+ * run is kept whatever its folder says: the record is the only handle on the
+ * process. Only the folder's ABSENCE answers no — see folderPresent.
+ */
+function heldOn(r: CodingRun): boolean {
+  return holdsResumableSession(r.status) && (isLive(r.status) || folderPresent(r.directory));
+}
+
+/** The oldest run that is history — see heldOn for what is not, and
  *  isPrPending for the run that has settled but is still being watched. */
 function findLastFinished(list: CodingRun[]): number {
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    // `holdsResumableSession`, not `isHeld`: a run that GAVE UP is settled, but
-    // its session is intact and its card offers Resume, so trimming it to make
-    // room for a new run would take that session and its evidence folder with
-    // it — unasked, and past the rail's newest dozen, invisibly.
-    if (!holdsResumableSession(list[i].status) && !isPrPending(list[i].pr)) return i;
+    // `heldOn`, not `isHeld`: a run that GAVE UP is settled, but its session is
+    // intact and its card offers Resume, so trimming it to make room for a new
+    // run would take that session and its evidence folder with it — unasked,
+    // and past the rail's newest dozen, invisibly. Unless its folder is gone,
+    // in which case nothing can resume it and it is history like any other.
+    if (!heldOn(list[i]) && !isPrPending(list[i].pr)) return i;
   }
   return -1;
 }
@@ -14988,6 +15092,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
     run.completionAttempts = settings.completionAttempts;
     run.diet = settings.diet;
+    run.headAtStart = await headCommitShort(run.directory);
     run.status = "running";
     run.queued = null;
     run.startedAt = Date.now();

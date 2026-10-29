@@ -57,10 +57,12 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
 }));
 const commitRunWork = vi.hoisted(() => vi.fn());
 const newestCommitSince = vi.hoisted(() => vi.fn());
+const headCommitShort = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-git")>()),
   commitRunWork,
   newestCommitSince,
+  headCommitShort,
 }));
 
 const snap = (over: Partial<PrSnapshot> = {}): PrSnapshot => ({
@@ -360,6 +362,7 @@ describe("the pull request across the owner's gestures", () => {
     github.mergePullRequest.mockResolvedValue({ ok: false, detail: "not in this test" });
     commitRunWork.mockResolvedValue({ committed: true, sha: "abc1234", initialized: false });
     newestCommitSince.mockResolvedValue(null);
+    headCommitShort.mockResolvedValue(null);
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
   });
@@ -467,6 +470,34 @@ describe("the pull request across the owner's gestures", () => {
     // CodeRabbit gives the one review it gives a pull request.
     expect(github.openPullRequest).toHaveBeenCalledWith(expect.objectContaining({ branch: runBranchName(started.id), draft: true }));
     expect(lib.getRun(started.id)?.pr?.readyAt).toBeNull();
+  });
+
+  it("does not take the commit the folder already had when the run began for the run's own", async () => {
+    // newestCommitSince allows a minute of clock slack, so a worktree forked
+    // or a team's base merged seconds before the spawn answered as the run's
+    // own commit: 29 of 52 read-only runs on the owner's box "committed
+    // themselves" as the base commit. HEAD at the spawn is on the record.
+    commitRunWork.mockResolvedValue({ committed: false, reason: "no_changes" });
+    headCommitShort.mockResolvedValue("base1234");
+    newestCommitSince.mockResolvedValue("base1234");
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    expect(started.headAtStart).toBe("base1234");
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.commit).toBeNull();
+    expect(done.progress.join("\n")).not.toMatch(/Committed by the run itself/);
+  });
+
+  it("records no commit at all for a read-only run", async () => {
+    newestCommitSince.mockResolvedValue("own1234");
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "look around", projectId: "site", source: "owner", readOnly: true });
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.commit).toBeNull();
+    expect(commitRunWork).not.toHaveBeenCalled();
+    expect(newestCommitSince).not.toHaveBeenCalled();
   });
 
   // TASK-1366. Invented values throughout; what matters is where they end up.
