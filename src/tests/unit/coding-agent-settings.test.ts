@@ -170,18 +170,20 @@ describe("what a run is told about the shell", () => {
     // IS shipped (BASH_KILL_DENYLIST) is what the brief names now.
     const lib = await import("@/lib/coding-agent");
     expect(lib.HEADLESS_BRIEF).not.toMatch(/ONE command per Bash call/i);
-    expect(lib.HEADLESS_BRIEF).toMatch(/You may chain commands with && or ;, pipe, redirect/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/End anything you started by its PID: pkill, killall and fuser are refused/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Bash may chain, pipe and background/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/end what you started by PID \(pkill, killall and fuser are refused\)/);
   });
 
   it("hands a merge the task asked for to GitHub's auto-merge — never into main, over hold, or on a draft", async () => {
     // Measured on ClawBox's own repository: green pull requests waited ten to
-    // sixteen hours for a merge. Every writing run hears this, whatever its
-    // review shape; a read-only run opens nothing and hears none of it.
+    // sixteen hours for a merge. Every writing run with a pull request in
+    // sight hears this, whatever its review shape; a run with none in sight,
+    // and a read-only run, which opens nothing, hear none of it.
     const lib = await import("@/lib/coding-agent");
-    for (const brief of [lib.HEADLESS_BRIEF, lib.headlessBrief({ reviewedSeparately: true })]) {
+    for (const brief of [lib.headlessBrief({ reviewedSeparately: false, pullRequest: true }), lib.headlessBrief({ reviewedSeparately: true, pullRequest: true })]) {
       expect(brief).toContain(lib.PR_AUTO_MERGE_BRIEF);
     }
+    expect(lib.HEADLESS_BRIEF).not.toContain(lib.PR_AUTO_MERGE_BRIEF);
     expect(lib.PR_AUTO_MERGE_BRIEF).toContain("`gh pr merge <number> --auto --merge`");
     expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/wants it merged/);
     expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/Never do that for a pull request into main or one labelled hold or do-not-merge/);
@@ -196,16 +198,19 @@ describe("what a run is told about the shell", () => {
     // ("no defects") the pass then re-derived with Bash in hand. One diff,
     // one review — the helper sentence is swapped for the reason.
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/before your final report, send the reviewer over your changes/);
-    expect(lib.HEADLESS_BRIEF).not.toContain("{{REVIEWER_CLAUSE}}");
+    expect(lib.HEADLESS_BRIEF).toContain(lib.leanHelpersBrief(false));
+    expect(lib.HEADLESS_BRIEF).toMatch(/send the reviewer exactly once/);
     const reviewed = lib.headlessBrief({ reviewedSeparately: true });
-    expect(reviewed).toMatch(/your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper/);
-    expect(reviewed).not.toMatch(/before your final report, send the reviewer/);
-    expect(reviewed).not.toContain("{{REVIEWER_CLAUSE}}");
-    // The explorer and tester steps stay whatever the review shape is — the
-    // comment above the sentence records what softer wording did.
-    expect(reviewed).toMatch(/send the explorer to map it/);
-    expect(reviewed).toMatch(/send the tester to run whatever check exists/);
+    expect(reviewed).toContain(lib.leanHelpersBrief(true));
+    expect(reviewed).toMatch(/Do not send the reviewer: a separate review on this device reads your diff/);
+    expect(reviewed).not.toMatch(/send the reviewer exactly once/);
+    // The shell-first checks and the explorer rule stay whatever the review
+    // shape is — the comment above leanHelpersBrief records why.
+    for (const brief of [lib.HEADLESS_BRIEF, reviewed]) {
+      expect(brief).toMatch(/Run the project's tests and builds yourself in your shell/);
+      expect(brief).toMatch(/Use the explorer only for a codebase too large to read directly/);
+      expect(brief).toMatch(/Helpers never edit/);
+    }
     expect(lib.headlessBrief({ reviewedSeparately: false })).toBe(lib.HEADLESS_BRIEF);
 
     const brief = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
@@ -217,12 +222,13 @@ describe("what a run is told about the shell", () => {
   it("tells a run whose pull request the box will watch to open it as a draft, and nobody else", async () => {
     // CodeRabbit reviews a pull request once, when it becomes ready, and the
     // watcher readies it once the checks pass. A draft nothing watches would
-    // never be readied, so only the auto-PR run hears this.
+    // never be readied, so only the auto-PR run hears this — and, with a pull
+    // request in sight, the auto-merge sentence with it.
     const lib = await import("@/lib/coding-agent");
     const brief = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
     expect(lib.PR_DRAFT_BRIEF).toContain("gh pr create --draft");
     expect(lib.PR_DRAFT_BRIEF).toMatch(/Do not mark it ready, ask for a review or merge it yourself/);
-    expect(brief(lib.buildRunArgs({ draftPullRequests: true }))).toBe(`${lib.HEADLESS_BRIEF} ${lib.PR_DRAFT_BRIEF}`);
+    expect(brief(lib.buildRunArgs({ draftPullRequests: true }))).toBe(`${lib.headlessBrief({ reviewedSeparately: false, pullRequest: true })} ${lib.PR_DRAFT_BRIEF}`);
     expect(brief(lib.buildRunArgs({}))).not.toContain(lib.PR_DRAFT_BRIEF);
     expect(brief(lib.buildRunArgs({ draftPullRequests: true, readOnly: true }))).not.toContain(lib.PR_DRAFT_BRIEF);
   });
@@ -234,41 +240,30 @@ describe("what a run is told about the shell", () => {
     // with nothing on disk. m-04's assumptions section came from the bench
     // folder's NAME, not from anything the brief asked for.
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/The one exception is your own evidence folder \(CLAWBOX_RUN_ARTIFACTS_DIR\), which lives under data\//);
-    expect(lib.HEADLESS_BRIEF).toMatch(/The folders beside yours under the project root are the owner's other projects: never list, search or read them/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/Do the parts you are sure of and that are inside this folder FIRST/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/try that step once with Edit or Write — never through Bash — so the device's refusal is on the record/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/every assumption you made where the task left a choice open — name the convention or default you picked and why/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/its data\/ folder, your run record and session files are off limits, except your evidence folder \(\$CLAWBOX_RUN_ARTIFACTS_DIR\)/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Folders beside yours are the owner's other projects: never list, search or read them/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Make the in-folder edits you are sure of FIRST/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/try it once with Edit or Write, never Bash, then carry on/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/every assumption you made where the task left a choice open, and why/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/Decide the shape once and do not re-argue whether the ultracode reminder applies/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/a Workflow is for a fan-out of many, never for a folder of two files/);
   });
 
-  it("tells the run to fix obviously garbled copy rather than ship it", async () => {
-    // Seen on a real run: the brief carried scraped artifacts — a step timed
-    // "260 sec" and one labelled "3 instant" — and the run reproduced them
-    // verbatim onto a marketing page. Faithful, and wrong: nobody wants
-    // nonsense strings shipped because the task had a paste error.
-    const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/copy-paste artifacts/i);
-    expect(lib.HEADLESS_BRIEF).toMatch(/note it in your final report/i);
-  });
-
   // Bench run run-g6vwqr9y: the Edit on an outside path was denied, so the
   // run made the same change with `sed -i` through Bash and reported success.
-  // The brief now names that move and forbids it; this pins the sentence.
+  // The brief names that move and forbids it; this pins the sentence.
   it("tells the run a denial is a decision, not a puzzle for Bash", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/denied file action is a DECISION/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/A refused Read, Write or Edit is a decision/);
     // Bench cycle 1 (2026-09-05): finish after ONE verification pass, ship
     // exactly the files named, never search the disk for a missing one.
-    expect(lib.HEADLESS_BRIEF).toMatch(/Finish decisively: once the work is done and ONE verification pass/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/Do not review verified work a second time/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/produce exactly those — no extra assets, pictures, notes or scripts/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/never search the disk for it/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Finish decisively: once ONE verification pass/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/exactly the files the task names, nothing beside them/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/never search the disk/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/a task of one to three files needs no workflow at all/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/at most ONE/);
     expect(lib.HEADLESS_BRIEF).toMatch(/no sed, tee, redirection or scripts through Bash/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/report plainly which part was refused/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/report it undone/);
   });
 
   it("allows the read-only git queries a real run reached for", async () => {

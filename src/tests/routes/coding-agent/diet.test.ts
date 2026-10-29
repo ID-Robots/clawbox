@@ -1,9 +1,10 @@
 /**
- * POST /setup-api/coding-agent/enable { diet } (TASK-1749): the owner's token
- * diet — a partial patch merged over what is stored, refused whole with a
- * stable code on an unknown key or value — the status reporting the effective
- * value, and a run record freezing it (a record from before the field reads as
- * the default). Against the real config store in a temp root.
+ * What is left of the token diet (TASK-1749) at the route and the record:
+ * POST /setup-api/coding-agent/enable no longer takes `{ diet }` (the knobs
+ * were measured and deleted), the status no longer reports one, and a run
+ * record freezes only the visual decision — a record from before the decision
+ * existed (no `diet` object) reads as visual, so a resumed old session keeps
+ * its browser tools. Against the real config store in a temp root.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -19,9 +20,9 @@ let session: SessionFixture;
 let restore: () => void;
 let enableRoute: typeof import("@/app/setup-api/coding-agent/enable/route");
 
-const post = (body: unknown, owner = true) => enableRoute.POST(new Request("http://localhost/setup-api/coding-agent/enable", {
+const post = (body: unknown) => enableRoute.POST(new Request("http://localhost/setup-api/coding-agent/enable", {
   method: "POST",
-  headers: { "Content-Type": "application/json", ...(owner ? { Cookie: session.cookie } : { Authorization: `Bearer ${MCP_TOKEN}` }) },
+  headers: { "Content-Type": "application/json", Cookie: session.cookie },
   body: JSON.stringify(body),
 }));
 
@@ -46,65 +47,21 @@ afterEach(async () => {
   fs.rmSync(session.root, { recursive: true, force: true });
 });
 
-describe("the diet setting", () => {
-  it("reports the lean defaults (TASK-1749's measurement) on a box that never set it", async () => {
-    const lib = await import("@/lib/coding-agent");
-    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
-    expect(await lib.getDiet()).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
-    expect(savedConfig()).not.toHaveProperty("coding_agent_diet");
-  });
-
-  it("merges a partial patch over the lean defaults when nothing is stored, then over what is stored", async () => {
-    let res = await post({ diet: { brief: "full" } });
-    expect(res.status).toBe(200);
-    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto", context: "full" });
-    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto", context: "full" });
-    res = await post({ diet: { visualTools: "always", helpers: "always" } });
-    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
-    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
-  });
-
-  it("names every diet setting in its usage answer", async () => {
-    const res = await post({ nothing: true });
+describe("the diet setting is gone", () => {
+  it("is refused by the enable route as an unknown body, and nothing is saved", async () => {
+    const res = await post({ diet: { brief: "full" } });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("{ diet: { brief?, helpers?, visualTools?, context? } }");
-  });
-
-  it.each([
-    [{ brief: "tiny" }, "diet_invalid_value"],
-    [{ visualTools: false }, "diet_invalid_value"],
-    [{ tools: "none" }, "diet_unknown_key"],
-    ["lean", "diet_not_object"],
-    [null, "diet_not_object"],
-  ])("refuses %j with %s before anything is saved", async (diet, code) => {
-    // A second field rides along to prove the refusal comes before ANY setter.
-    const res = await post({ diet, autoPr: true });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({ code, kind: "invalid" });
-    expect(savedConfig()).not.toHaveProperty("coding_agent_diet");
-    expect(savedConfig()).not.toHaveProperty("coding_agent_auto_pr");
-  });
-
-  it("is the owner's: the agent's bearer cannot change it", async () => {
-    const res = await post({ diet: { brief: "lean" } }, false);
-    expect(res.status).toBe(403);
+    expect((await res.json()).error).not.toContain("diet");
     expect(savedConfig()).not.toHaveProperty("coding_agent_diet");
   });
 
-  it("reports a stored junk value as the default it reads as", async () => {
-    fs.writeFileSync(path.join(session.root, "data", "config.json"), JSON.stringify({ ...savedConfig(), coding_agent_diet: { brief: "tiny", visualTools: "always" } }));
+  it("is not in the status", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "always", context: "full" });
-  });
-
-  it("is cleared by the reset with every other setting", async () => {
-    const lib = await import("@/lib/coding-agent");
-    expect(lib.CODING_AGENT_RESET_KEYS).toContain(lib.CODING_AGENT_DIET_CONFIG_KEY);
-    expect(lib.CODING_AGENT_DIET_CONFIG_KEY).toBe("coding_agent_diet");
+    expect(await lib.getCodingAgentStatus()).not.toHaveProperty("diet");
   });
 });
 
-describe("a run record's frozen diet", () => {
+describe("a run record's frozen visual decision", () => {
   const record = (id: string, extra: Record<string, unknown>) => ({
     id,
     task: "build the site",
@@ -114,24 +71,20 @@ describe("a run record's frozen diet", () => {
     ...extra,
   });
 
-  // A record is read against LEGACY_DIET, NOT the lean DEFAULT_DIET: a run
-  // started before the diet existed was opened with the full prompt, and its
-  // resumes must keep it byte for byte.
-  it("round-trips the diet and the visual decision, and reads a record from before them as the legacy full prompt", async () => {
+  it("round-trips the decision, and reads a record from before it as visual", async () => {
     fs.writeFileSync(path.join(session.root, "data", "coding-agent-runs.json"), JSON.stringify([
       record("run-aaaaaaaa", { diet: { brief: "lean", helpers: "lean", visualTools: "auto", context: "full" }, visual: false }),
+      // Before the decision existed: started with every tool, keeps them.
       record("run-bbbbbbbb", {}),
+      // A record with the diet's field that never spawned: decided at its spawn.
       record("run-cccccccc", { diet: { brief: "short", helpers: "lean" }, visual: "yes" }),
+      record("run-dddddddd", { visual: true }),
     ]));
     const lib = await import("@/lib/coding-agent");
-    const a = lib.getRun("run-aaaaaaaa")!;
-    expect(a.diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
-    expect(a.visual).toBe(false);
-    const b = lib.getRun("run-bbbbbbbb")!;
-    expect(b.diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
-    expect(b.visual).toBeNull();
-    const c = lib.getRun("run-cccccccc")!;
-    expect(c.diet).toEqual({ brief: "full", helpers: "lean", visualTools: "always", context: "full" });
-    expect(c.visual).toBeNull();
+    expect(lib.getRun("run-aaaaaaaa")!.visual).toBe(false);
+    expect(lib.getRun("run-bbbbbbbb")!.visual).toBe(true);
+    expect(lib.getRun("run-cccccccc")!.visual).toBeNull();
+    expect(lib.getRun("run-dddddddd")!.visual).toBe(true);
+    expect(lib.getRun("run-aaaaaaaa")).not.toHaveProperty("diet");
   });
 });
