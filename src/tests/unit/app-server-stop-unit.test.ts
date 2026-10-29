@@ -29,8 +29,9 @@ const UNIT = "hello-app-app.service";
 const systemd = vi.hoisted(() => ({
   /** The user `.service` the listener's cgroup names; null for none. */
   unit: null as string | null,
-  /** What `systemctl show -p WorkingDirectory` answers for it. */
+  /** What `systemctl show -p WorkingDirectory -p MainPID` answers for it. */
   workingDirectory: "",
+  mainPid: 0,
   calls: [] as string[][],
   /** What `systemctl stop` does to the unit's processes. */
   stop: async () => undefined as void,
@@ -53,7 +54,7 @@ vi.mock("@/lib/child-run", async (importOriginal) => {
       const [bin, args] = call;
       if (bin !== SYSTEMCTL) return actual.runChild(...call);
       systemd.calls.push([...args]);
-      if (args.includes("show")) return answer(`WorkingDirectory=${systemd.workingDirectory}\n`);
+      if (args.includes("show")) return answer(`WorkingDirectory=${systemd.workingDirectory}\nMainPID=${systemd.mainPid}\n`);
       if (args.includes("stop")) await systemd.stop();
       return answer();
     },
@@ -102,6 +103,7 @@ beforeEach(async () => {
   supervisor = null;
   systemd.unit = UNIT;
   systemd.workingDirectory = project;
+  systemd.mainPid = 0;
   systemd.calls.length = 0;
   // systemd's own stop: the unit's whole cgroup goes, the restart loop with it.
   systemd.stop = async () => {
@@ -166,22 +168,42 @@ describe("stopping an app served from a user .service of its own", () => {
     ]);
   });
 
-  it("never stops a whole unit whose own working directory is not the app's folder", async () => {
-    // A unit that merely has a process in the folder: an owner's shell
-    // service, a CI runner. Only the server itself is the app's to end; the
-    // unit is neither stopped nor disabled. (Whether the stop then answers
-    // before the unit starts the server again is the unit's timing, so the
-    // outcome is not asserted.)
+  it("stops a unit whose main process runs from the app's folder, with no WorkingDirectory there", async () => {
+    // An ExecStart that `cd`s into the folder first: the unit runs from it all the same.
     systemd.workingDirectory = base;
     const { port, supervisorPid } = await serveUnderRestart();
-    const server = Number(fs.readFileSync(path.join(project, "server.pid"), "utf-8"));
+    systemd.mainPid = supervisorPid;
 
-    const outcome = await start.stopServerApp("hello-app", { port, directory: project });
+    expect(await start.stopServerApp("hello-app", { port, directory: project })).toEqual({ ok: true, stopped: true, holder: null, units: [UNIT] });
 
-    expect(alive(server)).toBe(false);
-    expect(outcome).not.toHaveProperty("units");
-    expect(systemd.calls.some((args) => args.includes("stop"))).toBe(false);
-    expect(alive(supervisorPid)).toBe(true);
+    expect(systemd.calls).toContainEqual(["--user", "stop", "--", UNIT]);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("not_listening");
+  });
+
+  it("never stops a whole unit that merely has a process in the app's folder", async () => {
+    // An owner's shell service, a CI runner: neither its WorkingDirectory nor
+    // its main process is in the folder. Only the server itself is the app's
+    // to end; the unit is not stopped. (Whether the stop then answers before
+    // the unit starts the server again is the unit's timing, so the outcome's
+    // `ok` is not asserted.)
+    systemd.workingDirectory = base;
+    const main = spawn("/bin/sh", ["-c", "sleep 60"], { cwd: base, detached: true, stdio: "ignore" });
+    try {
+      systemd.mainPid = main.pid as number;
+      const { port, supervisorPid } = await serveUnderRestart();
+      const server = Number(fs.readFileSync(path.join(project, "server.pid"), "utf-8"));
+
+      const outcome = await start.stopServerApp("hello-app", { port, directory: project });
+
+      expect(alive(server)).toBe(false);
+      expect(outcome).not.toHaveProperty("units");
+      expect(systemd.calls.some((args) => args.includes("stop"))).toBe(false);
+      expect(alive(supervisorPid)).toBe(true);
+      expect(alive(main.pid as number)).toBe(true);
+    } finally {
+      try { process.kill(-(main.pid as number), "SIGKILL"); } catch { /* gone */ }
+    }
   });
 });
 
