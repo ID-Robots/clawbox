@@ -264,6 +264,23 @@ describe("syncChannelAudio", () => {
     expect(models.slice(1).every(isLocal)).toBe(true);
   });
 
+  /**
+   * `resolveClawaiToken` reads openclaw.json again with `readConfig`, which
+   * answers `{}` for a file caught half-written by a concurrent `config set` —
+   * the moment right after a provider save or a gateway start this pass runs
+   * in. The strict read this pass already holds has the token.
+   */
+  it("keeps a backed cloud row when the token's second read of the file comes back empty", async () => {
+    token.value = null;
+    config.read.mockResolvedValue(linked({
+      models: { providers: { deepseek: { apiKey: "claw_token" } } },
+      tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } },
+    }));
+    expect(await lib.syncChannelAudio(["cloud", "local"], false)).toBe(false);
+    expect(config.batch).not.toHaveBeenCalled();
+    expect(config.unset).not.toHaveBeenCalled();
+  });
+
   it("serialises its writers, so two at once cannot both read the same old list", async () => {
     let release!: () => void;
     config.batch.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
@@ -351,6 +368,20 @@ describe("reconcileChannelAudio — boot, a Whisper install, a provider save", (
     config.strict.mockRejectedValue(new Error("Unexpected end of JSON input"));
     await expect(lib.reconcileChannelAudio({ trigger: "boot" })).rejects.toThrow();
     expect(config.batch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the owner's cloud-first order when the token's second read of the file comes back empty", async () => {
+    store.set("stt_primary", "cloud");
+    token.value = null;
+    const { buildAudioModels } = await import("@/lib/stt-preference");
+    const settled = buildAudioModels(["cloud", "local"], true, true);
+    config.read.mockResolvedValue(linked({
+      models: { providers: { deepseek: { apiKey: "claw_token" } } },
+      tools: { media: { audio: { baseUrl: PROXY }, models: settled } },
+    }));
+    expect(await lib.reconcileChannelAudio({ trigger: "provider" })).toBe(false);
+    expect(config.batch).not.toHaveBeenCalled();
+    expect(config.unset).not.toHaveBeenCalled();
   });
 
   it("writes nothing when channels already hear the way the box would", async () => {

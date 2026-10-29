@@ -16,6 +16,7 @@ import { isDeepStrictEqual } from "util";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import { hasChatgptOauthProfile } from "@/lib/chatgpt-subscription";
 import { isClawboxAiToken } from "@/lib/clawai-token";
+import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import {
   readGatewayAuthProfile,
@@ -145,9 +146,26 @@ export function decideCloudSttBacking(facts: CloudSttFacts): CloudSttBacking {
   return { usable: true, reason: null };
 }
 
+/**
+ * The ClawBox AI token, from the config this pass already holds first.
+ *
+ * `resolveClawaiToken` reads openclaw.json again with `readConfig`, which
+ * answers `{}` for a file caught half-written by a concurrent `config set` —
+ * the moment right after a provider save or a gateway start these passes run
+ * in — and its null was taken for "not linked": the cloud row and our endpoint
+ * came off a box whose STRICT read, in hand, held the token. The second read
+ * is left to a token openclaw.json does not hold (the Hermes store).
+ */
+async function clawaiTokenFrom(config: OpenClawConfig): Promise<string | null> {
+  const held = config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
+  if (typeof held === "string" && held.trim()) return held.trim();
+  return await resolveClawaiToken();
+}
+
 /** {@link decideCloudSttBacking} over what this box holds now. */
 export async function readCloudSttBacking(config?: OpenClawConfig): Promise<CloudSttBacking> {
-  const [cfg, token] = await Promise.all([config ?? readConfig(), resolveClawaiToken()]);
+  const cfg = config ?? (await readConfig());
+  const token = await clawaiTokenFrom(cfg);
   // No token, no question for the store: both readers below open sqlite.
   if (token === null) return unusable("not_linked");
   return decideCloudSttBacking({
@@ -317,11 +335,14 @@ export interface ReconcileChannelAudioOptions {
 export async function reconcileChannelAudio(options: ReconcileChannelAudioOptions): Promise<boolean> {
   if (openclawIsAbsent()) return false;
   if (options.freshProbe) forgetLocalSttProbe();
-  const [stored, token, local] = await Promise.all([
+  // STRICT, like the write below: a null token from a half-written file read
+  // the order as "no cloud", and wrote Whisper ahead of an owner's cloud pick.
+  const [stored, config, local] = await Promise.all([
     readStoredSttPrimary(),
-    resolveClawaiToken(),
+    readConfigStrict(),
     localSttInstalled(),
   ]);
+  const token = await clawaiTokenFrom(config);
   const order = sttEngineOrder(resolveSttPrimary(stored, token !== null, local.installed));
   const wrote = await syncChannelAudio(order, local.installed, { onlyOurRoute: true });
   if (wrote) {
