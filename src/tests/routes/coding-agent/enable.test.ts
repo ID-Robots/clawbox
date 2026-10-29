@@ -655,7 +655,7 @@ describe("a team's model and effort per role", () => {
     const empty = await POST(request({ cookie: ownerCookie(), body: { providers: [] } }));
     expect(empty.status).toBe(400);
     expect((await empty.json()).error).toMatch(/at least one provider/i);
-    const unknown = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai", "openai"] } }));
+    const unknown = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai", "mistral"] } }));
     expect(unknown.status).toBe(400);
     expect((await unknown.json()).kind).toBe("invalid");
     expect(configSet).not.toHaveBeenCalled();
@@ -686,7 +686,8 @@ describe("a team's model and effort per role", () => {
       { planner: { provider: "clawbox-ai", model: "claude-fable-5-1" } },
       { bulk: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
       { worker: { model: "claude-fable-5-1" } },
-      { planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "openai" } },
+      { planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "mistral" } },
+      { reviewer: { provider: "openai", model: "claude-sonnet-5" } },
     ]) {
       const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low", roleModels } }));
       expect(res.status, JSON.stringify(roleModels)).toBe(400);

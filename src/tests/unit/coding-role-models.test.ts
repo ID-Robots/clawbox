@@ -26,7 +26,7 @@ import {
   weakerEffort,
   type RoleModels,
 } from "@/lib/coding-role-models";
-import { ANTHROPIC_MODELS, CODING_PROVIDERS, DEFAULT_ANTHROPIC_MODEL, ECONOMY_MODELS, economyModelForProvider, isRecordableModel } from "@/lib/coding-provider";
+import { ANTHROPIC_MODELS, CODING_PROVIDERS, DEFAULT_ANTHROPIC_MODEL, ECONOMY_MODELS, economyModelForProvider, isRecordableModel, OPENAI_MODELS } from "@/lib/coding-provider";
 import { EFFORT_LEVELS } from "@/lib/coding-agent";
 
 describe("the vocabulary", () => {
@@ -80,6 +80,23 @@ describe("the models a role may name", () => {
     expect([...roleModelOptions("anthropic")]).toEqual([...ANTHROPIC_MODELS]);
     expect(roleModelOptions("anthropic")).toContain("claude-fable-5-1");
     expect([...roleModelOptions("clawbox-ai")]).toEqual(["deepseek-v4-flash"]);
+  });
+
+  it("is the Codex CLI's own listed models on OpenAI, its economy model among them", () => {
+    expect([...roleModelOptions("openai")]).toEqual([...OPENAI_MODELS]);
+    expect(roleModelOptions("openai")).toContain("gpt-5.6-luna");
+    expect(isRoleModelId("openai", "gpt-6-astra")).toBe(true);
+    expect(isRoleModelId("openai", "claude-opus-5-5")).toBe(false);
+    expect(isRoleModelId("anthropic", "gpt-6-astra")).toBe(false);
+  });
+
+  it("puts an OpenAI role's economy tier on the cheapest OpenAI model it offers", () => {
+    const run = resolveRoleRun("planner", "openai", "gpt-6-astra", "max", {});
+    expect(run.provider).toBe("openai");
+    expect(run.model).toBe("gpt-5.6-luna");
+    expect(run.tier).toBe("economy");
+    const costs = OPENAI_MODELS.map((m) => relativeModelCost("openai", m)!);
+    expect(relativeModelCost("openai", "gpt-5.6-luna")).toBe(Math.min(...costs));
   });
 
   it("never offers the Max-plan-only pro tier, under any spelling", () => {
@@ -315,13 +332,15 @@ describe("the owner's edits", () => {
       { planner: { effort: "turbo" } },
       { planner: { temperature: 0 } },
       { planner: { model: "economy" }, worker: { effort: "MAX" } },
-      { planner: { provider: "openai" } },
+      { planner: { provider: "mistral" } },
       { planner: { provider: 1 } },
       { planner: { model: 5, provider: "anthropic" } },
       { planner: { model: "" , provider: "anthropic" } },
       // Invalid pairs.
       { planner: { provider: "clawbox-ai", model: "claude-fable-5-1" } },
       { planner: { provider: "anthropic", model: "deepseek-v4-flash" } },
+      { planner: { provider: "openai", model: "claude-opus-5-5" } },
+      { planner: { provider: "anthropic", model: "gpt-6-astra" } },
       { bulk: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
       { planner: { provider: ROLE_AUTO, model: "claude-opus-5-5" } },
       // A model id with no provider anywhere.
@@ -359,8 +378,11 @@ describe("the owner's edits", () => {
       reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro", effort: "high" },
       bulk: { provider: "openai", model: "gpt-5" },
       worker: { provider: "anthropic", model: "claude-fable-5-1" },
+      lead: { provider: "mistral" },
     })).toEqual({
       reviewer: { provider: "clawbox-ai", effort: "high" },
+      // OpenAI is a provider the box knows; "gpt-5" is not on its list.
+      bulk: { provider: "openai" },
       worker: { provider: "anthropic", model: "claude-fable-5-1" },
     });
   });

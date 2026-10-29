@@ -161,6 +161,21 @@ describe("coding_run_list", () => {
     expect(String(runs[2].copy)).toMatch(/files removed; the work is kept on branch/);
   });
 
+  it("names the account and the model each run is on", async () => {
+    apiGet.mockResolvedValue({
+      runs: [
+        { ...RUN, id: "run-openai01", provider: "openai", requestedModel: "gpt-5.6-luna", model: "gpt-5.6-luna" },
+        { ...RUN, id: "run-claude01", provider: "anthropic", requestedModel: "claude-opus-5-5", model: null },
+      ],
+    });
+    const out = await harness().call("coding_run_list", { status: "all", limit: 10 });
+    if (out.isError) throw new Error("expected a list");
+    const { runs } = JSON.parse(out.text) as { runs: Record<string, unknown>[] };
+    expect(runs[0]).toMatchObject({ run_id: "run-openai01", provider: "openai", model: "gpt-5.6-luna" });
+    // A run that has not reported its model yet says the one it was started on.
+    expect(runs[1]).toMatchObject({ run_id: "run-claude01", provider: "anthropic", model: "claude-opus-5-5" });
+  });
+
   it("does not mark a run resumable while the allowance that paused it is still spent", async () => {
     apiGet.mockResolvedValue({
       runs: [

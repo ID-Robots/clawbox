@@ -789,16 +789,18 @@ stable code, and the answer says which asset did not arrive. A file the OWNER
 wants a run to have goes in `data/coding-agent-inputs/shared/`, which every run
 may read with no permission rule at all.
 
-`coding_agent_run` takes an optional `provider` (`clawbox-ai` | `anthropic`)
-and, for `anthropic` only, a `model`. Omitted, they mean the owner's stored
+`coding_agent_run` takes an optional `provider` (`clawbox-ai` | `anthropic` |
+`openai`) and, for `anthropic` (`claude-*`) and `openai` (`gpt-*`), a `model`.
+An `openai` run is the Codex CLI (`codex exec`) rather than Claude Code, on the
+owner's own OpenAI API key or ChatGPT sign-in. Omitted, they mean the owner's stored
 default (Settings → Coding Agent), which this process does not know — so an
 omitted provider is NOT sent, and only a value the caller actually named
 travels. The pair is checked here before the request goes out, by the same
 resolver the route validates with (`src/lib/coding-provider.ts`): naming a
 model for `clawbox-ai` is refused, because the box's plan chooses its own and
 a run that silently answered on a different model is the failure the selector
-exists to prevent. `anthropic` works only where the owner has connected their
-own Anthropic access; `coding_agent_status` and the Coding Agent app say
+exists to prevent. `anthropic` and `openai` work only where the owner has
+connected their own access; `coding_agent_status` and the Coding Agent app say
 whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
 `coding_secret_list` answers the NAMES of the owner's stored secrets
@@ -1020,7 +1022,8 @@ STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 What a team COSTS is on its answer too. The planner and the reviewers (and
 the lead) run on the provider's cheaper model — `claude-sonnet-5` on
-Anthropic, the plan's `deepseek-v4-flash` on ClawBox AI — at no more than
+Anthropic, `gpt-5.6-luna` on OpenAI, the plan's `deepseek-v4-flash` on ClawBox
+AI — at no more than
 `xhigh` effort; workers keep the owner's model and effort, and so does bulk
 work (a worker's token-heavy, non-critical task) until the owner says
 otherwise; the owner may pick the provider, the model and the effort per role

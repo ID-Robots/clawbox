@@ -109,12 +109,14 @@ const BRAND_ONLY = new Set([
   // The company whose account pays for an `anthropic` coding run. A company
   // name, like every other entry here.
   "Anthropic",
-  // The provider row the Coding Agent lists greyed (no coding runner can run
-  // on it yet): a company and its product, nothing to translate.
+  // The third coding provider's name: a company and its product, nothing to
+  // translate.
   "OpenAI (ChatGPT)",
   // The literal prefix of an Anthropic API key, shown as an input
   // placeholder. Translating it would invent a key shape that does not exist.
   "sk-ant-\u2026",
+  // The same for an OpenAI API key.
+  "sk-\u2026",
   // Claude Code's own name for its xhigh-plus-workflows mode (`--effort
   // ultracode`); the label matches what the terminal prints.
   "Ultracode",

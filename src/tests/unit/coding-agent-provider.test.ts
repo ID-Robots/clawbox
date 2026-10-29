@@ -1,8 +1,10 @@
 /**
- * WHICH ACCOUNT PAYS for a coding run, and the isolation between the two.
+ * WHICH ACCOUNT PAYS for a coding run, and the isolation between them.
  *
  * `claude-ds` used to have exactly one answer: Claude Code pointed at the
- * box's own ClawBox AI plan. The second is the owner's own Anthropic access.
+ * box's own ClawBox AI plan. The second is the owner's own Anthropic access,
+ * and the third the owner's own OpenAI access — which runs on the Codex CLI,
+ * not on Claude Code (coding-codex.test.ts pins its argv and its stream).
  * What matters here, in order of how much it would cost to get wrong:
  *
  *  1. The two credentials never meet. `buildRunEnv` names ONE provider and
@@ -43,6 +45,14 @@ vi.mock("@/lib/coding-anthropic", async (importOriginal) => ({
   hasAnthropicLogin,
 }));
 
+// The OpenAI side is a secret-store row, a file in the coding agent's Codex
+// home and the Codex binary in ~/.local/bin — mocked for the same reason.
+const getOpenAIConnection = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-openai", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-openai")>()),
+  getOpenAIConnection,
+}));
+
 import {
   ANTHROPIC_MODELS,
   CODING_AGENT_PROVIDER_CONFIG_KEY,
@@ -50,11 +60,17 @@ import {
   CODING_PROVIDERS,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_CODING_PROVIDER,
+  DEFAULT_OPENAI_MODEL,
+  ECONOMY_MODELS,
+  OPENAI_MODELS,
   codingProviderFrom,
   defaultModelForProvider,
+  isRecordableModel,
   modelsForProvider,
   resolveRunProvider,
+  runsOnCodex,
 } from "@/lib/coding-provider";
+import { codexHome } from "@/lib/coding-openai";
 import {
   CodingAgentError,
   HELPER_MODEL,
@@ -67,6 +83,8 @@ import {
 
 const DISCONNECTED = { connected: false, hasKey: false, hasLogin: false, source: null };
 const VIA_KEY = { connected: true, hasKey: true, hasLogin: false, source: "key" as const };
+const OPENAI_OFF = { connected: false, hasKey: false, hasLogin: false, source: null, status: "disconnected", limitedUntil: null, codexInstalled: true };
+const OPENAI_VIA_CHATGPT = { connected: true, hasKey: false, hasLogin: true, source: "chatgpt" as const, status: "connected", limitedUntil: null, codexInstalled: true };
 
 beforeEach(() => {
   configGet.mockReset().mockResolvedValue(undefined);
@@ -74,11 +92,14 @@ beforeEach(() => {
   configSet.mockReset().mockResolvedValue(undefined);
   getAnthropicConnection.mockReset().mockResolvedValue(DISCONNECTED);
   hasAnthropicLogin.mockReset().mockReturnValue(false);
+  getOpenAIConnection.mockReset().mockResolvedValue(OPENAI_OFF);
 });
 
 describe("the vocabulary", () => {
-  it("offers exactly the two accounts a run can be paid from, ClawBox AI first", () => {
-    expect([...CODING_PROVIDERS]).toEqual(["clawbox-ai", "anthropic"]);
+  it("offers exactly the three accounts a run can be paid from, ClawBox AI first", () => {
+    // Appended, never inserted: the order is the readiness fallback's and the
+    // pickers', and a box whose stored list predates OpenAI reads the same.
+    expect([...CODING_PROVIDERS]).toEqual(["clawbox-ai", "anthropic", "openai"]);
     // The whole installed base is on this one, and a default that moved would
     // put every existing box on its owner's personal bill.
     expect(DEFAULT_CODING_PROVIDER).toBe("clawbox-ai");
@@ -86,9 +107,10 @@ describe("the vocabulary", () => {
 
   it("reads anything unrecognised as the default rather than refusing", () => {
     expect(codingProviderFrom(undefined)).toBe("clawbox-ai");
-    expect(codingProviderFrom("openai")).toBe("clawbox-ai");
+    expect(codingProviderFrom("mistral")).toBe("clawbox-ai");
     expect(codingProviderFrom(7)).toBe("clawbox-ai");
     expect(codingProviderFrom("anthropic")).toBe("anthropic");
+    expect(codingProviderFrom("openai")).toBe("openai");
   });
 
   it("has a catalogue key per provider, and none of them is built by interpolation", () => {
@@ -107,10 +129,31 @@ describe("the vocabulary", () => {
     expect(new Set(Object.values(CODING_PROVIDER_NAME_KEY)).size).toBe(CODING_PROVIDERS.length);
   });
 
-  it("names models for Anthropic only — the ClawBox AI plan chooses its own", () => {
+  it("names models for Anthropic and OpenAI — the ClawBox AI plan chooses its own", () => {
     expect([...modelsForProvider("anthropic")]).toEqual([...ANTHROPIC_MODELS]);
+    expect([...modelsForProvider("openai")]).toEqual([...OPENAI_MODELS]);
     expect(modelsForProvider("clawbox-ai")).toEqual([]);
     expect(ANTHROPIC_MODELS).toContain(DEFAULT_ANTHROPIC_MODEL);
+    expect(OPENAI_MODELS).toContain(DEFAULT_OPENAI_MODEL);
+  });
+
+  it("offers the Codex CLI's own listed models for OpenAI, its default first", () => {
+    // The literal, for the reason the Anthropic one is spelled out: these reach
+    // `codex exec -m` as strings. Read off `codex debug models` (the entries
+    // marked `visibility: list`), highest priority first.
+    expect([...OPENAI_MODELS]).toEqual(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.2"]);
+    // What `codex exec` reports as its model with nothing configured.
+    expect(DEFAULT_OPENAI_MODEL).toBe("gpt-6-astra");
+    expect(defaultModelForProvider("openai")).toBe("gpt-6-astra");
+    // The cheaper model a team's planner and reviewers run on — one the
+    // provider offers, so a role's record can carry it.
+    expect(ECONOMY_MODELS.openai).toBe("gpt-5.6-luna");
+    expect(isRecordableModel("openai", ECONOMY_MODELS.openai)).toBe(true);
+    expect(isRecordableModel("openai", "claude-opus-5-5")).toBe(false);
+  });
+
+  it("runs OpenAI, and only OpenAI, on the Codex CLI", () => {
+    expect(CODING_PROVIDERS.filter(runsOnCodex)).toEqual(["openai"]);
   });
 
   it("offers Opus 5.5 first and defaults to it, with the plain id spelled out", () => {
@@ -146,10 +189,25 @@ describe("resolveRunProvider — the one validator both surfaces use", () => {
     });
   });
 
-  it("refuses a provider that is not one of the two, naming both", () => {
-    const out = resolveRunProvider("openai", undefined, "clawbox-ai");
+  it("refuses a provider that is not one of the three, naming them", () => {
+    const out = resolveRunProvider("mistral", undefined, "clawbox-ai");
     expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.error).toMatch(/clawbox-ai, anthropic/);
+    if (!out.ok) expect(out.error).toMatch(/clawbox-ai, anthropic, openai/);
+  });
+
+  it("gives an unnamed OpenAI run the CLI's default model", () => {
+    expect(resolveRunProvider("openai", undefined, "clawbox-ai")).toEqual({ ok: true, provider: "openai", model: "gpt-6-astra" });
+    expect(resolveRunProvider(undefined, undefined, "openai")).toEqual({ ok: true, provider: "openai", model: "gpt-6-astra" });
+  });
+
+  it("accepts each offered OpenAI model, and refuses one provider's model on the other", () => {
+    for (const model of OPENAI_MODELS) {
+      expect(resolveRunProvider("openai", model, "clawbox-ai")).toEqual({ ok: true, provider: "openai", model });
+    }
+    const crossed = resolveRunProvider("openai", "claude-opus-5-5", "clawbox-ai");
+    expect(crossed.ok).toBe(false);
+    if (!crossed.ok) expect(crossed.error).toMatch(/gpt-6-astra/);
+    expect(resolveRunProvider("anthropic", "gpt-6-astra", "clawbox-ai").ok).toBe(false);
   });
 
   it("refuses a model named for ClawBox AI rather than ignoring it", () => {
@@ -180,7 +238,7 @@ describe("resolveRunProvider — the one validator both surfaces use", () => {
 describe("the owner's default", () => {
   it("is ClawBox AI until they choose, and survives a junk value", async () => {
     expect(await getCodingProvider()).toBe("clawbox-ai");
-    configGet.mockResolvedValue("openai");
+    configGet.mockResolvedValue("mistral");
     expect(await getCodingProvider()).toBe("clawbox-ai");
   });
 
@@ -190,8 +248,13 @@ describe("the owner's default", () => {
   });
 
   it("refuses one it does not, and writes nothing", async () => {
-    await expect(setCodingProvider("openai")).rejects.toBeInstanceOf(CodingAgentError);
+    await expect(setCodingProvider("mistral")).rejects.toBeInstanceOf(CodingAgentError);
     expect(configSet).not.toHaveBeenCalled();
+  });
+
+  it("stores OpenAI as the default too", async () => {
+    expect(await setCodingProvider("openai")).toBe("openai");
+    expect(configSet).toHaveBeenCalledWith(CODING_AGENT_PROVIDER_CONFIG_KEY, "openai");
   });
 
   it("can be set to a provider that is not connected yet", async () => {
@@ -263,6 +326,44 @@ describe("the spawn gate judges the account the run will actually use", () => {
     const message = await refusalFor({ provider: "anthropic" });
     expect(message).not.toMatch(/is not connected/);
   });
+
+  it("names OpenAI when the run wanted it, and never Anthropic", async () => {
+    getAnthropicConnection.mockResolvedValue(DISCONNECTED);
+    getOpenAIConnection.mockResolvedValue(OPENAI_OFF);
+    const message = await refusalFor({ provider: "openai" });
+    expect(message).toMatch(/OpenAI account is not connected/);
+    expect(message).not.toMatch(/Anthropic account is not connected/);
+  });
+
+  it("names the missing Codex CLI before the account, for an OpenAI run", async () => {
+    getOpenAIConnection.mockResolvedValue({ ...OPENAI_VIA_CHATGPT, codexInstalled: false });
+    const message = await refusalFor({ provider: "openai" });
+    expect(message).toMatch(/Codex CLI/);
+    expect(message).not.toMatch(/OpenAI account is not connected/);
+  });
+
+  it("holds an OpenAI run while OpenAI's usage limit is still ahead", async () => {
+    // finishRun remembers the limit; the gate turns it into the same queued
+    // wait an Anthropic pool at its limit gets, rather than a doomed spawn.
+    getOpenAIConnection.mockResolvedValue(OPENAI_VIA_CHATGPT);
+    const until = Date.now() + 30 * 60_000;
+    configGet.mockImplementation(async (key: string) => {
+      if (key === "coding_agent_enabled") return true;
+      if (key === "coding_agent_openai_limited_until") return until;
+      return undefined;
+    });
+    configGetAll.mockResolvedValue({ coding_agent_enabled: true, [CODING_AGENT_PROVIDER_CONFIG_KEY]: "openai" });
+    const lib = await import("@/lib/coding-agent");
+    const err = await lib.startRun({ task: "Do the thing", directory: "/nonexistent-for-this-test", source: "owner", provider: "openai" }).then(() => null, (e: unknown) => e);
+    // On a machine without Claude Code or setpriv the box's own half refuses
+    // first; only where it does not is the limit the answer.
+    if (err instanceof CodingAgentError && err.kind === "limited") {
+      expect(err.message).toMatch(/OpenAI is at its usage limit/);
+      expect(err.message).toContain(new Date(until).toISOString());
+    } else {
+      expect(err).toBeInstanceOf(Error);
+    }
+  });
 });
 
 describe("what a reset does and does not take away", () => {
@@ -321,6 +422,34 @@ describe("the run environment", () => {
     }
   });
 
+  it("gives an OpenAI run the coding agent's own Codex home and none of the wrapper's knobs", () => {
+    const saved = Object.fromEntries(["CLAUDE_DS_MODEL", "CLAUDE_DS_CONFIG_DIR", "CLAWBOX_AI_PROXY_URL"].map((k) => [k, process.env[k]]));
+    Object.assign(process.env, { CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]", CLAUDE_DS_CONFIG_DIR: "/srv/elsewhere", CLAWBOX_AI_PROXY_URL: "https://proxy.example.invalid" });
+    try {
+      const env = buildRunEnv({ effort: "max", provider: "openai", model: "gpt-5.6-sol" });
+      // Never ~/.codex: that is the gateway's ChatGPT sign-in.
+      expect(env.CODEX_HOME).toBe(codexHome());
+      expect(env.CODEX_HOME).not.toMatch(/\/\.codex$/);
+      expect(Object.keys(env).filter((k) => k.startsWith("CLAUDE_"))).toEqual([]);
+      expect(env.CLAWBOX_AI_PROXY_URL).toBeUndefined();
+      // The run's own folders are still named, as for every run.
+      expect(env.CLAWBOX_PREVIEW).toBeTruthy();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  it("never lets an owner secret name the variable Codex authenticates with, or its home", () => {
+    const env = buildRunEnv({ provider: "openai", model: "gpt-6-astra", secrets: { CODEX_API_KEY: "sk-proj-owner-secret-0000", CODEX_HOME: "/tmp/other-home", DEPLOY_TOKEN: "kept" } });
+    expect(env.CODEX_API_KEY).toBeUndefined();
+    expect(env.CODEX_HOME).toBe(codexHome());
+    // Every other secret the owner ticked still reaches the run, as on Claude.
+    expect(env.DEPLOY_TOKEN).toBe("kept");
+  });
+
   it("gives each run of a mixed team its own provider's wiring, and nothing of the other's", () => {
     // A team whose planner the owner put on Anthropic and whose workers stay
     // on ClawBox AI: two runs side by side, built one after the other from
@@ -367,6 +496,8 @@ describe("the helper sub-agents", () => {
     // into — the split the definitions describe, on an account that has no
     // DeepSeek in it.
     expect(HELPER_MODEL.anthropic).toBe("haiku");
+    // Codex takes no --agents; the table's entry is the economy model.
+    expect(HELPER_MODEL.openai).toBe("gpt-5.6-luna");
   });
 
   it("rewrites every definition's model for an anthropic run, and nothing else", () => {
@@ -449,5 +580,52 @@ describe("readiness, per provider", () => {
     expect(out.problems.join(" ")).toMatch(/Anthropic account is not connected/);
     // And not the other provider's, which is connected and irrelevant here.
     expect(out.problems.join(" ")).not.toMatch(/ClawBox AI is not connected/);
+  });
+
+  it("judges OpenAI on its own credential and its own CLI", async () => {
+    getOpenAIConnection.mockResolvedValue(OPENAI_VIA_CHATGPT);
+    const on = await readiness({ clawai_token: "tok" });
+    const openai = on.providers.find((p) => p.id === "openai")!;
+    expect(openai.problems).toEqual([]);
+    expect(openai.models).toEqual([...OPENAI_MODELS]);
+    expect(openai.defaultModel).toBe("gpt-6-astra");
+    expect(on.openaiConnected).toBe(true);
+    expect(on.openaiSource).toBe("chatgpt");
+    expect(on.codexInstalled).toBe(true);
+
+    getOpenAIConnection.mockResolvedValue(OPENAI_OFF);
+    const off = await readiness({ clawai_token: "tok" });
+    expect(off.providers.find((p) => p.id === "openai")!.problems.join(" ")).toMatch(/OpenAI account is not connected/);
+    // Not judged on the ClawBox AI token, which is here and irrelevant to it.
+    expect(off.providers.find((p) => p.id === "openai")!.problems.join(" ")).not.toMatch(/ClawBox AI/);
+
+    getOpenAIConnection.mockResolvedValue({ ...OPENAI_VIA_CHATGPT, codexInstalled: false });
+    const noCli = await readiness({ clawai_token: "tok" });
+    expect(noCli.providers.find((p) => p.id === "openai")!.problems.join(" ")).toMatch(/install\.sh --step codex_cli/);
+    expect(noCli.codexInstalled).toBe(false);
+  });
+
+  it("never holds an OpenAI run back for a fault only Claude Code's harness can have", async () => {
+    // A fault is recorded by a Claude Code run that could not get a model to
+    // answer; Codex never records one. It still holds every Claude provider.
+    getOpenAIConnection.mockResolvedValue(OPENAI_VIA_CHATGPT);
+    const out = await readiness({ clawai_token: "tok", [CODING_AGENT_PROVIDER_CONFIG_KEY]: "openai", coding_agent_harness_fault: { at: Date.now() } });
+    expect(out.harnessHealthy).toBe(false);
+    const byId = Object.fromEntries(out.providers.map((p) => [p.id, p]));
+    expect(byId["clawbox-ai"].ready).toBe(false);
+    expect(byId.openai.problems).toEqual([]);
+    if (out.capabilityDropAvailable) expect(byId.openai.ready).toBe(true);
+  });
+
+  it("never holds an OpenAI run back for Claude Code's own missing pieces", async () => {
+    // Whether Claude Code is on this machine is the machine's business; what
+    // is pinned is that NO Claude Code sentence is ever an OpenAI problem, and
+    // that a ready OpenAI default is ready whatever Claude Code's state.
+    getOpenAIConnection.mockResolvedValue(OPENAI_VIA_CHATGPT);
+    const out = await readiness({ clawai_token: "tok", [CODING_AGENT_PROVIDER_CONFIG_KEY]: "openai" });
+    const openai = out.providers.find((p) => p.id === "openai")!;
+    expect(openai.problems.join(" ")).not.toMatch(/Claude Code|claude-ds/);
+    if (out.capabilityDropAvailable && out.harnessHealthy) expect(openai.ready).toBe(true);
+    expect(out.ready).toBe(openai.ready);
   });
 });
