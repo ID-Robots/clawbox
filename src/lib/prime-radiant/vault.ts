@@ -492,7 +492,6 @@ export async function vaultOperation<T>(
     }
     if (commit) recordRetiredFromPages(vault, [...(await touchedPages()).values()]);
     if (commit && options.reindex !== false) reindexAfterCommit(vault, changed());
-    if (commit) followCoreAfterCommit(vault);
     return { result, commit, changed: changed(), findings };
   });
 }
@@ -589,20 +588,6 @@ function recordRetiredFromPages(vault: string, pages: Array<VaultPage | null>): 
  * operation must not need to load, and nothing here may slow or fail the
  * operation that already committed.
  */
-/**
- * The core block follows a commit on the box's own vault, metadata-only edits
- * included (a page set to confidential must leave it) — never one in a nightly
- * worktree, whose changes reach `main` by a merge that is followed in its turn.
- */
-function followCoreAfterCommit(vault: string): void {
-  if (path.resolve(vault) !== path.resolve(vaultDir())) return;
-  void import("./reindex-hook")
-    .then((m) => m.followCoreContextAfterCommit())
-    .catch((err) => {
-      console.warn(`[prime-radiant] the core block could not follow a commit: ${err instanceof Error ? err.message : String(err)}`);
-    });
-}
-
 function reindexAfterCommit(vault: string, changed: readonly string[]): void {
   void import("./shard-index")
     .then((m) => m.scheduleReindexAfterCommit(vault, changed))
