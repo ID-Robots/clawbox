@@ -146,26 +146,24 @@ describe("stopping an app served from a user .service of its own", () => {
   it("stops the unit, so its Restart= cannot bring the server back", async () => {
     const { port, supervisorPid } = await serveUnderRestart();
 
-    expect(await start.stopServerApp("hello-app", { port, directory: project })).toEqual({ ok: true, stopped: true, holder: null });
+    expect(await start.stopServerApp("hello-app", { port, directory: project })).toEqual({ ok: true, stopped: true, holder: null, units: [UNIT] });
 
     expect(systemd.calls).toContainEqual(["--user", "stop", "--", UNIT]);
     expect(alive(supervisorPid)).toBe(false);
     // Free for good: well past the supervisor's restart delay, nothing came back.
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(await proxy.listenerOwnedBy(port, project, { fresh: true })).toBe("not_listening");
-    // An install again, or the boot pass, leaves the owner's unit enabled.
+    // Stopped, not disabled: that is the uninstall's, once the folder is gone.
     expect(systemd.calls.some((args) => args.includes("disable"))).toBe(false);
   });
 
-  it("disables the unit after stopping it when the app is being removed", async () => {
-    const { port } = await serveUnderRestart();
+  it("disables the units it is given, each by name", async () => {
+    await start.disableUserUnits([UNIT, "other-app.service"]);
 
-    expect(await start.stopServerApp("hello-app", { port, directory: project }, { disableUnit: true })).toEqual({ ok: true, stopped: true, holder: null });
-
-    const verbs = systemd.calls.map((args) => args[1]);
-    expect(verbs).toContain("disable");
-    expect(verbs.indexOf("stop")).toBeLessThan(verbs.indexOf("disable"));
-    expect(systemd.calls).toContainEqual(["--user", "disable", "--", UNIT]);
+    expect(systemd.calls).toEqual([
+      ["--user", "disable", "--", UNIT],
+      ["--user", "disable", "--", "other-app.service"],
+    ]);
   });
 
   it("never stops a whole unit whose own working directory is not the app's folder", async () => {
@@ -178,10 +176,11 @@ describe("stopping an app served from a user .service of its own", () => {
     const { port, supervisorPid } = await serveUnderRestart();
     const server = Number(fs.readFileSync(path.join(project, "server.pid"), "utf-8"));
 
-    await start.stopServerApp("hello-app", { port, directory: project }, { disableUnit: true });
+    const outcome = await start.stopServerApp("hello-app", { port, directory: project });
 
     expect(alive(server)).toBe(false);
-    expect(systemd.calls.some((args) => args.includes("stop") || args.includes("disable"))).toBe(false);
+    expect(outcome).not.toHaveProperty("units");
+    expect(systemd.calls.some((args) => args.includes("stop"))).toBe(false);
     expect(alive(supervisorPid)).toBe(true);
   });
 });

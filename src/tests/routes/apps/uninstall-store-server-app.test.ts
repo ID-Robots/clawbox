@@ -64,6 +64,22 @@ vi.mock("@/lib/store-install-receipt", async (importOriginal) => {
   };
 });
 
+// A server in a user `.service` of the app's own needs a user manager a test
+// does not have: the real stop runs, and reports such a unit when one is set
+// here (app-server-stop-unit.test.ts proves the stop itself).
+const appUnits = vi.hoisted(() => ({ stopped: [] as string[], disabled: [] as string[][] }));
+vi.mock("@/lib/app-server-start", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/app-server-start")>();
+  return {
+    ...actual,
+    stopServerApp: async (...args: Parameters<typeof actual.stopServerApp>) => {
+      const outcome = await actual.stopServerApp(...args);
+      return outcome.ok && appUnits.stopped.length > 0 ? { ...outcome, units: [...appUnits.stopped] } : outcome;
+    },
+    disableUserUnits: async (units: readonly string[]) => { appUnits.disabled.push([...units]); },
+  };
+});
+
 const SERVER_JS = `
 const http = require("http");
 const fs = require("fs");
@@ -123,6 +139,8 @@ beforeEach(async () => {
   fs.rmSync(PID_FILE, { force: true });
   fs.mkdirSync(PROJECTS, { recursive: true });
   removeFailure.error = null;
+  appUnits.stopped = [];
+  appUnits.disabled.length = 0;
   setPreferences.mockReset();
   setPreferences.mockResolvedValue(undefined);
   vi.resetModules();
@@ -184,5 +202,55 @@ describe("uninstalling a Store app that runs a server", () => {
     expect(fs.existsSync(path.join(ROOT, "data", "webapps", APP_ID, "meta.json"))).toBe(true);
     expect(setPreferences).not.toHaveBeenCalled();
     expect(alive(pid)).toBe(true);
+  });
+});
+
+describe("the app's own user unit, on uninstall", () => {
+  const UNIT = `${APP_ID}-app.service`;
+
+  it("is disabled once the app's folder is gone", async () => {
+    const port = await freePort();
+    const { dir, manifest } = storeServerApp(port);
+    expect(await start.registerOrStartServerApp({ id: APP_ID, directory: dir, manifest, searchPath, noScope: true })).toEqual({ ok: true });
+    appUnits.stopped = [UNIT];
+
+    const res = await POST(post(APP_ID));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, projectRemoved: true, serverStopped: true });
+    expect(appUnits.disabled).toEqual([[UNIT]]);
+  });
+
+  it("stays enabled for an app whose project stays: one the agent built, with no Store receipt", async () => {
+    const port = await freePort();
+    const { dir, manifest } = storeServerApp(port);
+    fs.rmSync(path.join(dir, ".clawbox", "store-app.json"));
+    expect(await start.registerOrStartServerApp({ id: APP_ID, directory: dir, manifest, searchPath, noScope: true })).toEqual({ ok: true });
+    const pid = serverPid();
+    appUnits.stopped = [UNIT];
+
+    const res = await POST(post(APP_ID));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: true, serverStopped: true });
+    expect(body.projectRemoved).toBeUndefined();
+    expect(fs.existsSync(path.join(dir, "clawbox.json"))).toBe(true);
+    expect(alive(pid)).toBe(false);
+    expect(appUnits.disabled).toEqual([]);
+  });
+
+  it("stays enabled when the folder could not be removed", async () => {
+    const port = await freePort();
+    const { dir, manifest } = storeServerApp(port);
+    expect(await start.registerOrStartServerApp({ id: APP_ID, directory: dir, manifest, searchPath, noScope: true })).toEqual({ ok: true });
+    appUnits.stopped = [UNIT];
+    removeFailure.error = Object.assign(new Error("EBUSY: resource busy"), { code: "EBUSY" });
+
+    const res = await POST(post(APP_ID));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ ok: false, code: "project_remove_failed" });
+    expect(appUnits.disabled).toEqual([]);
   });
 });
