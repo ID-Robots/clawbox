@@ -156,6 +156,19 @@ async function fasterWhisperImports(): Promise<boolean> {
 }
 
 /**
+ * Drop the cached import answer, so the next {@link localSttInstalled} asks
+ * python again.
+ *
+ * For the moment an install has just finished: the Settings panel probed
+ * before it started, and the "missing" it cached is good for another minute —
+ * long enough for the step that wires the new engine into channel voice notes
+ * to read the box as still without one and leave the CLI row out.
+ */
+export function forgetLocalSttProbe(): void {
+  importCache = null;
+}
+
+/**
  * Whether this box can transcribe on its own.
  *
  * The two file checks are asked on EVERY call, and only the python import is

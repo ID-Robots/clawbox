@@ -9,9 +9,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * — which holds a credential middleware accepts — from making the choice.
  */
 
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
+
 const readConfigMock = vi.fn();
 const batchMock = vi.fn();
+const unsetMock = vi.fn();
 const restartMock = vi.fn();
+const boundProfileMock = vi.fn();
+const openaiAuthMock = vi.fn();
 const openclawAbsentMock = vi.fn();
 const ownerSessionMock = vi.fn();
 const localInstalledMock = vi.fn();
@@ -20,7 +25,9 @@ const store = vi.hoisted(() => new Map<string, unknown>());
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => readConfigMock(...a),
+  readConfigStrict: (...a: unknown[]) => readConfigMock(...a),
   runOpenclawConfigSetBatch: (...a: unknown[]) => batchMock(...a),
+  runOpenclawConfigUnset: (...a: unknown[]) => unsetMock(...a),
   restartGateway: (...a: unknown[]) => restartMock(...a),
   openclawIsAbsent: () => openclawAbsentMock(),
   // A REAL class: the route narrows on `instanceof GatewayNotReadyError` to
@@ -48,8 +55,34 @@ vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
 }));
+// The gateway's credential store, which decides whether the cloud row is
+// written at all (stt-channel.ts). Mocked so no test reads a real one.
+vi.mock("@/lib/openclaw-auth-store", () => ({
+  readGatewayAuthProfile: (...a: unknown[]) => boundProfileMock(...a),
+  readGatewayProviderAuth: (...a: unknown[]) => openaiAuthMock(...a),
+}));
 
 const PROXY = "https://clawbox.com/api/ai";
+/** `deepseek:default` holding this box's ClawBox AI token as an API key: what backs the cloud row. */
+const BACKED = {
+  kind: "present",
+  store: "shared",
+  type: "api_key",
+  fingerprint: tokenFingerprint("claw_token"),
+  refreshFingerprint: null,
+  expires: null,
+  fenced: false,
+  fence: null,
+  storeUpdatedAtMs: null,
+};
+const NO_OPENAI_PROFILES = { kind: "present", profiles: [], order: null, failures: {} };
+/** The owner signed in with ChatGPT: an OAuth profile of the openai provider. */
+const CHATGPT_SIGNED_IN = {
+  kind: "present",
+  profiles: [{ ...BACKED, type: "oauth", fingerprint: "f00dfeedf00dfeed", profileId: "openai:chatgpt" }],
+  order: null,
+  failures: {},
+};
 // The cloud row names the ClawBox AI auth profile: the transcription credential
 // no longer rides on the openai provider entry (it shadowed the ChatGPT sign-in).
 const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", profile: "deepseek:default", capabilities: ["audio"] };
@@ -74,12 +107,18 @@ function localRow(): Record<string, unknown> {
   return models.find((m) => m.type === "cli")!;
 }
 
+/** What every ClawBox AI sign-in records in openclaw.json beside the token: the profile, as a key. */
+const LINKED_AUTH = { auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } } };
+
 beforeEach(() => {
   vi.resetModules();
   store.clear();
-  readConfigMock.mockReset().mockResolvedValue({});
+  readConfigMock.mockReset().mockResolvedValue({ ...LINKED_AUTH });
   batchMock.mockReset().mockResolvedValue(undefined);
+  unsetMock.mockReset().mockResolvedValue(undefined);
   restartMock.mockReset().mockResolvedValue(undefined);
+  boundProfileMock.mockReset().mockReturnValue(BACKED);
+  openaiAuthMock.mockReset().mockReturnValue(NO_OPENAI_PROFILES);
   openclawAbsentMock.mockReset().mockReturnValue(false);
   ownerSessionMock.mockReset().mockResolvedValue(true);
   localInstalledMock.mockReset().mockResolvedValue(INSTALLED);
@@ -88,6 +127,7 @@ beforeEach(() => {
 
 describe("GET /setup-api/stt", () => {
   it("reports both engines, the chain, and never caches", async () => {
+    store.set("stt_primary", "cloud");
     const { GET } = await route();
     const res = await GET();
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -98,8 +138,49 @@ describe("GET /setup-api/stt", () => {
         local: { installed: true, label: "On this box", detail: INSTALLED.detail },
       },
       chain: ["cloud", "local"],
-      channels: { supportedOnEdition: true },
+      channels: { supportedOnEdition: true, chain: ["cloud", "local"], cloudUnavailable: null },
     });
+  });
+
+  it("puts the box's own engine first when nothing is stored", async () => {
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.primary).toBe("local");
+    expect(body.chain).toEqual(["local", "cloud"]);
+    expect(body.channels.chain).toEqual(["local", "cloud"]);
+  });
+
+  /**
+   * The real box: a ClawBox AI token still on it, the owner signed in with
+   * ChatGPT. The microphone sends the token to the proxy itself and keeps the
+   * cloud; a channel voice note goes through the gateway, which refuses the
+   * proxy endpoint for an OAuth credential — so the channel chain is the box's
+   * engine alone, and says why.
+   */
+  it("reports what a channel voice note tries apart from the microphone, and why the cloud is not in it", async () => {
+    store.set("stt_primary", "cloud");
+    openaiAuthMock.mockReturnValue(CHATGPT_SIGNED_IN);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.chain).toEqual(["cloud", "local"]);
+    expect(body.channels).toEqual({ supportedOnEdition: true, chain: ["local"], cloudUnavailable: "openai_oauth" });
+  });
+
+  /**
+   * A ClawBox AI sign-in left over as an OAuth profile is refused by BOTH
+   * surfaces (`cloudTranscribeProblem`): the microphone uploads nothing to the
+   * proxy and the channel row is left out, so neither chain may list the cloud.
+   */
+  it("leaves the cloud out of both chains for a ClawBox AI sign-in left over as an OAuth profile", async () => {
+    store.set("stt_primary", "cloud");
+    readConfigMock.mockResolvedValue({
+      models: { providers: { deepseek: { apiKey: "claw_token" } } },
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } },
+    });
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.chain).toEqual(["local"]);
+    expect(body.channels).toEqual({ supportedOnEdition: true, chain: ["local"], cloudUnavailable: "profile_not_api_key" });
   });
 
   it("never spawns the openclaw CLI or bounces the gateway just to render the panel", async () => {
@@ -147,6 +228,12 @@ describe("GET /setup-api/stt", () => {
     expect(body.chain).toEqual(["cloud"]);
   });
 
+  it("still puts the cloud first with nothing stored when the box has no engine of its own", async () => {
+    localInstalledMock.mockResolvedValue(MISSING);
+    const { GET } = await route();
+    expect((await (await GET()).json()).primary).toBe("cloud");
+  });
+
   it("follows the stored preference", async () => {
     store.set("stt_primary", "local");
     const { GET } = await route();
@@ -159,6 +246,7 @@ describe("GET /setup-api/stt", () => {
     // The chat microphone works on every edition; only channel voice notes go
     // through a gateway this SKU does not have.
     openclawAbsentMock.mockReturnValue(true);
+    store.set("stt_primary", "cloud");
     const { GET } = await route();
     const body = await (await GET()).json();
     expect(body.primary).toBe("cloud");
@@ -284,15 +372,69 @@ describe("POST /setup-api/stt — the write", () => {
    * would make every voice note pay a refused round trip before the engine that
    * can answer, and would disagree with the primary the same response reports.
    */
-  it("writes the on-box row first when the cloud is handed back on an unlinked box", async () => {
+  it("writes the on-box row alone when the cloud is handed back on an unlinked box", async () => {
     tokenMock.mockResolvedValue(null);
     const { POST } = await route();
     const res = await POST(post({ primary: "cloud" }));
     expect(res.status).toBe(200);
-    const models = JSON.parse(batchMock.mock.calls[0][0][1][1]);
+    // No credential, no cloud row: one that is written anyway is not a
+    // fallback but a refused attempt on every voice note.
+    expect(batchMock.mock.calls[0][0]).toEqual([["tools.media.models", expect.any(String), "--json"]]);
+    const models = JSON.parse(batchMock.mock.calls[0][0][0][1]);
+    expect(models).toHaveLength(1);
     expect(models[0].type).toBe("cli");
-    expect(models[1]).toEqual(CLOUD);
     expect((await res.json()).primary).toBe("local");
+  });
+
+  /**
+   * The box this was found on: Settings had written the cloud row bound to
+   * `deepseek:default` with our endpoint, and the owner then signed in with
+   * ChatGPT. Every Telegram voice note was refused ("OpenAI OAuth audio
+   * transcription requires the official endpoint without custom request
+   * overrides") while Whisper sat installed beside it.
+   */
+  it("never writes the openai row with our endpoint once the openai credential is a ChatGPT sign-in", async () => {
+    openaiAuthMock.mockReturnValue(CHATGPT_SIGNED_IN);
+    readConfigMock.mockResolvedValue({ ...LINKED_AUTH, tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } });
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(200);
+    const written = batchMock.mock.calls.flatMap(([ops]) => ops as string[][]);
+    expect(written.map(([key]) => key)).toEqual(["tools.media.models"]);
+    expect(JSON.parse(written[0][1])).toEqual([expect.objectContaining({ type: "cli" })]);
+    // And the endpoint goes with the row: it would also apply to a provider
+    // the core picked by itself.
+    expect(unsetMock).toHaveBeenCalledWith("tools.media.audio.baseUrl");
+  });
+
+  it("drops the cloud row once the profile it names is gone from the gateway's store", async () => {
+    boundProfileMock.mockReturnValue({ kind: "absent", store: "shared" });
+    readConfigMock.mockResolvedValue({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } });
+    const { POST } = await route();
+    await POST(post({ primary: "local" }));
+    const models = JSON.parse(batchMock.mock.calls[0][0][0][1]);
+    expect(models.some((row: { provider?: string }) => row.provider === "openai")).toBe(false);
+    expect(unsetMock).toHaveBeenCalledWith("tools.media.audio.baseUrl");
+  });
+
+  /**
+   * The box this card was found on: a ClawBox AI sign-in from a release that
+   * signed in by subscription left `deepseek:default` recorded as OAuth, the
+   * core took the row's bearer for an OAuth credential, and every Telegram
+   * voice note was refused while Whisper sat installed beside it.
+   */
+  it("drops the cloud row for a ClawBox AI sign-in left over as an OAuth profile, whatever the store holds", async () => {
+    readConfigMock.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } },
+      tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } },
+    });
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(200);
+    const written = batchMock.mock.calls.flatMap(([ops]) => ops as string[][]);
+    expect(written.map(([key]) => key)).toEqual(["tools.media.models"]);
+    expect(JSON.parse(written[0][1])).toEqual([expect.objectContaining({ type: "cli" })]);
+    expect(unsetMock).toHaveBeenCalledWith("tools.media.audio.baseUrl");
   });
 
   it("leaves the on-box row out when that engine is not installed", async () => {
@@ -306,6 +448,7 @@ describe("POST /setup-api/stt — the write", () => {
     // Key order differs from what the route would write; the comparison is
     // by content, because the CLI is free to serialise the file as it likes.
     readConfigMock.mockResolvedValue({
+      ...LINKED_AUTH,
       tools: {
         media: {
           audio: { baseUrl: PROXY },

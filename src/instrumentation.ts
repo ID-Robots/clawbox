@@ -549,8 +549,20 @@ export async function register() {
     // waiting for the answer. It never rejects — see its own docblock.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { applyClawaiCloudDefaults } = require('./lib/clawai-cloud-defaults')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { reconcileChannelAudio } = require('./lib/stt-channel')
     const defaults = setTimeout(() => {
-      void applyClawaiCloudDefaults({ trigger: 'boot' })
+      // Then channel voice notes, on EVERY box: the applier stands down on a
+      // box with no subscription, which is the box whose Whisper is all it
+      // has, and it never takes the cloud row back off a box whose credential
+      // stopped backing it. AFTER the applier, so the order is read from the
+      // primary it may just have stored.
+      void Promise.resolve(applyClawaiCloudDefaults({ trigger: 'boot' }))
+        .catch(() => undefined)
+        .then(() => reconcileChannelAudio({ trigger: 'boot' }))
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Could not align channel voice notes with the transcription engines:', err instanceof Error ? err.message : err)
+        })
     }, 45_000)
     defaults.unref?.()
   } catch (err) {

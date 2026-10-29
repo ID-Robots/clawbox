@@ -15,9 +15,14 @@
  * and its chat microphone still has a preference to honour.
  */
 
+import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
+import { isClawboxAiToken } from "@/lib/clawai-token";
 import { get, set } from "@/lib/config-store";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
-import { PYTHON3, sttClientScriptPath } from "@/lib/stt-local";
+import type { OpenClawConfig } from "@/lib/openclaw-config";
+import { localSttInstalled, PYTHON3, sttClientScriptPath } from "@/lib/stt-local";
+import { isKeyModeProfile } from "@/lib/auth-profile-mode";
+import type { AuthProfileEntries } from "@/lib/subscription-surface";
 
 export type SttEngine = "cloud" | "local";
 
@@ -67,8 +72,74 @@ export const TRANSCRIBE_MODEL =
  *
  * scripts/gateway-pre-start.sh carries a copy of this string for the same
  * reason it copies the model id; keep the two in step.
+ *
+ * NAMING IT IS NOT THE SAME AS HAVING IT. The row is only written while this
+ * profile is recorded in openclaw.json as a key ({@link transcribeProfileProblem}),
+ * is in the core's store as an API key that is the ClawBox AI token,
+ * and while the `openai` provider's own credential is not a ChatGPT sign-in —
+ * the pinned core refuses a custom endpoint for an OAuth credential ("Custom
+ * endpoints and request overrides require an API-key profile", OpenClaw
+ * 2026.10.7 docs/nodes/audio.md). See `readCloudSttBacking` in stt-channel.ts.
  */
 export const TRANSCRIBE_AUTH_PROFILE = "deepseek:default";
+
+/** Why the ClawBox AI credential cannot carry a transcription. */
+export type ClawaiTranscribeProblem =
+  /** No ClawBox AI token on this box, or the slot holds somebody else's key. */
+  | "not_linked"
+  /** openclaw.json records no {@link TRANSCRIBE_AUTH_PROFILE} at all. */
+  | "profile_missing"
+  /** It is recorded, but not as a key — the stale OAuth row of an older sign-in. */
+  | "profile_not_api_key";
+
+/**
+ * Is {@link TRANSCRIBE_AUTH_PROFILE} recorded in openclaw.json's `auth.profiles`
+ * as a key? PURE.
+ *
+ * ClawBox writes `{provider: "deepseek", mode: "api_key"}` there with every
+ * ClawBox AI sign-in, in the same batch as the provider itself. A release that
+ * signed in by SUBSCRIPTION wrote `mode: "oauth"` instead, and a box still
+ * carrying that row hands the core an OAuth credential for a row that names our
+ * endpoint: every Telegram voice note was refused with "OpenAI OAuth audio
+ * transcription requires the official endpoint without custom request
+ * overrides". A row in any mode but a key one is never written, and no row at
+ * all says the profile was never ClawBox's to name.
+ *
+ * gateway-pre-start.sh asks the same question of the same field
+ * (`_clawai_transcribe_profile_problem`) with the same mode set as
+ * `isKeyModeProfile`; keep the two in step, or each boot undoes the other.
+ */
+export function transcribeProfileProblem(profiles: AuthProfileEntries): ClawaiTranscribeProblem | null {
+  const recorded = profiles?.[TRANSCRIBE_AUTH_PROFILE];
+  if (!recorded) return "profile_missing";
+  return isKeyModeProfile(recorded) ? null : "profile_not_api_key";
+}
+
+/**
+ * Can the chat microphone's cloud leg send this token to the proxy? PURE.
+ *
+ * The microphone posts the token itself rather than through a gateway row, so
+ * the `openai` provider's own credential (a ChatGPT sign-in) is nothing to it.
+ * The rest of the channel row's rule applies unchanged, so the two surfaces
+ * agree on whether the box can use ClawBox AI to transcribe:
+ *  - the token has to be a ClawBox AI token. The slot it is read from is the
+ *    DeepSeek provider's, and an owner's own DeepSeek key there is not ours to
+ *    send to the proxy;
+ *  - a token openclaw.json holds is a ClawBox AI sign-in only while that
+ *    sign-in's profile is recorded as a key ({@link transcribeProfileProblem}).
+ *    A token from the Hermes store has no such record to ask.
+ *
+ * @param config openclaw.json, or null on an edition without one.
+ */
+export function cloudTranscribeProblem(
+  token: string | null,
+  config: Pick<OpenClawConfig, "models" | "auth"> | null,
+): ClawaiTranscribeProblem | null {
+  if (token === null || !isClawboxAiToken(token)) return "not_linked";
+  const held = config?.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
+  if (typeof held !== "string" || held.trim() !== token.trim()) return null;
+  return transcribeProfileProblem(config?.auth?.profiles);
+}
 
 export function isSttEngine(value: unknown): value is SttEngine {
   return value === "cloud" || value === "local";
@@ -97,10 +168,21 @@ export function isSttEngine(value: unknown): value is SttEngine {
  * connecting a subscription gives it back with no second write.
  *
  * An owner's `local` pick is unaffected in either direction.
+ *
+ * NOTHING STORED IS NOT A VOTE FOR THE CLOUD while the box has an engine of its
+ * own. A box whose owner installed Whisper and never opened the engine row had
+ * no stored pick, so the cloud went first — on the chat microphone and, through
+ * the same order, on every channel voice note — and a cloud leg that could not
+ * answer cost every recording a refused round trip before the engine that
+ * could. The engine on the box goes first until somebody (the owner, or the
+ * ClawBox AI cloud default, which stores `cloud` when it promotes a linked box)
+ * says otherwise. Without an engine on the box the cloud is the only answer, so
+ * it stays the default there.
  */
-export function resolveSttPrimary(stored: unknown, cloudConfigured: boolean): SttEngine {
+export function resolveSttPrimary(stored: unknown, cloudConfigured: boolean, localInstalled: boolean): SttEngine {
   if (!cloudConfigured) return "local";
-  return isSttEngine(stored) ? stored : "cloud";
+  if (isSttEngine(stored)) return stored;
+  return localInstalled ? "local" : "cloud";
 }
 
 /** What the store holds, before {@link resolveSttPrimary} has its say. */
@@ -110,8 +192,12 @@ export async function readStoredSttPrimary(): Promise<unknown> {
 
 /** The engine tried first. */
 export async function getSttPrimary(): Promise<SttEngine> {
-  const [stored, token] = await Promise.all([readStoredSttPrimary(), resolveClawaiToken()]);
-  return resolveSttPrimary(stored, token !== null);
+  const [stored, token, local] = await Promise.all([
+    readStoredSttPrimary(),
+    resolveClawaiToken(),
+    localSttInstalled(),
+  ]);
+  return resolveSttPrimary(stored, token !== null, local.installed);
 }
 
 export async function setSttPrimary(primary: SttEngine): Promise<void> {
@@ -137,11 +223,24 @@ export type AudioModelEntry = Record<string, unknown>;
  * not installed: OpenClaw would otherwise try the row and record a failed
  * attempt for every voice note before reaching the cloud row behind it — and
  * on a box with no usable cloud leg, that is the transcript lost.
+ *
+ * The cloud entry is left out the same way when no ClawBox AI credential backs
+ * it (`cloudBacked`, decided by `readCloudSttBacking` in stt-channel.ts). A row
+ * bound to a profile the core cannot use is not a fallback: the core resolves
+ * the `openai` provider's own credential instead, and when that is a ChatGPT
+ * sign-in it refuses the proxy endpoint outright ("OpenAI OAuth audio
+ * transcription requires the official endpoint without custom request
+ * overrides") — on every voice note, ahead of the engine that could answer.
  */
-export function buildAudioModels(order: readonly SttEngine[], localInstalled: boolean): AudioModelEntry[] {
+export function buildAudioModels(
+  order: readonly SttEngine[],
+  localInstalled: boolean,
+  cloudBacked: boolean,
+): AudioModelEntry[] {
   const entries: AudioModelEntry[] = [];
   for (const engine of order) {
     if (engine === "cloud") {
+      if (!cloudBacked) continue;
       // capabilities says where the row may be used; OpenClaw 2's shared
       // tools.media.models list requires it on every row.
       entries.push({

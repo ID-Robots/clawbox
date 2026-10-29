@@ -3,18 +3,20 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
-import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, openclawIsAbsent, readConfig, restartGateway } from "@/lib/openclaw-config";
 import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
-import { syncChannelAudio } from "@/lib/stt-channel";
+import { readCloudSttBacking, syncChannelAudio } from "@/lib/stt-channel";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
 import {
+  cloudTranscribeProblem,
   isSttEngine,
   readStoredSttPrimary,
   resolveSttPrimary,
   setSttPrimary,
   sttEngineOrder,
+  type SttEngine,
 } from "@/lib/stt-preference";
 
 /**
@@ -54,7 +56,12 @@ async function status() {
   const cloudConfigured = token !== null;
   // The credential this read already holds, rather than `getSttPrimary()`
   // fetching it a second time. Same verdict either way.
-  const primary = resolveSttPrimary(stored, cloudConfigured);
+  const primary = resolveSttPrimary(stored, cloudConfigured, local.installed);
+  const order = sttEngineOrder(primary);
+  // What the microphone's cloud leg will actually send to the proxy: the rule
+  // the transcribe route asks before it uploads anything.
+  const micCloud = token !== null
+    && cloudTranscribeProblem(token, openclawIsAbsent() ? null : await readConfig()) === null;
   return {
     primary,
     engines: {
@@ -64,15 +71,32 @@ async function status() {
     // The engines this box can actually use, in the order it tries them. An
     // unlinked cloud or an uninstalled whisper is shown under `engines`, not
     // listed here as a step that will silently do nothing.
-    chain: sttEngineOrder(primary).filter((engine) => (engine === "cloud" ? cloudConfigured : local.installed)),
+    chain: order.filter((engine) => (engine === "cloud" ? micCloud : local.installed)),
     // The ACTIVE harness, not the edition — the same rule /setup-api/tts uses
     // and for the same reason: on a licensed dual box switched to Hermes,
     // `openclawIsAbsent()` is false while the gateway that serves channels is
     // not the one this box is talking through, so it reported channel voice
     // notes as working on a harness that serves none.
     channels: (await getActiveHarness()) === "openclaw" && !openclawIsAbsent()
-      ? { supportedOnEdition: true as const }
+      ? await channelStatus(order, local.installed)
       : EDITION_UNSUPPORTED,
+  };
+}
+
+/**
+ * What a channel voice note tries, in the same order as the microphone, and —
+ * when the cloud is not in it — why. Both need a ClawBox AI sign-in whose
+ * profile is recorded as a key (`cloudTranscribeProblem`); past that the two
+ * chains differ only by the cloud row: the microphone sends the token to the
+ * proxy itself, while a channel goes through the gateway's credential for the
+ * row, which the token alone does not guarantee (see `readCloudSttBacking`).
+ */
+async function channelStatus(order: SttEngine[], localInstalled: boolean) {
+  const cloud = await readCloudSttBacking();
+  return {
+    supportedOnEdition: true as const,
+    chain: order.filter((engine) => (engine === "cloud" ? cloud.usable : localInstalled)),
+    cloudUnavailable: cloud.reason,
   };
 }
 
@@ -151,7 +175,7 @@ export async function POST(req: Request) {
     // engine on the box. Writing the cloud row first there would make every
     // voice note pay a refused round trip before the engine that can answer,
     // and would disagree with the primary this same response reports.
-    const effective = resolveSttPrimary(primary, token !== null);
+    const effective = resolveSttPrimary(primary, token !== null, local.installed);
     // Gateway first, preference second, so a failed CLI write leaves the
     // stored preference describing what the box still does.
     const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(effective), local.installed);

@@ -268,8 +268,13 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const sttRole: Role = !localStt ? null : stt?.primary === "local" ? "primary" : "fallback";
     // Explicitly `!== false`, so a server that predates the field — or one whose
     // read failed — leaves the action where it has always been rather than
-    // hiding it on a box that can use it.
-    setSttCloudReady(stt?.engines?.cloud?.configured !== false);
+    // hiding it on a box that can use it. And the cloud has to be IN the chain:
+    // a token the transcribe route will not send (an owner's own DeepSeek key,
+    // a sign-in whose profile is recorded as OAuth) still reads `configured`,
+    // and falling back to it put the only working engine behind one that hears
+    // nothing.
+    const sttChain: unknown[] | null = Array.isArray(stt?.chain) ? stt.chain : null;
+    setSttCloudReady(stt?.engines?.cloud?.configured !== false && (sttChain === null || sttChain.includes("cloud")));
     setRoles({ llm, tts: ttsRole, stt: sttRole });
   }, []);
 

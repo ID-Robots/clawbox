@@ -2286,6 +2286,28 @@ const GATEWAY_OFFLINE_HINT =
 const GATEWAY_RESTARTING_NOTICE =
   "Saved. The assistant is restarting to apply it and will be back in about a minute.";
 
+/**
+ * Re-point channel voice notes after ANY provider save, detached and never
+ * rejecting. A save is when the credential behind the ClawBox AI transcription
+ * row changes: a ChatGPT sign-in makes the core refuse that row's endpoint,
+ * and a box that moves off ClawBox AI keeps naming a profile nothing backs.
+ * Nothing rewrote the row on either, and every Telegram voice note was refused
+ * before the box's own Whisper was tried. See `reconcileChannelAudio`.
+ */
+function alignChannelAudio(): Promise<void> {
+  return import("@/lib/stt-channel")
+    .then(({ reconcileChannelAudio }) => reconcileChannelAudio({ trigger: "provider" }))
+    .then(
+      () => undefined,
+      (err) => {
+        console.warn(
+          "[configure] could not align channel voice notes with the new credential:",
+          err instanceof Error ? logSafe(err.message) : err,
+        );
+      },
+    );
+}
+
 export async function POST(request: Request) {
   const gateway: GatewayTracker = { state: "untouched" };
   let response: Response;
@@ -4737,7 +4759,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             "[configure] could not apply the ClawBox AI cloud defaults:",
             err instanceof Error ? logSafe(err.message) : err,
           );
-        });
+        })
+        .then(() => alignChannelAudio());
+    } else {
+      void Promise.resolve()
+        .then(() => gatewayBack)
+        .catch(() => false)
+        .then(() => alignChannelAudio());
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
