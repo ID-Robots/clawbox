@@ -180,6 +180,28 @@ describe("the device-code finaliser never stores a raw response body", () => {
     logged.mockRestore();
   });
 
+  it.each([
+    [409, "ClawBox AI could not replace an older sign-in stored in its credential slot (deepseek:default)."],
+    [500, "Failed to configure AI model. Please check your credentials and try again."],
+  ])("ends a %i configure as an error at once — the next poll says it, not configuring", async (status, sentence) => {
+    // A refused configure must not leave the session to the configuring
+    // window's 3-minute timeout: the owner would watch progress for nothing.
+    mockConfigure.mockResolvedValue(new Response(
+      JSON.stringify({ error: sentence }),
+      { status, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+    expect(sessionError()).toBe(sentence);
+
+    // The very next tick reads what the finaliser stored.
+    const stored = mockWriteSession.mock.calls.at(-1)?.[0];
+    mockReadSession.mockResolvedValue(stored as never);
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    const next = await POST();
+    expect(await next.json()).toEqual({ status: "error", error: sentence });
+  });
+
   it("leaves a successful configure alone", async () => {
     mockConfigure.mockResolvedValue(new Response(
       JSON.stringify({ success: true }),
