@@ -62,6 +62,8 @@ vi.mock("@/lib/harness/credentials", async (importOriginal) => ({
 }));
 
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
+import { clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
+import { set } from "@/lib/config-store";
 
 beforeEach(() => {
   cliMock.mockReset();
@@ -111,5 +113,39 @@ describe("applyClawaiToHermes and the credential refusal", () => {
       applyClawaiToHermes("claw_new", "flash", { previousClawaiToken: "claw_stored" }),
     ).rejects.toThrow();
     expect(forgetRefusal).not.toHaveBeenCalled();
+  });
+});
+
+describe("applyClawaiToHermes and a status poll still out about the previous token", () => {
+  /** Run the apply with a status poll that reads the token mid-way, and return that poll's snapshot. */
+  async function applyWithPollMidway(token: string): Promise<number> {
+    let polledAt: number | null = null;
+    cliMock.mockImplementation(async () => {
+      polledAt ??= clawaiPlanGeneration();
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await applyClawaiToHermes(token, "flash", { previousClawaiToken: "claw_stored" });
+    expect(polledAt).not.toBeNull();
+    return polledAt!;
+  }
+
+  const planWrites = () => vi.mocked(set).mock.calls.filter(([key]) => key === "clawai_plan_tier");
+
+  it("refuses that poll's plan once a DIFFERENT account is on record", async () => {
+    // The poll asked the portal about the old account; written now, its plan
+    // would stand over the new account's and the desktop would show it.
+    vi.mocked(set).mockClear();
+    const snapshot = await applyWithPollMidway("claw_new");
+
+    await persistClawaiPlanTier({ verdict: "pro" }, snapshot);
+    expect(planWrites()).toEqual([]);
+  });
+
+  it("keeps it when the same account was saved again", async () => {
+    vi.mocked(set).mockClear();
+    const snapshot = await applyWithPollMidway("claw_stored");
+
+    await persistClawaiPlanTier({ verdict: "pro" }, snapshot);
+    expect(planWrites()).toEqual([["clawai_plan_tier", "pro"]]);
   });
 });
