@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -129,6 +129,58 @@ describe("a coding team's git plumbing", () => {
     } finally {
       fs.rmSync(plain, { recursive: true, force: true });
     }
+  });
+});
+
+describe("where a new team forks from", () => {
+  /** A team branch with one commit on it, left checked out the way a failed team leaves it. */
+  async function failedTeam(id: string, recorded?: (b: string) => string | null): Promise<string> {
+    const made = await ensureTeamBranch(dir, id, recorded);
+    if (!made.ok) throw new Error(made.detail);
+    fs.writeFileSync(path.join(dir, `${id}.js`), "an old fix\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", `fix of ${id}`);
+    return git(dir, "rev-parse", "HEAD");
+  }
+
+  it("forks from the base the team on the checked-out branch recorded, followed back past teams that forked from teams", async () => {
+    git(dir, "checkout", "-q", "-b", "release");
+    const releaseTip = git(dir, "rev-parse", "HEAD");
+    await failedTeam("team-aaaaaaaa");
+    const recorded: Record<string, string> = { "clawbox/team-aaaaaaaa": "release" };
+    const b = await ensureTeamBranch(dir, "team-bbbbbbbb", (branch) => recorded[branch] ?? null);
+    expect(b).toEqual({ ok: true, branch: "clawbox/team-bbbbbbbb", base: "release" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(releaseTip);
+    // A board from before the fix recorded a team branch as its base: followed back to release.
+    recorded["clawbox/team-bbbbbbbb"] = "clawbox/team-aaaaaaaa";
+    await failedTeam("team-cccccccc");
+    recorded["clawbox/team-cccccccc"] = "clawbox/team-bbbbbbbb";
+    expect(await forkBase(dir, (branch) => recorded[branch] ?? null)).toEqual({ ok: true, base: "release", from: "release" });
+  });
+
+  it("falls back to the remote's default branch, then main, master or develop — and refuses rather than fork a team's branch", async () => {
+    await failedTeam("team-aaaaaaaa");
+    expect(await forkBase(dir)).toEqual({ ok: true, base: "master", from: "master" });
+    // The remote's default comes before master.
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), "team-wt-remote-"));
+    try {
+      git(remote, "init", "-q", "--bare", "-b", "develop");
+      git(dir, "remote", "add", "origin", remote);
+      git(dir, "push", "-q", "origin", "master:develop");
+      git(dir, "remote", "set-head", "origin", "develop");
+      expect(await forkBase(dir)).toEqual({ ok: true, base: "develop", from: "origin/develop" });
+      git(dir, "remote", "remove", "origin");
+    } finally {
+      fs.rmSync(remote, { recursive: true, force: true });
+    }
+    // Nothing but team branches: no fork at all, and why.
+    git(dir, "branch", "-q", "-m", "master", "trunk");
+    const none = await ensureTeamBranch(dir, "team-bbbbbbbb");
+    expect(none).toMatchObject({ ok: false });
+    if (!none.ok) expect(none.detail).toMatch(/clawbox\/team-aaaaaaaa, a coding team's branch/);
+    // A branch that is not a team's is forked as it always was.
+    git(dir, "checkout", "-q", "trunk");
+    expect(await forkBase(dir)).toEqual({ ok: true, base: "trunk", from: null });
   });
 });
 

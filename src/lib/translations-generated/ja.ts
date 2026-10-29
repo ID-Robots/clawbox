@@ -1889,6 +1889,7 @@ const table: Record<string, string> = {
   "codingAgent.team.addedByLead": "リードが追加",
   "codingAgent.team.adviceOneTask": "計画のタスクは 1 つです。チームより単独の実行のほうが安く済んだはずです。",
   "codingAgent.team.adviceOverlap": "この計画のタスクが触れるファイルの {n}% が別のタスクと重なっているため、並行して進められません。単独の実行のほうが安く済んだ可能性が高いです。",
+  "codingAgent.team.adviceOverlapRun": "このプランのタスクが触れるファイルの {n}% は別のタスクと共有されているため、プランはチームではなく通常の 1 回の実行として動きました。こちらのほうが安価です。",
   "codingAgent.team.adviceSingleRun": "計画のタスクが 1 つだったため、通常の実行 1 回として動きました。最も安上がりな形です。このような目標には、次回は単独の実行を選ぶほうが安く済みます。",
   "codingAgent.team.after": "{ids} の後",
   "codingAgent.team.alerts": "{n} 件の警告",

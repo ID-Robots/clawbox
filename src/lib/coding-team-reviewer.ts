@@ -55,6 +55,68 @@ export const FINAL_REVIEWER_BRIEF = [
  */
 export const REVIEWER_NUDGE = 'Answer with the JSON verdict object only, nothing else: {"verdict": "accepted" | "rejected", "notes": string}.';
 
+/**
+ * The reviewer offered a task's review ONCE more because the first one ran
+ * nothing (`ranNothing`): not read-only, in a throwaway worktree of the merged
+ * work, where it can run git and the task's checks and nothing it writes is
+ * kept.
+ */
+export const SHELL_REVIEWER_BRIEF = [
+  "You are the REVIEWER of a small coding team working unattended. One worker has finished the task quoted below. This folder is a throwaway checkout of the team's merged work, and the first review of it could not run git or the tests.",
+  "This time you have a shell: look at what changed with git (log, diff against the base) and run the checks the task's own verification names — its tests, linter, build — before you judge. Do not edit the project's files: nothing written in this folder is kept.",
+  'Answer with ONLY a JSON object, no prose before or after: {"verdict": "accepted" | "rejected", "notes": string}. Say in notes what you ran and what it showed. Reject only for something concrete, saying exactly what the next worker must fix. If you still cannot run them, say so in notes.',
+  "Send NO team_message: the verdict itself is what the lead reads.",
+  VERDICT_LAST,
+].join(" ");
+
+/** The task text of that second review: why it is asked, then the review as the first one had it. */
+export function shellReviewerTask(review: string, firstNotes: string): string {
+  const text = `The first review of this task ran nothing — it said: ${answerHead(firstNotes)}. This folder is a checkout of the merged work, with a shell: run git and the task's checks yourself.\n\n${review}`;
+  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+}
+
+/**
+ * The label on a review no reviewer could run git or the tests for: the task
+ * accepted on its worker's own test evidence, or sent back for the lack of it.
+ */
+export const NOT_REVIEWED = "NOT REVIEWED";
+
+/** How a reviewer says it ran nothing: "Static review only: no git, Biome or Jest could be run." */
+const RAN_NOTHING: readonly RegExp[] = [
+  /\bstatic[- ]review\b/i,
+  /\b(?:could not|couldn't|cannot|can't|can not|unable to|was not able to|wasn't able to|not able to|no way to)\s+(?:be\s+)?(?:run|execute|use|invoke|start)\b[^.;\n]{0,80}?\b(?:git|tests?|jest|vitest|biome|eslint|lint(?:er)?|build|playwright|pytest|npm|bun|suite|commands?|anything|bash|shell)\b/i,
+  /\bno\s+(?:git|bash|shell|tests?|jest|vitest|biome|commands?|tools?)\b[^.;\n]{0,60}?\b(?:could|can|was|were)\s+(?:be\s+)?(?:run|executed|used)\b/i,
+  /\b(?:git|tests?|jest|vitest|biome|lint|build|suite|playwright)\b[^.;\n]{0,40}?\b(?:were|was|could|can)\s*(?:not|n't)\s+(?:be\s+)?(?:run|executed)\b/i,
+];
+
+/**
+ * Whether a verdict's notes say its reviewer could not run git or the tests:
+ * then it is not a review, whatever it ruled (night run, 2026-10-29: a task was
+ * accepted on "Static review only: no git, Biome or Jest could be run").
+ */
+export function ranNothing(notes: string): boolean {
+  return RAN_NOTHING.some((re) => re.test(notes));
+}
+
+/** How much of the worker's evidence a NOT REVIEWED acceptance quotes. */
+const EVIDENCE_CHARS = 160;
+const CHECK_PASSED = /\b(?:tests?|specs?|jest|vitest|biome|eslint|lint|tsc|typecheck|type check|build|playwright|pytest|unittest|npm (?:run )?test|bun test|suite|e2e)\b[^\n]{0,120}?\b(?:pass(?:ed|es|ing)?|green|succeed(?:ed|s)?)\b|\b[1-9]\d* (?:passing|passed)\b/i;
+// A failure, a check that never ran ("0 passing", "no tests"), or one only expected to pass.
+const CHECK_FAILED = /\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bnot (?:run|pass)|\bcould ?n[o']t\b|\bcannot\b|\bunable\b|\b0 (?:passing|passed|tests?)\b|\bno tests?\b|\b(?:should|would|will|ought to|expected to)\s+(?:all\s+)?pass/i;
+
+/**
+ * The sentence of a worker's report that says its checks ran and passed —
+ * "keyboard.spec.js: 3 passing", "Biome, Jest and the build all green" — or
+ * null: the only ground a task no reviewer could check may be accepted on.
+ */
+export function testEvidence(report: string): string | null {
+  for (const part of report.split(/\n|(?<=[.!])\s+/)) {
+    const line = part.trim();
+    if (CHECK_PASSED.test(line) && !CHECK_FAILED.test(line)) return line.length > EVIDENCE_CHARS ? `${line.slice(0, EVIDENCE_CHARS - 1)}…` : line;
+  }
+  return null;
+}
+
 export const MAX_NOTES_CHARS = 2_000;
 /** How many changed files the reviewer is told about by name; the rest are counted. */
 export const MAX_REVIEW_FILES = 40;
