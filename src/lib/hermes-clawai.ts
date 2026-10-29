@@ -43,6 +43,7 @@ import {
   CLAWAI_PLAN_TIER_KEY,
   clawaiEntitlementTier,
   clawaiPlanTierForStore,
+  noteClawaiCredentialReplaced,
   type ClawaiPlanTier,
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
@@ -483,6 +484,11 @@ export async function applyClawaiToHermes(
     );
   }
 
+  // A status poll still out about the PREVIOUS token read it before this write
+  // and would record that account's badge and plan over the ones below, and
+  // the desktop would keep showing the previous account. Bumped in the same
+  // turn as the write, so such a poll's later stamps are refused.
+  if (previousToken !== trimmed) noteClawaiCredentialReplaced();
   // Keep the wizard's own status route consistent: without ai_model_configured
   // the setup flow can't advance past the AI step on a Hermes device.
   await setMany({
