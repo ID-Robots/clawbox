@@ -1152,7 +1152,15 @@ describe("/setup-api/chat/model", () => {
     }));
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
+    // Names the provider and what the box is missing (TASK-2055), not "the
+    // selected provider".
+    await expect(response.json()).resolves.toEqual({
+      error: "xAI Grok is not connected on this box — it has no API key or sign-in for it. "
+        + "Connect xAI Grok in Settings, then pick the model.",
+      kind: "provider_credential_missing",
+      provider: "xai",
+    });
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
   });
 
   it("rejects ChatGPT subscription Pro/API-only Codex models before gateway restart", async () => {
@@ -1323,7 +1331,10 @@ describe("/setup-api/chat/model", () => {
     }));
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining("Anthropic Claude is not connected on this box"),
+      provider: "anthropic",
+    });
   });
 
   it("never represents the OpenAI row by the ClawBox AI image entry", async () => {
@@ -1409,6 +1420,36 @@ describe("/setup-api/chat/model", () => {
 
     const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
     expect(openai?.model).toBe("openai/gpt-5.4");
+  });
+
+  it("offers no row for a provider the box holds no credential for (TASK-2055)", async () => {
+    // The config store's hint and a remembered primary both name Claude; the
+    // box holds only its ClawBox AI key. Each built an AVAILABLE row before,
+    // and a pick on it was refused with "Selected AI provider is not configured".
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "anthropic" });
+    vi.mocked(sqliteGet).mockResolvedValue("anthropic/claude-sonnet-4-6");
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    expect(body.options.map((option: { provider: string | null }) => option.provider)).not.toContain("anthropic");
+    expect(body.options.find((option: { provider: string }) => option.provider === "clawai")?.available).toBe(true);
+  });
+
+  it("counts a key under the provider definition as the credential, as the Providers strip does", async () => {
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openrouter" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: {} },
+      models: { mode: "merge", providers: { openrouter: { apiKey: "sk-or-v1-test", models: [] } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    expect(body.options.find((option: { provider: string }) => option.provider === "openrouter")?.available).toBe(true);
   });
 
   it("never offers a row for the image lane's provider, whatever the box is pinned to", async () => {

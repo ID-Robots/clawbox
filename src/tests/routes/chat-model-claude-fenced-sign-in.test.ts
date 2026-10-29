@@ -324,7 +324,10 @@ describe("/setup-api/chat/model and a Claude sign-in the gateway cannot use", ()
 
     const claude = claudeOf(await state());
 
-    expect(claude).toMatchObject({ available: true, model: CLAUDE });
+    // Greyed all the same — with nothing in auth.profiles the box has no
+    // credential to run Claude on (TASK-2055) — but as "Set up in Settings",
+    // never as a sign-in to repeat.
+    expect(claude).toMatchObject({ available: false, model: CLAUDE });
     expect(claude).not.toHaveProperty("reauthRequired");
     expect(storeRead).not.toHaveBeenCalled();
   });
@@ -399,11 +402,15 @@ describe("/setup-api/chat/model and a Claude sign-in the gateway cannot use", ()
     expect(configSetMock).toHaveBeenCalledWith(["agents.defaults.model.primary", FLASH]);
   });
 
-  it("still answers 'not configured' for a provider with no row at all", async () => {
+  it("still answers 'not connected' for a provider with no credential at all", async () => {
     const response = await post(POST, { model: "openrouter/anthropic/claude-haiku-4-5" });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining("OpenRouter is not connected on this box"),
+      kind: "provider_credential_missing",
+      provider: "openrouter",
+    });
   });
 
   it.each<[string, () => GatewayAuthProfileRead, string, boolean]>([
