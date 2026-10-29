@@ -3272,6 +3272,108 @@ describe("updater", () => {
     });
   });
 
+  describe("the OpenClaw step's fast path", () => {
+    beforeEach(() => { updater.resetUpdateState(); });
+
+    const FAST_STEP = "clawbox-run-root-step.sh openclaw_install_fast";
+    /** The full step's own dispatch — never the `_fast` one, whose name it prefixes. */
+    const isFullStep = (call: string) => /clawbox-run-root-step\.sh openclaw_install$/.test(call);
+    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+
+    /** A full update that ends at the rebuild dispatch, refused so the run settles. */
+    function runUpdate(results: Record<string, { stdout: string; stderr: string } | Error>) {
+      setupExecFileMock({
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ...results,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+    }
+
+    it("skips the quiesced step when install.sh took the fast path with the gateway running", async () => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  Installed: OpenClaw 2026.10.7 (abc1234), Target: 2026.10.7\n"
+            + "  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at 2026.10.7, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall\n",
+          stderr: "",
+        },
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = commands();
+      expect(calls.some((call) => call.includes(FAST_STEP))).toBe(true);
+      expect(calls.some(isFullStep)).toBe(false);
+      // The gateway was never masked or stopped for it.
+      expect(calls.some((call) => call.includes("clawbox-gateway-maintenance.sh enter"))).toBe(false);
+      expect(calls.some((call) => call.includes("systemctl stop clawbox-gateway.service"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      // …and the steps after it still ran.
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh openclaw_patch"))).toBe(true);
+    });
+
+    it("runs the full step, quiesced, after install.sh says the full path is needed", async () => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  OpenClaw refresh: full path needed (no full refresh has finished for 2026.10.7; the last on record is none) — nothing changed here; the updater runs it with the gateway quiesced\n",
+          stderr: "",
+        },
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = commands();
+      const fast = calls.findIndex((call) => call.includes(FAST_STEP));
+      const mask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
+      const stop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const full = calls.findIndex(isFullStep);
+      const unmask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh leave"));
+      expect(fast).toBeGreaterThanOrEqual(0);
+      expect(fast).toBeLessThan(mask);
+      expect(mask).toBeLessThan(stop);
+      expect(stop).toBeLessThan(full);
+      expect(full).toBeLessThan(unmask);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+    });
+
+    it("does not read a line that only QUOTES the fast path as the box taking it", async () => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  doctor: earlier run said 'OpenClaw refresh: fast path (…)'\n",
+          stderr: "",
+        },
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(isFullStep)).toBe(true);
+    });
+
+    it("runs the full step when the fast step cannot run — a runner that does not know it, say", async () => {
+      runUpdate({
+        [FAST_STEP]: Object.assign(new Error("clawbox-run-root-step: refusing step not on the web list: openclaw_install_fast"), {
+          stderr: "clawbox-run-root-step: refusing step not on the web list: openclaw_install_fast\n",
+        }),
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = commands();
+      const mask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
+      const full = calls.findIndex(isFullStep);
+      expect(full).toBeGreaterThan(mask);
+      expect(mask).toBeGreaterThan(calls.findIndex((call) => call.includes(FAST_STEP)));
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+    });
+
+    it("never asks it on the OpenClaw-only update, the owner's repair", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      const calls = commands();
+      expect(calls.some((call) => call.includes(FAST_STEP))).toBe(false);
+      expect(calls.some(isFullStep)).toBe(true);
+    });
+  });
+
   describe("startOpenclawUpdate", () => {
     it("keeps the gateway masked throughout the root package replacement", async () => {
       updater.resetUpdateState();
