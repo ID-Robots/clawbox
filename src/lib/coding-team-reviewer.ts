@@ -100,8 +100,9 @@ export function ranNothing(notes: string): boolean {
 
 /** How much of the worker's evidence a NOT REVIEWED acceptance quotes. */
 const EVIDENCE_CHARS = 160;
-const CHECK_PASSED = /\b(?:tests?|specs?|jest|vitest|biome|eslint|lint|tsc|typecheck|type check|build|playwright|pytest|unittest|npm (?:run )?test|bun test|suite|e2e)\b[^\n]{0,120}?\b(?:pass(?:ed|es|ing)?|green|succeed(?:ed|s)?)\b|\b\d+ (?:passing|passed)\b/i;
-const CHECK_FAILED = /\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bnot (?:run|pass)|\bcould ?n[o']t\b|\bcannot\b|\bunable\b/i;
+const CHECK_PASSED = /\b(?:tests?|specs?|jest|vitest|biome|eslint|lint|tsc|typecheck|type check|build|playwright|pytest|unittest|npm (?:run )?test|bun test|suite|e2e)\b[^\n]{0,120}?\b(?:pass(?:ed|es|ing)?|green|succeed(?:ed|s)?)\b|\b[1-9]\d* (?:passing|passed)\b/i;
+// A failure, a check that never ran ("0 passing", "no tests"), or one only expected to pass.
+const CHECK_FAILED = /\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bnot (?:run|pass)|\bcould ?n[o']t\b|\bcannot\b|\bunable\b|\b0 (?:passing|passed|tests?)\b|\bno tests?\b|\b(?:should|would|will|ought to|expected to)\s+(?:all\s+)?pass/i;
 
 /**
  * The sentence of a worker's report that says its checks ran and passed —
