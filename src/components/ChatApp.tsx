@@ -6,7 +6,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from '
 import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
-import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure } from '@/lib/chat-error-text'
 import {
   SESSION_EXPIRED_CHAT_MESSAGE,
   SESSION_EXPIRED_EVENT,
@@ -17,7 +17,8 @@ import {
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
-import { describeModelFallback, ModelFallbackWatch, reportModelFallback, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
+import { modelAvailabilityText, modelFallbackNotice, ModelFallbackWatch, openProvidersSettings, reportModelFallback, switchChatToProvider, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
+import ChatNoticeActions from '@/components/ChatNoticeActions'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -195,6 +196,9 @@ interface ChatAppMessageRowProps {
   msg: ChatMessage
   t: Translate
   onOpenEmail: (uid: number) => void
+  /** A notice's "Settings → Providers" and one-click switch (ChatNoticeActions). Stable. */
+  onOpenProviders?: () => void
+  onSwitchTo?: (target: { model: string; label: string; provider: string | null }) => void
 }
 
 // The message by VALUE: a history read rebuilds every message object from the
@@ -204,10 +208,12 @@ interface ChatAppMessageRowProps {
 function sameChatAppRowProps(prev: ChatAppMessageRowProps, next: ChatAppMessageRowProps): boolean {
   return prev.t === next.t
     && prev.onOpenEmail === next.onOpenEmail
+    && prev.onOpenProviders === next.onOpenProviders
+    && prev.onSwitchTo === next.onSwitchTo
     && samePlainData(prev.msg, next.msg)
 }
 
-const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail }: ChatAppMessageRowProps) {
+const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail, onOpenProviders, onSwitchTo }: ChatAppMessageRowProps) {
   // `MEDIA:` is lifted on the way INTO state — by the shared history
   // projection and by the live `final` handler — so what is stored
   // already carries its pictures and clips and the bubble just draws
@@ -218,6 +224,9 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
   // Where the owner pressed Stop: neutral, and worded here so a marker replayed
   // from the box's transcript reads in the chat's current language.
   const isStopped = msg.role === 'system' && msg.variant === 'stopped'
+  // A fact about the owner's account (no API quota right now), not a fault:
+  // calm blue, never the red of an error.
+  const isNotice = msg.role === 'system' && msg.variant === 'notice'
   const bodyText = isStopped ? t("chat.stopped") : emailRefs ? emailRefs.text : msg.text
   const images = msg.images ?? []
   const audio = msg.audio ?? []
@@ -235,10 +244,12 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
           ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
           : isStopped
             ? 'rgba(255,255,255,0.04)'
+            : isNotice
+            ? 'rgba(59,130,246,0.12)'
             : msg.role === 'system'
             ? 'rgba(239,68,68,0.15)'
             : 'rgba(255,255,255,0.06)',
-        color: msg.role === 'user' ? '#fff' : isStopped ? 'rgba(255,255,255,0.55)' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
+        color: msg.role === 'user' ? '#fff' : isStopped ? 'rgba(255,255,255,0.55)' : isNotice ? '#bfdbfe' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
         fontSize: 13.5,
         lineHeight: 1.45,
         wordBreak: 'break-word',
@@ -262,6 +273,7 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
           </div>
         )}
         {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
+        {isNotice && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {files.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
             {files.map(src => <ChatFileCard key={src} src={src} />)}
@@ -506,6 +518,17 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Runs stuck on a model this account cannot run, reported to the box once
   // each (lib/model-fallback-chat.ts) — and the "Stopped." a box-made stop owes.
   const fallbackWatchRef = useRef(new ModelFallbackWatch())
+  // A calm notice's one-click move to another provider the box has set up:
+  // this page has no header picker, so the picker's request is sent here, and
+  // the line under it says whether it landed. Stable for the memoised rows.
+  const switchFromNotice = useCallback((target: { model: string; label: string; provider: string | null }) => {
+    void switchChatToProvider(target).then((result) => {
+      const words = failureWordsRef.current
+      setMessages(prev => [...prev, result.ok
+        ? { role: 'system', variant: 'notice', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchedTo', { provider: target.label }) }
+        : { role: 'system', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchFailed', { provider: target.label }) }])
+    })
+  }, [])
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -1022,8 +1045,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
         .then((answer) => {
           const owesStop = fallbackWatchRef.current.settle(signal.runId, answer)
           if (sessionKeyRef.current !== forKey) return
-          const line = describeModelFallback(answer, failureWordsRef.current)
-          if (line) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
+          const notice = modelFallbackNotice(answer, failureWordsRef.current)
+          if (notice) setMessages(prev => [...prev, { role: 'system', timestamp: Date.now(), ...notice }])
           else if (owesStop) setMessages(prev => [...prev, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
         })
     }
@@ -1262,7 +1285,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
               const failureContext = settledError?.context
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current), timestamp: Date.now() }])
+              // No API quota on the owner's account is a fact, not a fault: calm, not red.
+              const failureTone = isAccountQuotaFailure(payload.errorMessage, failureContext) ? { variant: 'notice' as const } : {}
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current), timestamp: Date.now(), ...failureTone }])
               // A Claude account at its limit, or refused (TASK-1260): the box
               // moves every Claude consumer to the next account and sends the
               // turn again; the chat says which of those happened.
@@ -2122,7 +2147,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
         {/* One memoised row per message: a render of this page no longer
             parses the conversation — see ChatAppMessageRow. */}
         {messages.map((msg, i) => (
-          <ChatAppMessageRow key={i} msg={msg} t={t} onOpenEmail={setOpenEmailUid} />
+          <ChatAppMessageRow key={i} msg={msg} t={t} onOpenEmail={setOpenEmailUid} onOpenProviders={openProvidersSettings} onSwitchTo={switchFromNotice} />
         ))}
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />

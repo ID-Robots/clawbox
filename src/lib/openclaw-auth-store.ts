@@ -56,7 +56,8 @@
  *
  * Creates nothing — no database, table or row: a store that is not there is
  * core's to make, and `no-store` is the caller's to act on. Nothing here
- * throws, and no token leaves it: a fingerprint stands in for one.
+ * throws, and no token leaves it: a fingerprint stands in for one. The one
+ * exception is `readGatewayProviderSecret`, for the model probe, which says why.
  */
 
 import path from "./runtime-path";
@@ -438,40 +439,16 @@ function mapOf(blob: Json | null, key: string): Json {
 export function readGatewayProviderAuth(provider: string, paths?: GatewayAuthPaths): GatewayProviderAuthRead {
   const wanted = provider.trim().toLowerCase();
   try {
-    const where = paths ?? gatewayAuthPaths();
-    const found = findStore(where);
-    if (!found) return { kind: "no-store" };
-    const blob = parseBlob(found.json) as Json | null;
-    const stored = blob && profilesOf(blob);
-    if (!stored) return { kind: "unreadable" };
-    const merged: Json = { ...stored };
-    let localState: Json | null = null;
-    let baseState: Json | null;
-    if (found.store === "shared") {
-      const mainDb = mainAgentDb(where);
-      if (isFile(mainDb)) {
-        const db = openSqlite(mainDb, true);
-        try {
-          const local = profilesOf((parseBlob(readRow(db, STORE_CELLS.agent)?.json) as Json | null) ?? {});
-          if (local) Object.assign(merged, local);
-        } finally {
-          db.close();
-        }
-        localState = readStateBlob(mainDb, "agent");
-      }
-      baseState = readStateBlob(found.dbPath, "shared");
-    } else {
-      baseState = readStateBlob(found.dbPath, "agent");
-    }
+    const read = readMergedStore(paths ?? gatewayAuthPaths());
+    if (read === "no-store") return { kind: "no-store" };
+    if (read === "unreadable") return { kind: "unreadable" };
+    const { merged, localState, baseState } = read;
     const profiles: ProviderAuthProfile[] = [];
     for (const profileId of Object.keys(merged)) {
       const entry = profileAt(merged, profileId);
       if (entry && providerOf(profileId, entry) === wanted) profiles.push({ profileId, ...describeCopy(entry) });
     }
-    const orderOf = (state: Json | null): string[] | null => {
-      const list = mapOf(state, "order")[wanted];
-      return Array.isArray(list) && list.every((id) => typeof id === "string") ? (list as string[]) : null;
-    };
+    const orderOf = (state: Json | null) => storedOrderOf(state, wanted);
     const stats = { ...mapOf(baseState, "usageStats"), ...mapOf(localState, "usageStats") };
     const failures: Record<string, ProfileFailureState> = {};
     for (const { profileId } of profiles) {
@@ -490,6 +467,91 @@ export function readGatewayProviderAuth(provider: string, paths?: GatewayAuthPat
     return { kind: "present", profiles, order: orderOf(localState) ?? orderOf(baseState), failures };
   } catch (err) {
     return { kind: "unreadable", cause: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Core's stored try-order for `provider` in a state row, or null when none is stored. */
+function storedOrderOf(state: Json | null, provider: string): string[] | null {
+  const list = mapOf(state, "order")[provider];
+  return Array.isArray(list) && list.every((id) => typeof id === "string") ? (list as string[]) : null;
+}
+
+/**
+ * The profile map a turn resolves — the main agent's own copy merged over the
+ * shared row's under `state-db` ownership, id by id, as core merges them (see
+ * the header) — and the two state rows beside it. Throws when a database that
+ * is there cannot be asked.
+ */
+function readMergedStore(where: GatewayAuthPaths): { merged: Json; localState: Json | null; baseState: Json | null } | "no-store" | "unreadable" {
+  const found = findStore(where);
+  if (!found) return "no-store";
+  const blob = parseBlob(found.json) as Json | null;
+  const stored = blob && profilesOf(blob);
+  if (!stored) return "unreadable";
+  const merged: Json = { ...stored };
+  let localState: Json | null = null;
+  let baseState: Json | null;
+  if (found.store === "shared") {
+    const mainDb = mainAgentDb(where);
+    if (isFile(mainDb)) {
+      const db = openSqlite(mainDb, true);
+      try {
+        const local = profilesOf((parseBlob(readRow(db, STORE_CELLS.agent)?.json) as Json | null) ?? {});
+        if (local) Object.assign(merged, local);
+      } finally {
+        db.close();
+      }
+      localState = readStateBlob(mainDb, "agent");
+    }
+    baseState = readStateBlob(found.dbPath, "shared");
+  } else {
+    baseState = readStateBlob(found.dbPath, "agent");
+  }
+  return { merged, localState, baseState };
+}
+
+/**
+ * THE ONE READ THAT HANDS A CREDENTIAL OUT of this module: the one a turn on
+ * `provider` would be answered with — the first usable profile in core's
+ * stored order for it, then the rest in the store's own order.
+ *
+ * Its only caller is the model probe (src/lib/provider-model-probe.ts), which
+ * spends it on ONE request to that provider's own API about one model and
+ * keeps nothing. It exists because core has no per-model check while its
+ * gateway runs: `models.probe` (pinned 2026.10.7) tries only the provider's
+ * configured primary — the very model that has just failed — and reports a
+ * stated limit of zero as a plain `rate_limit`.
+ *
+ * An API key, a static token, or a sign-in's access token that has not
+ * expired. A fence, an expired sign-in, a key behind a SecretRef (`keyRef`) —
+ * nothing this module could spend — answer null, as does a store that is not
+ * there or cannot be read. Never throws, never logs.
+ */
+export function readGatewayProviderSecret(provider: string, paths?: GatewayAuthPaths, now: number = Date.now()): string | null {
+  const wanted = provider.trim().toLowerCase();
+  try {
+    const read = readMergedStore(paths ?? gatewayAuthPaths());
+    if (read === "no-store" || read === "unreadable") return null;
+    const { merged, localState, baseState } = read;
+    const ids = Object.keys(merged).filter((id) => {
+      const entry = profileAt(merged, id);
+      return !!entry && providerOf(id, entry) === wanted;
+    });
+    const order = storedOrderOf(localState, wanted) ?? storedOrderOf(baseState, wanted) ?? [];
+    const ranked = [...order.filter((id) => ids.includes(id)), ...ids.filter((id) => !order.includes(id))];
+    for (const id of ranked) {
+      const entry = profileAt(merged, id);
+      if (!entry || oauthRefreshFenceState(entry) !== null) continue;
+      const type = typeof entry.type === "string" ? entry.type : "";
+      const secret = type === "oauth" ? entry.access : type === "token" ? entry.token : type === "api_key" ? entry.key : null;
+      if (typeof secret !== "string" || !secret || secret.startsWith(FENCE_PREFIX)) continue;
+      const expires = numberOr(entry.expires);
+      if (type !== "api_key" && expires !== null && expires <= now) continue;
+      return secret;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 

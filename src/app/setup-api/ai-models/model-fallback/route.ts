@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { callGatewayRpc } from "@/lib/openclaw-config";
-import { readPrimaryModelRef, switchChatModelAutomatically } from "@/lib/automatic-model-switch";
+import { readAlternativeChatProvider, readPrimaryModelRef, switchChatModelAutomatically } from "@/lib/automatic-model-switch";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { forgetPickOfUnavailableModel } from "@/lib/explicit-model-pick";
@@ -9,6 +9,7 @@ import {
   readChoosableModels,
   readUnavailableModelIds,
 } from "@/lib/provider-model-availability";
+import { probeProviderModel } from "@/lib/provider-model-probe";
 import {
   handleModelFallback,
   type ModelFallbackDeps,
@@ -25,9 +26,11 @@ export const dynamic = "force-dynamic";
  * `model_not_found` error; the server does not. So the chat hands the run over
  * and this route lets the box act on it (src/lib/provider-model-fallback.ts):
  * confirm a 429 states a limit of ZERO from the gateway's own log, stop the
- * core's retry loop, move the chat to the next newest model and send the turn
- * again, once. A 429 that is an ordinary throttle is answered `handled: false`
- * and the core's retry goes on as before.
+ * core's retry loop, move the chat to the next newest model this account can
+ * run — asked first — and send the turn again, once; or, when no model of the
+ * provider runs on this account, stop there and name another provider the box
+ * can switch to. A 429 that is an ordinary throttle is answered
+ * `handled: false` and the core's retry goes on as before.
  *
  * OWNER-ONLY AND OUR PAGE ONLY, like /setup-api/anthropic/failure: a report
  * stops a run and changes the box's model, and the MCP bearer or another site
@@ -68,6 +71,8 @@ export async function POST(request: Request) {
     readUnavailable: (provider) => readUnavailableModelIds(provider),
     markUnavailable: (provider, modelId, reason) => markModelUnavailable(provider, modelId, reason),
     forgetPick: forgetPickOfUnavailableModel,
+    probeModel: (provider, modelId) => probeProviderModel(provider, modelId),
+    readAlternative: readAlternativeChatProvider,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now(),
     onDecided: (outcome) => { decided = outcome; },

@@ -159,6 +159,122 @@ describe("handleModelFallback — a 429 stating a limit of zero", () => {
   });
 });
 
+describe("handleModelFallback — never onto a dead model, never round in circles", () => {
+  // The test box, 2026-10: Grok 4.7 answered at 16:20; at 17:00:45 the same
+  // account's quota ran out (0/0 for Grok 4.7) and the fallback moved the chat
+  // to Grok 4.6 — which had answered that account 0/0 earlier the same day.
+  const ZERO_47 = ZERO.replace("grok-4.6", "grok-4.7");
+  const report47 = { ...report, model: "grok-4.7", runId: "run-47" };
+  const ALTERNATIVE = { model: "openai/gpt-5.5", label: "ChatGPT", provider: "openai-codex" };
+
+  function deps47(over: Partial<ModelFallbackDeps> & { lines?: string[] } = {}) {
+    return deps({
+      lines: [agentEndLine({ model: "grok-4.7", raw: ZERO_47 })],
+      readPrimary: vi.fn(async () => "xai/grok-4.7"),
+      readAlternative: vi.fn(async () => ALTERNATIVE),
+      ...over,
+    });
+  }
+
+  it("never falls back to a model already marked zero for this account — it is not even asked", async () => {
+    const probeModel = vi.fn(async () => "ok" as const);
+    const d = deps47({ readUnavailable: vi.fn(async () => new Set(["grok-4.6"])), probeModel });
+    const outcome = await handleModelFallback(report47, d);
+    expect(probeModel.mock.calls).toEqual([["xai", "grok-4.5"]]);
+    expect(outcome).toMatchObject({ handled: true, fallbackModel: "grok-4.5", switched: true, accountExhausted: false });
+    expect(d.switchModel).toHaveBeenCalledWith("xai/grok-4.5");
+  });
+
+  it("asks a model with no mark before moving the chat onto it; a zero limit marks it and the next one is asked", async () => {
+    const probeModel = vi.fn(async (_p: string, id: string) => (id === "grok-4.6" ? "zero_quota" as const : "ok" as const));
+    const d = deps47({ probeModel });
+    const outcome = await handleModelFallback(report47, d);
+    expect(probeModel.mock.calls.map(([, id]) => id)).toEqual(["grok-4.6", "grok-4.5"]);
+    expect(d.markUnavailable).toHaveBeenCalledWith("xai", "grok-4.7", "zero_quota");
+    expect(d.markUnavailable).toHaveBeenCalledWith("xai", "grok-4.6", "zero_quota");
+    expect(outcome).toMatchObject({ fallbackModel: "grok-4.5", switched: true, resent: true, accountExhausted: false });
+    expect(d.switchModel).toHaveBeenCalledTimes(1);
+    expect(d.switchModel).toHaveBeenCalledWith("xai/grok-4.5");
+  });
+
+  it("stops when no model of the provider runs on the account: no switch, no resend, one other provider named", async () => {
+    const probeModel = vi.fn<(provider: string, model: string) => Promise<"zero_quota">>(async () => "zero_quota");
+    const d = deps47({ readUnavailable: vi.fn(async () => new Set(["grok-4.6"])), probeModel });
+    const outcome = await handleModelFallback(report47, d);
+    expect(outcome).toMatchObject({
+      handled: true,
+      kind: "zero_quota",
+      model: "grok-4.7",
+      fallbackModel: null,
+      switched: false,
+      resent: false,
+      accountExhausted: true,
+      alternative: ALTERNATIVE,
+    });
+    expect(probeModel.mock.calls.map(([, id]) => id)).toEqual(["grok-4.5"]);
+    expect(d.markUnavailable).toHaveBeenCalledWith("xai", "grok-4.5", "zero_quota");
+    // The retry loop is still stopped — and nothing else is sent anywhere.
+    expect(d.calls.map((c) => c.method)).toEqual(["chat.abort"]);
+    expect(d.switchModel).not.toHaveBeenCalled();
+    expect(d.forgetPick).not.toHaveBeenCalled();
+  });
+
+  it("answers at once when every model is already marked: nothing to ask", async () => {
+    const probeModel = vi.fn(async () => "ok" as const);
+    const d = deps47({ readUnavailable: vi.fn(async () => new Set(["grok-4.6", "grok-4.5"])), probeModel });
+    const outcome = await handleModelFallback(report47, d);
+    expect(outcome).toMatchObject({ accountExhausted: true, fallbackModel: null, alternative: ALTERNATIVE });
+    expect(probeModel).not.toHaveBeenCalled();
+  });
+
+  it("names no other provider when the box has none", async () => {
+    const d = deps47({ readAlternative: vi.fn(async () => null), probeModel: vi.fn(async () => "zero_quota" as const) });
+    expect(await handleModelFallback(report47, d)).toMatchObject({ accountExhausted: true, alternative: null });
+  });
+
+  it("stops the retrying run before it asks anything", async () => {
+    const order: string[] = [];
+    const d = deps47({
+      gatewayCall: vi.fn(async (method: string) => { order.push(method); return {}; }),
+      probeModel: vi.fn(async (_p: string, id: string) => { order.push(`probe ${id}`); return "zero_quota" as const; }),
+    });
+    await handleModelFallback(report47, d);
+    expect(order).toEqual(["chat.abort", "probe grok-4.6", "probe grok-4.5"]);
+  });
+
+  it("moves the chat onto a model no probe could vouch for only once in a row", async () => {
+    const probeModel = vi.fn(async () => "unknown" as const);
+    let primary = "xai/grok-4.7";
+    const d = deps47({ probeModel, readPrimary: vi.fn(async () => primary) });
+    // The probe cannot decide (no credential the box can spend): the move is
+    // made, as it was before there was a probe.
+    const first = await handleModelFallback(report47, d);
+    expect(first).toMatchObject({ fallbackModel: "grok-4.6", switched: true, accountExhausted: false });
+    primary = "xai/grok-4.6";
+    // The model it landed on refuses with a zero limit too: two in a row. No
+    // second guess — the box stops and says so.
+    const second = await handleModelFallback(
+      { ...report, runId: "run-46" },
+      { ...d, logsTail: vi.fn(async () => ({ lines: [agentEndLine({ model: "grok-4.6", raw: ZERO })] })) },
+    );
+    expect(second).toMatchObject({ handled: true, fallbackModel: null, switched: false, accountExhausted: true, alternative: ALTERNATIVE });
+    expect(d.switchModel).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps hopping as long as each move is one a probe vouched for", async () => {
+    let primary = "xai/grok-4.7";
+    const probeModel = vi.fn(async () => "ok" as const);
+    const d = deps47({ probeModel, readPrimary: vi.fn(async () => primary) });
+    expect(await handleModelFallback(report47, d)).toMatchObject({ fallbackModel: "grok-4.6", switched: true });
+    primary = "xai/grok-4.6";
+    const second = await handleModelFallback(
+      { ...report, runId: "run-46" },
+      { ...d, readUnavailable: vi.fn(async () => new Set(["grok-4.7"])), logsTail: vi.fn(async () => ({ lines: [agentEndLine({ model: "grok-4.6", raw: ZERO })] })) },
+    );
+    expect(second).toMatchObject({ fallbackModel: "grok-4.5", switched: true, accountExhausted: false });
+  });
+});
+
 describe("handleModelFallback — a model the provider no longer offers", () => {
   it("needs no log: moves the chat and sends the ended turn again, with nothing to stop", async () => {
     const d = deps({ lines: [] });

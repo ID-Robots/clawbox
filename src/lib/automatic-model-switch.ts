@@ -37,3 +37,46 @@ export async function switchChatModelAutomatically(ref: string): Promise<boolean
   const data = await res.json().catch(() => ({})) as { warning?: unknown };
   return res.status === 502 && typeof data.warning === "string" && data.warning !== "";
 }
+
+/** One row of `/setup-api/chat/model`'s picker, as much of it as a switch needs. */
+interface PickerRow {
+  label?: unknown;
+  model?: unknown;
+  provider?: unknown;
+  available?: unknown;
+  isLocal?: unknown;
+}
+
+/**
+ * Another provider the chat's own picker can switch to right now — any row but
+ * `provider`'s that is set up and has a model — for the one-click switch when
+ * `provider` has no model left on this account (src/lib/provider-model-fallback.ts).
+ * A cloud provider first, then the box's local model. Read through the same
+ * route the header picker reads, so the row it names is one the picker offers;
+ * null when there is none, or the route cannot answer.
+ */
+export async function readAlternativeChatProvider(provider: string): Promise<{ model: string; label: string; provider: string | null } | null> {
+  const failed = provider.trim().toLowerCase();
+  try {
+    const { GET } = await import("@/app/setup-api/chat/model/route");
+    const res = await GET();
+    if (!res.ok) return null;
+    const data = await res.json() as { options?: unknown };
+    const rows = Array.isArray(data.options) ? data.options as PickerRow[] : [];
+    const usable = rows.filter((row) => {
+      if (row?.available !== true || typeof row.model !== "string" || !row.model) return false;
+      const rowProvider = typeof row.provider === "string" ? row.provider.toLowerCase() : "";
+      const refProvider = row.model.includes("/") ? row.model.slice(0, row.model.indexOf("/")).toLowerCase() : "";
+      return rowProvider !== failed && refProvider !== failed;
+    });
+    const pick = usable.find((row) => row.isLocal !== true) ?? usable[0];
+    if (!pick || typeof pick.model !== "string") return null;
+    return {
+      model: pick.model,
+      label: typeof pick.label === "string" && pick.label ? pick.label : pick.model,
+      provider: typeof pick.provider === "string" && pick.provider ? pick.provider : null,
+    };
+  } catch {
+    return null;
+  }
+}

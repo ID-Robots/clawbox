@@ -39,14 +39,39 @@
 // reason already says it, and the core does not retry it. The turn has already
 // ended, so there is nothing to stop; it is moved and sent again the same way.
 //
+// NEVER ONTO A DEAD MODEL, AND NEVER ROUND IN CIRCLES (a test box, 2026-10).
+// Grok 4.7 ran out of quota at 17:00 and the fallback moved the chat to Grok
+// 4.6 — which had answered the same account 0/0 earlier that day. So a model
+// is a fallback only when it carries no live mark for this account
+// (src/lib/provider-model-availability.ts, an hour each) AND, asked once
+// before the move (src/lib/provider-model-probe.ts), it answers; a probe that
+// proves a zero limit marks it too, and the next one is asked. When no model of
+// the provider is left, the box stops: no switch, no resend, and the chat says
+// once, calmly, that the account has no API quota right now — with Settings →
+// Providers and, when the box has another provider configured, a one-click
+// switch to it (`alternative`). A model the probe could not decide is still
+// tried, as before — but only once in a row: a zero limit on the model such an
+// untested move landed on stops the hopping there.
+//
 // THE SHAPE IS THE ANTHROPIC ACCOUNT SWAP'S (src/lib/anthropic-gateway.ts): a
 // chat surface reports, the server acts, the turn is sent again into its
 // session once, under a stable idempotency key.
 
 import { createHash } from "crypto";
-import { fallbackModelId, followsNewestModel } from "@/lib/provider-newest-model";
+import { fallbackModelId, flagshipVersion, followsNewestModel } from "@/lib/provider-newest-model";
 import { statesZeroRateLimit } from "@/lib/zero-quota";
 import type { CachedCatalogModel, UnavailableReason } from "@/lib/provider-model-availability";
+import type { ModelProbeVerdict } from "@/lib/provider-model-probe";
+
+/** Another provider the box can chat with, for the one-click switch when this one has nothing left. */
+export interface AlternativeChatProvider {
+  /** The `provider/model` reference the chat's own picker would switch to. */
+  model: string;
+  /** The picker row's name ("ChatGPT"). */
+  label: string;
+  /** The picker row's provider id, which tells the ChatGPT sign-in from the OpenAI key. */
+  provider: string | null;
+}
 
 /** What a chat surface reports. Every field is untrusted request input. */
 export interface ModelFallbackReport {
@@ -79,6 +104,14 @@ export interface ModelFallbackOutcome {
   news?: boolean;
   /** The route stopped waiting: the switch and the resend carry on behind it. */
   pending?: boolean;
+  /**
+   * No model of this provider runs on this account right now — every one is
+   * marked or was just refused with a zero limit — so the box stopped rather
+   * than move the chat again.
+   */
+  accountExhausted?: boolean;
+  /** Where the owner can switch in one click when `fallbackModel` is null; null when the box has no other provider. */
+  alternative?: AlternativeChatProvider | null;
 }
 
 export interface ModelFallbackDeps {
@@ -95,6 +128,10 @@ export interface ModelFallbackDeps {
   readUnavailable(provider: string): Promise<Set<string>>;
   markUnavailable(provider: string, modelId: string, reason: UnavailableReason): Promise<boolean>;
   forgetPick(ref: string): Promise<void>;
+  /** Ask the provider whether this account can run a model, before the chat is moved onto it. */
+  probeModel?(provider: string, modelId: string): Promise<ModelProbeVerdict>;
+  /** Another provider the box can chat with, for the one-click switch. */
+  readAlternative?(provider: string): Promise<AlternativeChatProvider | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
   /** Told what was decided — confirmed, marked, next model chosen — before the slow part (switch, resend) runs. */
@@ -106,6 +143,10 @@ const EVIDENCE_WINDOW_MS = 10 * 60_000;
 /** The log write can trail the frame the chat reported on: ask a few times. */
 const EVIDENCE_POLLS_MS = [0, 700, 1_500] as const;
 const LOG_TAIL = { limit: 1_000, maxBytes: 600_000 } as const;
+/** At most this many candidates are asked per failure: each probe can take PROBE_TIMEOUT_MS. */
+const MAX_PROBES = 3;
+/** How long a move onto a model no probe could vouch for counts as "the last hop". */
+const UNVERIFIED_HOP_WINDOW_MS = 10 * 60_000;
 
 const text = (value: unknown, max: number): string =>
   typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -198,6 +239,49 @@ function fingerprint(value: string): string {
 /** Reports for the same run collapse onto one action: two chat windows see the same frames. */
 const inFlight = new Map<string, Promise<ModelFallbackOutcome>>();
 
+/** Per provider: the model the box last moved the chat to without a probe vouching for it. */
+const unverifiedHops = new Map<string, { to: string; at: number }>();
+
+/**
+ * The fallback for `failedId`: the newest flagship with no live mark that, asked
+ * first, answers. A probe that proves a zero limit (or an unknown model) marks
+ * it and the next is asked; one that decides nothing leaves the model eligible
+ * only when `allowUnverified`. Adds every model it proved dead to `unavailable`.
+ */
+async function chooseFallback(
+  deps: ModelFallbackDeps,
+  provider: string,
+  models: readonly CachedCatalogModel[],
+  failedId: string,
+  unavailable: Set<string>,
+  allowUnverified: boolean,
+): Promise<{ id: string; verified: boolean } | null> {
+  const skip = new Set(unavailable);
+  for (let asked = 0; asked < MAX_PROBES; asked++) {
+    const candidate = fallbackModelId(provider, models, failedId, skip);
+    if (!candidate) return null;
+    const verdict: ModelProbeVerdict = deps.probeModel
+      ? await deps.probeModel(provider, candidate).catch((): ModelProbeVerdict => "unknown")
+      : "unknown";
+    if (verdict === "ok") return { id: candidate, verified: true };
+    skip.add(candidate);
+    if (verdict === "zero_quota" || verdict === "not_found") {
+      console.warn(`[model-fallback] ${provider}/${candidate}: asked before moving the chat, ${verdict === "zero_quota" ? "its rate limit is 0 too" : "the provider does not serve it"}`);
+      unavailable.add(candidate);
+      await deps.markUnavailable(provider, candidate, verdict).catch(() => false);
+      continue;
+    }
+    if (allowUnverified) return { id: candidate, verified: false };
+  }
+  return null;
+}
+
+/** Every flagship of the provider in the list is one this account cannot run. */
+function everyFlagshipUnavailable(provider: string, models: readonly CachedCatalogModel[], unavailable: ReadonlySet<string>): boolean {
+  const flagships = models.filter((m) => flagshipVersion(provider, m.id));
+  return flagships.length > 0 && flagships.every((m) => unavailable.has(m.id));
+}
+
 export function handleModelFallback(report: ModelFallbackReport, deps: ModelFallbackDeps): Promise<ModelFallbackOutcome> {
   const provider = text(report.provider, 40).toLowerCase();
   const reason = text(report.reason, 40).toLowerCase();
@@ -231,8 +315,30 @@ async function act(
   }
   const failedRef = `${provider}/${modelId}`;
   const news = await deps.markUnavailable(provider, modelId, kind);
-  const [models, unavailable] = await Promise.all([deps.readModels(provider), deps.readUnavailable(provider)]);
-  const fallback = fallbackModelId(provider, models, modelId, unavailable);
+  const sessionKey = text(report.sessionKey, 300);
+  const runId = text(report.runId, 200);
+  // Stop the core's retry loop first, whatever happens next — and before the
+  // probes below, which take seconds of their own: waiting out nine retries of
+  // a limit of zero is the failure this file exists for. A run that has
+  // already ended (a 404 is not retried) has nothing to stop.
+  if (kind === "zero_quota" && sessionKey) {
+    await deps.gatewayCall("chat.abort", { sessionKey, ...(runId ? { runId } : {}) }).catch((err: unknown) => {
+      console.warn("[model-fallback] could not stop the retrying run:", err instanceof Error ? err.message : err);
+    });
+  }
+
+  const [models, known] = await Promise.all([deps.readModels(provider), deps.readUnavailable(provider)]);
+  const unavailable = new Set([...known, modelId]);
+  // The model the box itself moved the chat to, untested, minutes ago, has
+  // refused too: two models in a row with a limit of zero. Another untested
+  // move would be guessing, so only a model a probe vouches for is tried now.
+  const hop = unverifiedHops.get(provider);
+  const afterUnverifiedHop = kind === "zero_quota" && !!hop && hop.to === modelId && deps.now() - hop.at < UNVERIFIED_HOP_WINDOW_MS;
+  unverifiedHops.delete(provider);
+  const choice = await chooseFallback(deps, provider, models, modelId, unavailable, !afterUnverifiedHop);
+  const fallback = choice?.id ?? null;
+  const accountExhausted = kind === "zero_quota" && !fallback
+    && (afterUnverifiedHop || everyFlagshipUnavailable(provider, models, unavailable));
   const labelOf = (id: string) => models.find((m) => m.id === id)?.label ?? id;
   const outcome: ModelFallbackOutcome = {
     handled: true,
@@ -245,23 +351,19 @@ async function act(
     switched: false,
     resent: false,
     news,
+    accountExhausted,
   };
+  if (!fallback) outcome.alternative = (await deps.readAlternative?.(provider).catch(() => null)) ?? null;
   console.warn(
     `[model-fallback] ${failedRef}: ${kind === "zero_quota" ? "the account's rate limit is 0" : "the provider does not serve it"}`
-    + (fallback ? `, moving the chat to ${provider}/${fallback}` : ", and no other model of this provider is available"),
+    + (fallback
+      ? `, moving the chat to ${provider}/${fallback}${choice?.verified ? " (asked first: it answers)" : ""}`
+      : accountExhausted
+        ? ", and no model of this provider runs on this account right now: the chat stays where it is"
+        : ", and no other model of this provider is available"),
   );
   deps.onDecided?.({ ...outcome });
 
-  const sessionKey = text(report.sessionKey, 300);
-  const runId = text(report.runId, 200);
-  // Stop the core's retry loop first, whatever happens next: waiting out nine
-  // retries of a limit of zero is the failure this file exists for. A run that
-  // has already ended (a 404 is not retried) has nothing to stop.
-  if (kind === "zero_quota" && sessionKey) {
-    await deps.gatewayCall("chat.abort", { sessionKey, ...(runId ? { runId } : {}) }).catch((err: unknown) => {
-      console.warn("[model-fallback] could not stop the retrying run:", err instanceof Error ? err.message : err);
-    });
-  }
   if (!fallback) return outcome;
 
   // Move the chat only when it was ON the failed model. A primary elsewhere
@@ -273,6 +375,7 @@ async function act(
   const fallbackRef = `${provider}/${fallback}`;
   outcome.switched = await deps.switchModel(fallbackRef).catch(() => false);
   if (!outcome.switched) return outcome;
+  if (!choice?.verified) unverifiedHops.set(provider, { to: fallback, at: deps.now() });
   await deps.forgetPick(failedRef).catch(() => undefined);
 
   const message = text(report.message, 32_000);
@@ -297,4 +400,5 @@ async function act(
 /** Test seam: forget the reports in flight. */
 export function _resetModelFallbackForTests(): void {
   inFlight.clear();
+  unverifiedHops.clear();
 }

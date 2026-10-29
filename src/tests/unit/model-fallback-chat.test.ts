@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { describeModelFallback, ModelFallbackWatch } from "@/lib/model-fallback-chat";
+import { describeModelFallback, modelFallbackNotice, ModelFallbackWatch } from "@/lib/model-fallback-chat";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
+import { de } from "@/lib/edition-translations/de";
 
 // The chat's half of the model fallback: which frames are reported, once per
 // run; the "Stopped." a box-made stop must not show; and the line the owner
@@ -127,5 +128,63 @@ describe("describeModelFallback", () => {
   it("says nothing when the box did not act", () => {
     expect(describeModelFallback({ handled: false }, en)).toBeNull();
     expect(describeModelFallback(null, en)).toBeNull();
+  });
+});
+
+describe("modelFallbackNotice — calm, and once, when the provider has nothing left", () => {
+  // The test box, 2026-10: the account's xAI quota ran out at 17:00. Every
+  // Grok model answers 0/0, so the box stops instead of hopping, and the chat
+  // says so in one calm line with the two ways forward.
+  const exhausted = {
+    handled: true,
+    kind: "zero_quota" as const,
+    provider: "xai",
+    model: "grok-4.7",
+    modelLabel: "Grok 4.7",
+    fallbackModel: null,
+    fallbackLabel: null,
+    switched: false,
+    resent: false,
+    accountExhausted: true,
+    alternative: { model: "openai/gpt-5.5", label: "ChatGPT", provider: "openai-codex" },
+  };
+
+  it("says the account has no API quota — not that one model is unavailable — with Settings → Providers and a one-click switch", () => {
+    expect(modelFallbackNotice(exhausted, en)).toEqual({
+      text: "Your xAI account has no API quota right now (xAI sets it by your spend). Add credit at console.x.ai, or switch provider.",
+      variant: "notice",
+      actions: { openProviders: true, switchTo: { model: "openai/gpt-5.5", label: "ChatGPT", provider: "openai-codex" } },
+    });
+  });
+
+  it("offers only Settings → Providers when the box has no other provider set up", () => {
+    expect(modelFallbackNotice({ ...exhausted, alternative: null }, en)?.actions).toEqual({ openProviders: true });
+  });
+
+  it("is a calm notice, never a red error, for every line the fallback adds", () => {
+    const moved = { ...exhausted, accountExhausted: false, fallbackModel: "grok-4.6", fallbackLabel: "Grok 4.6", switched: true, resent: true };
+    expect(modelFallbackNotice(moved, en)).toMatchObject({ variant: "notice" });
+    expect(modelFallbackNotice(moved, en)?.actions).toBeUndefined();
+    // Nowhere to move it, but not proved exhausted either: the same two buttons.
+    expect(modelFallbackNotice({ ...exhausted, accountExhausted: false }, en)).toMatchObject({
+      variant: "notice",
+      actions: { openProviders: true, switchTo: exhausted.alternative },
+    });
+  });
+
+  it("speaks the owner's language, and English while the locale pack loads", () => {
+    const german = { t: (key: string, params?: Record<string, string | number>) => {
+      let out = de[key] ?? key;
+      for (const [k, v] of Object.entries(params ?? {})) out = out.replaceAll(`{${k}}`, String(v));
+      return out;
+    } };
+    expect(modelFallbackNotice(exhausted, german)?.text).toBe(
+      "Ihr xAI-Konto hat gerade kein API-Kontingent (xAI legt es nach Ihren Ausgaben fest). Laden Sie Guthaben unter console.x.ai auf oder wechseln Sie den Anbieter.",
+    );
+    expect(modelFallbackNotice(exhausted, bare)?.text).toBe(modelFallbackNotice(exhausted, en)?.text);
+  });
+
+  it("adds nothing when the box did not act", () => {
+    expect(modelFallbackNotice({ handled: false }, en)).toBeNull();
   });
 });

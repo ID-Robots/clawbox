@@ -7,8 +7,10 @@
  * the chat moved to).
  *
  * {model} and {fallback} are model names as the picker shows them, {provider}
- * the company ("xAI"), {console} where that provider takes API credit
- * ("console.x.ai").
+ * the company ("xAI") — or, on the one-click switch and the lines after it,
+ * the picker row of ANOTHER provider ("ChatGPT") — and {console} where that
+ * provider takes API credit ("console.x.ai"). `AccountNoQuota` is the one calm
+ * notice when no model of the provider runs on the account at all.
  */
 export const modelAvailabilityEn: Record<string, string> = {
   "chat.modelUnavailableNoQuota":
@@ -22,4 +24,9 @@ export const modelAvailabilityEn: Record<string, string> = {
   "chat.modelUnavailablePick": "Pick {fallback} in the chat header and send your message again.",
   "chat.modelUnavailableNone": "No other {provider} model is available on this account — pick another provider in the chat header.",
   "chat.modelUnavailableAddCredit": "To use {model}, add credit at {console}.",
+  "chat.modelUnavailableAccountNoQuota": "Your {provider} account has no API quota right now ({provider} sets it by your spend). Add credit at {console}, or switch provider.",
+  "chat.modelUnavailableOpenProviders": "Settings → Providers",
+  "chat.modelUnavailableSwitchTo": "Switch to {provider}",
+  "chat.modelUnavailableSwitchedTo": "Switched the chat to {provider} — send your message again.",
+  "chat.modelUnavailableSwitchFailed": "Could not switch the chat to {provider} — try again, or pick it in Settings → Providers.",
 };

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { describeChatFailure, describeFallbackReply } from "@/lib/chat-error-text";
+import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure } from "@/lib/chat-error-text";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { translations } from "@/lib/translations";
 
@@ -639,5 +639,16 @@ describe("describeChatFailure — a zero rate limit", () => {
   it("keeps an ordinary 429 on the normal rate-limit sentence", () => {
     const text = describeChatFailure("429 Too many requests. Requests per Minute (actual/limit): 61/60.", context);
     expect(text).toMatch(/rate-limiting this box right now/);
+  });
+
+  // The test box's owner saw this sentence in red. No quota on their own
+  // account is a fact about the account, not a fault: the chat draws it calm.
+  it("is drawn as a calm notice — and only this sentence, not the throttle, allowance or sign-in ones", () => {
+    expect(isAccountQuotaFailure("⚠️ API rate limit reached.", { ...context, detail: `HTTP 429: ${ZERO}` })).toBe(true);
+    expect(isAccountQuotaFailure(ZERO, context)).toBe(true);
+    expect(isAccountQuotaFailure("429 Too many requests. Requests per Minute (actual/limit): 61/60.", context)).toBe(false);
+    expect(isAccountQuotaFailure("No API key found for provider \"xai\". Auth store: /x. limit: 0", context)).toBe(false);
+    expect(isAccountQuotaFailure("", undefined)).toBe(false);
+    expect(isAccountQuotaFailure(undefined, undefined)).toBe(false);
   });
 });
