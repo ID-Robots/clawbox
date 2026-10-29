@@ -569,13 +569,52 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
   // and answers false for anything it cannot be sure of. The config it reads
   // includes what this request has staged so far, which is what the paste
   // would have found on disk.
-  if (pasteWouldChangeNothing(await readOpenClawConfig().catch(() => null), provider, profileId, key)) {
+  const configNow = await readOpenClawConfig().catch(() => null);
+  if (pasteWouldChangeNothing(configNow, provider, profileId, key)) {
     console.log(`[configure] the auth store already holds this ${logSafe(provider)} key; nothing to paste`);
     return;
   }
   // The paste writes openclaw.json itself (the profile metadata), so what this
   // request's transaction has staged before it lands before it, in order.
   await flushConfigWrites();
+  // ClawBox AI's own slot is TAKEN OVER, never refused: see
+  // `releaseClawboxAiSlot`. Every other provider keeps the paste as it was.
+  const clawaiSlot = provider === CLAWBOX_AI_PROVIDER && profileId === CLAWBOX_AI_PROFILE_KEY;
+  let released = false;
+  if (clawaiSlot) {
+    const holder = signInHoldingSlot(configNow, profileId);
+    if (holder) {
+      await releaseClawboxAiSlot(profileId, holder);
+      released = true;
+    }
+  }
+  try {
+    await pasteApiKeyOnce(provider, profileId, key);
+  } catch (err) {
+    if (!clawaiSlot || !pasteRefusedOverSignIn(err)) throw err;
+    // Taken over already and still refused: nothing more this route can do.
+    if (released) throw new ClawboxAiSlotHeldError(profileId);
+    // The refusal names a sign-in the read above did not see — another
+    // agent's store, or one that could not be read. The CLI's own logout
+    // resolves the same agent the paste did, so it is asked once, and the
+    // paste once more.
+    await releaseClawboxAiSlot(profileId, "store");
+    try {
+      await pasteApiKeyOnce(provider, profileId, key);
+    } catch (retryErr) {
+      if (pasteRefusedOverSignIn(retryErr)) throw new ClawboxAiSlotHeldError(profileId);
+      throw retryErr;
+    }
+  }
+  // NEVER a success over a slot that still holds a sign-in: a paste that
+  // exited 0 with its refusal on stderr would otherwise go on to provision a
+  // provider whose every turn the gateway answers from the old credential.
+  if (clawaiSlot && signInHoldingSlot(null, profileId) === "store") {
+    throw new ClawboxAiSlotHeldError(profileId);
+  }
+}
+
+async function pasteApiKeyOnce(provider: string, profileId: string, key: string): Promise<void> {
   await spawnOpenclawCli(
     [
       "models", "auth", "paste-api-key",
@@ -604,6 +643,87 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
     ],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
+}
+
+/**
+ * The pinned core's refusal to paste an API key over a sign-in at the same id
+ * (2026.10.x): "The API-key profile belongs to another sign-in".
+ */
+const PASTE_REFUSED_OVER_SIGN_IN = /belongs to another sign-in/i;
+
+function pasteRefusedOverSignIn(err: unknown): boolean {
+  return err instanceof Error && PASTE_REFUSED_OVER_SIGN_IN.test(err.message);
+}
+
+/**
+ * Does something other than an API key hold `profileId`? `"store"` when the
+ * gateway's auth store has a non-api_key row there (or in the main agent's
+ * own copy of it), `"metadata"` when only openclaw.json's `auth.profiles`
+ * entry says so, null when neither does — or when neither can be read, which
+ * leaves the decision to the paste and its refusal. Never throws.
+ */
+function signInHoldingSlot(config: OpenClawConfig | null, profileId: string): "store" | "metadata" | null {
+  const stored = readGatewayAuthProfile(profileId);
+  if (stored?.kind === "present") {
+    const copies = [stored, stored.sharedCopy].filter((copy): copy is GatewayAuthProfileCopy => !!copy);
+    if (copies.some((copy) => copy.type !== "api_key")) return "store";
+  }
+  const profiles = config?.auth?.profiles;
+  const mode = profiles && Object.hasOwn(profiles, profileId) ? profiles[profileId]?.mode : undefined;
+  return typeof mode === "string" && mode !== "api_key" ? "metadata" : null;
+}
+
+/**
+ * ClawBox AI's credential slot still held a sign-in after this route tried to
+ * take it over.
+ */
+class ClawboxAiSlotHeldError extends Error {
+  constructor(readonly profileId: string) {
+    super(`auth profile ${profileId} still holds a sign-in`);
+    this.name = "ClawboxAiSlotHeldError";
+  }
+}
+
+/**
+ * Clear whatever sign-in holds ClawBox AI's credential slot, so the device's
+ * API key can be pasted there.
+ *
+ * TAKEN OVER, where every other provider's slot is guarded (`assertNoSignInAt`):
+ * `deepseek:default` is written by this route alone, so a sign-in found there
+ * is a leftover — an older ClawBox stored the device login as an OAuth bundle at
+ * this id — not a subscription the owner chose. The pinned core refuses to paste
+ * over it ("The API-key profile belongs to another sign-in"), which left ClawBox
+ * AI impossible to connect on such a box, from the wizard and from Settings.
+ *
+ * NATIVELY: `models auth logout <id> --yes` removes the profile from the store
+ * the paste writes and drops it from `auth.profiles` and `auth.order`
+ * (docs/cli/models.md). Logout refuses a profile its store does not hold; what
+ * is left then is an openclaw.json entry alone, which `config unset` removes.
+ * A failure here is not the answer: the paste that follows is, and so is the
+ * store read after it.
+ */
+async function releaseClawboxAiSlot(profileId: string, holder: "store" | "metadata"): Promise<void> {
+  console.warn(`[configure] a sign-in holds ${profileId} (${holder}); taking the slot over for the ClawBox AI key`);
+  try {
+    // Unpinned, like the paste: the core resolves the same agent for both.
+    await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: 60_000 });
+    return;
+  } catch (err) {
+    console.warn(
+      `[configure] models auth logout ${profileId} failed:`,
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+  }
+  if (holder !== "metadata") return;
+  try {
+    await runOpenclawConfigUnset(`auth.profiles.${profileId}`, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+    await flushConfigWrites();
+  } catch (err) {
+    console.warn(
+      `[configure] could not remove auth.profiles.${profileId}:`,
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+  }
 }
 
 /** A pasted API key would have replaced a subscription sign-in. */
@@ -4856,6 +4976,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             + `openclaw models auth logout ${err.profileId}`
             + " — then paste the key.",
           code: "sign_in_would_be_lost",
+          profileId: err.profileId,
+        },
+        { status: 409 },
+      );
+    }
+    // ClawBox AI's slot could not be taken over. Its own sentence, because the
+    // generic one below ("check your credentials") is wrong over a token the
+    // portal just issued, and the device-login finaliser relays this text to
+    // the wizard as it is.
+    if (err instanceof ClawboxAiSlotHeldError) {
+      console.warn(`[configure] the sign-in at ${err.profileId} could not be taken over for ClawBox AI`);
+      return NextResponse.json(
+        {
+          error: "ClawBox AI could not replace an older sign-in stored in its credential slot "
+            + `(${err.profileId}). Remove it in the Terminal: `
+            + `openclaw models auth logout ${err.profileId} — then connect ClawBox AI again.`,
+          code: "clawai_slot_held",
           profileId: err.profileId,
         },
         { status: 409 },
