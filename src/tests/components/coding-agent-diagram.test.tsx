@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
+import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 import CodingAgentDiagram, { DiagramDetails, SHEET_BELOW, type DiagramRun } from "@/components/CodingAgentDiagram";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "@/components/CodingAgentLiveAgents";
 import type { TeamView } from "@/components/CodingTeamCard";
@@ -37,7 +38,7 @@ const TEAM: TeamView = {
     { id: "run-plan0001", role: "planner", taskId: null, tokens: 8_000 },
     { id: "run-work0001", role: "worker", taskId: "t1", tokens: 50_000 },
     { id: "run-revw0001", role: "reviewer", taskId: "t1", tokens: 6_000 },
-    { id: "run-work0002", role: "worker", taskId: "t2" },
+    { id: "run-work0002", role: "worker", taskId: "t2", provider: "anthropic", model: "claude-sonnet-5", modelRole: "worker" },
   ],
   tasks: [
     { task_id: "t1", task_description: "Scaffold index.html", assigned_to: "run-work0001", status: "complete", result: "Built index.html; open it.", depends_on: [], review: { verdict: "rejected", notes: "The header overlaps the table.", at: 1 }, reviewRunId: "run-revw0001", attempts: 1 },
@@ -213,6 +214,8 @@ describe("the panel: what an agent is doing now", () => {
     const figures = within(panel).getByTestId("coding-agent-node-panel-figures");
     expect(figures).toHaveTextContent(t("codingAgent.diagram.turns", { n: 7 }));
     expect(figures).toHaveTextContent(t("codingAgent.team.metricTokens", { n: "33k" }));
+    // What it runs on, from the cast list — the one list of agents there is.
+    expect(within(figures).getByTestId("coding-agent-node-panel-model")).toHaveTextContent(t("codingAgent.memberModel", { model: "Sonnet 5", provider: t(CODING_PROVIDER_NAME_KEY.anthropic) }));
     const files = within(panel).getByTestId("coding-agent-node-panel-files");
     expect(files).toHaveTextContent("src/file0.ts");
     expect(files).toHaveTextContent(t("codingAgent.diagram.moreFiles", { n: 2 }));
@@ -435,6 +438,18 @@ describe("the chart of one run", () => {
     expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "run");
     await waitFor(() => expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "team"));
     expect(node("run-work0002")).toHaveAttribute("data-current", "true");
+    // A team chart keeps its task and role bars on the run's page.
+    expect(screen.getByTestId("coding-agent-diagram-figures")).toBeInTheDocument();
+  });
+
+  it("draws a solo run on its page without figure chips — the rail's tiles are their one home — and says nothing of a model the board never kept", () => {
+    render(<RunAgentsDiagram run={RUNS["run-work0001"]} teams={[]} runOf={(id) => RUNS[id]} onOpenRun={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "run");
+    expect(screen.queryByTestId("coding-agent-diagram-figures")).toBeNull();
+    // The legend and the nodes stay.
+    expect(screen.getByTestId("coding-agent-run-diagram-legend")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByTestId("coding-agent-node")[0]);
+    expect(within(screen.getByTestId("coding-agent-node-panel")).queryByTestId("coding-agent-node-panel-model")).toBeNull();
   });
 });
 

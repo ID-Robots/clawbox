@@ -111,6 +111,9 @@ export function RunAgentsDiagram({ run, teams, runOf, onOpenRun, onChanged, refr
       />
     );
   }
+  // No figure chips over a solo run's chart: the page's rail holds its
+  // tiles, and the same four numbers sat twice on one screen. A team chart
+  // keeps its task and role bars, which the rail does not draw.
   return (
     <CodingAgentDiagram
       source={{ kind: "run", run }}
@@ -118,6 +121,7 @@ export function RunAgentsDiagram({ run, teams, runOf, onOpenRun, onChanged, refr
       onOpenRun={onOpenRun}
       onChanged={onChanged}
       refreshKey={refreshKey}
+      figures={false}
       testId="coding-agent-run-diagram"
       className="mt-3"
     />

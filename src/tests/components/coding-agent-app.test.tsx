@@ -1331,7 +1331,7 @@ describe("CodingAgentApp", () => {
     });
 
     it("breathes on a running badge and counts the tokens up rather than jumping", async () => {
-      const running = { ...RUN, status: "running", tokensUsed: 26_000 };
+      const running = { ...RUN, status: "running", tokensUsed: 26_000, numTurns: 0 };
       stubFetch({ enabled: true, readiness: READY }, [running], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
@@ -1341,11 +1341,14 @@ describe("CodingAgentApp", () => {
       const tokens = screen.getByTestId("coding-agent-stat-tokens");
       expect(tokens).toHaveAttribute("data-value", "26000");
       expect(tokens.textContent).toBe("26k");
-      // The agents card is up for a live run even before a helper is out.
-      expect(screen.getByTestId("coding-agent-run-agents")).toBeInTheDocument();
+      // The chart is up for a live run even before a helper is out — and the
+      // Steps tile prints no 0 while the CLI has not reported its turns.
+      expect(screen.getByTestId("coding-agent-run-diagram")).toBeInTheDocument();
+      expect(screen.getByTestId("coding-agent-stat-steps").textContent).toContain(t("codingAgent.statNone"));
+      expect(screen.getByTestId("coding-agent-stat-steps").textContent).not.toContain("0");
     });
 
-    it("lists every agent on the run's page — the run itself, the helpers still out, and the ones back with how long they took", async () => {
+    it("draws every agent on the run's page as the chart — the run itself, the helpers still out, and the ones back — and no second list", async () => {
       const run = {
         ...RUN, status: "running", completedAt: null, summary: null,
         subagentsTotal: 3, subagentsActive: 1, subagentsByType: { explorer: 1, reviewer: 2 },
@@ -1359,77 +1362,23 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-      const card = await screen.findByTestId("coding-agent-run-agents");
-      // No tally in the header: the tree pulses for whoever is at work and
-      // every row carries its own state, so a third count of the same thing
-      // was only one more number to keep right.
-      expect(screen.queryByTestId("coding-agent-run-agents-count")).toBeNull();
-      expect(within(card).getByText(t("codingAgent.agentMain"))).toBeInTheDocument();
-      // The list sits folded under the chart (Details), and the chart draws
-      // the same agents first: the run itself and its three helpers — the one
-      // still out at work, the refused one rejected, the explorer done.
-      expect(screen.getByTestId("coding-agent-run-details")).toContainElement(card);
-      const chart = screen.getByTestId("coding-agent-run-diagram");
+      // The chart draws the run itself and its three helpers — the one still
+      // out at work, the refused one rejected, the explorer done. Nothing
+      // lists them a second time: the Agents card under it is gone.
+      const chart = await screen.findByTestId("coding-agent-run-diagram");
       expect(chart).toHaveAttribute("data-shape", "run");
       const nodes = within(chart).getAllByTestId("coding-agent-node");
       expect(nodes.map((n) => [n.getAttribute("data-role"), n.getAttribute("data-state")])).toEqual([
         ["run", "working"], ["helper", "done"], ["helper", "rejected"], ["helper", "working"],
       ]);
       expect(nodes[0]).toHaveAttribute("data-current", "true");
-      const live = within(card).getAllByTestId("coding-agent-subagent-live");
-      expect(live).toHaveLength(1);
-      expect(live[0].textContent).toContain("Review the toggle");
-      expect(live[0].textContent).toContain("1m 5s");
-      const done = within(card).getAllByTestId("coding-agent-subagent-done");
-      // Newest first: the refused one, then the explorer with its minute.
-      expect(done).toHaveLength(2);
-      expect(done[0]).toHaveAttribute("data-refused", "true");
-      expect(done[0].textContent).toContain(t("codingAgent.helperRefused"));
-      expect(done[1].textContent).toContain("Map the components folder");
-      expect(done[1].textContent).toContain(t("codingAgent.helperFor", { t: "1m 0s" }));
-    });
-
-    /**
-     * What the box actually knows about an agent, on hover AND on tap — the
-     * box is used on a touchscreen, where a title attribute is no affordance
-     * at all. Only fields with an answer: the run record keeps no per-helper
-     * model and no per-helper token count, and "Tokens: 0" would be a figure
-     * the page invented.
-     */
-    it("says what is known about each agent, on hover and on tap, and nothing it does not know", async () => {
-      const run = {
-        ...RUN,
-        tokensUsed: 42_000,
-        modelsUsed: ["claude-opus-5"],
-        subagentsTotal: 1,
-        subagents: [{ type: "explorer", description: "Map the components folder and report where the run page lives", startedAt: Date.now() - 300_000, endedAt: Date.now() - 240_000, refused: false }],
-      };
-      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
-      render(<CodingAgentApp />);
-      await openRuns();
-      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-      const card = await screen.findByTestId("coding-agent-run-agents");
-      const main = within(card).getByTestId("coding-agent-agent-main-row");
-      const title = main.getAttribute("title") ?? "";
-      expect(title).toContain(`${t("codingAgent.agentModel")}: claude-opus-5`);
-      expect(title).toContain(`${t("codingAgent.statTokens")}: 42k`);
-      expect(title).toContain(`${t("codingAgent.agentState")}: ${t("codingAgent.statusCompleted")}`);
-      expect(main).toHaveAttribute("aria-expanded", "false");
-      fireEvent.click(main);
-      expect(main).toHaveAttribute("aria-expanded", "true");
-      const detail = within(card).getByTestId("coding-agent-agent-main-row-detail");
-      expect(detail.textContent).toContain("claude-opus-5");
-      expect(detail.textContent).toContain("42k");
-
-      const helper = within(card).getByTestId("coding-agent-subagent-done-row");
-      const helperTitle = helper.getAttribute("title") ?? "";
-      expect(helperTitle).toContain(`${t("codingAgent.agentAsked")}: Map the components folder`);
-      expect(helperTitle).toContain(`${t("codingAgent.agentState")}: ${t("codingAgent.agentFinished")}`);
-      // No model and no token figure for a helper: the record keeps neither.
-      expect(helperTitle).not.toContain(t("codingAgent.agentModel"));
-      expect(helperTitle).not.toContain(t("codingAgent.statTokens"));
-      fireEvent.click(helper);
-      expect(within(card).getByTestId("coding-agent-subagent-done-row-detail").querySelectorAll("dt")).toHaveLength(2);
+      expect(screen.queryByTestId("coding-agent-run-agents")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-run-details")).toBeNull();
+      // The solo run's figures are the rail's tiles alone: no chips over the chart.
+      expect(within(chart).queryByTestId("coding-agent-diagram-figures")).toBeNull();
+      // A helper's errand opens on its node, where the roster row used to say it.
+      fireEvent.click(nodes[3]);
+      expect(within(screen.getByTestId("coding-agent-node-panel")).getByTestId("coding-agent-node-panel-now")).toHaveTextContent("Review the toggle");
     });
 
     it("reads an empty figure as a state rather than as a dash, and carries no zero nobody acts on", async () => {
@@ -2263,12 +2212,14 @@ describe("the workspace, the breadcrumb and the live view", () => {
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
     const card = await screen.findByTestId("coding-agent-live-card");
-    // The timeline, first and selected, with the chat's working line and the figures.
+    // The timeline, first and selected, with the chat's working line — the
+    // dots alone; the tokens and the clock are the rail's tiles, once each.
     expect(card).toHaveAttribute("data-tab", "timeline");
     expect(screen.getByTestId("coding-agent-live-tab-timeline")).toHaveAttribute("aria-selected", "true");
     const working = within(card).getByTestId("coding-agent-run-working");
     expect(working.textContent).toContain(t("codingAgent.chatWorking"));
-    expect(working.textContent).toContain(`332k ${t("codingAgent.tokensWord")}`);
+    expect(working.textContent).not.toContain(t("codingAgent.tokensWord"));
+    expect(screen.getByTestId("coding-agent-stat-tokens").textContent).toBe("332k");
     expect(within(working).getByRole("img", { name: t("codingAgent.chatBusy") })).toBeInTheDocument();
     // Only one pane shows: the terminal is mounted but hidden, the browser not mounted.
     expect(screen.getByTestId("coding-agent-run-terminal").closest("[role=tabpanel]")).toHaveAttribute("hidden");
@@ -2571,9 +2522,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
     await openRuns();
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
-    const main = screen.getByTestId("coding-agent-agent-main");
-    expect(main).toHaveAttribute("data-outcome", "unfinished");
-    expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("error");
+    const main = within(await screen.findByTestId("coding-agent-run-diagram")).getAllByTestId("coding-agent-node")[0];
+    expect(main).toHaveAttribute("data-role", "run");
+    expect(main).toHaveAttribute("data-state", "failed");
   });
 
   it("ticks one that did", async () => {
@@ -2583,9 +2534,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
     await openRuns();
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
-    const main = await screen.findByTestId("coding-agent-agent-main");
-    expect(main).toHaveAttribute("data-outcome", "completed");
-    expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("check_circle");
+    const main = within(await screen.findByTestId("coding-agent-run-diagram")).getAllByTestId("coding-agent-node")[0];
+    expect(main).toHaveAttribute("data-role", "run");
+    expect(main).toHaveAttribute("data-state", "done");
   });
 
   /**

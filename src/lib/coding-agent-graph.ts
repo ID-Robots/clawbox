@@ -50,8 +50,13 @@ export interface GraphTeam {
   id: string;
   status: TeamStatusView;
   plannerRunId: string | null;
-  /** The board's cast list, in the order the runs started. Absent from an older server. */
-  runs?: { id: string; role: "planner" | "worker" | "reviewer" | "lead"; taskId: string | null; tokens?: number }[];
+  /**
+   * The board's cast list, in the order the runs started. Absent from an older
+   * server. `provider`, `model` and `modelRole` are what each member runs on
+   * (coding-team-board.ts TeamRunRef), each absent on a board from before they
+   * were kept — the panel's model line then says nothing.
+   */
+  runs?: { id: string; role: "planner" | "worker" | "reviewer" | "lead"; taskId: string | null; tokens?: number; provider?: string | null; model?: string | null; modelRole?: string | null }[];
   tasks: {
     task_id: string;
     status: TaskStatusView;

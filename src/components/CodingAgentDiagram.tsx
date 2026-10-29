@@ -53,6 +53,7 @@ import {
 } from "@/lib/coding-agent-graph";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { codingModelName } from "@/lib/coding-model-names";
 import type { TeamTaskView, TeamView } from "./CodingTeamCard";
 import { useSteppedFlow } from "./CodingTeamTree";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
@@ -297,11 +298,17 @@ interface Props {
   header?: ReactNode;
   /** Inside a card of the host's already: no card of its own. */
   bare?: boolean;
+  /**
+   * The figure chips over the chart. Off for the solo run on its own page,
+   * whose rail already holds the same numbers as tiles; a team chart keeps its
+   * task and role bars either way.
+   */
+  figures?: boolean;
   testId?: string;
   className?: string;
 }
 
-export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, testId = "coding-agent-diagram", className = "" }: Props) {
+export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, figures = true, testId = "coding-agent-diagram", className = "" }: Props) {
   const { t } = useT();
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const wrap = useRef<HTMLDivElement>(null);
@@ -369,7 +376,7 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
   return (
     <div ref={wrap} className={`${bare ? "" : `${CARD_SURFACE} px-4 py-3`} ${className}`} data-testid={testId} data-shape={graph.shape} data-layout={sheet ? "sheet" : "beside"}>
       {header}
-      <DiagramFigures source={source} lookup={lookup} />
+      {figures && <DiagramFigures source={source} lookup={lookup} />}
       {/* What the colours mean, counted: the chart's own summary, and the words
           a state is never left without. */}
       <ul className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-secondary)]" aria-label={t("codingAgent.diagram.legend")} data-testid={`${testId}-legend`}>
@@ -535,9 +542,28 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
  * chip said "0 turns" beside "5 files changed · 109k tokens" for the whole
  * length of the run. No number is the true answer until there is one; a run
  * that was resumed keeps the turns of the segments it has already finished.
+ * The run page's Steps tile asks the same question.
  */
-function turnsKnown(run: DiagramRun): boolean {
+export function turnsKnown(run: Pick<DiagramRun, "numTurns" | "status">): boolean {
   return (run.numTurns ?? 0) > 0 || !isLive(run.status);
+}
+
+/**
+ * "Opus 5.5 on Anthropic" — what a teammate runs on, from the board's cast
+ * list, on its panel. Its role is already the panel's title, so the role is
+ * only added where the model was chosen for a different one: a worker on a
+ * task the plan marked bulk. Nothing on a board from before the fields were
+ * kept, or where the provider is not one the box knows.
+ */
+export function memberModelLine(t: Translate, m: { provider?: string | null; model?: string | null; modelRole?: string | null }): string | undefined {
+  if (!m.provider || !isCodingProvider(m.provider)) return undefined;
+  const params = {
+    model: m.model ? codingModelName(m.model) : t("codingAgent.roleModelPlanDecides"),
+    provider: t(CODING_PROVIDER_NAME_KEY[m.provider]),
+  };
+  return m.modelRole === "bulk"
+    ? t("codingAgent.memberModelRole", { ...params, role: t("codingAgent.modelRole.bulk") })
+    : t("codingAgent.memberModel", params);
 }
 
 /** The chart's figures as chips and bars: how far the tasks are, what each role spent, how long it has been. Exported for the home's plain row of a lone run. */
@@ -665,6 +691,8 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
   const step = lines.length > 0 ? describeStep(t, lines[lines.length - 1]) : null;
   const files = run?.filesTouched ?? [];
   const openTarget = node.runId ?? node.parentRunId ?? null;
+  // What this member runs on, from the cast list — the one list of agents.
+  const modelLine = node.runId && team ? memberModelLine(t, team.runs?.find((r) => r.id === node.runId) ?? {}) : undefined;
 
   const stop = async () => {
     if (!run) return;
@@ -760,11 +788,12 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
         <p className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--text-primary)]" aria-live="polite" data-testid="coding-agent-node-panel-now">{nowLine}</p>
       </div>
 
-      {run && (
+      {(run || modelLine) && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)]" data-testid="coding-agent-node-panel-figures">
-          {turnsKnown(run) && <span className="rounded-full bg-white/[0.05] px-2 py-0.5" data-testid="coding-agent-node-panel-turns">{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>}
-          {(run.tokensUsed ?? 0) > 0 && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.team.metricTokens", { n: compactCount(run.tokensUsed ?? 0) })}</span>}
-          <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.diagram.files", { n: files.length })}</span>
+          {run && turnsKnown(run) && <span className="rounded-full bg-white/[0.05] px-2 py-0.5" data-testid="coding-agent-node-panel-turns">{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>}
+          {run && (run.tokensUsed ?? 0) > 0 && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.team.metricTokens", { n: compactCount(run.tokensUsed ?? 0) })}</span>}
+          {run && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.diagram.files", { n: files.length })}</span>}
+          {modelLine && <span className="rounded-full bg-white/[0.05] px-2 py-0.5 font-mono" data-testid="coding-agent-node-panel-model">{modelLine}</span>}
         </div>
       )}
 
