@@ -85,7 +85,7 @@ import {
 } from '@/lib/session-expiry'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, dispatchOpenSettingsSection, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { sameSpokenWords, shortSpeechTextFor, shortSpeechTextFromStream } from '@/lib/short-speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
@@ -619,6 +619,7 @@ import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
+import VoiceSecureNotice from '@/components/VoiceSecureNotice'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 import {
   chatKeepsEarlierModel,
@@ -727,6 +728,8 @@ const SIZE_STORAGE_KEY = 'clawbox-chat-size'
 // own: which tab it has open, and the closes the box has not confirmed yet.
 type ChatTab = ChatTabRecord
 const TABS_STORAGE_KEY = 'clawbox-chat-tabs'
+/** Set once the owner dismisses the insecure-origin voice notice (TASK-2058). */
+const VOICE_SECURE_NOTICE_DISMISSED_KEY = 'clawbox-chat-voice-secure-notice-dismissed'
 /**
  * Each person's cached strip under their own name: two people who sign in on
  * one browser must never paint each other's tab labels, which are the first
@@ -4888,8 +4891,20 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // origin: it offers a live route to this box's Remote Access tunnel
   // (TASK-470). Opened only from a mic click that classified as `insecure`.
   const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
+  // The calm line that says the same before anyone clicks (TASK-2058). Starts
+  // dismissed so the first paint cannot flash it; the effect below reads the
+  // owner's earlier "dismiss", which holds on this browser from then on — the
+  // mic click still opens the popup for anyone who tries after that.
+  const [secureNoticeDismissed, setSecureNoticeDismissed] = useState(true)
   useEffect(() => {
     setCaptureAvailability(readCaptureAvailability())
+    let dismissed = false
+    try { dismissed = window.localStorage.getItem(VOICE_SECURE_NOTICE_DISMISSED_KEY) === '1' } catch { /* private mode: show it */ }
+    setSecureNoticeDismissed(dismissed)
+  }, [])
+  const dismissSecureNotice = useCallback(() => {
+    setSecureNoticeDismissed(true)
+    try { window.localStorage.setItem(VOICE_SECURE_NOTICE_DISMISSED_KEY, '1') } catch { /* this session only */ }
   }, [])
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -5655,12 +5670,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // label the button before anyone clicks, and a stale render must never be
     // what decides whether the microphone is opened.
     const availability = readCaptureAvailability()
+    // An insecure origin is not a failure, and does not get the red error
+    // line (TASK-2058): the popup answers the click with a live, one-click
+    // route to this box's Remote Access tunnel, where the mic works.
+    if (availability === 'insecure') {
+      setTunnelDialogOpen(true)
+      return
+    }
     if (availability !== 'ok') {
       setVoice({ state: 'error', error: availability, message: null, canRetry: false })
-      // On an insecure origin the status line can only say where the mic does
-      // not work. The popup carries the other half: a live, one-click route to
-      // this box's Remote Access tunnel, where it does.
-      if (availability === 'insecure') setTunnelDialogOpen(true)
       return
     }
     setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
@@ -7927,8 +7945,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     const disabled = status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'
     // On an origin the browser will not open a microphone on, the button says
     // WHY on hover and to a screen reader, instead of naming an action it
-    // cannot perform. It stays clickable so the same reason lands in the
-    // status row for anyone who tries.
+    // cannot perform. It stays clickable: a click opens the tunnel popup.
     const label = captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")
     // The hover text also says the button can be held, and which key does the
     // same — the one place the shortcut is written down.
@@ -8930,6 +8947,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           false mid-recording — and gating this on it took the pulsing dot and
           the running clock off screen while the microphone was still open,
           breaking the one invariant a live capture has. */}
+      {/* Voice input on an insecure origin (TASK-2058): said up front and
+          calmly, with this page on the Remote Access tunnel when it runs.
+          Only where the mic is offered at all, and mounted per open of the
+          chat so the tunnel is read live each time. */}
+      {isOpen && caps.canTranscribe && captureAvailability === 'insecure' && !secureNoticeDismissed && voice.state === 'idle' && (
+        <VoiceSecureNotice
+          onDismiss={dismissSecureNotice}
+          onOpenRemoteAccess={() => openFromChat(() => dispatchOpenSettingsSection('remote'))}
+        />
+      )}
       {voice.state !== 'idle' && (
         <div
           data-testid="voice-status"

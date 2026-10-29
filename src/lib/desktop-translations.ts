@@ -492,6 +492,14 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.voice.tunnel.failed": "Could not check this ClawBox's Remote Access tunnel. Open Settings → {settings} to see its status.",
     "chat.voice.tunnel.open": "Take me there",
     "chat.voice.tunnel.close": "Close",
+    // The quiet line a chat on an insecure origin carries about voice input
+    // (TASK-2058): said before anyone clicks the mic, as a fact about the
+    // address rather than a fault, with the one remedy that works.
+    "chat.voice.secureNotice.checking": "Voice input works over a secure (HTTPS) address. Checking this ClawBox's Remote Access…",
+    "chat.voice.secureNotice.ready": "Voice input works over a secure (HTTPS) address, and this ClawBox's Remote Access has one. Open this page there to talk.",
+    "chat.voice.secureNotice.off": "Voice input works over a secure (HTTPS) address. Turn on Remote Access in Settings → {settings}, then open this page there.",
+    "chat.voice.secureNotice.failed": "Voice input works over a secure (HTTPS) address. Remote Access could not be checked — see Settings → {settings}.",
+    "chat.voice.secureNotice.openSettings": "Open {settings}",
     "chat.voice.nothingHeard": "Nothing was heard. Try recording again.",
     "chat.voice.failed": "Could not turn that recording into text.",
     "chat.voice.privacy": "Voice input sends your recording to ClawBox AI to be transcribed. It leaves this ClawBox.",
