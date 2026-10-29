@@ -284,26 +284,69 @@ export async function listenerOwnedBy(port: number, directory: string, opts: { f
   return verdict;
 }
 
-async function checkListener(port: number, directory: string): Promise<ListenerVerdict> {
-  if (!isProxyablePort(port)) return "not_owned";
+/**
+ * Forget what was learned about `port`, for every folder: its server has
+ * just been stopped, and a cached "owned" would otherwise vouch for the port
+ * for another 30 seconds — long enough for an uninstall and an install again
+ * to register the app over a server that is gone.
+ */
+export function forgetListenerVerdict(port: number): void {
+  for (const key of verdicts.keys()) {
+    if (key.startsWith(`${port}:`)) verdicts.delete(key);
+  }
+}
+
+/** Who listens on a port where 127.0.0.1 reaches it. */
+export interface PortListeners {
+  listening: boolean;
+  /** The pids `ss` names: this user's listeners. Another user's listens with none. */
+  pids: number[];
+}
+
+/** The listeners on `port`, from `ss -ltnp`; null when the listing failed. */
+export async function portListeners(port: number): Promise<PortListeners | null> {
   const r = await runChild("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], {
     timeoutMs: 5_000,
     env: { PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" },
   });
-  if (r.code !== 0) return "unverifiable";
-  const lines = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return "not_listening";
+  if (r.code !== 0) return null;
   // Only a row the proxy can actually reach at 127.0.0.1 vouches for the
   // port: a project's listener bound to some other local address must not
   // authorise a different service answering on loopback.
-  const reachable = lines.filter((l) => isLoopbackListenRow(l));
-  if (reachable.length === 0) return "not_listening";
+  const reachable = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l && isLoopbackListenRow(l));
   const pids = [...new Set([...reachable.join("\n").matchAll(/pid=(\d+)/g)].map((m) => Number(m[1])))];
-  if (pids.length === 0) return "not_owned";
+  return { listening: reachable.length > 0, pids };
+}
+
+const DELETED_SUFFIX = " (deleted)";
+
+/**
+ * A process's working directory, and whether that folder has been removed
+ * since. The kernel shows a removed one as `<path> (deleted)` — and that path,
+ * suffix stripped, may well be inside a folder made again under the same name
+ * by now, which is exactly the folder it is NOT running from. The suffix alone
+ * proves nothing (a folder may be called that); a link count of 0 does. Null
+ * when it cannot be read: another user's process, or one that has gone.
+ */
+export async function processCwd(pid: number): Promise<{ path: string; deleted: boolean } | null> {
+  const link = await fs.promises.readlink(`/proc/${pid}/cwd`).catch(() => null);
+  if (!link) return null;
+  if (!link.endsWith(DELETED_SUFFIX)) return { path: link, deleted: false };
+  const stat = await fs.promises.stat(`/proc/${pid}/cwd`).catch(() => null);
+  if (!stat) return null;
+  return stat.nlink === 0 ? { path: link.slice(0, -DELETED_SUFFIX.length), deleted: true } : { path: link, deleted: false };
+}
+
+async function checkListener(port: number, directory: string): Promise<ListenerVerdict> {
+  if (!isProxyablePort(port)) return "not_owned";
+  const found = await portListeners(port);
+  if (!found) return "unverifiable";
+  if (!found.listening) return "not_listening";
+  if (found.pids.length === 0) return "not_owned";
   const real = await fs.promises.realpath(directory).catch(() => directory);
-  for (const pid of pids) {
-    const cwd = await fs.promises.readlink(`/proc/${pid}/cwd`).catch(() => null);
-    if (cwd && isInside(cwd, real)) return "owned";
+  for (const pid of found.pids) {
+    const cwd = await processCwd(pid);
+    if (cwd && !cwd.deleted && isInside(cwd.path, real)) return "owned";
   }
   return "not_owned";
 }
@@ -342,6 +385,20 @@ export async function resolveAppProxyTarget(id: string): Promise<AppProxyResolut
   return { ok: true, target: { id, port: meta.port, stripBasePath: meta.stripBasePath === true, directory } };
 }
 
+/**
+ * The port and the folder an app's registration names, when it is a server
+ * app; null for a one-file webapp, an unregistered id, or a meta.json that
+ * cannot be read. The folder is null when the registration predates the
+ * `directory` field and no folder answers to the id any more.
+ */
+export async function registeredServer(id: string): Promise<{ port: number; directory: string | null } | null> {
+  if (!APP_ID_RE.test(id)) return null;
+  const meta = await readMeta(id);
+  if (!meta || !isProxyablePort(meta.port)) return null;
+  const directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : await projectFolderFor(id);
+  return { port: meta.port, directory };
+}
+
 /** The one-file stub the webapp route still serves for the id: it sends the frame to the proxied path. */
 export function serverAppStubHtml(name: string, id: string): string {
   const safeName = name.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] as string));
@@ -359,7 +416,10 @@ export type RegisterOutcome = { ok: true } | { ok: false; reason: Exclude<Listen
 export async function registerServerApp(input: { id: string; directory: string; manifest: ClawboxManifest }): Promise<RegisterOutcome> {
   const { id, directory, manifest } = input;
   if (!APP_ID_RE.test(id) || !manifest.port) return { ok: false, reason: "failed", detail: "The manifest names no port." };
-  const verdict = await listenerOwnedBy(manifest.port, directory);
+  // Asked afresh: a registration is rare, and a verdict cached for the proxy
+  // can be up to 30 seconds old — older than the server it vouches for, when
+  // the app was removed and installed again in between.
+  const verdict = await listenerOwnedBy(manifest.port, directory, { fresh: true });
   if (verdict !== "owned") return { ok: false, reason: verdict, detail: listenerRefusal(verdict, manifest.port) };
   try {
     const existing = await readMeta(id);
