@@ -53,6 +53,14 @@ describe("followNewestModel", () => {
     expect(await followNewestModel("anthropic", withNew, deps())).toEqual({ moved: false, why: "not-following" });
   });
 
+  it("never moves the chat down to an older model than the one it is on", async () => {
+    // A release the enumeration has not caught up with, or a list that came
+    // back short: the chat stays on its own, newer model.
+    const d = deps({ readPrimary: vi.fn(async () => "xai/grok-4.9") });
+    expect(await followNewestModel("xai", withNew, d)).toEqual({ moved: false, why: "already-newest" });
+    expect(d.switchModel).not.toHaveBeenCalled();
+  });
+
   it("says when the switch did not land", async () => {
     expect(await followNewestModel("xai", withNew, deps({ switchModel: vi.fn(async () => false) })))
       .toEqual({ moved: false, why: "switch-failed" });

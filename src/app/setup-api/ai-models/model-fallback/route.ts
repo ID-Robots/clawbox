@@ -31,9 +31,11 @@ export const dynamic = "force-dynamic";
  *
  * OWNER-ONLY AND OUR PAGE ONLY, like /setup-api/anthropic/failure: a report
  * stops a run and changes the box's model, and the MCP bearer or another site
- * must not be able to do that with a made-up refusal. A made-up one from the
- * owner's own page cannot do much either: a zero limit is only acted on when
- * the gateway's log says so.
+ * must not be able to do that with a made-up refusal. That gate is the whole
+ * of it: a zero limit is confirmed from the gateway's log, OR from the
+ * provider's words the chat forwards (`evidence` — the core passes a short
+ * refusal through on its frames), so a signed-in page can claim one. It gains
+ * nothing it could not do through `/setup-api/chat/model` and Stop.
  */
 
 function refusal(error: string, code: string, status: number) {
