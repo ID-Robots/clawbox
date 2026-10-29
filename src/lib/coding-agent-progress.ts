@@ -67,6 +67,7 @@ export type ProgressLabelKey =
   | "reattached"
   | "startingFresh"
   | "noRepository"
+  | "notRepositoryRoot"
   | "worktree"
   | "worktreeMerged"
   | "worktreeRemoved"
@@ -249,6 +250,9 @@ export const RUNNER_STEP = {
   reattached: "The web server restarted; this run kept going and was picked back up",
   noRepository:
     "Not a git repository yet: the work is committed into a new one when the run settles, and there is no pull request to open.",
+  /** The folder is inside a repository that is not its own (a project under a parent checkout): no branch in that repository, no pull request. */
+  notRepositoryRoot: (root: string) =>
+    `Part of the repository at ${root}, not a repository of its own: no branch is made there and there is no pull request to open`,
   merged: "Merged into the base branch",
   providerSilent: "The provider did not answer; starting over in a fresh session",
   paused: "Paused — resume to continue",
@@ -481,6 +485,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
   { re: /^Not a git repository yet: .*$/, labelKey: "noRepository", icon: "folder_off" },
+  { re: /^Part of the repository at (.+), not a repository of its own: .*$/, labelKey: "notRepositoryRoot", icon: "folder_off", params: (m) => ({ root: m[1] }) },
   { re: /^Working in its own copy of the project on (.+), forked from (.+)$/, labelKey: "worktree", icon: "account_tree", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^Merged into (.+) and the run's copy of the project removed$/, labelKey: "worktreeMerged", icon: "merge", params: (m) => ({ base: m[1] }) },
   { re: /^The run's copy of the project was removed; it left nothing on its branch$/, labelKey: "worktreeRemoved", icon: "delete_sweep" },

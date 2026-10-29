@@ -175,6 +175,21 @@ describe("the archive", () => {
     expect(lib.archivedEvidencePath(id, "shot.png")).toBe(fs.realpathSync(path.join(bundle, "evidence", "shot.png")));
   });
 
+  it("drops the harness's thinking_tokens progress lines from the archived stream log, and nothing else", () => {
+    // 99.4% of a worker's stream log on the owner's box (12.4 MB, 53,014 lines
+    // in 12.5 minutes): read live for the idle clock, worth nothing after.
+    const id = "run-bbbbbbb9";
+    const sources = parts(id);
+    const progress = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":12,"session_id":"s"}';
+    const kept = ['{"type":"system","subtype":"init","session_id":"s"}', '{"type":"assistant","message":{"content":[{"type":"text","text":"thinking_tokens is a word"}]}}', '{"type":"result","subtype":"success"}'];
+    const lines = [kept[0], ...Array.from({ length: 2_000 }, () => progress), kept[1], progress, kept[2]];
+    fs.writeFileSync(sources.streamLog, `${lines.join("\n")}\n`);
+    expect(lib.archiveRun(record(id), sources, "trimmed")).toMatchObject({ id, stream: true });
+    const archived = path.join(data, "coding-agent-archive", id, "stream.jsonl");
+    expect(fs.readFileSync(archived, "utf-8")).toBe(`${kept.join("\n")}\n`);
+    expect(fs.existsSync(`${archived}.slim`)).toBe(false);
+  });
+
   it("keeps the team role a run was started under, and reads a bundle from before the field as none", () => {
     const bulk = lib.archiveRun(record("run-bbbbbbc1", { modelRole: "bulk" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
     expect(bulk.modelRole).toBe("bulk");

@@ -25,7 +25,6 @@ import CodingAgentOpenAICard from "./CodingAgentOpenAICard";
 import CodingRunHistoryCard from "./CodingRunHistoryCard";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
 import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
-import type { CodingDiet, DietBrief, DietHelpers, DietVisualTools } from "@/lib/coding-diet";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
@@ -212,10 +211,6 @@ export interface AgentStatus {
    *  switches — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
-  /** The token diet (src/lib/coding-diet.ts), every knob the owner never set
-   *  at today's behaviour. Optional: an older server answers without it, and
-   *  the Token use group is then not drawn at all. */
-  diet?: CodingDiet;
   // The owner's standing permission rules are deliberately NOT here, though the
   // status payload carries them: CodingAgentRulesCard reads and writes its own
   // route. This panel serialises its setting writes through one chain so two
@@ -256,31 +251,6 @@ const ROLE_HINT_KEY: Partial<Record<ModelRole, string>> = {
   planner: "codingAgent.roleModelsRoleHint.planner",
   bulk: "codingAgent.roleModelsRoleHint.bulk",
 };
-
-/**
- * The token diet's three selects, in the order the Token use group draws them:
- * each knob's label, one-sentence hint, test id and the label of every mode.
- * Records over the mode types rather than imports of the mode lists, for the
- * PR_BODY_TASK_LABEL_KEY reason: a mode added in @/lib/coding-diet without a
- * label here fails the typecheck.
- */
-const DIET_BRIEF_LABEL_KEY: Record<DietBrief, string> = {
-  full: "codingAgent.dietBriefFull",
-  lean: "codingAgent.dietBriefLean",
-};
-const DIET_HELPERS_LABEL_KEY: Record<DietHelpers, string> = {
-  always: "codingAgent.dietHelpersAlways",
-  lean: "codingAgent.dietHelpersLean",
-};
-const DIET_VISUAL_TOOLS_LABEL_KEY: Record<DietVisualTools, string> = {
-  always: "codingAgent.dietVisualToolsAlways",
-  auto: "codingAgent.dietVisualToolsAuto",
-};
-const DIET_KNOBS: readonly { knob: keyof CodingDiet; id: string; labelKey: string; hintKey: string; options: Record<string, string> }[] = [
-  { knob: "brief", id: "coding-agent-diet-brief", labelKey: "codingAgent.dietBriefLabel", hintKey: "codingAgent.dietBriefHint", options: DIET_BRIEF_LABEL_KEY },
-  { knob: "helpers", id: "coding-agent-diet-helpers", labelKey: "codingAgent.dietHelpersLabel", hintKey: "codingAgent.dietHelpersHint", options: DIET_HELPERS_LABEL_KEY },
-  { knob: "visualTools", id: "coding-agent-diet-visual-tools", labelKey: "codingAgent.dietVisualToolsLabel", hintKey: "codingAgent.dietVisualToolsHint", options: DIET_VISUAL_TOOLS_LABEL_KEY },
-];
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
 const GITHUB_REPROBE_MS = 15_000;
@@ -1581,37 +1551,6 @@ export default function CodingAgentSettingsPanel(_props: {
               />
             </div>
           </div>
-          {/* The token diet: what every turn of a run re-sends. Each knob posts
-              itself alone — the route merges a partial diet over the stored
-              one — and its refusal lands on the card's foot like the other
-              switches'. Not drawn for a server that answers without `diet`. */}
-          {status?.diet && (
-            <div className="mt-5" data-testid="coding-agent-diet">
-              <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupTokens")}</p>
-              {DIET_KNOBS.map(({ knob, id, labelKey, hintKey, options }) => (
-                <div key={knob} className="flex items-start justify-between gap-4 mt-4">
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <label htmlFor={id} className="text-xs font-medium text-[var(--text-secondary)]">
-                      {t(labelKey)}
-                    </label>
-                    <HelpTip text={t(hintKey)} label={t(labelKey)} testId={`${id}-help`} />
-                  </div>
-                  <select
-                    id={id}
-                    value={status.diet![knob]}
-                    disabled={saving}
-                    data-testid={id}
-                    onChange={(e) => void saveSetting({ diet: { [knob]: e.target.value } }, "diet", t("codingAgent.dietFailed"))}
-                    className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
-                  >
-                    {Object.entries(options).map(([value, key]) => (
-                      <option key={value} value={value}>{t(key)}</option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-          )}
         </details>
 
         {errorIn("settings")}

@@ -44,7 +44,9 @@ describe("a coding team's worker", () => {
 });
 
 describe("a run that is nobody's team", () => {
-  const argv = buildRunArgs({ run: SOLO });
+  // The lean brief spends the auto-merge sentence only on a run with a pull
+  // request in sight (its task mentions one, or drafts are on).
+  const argv = buildRunArgs({ run: SOLO, pullRequestMentioned: true });
 
   it("keeps the auto-merge sentence its task's consent governs, and no team denial", () => {
     expect(after(argv, "--append-system-prompt")).toContain(PR_AUTO_MERGE_BRIEF);

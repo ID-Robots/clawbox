@@ -232,6 +232,73 @@ describe("buildRunArgs carries both halves", () => {
   });
 });
 
+describe("a run's argv carries only its own share of the list", () => {
+  /** The values of one repeated flag, up to the next flag. */
+  function valuesOf(args: string[], flag: string): string[] {
+    const at = args.indexOf(flag);
+    if (at < 0) return [];
+    const out: string[] = [];
+    for (let i = at + 1; i < args.length && !args[i].startsWith("--"); i++) out.push(args[i]);
+    return out;
+  }
+  const slug = (dir: string) => dir.replace(/[^a-zA-Z0-9]/g, "-");
+  const softRule = (project: string) => `Read(/${pathMod.join(home, ".claude-ds", "projects", project)}/**)`;
+  const run = (directory: string) => ({ id: "run-aaaaaaaa", directory });
+
+  it("drops an absolute rule whose folder is gone, from BOTH halves", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const kept = pathMod.join(home, "notes");
+    fsSync.mkdirSync(kept);
+    const gone = `Read(/${pathMod.join(home, "deleted-long-ago")}/**)`;
+    const args = lib.buildRunArgs({ allowRules: [gone, `Read(/${kept}/**)`], run: run(pathMod.join(home, "work", "app")) });
+    const allowed = valuesOf(args, "--allowedTools");
+    expect(allowed).toContain(`Read(/${kept}/**)`);
+    expect(allowed).not.toContain(gone);
+  });
+
+  it("keeps a soft rule for this run's own folder and drops one for another project", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const dir = pathMod.join(home, "work", "app");
+    fsSync.mkdirSync(pathMod.join(home, ".claude-ds", "projects", slug(dir)), { recursive: true });
+    const own = softRule(slug(dir));
+    const other = softRule("other");
+    const args = lib.buildRunArgs({ allowRules: [other, own], run: run(dir) });
+    const allowed = valuesOf(args, "--allowedTools");
+    expect(allowed).toContain(own);
+    expect(allowed).not.toContain(other);
+    // The deny half was built from the SAME list: the other project stays
+    // shut and only this run's own folder is open.
+    const disallowed = valuesOf(args, "--disallowedTools");
+    expect(denied(disallowed, pathMod.join(home, ".claude-ds", "projects", "other", "x.md"))).toBe(true);
+    expect(denied(disallowed, pathMod.join(home, ".claude-ds", "projects", slug(dir), "x.md"))).toBe(false);
+  });
+
+  it("a run with only other projects' rules is argv-identical to one with none", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const dir = pathMod.join(home, "work", "app");
+    expect(lib.buildRunArgs({ allowRules: [softRule("other"), softRule("app")], run: run(dir) }))
+      .toEqual(lib.buildRunArgs({ run: run(dir) }));
+  });
+
+  it("a run in a worktree keeps the rule for the project root's slug too", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const project = pathMod.join(home, "work", "app");
+    const worktree = pathMod.join(project, ".clawbox", "worktrees", "run-aaaaaaaa");
+    const args = lib.buildRunArgs({ allowRules: [softRule(slug(project)), softRule(slug(worktree)), softRule("other")], run: run(worktree) });
+    const allowed = valuesOf(args, "--allowedTools");
+    expect(allowed).toContain(softRule(slug(project)));
+    expect(allowed).toContain(softRule(slug(worktree)));
+    expect(allowed).not.toContain(softRule("other"));
+  });
+
+  it("keeps a soft rule for this run's project before the harness has made the folder", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const dir = pathMod.join(home, "work", "fresh");
+    const allowed = valuesOf(lib.buildRunArgs({ allowRules: [softRule(slug(dir))], run: run(dir) }), "--allowedTools");
+    expect(allowed).toContain(softRule(slug(dir)));
+  });
+});
+
 describe("the stored list", () => {
   const KEY = "coding_agent_allow_rules";
 
@@ -306,5 +373,11 @@ describe("suggestAllowRule: what the run page offers", () => {
     const lib = await import("@/lib/coding-agent");
     expect(lib.suggestAllowRule({ tool: "Bash", target: "pkill -f next-server" }))
       .toEqual({ rule: null, refusal: null });
+  });
+
+  it("offers no rule for a session's own tool-results spill: it would carry the session id and never match again", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const target = pathMod.join(home, ".claude-ds", "projects", "app", "0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b", "tool-results", "toolu_01.txt");
+    expect(lib.suggestAllowRule({ tool: "Read", target })).toEqual({ rule: null, refusal: null });
   });
 });

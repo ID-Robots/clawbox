@@ -44,6 +44,13 @@ vi.mock("@/lib/coding-run-worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-run-worktree")>()),
   addRunWorktree: vi.fn(async () => ({ ok: false as const, reason: "no_repository" as const, detail: "Not a git repository yet." })),
 }));
+// Same again for the HEAD the run records as it begins (CodingRun.headAtStart):
+// one more `git` through the mocked `spawn`, asked just before the harness is,
+// that would otherwise take the one-shot failure meant for the harness.
+vi.mock("@/lib/coding-git", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-git")>()),
+  headCommitShort: vi.fn(async () => null),
+}));
 // Every run draws its project an icon through an upstream ClawBox AI call.
 // Nothing here asserts it, and left real it is one more thing racing the real
 // `git` below for a loaded runner's attention.

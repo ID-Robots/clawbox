@@ -150,6 +150,27 @@ describe("standard — the default", () => {
     expect((await lib.getCodingAgentStatus()).historyRetention).toBe("standard");
   });
 
+  it("trims a gave-up run whose folder is gone, and keeps one whose folder is there", async () => {
+    // Clear already made this exception; the trim did not, and 22 of the 40
+    // gave_up records on the owner's box named folders that no longer existed —
+    // nothing could resume them, and the runs file never trimmed.
+    const records = [];
+    for (let n = 0; n <= 29; n += 1) {
+      records.push(runRecord(n, n >= 28 ? { status: "gave_up", directory: n === 29 ? path.join(data, "gone") : project } : {}));
+    }
+    fs.writeFileSync(runsFile(), JSON.stringify(records));
+    const made = await draft();
+    const list = onDisk();
+    expect(list).toHaveLength(30);
+    expect(list[0].id).toBe(made.id);
+    expect(list.map((r) => r.id)).not.toContain(idOf(29));
+    expect(list.map((r) => r.id)).toContain(idOf(28));
+    expect(fs.existsSync(evidenceOf(idOf(29)))).toBe(false);
+    expect(fs.existsSync(evidenceOf(idOf(28)))).toBe(true);
+    // Compact: the file is rewritten every few seconds while a run streams.
+    expect(fs.readFileSync(runsFile(), "utf-8")).not.toContain("\n");
+  });
+
   it("never drops a held run, in any mode", async () => {
     for (const mode of ["standard", "extended", "archive"]) {
       writeConfig({ coding_agent_history_retention: mode });
