@@ -45,7 +45,7 @@ const WHISPER_STATE = {
 };
 const EMBED_STATUS = { installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 640 * 1024 * 1024, model: "qwen3-embedding-0.6b", engine: "llama.cpp" };
 
-function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
+function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; sttChain?: string[]; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
   posts = [];
   deletes = [];
   const json = (body: unknown, status = 200) =>
@@ -81,7 +81,7 @@ function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?:
       return json({
         primary,
         engines: { cloud: { configured: cloud, label: "c" }, local: { installed: true, label: "l" } },
-        chain: cloud ? ["cloud", "local"] : ["local"],
+        chain: over.sttChain ?? (cloud ? ["cloud", "local"] : ["local"]),
       });
     }
     if (url.startsWith("/setup-api/local-ai/exclusive")) return json({ enabled: false });
@@ -228,6 +228,23 @@ describe("LocalAiPanel", () => {
     fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
     fireEvent.click(await screen.findByTestId("local-model-action-whisper-fallback"));
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "cloud" } }));
+  });
+
+  /**
+   * A token the transcribe route will not send — an owner's own DeepSeek key,
+   * or a ClawBox AI sign-in whose profile is recorded as OAuth — still reads
+   * `engines.cloud.configured`, while `chain` leaves the cloud out. "Use as
+   * fallback" there put the box's only working engine behind one that hears
+   * nothing.
+   */
+  it("does not offer it behind a configured cloud that no chain uses", async () => {
+    stubFetch({ sttPrimary: "local", sttChain: ["local"] });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/primary/i));
+
+    expect(screen.queryByTestId("local-model-menu-whisper")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-action-whisper-fallback")).not.toBeInTheDocument();
   });
 
   /**
