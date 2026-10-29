@@ -70,7 +70,7 @@ function section(from: string, to: string): string {
   return src.slice(start, end);
 }
 
-const CLEANUP_HEADING = "# ── Field cleanup: the retired clawbox-web-taint plugin ";
+const CLEANUP_HEADING = "# ── Field cleanup: retired ClawBox plugins ";
 const EMAIL_HEADING = "# ── The outbound EMAIL:-directive hook plugin ";
 
 /** The cleanup alone: it uses nothing the shared installer defines. */
@@ -189,7 +189,7 @@ d("gateway-pre-start.sh — the retired web-taint gate's field cleanup", () => {
     // And nothing BEFORE the cleanup names the retired plugin in any form — an
     // unquoted argument, a variable assigned the id — so no installer spelling
     // can slip past the call-shaped check above.
-    const cleanupAt = src.indexOf("# ── Field cleanup: the retired clawbox-web-taint plugin");
+    const cleanupAt = src.indexOf(CLEANUP_HEADING);
     expect(cleanupAt).toBeGreaterThan(0);
     expect(src.slice(0, cleanupAt).toLowerCase()).not.toContain("web-taint");
   });

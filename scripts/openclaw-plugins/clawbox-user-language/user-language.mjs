@@ -31,8 +31,7 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
  * Where ClawBox keeps its device store: `<ClawBox root>/data/config.json`
  * (src/lib/config-store.ts). The gateway does not run with `CLAWBOX_ROOT`
  * set, so the root falls back exactly as scripts/gateway-pre-start.sh resolves
- * it: `$CLAWBOX_HOME_DIR/clawbox`, the home directory when that is unset — the
- * same resolution as the Prime Radiant core plugin's `coreContextFile`.
+ * it: `$CLAWBOX_HOME_DIR/clawbox`, the home directory when that is unset.
  *
  * @param {Record<string, string | undefined>} [env]
  * @param {string} [home]

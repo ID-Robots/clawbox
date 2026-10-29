@@ -1,7 +1,0 @@
-{
-  "id": "clawbox-prime-radiant-core",
-  "name": "ClawBox Prime Radiant core",
-  "description": "Adds the most-linked pages of the owner's Prime Radiant wiki to the owner's main agent's system context.",
-  "activation": { "onStartup": true },
-  "configSchema": { "type": "object", "additionalProperties": false }
-}
