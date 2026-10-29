@@ -11,6 +11,7 @@
 // `<org>/<model>` slugs.
 
 import { lastModelSegment } from "./chat-header-pills";
+import { newestModelId } from "./provider-newest-model";
 import {
   OPENROUTER_CURATED_MODELS,
   OPENROUTER_DEFAULT_MODEL_ID,
@@ -336,25 +337,31 @@ export const GOOGLE_DEFAULT_MODEL_ID = "gemini-2.5-flash";
 // manifest catalogue is what routes a turn, so the configure route writes the
 // key and the primary and leaves transport to the plugin, the way it does for
 // an OpenAI API key. The live list is `openclaw models list --provider xai
-// --all --json`, which answers `count: 0` until a key is on the box — the
-// picker shows these two until that enumeration lands.
+// --all --json --refresh`, which on the pinned core asks xAI's /v1/models with
+// the box's own credential — the picker shows these three only until that
+// enumeration lands, and only when it fails. xAI still serves all three
+// (docs.x.ai/developers/models, 2026-10-28: 500k context each); an account can
+// have a quota for one model and none for another, so the older two stay
+// selectable rather than leaving such an account with nothing to fall back to.
 export const XAI_MODELS: readonly ProviderModelOption[] = [
-  { id: "grok-4.6", label: "Grok 4.6", hint: "Default. Newest flagship." },
-  { id: "grok-4.5", label: "Grok 4.5", hint: "Previous generation." },
+  { id: "grok-4.7", label: "Grok 4.7", hint: "Default. Newest flagship." },
+  { id: "grok-4.6", label: "Grok 4.6", hint: "Previous generation." },
+  { id: "grok-4.5", label: "Grok 4.5", hint: "Older generation." },
 ] as const;
 
 /**
- * The xAI model this box lands on when nothing named one.
+ * The xAI model this box lands on when nothing named one AND no enumeration has
+ * answered yet.
  *
  * The fourth of the set, for the reason the Google one gives: the configure
  * route's PROVIDERS table, chat/model's DEFAULT_PROVIDER_MODELS and
- * PROVIDER_CATALOGS all need it, and chat/model's copy is written to
- * `agents.defaults.model.primary` by `POST /setup-api/providers/default`. It is
- * the row the bundled plugin's manifest names first (2026.9.4); a later core
- * that tags another row `default` outranks it in the picker only, exactly as
- * for the other providers.
+ * PROVIDER_CATALOGS all need a cold-start answer. It is no longer spelled by
+ * hand: xAI follows the newest model (src/lib/provider-newest-model.ts), and
+ * the live default comes from the box's enumeration through
+ * `readNewestModelId`. This is the same rule applied to the fallback list
+ * above, so the fallback cannot name an older model than the list it heads.
  */
-export const XAI_DEFAULT_MODEL_ID = "grok-4.6";
+export const XAI_DEFAULT_MODEL_ID = newestModelId("xai", XAI_MODELS) ?? XAI_MODELS[0].id;
 
 // ClawBox AI tiers — surfaced via the secondary model picker after
 // consolidating Flash/Pro into one "ClawBox AI" provider row in the

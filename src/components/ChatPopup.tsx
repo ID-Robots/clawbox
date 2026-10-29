@@ -75,7 +75,7 @@ import {
   type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
-import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply, describeImageFailure, isAccountQuotaFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import {
   SESSION_EXPIRED_CHAT_MESSAGE,
   SESSION_EXPIRED_EVENT,
@@ -84,6 +84,7 @@ import {
   isSessionExpiredResponse,
 } from '@/lib/session-expiry'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
+import { modelFallbackNotice, ModelFallbackWatch, openProvidersSettings, reportModelFallback, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, dispatchOpenSettingsSection, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
@@ -444,8 +445,9 @@ export function noticeColumnInset(
 }
 
 // `system`-role messages render as colored pill banners; `variant` picks
-// the colour (red error, green confirmation). Ignored for user/assistant.
-type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped' }
+// the colour (red error, green confirmation, calm blue notice). Ignored for
+// user/assistant.
+type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped' | 'notice' }
 
 /**
  * The line left where the owner pressed Stop. `ChatMessageRow` words it from
@@ -2614,6 +2616,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const runFailureRef = useRef(new RunFailureLedger())
   // The turns sent, by idempotency key, for the Anthropic account swap (TASK-1260) — see ChatApp.
   const turnsRef = useRef(new TurnLedger())
+  // Runs stuck on a model this account cannot run (lib/model-fallback-chat.ts) — see ChatApp.
+  const fallbackWatchRef = useRef(new ModelFallbackWatch())
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
    *
@@ -3494,6 +3498,21 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       }))
     }
 
+    // A turn stuck on a model this account cannot run: reported once per run;
+    // the box confirms it, moves the chat and sends the turn again — see ChatApp.
+    const reportModelFallbackFor = (signal: ModelFallbackSignal) => {
+      const forKey = sessionKeyRef.current
+      fallbackWatchRef.current.begin(signal.runId)
+      void reportModelFallback({ ...signal, sessionKey: forKey || null, message: turnsRef.current.resendable(signal.runId) })
+        .then((answer) => {
+          const owesStop = fallbackWatchRef.current.settle(signal.runId, answer)
+          if (sessionKeyRef.current !== forKey) return
+          const notice = modelFallbackNotice(answer, failureWordsRef.current)
+          if (notice) setMessages(prev => [...prev, { role: 'system', timestamp: Date.now(), ...notice }])
+          else if (owesStop) setMessages(prev => [...prev, stoppedMarker()])
+        })
+    }
+
     const onMessage = (event: MessageEvent) => {
       if (!isCurrent()) return
       let data: Record<string, unknown>
@@ -3540,6 +3559,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           runFailureRef.current.observe(payload)
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
+          const stuck = fallbackWatchRef.current.fromAgentFrame(payload, runFailureRef.current.peek(payload.runId))
+          if (stuck) reportModelFallbackFor(stuck)
           if (payload.stream === 'tool') {
             const toolData = payload.data as Record<string, unknown> | undefined
             applyToolEvent(toolData)
@@ -3630,6 +3651,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           const failureText = settledError
             ? describeChatFailure(settledError.errorMessage, settledError.context, failureWordsRef.current)
             : undefined
+          // No API quota on the owner's account is a fact, not a fault: calm, not red.
+          const failureTone = settledError && isAccountQuotaFailure(settledError.errorMessage, settledError.context)
+            ? { variant: 'notice' as const }
+            : {}
           // A repeat ends nothing: its run's busy mark went with the first
           // frame, and one on this key now belongs to a turn sent since.
           if (state === 'final' || state === 'aborted' || (state === 'error' && !settledError?.repeat)) {
@@ -3816,7 +3841,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // then (`withFailureNote`, which also puts it under its own turn).
             const failedRun = settledError.runId
             if (failedRun && failureText) {
-              const note = { role: 'system' as const, text: failureText, timestamp: Date.now(), failedRun }
+              const note = { role: 'system' as const, text: failureText, timestamp: Date.now(), failedRun, ...failureTone }
               setMessages(prev => withFailureNote(prev, note))
             }
           } else if (state === 'aborted' || state === 'error') {
@@ -3840,7 +3865,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // A Stop used to leave the question with nothing under it — no
             // partial answer when none had arrived yet, and no sign the reply
             // was stopped rather than lost (2026-10-13 smoke test).
-            if (state === 'aborted') setMessages(msgs => [...msgs, stoppedMarker()])
+            // Not for a run the BOX stopped to move it off a model this account
+            // cannot run: the fallback's own line says what happened instead.
+            if (state === 'aborted' && !fallbackWatchRef.current.holdStop(payload.runId)) setMessages(msgs => [...msgs, stoppedMarker()])
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
@@ -3854,7 +3881,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               // the customer's transcript (TASK-440).
               // Tagged with its run, so the gateway's repeat of this error
               // (above) can tell the sentence is already here.
-              setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now(), ...(settledError?.runId ? { failedRun: settledError.runId } : {}) }])
+              setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now(), ...(settledError?.runId ? { failedRun: settledError.runId } : {}), ...failureTone }])
               // A Claude account at its limit, or refused (TASK-1260): see ChatApp.
               const forKey = sessionKeyRef.current
               void reportAnthropicChatFailure({
@@ -3866,6 +3893,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 const line = describeChatSwap(answer, failureWordsRef.current)
                 if (line && sessionKeyRef.current === forKey) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
               })
+              // A model the provider no longer offers to this account — see ChatApp.
+              const notOffered = fallbackWatchRef.current.fromChatError(settledError?.runId ?? payload.runId, failureContext, payload.errorMessage)
+              if (notOffered) reportModelFallbackFor(notOffered)
             }
           }
         }
@@ -7096,6 +7126,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     await switchChatModel({ model: target.model, label: target.label, provider: target.provider })
   }, [chatModelState, onOpenSettingsSection, openFromChat, switchChatModel])
 
+  // A calm notice's two buttons (ChatNoticeActions): Settings → Providers, and
+  // the one-click move to another provider the box has set up — through the
+  // header picker's own switch, so the chat reconnects exactly as a pick there
+  // does. Stable, so the memoised rows are not drawn again for them.
+  const openProvidersFromNotice = useCallback(() => {
+    if (onOpenSettingsSection) openFromChat(() => onOpenSettingsSection('ai'))
+    else openProvidersSettings()
+  }, [onOpenSettingsSection, openFromChat])
+  // Through a ref: `switchChatModel` changes with the header's state, and a
+  // new callback would draw every row of the transcript again.
+  const switchChatModelRef = useRef(switchChatModel)
+  useEffect(() => { switchChatModelRef.current = switchChatModel }, [switchChatModel])
+  const switchFromNotice = useCallback((target: { model: string; label: string; provider: string | null }) => {
+    void switchChatModelRef.current({ model: target.model, label: target.label, provider: target.provider })
+  }, [])
+
   // Seed (or RE-seed) the Hermes header: which providers this device can
   // actually talk to, what it is configured to use, and its effort level. The
   // per-provider MODEL list is not fetched here — it comes from the scoped hook
@@ -8572,6 +8618,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               // constant, so a note landing on today's reply leaves them alone.
               cloudSpoken={hasAudio ? cloudSpoken : NO_AUDIO_NOTES}
               autoplayBlocked={hasAudio ? autoplayBlocked : NO_AUDIO_NOTES}
+              onOpenProviders={openProvidersFromNotice}
+              onSwitchTo={switchFromNotice}
             />
           );
         })}
