@@ -5,10 +5,10 @@
  * not write — each task becomes a worker with a shell.
  */
 import { describe, expect, it } from "vitest";
-import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
+import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, reopenAfterStop, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
 import { MAX_TEAM_WORKERS, TEAM_TASK_CHARS } from "@/lib/coding-agent";
 import type { TeamRoleModelMap } from "@/lib/coding-agent";
-import { clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, readTaskRole, REPLAN_BRIEF, replanContext, replanTask, teamModelsBrief, withTeamModels, type ReplanContext } from "@/lib/coding-team-planner";
+import { bulkIsDistinct, clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, readTaskRole, REPLAN_BRIEF, replanContext, replanTask, teamModelsBrief, withTeamModels, type ReplanContext } from "@/lib/coding-team-planner";
 
 describe("parsePlan", () => {
   it("reads a bare array, and one fenced in prose", () => {
@@ -74,7 +74,8 @@ describe("parsePlan", () => {
     expect(PLANNER_BRIEF).toMatch(/change NOTHING/);
     expect(PLANNER_BRIEF).toContain(String(MAX_TEAM_TASKS));
     expect(PLANNER_BRIEF).toMatch(/depends_on names EARLIER tasks — listed before it/);
-    // A task's optional role, in the schema and explained: bulk is token-heavy, non-critical work.
+    // A task's optional role, in the schema and explained: bulk is token-heavy, non-critical work —
+    // words `withTeamModels` keeps only on a box where bulk is a real choice.
     expect(PLANNER_BRIEF).toContain('"files_hint": ["path", ...], "role": "worker" | "bulk"}');
     expect(PLANNER_BRIEF).toMatch(/role is optional: "bulk" marks a task that is token-heavy and not critical — scraping, mass data, repetitive edits, long test runs/);
     expect(PLANNER_BRIEF).toMatch(/always for the code the goal depends on/);
@@ -131,16 +132,43 @@ describe("teamModelsBrief — the role/model map the planner and the lead are gi
     expect(teamModelsBrief({ ...MAP, reviewer: entry({ ready: false, problems: [] }) })).toContain("- reviewer: the plan's own model on ClawBox AI, cost not known — UNAVAILABLE: its provider is not ready.");
   });
 
-  it("says when bulk is the workers' own model, the plan's own model where the provider chooses, and nothing without a map", () => {
+  it("says the plan's own model where the provider chooses, and nothing without a map", () => {
     const same = teamModelsBrief({ ...MAP, worker: entry(), bulk: entry() });
     expect(same).toContain("- worker: the plan's own model on ClawBox AI, cost not known");
-    expect(same).toContain("- bulk: the plan's own model on ClawBox AI, cost not known — the workers' own model: marking a task bulk changes nothing on this box.");
+    expect(same).toContain("- bulk: the plan's own model on ClawBox AI, cost not known");
     expect(teamModelsBrief({ ...MAP, bulk: entry({ relativeCost: 0.5, model: "deepseek-v4-flash" }) })).toContain("- bulk: deepseek-v4-flash on ClawBox AI, ~0.5x");
     expect(teamModelsBrief(null)).toBe("");
     expect(teamModelsBrief(undefined)).toBe("");
-    // After the brief, apart from it — and the brief alone when there is no map.
+  });
+
+  it("knows when bulk is a real choice: a different provider, model or effort than the workers'", () => {
+    expect(bulkIsDistinct(MAP)).toBe(true);
+    expect(bulkIsDistinct({ ...MAP, worker: entry(), bulk: entry() })).toBe(false);
+    expect(bulkIsDistinct({ ...MAP, worker: entry(), bulk: entry({ effort: "low" }) })).toBe(true);
+    expect(bulkIsDistinct({ ...MAP, worker: entry(), bulk: entry({ model: "deepseek-v4-flash" }) })).toBe(true);
+    expect(bulkIsDistinct({ ...MAP, worker: entry({ provider: "anthropic", model: "claude-opus-5-5" }), bulk: entry({ provider: "openai", model: "claude-opus-5-5" }) })).toBe(true);
+    expect(bulkIsDistinct(null)).toBe(false);
+    expect(bulkIsDistinct(undefined)).toBe(false);
+  });
+
+  it("gives a brief the models and their costs only where bulk is a real choice, and strips every word of bulk otherwise", () => {
+    // After the brief, apart from it.
     expect(withTeamModels(PLANNER_BRIEF, MAP)).toBe(`${PLANNER_BRIEF}\n\n${teamModelsBrief(MAP)}`);
-    expect(withTeamModels(REPLAN_BRIEF, null)).toBe(REPLAN_BRIEF);
+    // Bulk is the workers' own model (every box that never pinned it), or no map at all:
+    // no cost table, no role field in the schema, no rule about it — the planner's and the lead's alike.
+    for (const map of [{ ...MAP, worker: entry(), bulk: entry() }, null, undefined]) {
+      for (const brief of [PLANNER_BRIEF, REPLAN_BRIEF]) {
+        const text = withTeamModels(brief, map);
+        expect(text).not.toMatch(/bulk/i);
+        expect(text).not.toContain("Team models");
+        expect(text).not.toMatch(/what a token costs|cost not known|~\d+x/);
+        expect(text).toContain('"files_hint": ["path", ...]}');
+        expect(text).toContain("task_description");
+      }
+    }
+    expect(withTeamModels(PLANNER_BRIEF, null)).toBe(withTeamModels(PLANNER_BRIEF, { ...MAP, worker: entry(), bulk: entry() }));
+    // Everything else of the brief is as it was: the strip takes the two bulk strings and nothing beside them.
+    expect(withTeamModels(PLANNER_BRIEF, null)).toBe(PLANNER_BRIEF.replace(', "role": "worker" | "bulk"', "").replace(/ role is optional: "bulk".*?always for the code the goal depends on\./, ""));
   });
 });
 
@@ -151,6 +179,8 @@ describe("replanTask", () => {
     expect(text).toContain("no JSON array");
     expect(text).toContain("Sure! Here is my thinking…");
     expect(text).toContain("ONLY the JSON plan");
+    // It continues the planner's own session: the folder is read, and it is not told to read it again.
+    expect(text).not.toMatch(/Read the folder again/);
     expect(replanTask("Build it", null, "empty")).toContain("You answered nothing.");
     const long = replanTask("g".repeat(TEAM_TASK_CHARS * 2), "y".repeat(TEAM_TASK_CHARS), "r");
     expect(long.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
@@ -566,58 +596,33 @@ function boardOf(tasks: Array<{ status: TaskStatus; verdict?: "accepted" | "reje
 const tell = (board: TeamBoard, from: string, text: string, at: number, to: "lead" | "owner_agent" = "lead") =>
   postMessage(board, worker(from), { from_run_id: from, to, text }, at);
 
-describe("leadShouldRun — a lead run only when there is something to decide", () => {
-  it("skips a batch accepted clean, with no message to the lead and no blocker", () => {
+describe("leadShouldRun — a lead run only when its answer can change the outcome", () => {
+  it("skips a batch accepted clean", () => {
     const board = boardOf([{ status: "complete", verdict: "accepted" }, { status: "complete", verdict: "accepted" }, { status: "pending" }]);
     expect(leadShouldRun(board, ["t1", "t2"], 0)).toMatchObject({ run: false });
   });
 
-  it("runs after a rejection — offered again or for good — and after a failure", () => {
-    for (const [status, verdict] of [["pending", "rejected"], ["rejected", "rejected"], ["failed", undefined]] as const) {
-      const board = boardOf([{ status: "complete", verdict: "accepted" }, { status, verdict }, { status: "pending" }]);
-      expect(leadShouldRun(board, ["t1", "t2"], 0), status).toEqual({ run: true, why: status === "failed" ? "t2 failed" : "t2 was rejected" });
+  it("skips a rejection with a try left, a blocker in a result and a message to the lead: none of them changes what runs next", () => {
+    // t2 rejected and offered again: its next worker is the answer, not a lead turn.
+    expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "pending", verdict: "rejected" }, { status: "pending" }]), ["t1", "t2"], 0)).toMatchObject({ run: false });
+    // A blocker in t1's own words, with t2 still to start.
+    for (const result of ["BLOCKED: t3 needs the API key only the owner has.", "Built the form.\nMISSING: assets/logo.svg — no task makes it."]) {
+      expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted", result }, { status: "pending" }]), ["t1"], 0), result).toMatchObject({ run: false });
     }
-  });
-
-  it("runs for a message to the lead after sinceTs — not for one before it, nor for one to someone else", () => {
+    // A message to the lead waits for the lead's next turn, whenever that is — it calls no turn of its own.
     const board = boardOf([{ status: "complete", verdict: "accepted" }, { status: "pending" }]);
     tell(board, "run-aaaaaaaa", "The spec names a logo.svg nobody makes.", 5_000);
-    expect(leadShouldRun(board, ["t1"], 4_999)).toEqual({ run: true, why: "run-aaaaaaaa sent the lead a message" });
-    expect(leadShouldRun(board, ["t1"], 5_000)).toMatchObject({ run: false });
-    tell(board, "run-bbbbbbbb", "Done with the form.", 6_000, "owner_agent");
-    expect(leadShouldRun(board, ["t1"], 5_000)).toMatchObject({ run: false });
+    expect(leadShouldRun(board, ["t1"], 4_999)).toMatchObject({ run: false });
   });
 
-  it("runs when a worker's result names a blocker, on its first line or any other", () => {
-    for (const result of [
-      "BLOCKED: t3 needs the API key only the owner has.",
-      "cannot find styles.css",
-      "Built the form.\nMISSING: assets/logo.svg — no task makes it.",
-      "Wired app.js.\n\n- Could not run the tests: there is no node here.",
-      "Built the form.\nblocked: waiting on t1's form ids",
-      "Built the form.\n\nNOT COMMITTED: fatal: cannot lock ref",
-      "Built the form.\n\nNO CHANGE: the worker's branch has no commit; redo the task and commit your files.",
-      "Built the form.\n\nMERGE CONFLICT: CONFLICT (content): Merge conflict in index.html",
-      "Built the form.\n**BLOCKED**: t3 needs the owner's API key.",
-      "Built the form.\n\n## Could not finish\n- Wiring the totals: app.js is not there yet.",
-    ]) {
-      const board = boardOf([{ status: "complete", verdict: "accepted", result }, { status: "pending" }]);
-      expect(leadShouldRun(board, ["t1"], 0), result).toMatchObject({ run: true, why: expect.stringMatching(/^t1's result says: /) });
-    }
-    // The words inside a line, or inside a longer word, are not a blocker — and
-    // neither is the report's "could not finish" section with nothing in it.
-    for (const result of [
-      "All done — nothing BLOCKED, nothing MISSING; I cannot see a gap.",
-      "cannot-fail tests pass.",
-      "MISSINGNO is the sprite's name.",
-      "Changed index.html.\nCould not finish: nothing.",
-      "Changed index.html.\n**Could not finish:** None.",
-      "Changed index.html.\n\n## Could not finish\n\nNone — all of it is done.",
-      "Changed index.html.\nCould not finish:\n- n/a",
-    ]) {
-      const fine = boardOf([{ status: "complete", verdict: "accepted", result }, { status: "pending" }]);
-      expect(leadShouldRun(fine, ["t1"], 0), result).toMatchObject({ run: false });
-    }
+  it("runs when a worker of the batch was stopped by the budget and its task is offered again — once, for that stop", () => {
+    const board = boardOf([{ status: "complete", verdict: "accepted" }, { status: "in_progress" }, { status: "pending" }]);
+    reopenAfterStop(board, { kind: "system" }, "t2", "The previous worker was paused for over 60 minutes and nobody resumed it.");
+    const at = board.log[board.log.length - 1].ts;
+    expect(leadShouldRun(board, ["t2"], at - 1)).toEqual({ run: true, why: "t2's worker was stopped by the budget and the task is offered again" });
+    // Not for a stop the lead already saw, and not for a task outside the batch.
+    expect(leadShouldRun(board, ["t2"], at)).toMatchObject({ run: false });
+    expect(leadShouldRun(board, ["t1"], at - 1)).toMatchObject({ run: false });
   });
 
   it("runs when nothing left can start and the goal is not complete — a dependency chain broke", () => {
@@ -626,8 +631,9 @@ describe("leadShouldRun — a lead run only when there is something to decide", 
     expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "failed" }]), ["t1"], 0)).toEqual(broke);
     // No pending task can start: t3 waits on t2, rejected for good.
     expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "rejected", verdict: "rejected" }, { status: "pending", depends_on: ["t2"] }]), ["t1"], 0)).toEqual(broke);
-    // A worker still at work is not a broken chain.
+    // A worker still at work is not a broken chain, and neither is a rejection offered again.
     expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "in_progress" }]), ["t1"], 0)).toMatchObject({ run: false });
+    expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "pending", verdict: "rejected" }]), ["t2"], 0)).toMatchObject({ run: false });
   });
 });
 

@@ -1,10 +1,15 @@
 /**
- * The team's REVIEWER (v1): a read-only run per finished task that answers a
+ * The team's REVIEWER (v1): one run per finished task that answers a
  * verdict — accepted, or rejected with what is wrong — on the worker's
- * merged work. v0's reviewer was a rule (no refusals, no straying); the rule
- * is still applied first and a worker that broke it is rejected without a
- * model, and the model's verdict on a clean run is what the rule could not
- * see: whether the task was actually done.
+ * merged work. On a team with a branch it is a run WITH a shell, in a
+ * throwaway worktree of the merged work, where it can run git and the
+ * task's checks (`SHELL_REVIEWER_BRIEF`); a team working in place (no
+ * branch: a code project) gets a read-only run in the project instead
+ * (`REVIEWER_BRIEF`), since two writers of one team in one folder are
+ * refused (`folderHolder`). v0's reviewer was a rule (no refusals, no
+ * straying); the rule is still applied first and a worker that broke it is
+ * rejected without a model, and the model's verdict on a clean run is what
+ * the rule could not see: whether the task was actually done.
  *
  * The parser is strict the way the planner's is: a verdict that is not what
  * the reviewer said is never repaired into one, and a garbled answer falls
@@ -28,6 +33,7 @@ export interface Verdict {
 const VERDICT_LAST =
   "The verdict object is the LAST thing you write, after your last tool call and any team_message: no summary, sign-off or other prose follows it.";
 
+/** The read-only reviewer: a team working in place, where the project is the only checkout. */
 export const REVIEWER_BRIEF = [
   "You are the REVIEWER of a small coding team working unattended in this folder. One worker has just finished the task quoted below and its work is already merged into this checkout.",
   "Read the changed files (listed) against the task: was it done as asked, does it build or run as the task's own verification says, did it break anything beside it? Change NOTHING: you may not edit, create, delete or run anything that writes.",
@@ -56,66 +62,19 @@ export const FINAL_REVIEWER_BRIEF = [
 export const REVIEWER_NUDGE = 'Answer with the JSON verdict object only, nothing else: {"verdict": "accepted" | "rejected", "notes": string}.';
 
 /**
- * The reviewer offered a task's review ONCE more because the first one ran
- * nothing (`ranNothing`): not read-only, in a throwaway worktree of the merged
- * work, where it can run git and the task's checks and nothing it writes is
- * kept.
+ * The reviewer of a team with a branch: not read-only, in a throwaway
+ * worktree of the merged work, where it can run git and the task's checks
+ * and nothing it writes is kept. A read-only reviewer could only read the
+ * diff, and 9 of 38 live verdicts admitted running nothing ("Static review
+ * only: no git, Biome or Jest could be run" — an acceptance, 2026-10-29).
  */
 export const SHELL_REVIEWER_BRIEF = [
-  "You are the REVIEWER of a small coding team working unattended. One worker has finished the task quoted below. This folder is a throwaway checkout of the team's merged work, and the first review of it could not run git or the tests.",
-  "This time you have a shell: look at what changed with git (log, diff against the base) and run the checks the task's own verification names — its tests, linter, build — before you judge. Do not edit the project's files: nothing written in this folder is kept.",
-  'Answer with ONLY a JSON object, no prose before or after: {"verdict": "accepted" | "rejected", "notes": string}. Say in notes what you ran and what it showed. Reject only for something concrete, saying exactly what the next worker must fix. If you still cannot run them, say so in notes.',
-  "Send NO team_message: the verdict itself is what the lead reads.",
+  "You are the REVIEWER of a small coding team working unattended. One worker has just finished the task quoted below and its work is already merged on the team's branch. This folder is a throwaway checkout of that branch, with a shell.",
+  "Look at what changed with git (log, diff against the base) and run the checks the task's own verification names — its tests, linter, build — before you judge. If they need the project's dependencies, link the project's own node_modules into this checkout (the project's path is in your task: ln -s <project>/node_modules node_modules) or install them here. Do not edit the project's files: nothing written in this folder is kept.",
+  'Answer with ONLY a JSON object, no prose before or after: {"verdict": "accepted" | "rejected", "notes": string}. Say in notes what you ran and what it showed. Reject only for something concrete — a missing piece of the task, a failing check, a wrong file — and say in notes exactly what the next worker must fix; accept with a one-line remark. If a check could not be run, say so in notes and judge on what you could.',
+  "Send NO team_message when your verdict is clear: the verdict itself is what the lead reads. Only when it turns on something you cannot settle — the work needs a sibling's output that is not there, or a decision only the owner can take — may you say so in one short team_message to the owner's assistant, never for progress or acknowledgements, and still answer with the JSON object.",
   VERDICT_LAST,
 ].join(" ");
-
-/** The task text of that second review: why it is asked, then the review as the first one had it. */
-export function shellReviewerTask(review: string, firstNotes: string): string {
-  const text = `The first review of this task ran nothing — it said: ${answerHead(firstNotes)}. This folder is a checkout of the merged work, with a shell: run git and the task's checks yourself.\n\n${review}`;
-  return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
-}
-
-/**
- * The label on a review no reviewer could run git or the tests for: the task
- * accepted on its worker's own test evidence, or sent back for the lack of it.
- */
-export const NOT_REVIEWED = "NOT REVIEWED";
-
-/** How a reviewer says it ran nothing: "Static review only: no git, Biome or Jest could be run." */
-const RAN_NOTHING: readonly RegExp[] = [
-  /\bstatic[- ]review\b/i,
-  /\b(?:could not|couldn't|cannot|can't|can not|unable to|was not able to|wasn't able to|not able to|no way to)\s+(?:be\s+)?(?:run|execute|use|invoke|start)\b[^.;\n]{0,80}?\b(?:git|tests?|jest|vitest|biome|eslint|lint(?:er)?|build|playwright|pytest|npm|bun|suite|commands?|anything|bash|shell)\b/i,
-  /\bno\s+(?:git|bash|shell|tests?|jest|vitest|biome|commands?|tools?)\b[^.;\n]{0,60}?\b(?:could|can|was|were)\s+(?:be\s+)?(?:run|executed|used)\b/i,
-  /\b(?:git|tests?|jest|vitest|biome|lint|build|suite|playwright)\b[^.;\n]{0,40}?\b(?:were|was|could|can)\s*(?:not|n't)\s+(?:be\s+)?(?:run|executed)\b/i,
-];
-
-/**
- * Whether a verdict's notes say its reviewer could not run git or the tests:
- * then it is not a review, whatever it ruled (night run, 2026-10-29: a task was
- * accepted on "Static review only: no git, Biome or Jest could be run").
- */
-export function ranNothing(notes: string): boolean {
-  return RAN_NOTHING.some((re) => re.test(notes));
-}
-
-/** How much of the worker's evidence a NOT REVIEWED acceptance quotes. */
-const EVIDENCE_CHARS = 160;
-const CHECK_PASSED = /\b(?:tests?|specs?|jest|vitest|biome|eslint|lint|tsc|typecheck|type check|build|playwright|pytest|unittest|npm (?:run )?test|bun test|suite|e2e)\b[^\n]{0,120}?\b(?:pass(?:ed|es|ing)?|green|succeed(?:ed|s)?)\b|\b[1-9]\d* (?:passing|passed)\b/i;
-// A failure, a check that never ran ("0 passing", "no tests"), or one only expected to pass.
-const CHECK_FAILED = /\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bnot (?:run|pass)|\bcould ?n[o']t\b|\bcannot\b|\bunable\b|\b0 (?:passing|passed|tests?)\b|\bno tests?\b|\b(?:should|would|will|ought to|expected to)\s+(?:all\s+)?pass/i;
-
-/**
- * The sentence of a worker's report that says its checks ran and passed —
- * "keyboard.spec.js: 3 passing", "Biome, Jest and the build all green" — or
- * null: the only ground a task no reviewer could check may be accepted on.
- */
-export function testEvidence(report: string): string | null {
-  for (const part of report.split(/\n|(?<=[.!])\s+/)) {
-    const line = part.trim();
-    if (CHECK_PASSED.test(line) && !CHECK_FAILED.test(line)) return line.length > EVIDENCE_CHARS ? `${line.slice(0, EVIDENCE_CHARS - 1)}…` : line;
-  }
-  return null;
-}
 
 export const MAX_NOTES_CHARS = 2_000;
 /** How many changed files the reviewer is told about by name; the rest are counted. */
@@ -123,19 +82,31 @@ export const MAX_REVIEW_FILES = 40;
 /** How much of the goal the final reviewer is quoted; the board's digest takes the room after it. */
 const FINAL_GOAL_CHARS = 1_200;
 
+/** Where a shell reviewer stands: its throwaway checkout, the branch it holds, and the project it was cut from. */
+export interface ReviewCheckout {
+  folder: string;
+  project: string;
+  branch: string;
+  base: string | null;
+}
+
 /**
- * The reviewer's task text: the task, what changed, which of it lies outside
- * the task's hint (`strayed` — the reviewer's to judge, not a rejection by
- * rule: a test or a helper beside the task's files is usually the task's
- * own), what the worker said — inside TEAM_TASK_CHARS.
+ * The reviewer's task text: the task, where it stands when it has a shell
+ * (`checkout`: the throwaway folder, the branch, the project whose
+ * node_modules it may link), what changed, which of it lies outside the
+ * task's hint (`strayed` — the reviewer's to judge, not a rejection by rule:
+ * a test or a helper beside the task's files is usually the task's own),
+ * what the worker said — inside TEAM_TASK_CHARS.
  */
-export function reviewerTask(input: { taskId: string; description: string; files: string[]; strayed?: string[]; report: string; goal: string }): string {
+export function reviewerTask(input: { taskId: string; description: string; files: string[]; strayed?: string[]; report: string; goal: string; checkout?: ReviewCheckout | null }): string {
   const named = input.files.slice(0, MAX_REVIEW_FILES);
   const more = input.files.length - named.length;
   const strayed = (input.strayed ?? []).slice(0, MAX_REVIEW_FILES);
+  const checkout = input.checkout;
   const text = [
     `Review task ${input.taskId}: ${input.description}`,
     `Team goal, for context: ${input.goal}`,
+    checkout ? `Your folder: ${checkout.folder} — a throwaway checkout of the team's branch ${checkout.branch}${checkout.base ? `, forked from ${checkout.base}` : ""}. The project itself is at ${checkout.project}; if the checks need its dependencies, link them (ln -s ${checkout.project}/node_modules node_modules) or install them here.` : "",
     input.files.length ? `Files the worker changed:\n${named.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- … and ${more} more` : ""}` : "The worker's branch changed no files.",
     strayed.length ? `Files outside the task's hint (judge whether they belong to the task — a test or a helper beside its files usually does; a change to another task's files does not):\n${strayed.map((f) => `- ${f}`).join("\n")}` : "",
     `The worker's report:\n${input.report.trim() || "(none)"}`,

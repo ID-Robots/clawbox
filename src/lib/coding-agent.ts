@@ -979,7 +979,7 @@ export const MAX_TASK_CHARS = 4_000;
 export const MAX_BOX_TASK_CHARS = 32_000;
 /**
  * The ceiling the coding TEAM's own task texts are built to — a worker's, a
- * reviewer's, the lead's (`workerTask`, `reviewerTask`, `shellReviewerTask`,
+ * reviewer's, the lead's (`workerTask`, `reviewerTask`,
  * `finalReviewerTask`, `leadTask`). Box-written like a review round, so
  * MAX_TASK_CHARS does not apply; built to THIS rather than MAX_BOX_TASK_CHARS
  * because the text is a brief, not a log. At the typed 4,000 a team's

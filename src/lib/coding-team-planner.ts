@@ -15,14 +15,19 @@
  *
  * The same planner comes back as the team's LEAD while the team runs, when
  * the owner's `coding_team_dynamic` switch is on: after workers settle — one
- * turn for every task that settled since its last, and only when there is
- * something to decide (`leadShouldRun`) — one short read-only run may add a
- * task or retire one still pending. Its answer is read here too, as
- * strictly, and against the board as it stands.
+ * turn for every task that settled since its last, and only when it can
+ * change the outcome (`leadShouldRun`: nothing left can start and the goal
+ * is not complete, or a worker was stopped by the team's budget) — one short
+ * read-only run may add a task or retire one still pending. Its answer is
+ * read here too, as strictly, and against the board as it stands.
  *
  * A task may be marked `"role": "bulk"` — token-heavy, not critical — so its
- * worker starts on the bulk role's model; the planner and the lead are told
- * what every role runs on and roughly what it costs (`teamModelsBrief`).
+ * worker starts on the bulk role's model. The planner and the lead hear of
+ * bulk at all, and of what every role runs on and roughly what it costs
+ * (`teamModelsBrief`), only where bulk resolves to a different provider,
+ * model or effort than the workers' (`bulkIsDistinct`, in `withTeamModels`):
+ * on a box that never pinned it, marking a task bulk changes nothing, and
+ * the words were ~300 characters of every planner's brief for nothing.
  */
 
 import { MAX_TEAM_WORKERS, TEAM_TASK_CHARS, type TeamRoleModelMap } from "@/lib/coding-agent";
@@ -41,10 +46,10 @@ import {
   MAX_TEAM_TASKS,
   normalizeRepoMap,
   REVIEW_MODES,
-  type LogEntry,
   type RepoMap,
   type ReviewMode,
   type TaskRole,
+  type LogEntry,
   type TaskStatus,
   type TeamBoard,
   type TeamShape,
@@ -62,6 +67,14 @@ export interface PlannedTask {
   role?: TaskRole;
 }
 
+/**
+ * The bulk vocabulary of the briefs — the schema's role field and its rule —
+ * each a whole string, so `withTeamModels` can take them out again on a box
+ * where bulk is the workers' own model.
+ */
+const BULK_FIELD = ', "role": "worker" | "bulk"';
+const BULK_RULE = 'role is optional: "bulk" marks a task that is token-heavy and not critical — scraping, mass data, repetitive edits, long test runs — so its worker may run on a cheaper model; leave it out (or say "worker") for every other task, and always for the code the goal depends on.';
+
 /** How a task is written: the planner's rules, and the lead's when it adds one. */
 const TASK_RULES = [
   "Each task_description must stand on its own: say what to build or change, in which files, how the worker verifies it, and every constraint of the goal that bears on it (what to leave alone, whether to commit, what not to open) — it is the whole brief that worker gets. A worker sees only the HEAD of a long goal after its own task, so a rule that lives only in the goal's tail never reaches it.",
@@ -69,13 +82,13 @@ const TASK_RULES = [
   "A task that verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer: its worker starts from the work merged so far, and a task it does not wait for may not be there yet.",
   "files_hint lists the files the task owns — files or folders; a worker may add tests or helpers beside them, and the reviewer is told which files lie outside the hint.",
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
-  'role is optional: "bulk" marks a task that is token-heavy and not critical — scraping, mass data, repetitive edits, long test runs — so its worker may run on a cheaper model; leave it out (or say "worker") for every other task, and always for the code the goal depends on.',
+  BULK_RULE,
 ];
 
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
-  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"}]}. The rationale is at most ${MAX_RATIONALE_CHARS} characters; longer text is cut.`,
+  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]${BULK_FIELD}}]}. The rationale is at most ${MAX_RATIONALE_CHARS} characters; longer text is cut.`,
   `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",
   ...TASK_RULES,
@@ -125,8 +138,8 @@ function costWords(cost: number | null): string {
  * line per role, for the planner's brief and the lead's: it weighs which tasks
  * to mark bulk by it. A role whose provider cannot run right now is marked
  * UNAVAILABLE with the reason; for bulk that means a bulk task runs as an
- * ordinary worker. Empty without a map (it could not be read): the brief is
- * then what it was before there were role models.
+ * ordinary worker. Empty without a map (it could not be read). Pure
+ * wording: whether a brief carries it at all is `withTeamModels`'s call.
  */
 export function teamModelsBrief(map: TeamRoleModelMap | null | undefined): string {
   if (!map) return "";
@@ -137,9 +150,7 @@ export function teamModelsBrief(map: TeamRoleModelMap | null | undefined): strin
       const why = r.problems.map((p) => p.trim()).filter(Boolean).join(" ") || "its provider is not ready.";
       return `${head} — UNAVAILABLE: ${why}${role === "bulk" ? " A task marked bulk runs as an ordinary worker until it is." : ""}`;
     }
-    const worker = map.worker;
-    const same = role === "bulk" && worker && worker.provider === r.provider && worker.model === r.model;
-    return same ? `${head} — the workers' own model: marking a task bulk changes nothing on this box.` : head;
+    return head;
   });
   if (!lines.length) return "";
   return [
@@ -149,8 +160,27 @@ export function teamModelsBrief(map: TeamRoleModelMap | null | undefined): strin
   ].join("\n");
 }
 
-/** A role's brief with the team's models after it, when there is a map to say. */
+/**
+ * Whether marking a task bulk would change anything on this box: the bulk
+ * role resolves to a different provider, model or effort than the workers'.
+ * False without a map (it could not be read), and on every box that never
+ * pinned bulk — there a bulk task IS a worker's task (`ROLE_AUTO_FOLLOWS`).
+ */
+export function bulkIsDistinct(map: TeamRoleModelMap | null | undefined): boolean {
+  const worker = map?.worker;
+  const bulk = map?.bulk;
+  if (!worker || !bulk) return false;
+  return worker.provider !== bulk.provider || worker.model !== bulk.model || worker.effort !== bulk.effort;
+}
+
+/**
+ * A role's brief as the box warrants it: with the team's models and their
+ * costs after it where bulk is a real choice (`bulkIsDistinct`), and
+ * without any word of bulk — the schema's role field, its rule, the cost
+ * table — where it is not. The one place that decides.
+ */
 export function withTeamModels(brief: string, map: TeamRoleModelMap | null | undefined): string {
+  if (!bulkIsDistinct(map)) return brief.split(BULK_FIELD).join("").replace(` ${BULK_RULE}`, "");
   const models = teamModelsBrief(map);
   return models ? `${brief}\n\n${models}` : brief;
 }
@@ -161,8 +191,9 @@ const REPLAN_QUOTE_CHARS = 1_500;
 /**
  * The second ask, when the planner's final message held no plan — a page of
  * prose about the tasks, a fenced list, a question. Seen on the box: a
- * 43-turn planner that wrote its plan as headings and never the array. The
- * folder is already read, so this run is asked for ONE thing: the plan.
+ * 43-turn planner that wrote its plan as headings and never the array. It
+ * continues the planner's own session (`resumeRunId`), where the folder is
+ * already read, so it asks for ONE thing: the plan.
  */
 export function replanTask(goal: string, previous: string | null | undefined, reason: string): string {
   const quoted = (previous ?? "").trim();
@@ -170,7 +201,7 @@ export function replanTask(goal: string, previous: string | null | undefined, re
     `Goal: ${goal}`,
     `Your previous answer to this goal was not a plan the team can read (${reason}).`,
     quoted ? `This is what you answered:\n${quoted.length > REPLAN_QUOTE_CHARS ? `${quoted.slice(0, REPLAN_QUOTE_CHARS - 1)}…` : quoted}` : "You answered nothing.",
-    "Answer again with ONLY the JSON plan described in your brief — the object with its shape and its tasks array — no prose before or after it. Read the folder again only if you must.",
+    "Answer again with ONLY the JSON plan described in your brief — the object with its shape and its tasks array — no prose before or after it.",
   ].join("\n\n");
   return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
@@ -414,7 +445,7 @@ export const REPLAN_BRIEF = [
   "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one or more workers have just finished their tasks. You decide ONE thing: does the rest of the plan still fit the goal?",
   "Read what you need, but change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"add": [task, ...], "retire": ["t4", ...], "note": string}. Every field is optional; {} means the plan stands, and that is the usual answer — change the plan only for a concrete reason.',
-  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"}, for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
+  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]${BULK_FIELD}}, for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
   `retire: tasks still PENDING that the goal no longer needs — a finished task already did that work, or it turned out to be unnecessary. At most ${MAX_LEAD_RETIRES} over the whole team; a task a worker has started cannot be retired.`,
   `note: why, in one line of at most ${MAX_LEAD_NOTE_CHARS} characters, for the team's log.`,
   "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is listed in full under \"Messages to the lead since your last turn:\", and older messages are among the latest lines of the board you are given: weigh them, and act on them only through add or retire.",
@@ -453,64 +484,22 @@ export function leadRoom(ctx: ReplanContext): { adds: number; retires: number; r
 }
 
 /**
- * A line of a worker's result that says it could not do its part: a
- * blocker in its own words, or the refusal the orchestrator appends when
- * the work could not be committed or merged, or never reached the branch.
- * Read at the start of a line, after any list or emphasis marks, as a whole
- * word.
- */
-const BLOCKER_LINE = /^(?:(?:BLOCKED|MISSING|[Cc]annot|[Cc]ould not|NOT COMMITTED|NO CHANGE|MERGE CONFLICT|MERGE FAILED)(?![\w-])|[Bb]locked:)/;
-/** What a report section with nothing in it says: "Could not finish: nothing." */
-const NOTHING = /^(?:none|nothing|n\/a)\b/i;
-
-const bare = (line: string) => line.replace(/^[\s>*_#-]+/, "");
-
-function blockerLine(result: string | null): string | null {
-  if (!result) return null;
-  const lines = result.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = bare(lines[i]);
-    if (!BLOCKER_LINE.test(line)) continue;
-    // A worker's final message is asked for "anything you could not finish",
-    // and one with nothing to say still writes the words: what the line says
-    // after its colon — or, for a heading, on the next line — decides.
-    const colon = line.indexOf(":");
-    const after = colon < 0 ? "" : line.slice(colon + 1).replace(/^[\s*_]+/, "").trim();
-    const heading = /^\s*#/.test(lines[i]) || (colon >= 0 && !after);
-    const said = after || (heading ? bare(lines.slice(i + 1).find((l) => l.trim()) ?? "") : "");
-    if (!NOTHING.test(said)) return line;
-  }
-  return null;
-}
-
-/** A `team_message` a run sent to the lead after `sinceTs`. */
-function isMessageToLead(e: LogEntry, sinceTs: number): boolean {
-  return e.type === "message" && e.payload?.to === "lead" && typeof e.payload.text === "string" && e.ts > sinceTs;
-}
-
-/**
  * Whether the lead is worth a run for `batch` — the tasks whose workers
- * settled since its last turn. An accepted, clean task with nothing said to
- * the lead leaves the plan as it was, and the lead's usual answer to it is
- * `{}`: ~10–45k tokens and a stall of every new worker, for nothing. It runs
- * when a task of the batch was rejected or failed; when a worker's result
- * names a blocker; when a run sent the lead a message after `sinceTs` (its
- * last turn, or 0: since the team started); or when nothing left can start
- * and the goal is not complete — a dependency chain broke, and only a new
- * task can mend it.
+ * settled since its last turn (`sinceTs`, or 0: since the team started). Only
+ * where its answer can change the outcome: when a worker of the batch was
+ * stopped by the team's budget (log `budget` after `sinceTs`) and its task is
+ * offered again — is it still worth a worker? — or when nothing left can
+ * start and the goal is not complete: a dependency chain broke, and only a
+ * new task can mend it. Not for a rejection with a try left, a blocker in a
+ * result or a message to the lead: on 28 live turns the plan stood every
+ * time (8 of 9 retirements undid rule rejections), each turn 10–45k tokens
+ * ahead of the next worker.
  */
 export function leadShouldRun(board: TeamBoard, batch: readonly string[], sinceTs: number): { run: boolean; why: string } {
-  const settled = board.tasks.filter((t) => batch.includes(t.task_id));
-  const bad = settled.find((t) => t.status === "failed" || t.status === "rejected" || t.review?.verdict === "rejected");
-  if (bad) return { run: true, why: `${bad.task_id} ${bad.status === "failed" ? "failed" : "was rejected"}` };
-  for (const t of settled) {
-    const line = blockerLine(t.result);
-    if (line) return { run: true, why: `${t.task_id}'s result says: ${clip(line, 160)}` };
-  }
-  const message = board.log.find((e) => isMessageToLead(e, sinceTs));
-  if (message) return { run: true, why: `${String(message.payload?.from)} sent the lead a message` };
+  const stopped = board.log.find((e) => e.type === "budget" && e.task_id !== undefined && batch.includes(e.task_id) && e.ts > sinceTs);
+  if (stopped) return { run: true, why: `${stopped.task_id}'s worker was stopped by the budget and the task is offered again` };
   if (isExhausted(board) && !allComplete(board)) return { run: true, why: "nothing left can start, and the goal is not complete" };
-  return { run: false, why: "every task settled clean and accepted; no blocker, no message to the lead" };
+  return { run: false, why: "nothing a lead could change: the work goes on" };
 }
 
 /** How much of a settled task's own result the lead is shown — alone; several share the room, never under the floor — and of the goal. */
@@ -530,6 +519,11 @@ const RESULT_LABEL = "Its worker's result:\n";
  * LEAD_INBOX_MESSAGE_CHARS, where the digest keeps a line of the last few
  * log entries. Over `maxChars` the OLDEST go, and a line says how many.
  */
+/** A `team_message` a run sent to the lead after `sinceTs`. */
+function isMessageToLead(e: LogEntry, sinceTs: number): boolean {
+  return e.type === "message" && e.payload?.to === "lead" && typeof e.payload.text === "string" && e.ts > sinceTs;
+}
+
 function leadInbox(board: TeamBoard, maxChars: number): string {
   if (maxChars <= INBOX_LABEL.length + 1) return "";
   // `?? 0`: a board built before the inbox has no lastLeadAt, and every message is new to its lead.

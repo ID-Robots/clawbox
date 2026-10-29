@@ -122,7 +122,7 @@ import {
 import { buildCommitMessage } from "@/lib/coding-git";
 import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
-import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, NOT_REVIEWED, parseVerdict, ranNothing, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, shellReviewerTask, testEvidence, type Verdict } from "@/lib/coding-team-reviewer";
+import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, SUITE_GATE_TIMEOUT_MS, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { ciFailureLine, ciFixNotes, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, readPullRequest } from "@/lib/coding-pr";
@@ -213,7 +213,7 @@ export const WORKER_BRIEF = [
   "Your files count only once they are committed on your branch: the runner commits what you changed when you finish, and a `git add` and `git commit` of your files in your own folder before your final message is welcome.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
   "Message a SIBLING with team_message (to=\"sibling\", its run id is in your task text under 'Teammates at work now') when your task needs a file, a name, a schema or an API shape that a teammate owns and that is not in your folder yet: ask for exactly that, in one message. If a teammate's message asks you for such a thing, answer it once with the exact answer (file name, field names, function signature) — that is the one reply that is not an acknowledgement.",
-  "Message the LEAD (to=\"lead\") when a task on the board is wrong for the goal: it is already done, it duplicates yours, or it cannot be done as written.",
+  "Message the LEAD (to=\"lead\") when a task on the board is wrong for the goal: it is already done, it duplicates yours, or it cannot be done as written. The lead never replies and reads your message only at its next turn, so say it once, whole, and go on with your task.",
   "Message the owner's assistant (to=\"owner_agent\") only for a decision only the owner can take.",
   "Never send a team_message for progress reports — what you did belongs in your final message — and never to acknowledge a message a teammate sent you.",
 ].join(" ");
@@ -812,6 +812,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   }
   let answer = planned.resultText ?? planned.summary;
   let plan = parsePlan(answer);
+  // The planner run whose answer is being corrected: the re-ask continues ITS
+  // session, which has the folder read already.
+  let lastPlanner = planner.id;
   // More than one correction, because one was not enough. On the box, a planner
   // told only to "shorten" a 2835-character description answered 3013 the second
   // time and the board died with no task ever posted — twice, on two devices.
@@ -825,16 +828,23 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     // an alert, so a team that needed another ask says so.
     bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON plan (attempt ${attempt} of ${MAX_PLANNER_ATTEMPTS}).` });
     const reask = replanTask(board.goal, answer, plan.reason);
-    const again = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
-      task: reask,
-      projectId: board.projectId,
-      directory: board.directory,
-      source,
-      team: plannerRole,
-      readOnly: true,
-      extraBrief: brief(),
-    }));
+    // In the planner's own session (`resumeRunId`): the folder is read, and
+    // the ask is for the plan alone. A session the runner cannot continue (it
+    // never opened one, the record is gone) is a fresh read-only run instead,
+    // the way the first was — never a lost attempt.
+    const fresh = { task: reask, projectId: board.projectId, directory: board.directory, source, team: plannerRole, readOnly: true as const, extraBrief: brief() };
+    const resumed = { task: reask, resumeRunId: lastPlanner, source, team: plannerRole, readOnly: true as const, extraBrief: brief() };
+    const again = await startWhenRoom(team, plannerRole, () => 0, async () => {
+      try {
+        return await startRun(resumed);
+      } catch (err) {
+        if (!(err instanceof CodingAgentError) || err.wait) throw err;
+        bus.send(SYSTEM, { type: "note", text: `The planner's session (${lastPlanner}) could not be continued (${firstLine(err.message, 200)}); asking in a fresh run.` });
+        return startRun(fresh);
+      }
+    });
     if (!again) return;
+    lastPlanner = again.id;
     board.runs.push(castRef(again, "planner", null));
     saveBoard(board);
     const replanned = await settle(team, again.id);
@@ -947,15 +957,15 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
         saveBoard(board);
         break;
       }
-      // The lead, before anything new starts: a pending task it retires must
-      // not be handed to a worker while it is still deciding. The workers
-      // already going go on meanwhile — and every one that settles while it
-      // thinks waits for ONE next turn, not a turn each.
+      // The lead, before anything new starts — and only when it can change
+      // the outcome (`leadShouldRun`: nothing left can start, or a worker was
+      // stopped by the budget): a pending task it retires must not be handed
+      // to a worker while it is still deciding. The workers already going go
+      // on meanwhile, every one that settles while it thinks waits for ONE
+      // next turn, not a turn each, and dispatch follows in this same round
+      // rather than behind another turn.
       const settledTasks = leadAfter.splice(0);
-      if (settledTasks.length) {
-        await leadTurn(team, settledTasks, source, () => new Set(inFlight.keys()), () => starting.size);
-        continue;
-      }
+      if (settledTasks.length) await leadTurn(team, settledTasks, source, () => new Set(inFlight.keys()), () => starting.size);
       const battery = await onBatteryPower();
       if (battery !== onBattery && plannedSlots > 1) {
         bus.send(SYSTEM, { type: "note", text: battery ? "The box is on battery: one worker at a time until it is plugged in again." : "The box is plugged in again: workers run side by side as planned." });
@@ -1451,12 +1461,13 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   }
 
   // The review loop: the rule first (v0 — a refused write is a rejection
-  // without a model), then the REVIEWER, a read-only run on the merged work
-  // that answers a verdict, told which files lie outside the task's hint. A
-  // review that was not done is not an acceptance: a garbled answer falls
-  // back to the rule with an alert. The planner's shape may ask for no
-  // reviewer here: `final` has one look at the merged whole at the end,
-  // `none` trusts the rule alone.
+  // without a model), then the REVIEWER, one run on the merged work that
+  // answers a verdict, told which files lie outside the task's hint — with a
+  // shell in a throwaway checkout of the team's branch, or read-only in the
+  // project when the team works in place. A review that was not done is not
+  // an acceptance: a garbled answer falls back to the rule with an alert. The
+  // planner's shape may ask for no reviewer here: `final` has one look at the
+  // merged whole at the end, `none` trusts the rule alone.
   if (ok) {
     const clean = settled && !refusedWrite;
     if (!clean) {
@@ -1485,6 +1496,15 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
 /**
  * The reviewer's run and its verdict; the rule's acceptance when the run cannot say.
  *
+ * On a team with a branch the reviewer has a SHELL: a run that is not
+ * read-only, in a throwaway worktree of the team's branch as it stands
+ * (`review-<task>`), where it can run git and the task's checks — removed
+ * afterwards with its branch, nothing of it merged. It is a team run that
+ * writes, so `TEAM_MERGE_DENYLIST` and the hook's merge guard apply to it as
+ * to a worker. A team working in place has one checkout, the project, and
+ * its reviewer reads it read-only beside the siblings (`folderHolder`). A
+ * checkout that cannot be made is "no reviewer": an alert, accepted by rule.
+ *
  * A reviewer refused for ROOM — the team's slots are full, the memory guard
  * says not yet — WAITS for it, asking again every few seconds up to the run
  * budget: room frees as a sibling settles. Accepting by rule there skipped
@@ -1503,26 +1523,56 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
 async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string; strayed: string[] }, starting: ReadonlySet<string>): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
   const { board, bus } = team;
   const role: RunTeam = { id: board.id, role: "reviewer", taskId: task.task_id };
-  // `resumeOf` names the reviewer run whose own session a re-ask continues
-  // (verdictOf); `shell` is the review offered once more with a shell, in a
-  // throwaway worktree of the merged work, after a first one that ran nothing.
-  const start = async (resumeOf: string | null, shell?: { folder: string; said: string }): Promise<CodingRun | { reason: string; wait: boolean }> => {
+  const noReviewer = (reason: string): { verdict: "accepted"; notes: string } => {
+    team.uncountedAlerts += 1;
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No reviewer for ${task.task_id}: ${reason}` });
+    return { verdict: "accepted", notes: "Accepted by rule: the reviewer could not start." };
+  };
+  // The shell reviewer's throwaway worktree of the team's branch, or null in place.
+  let shell: ReviewCheckout | null = null;
+  if (board.branch) {
+    const made = await addWorkerWorktree(board.directory, board.id, `review-${task.task_id}`, task.attempts);
+    if (!made.ok) return noReviewer(`no checkout for the review: ${firstLine(made.detail, 200)}`);
+    shell = { folder: made.path, project: board.directory, branch: board.branch, base: board.base };
+    try {
+      return await reviewIn(team, task, source, work, starting, role, shell, noReviewer);
+    } finally {
+      await removeWorktree(board.directory, made.path, { dropBranch: made.branch });
+    }
+  }
+  return reviewIn(team, task, source, work, starting, role, null, noReviewer);
+}
+
+/** `reviewTask`'s run, in the shell reviewer's checkout (`shell`) or, in place, the project. */
+async function reviewIn(
+  team: LiveTeam,
+  task: TeamTask,
+  source: CodingRunSource,
+  work: { files: string[]; report: string; strayed: string[] },
+  starting: ReadonlySet<string>,
+  role: RunTeam,
+  shell: ReviewCheckout | null,
+  noReviewer: (reason: string) => { verdict: "accepted"; notes: string },
+): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
+  const { board, bus } = team;
+  // `resumeOf` names the reviewer run whose own session a re-ask continues (verdictOf).
+  const start = async (resumeOf: string | null): Promise<CodingRun | { reason: string; wait: boolean }> => {
     // The orchestrator's own look first, as for a worker; the spawn asks
     // again, and a refusal there that is still about room is the same wait.
     // The reservations are read on every ask: a launch lands while we wait.
     const room = await teamSpawnSlot(role, starting.size);
     if (!room.ok) return room;
-    // The reviewer works in the project, on the merged work: a path the worker
-    // wrote in its worktree — gone by now — is said in the project instead.
+    // The reviewer works on the merged work, in its checkout or the project:
+    // a path the worker wrote in its worktree — gone by now — is said there.
     const here = (text: string) => toFolderPaths(text, board.directory, shell?.folder ?? board.directory);
-    const review = () => reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, strayed: work.strayed, report: here(work.report), goal: board.goal });
+    const review = () => reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, strayed: work.strayed, report: here(work.report), goal: board.goal, checkout: shell });
     const brief = shell ? withRepoMap(SHELL_REVIEWER_BRIEF, board, shell.folder) : withRepoMap(REVIEWER_BRIEF, board, null);
     const readOnly = shell ? {} : { readOnly: true };
     try {
       return await startRun(resumeOf
         ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, ...readOnly, extraBrief: brief }
         : {
-          task: shell ? shellReviewerTask(review(), shell.said) : review(),
+          task: review(),
           projectId: shell ? null : board.projectId,
           directory: shell?.folder ?? board.directory,
           source,
@@ -1535,12 +1585,12 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     }
   };
   // A started run, or why none could start; null once the team is stopped.
-  const launch = async (resumeOf: string | null, shell?: { folder: string; said: string }): Promise<CodingRun | { reason: string } | null> => {
+  const launch = async (resumeOf: string | null): Promise<CodingRun | { reason: string } | null> => {
     const waitingSince = Date.now();
     try {
       for (;;) {
         if (team.stopRequested) return null;
-        const started = await start(resumeOf, shell);
+        const started = await start(resumeOf);
         if ("id" in started) return started;
         if (!started.wait) return { reason: started.reason };
         if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
@@ -1552,11 +1602,6 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     } finally {
       clearSlotWait(team, role);
     }
-  };
-  const noReviewer = (reason: string): { verdict: "accepted"; notes: string } => {
-    team.uncountedAlerts += 1;
-    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No reviewer for ${task.task_id}: ${reason}` });
-    return { verdict: "accepted", notes: "Accepted by rule: the reviewer could not start." };
   };
 
   const run = await launch(null);
@@ -1582,74 +1627,7 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: answer.alert });
     return { verdict: "accepted", notes: `Accepted by rule: ${answer.reason}` };
   }
-  // A verdict that says it ran nothing is not a review (night run, 2026-10-29:
-  // "Static review only: no git, Biome or Jest could be run" was an
-  // acceptance). Offered ONCE more with a shell, in a throwaway worktree of the
-  // merged work; nothing run then either, a rejection stands, and an acceptance
-  // needs the worker's own test evidence — labelled NOT REVIEWED — or the task
-  // goes back.
-  const first = answer.verdict;
-  if (!ranNothing(first.notes)) return first;
-  bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Not reviewed: the reviewer of ${task.task_id} (${run.id}) could not run git or the tests — it said ${answerHead(first.notes)}.${board.branch ? " Offering the review once more, with a shell in a checkout of the merged work." : ""}` });
-  const second = board.branch ? await reviewWithShell(team, task, first.notes, launch) : null;
-  if (team.stopRequested) return { verdict: "accepted", notes: "The team was stopped during the review." };
-  if (!underReview(board, task.task_id)) return dropped;
-  if (second && !ranNothing(second.notes)) return second;
-  // A rejection said what is wrong, run or not: the worker's own word never overrules it.
-  const last = second ?? first;
-  if (last.verdict === "rejected") return { verdict: "rejected", notes: `${NOT_REVIEWED}: ${last.notes}` };
-  const evidence = testEvidence(work.report);
-  if (evidence) return { verdict: "accepted", notes: `${NOT_REVIEWED}: accepted on the worker's own test evidence ("${evidence}"); no reviewer could run git or the tests.` };
-  return { verdict: "rejected", notes: `${NOT_REVIEWED}: no reviewer could run git or the tests, and the worker's report shows no test run. Do the task again, run its tests and quote their result in your final message.` };
-}
-
-/**
- * The review offered once more, WITH a shell: a reviewer run that is not
- * read-only, in a throwaway worktree of the team's branch as it stands, where
- * it can run git and the task's checks — removed afterwards with its branch,
- * nothing of it merged. Its verdict, or null when it could not be had (said on
- * the board) or the team was stopped.
- */
-async function reviewWithShell(
-  team: LiveTeam,
-  task: TeamTask,
-  said: string,
-  launch: (resumeOf: string | null, shell?: { folder: string; said: string }) => Promise<CodingRun | { reason: string } | null>,
-): Promise<Verdict | null> {
-  const { board, bus } = team;
-  const made = await addWorkerWorktree(board.directory, board.id, `review-${task.task_id}`, task.attempts);
-  if (!made.ok) {
-    bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `No checkout for the second review of ${task.task_id}: ${firstLine(made.detail, 200)}` });
-    return null;
-  }
-  const shell = { folder: made.path, said };
-  try {
-    const run = await launch(null, shell);
-    if (run === null) return null;
-    if (!("id" in run)) {
-      bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `The second review of ${task.task_id} could not start: ${firstLine(run.reason, 200)}` });
-      return null;
-    }
-    const row = board.tasks.find((t) => t.task_id === task.task_id);
-    if (row) row.reviewRunId = run.id;
-    board.runs.push(castRef(run, "reviewer", task.task_id));
-    saveBoard(board);
-    const settled = await settle(team, run.id);
-    if (team.stopRequested || !underReview(board, task.task_id)) return null;
-    if (settled?.status !== "completed") {
-      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The second reviewer of ${task.task_id} (${run.id}) ended ${settled?.status ?? "without a record"}.` });
-      return null;
-    }
-    const answer = await verdictOf(team, settled, `The second reviewer of ${task.task_id}`, task.task_id, (id) => launch(id, shell));
-    if (answer === null) return null;
-    if (!answer.ok) {
-      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: answer.alert });
-      return null;
-    }
-    return answer.verdict;
-  } finally {
-    await removeWorktree(board.directory, made.path, { dropBranch: made.branch });
-  }
+  return answer.verdict;
 }
 
 /**
