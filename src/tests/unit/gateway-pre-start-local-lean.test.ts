@@ -36,7 +36,9 @@ function block(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   return [
     section(src, "# ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ", "# ── The protected-path deny hook "),
-    section(src, "# ── Lean mode for the on-device model ", "# ── The Prime Radiant core block "),
+    // Up to the NEXT section heading, whichever it is: naming the section that
+    // follows today breaks this test the day that section moves or goes.
+    section(src, "# ── Lean mode for the on-device model ", "\n# ── "),
   ].join("\n");
 }
 
