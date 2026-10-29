@@ -279,6 +279,13 @@ export interface TeamTask {
    * (MAX_TEAM_CI_ROUNDS), never against the task's two tries.
    */
   ciReoffers: number;
+  /**
+   * How many of its `attempts` the team stopped itself (`reopenAfterStop`):
+   * its worker was held — paused — past RUN_BUDGET_MS with nobody resuming
+   * it. Offered once more, never against the task's two tries; a board from
+   * before the field reads as 0.
+   */
+  budgetReoffers: number;
   created_at: number;
   updated_at: number;
   /**
@@ -301,8 +308,8 @@ export interface TaskHold {
 }
 
 /** A task's attempts that count toward its two tries — its holds are not its own failures. */
-export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number }): number {
-  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0));
+export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number; budgetReoffers?: number }): number {
+  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0) - (task.budgetReoffers ?? 0));
 }
 
 /**
@@ -405,7 +412,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "pr" | "repo_map";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "budget" | "pr" | "repo_map";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -798,6 +805,7 @@ function normalizeTask(raw: unknown): TeamTask | null {
     holds: typeof t.holds === "number" && Number.isInteger(t.holds) && t.holds >= 0 ? t.holds : 0,
     hold: normalizeHold(t.hold),
     ciReoffers: typeof t.ciReoffers === "number" && Number.isInteger(t.ciReoffers) && t.ciReoffers >= 0 ? t.ciReoffers : 0,
+    budgetReoffers: typeof t.budgetReoffers === "number" && Number.isInteger(t.budgetReoffers) && t.budgetReoffers >= 0 ? t.budgetReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
     // Only a bulk task carries it; absent is a worker's, as on a board from before.
@@ -891,8 +899,13 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
   return board;
 }
 
-/** The Planner sizes the team: how many workers side by side, and how the work is reviewed. Nobody else may, and only once. */
-export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): TeamShape {
+/**
+ * The Planner sizes the team: how many workers side by side, and how the work
+ * is reviewed. Nobody else may, and only once. `boxWidth` is how many runs the
+ * box lets go at once (the owner's Settings): the log line says so when the
+ * shape asks for more than that, since the extra workers only wait for a seat.
+ */
+export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape, boxWidth?: number): TeamShape {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "shape", `Only the planner shapes the team; ${describeActor(actor)} may not.`);
   if (board.shape) throw new Error("The team already has its shape.");
   if (!Number.isInteger(shape.parallelism) || shape.parallelism < 1) throw new Error("A team's parallelism is a whole number of at least 1.");
@@ -905,7 +918,7 @@ export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): Team
     ts: now,
     actor,
     type: "shape",
-    message: `Team shaped: ${shape.parallelism} side by side, review ${shape.review}${rationale ? ` — ${firstLine(rationale, MAX_RATIONALE_CHARS)}` : ""}`,
+    message: `Team shaped: ${shape.parallelism} side by side${typeof boxWidth === "number" && boxWidth < shape.parallelism ? ` (the box allows ${boxWidth} at once)` : ""}, review ${shape.review}${rationale ? ` — ${firstLine(rationale, MAX_RATIONALE_CHARS)}` : ""}`,
     payload: { parallelism: shape.parallelism, review: shape.review },
   });
   return board.shape;
@@ -972,6 +985,7 @@ export function postTask(
     holds: 0,
     hold: null,
     ciReoffers: 0,
+    budgetReoffers: 0,
     created_at: now,
     updated_at: now,
     ...role,
@@ -1152,6 +1166,27 @@ export function reopenForCi(board: TeamBoard, actor: Actor, taskId: string, note
   task.assigned_to = null;
   task.updated_at = now;
   append(board, { ts: now, actor, type: "ci", task_id: taskId, message: `Task ${taskId} re-offered for the pull request's failing checks: ${firstLine(notes)}` });
+  return task;
+}
+
+/**
+ * The team STOPPED a worker itself — held (paused) past RUN_BUDGET_MS with
+ * nobody resuming it — and offers the task once more: back to pending with
+ * the why as its notes, the system's (nobody judged the work), never against
+ * the task's two tries (`budgetReoffers`; the orchestrator offers it once).
+ * Its next worker reads the why as "a previous attempt was rejected".
+ */
+export function reopenAfterStop(board: TeamBoard, actor: Actor, taskId: string, notes: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "budget_reopen", `Only the system re-offers a task it stopped; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "in_progress") throw new Error(`Task ${taskId} is ${task.status}; only a task at work is re-offered after a stop.`);
+  const now = Date.now();
+  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.budgetReoffers += 1;
+  task.status = "pending";
+  task.assigned_to = null;
+  task.updated_at = now;
+  append(board, { ts: now, actor, type: "budget", task_id: taskId, message: `Task ${taskId} re-offered after the team stopped its worker: ${firstLine(notes)}` });
   return task;
 }
 

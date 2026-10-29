@@ -123,16 +123,23 @@ export const MAX_REVIEW_FILES = 40;
 /** How much of the goal the final reviewer is quoted; the board's digest takes the room after it. */
 const FINAL_GOAL_CHARS = 1_200;
 
-/** The reviewer's task text: the task, what changed, what the worker said — inside TEAM_TASK_CHARS. */
-export function reviewerTask(input: { taskId: string; description: string; files: string[]; report: string; goal: string }): string {
+/**
+ * The reviewer's task text: the task, what changed, which of it lies outside
+ * the task's hint (`strayed` — the reviewer's to judge, not a rejection by
+ * rule: a test or a helper beside the task's files is usually the task's
+ * own), what the worker said — inside TEAM_TASK_CHARS.
+ */
+export function reviewerTask(input: { taskId: string; description: string; files: string[]; strayed?: string[]; report: string; goal: string }): string {
   const named = input.files.slice(0, MAX_REVIEW_FILES);
   const more = input.files.length - named.length;
+  const strayed = (input.strayed ?? []).slice(0, MAX_REVIEW_FILES);
   const text = [
     `Review task ${input.taskId}: ${input.description}`,
     `Team goal, for context: ${input.goal}`,
     input.files.length ? `Files the worker changed:\n${named.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- … and ${more} more` : ""}` : "The worker's branch changed no files.",
+    strayed.length ? `Files outside the task's hint (judge whether they belong to the task — a test or a helper beside its files usually does; a change to another task's files does not):\n${strayed.map((f) => `- ${f}`).join("\n")}` : "",
     `The worker's report:\n${input.report.trim() || "(none)"}`,
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
   return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
 

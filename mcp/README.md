@@ -988,7 +988,8 @@ team's branch, up to `MAX_TEAM_WORKERS` (3) while the box has the memory,
 each merged home as it settles; a merge git cannot do alone is aborted and
 the task offered once more from the merged state; a code project keeps one
 worker at a time, in place), a **reviewer** (the v0 rule first — a refused
-action or a stray file rejects without a model — then a read-only run on
+write rejects without a model; a file outside the task's hint is a note the
+reviewer is told of — then a read-only run on
 the merged work that answers `{verdict, notes}`; a reviewer that gives no
 verdict is an alert and an acceptance by rule, never a silent pass), all on
 a **shared blackboard**
@@ -996,8 +997,11 @@ a **shared blackboard**
 may not send — only the planner posts tasks, only the assigned worker moves
 one or submits a result, only the reviewer rules, only the owner stops — and
 logs every accepted message and every refusal (the audit trail). A worker
-that hit a permission denial or strayed outside its files raises an ALERT;
-three alerts stop the team. A reviewer the box has no room for yet waits
+refused a WRITE raises an ALERT (a refused read, or a file beside the
+task's hinted files, is a note); three alerts stop the team. A live worker
+has no wall clock — its idle timeout and the owner's ceilings bound it; one
+paused for an hour with nobody resuming it is stopped and its task offered
+once more. A reviewer the box has no room for yet waits
 for room rather than being skipped; one that cannot start at all (another
 run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans

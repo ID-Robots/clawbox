@@ -191,9 +191,17 @@ describe("reading unittest's output", () => {
 });
 
 describe("what is red and what is not judged", () => {
-  it("counts a suite still going at the deadline as red — a hung suite is not a passing one", () => {
+  it("counts a suite still going at the deadline as red — a hung suite is not a passing one — quoting only a failure it really named", () => {
     const v = readSuiteOutput("npm test", ran({ code: null, timedOut: true, output: "> test\n> node --test\nwaiting on port 3000" }), "/p");
-    expect(v).toMatchObject({ kind: "fail", summary: "did not finish within 5 minutes", excerpt: "> test | > node --test | waiting on port 3000" });
+    // The tail of a suite cut short is whatever was running, passing or not: never quoted as "First failure".
+    expect(v).toEqual({ kind: "fail", command: "npm test", summary: "did not finish within 5 minutes", failing: [], files: [], excerpt: "", deadlineMinutes: 5 });
+    expect(suiteRejection(v as Red)).toContain("No failing test was named; it may be too slow for the gate's 5-minute box.");
+    expect(suiteRejection(v as Red)).not.toContain("First failure");
+    expect(suiteFailure(v as Red)).toBe("The project's own tests fail on the merged result: npm test — did not finish within 5 minutes. No failing test was named; it may be too slow for the gate's 5-minute box.");
+    // A failure the output did name before the deadline is quoted as one.
+    const named = readSuiteOutput("npm test", ran({ code: null, timedOut: true, output: "FAIL src/a.test.ts > adds\nAssertionError: 1 != 2\nwaiting…" }), "/p", 15 * 60_000);
+    expect(named).toMatchObject({ kind: "fail", summary: "did not finish within 15 minutes", failing: ["src/a.test.ts > adds"], files: ["src/a.test.ts"], excerpt: "AssertionError: 1 != 2", deadlineMinutes: 15 });
+    expect(suiteRejection(named as Red)).toContain("First failure: AssertionError: 1 != 2");
   });
 
   it("does not judge a runner the box does not have (exit 127) or a command that could not start", () => {

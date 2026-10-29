@@ -62,6 +62,7 @@ export interface GraphTeam {
     attempts: number;
     holds?: number;
     ciReoffers?: number;
+    budgetReoffers?: number;
   }[];
   shape?: { review: "each" | "final" | "none" } | null;
   finalReview?: { verdict: "accepted" | "rejected" } | null;
@@ -297,7 +298,7 @@ export function teamGraph(team: GraphTeam, runOf: (id: string) => GraphRunInfo |
     const currentAttempt = currentWorker ? workers.indexOf(currentWorker) + 1 : 0;
     // An earlier attempt was superseded by a rejection — unless the task was
     // ever held or re-offered for CI, when it may have been set aside instead.
-    const earlierRejected = (task.holds ?? 0) + (task.ciReoffers ?? 0) === 0;
+    const earlierRejected = (task.holds ?? 0) + (task.ciReoffers ?? 0) + (task.budgetReoffers ?? 0) === 0;
     const reviewerLive = drawn.some((r) => r.role === "reviewer" && statusOf(r.id) === "running");
     const perTaskReview = !team.shape || team.shape.review === "each";
 

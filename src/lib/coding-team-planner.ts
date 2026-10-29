@@ -67,7 +67,7 @@ const TASK_RULES = [
   "Each task_description must stand on its own: say what to build or change, in which files, how the worker verifies it, and every constraint of the goal that bears on it (what to leave alone, whether to commit, what not to open) — it is the whole brief that worker gets. A worker sees only the HEAD of a long goal after its own task, so a rule that lives only in the goal's tail never reaches it.",
   `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks). Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
   "A task that verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer: its worker starts from the work merged so far, and a task it does not wait for may not be there yet.",
-  "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
+  "files_hint lists the files the task owns — files or folders; a worker may add tests or helpers beside them, and the reviewer is told which files lie outside the hint.",
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
   'role is optional: "bulk" marks a task that is token-heavy and not critical — scraping, mass data, repetitive edits, long test runs — so its worker may run on a cheaper model; leave it out (or say "worker") for every other task, and always for the code the goal depends on.',
 ];
@@ -79,10 +79,20 @@ export const PLANNER_BRIEF = [
   `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",
   ...TASK_RULES,
-  `Size the team to the goal in shape: parallelism is how many workers may run side by side; review is "each" (a reviewer checks every task), "final" (one reviewer checks the merged result at the end) or "none" (only the automatic check that a worker was refused nothing and stayed inside its files); rationale says why in at most ${MAX_RATIONALE_CHARS} characters.`,
+  `Size the team to the goal in shape: parallelism is how many workers may run side by side; review is "each" (a reviewer checks every task), "final" (one reviewer checks the merged result at the end) or "none" (only the automatic check that a worker was refused nothing); rationale says why in at most ${MAX_RATIONALE_CHARS} characters.`,
   'A one-file fix is ONE task with parallelism 1 and review "final". Tasks on independent files may run in parallel — parallelism up to the number of tasks that can run at once. A migration, or any chain where each step builds on the last, runs serially: parallelism 1, each task depending on the one before.',
   "If the goal cannot be planned as written — it names files or folders that are not there, or turns on a decision only the owner can take — say so in one short team_message to the lead or to the owner's assistant, never for progress or acknowledgements, and still answer with the JSON plan.",
 ].join(" ");
+
+/**
+ * The brief with the box's real width after it: how many of the team's runs
+ * the owner lets go at once (a task's reviewer takes its worker's seat), so a
+ * parallelism above it is known to only wait for a seat — the planner was
+ * told 3 while the box ran 2, in silence.
+ */
+export function withBoxWidth(brief: string, width: number): string {
+  return `${brief} This box runs at most ${width} of the team's runs at once (the owner's Settings), a task's reviewer in its worker's seat: a parallelism above ${width} only waits for a seat.`;
+}
 
 /** A provider as the briefs — and the team's own English lines — name it. */
 const PROVIDER_WORDS: Readonly<Record<CodingProvider, string>> = {
