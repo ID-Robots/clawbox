@@ -15,6 +15,15 @@ vi.mock("fs", () => ({
   promises: { readFile: vi.fn() },
 }));
 
+// The newest-model default (src/lib/provider-model-availability.ts) reads the
+// catalog route's disk cache through the same `fsp.readFile` this file counts
+// surface reads with. It is not the surface, and its own suites cover it: here
+// it answers "no newest model", so every read counted below is a surface read.
+vi.mock("@/lib/provider-model-availability", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/provider-model-availability")>()),
+  readNewestModelRefs: vi.fn(async () => new Map<string, string>()),
+}));
+
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
 // The catalogue is told out-of-band when the plugin gate changes the provider
