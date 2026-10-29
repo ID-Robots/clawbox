@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { describeChatFailure, describeFallbackReply } from "@/lib/chat-error-text";
+import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure } from "@/lib/chat-error-text";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { translations } from "@/lib/translations";
 
@@ -604,5 +604,51 @@ describe("ClawBox AI usage_limit refusals (TASK-1602)", () => {
   it("keeps the ordinary rate-limit sentence when the turn was another provider's", () => {
     const text = describeChatFailure("rate limited", { provider: "anthropic", reason: "rate_limit" }, words(usage(true)));
     expect(text).toMatch(/rate-limiting this box/);
+  });
+});
+
+// A 429 that states the account's limit as ZERO is not a throttle (xAI,
+// 2026-10: "Requests per Minute (actual/limit): 0/0" on grok-4.6, while Grok
+// 4.7 on the same account answered). "Wait a minute" cannot work there; the
+// owner is told the model is not available on this account and what does work.
+describe("describeChatFailure — a zero rate limit", () => {
+  const ZERO = "429 Too many requests for team T and model grok-4.6. Your team's rate limit is — Requests per Minute (actual/limit): 0/0.";
+  const context = { provider: "xai", model: "xai/grok-4.6", reason: "rate_limit" };
+
+  it("names the model, the account and both remedies instead of the throttle sentence", () => {
+    const text = describeChatFailure("⚠️ API rate limit reached.", { ...context, detail: `HTTP 429: ${ZERO}` });
+    expect(text).toBe(
+      "That message did not go through — grok-4.6 is not available on this xAI account: its rate limit is 0,"
+      + " so there is no API credit or quota for it yet. Pick another model in the header, or add credit at"
+      + " console.x.ai, then send it again.",
+    );
+    expect(text).not.toMatch(/rate-limiting this box/);
+  });
+
+  it("is said in the owner's language", () => {
+    const t = (key: string, params?: Record<string, string | number>) => {
+      let out = translations.de[key] ?? key;
+      for (const [k, v] of Object.entries(params ?? {})) out = out.replaceAll(`{${k}}`, String(v));
+      return out;
+    };
+    const text = describeChatFailure(ZERO, context, { t, locale: "de" });
+    expect(text).toContain("grok-4.6 ist für dieses xAI-Konto nicht verfügbar");
+    expect(text).toContain("console.x.ai");
+  });
+
+  it("keeps an ordinary 429 on the normal rate-limit sentence", () => {
+    const text = describeChatFailure("429 Too many requests. Requests per Minute (actual/limit): 61/60.", context);
+    expect(text).toMatch(/rate-limiting this box right now/);
+  });
+
+  // The test box's owner saw this sentence in red. No quota on their own
+  // account is a fact about the account, not a fault: the chat draws it calm.
+  it("is drawn as a calm notice — and only this sentence, not the throttle, allowance or sign-in ones", () => {
+    expect(isAccountQuotaFailure("⚠️ API rate limit reached.", { ...context, detail: `HTTP 429: ${ZERO}` })).toBe(true);
+    expect(isAccountQuotaFailure(ZERO, context)).toBe(true);
+    expect(isAccountQuotaFailure("429 Too many requests. Requests per Minute (actual/limit): 61/60.", context)).toBe(false);
+    expect(isAccountQuotaFailure("No API key found for provider \"xai\". Auth store: /x. limit: 0", context)).toBe(false);
+    expect(isAccountQuotaFailure("", undefined)).toBe(false);
+    expect(isAccountQuotaFailure(undefined, undefined)).toBe(false);
   });
 });

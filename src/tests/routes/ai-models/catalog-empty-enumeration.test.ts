@@ -140,17 +140,18 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     // ...and what the picker gets is the cold-start list, never stamped as an
     // enumeration, with a custom id still allowed.
     const before = await get("xai");
-    expect((before.models as { id: string }[]).map((m) => m.id)).toEqual(["grok-4.6", "grok-4.5"]);
-    expect(before.defaultModelId).toBe("grok-4.6");
+    expect((before.models as { id: string }[]).map((m) => m.id)).toEqual(["grok-4.7", "grok-4.6", "grok-4.5"]);
+    expect(before.defaultModelId).toBe("grok-4.7");
     expect(before.allowCustom).toBe(true);
     expect(before.source).not.toBe("live");
 
     // The key lands. `notifyProviderSetChanged` forgets the recorded zero and
     // re-enumerates, without waiting out any backoff.
     mockList({
-      count: 3,
+      count: 4,
       models: [
-        { key: "xai/grok-4.6", name: "Grok 4.6", contextWindow: 500_000, available: true, tags: ["default"] },
+        { key: "xai/grok-4.7", name: "Grok 4.7", contextWindow: 500_000, available: true, tags: ["default"] },
+        { key: "xai/grok-4.6", name: "Grok 4.6", contextWindow: 500_000, available: true, tags: [] },
         { key: "xai/grok-4.5", name: "Grok 4.5", contextWindow: 500_000, available: true, tags: [] },
         { key: "xai/grok-4.3", name: "Grok 4.3", contextWindow: 1_000_000, available: true, tags: [] },
       ],
@@ -164,12 +165,46 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     }, { timeout: 4000, interval: 25 });
     const ids = (after.models as { id: string }[]).map((m) => m.id);
     // A row the curated list never named is offered: the enumeration decides.
-    expect(ids).toEqual(expect.arrayContaining(["grok-4.6", "grok-4.5", "grok-4.3"]));
-    expect(after.defaultModelId).toBe("grok-4.6");
-    await vi.waitFor(() => expect(readRecord().xai?.models).toBe(3), { timeout: 4000, interval: 25 });
-    // The CLI was asked about the provider id the plugin registers.
+    expect(ids).toEqual(expect.arrayContaining(["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.3"]));
+    expect(after.defaultModelId).toBe("grok-4.7");
+    await vi.waitFor(() => expect(readRecord().xai?.models).toBe(4), { timeout: 4000, interval: 25 });
+    // The CLI was asked about the provider id the plugin registers — with
+    // `--refresh`, so the core acquires xAI's live inventory before listing.
     expect(mockSpawn.mock.calls.some(([, args]) =>
-      Array.isArray(args) && args.join(" ") === "models list --provider xai --all --json")).toBe(true);
+      Array.isArray(args) && args.join(" ") === "models list --provider xai --all --json --refresh")).toBe(true);
+  });
+
+  // The default follows the newest model the provider publishes, by the version
+  // in xAI's own ids — not the core's curated `default` tag, frozen at the
+  // core's release, and never a dated variant whose "4.20" would read as newer
+  // than 4.7. No ClawBox release sits between xAI shipping a model and the
+  // picker defaulting to it.
+  it("makes a Grok model xAI ships later the default, newest first", async () => {
+    mockList({
+      count: 5,
+      models: [
+        { key: "xai/grok-4.20-0309-reasoning", name: "Grok 4.20 Reasoning", contextWindow: 1_000_000, available: true, tags: [] },
+        { key: "xai/grok-4.3", name: "Grok 4.3", contextWindow: 1_000_000, available: true, tags: [] },
+        { key: "xai/grok-4.7", name: "Grok 4.7", contextWindow: 500_000, available: true, tags: ["default"] },
+        { key: "xai/grok-4.8", name: "Grok 4.8", contextWindow: 500_000, available: true, tags: [] },
+        { key: "xai/grok-4.6", name: "Grok 4.6", contextWindow: 500_000, available: true, tags: [] },
+      ],
+    });
+    notifyProviderSetChanged("xai");
+
+    let after: Record<string, unknown> = {};
+    await vi.waitFor(async () => {
+      after = await get("xai");
+      expect(after.source).toBe("live");
+      expect((after.models as unknown[]).length).toBe(5);
+    }, { timeout: 4000, interval: 25 });
+    const rows = after.models as { id: string; hint?: string }[];
+    expect(after.defaultModelId).toBe("grok-4.8");
+    expect(rows.map((m) => m.id)).toEqual(["grok-4.8", "grok-4.7", "grok-4.6", "grok-4.3", "grok-4.20-0309-reasoning"]);
+    // The curated "Default. Newest flagship." moved with the default instead of
+    // describing yesterday's model.
+    expect(rows.find((m) => m.id === "grok-4.8")?.hint).toBe("Default. Newest flagship.");
+    expect(rows.find((m) => m.id === "grok-4.7")?.hint).toBeUndefined();
   });
 
   it("records NOTHING when `models` is not a list at all", async () => {
