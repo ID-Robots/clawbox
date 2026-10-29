@@ -21,8 +21,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 const setEnabled = vi.hoisted(() => vi.fn());
 const getStatus = vi.hoisted(() => vi.fn());
 const setEffort = vi.hoisted(() => vi.fn());
-const setGenerateImages = vi.hoisted(() => vi.fn());
-const setGenerateAudio = vi.hoisted(() => vi.fn());
+const setGenerateMedia = vi.hoisted(() => vi.fn());
 const setRealBrowser = vi.hoisted(() => vi.fn());
 const setTeamDynamic = vi.hoisted(() => vi.fn());
 const clearHarnessFault = vi.hoisted(() => vi.fn());
@@ -34,13 +33,10 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   hostMaxParallelRuns: () => 4,
   getCodingAgentStatus: getStatus,
   setEffort,
-  setGenerateImages,
-  setGenerateAudio,
+  setGenerateMedia,
   setRealBrowser,
   setTeamDynamic,
   clearHarnessFault,
-  // setReviewRounds is deliberately left REAL: its range refusal is the thing
-  // under test below, and a mock would pin the route's plumbing instead.
   setAutoMerge,
 }));
 
@@ -93,8 +89,7 @@ beforeEach(async () => {
   setEnabled.mockResolvedValue(undefined);
   reloadMcp.mockResolvedValue(true);
   setEffort.mockResolvedValue("low");
-  setGenerateImages.mockResolvedValue(false);
-  setGenerateAudio.mockResolvedValue(false);
+  setGenerateMedia.mockResolvedValue(false);
   setRealBrowser.mockResolvedValue(false);
   setTeamDynamic.mockImplementation(async (on: boolean) => on);
   clearHarnessFault.mockResolvedValue(undefined);
@@ -148,20 +143,35 @@ describe("the body", () => {
     expect(setEnabled).not.toHaveBeenCalled();
   });
 
-  it("takes the two media switches, and names them in the refusal when a body carries nothing it knows", async () => {
-    const images = await POST(request({ cookie: ownerCookie(), body: { generateImages: false } }));
-    expect(images.status).toBe(200);
-    expect(setGenerateImages).toHaveBeenCalledWith(false);
-    const audio = await POST(request({ cookie: ownerCookie(), body: { generateAudio: true } }));
-    expect(audio.status).toBe(200);
-    expect(setGenerateAudio).toHaveBeenCalledWith(true);
+  it("takes the one media switch, and names it in the refusal when a body carries nothing it knows", async () => {
+    const off = await POST(request({ cookie: ownerCookie(), body: { generateMedia: false } }));
+    expect(off.status).toBe(200);
+    expect(setGenerateMedia).toHaveBeenCalledWith(false);
+    const on = await POST(request({ cookie: ownerCookie(), body: { generateMedia: true } }));
+    expect(on.status).toBe(200);
+    expect(setGenerateMedia).toHaveBeenCalledWith(true);
     // A body with none of the route's fields has to say which fields exist, or
     // the caller is left guessing at the one that was misspelled.
     const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
     expect(empty.status).toBe(400);
     const message = (await empty.json()).error as string;
-    expect(message).toContain("{ generateImages: boolean }");
-    expect(message).toContain("{ generateAudio: boolean }");
+    expect(message).toContain("{ generateMedia: boolean }");
+    expect(message).not.toContain("generateImages");
+    expect(message).not.toContain("generateAudio");
+  });
+
+  it("answers 400 to the knobs SCA C3 took away, and writes nothing for them", async () => {
+    // The review rounds, the attempts at a deliverable and the extended
+    // history's N are constants now (DEFAULT_REVIEW_ROUNDS,
+    // DEFAULT_COMPLETION_ATTEMPTS, DEFAULT_HISTORY_EXTENDED_LIMIT): a body
+    // that names one alone is a body the route does not know.
+    for (const body of [{ reviewRounds: 3 }, { completionAttempts: 2 }, { historyLimit: 300 }, { generateImages: false }, { generateAudio: false }]) {
+      const res = await POST(request({ cookie: ownerCookie(), body }));
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(configSet).not.toHaveBeenCalled();
+    expect(configSetMany).not.toHaveBeenCalled();
+    expect(setGenerateMedia).not.toHaveBeenCalled();
   });
 
   it("takes the real-browser switch, and names it in the refusal too", async () => {
@@ -251,17 +261,15 @@ describe("the body", () => {
     expect(message).toContain("{ gitAuthorEmail: string | null }");
   });
 
-  it("takes the review-loop settings, and names them in the refusal too", async () => {
-    const rounds = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: 5 } }));
-    expect(rounds.status).toBe(200);
+  it("takes the merge switch, and names it in the refusal too", async () => {
     const merge = await POST(request({ cookie: ownerCookie(), body: { autoMerge: true } }));
     expect(merge.status).toBe(200);
     expect(setAutoMerge).toHaveBeenCalledWith(true);
 
     const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
     const message = (await empty.json()).error as string;
-    expect(message).toContain("{ reviewRounds: number }");
     expect(message).toContain("{ autoMerge: boolean }");
+    expect(message).not.toContain("reviewRounds");
   });
 
   it("takes the runs-at-once setting, refuses a value outside the range, and names it in the refusal", async () => {
@@ -286,76 +294,6 @@ describe("the body", () => {
     const res = await POST(request({ cookie: ownerCookie(), body: { effort: "high", maxParallelRuns: 9 } }));
     expect(res.status).toBe(400);
     expect(setEffort).not.toHaveBeenCalled();
-  });
-
-  it("takes 0 rounds — the loop switched off is a setting, not an empty body", async () => {
-    // `!fields.reviewRounds` would read 0 as "this request is not about the
-    // rounds" and answer 400 for the one value that switches the loop off.
-    const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: 0 } }));
-    expect(res.status).toBe(200);
-  });
-
-  it("REFUSES a round count outside the range rather than clamping it", async () => {
-    // A caller that asked for 20 meant something this box does not offer, and
-    // silently saving 6 would answer a question it did not ask.
-    for (const bad of [-1, 7, 100]) {
-      const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: bad } }));
-      expect(res.status, String(bad)).toBe(400);
-      expect((await res.json()).error as string).toContain("between 0 and 6");
-    }
-  });
-
-  it("REFUSES a fractional round count rather than rounding it into one", async () => {
-    // `clampReviewRounds` rounds, so 1.5 would have been SAVED as 2 — an
-    // answer to a question the caller did not ask.
-    for (const bad of [1.5, 0.5, 2.0001]) {
-      const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: bad } }));
-      expect(res.status, String(bad)).toBe(400);
-      expect((await res.json()).error as string).toContain("whole number");
-    }
-  });
-
-  /**
-   * How many goes a run with a deliverable gets at it.
-   *
-   * `setCompletionAttempts` is deliberately left REAL in this file's mocks, like
-   * `setReviewRounds`: the range refusal is the thing under test, and a mock
-   * would pin the route's plumbing rather than what a caller is actually told.
-   */
-  it("takes the attempt count, and names it in the refusal too", async () => {
-    const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: 5 } }));
-    expect(res.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("coding_agent_completion_attempts", 5);
-
-    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
-    expect((await empty.json()).error as string).toContain("{ completionAttempts: number }");
-  });
-
-  it("takes 1 — check it and spend nothing more is a real setting", async () => {
-    const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: 1 } }));
-    expect(res.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("coding_agent_completion_attempts", 1);
-  });
-
-  it("REFUSES an attempt count outside the range, and a fractional one", async () => {
-    // Refused rather than clamped, the rule the rounds above follow: a caller
-    // that asked for 20 meant something this box does not offer.
-    for (const bad of [0, -1, 7, 100]) {
-      const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: bad } }));
-      expect(res.status, String(bad)).toBe(400);
-      expect((await res.json()).error as string).toContain("between 1 and 6");
-    }
-    for (const bad of [1.5, 2.0001]) {
-      const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: bad } }));
-      expect(res.status, String(bad)).toBe(400);
-      expect((await res.json()).error as string).toContain("whole number");
-    }
-  });
-
-  it("refuses the AGENT the attempt count, like every other setting here", async () => {
-    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { completionAttempts: 6 } }));
-    expect(res.status).toBe(403);
-    expect(configSet).not.toHaveBeenCalled();
   });
 
   it("refuses the agent the merge switch — a consent it must not give itself", async () => {
@@ -486,10 +424,9 @@ describe("telling the running agent", () => {
     const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low" } }));
     expect(res.status).toBe(200);
     expect(reloadMcp).not.toHaveBeenCalled();
-    // The media switches are read per RUN, at spawn, so they move no tool on
-    // the assistant's own long-lived server either.
-    await POST(request({ cookie: ownerCookie(), body: { generateImages: false } }));
-    await POST(request({ cookie: ownerCookie(), body: { generateAudio: false } }));
+    // The media switch is read per RUN, at spawn, so it moves no tool on the
+    // assistant's own long-lived server either.
+    await POST(request({ cookie: ownerCookie(), body: { generateMedia: false } }));
     // The real-browser switch moves no tool either: browser_open and its
     // siblings exist whichever Chromium answers them.
     await POST(request({ cookie: ownerCookie(), body: { realBrowser: false } }));

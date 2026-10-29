@@ -75,7 +75,7 @@ describe("CodingRunHistoryCard", () => {
   it("shows the mode, what the history weighs and the free space, and saves a new mode", async () => {
     stubFetch((url) => (url === "/setup-api/coding-agent/history" ? json(summary()) : undefined));
     const onSave = vi.fn(async () => ({}));
-    render(<CodingRunHistoryCard mode="standard" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={onSave} error={null} />);
+    render(<CodingRunHistoryCard mode="standard" limit={100} liveKept={30} saving={false} onSave={onSave} error={null} />);
     const select = screen.getByTestId("coding-agent-history-mode") as HTMLSelectElement;
     expect(select.value).toBe("standard");
     expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["Standard", "Extended", "Keep everything", "Archive"]);
@@ -94,17 +94,17 @@ describe("CodingRunHistoryCard", () => {
     expect(onSave).toHaveBeenCalledWith({ historyRetention: "archive" });
   });
 
-  it("offers N under extended, and warns what the next run will delete", async () => {
+  it("warns under extended what the next run will delete, with no N to set (SCA C3)", async () => {
     stubFetch(() => json(summary({ mode: "extended", counts: { live: 30, older: 120, archived: 0 } })));
     const onSave = vi.fn(async () => ({}));
-    render(<CodingRunHistoryCard mode="extended" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={onSave} error={null} />);
-    const limit = screen.getByTestId("coding-agent-history-limit") as HTMLSelectElement;
-    expect(Array.from(limit.options).map((o) => o.textContent)).toEqual(["100 runs", "300 runs", "1000 runs"]);
+    render(<CodingRunHistoryCard mode="extended" limit={100} liveKept={30} saving={false} onSave={onSave} error={null} />);
+    // The N is the box's (the stored one, or the default) and is read for the
+    // warning; the select that set it is gone.
+    expect(screen.queryByTestId("coding-agent-history-limit")).toBeNull();
     await waitFor(() => expect(screen.getByTestId("coding-agent-history-pending").textContent).toBe(
       "50 older runs are past this setting and will be deleted when the next run starts. Switch back to keep them.",
     ));
-    fireEvent.change(limit, { target: { value: "300" } });
-    expect(onSave).toHaveBeenCalledWith({ historyLimit: 300 });
+    expect(onSave).not.toHaveBeenCalled();
     // Never drawn, whatever the mode.
     expect(screen.queryByTestId("coding-agent-history-open")).toBeNull();
   });
@@ -118,7 +118,7 @@ describe("CodingRunHistoryCard", () => {
         { file: "/h/.claude/settings.json", label: "~/.claude/settings.json", days: null, kept: false, readable: false },
       ],
     })));
-    render(<CodingRunHistoryCard mode="everything" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
+    render(<CodingRunHistoryCard mode="everything" limit={100} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
     await waitFor(() => expect(screen.getByTestId("coding-agent-history-transcripts").textContent).toContain("Claude Code keeps its transcripts (~/.claude-ds/settings.json)."));
     expect(screen.getByTestId("coding-agent-history-transcripts").textContent).toContain("~/.claude/settings.json is not a settings file the box can read");
     const alert = screen.getByTestId("coding-agent-history-low-disk");
@@ -129,7 +129,7 @@ describe("CodingRunHistoryCard", () => {
   it("re-reads its figures when the coding agent says it changed — the app's Clear history on the same page", async () => {
     let archived = 0;
     stubFetch((url) => (url === "/setup-api/coding-agent/history" ? json(summary({ mode: "archive", counts: { live: 30, older: 0, archived } })) : undefined));
-    render(<CodingRunHistoryCard mode="archive" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
+    render(<CodingRunHistoryCard mode="archive" limit={100} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
     await waitFor(() => expect(screen.getByTestId("coding-agent-history-usage").textContent).toContain("0 archived"));
     expect((screen.getByTestId("coding-agent-history-clear-archive") as HTMLButtonElement).disabled).toBe(true);
     // The owner's Clear history just moved 12 runs into the archive.
@@ -150,7 +150,7 @@ describe("CodingRunHistoryCard", () => {
       if (url === "/setup-api/coding-agent/history") return json(summary({ mode: "archive", counts: { live: 30, older: 0, archived } }));
       return undefined;
     });
-    render(<CodingRunHistoryCard mode="archive" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
+    render(<CodingRunHistoryCard mode="archive" limit={100} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
     const button = screen.getByTestId("coding-agent-history-clear-archive") as HTMLButtonElement;
     await waitFor(() => expect(button.disabled).toBe(false));
     expect(screen.getByTestId("coding-agent-history-archive-note")).toBeTruthy();

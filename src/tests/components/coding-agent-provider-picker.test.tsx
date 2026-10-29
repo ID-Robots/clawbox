@@ -60,7 +60,7 @@ function basePayload(provider: string, connected: string[] | null, extra: { prov
     subagents: true,
     maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
     tokenLimit: null, minTokenLimit: 10_000,
-    reviewPass: false, generateImages: true, generateAudio: true, realBrowser: true,
+    reviewPass: false, generateMedia: true, realBrowser: true,
   };
 }
 

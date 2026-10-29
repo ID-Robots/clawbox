@@ -14,7 +14,6 @@ import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import {
   devicePollSeconds,
   type AgentStatus,
-  type Effort,
   type GitHubState,
 } from "./CodingAgentSettingsPanel";
 
@@ -177,9 +176,9 @@ export default function CodingAgentSetupWizard({
   // is one tap. The folder need not exist yet — saving creates it, as long as
   // it is inside the owner's home.
   const [folder, setFolder] = useState(status.defaultDirectory ?? status.suggestedDirectory ?? "");
-  // The box's own default (xhigh since TASK-1749) is what the wizard proposes;
-  // ultracode stays on offer and the step says what it costs.
-  const [effort, setEffort] = useState<Effort>(status.effort ?? "xhigh");
+  // No effort choice here (SCA C3): a run starts at the box's own default
+  // (DEFAULT_EFFORT), the note below says what the heavier levels cost, and
+  // the Settings page is where an owner who wants one changes it.
   const [reviewPass, setReviewPass] = useState(status.reviewPass);
 
   const [browse, setBrowse] = useState<BrowseAnswer | null>(null);
@@ -260,7 +259,6 @@ export default function CodingAgentSetupWizard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           defaultDirectory: folder.trim() === "" ? null : folder.trim(),
-          effort,
           reviewPass,
           enabled: true,
           // Explicitly NOT finished: there is one step left. Without this the
@@ -665,35 +663,12 @@ export default function CodingAgentSetupWizard({
             </div>
           )}
 
-          {/* Effort, with the honest note about what the default costs. */}
-          <div className="mt-5">
-            <p className="text-xs font-semibold text-[var(--text-primary)]">{t("codingAgent.effortLabel")}</p>
-            {/* Toggle buttons, not a radio group: each is its own tab stop and
-                arrow keys do nothing here, so the radio contract would promise
-                keyboard behaviour that is not there. The same pattern as the
-                settings panel's effort row. */}
-            <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label={t("codingAgent.effortLabel")}>
-              {status.effortLevels.map((level) => (
-                <button
-                  key={level}
-                  type="button"
-                  aria-pressed={effort === level}
-                  onClick={() => setEffort(level)}
-                  data-testid={`coding-agent-wizard-effort-${level}`}
-                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition ${
-                    effort === level
-                      ? "border-[var(--coral-bright)]/60 bg-[var(--coral-bright)]/15 text-[var(--text-primary)]"
-                      : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                  }`}
-                >
-                  {t(`codingAgent.effort.${level}`)}
-                </button>
-              ))}
-            </div>
-            <p className="mt-2 text-[11px] leading-relaxed text-amber-400/90" data-testid="coding-agent-wizard-cost">
-              {t("codingAgent.wizardEffortCost")}
-            </p>
-          </div>
+          {/* What a run costs to think: the default is what it starts at, the
+              note says what the heavier levels spend. No picker here — one
+              fewer first-run decision; the Settings page has the row. */}
+          <p className="mt-5 text-[11px] leading-relaxed text-amber-400/90" data-testid="coding-agent-wizard-cost">
+            {t("codingAgent.wizardEffortCost")}
+          </p>
 
           <label className="mt-4 flex items-start gap-2 cursor-pointer">
             <input

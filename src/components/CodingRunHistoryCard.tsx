@@ -73,15 +73,14 @@ export function olderRunsOverLimit(mode: HistoryRetentionMode, limit: number, co
 export default function CodingRunHistoryCard({
   mode,
   limit,
-  limits,
   liveKept,
   saving,
   onSave,
   error,
 }: {
   mode: HistoryRetentionMode;
+  /** The extended mode's N, for the hint and the warning: read, no longer set here (SCA C3). */
   limit: number;
-  limits: number[];
   liveKept: number;
   saving: boolean;
   /** Save through the panel's chain; resolves null when the write was refused. */
@@ -181,26 +180,6 @@ export default function CodingRunHistoryCard({
       <p className="text-[11px] text-[var(--text-muted)] mt-1.5 leading-relaxed" data-testid="coding-agent-history-mode-hint">
         {t(MODE_HINT[mode], { count: liveKept, limit })}
       </p>
-
-      {mode === "extended" && (
-        <div className="flex items-start justify-between gap-4 mt-3">
-          <label htmlFor="coding-agent-history-limit" className="text-xs font-medium text-[var(--text-secondary)]">
-            {t("codingAgent.history.limitLabel")}
-          </label>
-          <select
-            id="coding-agent-history-limit"
-            value={String(limit)}
-            disabled={saving}
-            data-testid="coding-agent-history-limit"
-            onChange={(e) => void onSave({ historyLimit: Number(e.target.value) })}
-            className={`text-base sm:text-xs ${FIELD} w-44`}
-          >
-            {limits.map((n) => (
-              <option key={n} value={n}>{t("codingAgent.history.limitOption", { count: n })}</option>
-            ))}
-          </select>
-        </div>
-      )}
 
       {pending > 0 && (
         <p className="text-[11px] text-amber-300 mt-2 leading-relaxed" data-testid="coding-agent-history-pending">

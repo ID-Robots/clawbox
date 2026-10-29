@@ -40,8 +40,6 @@ import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
 import CodingRunPipelineCard from "./CodingRunPipelineCard";
 import type { PipelineState } from "@/lib/coding-pipeline";
-import CodingRunTeamMembers from "./CodingRunTeamMembers";
-import CodingAgentRosterRow from "./CodingAgentRosterRow";
 import {
   OPEN_CODING_RUN_EVENT,
   dispatchOpenApp,
@@ -63,7 +61,7 @@ import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceH
 import CodingRunNotesCard from "./CodingRunNotesCard";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
-import { DiagramDetails } from "./CodingAgentDiagram";
+import { turnsKnown } from "./CodingAgentDiagram";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import { taskTitle } from "@/lib/task-title";
@@ -107,8 +105,6 @@ interface Run {
   queued?: { at: number; position?: number } | null;
   /** Its pull request's FAILED CI, read — what the Fix CI card offers from. Absent from an older server. */
   ci?: RunCiView | null;
-  /** A Fix CI continuation of another run. */
-  ciFixOf?: { runId: string; attempt: number } | null;
   startedAt: number;
   completedAt: number | null;
   summary: string | null;
@@ -118,6 +114,10 @@ interface Run {
    *  record written before it was kept. */
   failureKind?: "harness_not_ready" | null;
   numTurns: number;
+  /** The step ceiling the run was started with (`--max-turns`). Absent on a record from before the field. */
+  maxTurns?: number;
+  /** The session did real work and can be carried on in — a run that hit a ceiling. Absent on a record from before the field. */
+  resumable?: boolean;
   /** The run's plan, as it last wrote it with TodoWrite. */
   todos?: { content?: string; status?: string; activeForm?: string }[];
   filesTouched: string[];
@@ -278,14 +278,6 @@ export function installedAppId(folder: string): string {
 /** One page of runs. The list is open by default now, so it has to be paged
  *  rather than unbounded — a long history should not push the settings off
  *  the top of the window. */
-/** "12s" / "3m 4s" — how long a helper has been out, or took. */
-function elapsedShort(from: number, to: number): string {
-  const sec = Math.max(0, Math.round((to - from) / 1000));
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  return `${m}m ${sec - m * 60}s`;
-}
-
 /** How many pictures a run's evidence card shows before it asks to be unfolded. */
 const ARTIFACT_PREVIEW = 4;
 const RUNS_PAGE = 10;
@@ -523,31 +515,6 @@ function StatLine({ label, value, hint, note, mono = false, testId }: { label: s
   );
 }
 
-/**
- * How a run ENDED, not merely whether it is over.
- *
- * `isSettled` alone drew a run that failed exactly like one that succeeded —
- * a tick — next to a status chip reading "Did not finish" in red.
- */
-type RunOutcome = "working" | "completed" | "unfinished" | "waiting";
-
-function runOutcome(status: CodingRunStatus): RunOutcome {
-  if (isLive(status)) return "working";
-  if (status === "completed") return "completed";
-  // A run that gave up lands in "unfinished" through isSettled, which is right:
-  // it did not deliver. The deliverable card beside it is what says so in
-  // words, and the chip's own amber keeps it apart from a failure.
-  return isSettled(status) ? "unfinished" : "waiting";
-}
-
-/** The Agents card's glyph for the run itself, per outcome. */
-const MAIN_AGENT_GLYPH: Record<RunOutcome, { icon: string; className: string }> = {
-  working: { icon: "sync", className: "text-amber-400 animate-pulse" },
-  completed: { icon: "check_circle", className: "text-[var(--text-muted)]" },
-  unfinished: { icon: "error", className: "text-red-400/80" },
-  waiting: { icon: "schedule", className: "text-[var(--text-muted)]" },
-};
-
 /** Every run button's shape; the action's own colour is added per row. */
 const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
 
@@ -557,7 +524,7 @@ const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
  * (`coding-agent-<route>-<runId>`) and the key of the message shown when it
  * is refused.
  */
-const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | "start"; label: string; failed: string; className: string }>> = {
+const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | "start" | "continue"; label: string; failed: string; className: string }>> = {
   running: { route: "pause", label: "codingAgent.pause", failed: "codingAgent.pauseFailed", className: "border-white/10 text-[var(--text-primary)] hover:bg-white/5" },
   paused: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-sky-300/40 text-sky-300 hover:bg-sky-300/10" },
   // A run that gave up offers the same gesture, and for the same reason: its
@@ -566,7 +533,17 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
   // would start the task over.
   gave_up: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-amber-300/40 text-amber-300 hover:bg-amber-300/10" },
   draft: { route: "start", label: "codingAgent.startDraft", failed: "codingAgent.startFailed", className: "border-violet-300/40 text-violet-300 hover:bg-violet-300/10" },
+  // A run that hit a ceiling (the step limit, the cost ceiling) settles
+  // failed AND resumable: the session did real work and simply ran out of
+  // room. Continue is a continuation of it — `POST run { resumeRunId }`, the
+  // path Fix CI takes — which re-reads the settings and so gets a fresh
+  // ceiling; it is offered only while `resumable` says the session can take
+  // it (runControls), since a failure that is not a ceiling starts over.
+  failed: { route: "continue", label: "codingAgent.continueRun", failed: "codingAgent.continueFailed", className: "border-amber-300/40 text-amber-300 hover:bg-amber-300/10" },
 };
+
+/** What a Continue asks the harness for, in its own language — the session holds the task. */
+const CONTINUE_TASK = "Continue the task you were working on in this session: finish what remains, then report what you did.";
 
 /**
  * The sentence for each spent meter, keyed by the meter the record names.
@@ -610,7 +587,13 @@ export default function CodingAgentApp() {
   // The browser preview above a live run's terminal, shown or folded.
   // The live card's tab — Timeline, Terminal or Browser, one at a time —
   // remembered per run, so another run's page opens on its timeline.
-  const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser" } | null>(null);
+  // `terminalSeen`: the terminal pane is mounted on the Terminal tab's first
+  // selection and kept from then on (it types its command once, and a
+  // remount would tail from the top) — not on every live run page, where
+  // most owners never open it and it cost a PTY and a tail each.
+  const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser"; terminalSeen: boolean } | null>(null);
+  /** How many MCP servers each project's runs start with, as its Setup tab's card last read them — the count on the tab. */
+  const [mcpTicked, setMcpTicked] = useState<Record<string, number>>({});
   /** The markdown artifact open in the preview dialog, if any. */
   // The run whose whole evidence list is unfolded. A run that screenshots
   // every step files dozens of pictures, and drawn in full they pushed the
@@ -1441,6 +1424,24 @@ export default function CodingAgentApp() {
       : <span data-testid={testId} className={className}>{label}</span>;
   };
 
+  /** Which run reviewed which: one pass over the list, read per row. */
+  const reviewerOf = new Map<string, Run>();
+  for (const r of runs) if (r.reviewOf) reviewerOf.set(r.reviewOf, r);
+  /** A run's relations as chips: the run it reviewed, the loop it belongs to,
+   *  the run that reviewed it. The same three on a row and on the run's page. */
+  const relationChips = (run: Run) => {
+    const reviewedBy = reviewerOf.get(run.id);
+    return (
+      <>
+        {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+        {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
+          ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
+          : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
+        {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
+      </>
+    );
+  };
+
   /** The pull request as one chip: its phase, and while checks run, how many
    *  have answered. A link once GitHub has given us one. */
   const prChip = (run: Run) => {
@@ -1643,9 +1644,36 @@ export default function CodingAgentApp() {
   const removeRunCopy = (id: string) => runAction(id, "worktree", t("codingAgent.worktreeRemoveFailed"));
   /** Resume after "Allow next time" — the denials card's button. */
   const resumeRunNow = (id: string) => runAction(id, "resume", t("codingAgent.resumeFailed"));
+  /**
+   * Carry a ceiling-hit run on: a NEW run continuing its session (the same
+   * POST the Fix CI card makes, without `fixCi`), then its page.
+   */
+  const continueRun = async (id: string) => {
+    const failText = t("codingAgent.continueFailed");
+    setBusy(id);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: CONTINUE_TASK, resumeRunId: id }),
+      });
+      if (!res.ok) throw new Error(await readError(res, failText));
+      const data = await res.json().catch(() => null) as { run?: { id?: string } } | null;
+      notifyCodingRunStarted();
+      await load();
+      if (data?.run?.id) showRun(data.run.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : failText);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const runControls = (run: Run, where: "row" | "page") => {
-    const action = RUN_ACTION[run.status];
+    // Continue is for a failure the session can take — a ceiling; any other
+    // failed run offers nothing here, as before.
+    const action = run.status === "failed" && run.resumable !== true ? undefined : RUN_ACTION[run.status];
     // Resume in a terminal is for a run that has STOPPED; a live run's
     // transcript is on its page already, with its own Open in Terminal.
     const canOpenTerminal = Boolean(run.sessionId) && run.status !== "running";
@@ -1672,7 +1700,7 @@ export default function CodingAgentApp() {
         {action && (
           <button
             type="button"
-            onClick={() => runAction(run.id, action.route, t(action.failed))}
+            onClick={() => (action.route === "continue" ? void continueRun(run.id) : runAction(run.id, action.route, t(action.failed)))}
             disabled={busy === run.id}
             data-testid={`coding-agent-${action.route}-${run.id}`}
             className={small ? `${RUN_BUTTON} ${action.className}` : `${BTN_BASE} border ${action.className}`}
@@ -1783,7 +1811,6 @@ export default function CodingAgentApp() {
               // time-since-drafting, which the "updated" line already says —
               // and the effort it will run with is read at start.
               const started = run.status !== "draft" && run.status !== "queued";
-              const reviewedBy = runs.find((r) => r.reviewOf === run.id);
               return (
                 <li
                   key={run.id}
@@ -1821,13 +1848,7 @@ export default function CodingAgentApp() {
                           </span>
                         )}
                         {prChip(run)}
-                        {/* A review pass names the run it reviewed, and that
-                            run names its reviewer. */}
-                        {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                  {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
-                    ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
-                    : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
-                        {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
+                        {relationChips(run)}
                       </div>
                       <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
                         {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
@@ -2086,7 +2107,7 @@ export default function CodingAgentApp() {
               the bottom edge of the scroll area. Same scale as the run page,
               not a new one. */}
           <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
-            <CodingAgentSettingsPanel onOpenHistory={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }} />
+            <CodingAgentSettingsPanel />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
                 its explanation on the question mark beside it. The headings
@@ -2417,13 +2438,11 @@ export default function CodingAgentApp() {
           const run = view.run;
           const tone = RUN_TONE[run.status];
           const started = run.status !== "draft" && run.status !== "queued";
-          const mainOutcome = runOutcome(run.status);
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
           // Its project folder has been removed. The record is kept — see
           // missingProjectOf — so the page has to say so rather than draw a run
           // that appears to belong nowhere.
           const missingProject = missingProjectOf(run, projects, projectsDir);
-          const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
           const artifactsFolded = artifacts.length > ARTIFACT_PREVIEW && artifactsOpenFor !== run.id;
           // Folded: the first few of WHATEVER kind — a run with two pictures
@@ -2492,7 +2511,7 @@ export default function CodingAgentApp() {
 
               {/* The agents first: this run's team with the run marked on it,
                   or — solo — the run and the helpers it sent out. A node opens
-                  what that agent is doing now; the lists are in Details. */}
+                  what that agent is doing now — the one list of agents on the page. */}
               {started && (
                 <RunAgentsDiagram
                   run={run}
@@ -2503,102 +2522,6 @@ export default function CodingAgentApp() {
                   refreshKey={runs}
                 />
               )}
-              {/* Who is working on this run, as a list — folded under the
-                  chart above (Details), which draws the same agents first.
-
-                  A run can be BOTH: a member of a coding team (planner,
-                  workers, reviewers) and the sender of its own Claude Code
-                  helpers. This card covers both — the team's members, then
-                  the run itself and every helper it sent out — and every one
-                  of them is the same row, so the eye reads one list rather
-                  than two widgets that happened to be stacked.
-
-                  No tally in the header: the tree pulses for whoever is at
-                  work and every row carries its own state, so a third
-                  statement of the same thing was only ever one more number to
-                  keep right — and on a team run it was wrong, counting the run
-                  and its helpers while six teammates worked beside it. */}
-              {started && (
-                <DiagramDetails testId="coding-agent-run-details">
-                <div className={`${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-agents">
-                  <p className={SECTION_LABEL}>{t("codingAgent.agentsTitle")}</p>
-                  {run.team && (
-                    <CodingRunTeamMembers
-                      key={`${run.id}/${run.team.id}`}
-                      teamId={run.team.id}
-                      runId={run.id}
-                      runs={runs.map((r) => ({ id: r.id, status: r.status }))}
-                      live={isLive(run.status)}
-                      onOpenRun={showRun}
-                      tree={false}
-                      cast={teams.find((x) => x.id === run.team!.id)?.runs ?? null}
-                    />
-                  )}
-                  <ul className="mt-2 space-y-0.5" data-testid="coding-agent-active-subagents">
-                    {/* A tick for a run that did not finish is a lie the
-                        status chip above already contradicts: only a
-                        completed run gets one, a failed or stopped one gets
-                        the error glyph, and a paused run or a draft is still
-                        waiting rather than done. */}
-                    <li className="min-w-0" data-testid="coding-agent-agent-main" data-outcome={mainOutcome}>
-                      <CodingAgentRosterRow
-                        icon={MAIN_AGENT_GLYPH[mainOutcome].icon}
-                        iconClassName={MAIN_AGENT_GLYPH[mainOutcome].className}
-                        testId="coding-agent-agent-main-row"
-                        name={t("codingAgent.agentMain")}
-                        // Its role on the board is the one thing about this run
-                        // that is written nowhere else on the page.
-                        what={run.team ? teamRole(run.team) : undefined}
-                        meta={duration(run)}
-                        fields={[
-                          { label: t("codingAgent.agentModel"), value: runModels(run) ?? "", mono: true },
-                          { label: t("codingAgent.statTokens"), value: (run.tokensUsed ?? 0) > 0 ? tokens(run.tokensUsed ?? 0) : "" },
-                          { label: t("codingAgent.agentState"), value: statusLabel(run.status) },
-                        ]}
-                      />
-                    </li>
-                    {run.activeSubagents?.map((a, i) => (
-                      <li key={`live-${i}`} className="min-w-0" data-testid="coding-agent-subagent-live">
-                        <CodingAgentRosterRow
-                          testId="coding-agent-subagent-live-row"
-                          icon="sync"
-                          iconClassName="text-sky-400 animate-pulse"
-                          name={a.type}
-                          nameClassName="text-sky-300"
-                          what={a.description}
-                          meta={t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, now) })}
-                          fields={[
-                            { label: t("codingAgent.agentAsked"), value: a.description },
-                            { label: t("codingAgent.agentState"), value: t("codingAgent.agentStillWorking") },
-                          ]}
-                        />
-                      </li>
-                    ))}
-                    {[...(run.subagents ?? [])].reverse().map((a, i) => (
-                      <li key={`done-${i}`} className="min-w-0" data-testid="coding-agent-subagent-done" data-refused={a.refused || undefined}>
-                        <CodingAgentRosterRow
-                          testId="coding-agent-subagent-done-row"
-                          icon={a.refused ? "block" : "check_circle"}
-                          iconClassName={a.refused ? "text-amber-400" : "text-emerald-400/80"}
-                          name={a.type}
-                          nameClassName={a.refused ? "text-amber-300" : "text-emerald-300/90"}
-                          what={a.description}
-                          meta={a.refused ? t("codingAgent.helperRefused") : t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, a.endedAt) })}
-                          fields={[
-                            { label: t("codingAgent.agentAsked"), value: a.description },
-                            // A refused helper says so on the row already, in
-                            // amber; the panel would only say it twice.
-                            !a.refused && { label: t("codingAgent.agentState"), value: t("codingAgent.agentFinished") },
-                          ]}
-                        />
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                </DiagramDetails>
-              )}
-
-
               {/* The header: what this run is, how it stands, and everything
                   you can do to it. */}
               <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
@@ -2622,11 +2545,7 @@ export default function CodingAgentApp() {
                       {teamRole(run.team)}
                     </span>
                   )}
-                  {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                  {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
-                    ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
-                    : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
-                  {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
+                  {relationChips(run)}
                   {project && (
                     <button
                       type="button"
@@ -2826,7 +2745,8 @@ export default function CodingAgentApp() {
                   ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
                   : null;
                 const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
-                const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next });
+                const terminalSeen = liveTabFor?.id === run.id && liveTabFor.terminalSeen;
+                const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next, terminalSeen: terminalSeen || next === "terminal" });
                 const tabButton = (id: "timeline" | "terminal" | "browser", icon: string, label: string, disabled = false) => (
                   <button
                     type="button"
@@ -2881,17 +2801,14 @@ export default function CodingAgentApp() {
                         embedded
                         provider={run.provider}
                         modelRole={run.modelRole}
-                        working={{
-                          label: t("codingAgent.chatWorking"),
-                          busy: t("codingAgent.chatBusy"),
-                          tokens: (run.tokensUsed ?? 0) > 0 ? `${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}` : undefined,
-                          duration: started ? duration(run) : undefined,
-                        }}
+                        working={{ label: t("codingAgent.chatWorking"), busy: t("codingAgent.chatBusy") }}
                       />
                     </div>
-                    {command && (
-                      // Mounted whatever the tab, hidden otherwise: the terminal
-                      // types its command once, and a remount would tail from the top.
+                    {command && terminalSeen && (
+                      // Mounted once the tab has been picked and kept, hidden,
+                      // from then on: the terminal types its command once, and a
+                      // remount would tail from the top (the preview replays the
+                      // last lines anyway, so a first pick mid-run misses nothing).
                       <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
                         <TerminalApp key={run.id} initialCommand={command} />
                       </div>
@@ -3090,7 +3007,9 @@ export default function CodingAgentApp() {
                   own hyphens instead of breaking mid-word. */}
               <div className="mt-3" data-testid="coding-agent-run-figures">
                 <div className="grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2">
-                  <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : nothingYet} />
+                  {/* The CLI reports its turns with its final result: a live
+                      run's 0 is no count yet, not a count (turnsKnown). */}
+                  <StatTile label={t("codingAgent.statSteps")} value={started && turnsKnown(run) ? (run.maxTurns ? `${run.numTurns} / ${run.maxTurns}` : String(run.numTurns)) : nothingYet} testId="coding-agent-stat-steps" />
                   <StatTile label={t("codingAgent.statFiles")} value={run.filesTouched.length > 0 ? String(run.filesTouched.length) : nothingYet} testId="coding-agent-stat-files" />
                   <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : nothingYet} />
                   <StatTile
@@ -3344,23 +3263,9 @@ export default function CodingAgentApp() {
                   )}
                 </span>
               </div>
-              {/* What earlier runs here learned (src/lib/coding-run-notes.ts):
-                  every run and team role reads it; the owner reads, edits and
-                  clears it here. Keyed like the team card, by the whole scope. */}
-              <CodingRunNotesCard
-                key={`notes-${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                directory={p.directory}
-                projectId={p.kind === "codeProject" ? p.folder : null}
-              />
-              {/* Which MCP servers this project's runs start with
-                  (src/lib/project-mcp-servers.ts): the harness's configured
-                  servers and the ClawBox read-only tools, all unticked until
-                  the owner ticks one. Keyed by the project's scope — the same
-                  `folder` a run's secrets are scoped by. */}
-              <CodingProjectMcpServersCard key={`mcp-${p.folder}`} project={p.folder} />
-              {/* Four tabs, each with the whole width: the folder, what changed,
-                  the runs, the team. The runs sat in a 22rem rail before and
-                  their rows wrapped three deep. */}
+              {/* Five tabs, each with the whole width: the team, the runs, the
+                  folder, what changed, and Setup. The runs sat in a 22rem rail
+                  before and their rows wrapped three deep. */}
               <CodingProjectWorkspace
                 key={`workspace-${projectQuery}`}
                 query={projectQuery}
@@ -3371,6 +3276,35 @@ export default function CodingAgentApp() {
                 runsCount={visibleRuns.length}
                 runsLive={projectLive}
                 runs={<div className="pt-1" data-testid="coding-agent-project-runs">{runsList}</div>}
+                setupCount={mcpTicked[p.folder] ?? null}
+                setup={(
+                  /* Rendered only while the tab is open (not hidden): the two
+                     cards each read the box on mount, and on every project
+                     page that was two GETs for cards most visits never
+                     unfolded. */
+                  <div className="pt-1" data-testid="coding-agent-project-setup">
+                    {/* What earlier runs here learned (src/lib/coding-run-notes.ts):
+                        every run and team role reads it; the owner reads, edits
+                        and clears it here. Keyed like the team card, by the
+                        whole scope. */}
+                    <CodingRunNotesCard
+                      key={`notes-${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
+                      directory={p.directory}
+                      projectId={p.kind === "codeProject" ? p.folder : null}
+                    />
+                    {/* Which MCP servers this project's runs start with
+                        (src/lib/project-mcp-servers.ts): the harness's
+                        configured servers and the ClawBox read-only tools, all
+                        unticked until the owner ticks one. Keyed by the
+                        project's scope — the same `folder` a run's secrets are
+                        scoped by. The count it read is carried on the tab. */}
+                    <CodingProjectMcpServersCard
+                      key={`mcp-${p.folder}`}
+                      project={p.folder}
+                      onTicked={(n) => setMcpTicked((prev) => (prev[p.folder] === n ? prev : { ...prev, [p.folder]: n }))}
+                    />
+                  </div>
+                )}
                 team={(
                   /* Keyed by the WHOLE scope the card reads by — the folder
                      and the code-project id — so a project that changes kind
@@ -3379,8 +3313,8 @@ export default function CodingAgentApp() {
                   <div className="pt-1">
                     <CodingTeamCard
                       key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                      directory={p.directory}
-                      projectId={p.kind === "codeProject" ? p.folder : null}
+                      teams={teams.filter((x) => (p.kind === "codeProject" ? x.projectId === p.folder : x.directory === p.directory))}
+                      onChanged={() => { void load(); }}
                       onOpenRun={(id) => showRun(id)}
                       onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
                       runs={runs}

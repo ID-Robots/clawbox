@@ -382,6 +382,33 @@ describe("the Changes tab", () => {
     }
   });
 
+  it("renders Setup only while its tab is open — not hidden — with the count the host carries on the tab", async () => {
+    stubDevice();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} initialTab="files" setup={<div data-testid="setup-pane" />} setupCount={2} />);
+    await screen.findByTestId("coding-agent-workspace");
+    const tab = screen.getByTestId("coding-agent-workspace-setup");
+    expect(tab).toHaveTextContent(t("codingAgent.setupTab"));
+    expect(screen.getByTestId("coding-agent-workspace-setup-count")).toHaveTextContent("(2)");
+    expect(screen.getAllByRole("tab").at(-1)).toBe(tab);
+    expect(screen.queryByTestId("setup-pane")).toBeNull();
+    fireEvent.click(tab);
+    expect(tab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("setup-pane")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-workspace-files"));
+    expect(screen.queryByTestId("setup-pane")).toBeNull();
+  });
+
+  it("has no Setup tab on a host that hands none, and no count before the host has one", async () => {
+    stubDevice();
+    const { unmount } = render(<CodingProjectWorkspace query="projectId=site" live={false} initialTab="files" />);
+    await screen.findByTestId("coding-agent-workspace");
+    expect(screen.queryByTestId("coding-agent-workspace-setup")).toBeNull();
+    unmount();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} initialTab="files" setup={<div data-testid="setup-pane" />} />);
+    await screen.findByTestId("coding-agent-workspace");
+    expect(screen.queryByTestId("coding-agent-workspace-setup-count")).toBeNull();
+  });
+
   it("says in words when there is no git history, and when nothing changed", async () => {
     stubDevice({ noGit: true });
     const { unmount } = render(<CodingProjectWorkspace query="projectId=site" live={false} initialTab="changes" />);

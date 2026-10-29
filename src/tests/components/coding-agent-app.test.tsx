@@ -352,19 +352,21 @@ describe("CodingAgentApp", () => {
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
     });
 
-    it("proposes Ultracode and says what it costs", async () => {
+    it("asks for no effort, and says what the default and Ultracode cost", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
       await passGithubStep();
-      expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
-      expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
-      // The owner is told before they choose, not by a bill afterwards.
+      // One fewer first-run decision (SCA C3): a run starts at the box's own
+      // default, and the Settings page is where the level is changed.
+      expect(screen.queryByTestId("coding-agent-wizard-effort-ultracode")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-wizard-effort-low")).toBeNull();
+      // The owner is still told what the heavier levels cost, before a bill does.
       expect(screen.getByTestId("coding-agent-wizard-cost").textContent)
         .toBe(translations.en["codingAgent.wizardEffortCost"]);
     });
 
-    it("saves the folder, the effort and the switch in ONE post, and marks setup done", async () => {
+    it("saves the folder, the review pass and the switch in ONE post, and marks setup done", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
@@ -381,7 +383,6 @@ describe("CodingAgentApp", () => {
       // page.
       expect(post!.body).toEqual({
         defaultDirectory: "/home/clawbox/Projects",
-        effort: "ultracode",
         reviewPass: false,
         enabled: true,
         setupComplete: false,
@@ -1217,13 +1218,17 @@ describe("CodingAgentApp", () => {
       });
     });
 
-    it("embeds the live terminal on a running run's page in place of the activity log, and keeps the log once it settled", async () => {
+    it("embeds the live terminal on a running run's page once its tab is picked, and keeps the log once it settled", async () => {
       const live = { ...RUN, status: "running", completedAt: null, summary: null, transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", progress: ["$ npm test"] };
       stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });
       const { unmount } = render(<CodingAgentApp />);
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
       await screen.findByTestId("coding-agent-run-page");
+      // Not mounted until asked for: a PTY and a tail on every live run page
+      // was the cost, and most pages never open it.
+      expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
+      fireEvent.click(screen.getByTestId("coding-agent-live-tab-terminal"));
       const terminal = await screen.findByTestId("coding-agent-run-terminal");
       expect(within(terminal).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
       // The timeline sits ABOVE the summary while the run works too, live.
@@ -1331,7 +1336,7 @@ describe("CodingAgentApp", () => {
     });
 
     it("breathes on a running badge and counts the tokens up rather than jumping", async () => {
-      const running = { ...RUN, status: "running", tokensUsed: 26_000 };
+      const running = { ...RUN, status: "running", tokensUsed: 26_000, numTurns: 0 };
       stubFetch({ enabled: true, readiness: READY }, [running], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
@@ -1341,11 +1346,14 @@ describe("CodingAgentApp", () => {
       const tokens = screen.getByTestId("coding-agent-stat-tokens");
       expect(tokens).toHaveAttribute("data-value", "26000");
       expect(tokens.textContent).toBe("26k");
-      // The agents card is up for a live run even before a helper is out.
-      expect(screen.getByTestId("coding-agent-run-agents")).toBeInTheDocument();
+      // The chart is up for a live run even before a helper is out — and the
+      // Steps tile prints no 0 while the CLI has not reported its turns.
+      expect(screen.getByTestId("coding-agent-run-diagram")).toBeInTheDocument();
+      expect(screen.getByTestId("coding-agent-stat-steps").textContent).toContain(t("codingAgent.statNone"));
+      expect(screen.getByTestId("coding-agent-stat-steps").textContent).not.toContain("0");
     });
 
-    it("lists every agent on the run's page — the run itself, the helpers still out, and the ones back with how long they took", async () => {
+    it("draws every agent on the run's page as the chart — the run itself, the helpers still out, and the ones back — and no second list", async () => {
       const run = {
         ...RUN, status: "running", completedAt: null, summary: null,
         subagentsTotal: 3, subagentsActive: 1, subagentsByType: { explorer: 1, reviewer: 2 },
@@ -1359,77 +1367,23 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-      const card = await screen.findByTestId("coding-agent-run-agents");
-      // No tally in the header: the tree pulses for whoever is at work and
-      // every row carries its own state, so a third count of the same thing
-      // was only one more number to keep right.
-      expect(screen.queryByTestId("coding-agent-run-agents-count")).toBeNull();
-      expect(within(card).getByText(t("codingAgent.agentMain"))).toBeInTheDocument();
-      // The list sits folded under the chart (Details), and the chart draws
-      // the same agents first: the run itself and its three helpers — the one
-      // still out at work, the refused one rejected, the explorer done.
-      expect(screen.getByTestId("coding-agent-run-details")).toContainElement(card);
-      const chart = screen.getByTestId("coding-agent-run-diagram");
+      // The chart draws the run itself and its three helpers — the one still
+      // out at work, the refused one rejected, the explorer done. Nothing
+      // lists them a second time: the Agents card under it is gone.
+      const chart = await screen.findByTestId("coding-agent-run-diagram");
       expect(chart).toHaveAttribute("data-shape", "run");
       const nodes = within(chart).getAllByTestId("coding-agent-node");
       expect(nodes.map((n) => [n.getAttribute("data-role"), n.getAttribute("data-state")])).toEqual([
         ["run", "working"], ["helper", "done"], ["helper", "rejected"], ["helper", "working"],
       ]);
       expect(nodes[0]).toHaveAttribute("data-current", "true");
-      const live = within(card).getAllByTestId("coding-agent-subagent-live");
-      expect(live).toHaveLength(1);
-      expect(live[0].textContent).toContain("Review the toggle");
-      expect(live[0].textContent).toContain("1m 5s");
-      const done = within(card).getAllByTestId("coding-agent-subagent-done");
-      // Newest first: the refused one, then the explorer with its minute.
-      expect(done).toHaveLength(2);
-      expect(done[0]).toHaveAttribute("data-refused", "true");
-      expect(done[0].textContent).toContain(t("codingAgent.helperRefused"));
-      expect(done[1].textContent).toContain("Map the components folder");
-      expect(done[1].textContent).toContain(t("codingAgent.helperFor", { t: "1m 0s" }));
-    });
-
-    /**
-     * What the box actually knows about an agent, on hover AND on tap — the
-     * box is used on a touchscreen, where a title attribute is no affordance
-     * at all. Only fields with an answer: the run record keeps no per-helper
-     * model and no per-helper token count, and "Tokens: 0" would be a figure
-     * the page invented.
-     */
-    it("says what is known about each agent, on hover and on tap, and nothing it does not know", async () => {
-      const run = {
-        ...RUN,
-        tokensUsed: 42_000,
-        modelsUsed: ["claude-opus-5"],
-        subagentsTotal: 1,
-        subagents: [{ type: "explorer", description: "Map the components folder and report where the run page lives", startedAt: Date.now() - 300_000, endedAt: Date.now() - 240_000, refused: false }],
-      };
-      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
-      render(<CodingAgentApp />);
-      await openRuns();
-      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-      const card = await screen.findByTestId("coding-agent-run-agents");
-      const main = within(card).getByTestId("coding-agent-agent-main-row");
-      const title = main.getAttribute("title") ?? "";
-      expect(title).toContain(`${t("codingAgent.agentModel")}: claude-opus-5`);
-      expect(title).toContain(`${t("codingAgent.statTokens")}: 42k`);
-      expect(title).toContain(`${t("codingAgent.agentState")}: ${t("codingAgent.statusCompleted")}`);
-      expect(main).toHaveAttribute("aria-expanded", "false");
-      fireEvent.click(main);
-      expect(main).toHaveAttribute("aria-expanded", "true");
-      const detail = within(card).getByTestId("coding-agent-agent-main-row-detail");
-      expect(detail.textContent).toContain("claude-opus-5");
-      expect(detail.textContent).toContain("42k");
-
-      const helper = within(card).getByTestId("coding-agent-subagent-done-row");
-      const helperTitle = helper.getAttribute("title") ?? "";
-      expect(helperTitle).toContain(`${t("codingAgent.agentAsked")}: Map the components folder`);
-      expect(helperTitle).toContain(`${t("codingAgent.agentState")}: ${t("codingAgent.agentFinished")}`);
-      // No model and no token figure for a helper: the record keeps neither.
-      expect(helperTitle).not.toContain(t("codingAgent.agentModel"));
-      expect(helperTitle).not.toContain(t("codingAgent.statTokens"));
-      fireEvent.click(helper);
-      expect(within(card).getByTestId("coding-agent-subagent-done-row-detail").querySelectorAll("dt")).toHaveLength(2);
+      expect(screen.queryByTestId("coding-agent-run-agents")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-run-details")).toBeNull();
+      // The solo run's figures are the rail's tiles alone: no chips over the chart.
+      expect(within(chart).queryByTestId("coding-agent-diagram-figures")).toBeNull();
+      // A helper's errand opens on its node, where the roster row used to say it.
+      fireEvent.click(nodes[3]);
+      expect(within(screen.getByTestId("coding-agent-node-panel")).getByTestId("coding-agent-node-panel-now")).toHaveTextContent("Review the toggle");
     });
 
     it("reads an empty figure as a state rather than as a dash, and carries no zero nobody acts on", async () => {
@@ -2263,15 +2217,18 @@ describe("the workspace, the breadcrumb and the live view", () => {
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
     const card = await screen.findByTestId("coding-agent-live-card");
-    // The timeline, first and selected, with the chat's working line and the figures.
+    // The timeline, first and selected, with the chat's working line — the
+    // dots alone; the tokens and the clock are the rail's tiles, once each.
     expect(card).toHaveAttribute("data-tab", "timeline");
     expect(screen.getByTestId("coding-agent-live-tab-timeline")).toHaveAttribute("aria-selected", "true");
     const working = within(card).getByTestId("coding-agent-run-working");
     expect(working.textContent).toContain(t("codingAgent.chatWorking"));
-    expect(working.textContent).toContain(`332k ${t("codingAgent.tokensWord")}`);
+    expect(working.textContent).not.toContain(t("codingAgent.tokensWord"));
+    expect(screen.getByTestId("coding-agent-stat-tokens").textContent).toBe("332k");
     expect(within(working).getByRole("img", { name: t("codingAgent.chatBusy") })).toBeInTheDocument();
-    // Only one pane shows: the terminal is mounted but hidden, the browser not mounted.
-    expect(screen.getByTestId("coding-agent-run-terminal").closest("[role=tabpanel]")).toHaveAttribute("hidden");
+    // Only one pane shows: neither the terminal nor the browser is mounted
+    // until its tab is picked.
+    expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
     expect(screen.queryByTestId("coding-agent-browser-preview")).toBeNull();
     expect(screen.queryByTestId("coding-agent-live-row")).toBeNull();
     // The terminal tab: the transcript, and Open in Terminal beside the tabs.
@@ -2281,7 +2238,10 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(within(screen.getByTestId("coding-agent-run-terminal")).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
     expect(screen.getByTestId("coding-agent-run-terminal-open")).toBeInTheDocument();
     // The browser tab: a view-only picture, and Open VNC opens the VNC app.
+    // The terminal, once picked, stays mounted and hidden: it typed its
+    // command once, and a remount would tail from the top.
     fireEvent.click(screen.getByTestId("coding-agent-live-tab-browser"));
+    expect(screen.getByTestId("coding-agent-run-terminal").closest("[role=tabpanel]")).toHaveAttribute("hidden");
     const preview = screen.getByTestId("coding-agent-browser-preview");
     const screenMock = within(preview).getByTestId("vnc-mock");
     expect(screenMock).toHaveAttribute("data-view-only", "true");
@@ -2571,9 +2531,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
     await openRuns();
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
-    const main = screen.getByTestId("coding-agent-agent-main");
-    expect(main).toHaveAttribute("data-outcome", "unfinished");
-    expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("error");
+    const main = within(await screen.findByTestId("coding-agent-run-diagram")).getAllByTestId("coding-agent-node")[0];
+    expect(main).toHaveAttribute("data-role", "run");
+    expect(main).toHaveAttribute("data-state", "failed");
   });
 
   it("ticks one that did", async () => {
@@ -2583,9 +2543,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
     await openRuns();
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
-    const main = await screen.findByTestId("coding-agent-agent-main");
-    expect(main).toHaveAttribute("data-outcome", "completed");
-    expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("check_circle");
+    const main = within(await screen.findByTestId("coding-agent-run-diagram")).getAllByTestId("coding-agent-node")[0];
+    expect(main).toHaveAttribute("data-role", "run");
+    expect(main).toHaveAttribute("data-state", "done");
   });
 
   /**
@@ -3113,5 +3073,98 @@ describe("publishing a ClawBox app to the Store", () => {
     expect(publish).toHaveAccessibleName(translations.en["codingAgent.publishFor"].replace("{name}", "My Site"));
     fireEvent.click(publish);
     expect(await screen.findByTestId("store-publish-dialog")).toBeInTheDocument();
+  });
+});
+
+/**
+ * A run that hit a ceiling — the step limit, the cost ceiling — settles
+ * failed AND resumable: the session did real work and ran out of room. The
+ * page offers Continue, a continuation of the run through the same POST the
+ * Fix CI card makes, and draws the steps against the ceiling they hit.
+ */
+describe("a run that hit a ceiling", () => {
+  const CEILING = {
+    ...RUN,
+    id: "run-ceiling01",
+    status: "failed",
+    resumable: true,
+    numTurns: 200,
+    maxTurns: 200,
+    summary: null,
+    error: "Stopped at the step limit (200 of 200) without finishing. Press Continue to carry on in the same session with a fresh limit, or split the work.",
+  };
+
+  async function openRun(id: string) {
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${id}`));
+    return screen.findByTestId("coding-agent-run-page");
+  }
+
+  it("draws the steps against the ceiling and offers Continue, which starts a continuation of the run", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [CEILING], { projects: [SITE_PROJECT] });
+    const real = globalThis.fetch as typeof fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/coding-agent/run" && init?.method === "POST") {
+        posts.push({ url: "/setup-api/coding-agent/run", body: JSON.parse(String(init.body)) });
+        return json({ run: { ...CEILING, id: "run-ceiling02", status: "running", completedAt: null, error: null, numTurns: 0 } });
+      }
+      return real(input, init);
+    }));
+    const page = await openRun(CEILING.id);
+    expect(within(page).getByTestId("coding-agent-stat-steps").textContent).toContain("200 / 200");
+    expect(within(page).getByTestId("coding-agent-run-error")).toHaveTextContent("Press Continue");
+    // Continue, and no Stop: the run is settled.
+    const button = within(page).getByTestId(`coding-agent-continue-${CEILING.id}`);
+    expect(button).toHaveTextContent(translations.en["codingAgent.continueRun"]);
+    expect(within(page).queryByTestId(`coding-agent-stop-${CEILING.id}`)).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
+    const body = posts.find((p) => p.url === "/setup-api/coding-agent/run")?.body as Record<string, unknown>;
+    expect(body).toMatchObject({ resumeRunId: CEILING.id });
+    expect(typeof body.task).toBe("string");
+    expect(body).not.toHaveProperty("fixCi");
+  });
+
+  it("offers nothing to a failure the session cannot take", async () => {
+    const dead = { ...CEILING, id: "run-ceiling03", resumable: false, numTurns: 12, error: "Claude Code reported an error." };
+    stubFetch({ enabled: true, readiness: READY }, [dead], { projects: [SITE_PROJECT] });
+    const page = await openRun(dead.id);
+    expect(within(page).queryByTestId(`coding-agent-continue-${dead.id}`)).toBeNull();
+    expect(within(page).getByTestId("coding-agent-stat-steps").textContent).toContain("12 / 200");
+  });
+});
+
+/**
+ * The project's Setup tab: its run notes and MCP servers, two cards that each
+ * read the box on mount — so they are rendered only while the tab is open,
+ * not hidden, and the count the servers card read rides on the tab.
+ */
+describe("the project's Setup tab", () => {
+  it("reads the run notes and the MCP servers only once the tab is opened, and carries the ticked count on it", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    const real = globalThis.fetch as typeof fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/mcp-servers?")) {
+        return json({ selected: ["clawbox", "github"], options: [{ id: "clawbox", kind: "clawbox", usable: true }, { id: "github", kind: "harness", harness: "openclaw", transport: "stdio", usable: true }], unreadable: [] });
+      }
+      if (url.startsWith("/setup-api/coding-agent/run-notes?")) return json({ notes: "", maxChars: 4000, file: "/home/clawbox/Projects/site/.clawbox/run-notes.md" });
+      return real(input, init);
+    }));
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    const urls = () => vi.mocked(globalThis.fetch).mock.calls.map(([input]) => input.toString());
+    expect(urls().some((u) => u.includes("/run-notes") || u.includes("/mcp-servers"))).toBe(false);
+    expect(screen.queryByTestId("coding-agent-project-setup")).toBeNull();
+    const tab = screen.getByTestId("coding-agent-workspace-setup");
+    expect(tab).toHaveTextContent(translations.en["codingAgent.setupTab"]);
+    expect(screen.getAllByRole("tab").at(-1)).toBe(tab);
+    fireEvent.click(tab);
+    await screen.findByTestId("coding-agent-project-setup");
+    await waitFor(() => expect(urls().some((u) => u.includes("/run-notes?"))).toBe(true));
+    await waitFor(() => expect(urls().some((u) => u.includes("/mcp-servers?"))).toBe(true));
+    expect(await screen.findByTestId("coding-agent-workspace-setup-count")).toHaveTextContent("(2)");
   });
 });
