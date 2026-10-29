@@ -168,9 +168,33 @@ import {
   isRecordableModel,
   modelsForProvider,
   resolveRunProvider,
+  runsOnCodex,
+  DEFAULT_OPENAI_MODEL,
   type CodingProvider,
 } from "@/lib/coding-provider";
 import { getAnthropicConnection, verifyAnthropicKey, type AnthropicSource } from "@/lib/coding-anthropic";
+import {
+  buildCodexArgs,
+  codexEventActions,
+  codexLimitUntil,
+  codexRulesText,
+  CODEX_API_KEY_ENV,
+  CODEX_COMMAND,
+  isCodexAuthFailure,
+  isCodexLimit,
+  type CodexMcpServer,
+} from "@/lib/coding-codex";
+import {
+  clearOpenAILimit,
+  codexBinary,
+  codexHome,
+  ensureCodexHome,
+  getOpenAIConnection,
+  noteOpenAILimit,
+  openAILimitedUntil,
+  readOpenAIKey,
+  type OpenAISource,
+} from "@/lib/coding-openai";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
@@ -1382,6 +1406,9 @@ export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
 export const HELPER_MODEL: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "deepseek-v4-flash",
   anthropic: "haiku",
+  // A Codex run is never handed `--agents` (Codex has no such flag); the entry
+  // is the provider's economy model so the table stays whole.
+  openai: "gpt-5.6-luna",
 };
 
 /** The `--agents` payload for a run on this provider. */
@@ -1891,6 +1918,13 @@ export interface CodingRun {
    * progress" and called coding_agent_stop at 295 seconds.
    */
   thinkingTokens: number;
+  /**
+   * An `openai` run's thread usage as Codex last reported it — its CUMULATIVE
+   * figure for the whole thread, not this record's share. Kept so a later
+   * spawn that continues the same thread (a resume, a completion attempt) can
+   * bill only what it added: see codexUsageBaseline. Absent on every other run.
+   */
+  codexThreadUsage?: CodexThreadUsage;
   /** When the run last showed ANY sign of life. The answer to "is it stuck?". */
   lastActivityAt: number;
   /**
@@ -2247,6 +2281,15 @@ export interface RunMedia {
 }
 
 /** One item of the run's plan, as Claude Code's TodoWrite tool reports it. */
+/** Codex's cumulative token figures for one thread (`turn.completed` usage). */
+export interface CodexThreadUsage {
+  /** Every input token, the cached prefix included. */
+  input: number;
+  /** The part of `input` served from the prompt cache. */
+  cachedInput: number;
+  output: number;
+}
+
 export interface CodingTodo {
   content: string;
   status: CodingTodoStatus;
@@ -2340,6 +2383,12 @@ export interface CodingHarnessReadiness {
   anthropicConnected: boolean;
   /** Which of the two a run would use, or null when there is neither. Never the credential. */
   anthropicSource: AnthropicSource | null;
+  /** Is the Codex CLI an `openai` run needs where install.sh puts it? */
+  codexInstalled: boolean;
+  /** Has the owner's own OpenAI access — a saved key or a ChatGPT sign-in for coding runs? */
+  openaiConnected: boolean;
+  /** Which of the two an `openai` run would use, or null. Never the credential. */
+  openaiSource: OpenAISource | null;
   /**
    * Whether `setpriv` is here to strip the web server's inherited network
    * capabilities off the run. False means no run may start: see the header.
@@ -2911,6 +2960,9 @@ function isEffort(value: unknown): value is CodingEffort {
  */
 export function harnessStateDir(provider: CodingProvider): string {
   if (provider === "anthropic") return path.join(homeDir(), ".claude");
+  // An `openai` run is Codex, whose state is the coding agent's own CODEX_HOME
+  // under the box's data folder (src/lib/coding-openai.ts) — never ~/.codex.
+  if (runsOnCodex(provider)) return codexHome();
   return process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
 }
 
@@ -2934,6 +2986,9 @@ export function harnessStateDir(provider: CodingProvider): string {
 export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory" | "provider">): string | null {
   if (!run.sessionId) return null;
   const provider = codingProviderFrom(run.provider);
+  // A Codex run keeps no Claude Code transcript: its session is the CLI's own
+  // rollout, and everything the box shows of it came through the stream log.
+  if (runsOnCodex(provider)) return null;
   const file = (p: CodingProvider) =>
     path.join(harnessStateDir(p), "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
   const own = file(provider);
@@ -4016,6 +4071,13 @@ const ANTHROPIC_MISSING =
 const CLAWAI_MISSING =
   "ClawBox AI is not connected. Open Settings → AI Models and sign in to ClawBox AI first.";
 
+/** Why an `openai` run cannot start, in the owner's words. */
+const OPENAI_MISSING =
+  "Your OpenAI account is not connected. Open the Coding Agent app → Settings and save an OpenAI API key, or sign in with ChatGPT there.";
+
+const CODEX_MISSING =
+  "The Codex CLI that OpenAI runs use is not installed on this ClawBox. Run: sudo bash install.sh --step codex_cli";
+
 /**
  * The readiness probe proper, given the config values the caller already read.
  *
@@ -4031,11 +4093,12 @@ const CLAWAI_MISSING =
  * provider's, because that is the run a caller who names nothing gets.
  */
 async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, anthropic, scope] = await Promise.all([
+  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
     getAnthropicConnection(),
+    getOpenAIConnection(),
     // Cached for a minute inside the module, so a status poll pays for the bus
     // round trip at most once a minute.
     probeSystemdRun(),
@@ -4044,11 +4107,16 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   const capabilityDropAvailable = setprivPath !== null;
   const clawaiConnected = typeof token === "string" && token.trim() !== "";
   const shared: string[] = [];
+  // Claude Code and its wrapper are in the way of every provider that runs on
+  // them — every one but `openai`, whose runs are the Codex CLI. They stay in
+  // the SHARED list (the panels and the MCP probe read it) unless an `openai`
+  // run is the only thing they would be stopping, which is said per provider.
+  const claudeProblems: string[] = [];
   if (!claudeInstalled) {
-    shared.push("Claude Code is not installed on this ClawBox. Run: sudo bash install.sh --step coding_harness");
+    claudeProblems.push("Claude Code is not installed on this ClawBox. Run: sudo bash install.sh --step coding_harness");
   }
   if (!wrapperInstalled) {
-    shared.push(`The ${CODING_HARNESS_COMMAND} wrapper is missing from ~/${CODING_HARNESS_WRAPPER_PATH}. Run: sudo bash install.sh --step coding_harness`);
+    claudeProblems.push(`The ${CODING_HARNESS_COMMAND} wrapper is missing from ~/${CODING_HARNESS_WRAPPER_PATH}. Run: sudo bash install.sh --step coding_harness`);
   }
   if (!capabilityDropAvailable) {
     shared.push(`${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`);
@@ -4070,16 +4138,32 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   if (fault) shared.push(harnessFaultProblem(fault));
   const credentialProblem = (id: CodingProvider): string[] => {
     if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
+    if (id === "openai") {
+      // The CLI first: a connected account with nothing to run it on is the
+      // install's to fix, and saying "connect" would send the owner the wrong way.
+      if (!openai.codexInstalled) return [CODEX_MISSING];
+      return openai.connected ? [] : [OPENAI_MISSING];
+    }
     return clawaiConnected ? [] : [CLAWAI_MISSING];
   };
+  // The Claude Code half is shared by every provider but `openai`. Carried into
+  // `shared` when any of the providers it stops is one the box would run — the
+  // owner's default, or anything on a box with no OpenAI at all — so a
+  // Claude-less box still reports itself as not ready; an `openai` run alone is
+  // judged without it.
+  const claudeShared = claudeProblems.length > 0 && !(runsOnCodex(defaultProvider) && openai.connected && openai.codexInstalled);
+  if (claudeShared) shared.unshift(...claudeProblems);
   const providers: CodingProviderReadiness[] = CODING_PROVIDERS.map((id) => {
-    const problems = credentialProblem(id);
+    const own = runsOnCodex(id)
+      ? credentialProblem(id)
+      : [...(claudeShared ? [] : claudeProblems), ...credentialProblem(id)];
+    const blocking = runsOnCodex(id) ? shared.filter((m) => !claudeProblems.includes(m)) : shared;
     return {
       id,
-      ready: shared.length === 0 && problems.length === 0,
+      ready: blocking.length === 0 && own.length === 0,
       models: modelsForProvider(id),
       defaultModel: defaultModelForProvider(id),
-      problems,
+      problems: own,
     };
   });
   const forDefault = providers.find((p) => p.id === defaultProvider) ?? providers[0];
@@ -4091,6 +4175,9 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     clawaiConnected,
     anthropicConnected: anthropic.connected,
     anthropicSource: anthropic.source,
+    codexInstalled: openai.codexInstalled,
+    openaiConnected: openai.connected,
+    openaiSource: openai.source,
     capabilityDropAvailable,
     harnessHealthy,
     detachedRuns: scope.available,
@@ -4217,6 +4304,12 @@ async function assertProviderReady(provider: CodingProvider): Promise<void> {
   if (provider === "anthropic") {
     const anthropic = await getAnthropicConnection();
     if (!anthropic.connected) throw new CodingAgentError("not_ready", ANTHROPIC_MISSING);
+    return;
+  }
+  if (provider === "openai") {
+    const openai = await getOpenAIConnection();
+    if (!openai.codexInstalled) throw new CodingAgentError("not_ready", CODEX_MISSING);
+    if (!openai.connected) throw new CodingAgentError("not_ready", OPENAI_MISSING);
     return;
   }
   const token = await configGet("clawai_token");
@@ -4569,6 +4662,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
       : [],
     tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
     thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
+    ...(readCodexThreadUsage((raw as { codexThreadUsage?: unknown }).codexThreadUsage) ?? {}),
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
     retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
@@ -4998,6 +5092,18 @@ interface LiveRun {
   sawInit: boolean;
   /** Whether "Thinking…" has already been said once. */
   sawThinking: boolean;
+  /**
+   * A Codex run's last agent message — its closing words once the turn
+   * completes — and the last notice the CLI printed (a retry, a stream error),
+   * which is the best account of a run that ends with no verdict at all.
+   */
+  codexLastMessage?: string | null;
+  codexNotice?: string | null;
+  /** A Codex run's usage limit or refused credential, in the CLI's words. */
+  codexLimit?: string | null;
+  codexAuth?: string | null;
+  /** What the thread had already billed before this spawn — see codexUsageBaseline. */
+  codexBaseline?: CodexThreadUsage;
   /** The last thinking_tokens figure seen, to tell "more of this block"
    *  (add the difference) from "a new block began" (add it all). */
   thinkingSeen: number;
@@ -5189,6 +5295,8 @@ interface RunStore {
   runAnthropicCredential: Map<string, RunAnthropicCredential>;
   /** The MCP servers a run's project opted into, credentials included — see runMcpPlan. */
   runMcpPlan: Map<string, RunMcpPlan>;
+  /** An `openai` run's API key — see runOpenAIKey. Optional: a store from an older module. */
+  runOpenAIKey?: Map<string, string>;
   /** The runs whose pull request or review is already being watched. */
   prWatchers: Set<string>;
   reviewWatchers: Set<string>;
@@ -5412,6 +5520,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     breakdownAtSpawn: { ...run.tokenBreakdown },
     sawThinking: false,
     thinkingSeen: 0,
+    ...(runsOnCodex(run.provider) ? { codexBaseline: codexUsageBaseline(run.sessionId) } : {}),
     tools,
     settings: { effort: run.effort, maxTurns: run.maxTurns },
     commandMayHaveSideEffects: false,
@@ -6151,6 +6260,13 @@ export function leanHelpersBrief(reviewedSeparately: boolean): string {
   ].join(" ");
 }
 
+/**
+ * The helper sentence of a run that has no helpers — a Codex run, which has no
+ * sub-agents to send. The same checks, done in its own shell.
+ */
+export const NO_HELPERS_BRIEF =
+  "You have no helper agents: read what you need yourself, run the project's tests and builds in your shell after each batch of changes, and read your own diff once before you finish.";
+
 function helpersSentence(diet: CodingDiet, reviewedSeparately: boolean): string {
   return diet.helpers === "lean"
     ? leanHelpersBrief(reviewedSeparately)
@@ -6166,9 +6282,9 @@ function helpersSentence(diet: CodingDiet, reviewedSeparately: boolean): string 
  * sentence only for a run that can open a pull request or was asked about
  * one. Omitted, `diet` is LEGACY_DIET: the pre-diet brief byte for byte.
  */
-export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; diet?: CodingDiet; visual?: boolean; pullRequest?: boolean }): string {
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; diet?: CodingDiet; visual?: boolean; pullRequest?: boolean; noHelpers?: boolean }): string {
   const diet = opts.diet ?? LEGACY_DIET;
-  const helpers = helpersSentence(diet, opts.reviewedSeparately);
+  const helpers = opts.noHelpers ? NO_HELPERS_BRIEF : helpersSentence(diet, opts.reviewedSeparately);
   // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
   // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
   // at the end — never a worker's, whatever its task text quotes of the goal.
@@ -6795,8 +6911,8 @@ export interface RunMcpArgs {
   readOnlyTools: boolean;
 }
 
-/** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null };
+/** What a run's argv — and its brief — are built from. */
+export interface RunArgsOptions { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null };
   /** The token diet frozen on the run (CodingRun.diet); omitted = LEGACY_DIET, the pre-diet argv. */
   diet?: CodingDiet;
   /** The run's frozen visual decision (CodingRun.visual); only read under `visualTools: "auto"`. */
@@ -6809,13 +6925,23 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
    * for byte. Never for a read-only run.
    */
   mcp?: RunMcpArgs | null;
-}): string[] {
+  /**
+   * The run has no helper agents to delegate to — a Codex run (provider
+   * `openai`), which has no `--agents`. Its brief says so instead of the
+   * delegation sentence.
+   */
+  noHelpers?: boolean;
+}
+
+/**
+ * The run's system prompt: the device's brief, then the project's run notes and
+ * the lessons of earlier runs. Claude Code gets it as `--append-system-prompt`,
+ * Codex as `developer_instructions` — one text, so the two runners are told the
+ * same things. Exported for the contract test.
+ */
+export function buildRunSystemPrompt(opts: RunArgsOptions): string {
   const diet = opts.diet ?? LEGACY_DIET;
-  // Does this run hold the browser and media tools? See runHoldsVisualTools.
   const visual = runHoldsVisualTools(diet, opts.visual);
-  // The project's extra servers: a writing run's only (prepareRunMcp hands a
-  // read-only run none, and this is the last place before argv).
-  const mcp = opts.run && !opts.readOnly ? opts.mcp ?? null : null;
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
   const headless = headlessBrief({
@@ -6824,6 +6950,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     diet,
     visual,
     pullRequest: opts.draftPullRequests === true || opts.pullRequestMentioned === true,
+    noHelpers: opts.noHelpers === true,
   });
   // The media the run actually holds: none for a run without the tools.
   const media = visual ? opts.run?.media : undefined;
@@ -6857,7 +6984,18 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   // delimited blocks after every word of the device's own. In the system
   // prompt rather than the task, so the task stays what the caller typed. A
   // run given neither gets the brief above unchanged, byte for byte.
-  const systemPrompt = [brief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
+  return [brief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
+}
+
+/** The argv handed to the wrapper. Exported for the contract test. */
+export function buildRunArgs(opts: RunArgsOptions): string[] {
+  const diet = opts.diet ?? LEGACY_DIET;
+  // Does this run hold the browser and media tools? See runHoldsVisualTools.
+  const visual = runHoldsVisualTools(diet, opts.visual);
+  // The project's extra servers: a writing run's only (prepareRunMcp hands a
+  // read-only run none, and this is the last place before argv).
+  const mcp = opts.run && !opts.readOnly ? opts.mcp ?? null : null;
+  const systemPrompt = buildRunSystemPrompt(opts);
   const args = [
     "-p",
     "--verbose",
@@ -7113,6 +7251,8 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
   // here just before it, which is exactly where "which account is first in
   // line right now" should be asked (TASK-902).
   await prepareRunAccount(run);
+  // …and the OpenAI key, for an `openai` run.
+  await prepareRunOpenAIKey(run);
   // …and the project's MCP servers, whose credentials the table below must
   // know before the child that holds them exists.
   await prepareRunMcp(run, project);
@@ -7139,6 +7279,14 @@ interface RunAnthropicCredential {
 
 const runAnthropicCredential: Map<string, RunAnthropicCredential> =
   store.runAnthropicCredential ?? (store.runAnthropicCredential = new Map<string, RunAnthropicCredential>());
+
+/**
+ * The owner's OpenAI API key for an `openai` run's next spawn — in memory only,
+ * beside the owner's secrets and dropped with them, never on the record. No
+ * entry is a run on the ChatGPT sign-in in the coding agent's CODEX_HOME.
+ */
+const runOpenAIKey: Map<string, string> =
+  store.runOpenAIKey ?? (store.runOpenAIKey = new Map<string, string>());
 
 /**
  * The MCP servers a run's project opted into (src/lib/project-mcp-servers.ts),
@@ -7174,6 +7322,16 @@ async function prepareRunMcp(run: CodingRun, project: string | null): Promise<vo
     console.error(`[coding-agent] ${run.id}: the project's MCP servers could not be read:`, err instanceof Error ? err.message : err);
   }
   if (!plan) return;
+  // A Codex run is handed its MCP servers in argv (buildCodexRunArgs), which
+  // is world-readable: the ClawBox read-only tools travel (they carry no
+  // secret), the harness servers and their credentials do not — and the feed
+  // says which, rather than leaving the owner to wonder where a tool went.
+  if (runsOnCodex(run.provider)) {
+    const unavailable = Object.keys(plan.servers);
+    if (unavailable.length > 0) pushProgress(run, RUNNER_STEP.mcpServersMissing(unavailable.map(mcpEntryLabel)));
+    if (!plan.readOnlyTools) return;
+    plan = { ...plan, servers: {}, names: plan.names.filter((n) => !unavailable.includes(n)), secrets: [], allowedTools: [], disallowedTools: [] };
+  }
   if (plan.names.length > 0) {
     runMcpPlan.set(run.id, plan);
     pushProgress(run, RUNNER_STEP.mcpServers(plan.names.map(mcpEntryLabel)));
@@ -7210,6 +7368,22 @@ async function prepareRunAccount(run: CodingRun): Promise<void> {
 }
 
 /**
+ * The OpenAI key for an `openai` run's next spawn, when the owner saved one.
+ * Never throws: a store that cannot be read leaves the run on the ChatGPT
+ * sign-in, and Codex says so if there is none.
+ */
+async function prepareRunOpenAIKey(run: CodingRun): Promise<void> {
+  runOpenAIKey.delete(run.id);
+  if (!runsOnCodex(run.provider)) return;
+  try {
+    const key = await readOpenAIKey();
+    if (key) runOpenAIKey.set(run.id, key);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: the OpenAI key could not be read:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Arm the redaction table with everything this run was handed: the owner's
  * injected secrets, and the Anthropic account's own token or key — which is in
  * the harness's environment too, so a run that echoes it must not get it onto
@@ -7219,6 +7393,8 @@ function registerRunRedaction(runId: string): void {
   const list = Object.entries(runSecretEnv.get(runId) ?? {}).map(([name, value]) => ({ name, value }));
   const account = runAnthropicCredential.get(runId);
   if (account?.credential.secret) list.push({ name: "ANTHROPIC_ACCOUNT", value: account.credential.secret });
+  const openaiKey = runOpenAIKey.get(runId);
+  if (openaiKey) list.push({ name: "OPENAI_API_KEY", value: openaiKey });
   // Every env and header value of the project's MCP servers: the run holds
   // them through its config file, and one it echoes must not reach the record.
   list.push(...(runMcpPlan.get(runId)?.secrets ?? []));
@@ -7242,9 +7418,10 @@ function registerRunRedaction(runId: string): void {
  * the deliverable gate. Those are the paths where re-reading is the right
  * answer, because time has passed and the owner may have changed their mind.
  */
-function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential, mcp?: RunMcpPlan): void {
+function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential, mcp?: RunMcpPlan, openaiKey?: string): void {
   runSecretEnv.set(runId, env);
   if (account) runAnthropicCredential.set(runId, account);
+  if (openaiKey) runOpenAIKey.set(runId, openaiKey);
   if (mcp) runMcpPlan.set(runId, mcp);
   registerRunRedaction(runId);
 }
@@ -7254,6 +7431,7 @@ function restoreRunSecrets(runId: string, env: Record<string, string>, account?:
 function dropRunSecrets(runId: string): void {
   runSecretEnv.delete(runId);
   runAnthropicCredential.delete(runId);
+  runOpenAIKey.delete(runId);
   runMcpPlan.delete(runId);
   forgetRunSecrets(runId);
 }
@@ -7317,6 +7495,14 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // the other does not serve.
   if (opts.model) env.CLAUDE_DS_MODEL = opts.model;
   else if (modelsForProvider(provider).length > 0) delete env.CLAUDE_DS_MODEL;
+  // An `openai` run is the Codex CLI: none of the wrapper's knobs mean
+  // anything to it, and its state lives in the coding agent's own CODEX_HOME
+  // (src/lib/coding-openai.ts) — set here, ahead of the owner's secrets, so no
+  // stored secret can point a run's Codex at another home and another login.
+  if (runsOnCodex(provider)) {
+    for (const key of Object.keys(env)) if (key.startsWith("CLAUDE_") || key === "CLAWBOX_AI_PROXY_URL") delete env[key];
+    env.CODEX_HOME = codexHome();
+  }
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
@@ -7355,6 +7541,11 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
     if (!SECRET_NAME_RE.test(name) || isReservedSecretName(name)) continue;
     env[name] = value;
   }
+  // On an `openai` run, the variable `codex exec` authenticates with is the
+  // box's to set, from the owner's saved key (spawnRun) — never an owner
+  // secret that happens to carry the name, which would move the run onto
+  // another bill. A Claude run's harness never reads it.
+  if (runsOnCodex(provider)) delete env[CODEX_API_KEY_ENV];
   return env;
 }
 
@@ -8620,6 +8811,155 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // stdin: hand it whatever the owner has queued, or close the pipe so it
     // can exit and the run can settle.
     afterTurn(run, state);
+  }
+}
+
+/** A stored Codex thread usage, or null when the record carries none that reads. */
+function readCodexThreadUsage(raw: unknown): { codexThreadUsage: CodexThreadUsage } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const u = raw as Record<string, unknown>;
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  const input = n(u.input);
+  const cachedInput = n(u.cachedInput);
+  const output = n(u.output);
+  if (input === null || cachedInput === null || output === null) return null;
+  return { codexThreadUsage: { input, cachedInput, output } };
+}
+
+/**
+ * What a Codex thread had already billed before this spawn: the largest usage
+ * any record of the same thread carries — the run this one resumes, or this
+ * very record's earlier spawn on a completion attempt. Codex reports a
+ * thread's usage cumulatively, so a continuation's own share is its figure
+ * less this one. Zero for a fresh thread.
+ */
+function codexUsageBaseline(sessionId: string | null): CodexThreadUsage {
+  const base: CodexThreadUsage = { input: 0, cachedInput: 0, output: 0 };
+  if (!sessionId) return base;
+  for (const other of loadRuns()) {
+    if (other.sessionId !== sessionId || !other.codexThreadUsage) continue;
+    const u = other.codexThreadUsage;
+    if (u.input + u.output > base.input + base.output) Object.assign(base, u);
+  }
+  return base;
+}
+
+/**
+ * The usage of one Codex turn onto the record: this spawn's share of the
+ * thread's cumulative figure (codexUsageBaseline), split the way the record
+ * bills — fresh input, cached input read back, output. A figure BELOW the
+ * baseline is not cumulative after all (a CLI that counts per process): it is
+ * taken whole rather than read as a negative.
+ *
+ * @returns whether the token ceiling stopped the run (noteTokens)
+ */
+function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage): boolean {
+  const base = state.codexBaseline ?? { input: 0, cachedInput: 0, output: 0 };
+  const cumulative = usage.input >= base.input && usage.output >= base.output && usage.cachedInput >= base.cachedInput;
+  const input = cumulative ? usage.input - base.input : usage.input;
+  const cached = Math.min(input, cumulative ? usage.cachedInput - base.cachedInput : usage.cachedInput);
+  const output = cumulative ? usage.output - base.output : usage.output;
+  run.codexThreadUsage = { ...usage };
+  // The next turn of this same process (there is none in `codex exec` today)
+  // would report a figure that includes this one.
+  state.codexBaseline = { ...usage };
+  run.tokenBreakdown.input += input - cached;
+  run.tokenBreakdown.cacheRead += cached;
+  run.tokenBreakdown.output += output;
+  return noteTokens(run, state, input + output);
+}
+
+/**
+ * One line of `codex exec --json`, onto the record — the Codex twin of
+ * handleEvent, for an `openai` run. What the event MEANS is read by
+ * codexEventActions (src/lib/coding-codex.ts, pure and tested on its own);
+ * this applies it with the same helpers the Claude path uses, so the run's
+ * feed, its changed files, its plan, its tokens and its verdict land in the
+ * same fields the card, the settle and the commit read.
+ */
+function handleCodexEvent(run: CodingRun, state: LiveRun, event: unknown): void {
+  run.lastActivityAt = Date.now();
+  for (const action of codexEventActions(event)) {
+    switch (action.kind) {
+      case "session":
+        if (!run.sessionId) run.sessionId = action.id;
+        if (!state.sawInit) {
+          // Codex does not name the model on the stream; the run asked for it
+          // by name (`-m`), so the record says the model it asked for.
+          run.model = run.requestedModel ?? defaultModelForProvider(run.provider);
+          run.modelsUsed = run.model ? [run.model] : [];
+          pushProgress(run, RUNNER_STEP.started(run.model));
+          if (state.unit) noteScopeWorked();
+          state.sawInit = true;
+        }
+        break;
+      case "reasoning":
+        state.sawModelAnswer = true;
+        if (!state.sawThinking) {
+          state.sawThinking = true;
+          pushProgress(run, RUNNER_STEP.thinking);
+        }
+        break;
+      case "message":
+        state.sawModelAnswer = true;
+        state.codexLastMessage = action.text;
+        pushProgress(run, action.text);
+        break;
+      case "command":
+        state.sawModelAnswer = true;
+        run.commandsRun += 1;
+        if (!isReadOnlyInspectionCommand(action.command) && !isRetrySafeSetupCommand(action.command)) state.commandMayHaveSideEffects = true;
+        pushProgress(run, `$ ${action.command}`);
+        break;
+      case "files":
+        state.sawModelAnswer = true;
+        // Reported once the CLI has APPLIED the change — the confirmation a
+        // Claude run's tool_result gives — so it counts at once.
+        state.sawWriteAttempt = true;
+        for (const raw of action.paths) {
+          const file = relativeToRun(run, raw);
+          if (file && !isEvidencePath(run, file)) noteFile(run, file);
+          pushProgress(run, `Edit ${file ?? raw}`);
+        }
+        break;
+      case "tool":
+        state.sawModelAnswer = true;
+        pushProgress(run, action.label);
+        break;
+      case "todos": {
+        const todos = parseTodos(action.items.map((t) => ({ content: t.text, status: t.completed ? "completed" : "pending" })));
+        if (!todos) break;
+        run.todos = todos;
+        const done = todos.filter((t) => t.status === "completed").length;
+        pushProgress(run, `Plan: ${todos.length} tasks, ${done} done`);
+        break;
+      }
+      case "usage":
+        if (applyCodexUsage(run, state, { input: action.input, cachedInput: action.cachedInput, output: action.output })) return;
+        break;
+      case "completed": {
+        state.sawResult = true;
+        run.numTurns += 1;
+        const text = state.codexLastMessage ? redactForRun(run.id, state.codexLastMessage).trim() : "";
+        if (text) {
+          run.summary = text.slice(0, MAX_SUMMARY_CHARS);
+          run.resultText = text;
+        }
+        state.outcome = { status: "completed", error: null, resumable: false };
+        break;
+      }
+      case "failed": {
+        state.sawResult = true;
+        const error = redactForRun(run.id, action.error).trim();
+        if (isCodexLimit(error)) state.codexLimit = error;
+        else if (isCodexAuthFailure(error)) state.codexAuth = error;
+        state.outcome = { status: "failed", error: (error || "Codex stopped with an error.").slice(0, MAX_ERROR_CHARS), resumable: false };
+        break;
+      }
+      case "notice":
+        state.codexNotice = action.text;
+        break;
+    }
   }
 }
 
@@ -11749,13 +12089,41 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         noteStreamInputRefused();
         console.error(`[coding-agent] ${run.id}: the harness refused streaming input; messages will wait for a boundary`);
       }
-      run.error = ULTRACODE_REFUSED.test(state.stderr)
-        // The CLI refuses the flag before the first turn when dynamic
-        // workflows are off for this install or the plan does not allow
-        // xhigh. Name the way out rather than echo its /config advice, which
-        // the owner cannot follow from the app.
-        ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
-        : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+      run.error = runsOnCodex(run.provider)
+        // Codex prints its own failures as stream notices ("Reconnecting...",
+        // a stream error) before it gives up; the last one is the best account
+        // of a run that ended with no verdict, and stderr is the next.
+        ? (state.codexNotice ? redactForRun(run.id, state.codexNotice).slice(0, MAX_ERROR_CHARS) : "")
+          || tail || `Codex exited with code ${exitCode ?? "unknown"} before reporting a result.`
+        : ULTRACODE_REFUSED.test(state.stderr)
+          // The CLI refuses the flag before the first turn when dynamic
+          // workflows are off for this install or the plan does not allow
+          // xhigh. Name the way out rather than echo its /config advice, which
+          // the owner cannot follow from the app.
+          ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
+          : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+    }
+    // An `openai` run OpenAI turned away for a usage limit or a refused
+    // credential, said in the owner's terms. The limit is remembered, so the
+    // provider reads "limited" in the settings and the next run waits for the
+    // reset instead of being refused the same way (assertCanSpawn); a run that
+    // got its answer clears it. Resumable across a limit: the thread holds
+    // the work done so far, and a limit comes good by itself.
+    if (runsOnCodex(run.provider)) {
+      if (run.status === "completed") {
+        void clearOpenAILimit().catch((err: unknown) => {
+          console.error(`[coding-agent] ${run.id}: could not clear the OpenAI limit:`, err instanceof Error ? err.message : err);
+        });
+      } else if (run.status === "failed" && state.endRequested === null && state.codexLimit) {
+        const resetsAt = codexLimitUntil(state.codexLimit, Date.now());
+        void noteOpenAILimit(resetsAt).catch((err: unknown) => {
+          console.error(`[coding-agent] ${run.id}: could not record the OpenAI limit:`, err instanceof Error ? err.message : err);
+        });
+        run.error = `OpenAI turned this run away at its usage limit; it should be back at about ${formatResetClock(resetsAt)}: ${state.codexLimit}`.slice(0, MAX_ERROR_CHARS);
+        if (run.sessionId) run.resumable = true;
+      } else if (run.status === "failed" && state.codexAuth) {
+        run.error = `OpenAI did not accept this ClawBox's credential (${state.codexAuth}). Reconnect OpenAI in the Coding Agent app → Settings.`.slice(0, MAX_ERROR_CHARS);
+      }
     }
     // ClawBox AI refused the run's MODEL calls because one of its rolling
     // allowances is spent. That is not the work failing, and neither a retry
@@ -11767,7 +12135,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // Only the proxy's own answer counts — its 429 or its `usage_limit`
     // envelope — never words that merely quote a code: a run working on this
     // very codebase can fail with a sentence about `weekly_limit_exceeded`.
-    if (run.status === "failed" && state.endRequested === null && run.sessionId && PROXY_REFUSAL_RE.test(run.error ?? "")) {
+    // An OpenAI run's limit is OpenAI's, never the proxy's: it is read below.
+    if (run.status === "failed" && state.endRequested === null && run.sessionId && !runsOnCodex(run.provider) && PROXY_REFUSAL_RE.test(run.error ?? "")) {
       const refusal = parseClawaiAllowanceRefusal(run.error);
       if (refusal) {
         run.status = "paused";
@@ -11854,6 +12223,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   const carriedAccount = runAnthropicCredential.get(run.id);
   // …and its project's MCP servers, for the same two continuations.
   const carriedMcp = runMcpPlan.get(run.id);
+  // …and an `openai` run's key, for the retry.
+  const carriedOpenAIKey = runOpenAIKey.get(run.id);
   // …and its process group, which the cleanup forgets once it has signalled
   // it: the prune below waits for that group to be gone.
   const settledGroup = run.pgid;
@@ -11947,8 +12318,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // got nowhere: this is one run making a second try at the same work, not
       // a new decision by the owner. Less a dated copy whose day ended while the
       // first attempt ran: one is never handed after its day, whoever hands it.
-      if (carriedSecrets || carriedAccount || carriedMcp) {
-        restoreRunSecrets(run.id, withoutPastDueSecrets(carriedSecrets ?? {}, carriedExpiry ?? {}), carriedAccount, carriedMcp);
+      if (carriedSecrets || carriedAccount || carriedMcp || carriedOpenAIKey) {
+        restoreRunSecrets(run.id, withoutPastDueSecrets(carriedSecrets ?? {}, carriedExpiry ?? {}), carriedAccount, carriedMcp, carriedOpenAIKey);
       }
       try {
         spawnRun(run, null, state.tools, state.settings);
@@ -12009,7 +12380,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // THIS spawn's bill (and its retry's), not the record's: see tokensAtSpawn.
   const spawnTokens = Math.max(0, run.tokensUsed - state.tokensAtSpawn);
   run.spawnTokens = [...run.spawnTokens, spawnTokens].slice(-MAX_SPAWN_TOKENS_KEPT);
-  const harnessVerdict = run.status === "failed"
+  // Claude Code's harness only: a Codex run that could not get an answer is
+  // OpenAI's or the Codex CLI's to explain, and a fault recorded for it would
+  // refuse every Claude run on the box for nothing.
+  const harnessVerdict = run.status === "failed" && !runsOnCodex(run.provider)
     ? classifyHarnessFailure(run.error, { tokensUsed: spawnTokens, sawModelAnswer: state.sawModelAnswer })
     : null;
   if (harnessVerdict === "run_failure") {
@@ -12216,7 +12590,11 @@ function consumeStreamText(run: CodingRun, state: LiveRun, text: string): void {
     stream.buffer = stream.buffer.slice(nl + 1);
     if (line && line.length <= MAX_STDOUT_LINE_CHARS && line.startsWith("{")) {
       try {
-        handleEvent(run, state, JSON.parse(line) as StreamEvent);
+        const event = JSON.parse(line) as unknown;
+        // The same log and the same tail for both runners; only the reading
+        // differs — Claude Code's stream-json, or Codex's `exec --json`.
+        if (runsOnCodex(run.provider)) handleCodexEvent(run, state, event);
+        else handleEvent(run, state, event as StreamEvent);
         // The stream's own cadence, not the state one: a harness emits lines
         // far faster than anybody reads the record, and each flush rewrites
         // the whole file.
@@ -12299,6 +12677,66 @@ export function buildSpawnArgv(setprivPath: string, claudeArgs: string[]): { bin
   return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, wrapperPath(), ...claudeArgs] };
 }
 
+/** The same prefix in front of the Codex CLI, for an `openai` run. Exported for the contract test. */
+export function buildCodexSpawnArgv(setprivPath: string, codexArgs: string[]): { bin: string; argv: string[] } {
+  return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, codexBinary(), ...codexArgs] };
+}
+
+/**
+ * The Codex argv of an `openai` run (src/lib/coding-codex.ts): the same brief a
+ * Claude run gets, as developer instructions, and the run's own clawbox MCP
+ * server when it holds any of its tools. Never the project's harness servers:
+ * their credentials would have to travel in argv (prepareRunMcp says so in the
+ * run's feed). Exported for the contract test.
+ */
+export function buildCodexRunArgs(opts: RunArgsOptions & { model: string; readOnlyTools?: boolean }): string[] {
+  const diet = opts.diet ?? LEGACY_DIET;
+  const visual = runHoldsVisualTools(diet, opts.visual);
+  const developerInstructions = buildRunSystemPrompt({
+    ...opts,
+    // Ultracode's brief is about Claude Code's Workflow tool, which Codex does
+    // not have; its thinking half is the reasoning effort (codexReasoningEffort).
+    effort: opts.effort === ULTRACODE_EFFORT ? "xhigh" : opts.effort,
+    noHelpers: true,
+  });
+  const run = opts.run;
+  const mcpServers: Record<string, CodexMcpServer> = {};
+  if (run && !opts.readOnly && (visual || run.team || opts.readOnlyTools)) {
+    mcpServers.clawbox = runClawboxServer(run, { visual, readOnlyTools: opts.readOnlyTools === true });
+  } else if (run && opts.readOnly && run.team) {
+    // A read-only team run still speaks to its team (MCP_TEAM_TOOL).
+    mcpServers.clawbox = runClawboxServer(run, { visual: false, readOnlyTools: false });
+  }
+  return buildCodexArgs({
+    model: opts.model,
+    effort: opts.effort ?? DEFAULT_EFFORT,
+    developerInstructions,
+    resumeSessionId: opts.resumeSessionId ?? null,
+    mcpServers,
+    readOnly: opts.readOnly === true,
+  });
+}
+
+/**
+ * The run's command fence for Codex: the kill deny-list every Claude run gets,
+ * as execpolicy rules in the coding agent's CODEX_HOME. Rewritten at each spawn
+ * so a box that updates gets the current list. Best effort — a run that could
+ * not have its rules written still has its brief, as a Claude run whose hook
+ * failed does — and said in the log.
+ */
+function writeCodexRules(runId: string): void {
+  try {
+    const dir = path.join(ensureCodexHome(), "rules");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, "clawbox.rules");
+    const tmp = untraced(`${file}.${runId}.tmp`);
+    fs.writeFileSync(tmp, codexRulesText(BASH_KILL_DENYLIST, "A run ends what it started by PID; killing by name or every process can take this ClawBox down."), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: could not write the Codex rules:`, err instanceof Error ? err.message : err);
+  }
+}
+
 function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
@@ -12324,11 +12762,15 @@ function spawnRun(
   // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
   // the pass: in each case the flash reviewer would be a second look.
   const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
+  // An `openai` run is the Codex CLI, not Claude Code (src/lib/coding-codex.ts).
+  const codex = runsOnCodex(run.provider);
   // Streaming input unless this box's harness has been caught refusing the
   // flag (coding-run-messages.ts). It is what keeps the harness's stdin open
   // for the life of the run, so a message the owner sends at minute three can
   // be written as the next user turn instead of waiting for a boundary.
-  const streamInput = streamInputAvailable();
+  // `codex exec` reads its prompt once and has no such mode: a message to a
+  // Codex run waits for the next boundary, as on a box whose CLI refused it.
+  const streamInput = codex ? false : streamInputAvailable();
   // "opening" is the auto-PR path's promise to open or adopt a pull request
   // from this run's branch when it settles, and then to watch it — see
   // PR_DRAFT_BRIEF.
@@ -12337,7 +12779,9 @@ function spawnRun(
   // previous spawn's hook did not take is the queue's again first — that
   // process is gone, and the queue below is delivered this spawn's way.
   settleRunInbox(run, null);
-  const hookSettings = spawnHookSettings(run);
+  // Codex takes no per-run hooks, so no inbox and no merge guard (its command
+  // fence is the execpolicy rules below).
+  const hookSettings = codex ? null : spawnHookSettings(run);
   run.midTurn = hookSettings !== null && hookSettings.inbox;
   // The CPU budget frozen at start; a record from before it existed gets the
   // lone-run figure rather than none.
@@ -12354,7 +12798,7 @@ function spawnRun(
   // project ticked nothing has no plan, writes nothing and keeps today's argv.
   removeRunMcpConfigs(run.id);
   const mcpPlan = run.readOnly ? undefined : runMcpPlan.get(run.id);
-  const runMcp: RunMcpArgs | null = mcpPlan
+  const runMcp: RunMcpArgs | null = mcpPlan && !codex
     ? {
         configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team }, mcpPlan, { visual: runHoldsVisualTools(run.diet, run.visual) })),
         allowedTools: mcpPlan.allowedTools,
@@ -12362,7 +12806,11 @@ function spawnRun(
         readOnlyTools: mcpPlan.readOnlyTools,
       }
     : null;
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, diet: run.diet, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp }));
+  const runArgs: RunArgsOptions = { resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, diet: run.diet, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp };
+  if (codex) writeCodexRules(run.id);
+  const dropped = codex
+    ? buildCodexSpawnArgv(tools.setprivPath, buildCodexRunArgs({ ...runArgs, model: run.requestedModel ?? defaultModelForProvider(run.provider) ?? DEFAULT_OPENAI_MODEL, readOnlyTools: mcpPlan?.readOnlyTools === true }))
+    : buildSpawnArgv(tools.setprivPath, buildRunArgs(runArgs));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -12407,6 +12855,15 @@ function spawnRun(
     // make), and the `finally` must still close the two logs opened above. The
     // settle path takes any file it did write (removeCredentialHandoffs).
     if (account) runEnv.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE = writeCredentialHandoff(run.id, account.credential);
+    // An `openai` run on the owner's saved key: the one variable `codex exec`
+    // authenticates with. Codex keeps it from the commands the run starts
+    // (shell_environment_policy, coding-codex.ts) and the redaction table holds
+    // it (registerRunRedaction). Without a key, Codex reads the ChatGPT sign-in
+    // out of its own CODEX_HOME.
+    if (codex) {
+      const key = runOpenAIKey.get(run.id);
+      if (key) runEnv[CODEX_API_KEY_ENV] = key;
+    }
     child = spawn(bin, argv, {
       cwd: run.directory,
       // Deliberately NOT process.env: see the header. The cast is only because
@@ -12491,6 +12948,9 @@ function spawnRun(
     resumedSession: Boolean(resumeSessionId),
     sawThinking: false,
     thinkingSeen: 0,
+    // A Codex thread reports its usage cumulatively: what it had billed before
+    // this spawn is taken off (applyCodexUsage).
+    ...(codex ? { codexBaseline: codexUsageBaseline(resumeSessionId) } : {}),
     tools,
     settings,
     commandMayHaveSideEffects: false,
@@ -12543,7 +13003,7 @@ function spawnRun(
   child.on("error", (err) => {
     // Typically ENOENT: the wrapper is not where install.sh puts it.
     run.status = "failed";
-    run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err.message}`.slice(0, MAX_ERROR_CHARS);
+    run.error = `Could not start ${codex ? CODEX_COMMAND : CODING_HARNESS_COMMAND}: ${err.message}`.slice(0, MAX_ERROR_CHARS);
     settle(null);
   });
   // Settled a moment after the process is gone rather than the instant it is:
@@ -13206,7 +13666,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // caller, and without this exemption a round over a run that never
       // opened a session is refused rather than done cold.
       if (!previous.sessionId && input.freshSession !== true) {
-        throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+        throw new CodingAgentError("invalid", `That run never started a ${runsOnCodex(previous.provider) ? "Codex" : "Claude Code"} session, so it cannot be resumed. Start a new run instead.`);
       }
       // Fix CI: what failed goes after the caller's words — the box's own text
       // from GitHub's logs, clipped the way a box-written task is.
@@ -14793,6 +15253,19 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
         "limited",
         `Every Anthropic account on this ClawBox is at its usage limit${waitUntil !== null ? `; the first one is back at ${formatResetClock(waitUntil)} (${new Date(waitUntil).toISOString()})` : ""}.`
         + " Wait for the limit reset rather than retrying, or connect another account in Settings → Providers.",
+      );
+    }
+  }
+  // OpenAI turned the last run away at its usage limit (finishRun remembered
+  // when it is over): the same wait as an Anthropic pool at its limit, so a
+  // queue holds the run until then instead of spending it on a refusal.
+  if (!refusal && provider === "openai") {
+    const until = await openAILimitedUntil();
+    if (until !== null) {
+      throw new CodingAgentError(
+        "limited",
+        `OpenAI is at its usage limit for this ClawBox; it should be back at ${formatResetClock(until)} (${new Date(until).toISOString()}).`
+        + " Wait for the limit reset rather than retrying, or connect OpenAI again with another key or account in the Coding Agent settings.",
       );
     }
   }

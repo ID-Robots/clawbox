@@ -238,8 +238,11 @@ export function isValidSecretScope(scope: string): boolean {
  * `isValidSecretScope` nor `requireSecretScope` accepts the name — so no owner
  * route and no MCP verb can read, overwrite or delete one. `@`-prefixed for the
  * reason `BOX_SCOPE` is: outside `SECRET_SCOPE_RE`, no project can be called it.
+ *
+ * The second is the owner's OpenAI API key for coding runs
+ * (src/lib/coding-openai.ts), under the same rules for the same reasons.
  */
-export const DEVICE_SECRET_SCOPES = ["@anthropic-accounts"] as const;
+export const DEVICE_SECRET_SCOPES = ["@anthropic-accounts", "@openai-coding"] as const;
 
 export type DeviceSecretScope = (typeof DEVICE_SECRET_SCOPES)[number];
 

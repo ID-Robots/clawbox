@@ -7,7 +7,10 @@
  * answer is the owner's OWN Anthropic access — either the native `claude`
  * login in their home, or an API key they saved on the box — which buys them
  * Claude's own models for a run when the ClawBox AI plan's DeepSeek tier is
- * not what the task needs.
+ * not what the task needs. The third is the owner's OWN OpenAI access — a
+ * ChatGPT sign-in or an API key — and it is the one provider that does not
+ * run on Claude Code at all: an `openai` run is the Codex CLI (`codex exec`),
+ * see src/lib/coding-codex.ts and src/lib/coding-openai.ts.
  *
  * PURE ON PURPOSE. No `fs`, no `child_process`, no config store: the MCP
  * server imports this to validate its own arguments before it ever reaches
@@ -26,7 +29,7 @@
  */
 
 /** The providers a run may be started against, default first. */
-export const CODING_PROVIDERS = ["clawbox-ai", "anthropic"] as const;
+export const CODING_PROVIDERS = ["clawbox-ai", "anthropic", "openai"] as const;
 
 export type CodingProvider = (typeof CODING_PROVIDERS)[number];
 
@@ -87,6 +90,39 @@ export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
 
 /**
+ * The models offered for an `openai` run — the Codex CLI's own picker list.
+ *
+ * Read off the CLI rather than chosen here: `codex debug models` (codex-cli
+ * 0.154.0) marks exactly these `visibility: list`, highest priority first. The
+ * hidden ones beside them are a security research tier, retired ids the CLI
+ * itself migrates away from (gpt-5.4, gpt-5.4-mini) and its own approval
+ * reviewer — none of them a model a coding run should be started on.
+ *
+ * The same fence as ANTHROPIC_MODELS: what a caller may ASK for, never what a
+ * stored record may carry.
+ */
+export const OPENAI_MODELS = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.2"] as const;
+
+export type OpenAIModel = (typeof OPENAI_MODELS)[number];
+
+/**
+ * The model an `openai` run gets when the caller named none: the CLI's own
+ * default, which is what `codex exec` reports in its header with nothing
+ * configured (`model: gpt-6-astra`). Named explicitly rather than left to the
+ * CLI so the record says which model ran and a resume re-enters on it.
+ */
+export const DEFAULT_OPENAI_MODEL: OpenAIModel = "gpt-6-astra";
+
+/**
+ * The owner's OpenAI API key, in the device secret store beside the Anthropic
+ * account pool's credentials (src/lib/project-secrets.ts, device scope) —
+ * never data/config.json, never a route's answer, never a log line. A run gets
+ * it as `CODEX_API_KEY`, the variable `codex exec` authenticates with.
+ */
+export const OPENAI_SECRET_SCOPE = "@openai-coding";
+export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
+
+/**
  * The CHEAPER model of each provider: what a coding team's planner and
  * reviewers run on unless the owner says otherwise (src/lib/coding-role-models.ts).
  * Reading a folder and answering a plan, or reading a diff and answering a
@@ -97,10 +133,14 @@ export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
  * box on the Max plan pays for its pro model only where a worker writes code.
  * It is the one model a `clawbox-ai` run's record may carry
  * (`isRecordableModel`); a CALLER still cannot name one for that provider.
+ *
+ * On `openai` it is the one the CLI's own catalogue describes as its fast and
+ * affordable coding model, gpt-5.6-luna.
  */
 export const ECONOMY_MODELS: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "deepseek-v4-flash",
   anthropic: "claude-sonnet-5",
+  openai: "gpt-5.6-luna",
 };
 
 /** The cheaper model of this provider. */
@@ -132,6 +172,7 @@ export function isRecordableModel(provider: CodingProvider, model: unknown): mod
 export const CODING_PROVIDER_NAME_KEY: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "codingAgent.providerName.clawboxAi",
   anthropic: "codingAgent.providerName.anthropic",
+  openai: "codingAgent.providerName.openai",
 };
 
 export function isCodingProvider(value: unknown): value is CodingProvider {
@@ -159,12 +200,21 @@ export function connectedProvidersFrom(raw: unknown, fallback: CodingProvider): 
  * rather than pretending to honour it.
  */
 export function modelsForProvider(provider: CodingProvider): readonly string[] {
-  return provider === "anthropic" ? ANTHROPIC_MODELS : [];
+  if (provider === "anthropic") return ANTHROPIC_MODELS;
+  if (provider === "openai") return OPENAI_MODELS;
+  return [];
 }
 
 /** The model an unnamed run gets, or null where the plan decides. */
 export function defaultModelForProvider(provider: CodingProvider): string | null {
-  return provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : null;
+  if (provider === "anthropic") return DEFAULT_ANTHROPIC_MODEL;
+  if (provider === "openai") return DEFAULT_OPENAI_MODEL;
+  return null;
+}
+
+/** Does this provider's run go through the Codex CLI rather than Claude Code? */
+export function runsOnCodex(provider: CodingProvider): boolean {
+  return provider === "openai";
 }
 
 /**
@@ -206,7 +256,7 @@ export function resolveRunProvider(
     // selector exists to make visible.
     return {
       ok: false,
-      error: "ClawBox AI chooses the model from the box's plan, so a model cannot be named for it. Use provider \"anthropic\" to choose a model.",
+      error: "ClawBox AI chooses the model from the box's plan, so a model cannot be named for it. Use provider \"anthropic\" or \"openai\" to choose a model.",
     };
   }
   if (!allowed.includes(model)) {

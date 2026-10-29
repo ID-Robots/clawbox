@@ -88,6 +88,7 @@ export const PLANNER_BRIEF = [
 const PROVIDER_WORDS: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "ClawBox AI",
   anthropic: "Anthropic",
+  openai: "OpenAI",
 };
 
 export function providerWords(provider: CodingProvider): string {
