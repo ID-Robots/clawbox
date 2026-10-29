@@ -167,8 +167,8 @@ describe("X64_DESKTOP_CORE_STEP_TIMEOUT_MS", () => {
  * changed nothing; every doubt runs the adapter's step as before.
  */
 describe("desktopCoreStepIsNoop", () => {
-  const PREFIX = "/home/fixture/.npm-global";
-  const HOME = "/home/fixture";
+  const PREFIX = "/fixture/home/.npm-global";
+  const HOME = "/fixture/home";
   const PIN = "/var/lib/clawbox/root-exec-mirror/config/openclaw-target.txt";
   const PKG = `${PREFIX}/lib/node_modules/openclaw/package.json`;
   const ENV = `INSTALL_USER=fixture\nINSTALL_UID=1000\nINSTALL_HOME=${HOME}\nPROJECT_DIR=/fixture/clawbox\nNODE_DIR=/opt/node/bin\nNPM_PREFIX=${PREFIX}\n`;
