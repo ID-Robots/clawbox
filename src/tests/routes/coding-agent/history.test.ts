@@ -7,7 +7,7 @@
  *  - GET /setup-api/coding-agent/history/file — an archived run's evidence,
  *    under the artifacts route's rules.
  *  - GET /setup-api/coding-agent/runs?history=1 — the older runs' pages.
- *  - POST /setup-api/coding-agent/enable { historyRetention, historyLimit }.
+ *  - POST /setup-api/coding-agent/enable { historyRetention }.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -199,23 +199,31 @@ describe("GET runs?history=1", () => {
   });
 });
 
-describe("POST enable { historyRetention, historyLimit }", () => {
+describe("POST enable { historyRetention }", () => {
   const post = (body: unknown, owner = true) => enableRoute.POST((owner ? asOwner : asAgent)("enable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
 
-  it("saves the mode and the limit and answers the status carrying them", async () => {
-    const res = await post({ historyRetention: "extended", historyLimit: 300 });
+  it("saves the mode and answers the status carrying it and the extended N, which is no longer set here", async () => {
+    const res = await post({ historyRetention: "extended" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ historyRetention: "extended", historyLimit: 300, historyLimits: [100, 300, 1000], historyLiveKept: 30 });
+    // The N stays on the status for the card's hint; the choices are gone with
+    // the select (SCA C3), and the stored one — or the default — is what applies.
+    const body = await res.json();
+    expect(body).toMatchObject({ historyRetention: "extended", historyLimit: 100, historyLiveKept: 30 });
+    expect(body.historyLimits).toBeUndefined();
     const cfg = JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf-8"));
-    expect(cfg).toMatchObject({ coding_agent_history_retention: "extended", coding_agent_history_limit: 300 });
+    expect(cfg).toMatchObject({ coding_agent_history_retention: "extended" });
+    expect(cfg.coding_agent_history_limit).toBeUndefined();
   });
 
-  it("refuses a value the box does not offer before saving anything, and the agent's bearer", async () => {
-    for (const body of [{ historyRetention: "forever" }, { historyRetention: 3 }, { historyLimit: 50 }, { historyRetention: "extended", historyLimit: "300" }]) {
+  it("refuses a value the box does not offer before saving anything, the N it no longer takes, and the agent's bearer", async () => {
+    for (const body of [{ historyRetention: "forever" }, { historyRetention: 3 }]) {
       const res = await post(body);
       expect(res.status, JSON.stringify(body)).toBe(400);
       expect((await res.json()).kind).toBe("invalid");
     }
+    // A body about the N alone is a body the route does not know (400, no
+    // kind); one that carries it beside a mode saves the mode and ignores it.
+    expect((await post({ historyLimit: 300 })).status).toBe(400);
     expect((await post({ historyRetention: "everything" }, false)).status).toBe(403);
     const cfg = JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf-8"));
     expect(cfg.coding_agent_history_retention).toBeUndefined();

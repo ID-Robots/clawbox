@@ -705,6 +705,38 @@ describe("the commit author the box signs the owner's work as", () => {
   });
 });
 
+describe("the knobs SCA C3 took off the settings page", () => {
+  // The review rounds, the attempts at a deliverable, the extended history's
+  // N and the second media switch are gone from the status (and the route):
+  // a run gets the constants the code always fell back to. The config keys
+  // are still READ — an older box's stored value still applies — so they
+  // stay on the reset list, where Start over puts them back to the default.
+  it("are no longer on the status, which carries one media switch instead", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus() as unknown as Record<string, unknown>;
+    for (const gone of ["reviewRounds", "minReviewRounds", "maxReviewRounds", "completionAttempts", "minCompletionAttempts", "maxCompletionAttempts", "historyLimits", "generateImages", "generateAudio"]) {
+      expect(status[gone], gone).toBeUndefined();
+    }
+    expect(status.generateMedia).toBe(true);
+    expect(status.historyLimit).toBe(100);
+  });
+
+  it("read as one switch that is on only when both keys are", async () => {
+    const lib = await import("@/lib/coding-agent");
+    configGetAll.mockResolvedValue({ [lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY]: false });
+    expect((await lib.getCodingAgentStatus()).generateMedia).toBe(false);
+    configGetAll.mockResolvedValue({ [lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]: false });
+    expect((await lib.getCodingAgentStatus()).generateMedia).toBe(false);
+  });
+
+  it("keep their keys on the reset list, since the code still reads them", async () => {
+    const lib = await import("@/lib/coding-agent");
+    for (const key of [lib.CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, lib.CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY, lib.CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY, lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]) {
+      expect(lib.CODING_AGENT_RESET_KEYS).toContain(key);
+    }
+  });
+});
+
 describe("what every run now gets, permanently", () => {
   // The owner removed both switches: full command access and sub-agents are
   // always on. These pin what that means so it cannot drift back silently.

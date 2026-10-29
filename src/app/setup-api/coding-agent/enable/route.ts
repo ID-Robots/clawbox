@@ -8,7 +8,6 @@ import {
   clearHarnessFault,
   CodingAgentError,
   getCodingAgentStatus,
-  HISTORY_EXTENDED_LIMITS,
   HISTORY_RETENTION_MODES,
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
@@ -25,16 +24,13 @@ import {
   setMaxTurns,
   setAutoMerge,
   setAutoPr,
-  setCompletionAttempts,
   setDiet,
   setMaxParallelRuns,
   setPrBodyIncludesTask,
-  setGenerateAudio,
-  setGenerateImages,
+  setGenerateMedia,
   setHistoryRetention,
   setRealBrowser,
   setReviewPass,
-  setReviewRounds,
   setRoleModels,
   setSetupComplete,
   setTeamDynamic,
@@ -79,14 +75,14 @@ function forbidden() {
  * the key — but STARTING a run against it does.
  * POST { maxTurns: number } → how many steps a run gets.
  * POST { tokenLimit: number | null } → token ceiling, or null for none.
- * POST { generateImages: boolean } → may a run draw pictures with ClawBox AI,
- * and may the box draw the project's desktop icon and its favicon while a run
- * works. POST { generateAudio: boolean } → may a run have this box speak a
- * clip into its project. Both default ON; see their config keys in
- * @/lib/coding-agent for why these two are not consents.
+ * POST { generateMedia: boolean } → may a run draw pictures with ClawBox AI
+ * (and the box draw the project's desktop icon and favicon while it works)
+ * and have this box speak clips into its project. ONE switch over the two
+ * keys since SCA C3 (`setGenerateMedia`); ON by default — see the keys in
+ * @/lib/coding-agent for why it is not a consent.
  * POST { realBrowser: boolean } → does a run verify its work in the Chromium
  * on the owner's screen, or in a headless one nobody sees? ON when absent, for
- * the same reason as the media switches.
+ * the same reason as the media switch.
  * POST { teamDynamic: boolean } → may a coding team's lead add or retire tasks
  * while the team runs (one short read-only run after each worker settles).
  * OFF when absent; a team reads it when it starts.
@@ -116,27 +112,20 @@ function forbidden() {
  * ~600 characters (the default), the whole task, or none of it. Whichever, it
  * is redacted before it is published (@/lib/publish-redaction); a value this
  * box does not offer is refused before anything is saved.
- * POST { reviewRounds: number } → how many follow-up turns the review loop may
- * hand the harness after the pull request is opened (failing check logs,
- * unresolved review comments, "rebase onto <base>"). 0 switches the loop off
- * and leaves the older checks-only watcher in charge; the range is refused
- * rather than clamped, so a caller learns what this box offers.
  * POST { autoMerge: boolean } → may the box squash-merge a pull request its
  * own review loop cleared? Off by default, and never into `main`. See
  * @/lib/coding-review-state for the decision.
  * POST { maxParallelRuns: number } → how many coding runs may be going at
  * once. Each run works in a git worktree of its own, so the limit is a
  * question about the box's memory rather than about the filesystem; the range
- * is refused rather than clamped, like the review rounds.
- * POST { completionAttempts: number } → how many goes a run with a deliverable
- * gets at it, its own first turn counted as one. Only ever spent by a run that
- * HAS a deliverable — one the caller named, or the pull request the auto-PR
- * switch implies — so a box that uses neither is unaffected. The range is
- * refused rather than clamped, like the review rounds.
- * POST { historyRetention: "standard"|"extended"|"everything"|"archive",
- * historyLimit?: 100|300|1000 } → what the box keeps of finished runs (see
- * @/lib/coding-run-history). Either field alone is accepted; a value this box
- * does not offer is refused before anything is saved. Choosing "everything"
+ * is refused rather than clamped.
+ * (The review rounds, the attempts at a deliverable and the extended
+ * history's N are no longer settings since SCA C3: a run gets the constants
+ * — DEFAULT_REVIEW_ROUNDS, DEFAULT_COMPLETION_ATTEMPTS,
+ * DEFAULT_HISTORY_EXTENDED_LIMIT — and a body naming them is answered 400.)
+ * POST { historyRetention: "standard"|"extended"|"everything"|"archive" } →
+ * what the box keeps of finished runs (see @/lib/coding-run-history); a value
+ * this box does not offer is refused before anything is saved. Choosing "everything"
  * also tells Claude Code to keep its transcripts (merged into its settings
  * files, never overwriting them); choosing anything else hands that back.
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
@@ -211,12 +200,9 @@ export async function POST(request: Request) {
     reviewPass?: unknown;
     autoPr?: unknown;
     prBodyIncludesTask?: unknown;
-    reviewRounds?: unknown;
     autoMerge?: unknown;
-    completionAttempts?: unknown;
     maxParallelRuns?: unknown;
-    generateImages?: unknown;
-    generateAudio?: unknown;
+    generateMedia?: unknown;
     realBrowser?: unknown;
     teamDynamic?: unknown;
     setupComplete?: unknown;
@@ -226,7 +212,6 @@ export async function POST(request: Request) {
     gitAuthorName?: unknown;
     gitAuthorEmail?: unknown;
     historyRetention?: unknown;
-    historyLimit?: unknown;
     roleModels?: unknown;
     diet?: unknown;
   };
@@ -234,12 +219,9 @@ export async function POST(request: Request) {
   const hasReviewPass = typeof fields.reviewPass === "boolean";
   const hasSetupComplete = typeof fields.setupComplete === "boolean";
   const hasAutoPr = typeof fields.autoPr === "boolean";
-  const hasReviewRounds = typeof fields.reviewRounds === "number";
   const hasAutoMerge = typeof fields.autoMerge === "boolean";
-  const hasCompletionAttempts = typeof fields.completionAttempts === "number";
   const hasMaxParallelRuns = typeof fields.maxParallelRuns === "number";
-  const hasGenImages = typeof fields.generateImages === "boolean";
-  const hasGenAudio = typeof fields.generateAudio === "boolean";
+  const hasGenMedia = typeof fields.generateMedia === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
   const hasTeamDynamic = typeof fields.teamDynamic === "boolean";
   // Only `true`. `false` is not the other half of a switch here — it would
@@ -266,7 +248,6 @@ export async function POST(request: Request) {
   // Presence decides, like the counted settings: a wrong TYPE is still a
   // request about the history, and is refused below rather than ignored.
   const hasHistoryRetention = "historyRetention" in fields;
-  const hasHistoryLimit = "historyLimit" in fields;
   // Presence decides here too, for the same reason as the history setting.
   const hasPrBodyIncludesTask = "prBodyIncludesTask" in fields;
   // A team's per-role model and effort (src/lib/coding-role-models.ts):
@@ -274,19 +255,18 @@ export async function POST(request: Request) {
   const hasRoleModels = "roleModels" in fields;
   // The token diet: presence decides, and a wrong shape is refused below, whole.
   const hasDiet = "diet" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !hasDiet && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasAutoMerge && !hasMaxParallelRuns && !hasGenMedia && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasRoleModels && !hasDiet && !clearsFault) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
           + "{ effort: string }, { provider: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
-          + "{ generateImages: boolean }, { generateAudio: boolean }, "
+          + "{ generateMedia: boolean }, "
           + "{ realBrowser: boolean }, { teamDynamic: boolean }, "
-          + "{ reviewRounds: number }, "
-          + "{ autoMerge: boolean }, { completionAttempts: number }, "
+          + "{ autoMerge: boolean }, "
           + "{ maxParallelRuns: number }, "
-          + "{ historyRetention: string, historyLimit?: number }, "
+          + "{ historyRetention: string }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
           + "{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }, "
@@ -332,12 +312,6 @@ export async function POST(request: Request) {
   if (hasHistoryRetention && !(HISTORY_RETENTION_MODES as readonly unknown[]).includes(fields.historyRetention)) {
     return NextResponse.json(
       { error: `The run history setting must be one of: ${HISTORY_RETENTION_MODES.join(", ")}.`, kind: "invalid" },
-      { status: 400 },
-    );
-  }
-  if (hasHistoryLimit && !(HISTORY_EXTENDED_LIMITS as readonly unknown[]).includes(fields.historyLimit)) {
-    return NextResponse.json(
-      { error: `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`, kind: "invalid" },
       { status: 400 },
     );
   }
@@ -450,20 +424,9 @@ export async function POST(request: Request) {
       // A value from the setter's own fixed list by now.
       console.error(`[coding-agent] pull requests will carry the task as ${logSafe(saved)}, by the owner's choice`);
     }
-    if (hasReviewRounds) {
-      const saved = await setReviewRounds(fields.reviewRounds);
-      console.error(`[coding-agent] review rounds set to ${saved} by the owner`);
-    }
     if (hasAutoMerge) {
       const saved = await setAutoMerge(fields.autoMerge);
       console.error(`[coding-agent] merging a cleared pull request switched ${saved ? "on" : "off"} by the owner`);
-    }
-    if (hasCompletionAttempts) {
-      const saved = await setCompletionAttempts(fields.completionAttempts);
-      // `saved` is a whole number the setter validated, so it can carry no line
-      // break — but it is the REQUEST's value that decided it, and the log
-      // sanitiser is what says so at the point the record is written.
-      console.error(`[coding-agent] attempts at a run's deliverable set to ${logSafe(String(saved))} by the owner`);
     }
     if (hasMaxParallelRuns) {
       await setMaxParallelRuns(fields.maxParallelRuns);
@@ -481,24 +444,17 @@ export async function POST(request: Request) {
       // record that the owner changed it, which it still does.
       console.error("[coding-agent] the number of coding runs at once was changed by the owner");
     }
-    if (hasHistoryRetention || hasHistoryLimit) {
-      const { policy, transcripts } = await setHistoryRetention({
-        ...(hasHistoryRetention ? { mode: fields.historyRetention } : {}),
-        ...(hasHistoryLimit ? { limit: fields.historyLimit } : {}),
-      });
+    if (hasHistoryRetention) {
+      const { policy, transcripts } = await setHistoryRetention({ mode: fields.historyRetention });
       // Both are values from the setter's own fixed lists by now.
       console.error(`[coding-agent] run history set to ${logSafe(policy.mode)}${policy.mode === "extended" ? ` (${logSafe(String(policy.limit))} runs)` : ""} by the owner`);
       for (const t of transcripts) {
         if (t.state !== "already") console.error(`[coding-agent] Claude Code transcript period ${t.state}: ${logSafe(t.file)}`);
       }
     }
-    if (hasGenImages) {
-      const saved = await setGenerateImages(fields.generateImages);
-      console.error(`[coding-agent] generated pictures switched ${saved ? "on" : "off"} by the owner`);
-    }
-    if (hasGenAudio) {
-      const saved = await setGenerateAudio(fields.generateAudio);
-      console.error(`[coding-agent] generated audio switched ${saved ? "on" : "off"} by the owner`);
+    if (hasGenMedia) {
+      const saved = await setGenerateMedia(fields.generateMedia);
+      console.error(`[coding-agent] generated pictures and audio switched ${saved ? "on" : "off"} by the owner`);
     }
     if (hasRealBrowser) {
       const saved = await setRealBrowser(fields.realBrowser);

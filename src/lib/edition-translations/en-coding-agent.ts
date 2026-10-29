@@ -640,8 +640,10 @@ export const codingAgentEn: Record<string, string> = {
   // account groups in each row's model select with their relative cost, what
   // each role starts on now, and why an account's choices are disabled.
   "codingAgent.roleModels.bulk": "Bulk work",
-  "codingAgent.roleModelsRoleHint.planner": "Also the team lead",
-  "codingAgent.roleModelsRoleHint.bulk": "Token-heavy, non-critical tasks: scraping, mass data, repetitive edits, long test runs",
+  "codingAgent.roleModelsRoleJob.planner": "plans the work and leads the team",
+  "codingAgent.roleModelsRoleJob.worker": "write your code",
+  "codingAgent.roleModelsRoleJob.reviewer": "check each task before it is accepted",
+  "codingAgent.roleModelsRoleJob.bulk": "token-heavy, non-critical tasks: scraping, mass data, repetitive edits, long test runs",
   "codingAgent.roleAutoAsWorkers": "Default (as the workers)",
   "codingAgent.roleModelNow": "Now: {model} on {provider}",
   "codingAgent.roleModelPlanDecides": "the plan's model",
@@ -695,12 +697,9 @@ export const codingAgentEn: Record<string, string> = {
   // the owner turns them off, and each hint names its own cost — the pictures
   // come out of the ClawBox AI daily allowance, the voice out of the one
   // synthesis slot the chat shares.
-  "codingAgent.genImagesLabel": "Let runs draw pictures",
-  "codingAgent.genImagesHint": "A run may have this box draw pictures for its project, out of your ClawBox AI daily allowance \u2014 at most twenty per run.",
-  "codingAgent.genImagesFailed": "Could not change the picture setting.",
-  "codingAgent.genAudioLabel": "Let runs record speech",
-  "codingAgent.genAudioHint": "A run may have this box speak a line into a sound file in its project, in your spoken-reply voice \u2014 at most forty per run.",
-  "codingAgent.genAudioFailed": "Could not change the speech setting.",
+  "codingAgent.genMediaLabel": "Let runs make pictures and speech",
+  "codingAgent.genMediaHint": "A run may have this box draw pictures and speak lines into sound files for its project, out of your ClawBox AI allowance — at most twenty pictures and forty clips per run.",
+  "codingAgent.genMediaFailed": "Could not change the media setting.",
   "codingAgent.realBrowserLabel": "Verify in this box's browser",
   "codingAgent.realBrowserHint": "A run checks its work in the Chromium on this box's screen, which you can watch in the Agent Browser app; off, it uses an invisible browser.",
   "codingAgent.realBrowserFailed": "Could not change the browser setting.",
@@ -753,10 +752,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.reviewThreads": "{n} unresolved comments",
   "codingAgent.reviewChangesRequested": "Changes requested",
   "codingAgent.reviewFixRun": "round {id}",
-  "codingAgent.reviewRoundsLabel": "Review rounds after a pull request",
-  "codingAgent.reviewRoundsHint": "After the pull request opens, ClawBox hands failing checks, review comments and conflicts back to the run, one turn per round.",
-  "codingAgent.reviewRoundsOff": "Off",
-  "codingAgent.reviewRoundsFailed": "Could not change the number of review rounds.",
   "codingAgent.autoMergeLabel": "Merge a pull request the review rounds cleared",
   "codingAgent.autoMergeHint": "Merges a pull request into any base branch once every check has passed and no review is outstanding — never into main, never one labelled hold.",
   "codingAgent.autoMergeFailed": "Could not change the merge setting.",
@@ -789,9 +784,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.stepDeliverableMet": "The deliverable is there",
   "codingAgent.stepDeliverableMissing": "Not finished yet: {reason}",
   "codingAgent.stepAnotherAttempt": "Attempt {attempt} of {attempts} at the deliverable",
-  "codingAgent.completionAttemptsLabel": "Attempts at a run's deliverable",
-  "codingAgent.completionAttemptsHint": "How many goes a run gets at leaving behind what it had to deliver, its own first turn counted as one.",
-  "codingAgent.completionAttemptsFailed": "Could not change the number of attempts.",
   "codingAgent.maxParallelRunsLabel": "Coding runs at once",
   "codingAgent.maxParallelRunsHint": "How many runs may work at once, each in its own copy of the project. Two is comfortable; four is a lot for this box's memory.",
   "codingAgent.maxParallelRunsFailed": "Could not change how many runs may go at once.",
@@ -808,8 +800,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.history.modeExtendedHint": "The newest {limit} runs, each with its evidence and inputs. Runs past the newest {count} are listed under Run history and open like any other run.",
   "codingAgent.history.modeEverythingHint": "Every run, with its evidence and inputs, and Claude Code is told to keep its transcripts too. Nothing is deleted unless you clear it.",
   "codingAgent.history.modeArchiveHint": "The newest {count} runs stay in the list. An older run, or one you clear, moves to the archive with its evidence, inputs and transcript, where you can read it and export it.",
-  "codingAgent.history.limitLabel": "Runs to keep",
-  "codingAgent.history.limitOption": "{count} runs",
   "codingAgent.history.saveFailed": "Could not change what the run history keeps.",
   "codingAgent.history.pendingDelete": "{count} older runs are past this setting and will be deleted when the next run starts. Switch back to keep them.",
   "codingAgent.history.pendingArchive": "{count} older runs will move to the archive when the next run starts.",
@@ -931,7 +921,7 @@ export const codingAgentEn: Record<string, string> = {
   // Said plainly and up front: Ultracode is the best answer this box can give
   // and the most expensive one, and an owner who finds that out from a bill
   // was told too late.
-  "codingAgent.wizardEffortCost": "Ultracode gives the best results and consumes a lot of tokens — it thinks longer and can run several agents for one task. A Max plan is recommended if you use it often. Lower effort costs less and finishes sooner.",
+  "codingAgent.wizardEffortCost": "Runs think at the default effort, which measured best for the tokens it spends — keep it unless a task needs more. Ultracode gives the best results on hard work and consumes a lot more tokens: it thinks longer and can run several agents for one task, so a Max plan is recommended if you use it often. The effort is changed in Settings.",
   // ── Step 3: which browser a run checks its work in ──────────────────────
   // The step says what the owner will SEE, because that is the difference
   // between the two answers: pages opening on the device's own screen, or

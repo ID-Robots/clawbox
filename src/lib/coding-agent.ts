@@ -333,8 +333,6 @@ import {
   describeProblems,
   findOpenPullRequestForBranch,
   isReviewPending,
-  MAX_REVIEW_ROUNDS,
-  MIN_REVIEW_ROUNDS,
   parseReviewLoop,
   pushBranch,
   readFailedCheckLogs,
@@ -354,7 +352,6 @@ import {
   gaveUpReason,
   MAX_COMPLETION_ATTEMPTS,
   MAX_MISSING_CHARS,
-  MIN_COMPLETION_ATTEMPTS,
   parseAttempts,
   parseDeliverable,
   parseDeliverableVerdict,
@@ -2484,11 +2481,6 @@ export interface CodingAgentStatus {
   autoPr: boolean;
   /** How much of the task that pull request carries, always redacted. */
   prBodyIncludesTask: PrBodyTaskMode;
-  /** How many follow-up turns a pull request's review loop gets. 0 = off. */
-  reviewRounds: number;
-  /** The range the app offers, so it does not have to guess the bounds. */
-  minReviewRounds: number;
-  maxReviewRounds: number;
   /** May the box merge a pull request its review loop cleared? */
   autoMerge: boolean;
   /** How many coding runs may be going at once — see the config key. */
@@ -2498,22 +2490,15 @@ export interface CodingAgentStatus {
   maxMaxParallelRuns: number;
   /** What the box keeps of finished runs — see src/lib/coding-run-history.ts. */
   historyRetention: HistoryRetentionMode;
-  /** The extended mode's N, and the choices the app offers for it. */
+  /** The extended mode's N — read-only since SCA C3: the route no longer takes it. */
   historyLimit: number;
-  historyLimits: number[];
   /** Runs the live list holds in every mode (the thirty it always held). */
   historyLiveKept: number;
-  /** Attempts a run with a deliverable gets at it, its own first turn included. */
-  completionAttempts: number;
   /** The token diet in effect — the stored one, every unset knob at its default. */
   diet: CodingDiet;
-  /** The range the app offers, so it does not have to guess the bounds. */
-  minCompletionAttempts: number;
-  maxCompletionAttempts: number;
-  /** May a run draw pictures, and may the box draw the project's icon? */
-  generateImages: boolean;
-  /** May a run have this box speak a clip into its project? */
-  generateAudio: boolean;
+  /** May a run have this box draw pictures and speak clips into its project
+   *  (and the box draw the project's icon)? One switch over the two keys. */
+  generateMedia: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
   /** May a coding team's lead add or retire tasks while the team runs? Off unless the owner said so. */
@@ -3121,28 +3106,11 @@ export async function setPrBodyIncludesTask(mode: unknown): Promise<PrBodyTaskMo
   return mode;
 }
 
-/** How many review rounds a pull request gets. Absent means the default. */
+/** How many review rounds a pull request gets. Absent means the default
+ *  (DEFAULT_REVIEW_ROUNDS); no route sets the key since SCA C3. */
 export async function getReviewRounds(): Promise<number> {
   const stored = await configGet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY);
   return typeof stored === "number" ? clampReviewRounds(stored) : DEFAULT_REVIEW_ROUNDS;
-}
-
-export async function setReviewRounds(rounds: unknown): Promise<number> {
-  // Integer, not merely finite: `clampReviewRounds` rounds, so 1.5 would have
-  // been SAVED as 2 — an answer to a question the caller did not ask, and the
-  // same reason the range below is refused rather than clamped.
-  if (typeof rounds !== "number" || !Number.isInteger(rounds)) {
-    throw new CodingAgentError("invalid", "The number of review rounds must be a whole number.");
-  }
-  if (rounds < MIN_REVIEW_ROUNDS || rounds > MAX_REVIEW_ROUNDS) {
-    // Refused rather than clamped: a caller that asked for 20 rounds meant
-    // something this box does not offer, and silently saving 6 would answer a
-    // question it did not ask.
-    throw new CodingAgentError("invalid", `The number of review rounds must be between ${MIN_REVIEW_ROUNDS} and ${MAX_REVIEW_ROUNDS}.`);
-  }
-  const saved = clampReviewRounds(rounds);
-  await configSet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, saved);
-  return saved;
 }
 
 /** How many runs at once this box allows. Absent means the default. */
@@ -3264,24 +3232,10 @@ export async function setDiet(patch: unknown): Promise<CodingDiet> {
   return next;
 }
 
-/** How many attempts at its deliverable a run gets. Absent means the default. */
+/** How many attempts at its deliverable a run gets. Absent means the default
+ *  (DEFAULT_COMPLETION_ATTEMPTS); no route sets the key since SCA C3. */
 export async function getCompletionAttempts(): Promise<number> {
   return completionAttemptsFrom(await configGet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY));
-}
-
-export async function setCompletionAttempts(attempts: unknown): Promise<number> {
-  // Whole numbers only, and the range refused rather than clamped — the rule
-  // `setReviewRounds` follows, for its reason: a caller that asked for 20
-  // attempts meant something this box does not offer, and quietly saving 6
-  // answers a question it did not ask.
-  if (typeof attempts !== "number" || !Number.isInteger(attempts)) {
-    throw new CodingAgentError("invalid", "The number of attempts must be a whole number.");
-  }
-  if (attempts < MIN_COMPLETION_ATTEMPTS || attempts > MAX_COMPLETION_ATTEMPTS) {
-    throw new CodingAgentError("invalid", `The number of attempts must be between ${MIN_COMPLETION_ATTEMPTS} and ${MAX_COMPLETION_ATTEMPTS}.`);
-  }
-  await configSet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY, attempts);
-  return attempts;
 }
 
 /** The two media switches. ON when absent — see their config keys. */
@@ -3297,23 +3251,21 @@ export async function getGenerateImages(): Promise<boolean> {
   return generateImagesFrom(await configGet(CODING_AGENT_GEN_IMAGES_CONFIG_KEY));
 }
 
-export async function setGenerateImages(on: unknown): Promise<boolean> {
-  if (typeof on !== "boolean") {
-    throw new CodingAgentError("invalid", "The picture switch must be true or false.");
-  }
-  await configSet(CODING_AGENT_GEN_IMAGES_CONFIG_KEY, on);
-  return on;
-}
-
 export async function getGenerateAudio(): Promise<boolean> {
   return generateAudioFrom(await configGet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY));
 }
 
-export async function setGenerateAudio(on: unknown): Promise<boolean> {
+/**
+ * The owner's ONE media switch (SCA C3), written to both keys at once. The
+ * keys stay separate underneath — a run still reads each, and the status
+ * reads the switch as on only when both are — so a box that had one of them
+ * off before reads as off until the owner flips the switch, which sets both.
+ */
+export async function setGenerateMedia(on: unknown): Promise<boolean> {
   if (typeof on !== "boolean") {
-    throw new CodingAgentError("invalid", "The voice switch must be true or false.");
+    throw new CodingAgentError("invalid", "The media switch must be true or false.");
   }
-  await configSet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY, on);
+  await configSetMany({ [CODING_AGENT_GEN_IMAGES_CONFIG_KEY]: on, [CODING_AGENT_GEN_AUDIO_CONFIG_KEY]: on });
   return on;
 }
 
@@ -4353,21 +4305,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // Absent means "summary": a box that predates the setting stops pasting a
     // whole task into a public pull request the day it updates.
     prBodyIncludesTask: prBodyTaskModeFrom(config[CODING_AGENT_PR_BODY_TASK_CONFIG_KEY]),
-    // Absent means the DEFAULT here, not zero: a box that predates the loop
-    // gets it, which is the point of shipping it on.
-    reviewRounds: typeof config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY] === "number"
-      ? clampReviewRounds(config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY])
-      : DEFAULT_REVIEW_ROUNDS,
-    minReviewRounds: MIN_REVIEW_ROUNDS,
-    maxReviewRounds: MAX_REVIEW_ROUNDS,
     autoMerge: config[CODING_AGENT_AUTO_MERGE_CONFIG_KEY] === true,
-    // Absent means the default, like the review rounds above: a box that
-    // predates the setting still gives a run with a deliverable its three goes.
-    completionAttempts: completionAttemptsFrom(config[CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY]),
     // The effective diet: DEFAULT_DIET (lean) on every knob the owner never set.
     diet: readDiet(config[CODING_AGENT_DIET_CONFIG_KEY], DEFAULT_DIET),
-    minCompletionAttempts: MIN_COMPLETION_ATTEMPTS,
-    maxCompletionAttempts: MAX_COMPLETION_ATTEMPTS,
     // Absent means the default here too: a box that predates the setting runs
     // two at once, which is what shipping it on means.
     maxParallelRuns: maxParallelRunsFrom(config[CODING_AGENT_MAX_PARALLEL_CONFIG_KEY]),
@@ -4379,12 +4319,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
       return {
         historyRetention: history.mode,
         historyLimit: history.limit,
-        historyLimits: [...HISTORY_EXTENDED_LIMITS],
         historyLiveKept: MAX_RUNS_KEPT,
       };
     })(),
-    generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
-    generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
+    // One switch over the two keys: on only when both are.
+    generateMedia: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]) && generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
     teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels

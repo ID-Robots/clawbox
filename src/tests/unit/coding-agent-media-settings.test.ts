@@ -15,11 +15,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const configGet = vi.hoisted(() => vi.fn());
 const configGetAll = vi.hoisted(() => vi.fn());
 const configSet = vi.hoisted(() => vi.fn());
+const configSetMany = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: configGet,
   getAll: configGetAll,
   set: configSet,
+  // The one switch writes both keys in one batch.
+  setMany: configSetMany,
 }));
 
 import {
@@ -40,8 +43,7 @@ import {
   MEDIA_BRIEF_IMAGES,
   runMcpTools,
   runMediaEnv,
-  setGenerateAudio,
-  setGenerateImages,
+  setGenerateMedia,
 } from "@/lib/coding-agent";
 
 const RUN = { id: "run-abcd1234", directory: "/home/clawbox/Projects/site" };
@@ -50,6 +52,7 @@ beforeEach(() => {
   configGet.mockReset().mockResolvedValue(undefined);
   configGetAll.mockReset().mockResolvedValue({});
   configSet.mockReset().mockResolvedValue(undefined);
+  configSetMany.mockReset().mockResolvedValue(undefined);
 });
 
 describe("the media switches", () => {
@@ -65,14 +68,15 @@ describe("the media switches", () => {
     expect(await getGenerateAudio()).toBe(false);
   });
 
-  it("refuse anything that is not a boolean, and write the key when it is", async () => {
-    await expect(setGenerateImages("yes")).rejects.toBeInstanceOf(CodingAgentError);
-    await expect(setGenerateAudio(1)).rejects.toBeInstanceOf(CodingAgentError);
+  it("are ONE switch to the owner (SCA C3): it refuses a non-boolean and writes both keys at once", async () => {
+    await expect(setGenerateMedia("yes")).rejects.toBeInstanceOf(CodingAgentError);
+    await expect(setGenerateMedia(1)).rejects.toBeInstanceOf(CodingAgentError);
     expect(configSet).not.toHaveBeenCalled();
-    await setGenerateImages(false);
-    expect(configSet).toHaveBeenCalledWith(CODING_AGENT_GEN_IMAGES_CONFIG_KEY, false);
-    await setGenerateAudio(true);
-    expect(configSet).toHaveBeenCalledWith(CODING_AGENT_GEN_AUDIO_CONFIG_KEY, true);
+    expect(configSetMany).not.toHaveBeenCalled();
+    await setGenerateMedia(false);
+    expect(configSetMany).toHaveBeenCalledWith({ [CODING_AGENT_GEN_IMAGES_CONFIG_KEY]: false, [CODING_AGENT_GEN_AUDIO_CONFIG_KEY]: false });
+    await setGenerateMedia(true);
+    expect(configSetMany).toHaveBeenCalledWith({ [CODING_AGENT_GEN_IMAGES_CONFIG_KEY]: true, [CODING_AGENT_GEN_AUDIO_CONFIG_KEY]: true });
   });
 
   it("are cleared by the reset, ahead of the switch that is the consent", () => {

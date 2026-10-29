@@ -352,19 +352,21 @@ describe("CodingAgentApp", () => {
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
     });
 
-    it("proposes Ultracode and says what it costs", async () => {
+    it("asks for no effort, and says what the default and Ultracode cost", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
       await passGithubStep();
-      expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
-      expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
-      // The owner is told before they choose, not by a bill afterwards.
+      // One fewer first-run decision (SCA C3): a run starts at the box's own
+      // default, and the Settings page is where the level is changed.
+      expect(screen.queryByTestId("coding-agent-wizard-effort-ultracode")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-wizard-effort-low")).toBeNull();
+      // The owner is still told what the heavier levels cost, before a bill does.
       expect(screen.getByTestId("coding-agent-wizard-cost").textContent)
         .toBe(translations.en["codingAgent.wizardEffortCost"]);
     });
 
-    it("saves the folder, the effort and the switch in ONE post, and marks setup done", async () => {
+    it("saves the folder, the review pass and the switch in ONE post, and marks setup done", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
@@ -381,7 +383,6 @@ describe("CodingAgentApp", () => {
       // page.
       expect(post!.body).toEqual({
         defaultDirectory: "/home/clawbox/Projects",
-        effort: "ultracode",
         reviewPass: false,
         enabled: true,
         setupComplete: false,

@@ -56,12 +56,9 @@ function stubFetch(
     tokenLimit?: number | null;
     reviewPass?: boolean;
     teamDynamic?: boolean;
-    generateImages?: boolean;
-    generateAudio?: boolean;
+    generateMedia?: boolean;
     realBrowser?: boolean;
-    reviewRounds?: number;
     autoMerge?: boolean;
-    completionAttempts?: number;
     maxParallelRuns?: number;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
@@ -78,14 +75,9 @@ function stubFetch(
     /** A server from before the browser switch existed: it answers with no
      *  such field at all, which is the state the panel's `?? true` is for. */
     noRealBrowser?: boolean;
-    /** A server from before the review loop: it answers with no rounds field,
-     *  and the card must then show no control rather than invent a value. */
+    /** A server from before the review loop: it answers with no merge field,
+     *  and the card must then show no switch rather than invent a value. */
     noReviewLoop?: boolean;
-    /** The route's own range refusal, in its own words. */
-    rejectRounds?: boolean;
-    /** A server from before the deliverable gate: no attempts field, so the
-     *  control must not be drawn at all. */
-    noCompletionAttempts?: boolean;
     /** A server from before worktrees: no runs-at-once field, so that control
      *  must not be drawn either. */
     noMaxParallelRuns?: boolean;
@@ -123,12 +115,9 @@ function stubFetch(
   let reviewPass = status.reviewPass ?? false;
   let teamDynamic = status.teamDynamic;
   // The two that are ON when the device has never stored them.
-  let generateImages = status.generateImages ?? true;
-  let generateAudio = status.generateAudio ?? true;
+  let generateMedia = status.generateMedia ?? true;
   let realBrowser = status.realBrowser ?? true;
-  let reviewRounds = status.reviewRounds ?? 3;
   let autoMerge = status.autoMerge ?? false;
-  let completionAttempts = status.completionAttempts ?? 3;
   let maxParallelRuns = status.maxParallelRuns ?? 2;
   // OFF when the device has never stored it, unlike the media switches above.
   // Both halves unset means "use the project's own git identity", which is
@@ -167,11 +156,9 @@ function stubFetch(
     reviewPass,
     // Absent unless the test says: an older server does not answer with it.
     ...(teamDynamic === undefined ? {} : { teamDynamic }),
-    generateImages,
-    generateAudio,
+    generateMedia,
     ...(opts.noRealBrowser ? {} : { realBrowser }),
-    ...(opts.noReviewLoop ? {} : { reviewRounds, minReviewRounds: 0, maxReviewRounds: 6, autoMerge }),
-    ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
+    ...(opts.noReviewLoop ? {} : { autoMerge }),
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
     ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
     ...(opts.noPrBodyTask ? {} : { prBodyIncludesTask }),
@@ -233,15 +220,8 @@ function stubFetch(
       if ("tokenLimit" in body) tokenLimit = body.tokenLimit;
       if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
       if (typeof body.teamDynamic === "boolean") teamDynamic = body.teamDynamic;
-      if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
-      if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
+      if (typeof body.generateMedia === "boolean") generateMedia = body.generateMedia;
       if (typeof body.realBrowser === "boolean") realBrowser = body.realBrowser;
-      if (typeof body.reviewRounds === "number") {
-        if (opts.rejectRounds) {
-          return json({ error: "The number of review rounds must be between 0 and 6.", kind: "invalid" }, 400);
-        }
-        reviewRounds = body.reviewRounds;
-      }
       if ("gitAuthorName" in body || "gitAuthorEmail" in body) {
         if (opts.rejectAuthor && body.gitAuthorEmail !== null) {
           return json({ error: opts.rejectAuthor, kind: "invalid" }, 400);
@@ -269,7 +249,6 @@ function stubFetch(
           if (pinned && pinned !== "auto" && !next.includes(pinned)) roleModels[role] = { ...roleModels[role], provider: "auto", model: "auto" };
         }
       }
-      if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
       // The route merges a partial diet over the stored one.
       if (diet && body.diet && typeof body.diet === "object") Object.assign(diet, body.diet);
       if (typeof body.maxParallelRuns === "number") {
@@ -567,40 +546,37 @@ describe("effort and the ceilings", () => {
   });
 });
 
-describe("the media switches", () => {
-  const IMAGES = translations.en["codingAgent.genImagesLabel"];
-  const AUDIO = translations.en["codingAgent.genAudioLabel"];
+describe("the media switch", () => {
+  const MEDIA = translations.en["codingAgent.genMediaLabel"];
 
-  it("render ON for a device that has never answered with them", async () => {
-    // These two are the only settings here that default ON, so a panel that
-    // fell back to `false` would show every box as switched off and invite the
-    // owner to "turn on" something that was never off.
+  it("renders ON for a device that has never answered with it", async () => {
+    // One of the few settings here that defaults ON, so a panel that fell back
+    // to `false` would show every box as switched off and invite the owner to
+    // "turn on" something that was never off.
     stubFetch({ enabled: true, readiness: READY });
     render(<CodingAgentSettingsPanel />);
-    expect(await screen.findByRole("switch", { name: IMAGES })).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByRole("switch", { name: AUDIO })).toHaveAttribute("aria-checked", "true");
+    expect(await screen.findByRole("switch", { name: MEDIA })).toHaveAttribute("aria-checked", "true");
+    // One switch for pictures and speech together (SCA C3), not two.
+    expect(screen.queryByTestId("coding-agent-gen-images")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-gen-audio")).toBeNull();
   });
 
-  it("post the field the route reads and render what it answers", async () => {
-    stubFetch({ enabled: true, readiness: READY, generateImages: true, generateAudio: true });
+  it("posts the one field the route reads and renders what it answers", async () => {
+    stubFetch({ enabled: true, readiness: READY, generateMedia: true });
     render(<CodingAgentSettingsPanel />);
-    const images = await screen.findByRole("switch", { name: IMAGES });
-    fireEvent.click(images);
-    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { generateImages: false } }]));
-    await waitFor(() => expect(images).toHaveAttribute("aria-checked", "false"));
-    // The other one is untouched by that write.
-    expect(screen.getByRole("switch", { name: AUDIO })).toHaveAttribute("aria-checked", "true");
+    const media = await screen.findByRole("switch", { name: MEDIA });
+    fireEvent.click(media);
+    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { generateMedia: false } }]));
+    await waitFor(() => expect(media).toHaveAttribute("aria-checked", "false"));
   });
 
-  it("keep their hints one tap away, like every other setting on this card", async () => {
+  it("keeps its hint one tap away, like every other setting on this card", async () => {
     stubFetch({ enabled: true, readiness: READY });
     render(<CodingAgentSettingsPanel />);
-    await screen.findByRole("switch", { name: IMAGES });
-    expect(screen.queryByText(translations.en["codingAgent.genImagesHint"])).toBeNull();
-    fireEvent.click(screen.getByTestId("coding-agent-gen-images-help"));
-    expect(screen.getByText(translations.en["codingAgent.genImagesHint"])).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("coding-agent-gen-audio-help"));
-    expect(screen.getByText(translations.en["codingAgent.genAudioHint"])).toBeInTheDocument();
+    await screen.findByRole("switch", { name: MEDIA });
+    expect(screen.queryByText(translations.en["codingAgent.genMediaHint"])).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-gen-media-help"));
+    expect(screen.getByText(translations.en["codingAgent.genMediaHint"])).toBeInTheDocument();
   });
 });
 
@@ -965,39 +941,7 @@ describe("motion", () => {
  * has no route for.
  */
 describe("the review loop", () => {
-  const ROUNDS = translations.en["codingAgent.reviewRoundsLabel"];
   const MERGE = translations.en["codingAgent.autoMergeLabel"];
-
-  it("shows the rounds the device answered with, and saves a new one", async () => {
-    stubFetch({ enabled: true, readiness: READY, reviewRounds: 3 });
-    render(<CodingAgentSettingsPanel />);
-    const select = await screen.findByTestId("coding-agent-review-rounds") as HTMLSelectElement;
-    expect(select.value).toBe("3");
-
-    fireEvent.change(select, { target: { value: "5" } });
-    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { reviewRounds: 5 } }); });
-    await waitFor(() => { expect((screen.getByTestId("coding-agent-review-rounds") as HTMLSelectElement).value).toBe("5"); });
-  });
-
-  it("offers 0 as a real choice, worded as off rather than as a number", async () => {
-    stubFetch({ enabled: true, readiness: READY, reviewRounds: 0 });
-    render(<CodingAgentSettingsPanel />);
-    const select = await screen.findByTestId("coding-agent-review-rounds") as HTMLSelectElement;
-    expect(select.value).toBe("0");
-    expect(screen.getByRole("option", { name: translations.en["codingAgent.reviewRoundsOff"] })).toBeTruthy();
-    // The whole range the device named, and nothing outside it.
-    expect(select.querySelectorAll("option")).toHaveLength(7);
-  });
-
-  it("renders the route's range refusal beside the control", async () => {
-    stubFetch({ enabled: true, readiness: READY, reviewRounds: 3 }, { rejectRounds: true });
-    render(<CodingAgentSettingsPanel />);
-    const select = await screen.findByTestId("coding-agent-review-rounds") as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "6" } });
-    expect(await screen.findByText(/must be between 0 and 6/)).toBeTruthy();
-    // …and the control still shows what the device actually holds.
-    expect((screen.getByTestId("coding-agent-review-rounds") as HTMLSelectElement).value).toBe("3");
-  });
 
   it("renders the merge switch OFF when the device has never stored it", async () => {
     // The one switch on this card that is a consent: absent means no.
@@ -1011,14 +955,15 @@ describe("the review loop", () => {
     await waitFor(() => { expect(screen.getByRole("switch", { name: MERGE }).getAttribute("aria-checked")).toBe("true"); });
   });
 
-  it("shows neither control on a server that predates the loop", async () => {
+  it("shows no merge switch on a server that predates the loop, and never a rounds select", async () => {
     stubFetch({ enabled: true, readiness: READY }, { noReviewLoop: true });
     render(<CodingAgentSettingsPanel />);
     // The card is up…
     await screen.findByRole("switch", { name: SWITCH });
-    expect(screen.queryByTestId("coding-agent-review-rounds")).toBeNull();
     expect(screen.queryByRole("switch", { name: MERGE })).toBeNull();
-    expect(screen.queryByText(ROUNDS)).toBeNull();
+    // The round count is no longer a setting (SCA C3): every pull request
+    // gets the default, and no control offers to change it.
+    expect(screen.queryByTestId("coding-agent-review-rounds")).toBeNull();
   });
 });
 
@@ -1060,39 +1005,6 @@ describe("the task text in the pull request", () => {
     await screen.findByRole("switch", { name: SWITCH });
     expect(screen.queryByTestId("coding-agent-pr-body-task")).toBeNull();
     expect(screen.queryByText(HINT)).toBeNull();
-  });
-});
-
-/**
- * How many goes a run gets at the thing it was asked to DELIVER.
- *
- * Beside the pull-request controls because the commonest deliverable IS the
- * pull request those switches ask for. Hidden on a server that answers with no
- * field, like the rounds above: a control over a setting the box has no route
- * for would save nothing.
- */
-describe("the attempts at a run's deliverable", () => {
-  it("shows what the device answered with, and saves a new value", async () => {
-    stubFetch({ enabled: true, readiness: READY, completionAttempts: 3 });
-    render(<CodingAgentSettingsPanel />);
-    const select = await screen.findByTestId("coding-agent-completion-attempts") as HTMLSelectElement;
-    expect(select.value).toBe("3");
-    // The whole range the device named, and nothing outside it — 1 is the floor
-    // here, unlike the rounds, because zero attempts would mean never running.
-    expect(select.querySelectorAll("option")).toHaveLength(6);
-    expect((select.querySelectorAll("option")[0] as HTMLOptionElement).value).toBe("1");
-
-    fireEvent.change(select, { target: { value: "5" } });
-    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { completionAttempts: 5 } }); });
-    await waitFor(() => { expect((screen.getByTestId("coding-agent-completion-attempts") as HTMLSelectElement).value).toBe("5"); });
-  });
-
-  it("shows no control at all on a server that predates it", async () => {
-    stubFetch({ enabled: true, readiness: READY }, { noCompletionAttempts: true });
-    render(<CodingAgentSettingsPanel />);
-    await screen.findByRole("switch", { name: SWITCH });
-    expect(screen.queryByTestId("coding-agent-completion-attempts")).toBeNull();
-    expect(screen.queryByText(translations.en["codingAgent.completionAttemptsLabel"])).toBeNull();
   });
 });
 
@@ -1216,9 +1128,14 @@ describe("a team's model and effort per role", () => {
     expect(texts(effort("bulk"))[0]).toBe(t("codingAgent.roleAutoAsWorkers"));
     expect(screen.getByLabelText(`Account for ${t("codingAgent.roleModels.bulk")}`)).toBe(provider("bulk"));
     expect(screen.getByLabelText("Model for Reviewers")).toBe(model("reviewer"));
-    // The planner's row says it is the lead too; bulk work's says what it is for.
-    expect(screen.getByTestId("coding-agent-role-planner-about")).toHaveTextContent(t("codingAgent.roleModelsRoleHint.planner"));
-    expect(screen.getByTestId("coding-agent-role-bulk-about")).toHaveTextContent(t("codingAgent.roleModelsRoleHint.bulk"));
+    // Each row's label says what the role DOES, not only behind the help tip
+    // (SCA C3): "Workers: write your code".
+    expect(screen.getByTestId("coding-agent-role-worker-label")).toHaveTextContent(`${t("codingAgent.roleModels.worker")}: ${t("codingAgent.roleModelsRoleJob.worker")}`);
+    expect(screen.getByTestId("coding-agent-role-planner-label")).toHaveTextContent(t("codingAgent.roleModelsRoleJob.planner"));
+    expect(screen.getByTestId("coding-agent-role-reviewer-label")).toHaveTextContent(t("codingAgent.roleModelsRoleJob.reviewer"));
+    expect(screen.getByTestId("coding-agent-role-bulk-label")).toHaveTextContent(t("codingAgent.roleModelsRoleJob.bulk"));
+    // Nothing stored and no map answered: no "now on" line either.
+    expect(screen.queryByTestId("coding-agent-role-planner-about")).toBeNull();
     // No price estimate anywhere on the card (the owner's ruling, 2026-10-28).
     expect(screen.queryByTestId("coding-agent-role-models-cost")).toBeNull();
     expect(section.textContent).not.toMatch(/the cost|×/);
@@ -1357,10 +1274,9 @@ describe("a team's model and effort per role", () => {
     });
     render(<CodingAgentSettingsPanel />);
     const planner = await screen.findByTestId("coding-agent-role-planner-about");
-    expect(planner.textContent).toBe([
-      t("codingAgent.roleModelsRoleHint.planner"),
-      t("codingAgent.roleModelNow", { model: "Sonnet 5", provider: "Anthropic" }),
-    ].join(" · "));
+    // Only what it starts on: the role's job moved up onto the label (SCA C3).
+    expect(planner.textContent).toBe(t("codingAgent.roleModelNow", { model: "Sonnet 5", provider: "Anthropic" }));
+    expect(screen.getByTestId("coding-agent-role-planner-label")).toHaveTextContent(t("codingAgent.roleModelsRoleJob.planner"));
     // Where the plan picks the model, the account is still said.
     expect(screen.getByTestId("coding-agent-role-worker-about").textContent).toBe(
       t("codingAgent.roleModelNow", { model: t("codingAgent.roleModelPlanDecides"), provider: "ClawBox AI" }),

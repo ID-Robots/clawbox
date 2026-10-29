@@ -369,7 +369,9 @@ describe("the setting's door", () => {
     expect(readJson(ds())).toEqual({ model: "deepseek-v4-flash", cleanupPeriodDays: 36_500 });
     expect(readJson(own())).toEqual({ cleanupPeriodDays: 36_500 });
     const status = await lib.getCodingAgentStatus();
-    expect(status).toMatchObject({ historyRetention: "everything", historyLimit: 100, historyLimits: [100, 300, 1000], historyLiveKept: 30 });
+    expect(status).toMatchObject({ historyRetention: "everything", historyLimit: 100, historyLiveKept: 30 });
+    // The choices went with the select (SCA C3).
+    expect((status as { historyLimits?: unknown }).historyLimits).toBeUndefined();
 
     const back = await lib.setHistoryRetention({ mode: "extended", limit: 300 });
     expect(back.policy).toEqual({ mode: "extended", limit: 300 });
