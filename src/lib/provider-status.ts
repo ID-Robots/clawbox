@@ -20,7 +20,12 @@ import { hasClawaiToken } from "@/lib/harness/credentials";
 import { clawaiTokenRejectedByPortal } from "@/lib/clawbox-ai-portal-tier";
 import { readConfig, type OpenClawConfig } from "@/lib/openclaw-config";
 import { readGatewayAuthProfile } from "@/lib/openclaw-auth-store";
-import { isOauthProfile, profileProviderId } from "@/lib/chatgpt-subscription";
+import {
+  CHATGPT_PROVIDER,
+  CHATGPT_UI_PROVIDER,
+  isOauthProfile,
+  profileProviderId,
+} from "@/lib/chatgpt-subscription";
 import { get as getConfigValue } from "@/lib/config-store";
 import {
   CLAWAI_PROVIDER,
@@ -472,38 +477,61 @@ export function claudeSignInFenced(config: OpenClawConfig): boolean {
 }
 
 /**
- * OpenClaw: `openclaw.json` is the answer for every row but one. A provider is
- * connected when the gateway holds an auth profile for it or a key under its
- * provider definition — the same two places `/setup-api/chat/model` builds its
- * dropdown from, so the strip and the chat can never disagree about who is
- * available. The one exception is a Claude sign-in the gateway's store holds
- * only a dead marker for ({@link claudeSignInFenced}).
+ * The providers `openclaw.json` holds a credential for: an auth profile filed
+ * under the provider, or a key under its provider definition. ONE reader for
+ * the Providers strip and the chat picker (`/setup-api/chat/model`), so the two
+ * cannot disagree about who is connected — and the picker offers no row the
+ * gateway has nothing to authenticate with (TASK-2055).
+ *
+ * The auth-profile MODE splits OpenAI into the picker's two rows. Both
+ * credentials are filed under `openai`, but an OAuth profile is the ChatGPT
+ * sign-in — the `codex` row ({@link CHATGPT_UI_PROVIDER}), which routes only
+ * the subscription's models — and a key or token is the API-key row. Read as
+ * one provider, a box signed in with ChatGPT alone offered "OpenAI GPT" too,
+ * and every pick on it was refused. The strip folds the two back into its one
+ * OpenAI row through {@link normalizeProviderId}.
+ *
+ * `normalize` collapses aliases BEFORE ids are counted, for the reason
+ * `subscriptionOnlyProviders` spells out (deepseek and clawai are one provider
+ * under two names). Pure and synchronous: no store, no CLI, no probe.
  */
-async function readOpenclawStatus(): Promise<UnstampedSummary> {
-  const config = await readConfig();
-  const profiles = config.auth?.profiles ?? {};
-  const definitions = config.models?.providers ?? {};
-
+export function credentialedProviders(
+  config: OpenClawConfig,
+  normalize: (provider: string) => string | null = normalizeProviderId,
+): Set<string> {
   const credentialed = new Set<string>();
-  for (const [profileKey, entry] of Object.entries(profiles)) {
-    const id = normalizeProviderId(entry?.provider ?? profileKey.split(":")[0]);
+  const add = (provider: string) => {
+    const id = normalize(provider);
     if (id) credentialed.add(id);
+  };
+  for (const [profileKey, entry] of Object.entries(config.auth?.profiles ?? {})) {
+    const provider = profileProviderId(profileKey, entry);
+    if (!provider) continue;
+    add(isOauthProfile(entry) && provider === CHATGPT_PROVIDER ? CHATGPT_UI_PROVIDER : provider);
   }
-  for (const [wireId, definition] of Object.entries(definitions)) {
-    const key = (definition as { apiKey?: unknown })?.apiKey;
+  for (const [wireId, definition] of Object.entries(config.models?.providers ?? {})) {
+    const key = (definition as { apiKey?: unknown } | undefined)?.apiKey;
     if (typeof key !== "string" || !key.trim()) continue;
-    const id = normalizeProviderId(wireId);
-    if (!id) continue;
     // ClawBox AI's images and cloud voice ride in the `openai` slot — its
     // OpenAI-compatible routes on our proxy, keyed with the claw_ token. That
     // is a ClawBox AI credential wherever it sits, not an OpenAI account, and
     // a box with only ClawBox AI linked was reading "OpenAI: Connected".
-    if (isClawboxAiToken(key)) {
-      credentialed.add(CLAWAI_PROVIDER);
-      continue;
-    }
-    credentialed.add(id);
+    add(isClawboxAiToken(key) ? CLAWAI_PROVIDER : wireId);
   }
+  return credentialed;
+}
+
+/**
+ * OpenClaw: `openclaw.json` is the answer for every row but one. A provider is
+ * connected when {@link credentialedProviders} says so — the reader
+ * `/setup-api/chat/model` builds its dropdown from, so the strip and the chat
+ * can never disagree about who is available. The one exception is a Claude
+ * sign-in the gateway's store holds only a dead marker for
+ * ({@link claudeSignInFenced}).
+ */
+async function readOpenclawStatus(): Promise<UnstampedSummary> {
+  const config = await readConfig();
+  const credentialed = credentialedProviders(config);
   // The ClawBox AI credential can live in the config store instead of the
   // config file (a box migrated from a Hermes install), and `hasClawaiToken`
   // is the helper that knows both homes.

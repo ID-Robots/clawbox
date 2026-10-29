@@ -7008,9 +7008,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // claims that body above — by its code and, for a server that predates
       // the code, by the CLI's own wording — so the sentence this fix exists to
       // remove can no longer be thrown as `data.error` and relayed from here.
+      // Says what did not happen before why: the route's refusal names the
+      // provider and what the box is missing (TASK-2055), and a bare "Error:"
+      // over it left the owner unsure whether the chat had moved at all.
       setMessages(prev => [...prev, {
         role: 'system',
-        text: `Error: ${err instanceof Error ? err.message : 'Failed to switch chat model'}`,
+        text: `Could not switch the chat to ${target.label}. ${err instanceof Error ? err.message : 'The switch failed.'}`,
         timestamp: Date.now(),
       }])
       return false
