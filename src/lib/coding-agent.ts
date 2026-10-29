@@ -205,11 +205,13 @@ import { taskTitle } from "@/lib/task-title";
 import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { CLAWAI_PLAN_TIER_KEY, clawaiEntitlementTier } from "@/lib/clawai-plan-tier";
 import {
+  concretePrefix,
   deriveAllowRule,
   isAllowRuleRefusal,
   MAX_ALLOW_RULES,
   normalizeAllowRules,
   SOFT_HOME_SUBTREES,
+  softProjectDir,
   unlockedSoftPaths,
   validateAllowRule,
   type AllowRuleContext,
@@ -322,7 +324,7 @@ import {
   worktreeHasChanges,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
-import { worktreeHintFor, worktreeHintText } from "@/lib/coding-worktree-paths";
+import { worktreeHintFor, worktreeHintText, worktreeProject } from "@/lib/coding-worktree-paths";
 import {
   autoMergeOutstanding,
   buildReviewFeedback,
@@ -7010,6 +7012,48 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
   return [brief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
 }
 
+/**
+ * The owner's rules THIS run can use, out of the box-wide list.
+ *
+ * The list is one global key, filled over months from refusals in many
+ * projects, and every rule on it used to reach every run's argv: a `//` rule for
+ * a folder that has since been deleted still rode along, and ONE soft rule for
+ * another project's harness notes turned the wholesale `~/.claude-ds/**` deny
+ * into two entry-by-entry passes over every project the harness ever touched
+ * (measured on the box: 1,680 deny rules, 113 KB of argv, from six rules naming
+ * other projects and folders that no longer exist). So, per spawn:
+ *
+ *   - an absolute rule whose concrete folder (`concretePrefix`) is gone is left
+ *     out — it could match nothing, and it costs argv and evaluation on every
+ *     tool call;
+ *   - a SOFT rule (`softProjectDir`) is kept only when the project it names is
+ *     this run's own: the harness files a folder's state under
+ *     `projects/<slug>` of the folder it runs in (`transcriptPath`), and for a
+ *     run in a worktree under the project's root as well (`worktreeProject`).
+ *     Kept whether or not the folder exists yet — the harness creates it at its
+ *     first turn, and `fileDenyRules` denies nothing for an absent project.
+ *
+ * With no working folder to judge by (no `run`) a soft rule is kept: the
+ * caller is a contract test, not a spawn. The list stays stored whole; nothing
+ * here is written back. A relative rule is about the working folder and is
+ * kept as it is.
+ */
+export function runAllowRules(rules: readonly string[], directory: string | null): string[] {
+  const home = homeDir();
+  const slugOf = (dir: string) => dir.replace(/[^a-zA-Z0-9]/g, "-");
+  const project = directory ? worktreeProject(directory) : null;
+  const own = directory ? [directory, ...(project ? [project] : [])].map(slugOf) : null;
+  return rules.filter((rule) => {
+    const m = /^[A-Za-z][A-Za-z0-9_]*\((.+)\)$/.exec(rule);
+    const spec = m?.[1].trim() ?? "";
+    if (!spec.startsWith("//")) return true;
+    const folder = concretePrefix(spec);
+    const soft = softProjectDir(folder, home);
+    if (soft) return own === null || own.includes(path.basename(soft));
+    return fs.existsSync(folder);
+  });
+}
+
 /** The argv handed to the wrapper. Exported for the contract test. */
 export function buildRunArgs(opts: RunArgsOptions): string[] {
   const diet = opts.diet ?? LEGACY_DIET;
@@ -7107,7 +7151,10 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // feature exists to grant. The deny half cannot be passed here without
     // circularity — `fileDenyRules` below is built FROM this list — and does
     // not need to be: every deny rule it returns still outranks each allow.
-    const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
+    // Then THIS run's share of the list (`runAllowRules`): the same filtered
+    // list goes to both flags below, so the deny half is built from exactly
+    // what the allow half carries.
+    const allowRules = runAllowRules(normalizeAllowRules(opts.allowRules, allowRuleHomeContext()), opts.run?.directory ?? null);
     // A team run's `team_message` is approved whatever else the run may do —
     // read-only included (see MCP_TEAM_TOOL) — and only for a team run.
     // The project's extra servers come right after the run's own MCP tools:
@@ -8140,6 +8187,9 @@ function describeDenial(entry: unknown): string {
   return wholeDenial(entry).slice(0, MAX_DENIAL_CHARS);
 }
 
+/** `…/<session uuid>/tool-results/…` — one session's own spill folder. */
+const SESSION_TOOL_RESULTS = /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/tool-results(?:\/|$)/i;
+
 /**
  * What this box would have to allow for a refused action to go through — the
  * narrowest such rule, already judged against the floor.
@@ -8154,7 +8204,11 @@ function describeDenial(entry: unknown): string {
  *
  * `{ rule: null, refusal: null }` is the third answer and the commonest: a Bash
  * command, a tool no rule may name, a refusal whose target could not be read.
- * Nothing to offer, and nothing to explain either.
+ * Nothing to offer, and nothing to explain either. A path under a session's
+ * own `<sessionId>/tool-results/` folder (the harness's spill of a large tool
+ * result) is in that set too: the folder rule `deriveAllowRule` would make
+ * carries the session UUID, so it could never match another run and would only
+ * sit on the list — six such rules were what inflated every spawn's argv.
  *
  * @param denial the refused action's tool and what it was pointed at
  * @param context what the device denies right now; read here when omitted
@@ -8163,6 +8217,7 @@ export function suggestAllowRule(
   denial: DenialInput,
   context?: AllowRuleContext,
 ): { rule: string | null; refusal: AllowRuleRefusal | null } {
+  if (SESSION_TOOL_RESULTS.test(denial.target ?? "")) return { rule: null, refusal: null };
   const candidate = deriveAllowRule(denial);
   if (!candidate) return { rule: null, refusal: null };
   // No `known` list: this is the rule the action NEEDS, and whether the owner

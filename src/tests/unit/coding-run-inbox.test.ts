@@ -190,6 +190,19 @@ describe("the --settings a run is spawned with", () => {
     expect(contextOf(r.stdout)).toBe("use tabs");
   });
 
+  it("an empty inbox costs no Node process: the shell guard alone answers, with exit 0", () => {
+    const dir = inbox.ensureRunInbox(RUN);
+    // A node binary that cannot run: the guard must never reach it.
+    const settings = JSON.parse(inbox.runHookSettings({ node: path.join(root, "no-such-node"), script: SCRIPT, inbox: dir, mergeGuard: false })!) as {
+      hooks: Record<string, Array<{ matcher: string; hooks: Array<{ command: string }> }>>;
+    };
+    expect(settings.hooks.PostToolUse[0].matcher).toBe("*");
+    const r = spawnSync("sh", ["-c", settings.hooks.PostToolUse[0].hooks[0].command], { input: JSON.stringify(POST_TOOL), encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("");
+  });
+
   it("adds the merge guard for a team's run, and says nothing when there is no hook to give", () => {
     const both = JSON.parse(inbox.runHookSettings({ node: "/usr/bin/node", script: "/x/hook.mjs", inbox: "/d/in", mergeGuard: true })!) as { hooks: Record<string, Array<{ matcher: string; hooks: Array<{ command: string }> }>> };
     expect(both.hooks.PreToolUse[0].matcher).toBe("Bash");
