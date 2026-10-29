@@ -10,6 +10,8 @@ import { WEBAPPS_DIR } from "@/lib/code-projects";
 import { safeAppId, webappIconPath } from "@/lib/webapp-icon";
 import { disablePublicLink } from "@/lib/public-app-links";
 import { removeStoreInstalledFolder } from "@/lib/store-install-receipt";
+import { registeredServer } from "@/lib/app-proxy";
+import { disableUserUnits, stopServerApp } from "@/lib/app-server-start";
 
 export const dynamic = "force-dynamic";
 
@@ -177,6 +179,37 @@ export async function POST(req: Request) {
       }
       skillHalfChecked = false;
     }
+
+    // An app with a server of its own (a Store app, or one the agent built,
+    // registered with a port in data/webapps/<id>/meta.json) has it STOPPED
+    // before any folder goes. Left running, it served on from a deleted folder
+    // and held the app's port, and the next install of the same app found the
+    // port taken and started nothing. Outside the skill branch: a server app
+    // is the same on every edition. A server that will not stop stops the
+    // uninstall with nothing removed, so the owner keeps the entry to retry
+    // from — the contract of the two refusals around it.
+    let serverStopped = false;
+    // The app's own user `.service` units the stop went through: disabled
+    // below only if the app's folder is removed (a Store app), never for an
+    // app whose project stays.
+    let serverUnits: string[] = [];
+    const server = await registeredServer(appId);
+    if (server) {
+      const stop = await stopServerApp(appId, server);
+      if (!stop.ok) {
+        console.warn(`[uninstall] Could not stop the app's server: ${stop.detail}`);
+        return NextResponse.json({
+          ok: false,
+          error: `The app's server could not be stopped, so nothing was removed. Try again in a moment. ${stop.detail}`,
+          code: "server_stop_failed",
+          retryable: true,
+          appId,
+        }, { status: 503 });
+      }
+      serverStopped = stop.stopped;
+      serverUnits = stop.units ?? [];
+    }
+
     // What actually happened to the skill half, so the answer can say it.
     //   true  — a skill directory was there and is gone
     //   false — this box has a skills root and nothing of that name was in it
@@ -249,6 +282,9 @@ export async function POST(req: Request) {
         skillRemoved,
       }, { status: 503 });
     }
+    // Its folder is gone: a unit of its own left enabled would start a server
+    // from nowhere at the next boot.
+    if (projectRemoved) await disableUserUnits(serverUnits);
 
     // Remove the deployed webapp, if this app is one. `webapp_create`,
     // `webapp_update` and `code_project_build` all deploy to
@@ -381,6 +417,7 @@ export async function POST(req: Request) {
       skillRemoved,
       ...(skillHalfChecked ? {} : { skillHalfChecked: false }),
       ...(projectRemoved ? { projectRemoved: true } : {}),
+      ...(serverStopped ? { serverStopped: true } : {}),
     });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);

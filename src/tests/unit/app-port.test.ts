@@ -75,4 +75,19 @@ describe("appListenerOwned", () => {
     expect(process.cwd().startsWith(fs.realpathSync(project))).toBe(false);
     expect(appListenerOwned(port, project)).toBe(false);
   });
+
+  it("is no to a server left running in a subfolder of a removed project, once a folder of the same name is back", async () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "app-port-"));
+    fs.mkdirSync(path.join(project, "sub"));
+    const port = await freePort();
+    await projectServer(port, path.join(project, "sub"));
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.mkdirSync(project);
+    try {
+      // Its cwd reads `<project>/sub (deleted)`: inside the new folder by its spelling only.
+      expect(appListenerOwned(port, project)).toBe(false);
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
 });
