@@ -142,6 +142,9 @@ vi.mock("@/lib/llamacpp", () => ({
   getLlamaCppContextWindow: vi.fn().mockReturnValue(131072),
   getLlamaCppMaxTokens: vi.fn().mockReturnValue(131072),
   getLlamaCppProxyBaseUrl: vi.fn().mockReturnValue(LLAMACPP_PROXY_BASE_URL),
+  // The real declaration: the row a 2026.10+ core gets (src/lib/llamacpp.ts).
+  LLAMACPP_REASONING_COMPAT: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+  llamaCppThinkingDefaultOp: (ref: string) => [`agents.defaults.models[${JSON.stringify(ref)}].params.thinking`, "off"],
 }));
 
 vi.mock("@/lib/local-ai-runtime", () => ({

@@ -66,6 +66,13 @@ export interface PatchSessionModelsOptions {
   retryDelayMs?: number;
   /** Forwarded to `call` unchanged. */
   timeoutMs?: number;
+  /**
+   * Also set every target's sticky `thinkingLevel`, in the same patch — the
+   * field policy of `sessions.patch` applies to `sessions.patchMany`
+   * (docs/gateway/protocol/rpc-session-control.md in the pinned core). Absent,
+   * the patch carries the model alone and the core folds the level itself.
+   */
+  thinkingLevel?: string;
 }
 
 /**
@@ -126,7 +133,7 @@ async function patchChunk(
       "sessions.patchMany",
       {
         targets: chunk.map((t) => ({ key: t.key, agentId: t.agentId })),
-        patch: { model },
+        patch: opts.thinkingLevel === undefined ? { model } : { model, thinkingLevel: opts.thinkingLevel },
       },
       { timeoutMs: opts.timeoutMs },
     );

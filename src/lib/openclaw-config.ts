@@ -2102,6 +2102,9 @@ export async function applyModelOverrideToAllAgentSessions(
   /** The legacy-file mutation. */
   const applyToSession = (session: Record<string, unknown>): boolean => {
     if (keepsUserPick(session)) return false;
+    // Read before the override below rewrites it: the provider this session's
+    // reasoning level was chosen for.
+    const previousProvider = session.modelProvider ?? session.providerOverride;
     session.providerOverride = update.provider;
     session.modelOverride = update.modelId;
     session.modelOverrideSource = source;
@@ -2117,9 +2120,16 @@ export async function applyModelOverrideToAllAgentSessions(
     // next turn with `thinkingLevel "high" is not supported for llamacpp/…
     // (use off)`. Only rewrite when the existing level is actually
     // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
+    //
+    // The one exception is a move ONTO the on-device model from another
+    // provider: Gemma takes `high` too (LLAMACPP_REASONING_COMPAT), but there
+    // it means thinking on every turn at about twice the answer time, so a
+    // level picked for a cloud model is not carried over — the session starts
+    // at the local model's own default (`off`) and the owner opts in there.
     if (isThinkingLevel(session.thinkingLevel)) {
       const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
-      if (!reasoning.levels.includes(session.thinkingLevel)) {
+      const ontoDevice = update.provider === "llamacpp" && previousProvider !== "llamacpp";
+      if (ontoDevice || !reasoning.levels.includes(session.thinkingLevel)) {
         session.thinkingLevel = reasoning.default;
       }
     }
@@ -2132,6 +2142,7 @@ export async function applyModelOverrideToAllAgentSessions(
   // reads, and is left alone below.
   const migratedAgents = new Set<string>();
   const model = `${update.provider}/${update.modelId}`;
+  const localThinkingDefault = getProviderReasoningConfig(update.provider, model).default;
   for (const agentId of listAgentIds(agentsDir)) {
     if (!sessionStorePath(agentId, agentsDir)) continue;
     migratedAgents.add(agentId);
@@ -2140,12 +2151,31 @@ export async function applyModelOverrideToAllAgentSessions(
       console.warn(`[openclaw-config] could not list the sessions of agent ${agentId}; they keep their previous model`);
       continue;
     }
-    const targets = rows
-      .filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry))
-      .map(({ key }) => ({ key, agentId }));
-    if (targets.length === 0) continue;
+    const eligible = rows.filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry));
+    if (eligible.length === 0) continue;
+    // The legacy path's rule above, the core's way: a sticky level picked for
+    // another provider is not carried onto the on-device model, so those
+    // sessions get the local default in the same patch. The core folds only a
+    // level the new model cannot take, and Gemma takes `high`.
+    const resetsThinking = (entry: Record<string, unknown>): boolean =>
+      update.provider === "llamacpp"
+      && (entry.modelProvider ?? entry.providerOverride) !== "llamacpp"
+      && isThinkingLevel(entry.thinkingLevel)
+      && entry.thinkingLevel !== localThinkingDefault;
+    const batches = [
+      { targets: eligible.filter(({ entry }) => !resetsThinking(entry)), thinkingLevel: undefined },
+      { targets: eligible.filter(({ entry }) => resetsThinking(entry)), thinkingLevel: localThinkingDefault },
+    ].filter((batch) => batch.targets.length > 0);
+    const outcomes = [];
+    for (const batch of batches) {
+      outcomes.push(...await patchSessionModels(
+        batch.targets.map(({ key }) => ({ key, agentId })),
+        model,
+        { call: callGateway, ...(batch.thinkingLevel === undefined ? {} : { thinkingLevel: batch.thinkingLevel }) },
+      ));
+    }
     let patched = 0;
-    for (const outcome of await patchSessionModels(targets, model, { call: callGateway })) {
+    for (const outcome of outcomes) {
       if (outcome.ok) {
         patched += 1;
         continue;
@@ -2248,6 +2278,8 @@ export interface OpenClawConfig {
   };
   tools?: {
     profile?: string;
+    /** OpenClaw's Tool Search; unset means on. Off while the primary is on the device (src/lib/local-tool-search.ts). */
+    toolSearch?: boolean | { enabled?: boolean; mode?: string; [key: string]: unknown };
     web?: { search?: { enabled?: boolean } };
     // Media understanding — the surface a channel voice note is transcribed
     // through. Not a models[] row: it has its own endpoint and its own ordered

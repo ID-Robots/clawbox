@@ -57,8 +57,17 @@ update puts it back: it is the one model ClawBox installs on every box.
   period is slower than the ones that follow.
 - **Its reasoning control depends on the edition.** On the **Hermes** edition it is a
   two-state switch — *Thinking off* / *Thinking on* — rather than an effort scale, because
-  that is what its backend accepts. On the **OpenClaw** edition the model takes no
-  reasoning level at all, so no reasoning pill is shown while it is answering.
+  that is what its backend accepts. On the **OpenClaw** edition it is *Off* / *High*:
+  High makes Gemma think before it answers, which takes about twice as long and helps
+  most on multi-step questions. It starts at Off in every new chat and on your channels;
+  pick High for a hard question, or start one message with `/think high`.
+- **On the OpenClaw edition, Gemma works in a lean mode.** A model this small cannot
+  follow the full instructions and tool list a cloud model gets, so while Gemma answers it
+  gets a short brief — reply in the language you wrote in, do what you ask instead of
+  asking back, keep it short — and six tools: read and write files, make a web app, read a
+  web page, search the web, and open a page in the browser. While Gemma is your primary
+  model, OpenClaw's tool search is off so it sees those tools directly. Switch back to a
+  cloud model and it gets the full instructions and every tool again.
 - **Turning a local model on makes it available. It does not take over.** Making it your
   default is a separate, explicit choice.
 - **Kokoro** starts cold: the first sound can take fifteen seconds or more unless you

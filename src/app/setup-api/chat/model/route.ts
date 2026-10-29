@@ -22,6 +22,7 @@ import {
   isConfigMutationConflict,
 } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
@@ -1535,6 +1536,9 @@ export async function POST(request: Request) {
         ...enableProviderPluginOps([targetModel]),
         ["agents.defaults.model.primary", targetModel],
         ...armOps,
+        // Tool Search off while the primary is the on-device model, in the
+        // batch it describes (src/lib/local-tool-search.ts).
+        ...(await localToolSearchArmOps(configBeforeBatch, targetModel)),
       ]);
     } catch (err) {
       // OpenClaw 2 validates the reference against the catalogs it can see and
@@ -1587,6 +1591,11 @@ export async function POST(request: Request) {
     let disarmWarning: string | undefined;
     if (!chatgptRouted && chatgptRuntimeArmed(preloadedConfig, targetModel)) {
       disarmWarning = await disarmChatgptRuntime(targetModel);
+    }
+    // 1d. Off the device: OpenClaw's own Tool Search back, as it ships.
+    let toolSearchWarning: string | undefined;
+    if (localToolSearchDisarmNeeded(configBeforeBatch, targetModel)) {
+      toolSearchWarning = await disarmLocalToolSearch("chat/model");
     }
 
     // 2. Full sweep including sessions previously tagged
@@ -1668,7 +1677,7 @@ export async function POST(request: Request) {
     const nextState = await loadChatModelState();
     // One `warning` field, both producers: the disarm failure and the sweep,
     // joined the way the configure route joins its own.
-    const warning = [disarmWarning, sweepWarning].filter(Boolean).join(" ");
+    const warning = [disarmWarning, toolSearchWarning, sweepWarning].filter(Boolean).join(" ");
     return NextResponse.json(
       { ...nextState, ...(warning ? { warning } : {}) },
       { headers: { "Cache-Control": "no-store" } },

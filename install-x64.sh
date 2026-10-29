@@ -979,10 +979,15 @@ step_directories_permissions() {
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
+  # Same values and migration as install.sh (src/lib/llamacpp.ts says why).
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
   echo "  Done"
 }
 

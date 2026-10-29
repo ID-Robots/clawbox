@@ -11,16 +11,20 @@
   "config set: the key is computed at runtime": 2
  },
  "src/app/setup-api/ai-models/configure/route.ts": {
+  "runConfigSetBatch: operations from ...(localReasoning && thinkingDefault === undefined ? [llama": 1,
   "runConfigSetBatch: the operations are built at runtime": 5,
   "runOpenclawConfigSet: the key is computed at runtime": 2
  },
  "src/app/setup-api/chat/model/route.ts": {
   "runOpenclawConfigSet: the key is computed at runtime": 1,
+  "runOpenclawConfigSetBatch: operations from ...(await localToolSearchArmOps(configBeforeBatch, targetMod": 1,
   "runOpenclawConfigSetBatch: operations from ...armOps": 1,
   "runOpenclawConfigSetBatch: operations from ...enableProviderPluginOps([targetModel])": 1,
   "runOpenclawConfigUnset: the key is computed at runtime": 1
  },
  "src/app/setup-api/local-ai/exclusive/route.ts": {
+  "setConfigBatch: operations from ...(await localToolSearchArmOps(await readConfig(), localMod": 1,
+  "setConfigBatch: operations from ...(await localToolSearchArmOps(config, localModel))": 1,
   "setConfigBatch: operations from ...(restorablePrimary ? [[\"agents.defaults.model.primary\", J": 1,
   "setConfigBatch: operations from ...(restoreFallbacks ? [[\"agents.defaults.model.fallbacks\", ": 1,
   "setConfigBatch: operations from ...enableProviderPluginOps([restorablePrimary, ...(restoreFa": 1

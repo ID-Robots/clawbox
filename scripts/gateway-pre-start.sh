@@ -1705,6 +1705,82 @@ if _wants_llamacpp:
 
 _clawbox_root = os.environ.get("CLAWBOX_ROOT", "/home/clawbox/clawbox")
 
+# The tuning below lives in $CLAWBOX_ROOT/.env (install.sh and
+# install-x64.sh both write it with ensure_env_setting) and NEITHER
+# gateway unit loads that file: clawbox-gateway.service takes
+# network.env and discord.env, the x64 unit only Environment= lines.
+# (Other units do read .env — clawbox-setup, clawbox-embed,
+# clawbox-browser — which is exactly why llama-server, started under
+# clawbox-setup, ran at the configured size while this repair, reading
+# os.environ alone, ALWAYS wrote the 131072 default: OpenClaw believed
+# 131k, compaction never fired, and a long session died with
+# context-exceeded.) Reading the few keys we need is deliberately
+# narrower than adding `EnvironmentFile=-.../.env` to the gateway unit,
+# which would hand every key in a clawbox-writable file to the
+# long-running gateway process, CLAWBOX_TEST_MODE included.
+#
+# Read for the repair below AND for the window reconciliation after it,
+# which needs the server's real size on a box whose entry is complete.
+#
+# errors="replace" and a bare except: .env is clawbox-writable and one
+# latin-1 byte in an operator's key would otherwise raise
+# UnicodeDecodeError out of this heredoc, fail ExecStartPre under
+# `set -euo pipefail`, and leave the box with no gateway at all.
+_llamacpp_dotenv = {}
+try:
+    with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _key, _, _value = _line.partition("=")
+            _key = _key.strip()
+            if _key.startswith("export "):
+                _key = _key[len("export "):].strip()
+            _value = _value.strip()
+            if len(_value) >= 2 and _value[0] == _value[-1] and _value[0] in ("'", '"'):
+                _value = _value[1:-1]
+            _llamacpp_dotenv[_key] = _value
+except Exception:
+    _llamacpp_dotenv = {}
+
+def _llamacpp_setting(_name):
+    """The process environment first, then the shipped .env."""
+    _from_env = (os.environ.get(_name) or "").strip()
+    return _from_env if _from_env else _llamacpp_dotenv.get(_name, "").strip()
+
+def _llamacpp_int(_raw, _minimum, _default):
+    """Number() semantics, not int(): see src/lib/llamacpp.ts.
+
+    int() raises on "32768.0" and "1e5" — both of which the TypeScript
+    side accepts and llama-server is genuinely started with — and the
+    except swallowed it, so the provider silently got the default while
+    the server ran at the configured size. A non-numeric override must
+    still not abort gateway pre-start: this migration runs on the path
+    that repairs a mute box, so raising here would turn a bad env var
+    into a box that never starts at all.
+    """
+    try:
+        _value = int(float(_raw))
+    except (TypeError, ValueError, OverflowError):
+        return _default
+    return _value if _value >= _minimum else _default
+
+# Keep the two defaults in step with DEFAULT_LLAMACPP_CONTEXT_WINDOW and
+# DEFAULT_LLAMACPP_MAX_TOKENS in src/lib/llamacpp.ts, and the output cap no
+# larger than the window, as getLlamaCppMaxTokens() keeps it.
+_ctx = _llamacpp_int(_llamacpp_setting("LLAMACPP_CONTEXT_WINDOW"), 16384, 32768)
+_max_tokens = min(_llamacpp_int(_llamacpp_setting("LLAMACPP_MAX_TOKENS"), 1, 8192), _ctx)
+
+# Thinking on the on-device model: per request, off unless asked. The row
+# declares binary reasoning (every enabled level clamps to `high`, `off` is sent
+# as `none`, which the ClawBox proxy turns into enable_thinking) and the model's
+# own default is `off`, because a reasoning row otherwise defaults to `medium`.
+# Keys of a 2026.10+ core. Keep in step with LLAMACPP_REASONING_COMPAT in
+# src/lib/llamacpp.ts.
+_LLAMACPP_REASONING_COMPAT = {"supportedReasoningEfforts": ["none", "high"], "reasoningEffortMap": {"off": "none"}}
+_llamacpp_reasoning = bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False))
+
 if _wants_llamacpp and _llamacpp_gaps and not _llamacpp_model_ids:
     print(
         "  Skipped llamacpp provider repair: "
@@ -1766,69 +1842,6 @@ elif _wants_llamacpp and _llamacpp_gaps:
             _providers_now = {}
             _models_now["providers"] = _providers_now
 
-        # The tuning below lives in $CLAWBOX_ROOT/.env (install.sh and
-        # install-x64.sh both write it with ensure_env_setting) and NEITHER
-        # gateway unit loads that file: clawbox-gateway.service takes
-        # network.env and discord.env, the x64 unit only Environment= lines.
-        # (Other units do read .env — clawbox-setup, clawbox-embed,
-        # clawbox-browser — which is exactly why llama-server, started under
-        # clawbox-setup, ran at the configured size while this repair, reading
-        # os.environ alone, ALWAYS wrote the 131072 default: OpenClaw believed
-        # 131k, compaction never fired, and a long session died with
-        # context-exceeded.) Reading the few keys we need is deliberately
-        # narrower than adding `EnvironmentFile=-.../.env` to the gateway unit,
-        # which would hand every key in a clawbox-writable file to the
-        # long-running gateway process, CLAWBOX_TEST_MODE included.
-        #
-        # errors="replace" and a bare except: .env is clawbox-writable and one
-        # latin-1 byte in an operator's key would otherwise raise
-        # UnicodeDecodeError out of this heredoc, fail ExecStartPre under
-        # `set -euo pipefail`, and leave the box with no gateway at all.
-        _llamacpp_dotenv = {}
-        try:
-            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _ef:
-                for _line in _ef:
-                    _line = _line.strip()
-                    if not _line or _line.startswith("#") or "=" not in _line:
-                        continue
-                    _key, _, _value = _line.partition("=")
-                    _key = _key.strip()
-                    if _key.startswith("export "):
-                        _key = _key[len("export "):].strip()
-                    _value = _value.strip()
-                    if len(_value) >= 2 and _value[0] == _value[-1] and _value[0] in ("'", '"'):
-                        _value = _value[1:-1]
-                    _llamacpp_dotenv[_key] = _value
-        except Exception:
-            _llamacpp_dotenv = {}
-
-        def _llamacpp_setting(_name):
-            """The process environment first, then the shipped .env."""
-            _from_env = (os.environ.get(_name) or "").strip()
-            return _from_env if _from_env else _llamacpp_dotenv.get(_name, "").strip()
-
-        def _llamacpp_int(_raw, _minimum, _default):
-            """Number() semantics, not int(): see src/lib/llamacpp.ts.
-
-            int() raises on "32768.0" and "1e5" — both of which the TypeScript
-            side accepts and llama-server is genuinely started with — and the
-            except swallowed it, so the provider silently got the default while
-            the server ran at the configured size. A non-numeric override must
-            still not abort gateway pre-start: this migration runs on the path
-            that repairs a mute box, so raising here would turn a bad env var
-            into a box that never starts at all.
-            """
-            try:
-                _value = int(float(_raw))
-            except (TypeError, ValueError, OverflowError):
-                return _default
-            return _value if _value >= _minimum else _default
-
-        _ctx = _llamacpp_int(_llamacpp_setting("LLAMACPP_CONTEXT_WINDOW"), 16384, 131072)
-        # getLlamaCppMaxTokens(): an absent or unusable value means the context
-        # window, not the 131072 default.
-        _max_tokens_raw = _llamacpp_setting("LLAMACPP_MAX_TOKENS")
-        _max_tokens = _llamacpp_int(_max_tokens_raw, 1, _ctx) if _max_tokens_raw else _ctx
         # The port is in the unit environment on both installers (this script
         # defaults and exports it; the x64 unit sets Environment=CLAWBOX_PORT),
         # and no installer writes it to .env — so it is read from the process
@@ -1844,15 +1857,16 @@ elif _wants_llamacpp and _llamacpp_gaps:
         ).rstrip("/")
         _repaired_entry = dict(_llamacpp_entry) if isinstance(_llamacpp_entry, dict) else {}
         if "models" in _llamacpp_gaps:
-            _repaired_entry["models"] = _llamacpp_rows + [{
+            _repaired_entry["models"] = _llamacpp_rows + [dict({
                 "id": _mid,
                 "name": _mid,
-                "reasoning": False,
+                "reasoning": _llamacpp_reasoning,
                 "input": ["text"],
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 "contextWindow": _ctx,
                 "maxTokens": _max_tokens,
-            } for _mid in _llamacpp_missing_ids]
+            }, **({"compat": json.loads(json.dumps(_LLAMACPP_REASONING_COMPAT))} if _llamacpp_reasoning else {}))
+                for _mid in _llamacpp_missing_ids]
         # The bearer we are about to write is PROVIDER-WIDE. OpenClaw resolves a
         # row's endpoint as `model.baseUrl ?? provider.baseUrl` and has no
         # per-model credential slot, so completing this entry while a row keeps
@@ -1954,6 +1968,111 @@ elif _wants_llamacpp and _llamacpp_gaps:
                     "  Repaired models.providers.llamacpp for "
                     + ", ".join(_llamacpp_model_ids)
                 )
+
+# Reconciliation: the llamacpp rows' window vs the window llama-server runs.
+#
+# ai-models/configure writes a row's contextWindow/maxTokens from .env once,
+# when Local AI is turned on, and the repair above only fills rows that are
+# missing. So when .env moves (install.sh migrates the shipped 131072 to 32768)
+# the server restarts at the new size while the row goes on claiming the old
+# one, and OpenClaw sizes prompts and compaction for a window the server does
+# not have — a long session ends in "context exceeded". A row may claim LESS
+# than the server (harmless, and maybe an operator's choice), never MORE.
+#
+# Only on an entry routed through this box's own proxy (whose server is the one
+# .env describes) and only on rows without a baseUrl of their own.
+_lc_entry_now = _providers_now.get("llamacpp") if isinstance(_providers_now, dict) else None
+_lc_base_now = _lc_entry_now.get("baseUrl") if isinstance(_lc_entry_now, dict) else None
+if (
+    isinstance(_lc_base_now, str)
+    and _lc_base_now.strip().rstrip("/").endswith("/setup-api/local-ai/llamacpp/v1")
+    and isinstance(_lc_entry_now.get("models"), list)
+):
+    def _lc_number(_v):
+        return isinstance(_v, (int, float)) and not isinstance(_v, bool) and _v > 0
+
+    _lc_resized = []
+    for _row in _lc_entry_now["models"]:
+        if not isinstance(_row, dict) or not isinstance(_row.get("id"), str):
+            continue
+        if isinstance(_row.get("baseUrl"), str) and _row["baseUrl"].strip():
+            continue
+        _row_ctx = _row.get("contextWindow")
+        _row_max = _row.get("maxTokens")
+        # A row that states no window is not one ai-models/configure wrote,
+        # and OpenClaw resolves it its own way: left as it is.
+        if not _lc_number(_row_ctx):
+            continue
+        if _row_ctx > _ctx:
+            _row["contextWindow"] = _ctx
+            # The output cap was sized for the window being replaced.
+            _row["maxTokens"] = _max_tokens
+            _lc_resized.append(_row["id"])
+        elif _lc_number(_row_max) and _row_max > _row_ctx:
+            _row["maxTokens"] = min(_max_tokens, int(_row_ctx))
+            _lc_resized.append(_row["id"])
+    if _lc_resized:
+        changed = True
+        print(
+            "  Resized models.providers.llamacpp row(s) "
+            + ", ".join(_lc_resized)
+            + " to the window llama-server runs ("
+            + str(_ctx)
+            + " tokens, answers up to "
+            + str(_max_tokens)
+            + ")"
+        )
+
+    # The same rows, thinking per request (see _LLAMACPP_REASONING_COMPAT): a
+    # row in the shape ClawBox wrote before — `reasoning: false`, no compat —
+    # takes the declaration, and every reasoning row's model gets an `off`
+    # default unless one is set. An owner's own compat is left as it is.
+    if _llamacpp_reasoning:
+        _lc_thinking = []
+        _lc_defaults_models = None
+        for _row in _lc_entry_now["models"]:
+            if not isinstance(_row, dict) or not isinstance(_row.get("id"), str) or not _row["id"].strip():
+                continue
+            if isinstance(_row.get("baseUrl"), str) and _row["baseUrl"].strip():
+                continue
+            if _row.get("reasoning") is False and "compat" not in _row:
+                _row["reasoning"] = True
+                _row["compat"] = json.loads(json.dumps(_LLAMACPP_REASONING_COMPAT))
+                _lc_thinking.append(_row["id"])
+            if _row.get("reasoning") is not True:
+                continue
+            _agents_now = cfg.get("agents")
+            _defaults_now = _agents_now.get("defaults") if isinstance(_agents_now, dict) else None
+            if not isinstance(_defaults_now, dict):
+                continue
+            _lc_defaults_models = _defaults_now.get("models")
+            if _lc_defaults_models is None:
+                _lc_defaults_models = {}
+                _defaults_now["models"] = _lc_defaults_models
+            if not isinstance(_lc_defaults_models, dict):
+                continue
+            _ref = "llamacpp/" + _row["id"].strip()
+            _entry = _lc_defaults_models.get(_ref)
+            if _entry is None:
+                _entry = {}
+                _lc_defaults_models[_ref] = _entry
+            if not isinstance(_entry, dict):
+                continue
+            _params = _entry.get("params")
+            if _params is None:
+                _params = {}
+                _entry["params"] = _params
+            if isinstance(_params, dict) and "thinking" not in _params:
+                _params["thinking"] = "off"
+                if _row["id"] not in _lc_thinking:
+                    _lc_thinking.append(_row["id"])
+        if _lc_thinking:
+            changed = True
+            print(
+                "  Thinking on demand for models.providers.llamacpp row(s) "
+                + ", ".join(_lc_thinking)
+                + ": off by default, on when a chat or a message asks for it"
+            )
 
 # Reconciliation: models.providers.{llamacpp,ollama}.apiKey vs data/.local-ai-token.
 #
@@ -4441,6 +4560,47 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
     if _memory_index_changes:
         changed = True
 # --- end memory index defaults ---
+
+# Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
+#
+# Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
+# rule src/lib/local-tool-search.ts applies when a route moves the primary,
+# applied here on every boot for a box that was already on the local model
+# before this shipped and for the migrations above, which move the primary
+# themselves. The ~2B on-device model cannot drive tool_search/tool_call (it
+# sent tool_call with no id and claimed success), and the core's switch is
+# global, so it follows the primary. ClawBox writes {"enabled": false} and
+# removes only that exact value: an owner's own setting is never touched.
+# After every migration that moves the primary, so it sees the one they left
+# (only the DeepSeek V4 row defaults below follow, and they never move it).
+_LOCAL_TOOL_SEARCH_OFF = {"enabled": False}
+_ts_agents = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+_ts_defaults = _ts_agents.get("defaults") if isinstance(_ts_agents.get("defaults"), dict) else {}
+_ts_model = _ts_defaults.get("model")
+_ts_primary = _ts_model if isinstance(_ts_model, str) else (
+    _ts_model.get("primary") if isinstance(_ts_model, dict) else None
+)
+_ts_on_device = isinstance(_ts_primary, str) and _ts_primary.strip().startswith("llamacpp/")
+_ts_tools = cfg.get("tools")
+_ts_value = _ts_tools.get("toolSearch") if isinstance(_ts_tools, dict) else None
+_ts_ours = (
+    isinstance(_ts_value, dict)
+    and list(_ts_value.keys()) == ["enabled"]
+    and _ts_value["enabled"] is False
+)
+if _ts_on_device and (_ts_tools is None or (isinstance(_ts_tools, dict) and "toolSearch" not in _ts_tools)):
+    # 2026.10+ only: a key an older core's strict schema could refuse.
+    if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
+        if _ts_tools is None:
+            _ts_tools = {}
+            cfg["tools"] = _ts_tools
+        _ts_tools["toolSearch"] = dict(_LOCAL_TOOL_SEARCH_OFF)
+        changed = True
+        print("  Turned OpenClaw's Tool Search off: the primary is the on-device model, which needs its few tools as direct schemas")
+elif not _ts_on_device and _ts_ours:
+    del _ts_tools["toolSearch"]
+    changed = True
+    print("  Restored OpenClaw's Tool Search default: the primary is no longer the on-device model")
 
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
@@ -8715,6 +8875,42 @@ if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_USER_LANG_NODE" ]; t
     if (await promptContext({ sessionKey: "agent:main:main" }, languages)) throw new Error("the owner chat would get a user language");
   ' 2>&1; then
     echo "  WARNING: the installed $CLAWBOX_USER_LANG_ID plugin did not load or did not register its hook — a ClawBox user's chat answers in the box's language rather than their own" >&2
+  fi
+fi
+
+# ── Lean mode for the on-device model ─────────────────────────────────────
+#
+# scripts/openclaw-plugins/clawbox-local-lean: a turn on the llamacpp model
+# gets a short system prompt and six tools; every cloud turn keeps OpenClaw's
+# full prompt and tools. HARNESS FIRST: the core's typed `before_prompt_build`
+# hook, which may return `systemPrompt` and `toolsAllow` for one turn and names
+# the attempt's provider — the core has no per-model prompt setting. Its prompt
+# hook needs the `hooks.allowConversationAccess` grant: it reads the current
+# message to tell which language to answer in.
+CLAWBOX_LOCAL_LEAN_ID="clawbox-local-lean"
+CLAWBOX_LOCAL_LEAN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_LOCAL_LEAN_ID"
+CLAWBOX_LOCAL_LEAN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_LOCAL_LEAN_ID"
+CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 install_clawbox_hook_plugin "$CLAWBOX_LOCAL_LEAN_ID" "$CLAWBOX_LOCAL_LEAN_DST" \
+  "the on-device model gets OpenClaw's full system prompt and tool catalog, which a ~2B model cannot follow" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/package.json" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/index.mjs" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/local-lean.mjs"
+
+CLAWBOX_LOCAL_LEAN_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_LOCAL_LEAN_NODE" ]; then
+  if ! CLAWBOX_LOCAL_LEAN_DST="$CLAWBOX_LOCAL_LEAN_DST" "$CLAWBOX_LOCAL_LEAN_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_LOCAL_LEAN_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const handlers = {};
+    plugin.register({ on: (name, fn) => { handlers[name] = fn; }, config: {} });
+    const hook = handlers.before_prompt_build;
+    if (typeof hook !== "function") throw new Error("no before_prompt_build hook");
+    const local = await hook({ prompt: "hi" }, { modelProviderId: "llamacpp" });
+    if (!local?.systemPrompt || !Array.isArray(local.toolsAllow)) throw new Error("a local turn would not get the lean prompt");
+    if (await hook({ prompt: "hi" }, { modelProviderId: "deepseek" })) throw new Error("a cloud turn would lose the full prompt");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_LOCAL_LEAN_ID plugin did not load or did not register its hook — the on-device model gets OpenClaw's full system prompt and tool catalog" >&2
   fi
 fi
 
