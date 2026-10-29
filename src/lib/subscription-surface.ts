@@ -1,5 +1,6 @@
 import { promises as fsp } from "fs";
 import path from "@/lib/runtime-path";
+import { isKeyModeProfile } from "@/lib/auth-profile-mode";
 import { DATA_DIR } from "@/lib/config-store";
 import {
   getProviderCatalog,
@@ -282,17 +283,9 @@ export function offSurfaceCodexModelMessage(
     + "or switch OpenAI to API-key mode for Pro/API-only models.";
 }
 
-/** Auth-profile modes that mean "this provider has a bearer key of its own". */
-const KEY_MODES: ReadonlySet<string> = new Set(["token", "api_key", "api-key"]);
-
-/**
- * Does this auth profile carry a key/token of its own (as opposed to OAuth)?
- * Exported because the chat route asks the same question of the openai
- * profiles and had its own hard-coded copy of the mode set.
- */
-export function isKeyModeProfile(entry: { mode?: string } | undefined): boolean {
-  return typeof entry?.mode === "string" && KEY_MODES.has(entry.mode.trim().toLowerCase());
-}
+// Moved to a module of its own so stt-preference.ts can ask it too; every
+// existing caller keeps importing it from here.
+export { isKeyModeProfile };
 
 /**
  * Providers this box authenticates to by SUBSCRIPTION only — an OAuth profile

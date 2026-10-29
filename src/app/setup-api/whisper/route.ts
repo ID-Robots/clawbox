@@ -12,7 +12,7 @@ import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { syncChannelAudio } from "@/lib/stt-channel";
+import { reconcileChannelAudio, syncChannelAudio } from "@/lib/stt-channel";
 import { withWhisperLibraryPath } from "@/lib/stt-local";
 import { getSttPrimary, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
 import {
@@ -295,6 +295,12 @@ async function installEngine(): Promise<Response> {
         if (!result.ok) {
           emit(controller, { error: result.error || "The speech install did not finish." });
         } else {
+          const wired = await wireLocalTranscription();
+          if (!wired) {
+            emit(controller, {
+              status: "Channel voice notes could not be switched to it yet — they will be at the next restart.",
+            });
+          }
           emit(controller, { success: true, status: "Speech on this box is installed." });
         }
       } catch (err) {
@@ -430,6 +436,32 @@ function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok:
       finish({ ok: false, error: lines.at(-1) || `The speech model download failed (exit ${code}).` });
     });
   });
+}
+
+/**
+ * The install's half of the bookkeeping {@link releaseLocalTranscription} does
+ * for a removal: put the engine that just landed into the audio list channel
+ * voice notes walk. Nothing did — the install built the engine, enabled the
+ * unit and answered "installed", and Telegram voice notes went on trying only
+ * the cloud row, which on a box whose ClawBox AI credential no longer backs it
+ * meant no transcript at all, with Whisper running beside it (found on a real
+ * box).
+ *
+ * `freshProbe`, because the panel asked whether faster-whisper imports before
+ * the install began and the "missing" it cached is still good for a minute.
+ * Whether the engine goes first is the preference's call (stt-preference.ts):
+ * on a box with no stored pick, or no ClawBox AI credential, it does. No
+ * restart — see `reconcileChannelAudio`. Answers false when the write failed;
+ * the boot pass puts it right at the next start.
+ */
+async function wireLocalTranscription(): Promise<boolean> {
+  try {
+    await reconcileChannelAudio({ trigger: "whisper-install", freshProbe: true });
+    return true;
+  } catch (err) {
+    console.warn("[setup-api/whisper] could not add the installed engine to channel voice notes:", err);
+    return false;
+  }
 }
 
 /**

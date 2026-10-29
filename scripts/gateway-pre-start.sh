@@ -3572,15 +3572,18 @@ CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL = {
     "provider": "openai",
     "model": CLAWBOX_TRANSCRIBE_MODEL_ID,
 }
-# What a box with no audio config gets: the cloud alone. The on-box engine is
-# a `type: "cli"` row running the workspace's stt-client.py, and it is
-# Settings (src/app/setup-api/stt) that adds it — only that route knows
-# whether faster-whisper is installed here. The script name is duplicated from
-# src/lib/stt-local.ts; it is matched by name rather than full path because
-# HOME is the script's to resolve, and a path check here would call a moved
-# workspace foreign.
-CLAWBOX_AUDIO_MODELS = [CLAWBOX_CLOUD_AUDIO_MODEL]
+# What a box with no audio config gets: the on-box engine first when it is
+# installed here (`_clawbox_local_stt_row`), then the cloud row while a
+# ClawBox AI credential backs it — the order `resolveSttPrimary` in
+# src/lib/stt-preference.ts gives a box nobody has chosen for. The on-box
+# engine is a `type: "cli"` row running the workspace's stt-client.py. The
+# script name is duplicated from src/lib/stt-local.ts; an existing row is
+# matched by name rather than full path because HOME is the script's to
+# resolve, and a path check here would call a moved workspace foreign.
 CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+# The modes `isKeyModeProfile` (src/lib/auth-profile-mode.ts) reads as a
+# key of the profile's own; anything else — `oauth` above all — is not.
+CLAWBOX_KEY_PROFILE_MODES = ("token", "api_key", "api-key")
 # v2 keeps baseUrl under tools.media.audio; the model list moved to
 # tools.media.models with capabilities: ["audio"] per row. Bound via
 # globals() because the unit tests run this block extracted from the file.
@@ -3602,6 +3605,112 @@ def _is_clawbox_audio_model(_entry):
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
         return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
     return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
+
+
+def _is_clawbox_cloud_audio_model(_entry):
+    """Is one row the ClawBox AI cloud row (as opposed to the on-box CLI row)?"""
+    return isinstance(_entry, dict) and _entry.get("type") != "cli" and _is_clawbox_audio_model(_entry)
+
+
+def _openai_signed_in_with_oauth(_cfg):
+    """Is the openai provider's credential a ChatGPT sign-in (an OAuth profile)?
+
+    The cloud row is `provider: "openai"` with our proxy as the endpoint, and
+    the pinned core refuses that pair for an OAuth credential: "Custom
+    endpoints and request overrides require an API-key profile" (OpenClaw
+    2026.10.7 docs/nodes/audio.md). On a real box that had moved to a ChatGPT
+    sign-in every Telegram voice note came back "OpenAI OAuth audio
+    transcription requires the official endpoint without custom request
+    overrides", and the repair below kept re-stamping the row at every start.
+    So with a sign-in like that this migration neither seeds the row nor keeps
+    it; src/lib/stt-channel.ts (`decideCloudSttBacking`) withholds it on the
+    same rule, and puts the box's own engine in its place.
+
+    Read from openclaw.json's `auth.profiles` — the provider field, else the
+    id's prefix, the rule `profileProviderId` in
+    src/lib/chatgpt-subscription.ts uses — so this block stays runnable on its
+    own (the unit tests run it extracted from the file).
+    """
+    _auth = _cfg.get("auth") if isinstance(_cfg, dict) else None
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    if not isinstance(_profiles, dict):
+        return False
+    for _id, _entry in _profiles.items():
+        if not isinstance(_entry, dict):
+            continue
+        _provider = _entry.get("provider")
+        if not (isinstance(_provider, str) and _provider.strip()):
+            _provider = str(_id).split(":")[0]
+        _mode = _entry.get("mode")
+        if (
+            _provider.strip().lower() == "openai"
+            and isinstance(_mode, str)
+            and _mode.strip().lower() == "oauth"
+        ):
+            return True
+    return False
+
+
+def _clawai_transcribe_profile_problem(_cfg):
+    """Why the row's own profile cannot carry it, or None when it can.
+
+    The cloud row names CLAWBOX_TRANSCRIBE_AUTH_PROFILE as its bearer, and
+    ClawBox records that profile in openclaw.json's `auth.profiles` as
+    `{provider: "deepseek", mode: "api_key"}` with every ClawBox AI sign-in.
+    A release that signed in by subscription recorded `mode: "oauth"`; on a
+    box still carrying that row the core took the bearer for an OAuth
+    credential and refused our endpoint on every voice note ("OpenAI OAuth
+    audio transcription requires the official endpoint without custom request
+    overrides"), and the repair below re-stamped the profile at every start.
+    No record at all says the profile was never ours to name.
+
+    `transcribeProfileProblem` in src/lib/stt-preference.ts is this rule over
+    the same field, and src/lib/stt-channel.ts withholds the row on it; keep
+    the two in step, or each boot undoes the other.
+    """
+    _auth = _cfg.get("auth") if isinstance(_cfg, dict) else None
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    _entry = _profiles.get(CLAWBOX_TRANSCRIBE_AUTH_PROFILE) if isinstance(_profiles, dict) else None
+    if not _entry:
+        return "the %s auth profile is not recorded" % CLAWBOX_TRANSCRIBE_AUTH_PROFILE
+    _mode = _entry.get("mode") if isinstance(_entry, dict) else None
+    if isinstance(_mode, str) and _mode.strip().lower() in CLAWBOX_KEY_PROFILE_MODES:
+        return None
+    return (
+        "the %s auth profile is not an API key (a ClawBox AI sign-in left over as OAuth)"
+        % CLAWBOX_TRANSCRIBE_AUTH_PROFILE
+    )
+
+
+def _clawbox_local_stt_row():
+    """The on-box engine's CLI row when it is installed here, else None.
+
+    The three checks `localSttInstalled` (src/lib/stt-local.ts) makes: the
+    client script in the workspace, the whisper-server unit, and faster-whisper
+    on python3's path — LOCATED rather than imported, so a gateway start does
+    not load the engine's libraries to learn it is there. The row is the one
+    `buildAudioModels` (src/lib/stt-preference.ts) writes, field for field, so
+    the web server's own pass finds it already in force.
+    """
+    import importlib.util
+    import os
+
+    _home = os.environ.get("HOME") or "/home/clawbox"
+    _script = os.path.join(_home, ".openclaw", "workspace", "scripts", CLAWBOX_STT_CLIENT_SCRIPT)
+    _unit = os.path.join(_home, ".config", "systemd", "user", "whisper-server.service")
+    if not (os.path.exists(_script) and os.path.exists(_unit)):
+        return None
+    try:
+        if importlib.util.find_spec("faster_whisper") is None:
+            return None
+    except (ImportError, ValueError):
+        return None
+    return {
+        "type": "cli",
+        "command": "/usr/bin/python3",
+        "args": [_script, "{{MediaPath}}"],
+        "timeoutSeconds": 120,
+    }
 
 
 def _is_clawbox_audio_models(_models):
@@ -3797,10 +3906,45 @@ if _clawai_openai_route_is_ours:
         _audio_models = _audio.get("models")
         _audio_models_move_in_flight = True
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
+    # Asked once: the seed and the repair below both stand down on it. The
+    # reason why, or None while a ClawBox AI credential backs the cloud row.
+    _audio_cloud_refused = (
+        "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
+        if _openai_signed_in_with_oauth(cfg)
+        else _clawai_transcribe_profile_problem(cfg)
+    )
     _audio_route_taken = bool(
         (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
         or (_audio_models is not None and not _is_clawbox_audio_models(_audio_models))
     )
+    # A box with no list at all gets one, and the box's own engine leads it
+    # once it is installed: see CLAWBOX_STT_CLIENT_SCRIPT. Never where the
+    # LEGACY key is still present, whatever it holds — a
+    # `tools.media.audio.models: null` leaves `_audio_models` None, and seeding
+    # the v2 home beside a key the core refuses is the dual-home write the
+    # image guard in this file stands down over (TASK-743).
+    _audio_seed = None
+    if not _audio_route_taken and _audio_models is None and not _audio_models_move_in_flight:
+        _audio_local_row = _clawbox_local_stt_row()
+        _audio_seed = ([_audio_local_row] if _audio_local_row else []) + (
+            [] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)]
+        )
+        if _audio_local_row:
+            print("  Channel voice notes try the Whisper engine installed on this box first")
+
+    def _audio_write_seed(_rows):
+        _rows = [dict(_row) for _row in _rows]
+        if _clawbox_v2:
+            for _row in _rows:
+                _row["capabilities"] = ["audio"]
+            _media["models"] = _rows
+        else:
+            _audio["models"] = _rows
+        if _audio or not _clawbox_v2:
+            _media["audio"] = _audio
+        _tools["media"] = _media
+        cfg["tools"] = _tools
+
     if _audio_route_taken:
         # A list this migration does not recognise is the owner's own route —
         # UNLESS it is the legacy list above, which is a migration in flight and
@@ -3815,26 +3959,31 @@ if _clawai_openai_route_is_ours:
                 else "tools.media.audio already names its own transcription route"
             )
         )
-    elif _audio_base_url != _clawai_proxy_base_url or _audio_models is None:
+    elif _audio_cloud_refused:
+        # No cloud row and no endpoint: see `_openai_signed_in_with_oauth` and
+        # `_clawai_transcribe_profile_problem`. The box's own engine is seeded
+        # alone when it is installed; the withdrawal below takes back what an
+        # earlier boot wrote.
+        if _audio_seed:
+            _audio_write_seed(_audio_seed)
+            changed = True
+    elif _audio_models is None or (
+        # The endpoint only ever travels WITH the cloud row. A list Settings
+        # wrote without one — the box's own engine alone, because no ClawBox
+        # AI credential backs the cloud row (src/lib/stt-channel.ts) — has no
+        # row that reads it, and writing it back at every start would undo
+        # what Settings just took away.
+        _audio_base_url != _clawai_proxy_base_url
+        and any(_is_clawbox_cloud_audio_model(_row) for _row in _audio_models)
+    ):
         _audio["baseUrl"] = _clawai_proxy_base_url
-        # Seed the list only where there is none. A list this migration
-        # recognises is left exactly as Settings wrote it, order included.
-        #
-        # …and never where the LEGACY key is still present, whatever it holds.
-        # A `tools.media.audio.models: null` leaves `_audio_models` None, so the
-        # bare `is None` test above seeded the v2 home beside a key the core
-        # refuses — the same dual-home write the image guard in this file now
-        # stands down over (TASK-743). `baseUrl` is still written either way:
+        # Seed the list only where there is none (`_audio_seed`). A list this
+        # migration recognises is left exactly as Settings wrote it, order
+        # included. `baseUrl` is still written beside a legacy key in flight:
         # it lives at the same address in both generations, which is what the
         # comment on the in-flight flag says.
-        if _audio_models is None and not _audio_models_move_in_flight:
-            _seed = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
-            if _clawbox_v2:
-                for _row in _seed:
-                    _row["capabilities"] = ["audio"]
-                _media["models"] = _seed
-            else:
-                _audio["models"] = _seed
+        if _audio_seed is not None:
+            _audio_write_seed(_audio_seed)
         _media["audio"] = _audio
         _tools["media"] = _media
         cfg["tools"] = _tools
@@ -3853,7 +4002,27 @@ if _clawai_openai_route_is_ours:
     # so a list the owner wrote is never touched; the ORDER is his speech-to-text
     # preference and is preserved row for row. Idempotent: a row that already
     # names the profile is left alone, so the next boot writes nothing.
-    if not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+    #
+    # WITHDRAWN instead of repaired once no ClawBox AI credential backs it —
+    # the openai credential is a ChatGPT sign-in, or the profile the row names
+    # is not recorded as a key: a profile re-stamped onto a row the core
+    # refuses is the row that answered every voice note on a real box with
+    # "requires the official endpoint". src/lib/stt-channel.ts leaves the row
+    # out on the same rule, so this never puts back what Settings left out.
+    # Only OUR rows and OUR endpoint go; the on-box CLI row stays, in its
+    # place, and is then the first thing a voice note tries.
+    if not _audio_route_taken and _audio_cloud_refused:
+        if isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+            _audio_kept = [_row for _row in _audio_models if not _is_clawbox_cloud_audio_model(_row)]
+            if len(_audio_kept) != len(_audio_models):
+                _audio_models[:] = _audio_kept
+                print("  Withdrew the ClawBox AI transcription row: %s" % _audio_cloud_refused)
+                changed = True
+        if _audio_has_base_url and _same_endpoint(_audio_base_url, _clawai_proxy_base_url):
+            del _audio["baseUrl"]
+            print("  Removed the ClawBox AI transcription endpoint along with its row")
+            changed = True
+    elif not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
         _audio_repaired = False
         for _row in _audio_models:
             if not isinstance(_row, dict) or _row.get("type") == "cli":
@@ -9566,6 +9735,21 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     clawbox_agents_append "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_RULE_TEXT" \
       "Appended the system-actions rule to AGENTS.md" \
       "could not append the system-actions rule to AGENTS.md"
+
+    # WHAT TO SAY WHEN A VOICE NOTE COULD NOT BE HEARD. When every engine in
+    # `tools.media.models` fails, the core hands the turn on with a bounded
+    # model-visible marker in place of a transcript (OpenClaw 2026.10.7
+    # docs/nodes/media-understanding.md) and has no setting for what the reply
+    # says. Left to itself the model answered a Telegram voice note on a real
+    # box with "can't recognise audio, send text" — true, and no help to an
+    # owner whose box could transcribe after one install. So the rule names
+    # the two ways in, in the words Settings uses. Its own marker, so it lands
+    # on every box once, like the rule above.
+    CLAWBOX_AGENTS_VOICE_RULE="## Voice notes on this ClawBox"
+    printf -v CLAWBOX_AGENTS_VOICE_RULE_TEXT '\n\n%s\n\nA voice note or audio message that reaches you with no transcript (no `[Audio]` block, or a marker that the audio could not be transcribed) means speech-to-text is not available on this ClawBox right now. Do not just ask for text. Say that voice notes cannot be transcribed here yet, and how the owner turns it on: Settings -> Local AI -> Whisper -> Install (transcribes on the box itself), or connect ClawBox AI under Settings -> Providers for cloud transcription. Then answer anything they also typed, and offer to carry on in text meanwhile.\n' "$CLAWBOX_AGENTS_VOICE_RULE"
+    clawbox_agents_append "$CLAWBOX_AGENTS_VOICE_RULE" "$CLAWBOX_AGENTS_VOICE_RULE_TEXT" \
+      "Appended the voice-notes rule to AGENTS.md" \
+      "could not append the voice-notes rule to AGENTS.md"
   fi
 
   # --- clawbox language re-apply ---

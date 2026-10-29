@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -33,7 +33,9 @@ const TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
 // sign-in), so the row names the auth profile ClawBox already writes for the
 // ClawBox AI subscription instead.
 const TRANSCRIBE_AUTH_PROFILE = "deepseek:default";
-const CLOUD = { provider: "openai", model: TRANSCRIBE_MODEL, profile: TRANSCRIBE_AUTH_PROFILE };
+/** What every ClawBox AI sign-in records for that profile in openclaw.json. */
+const CLAWAI_PROFILE = { provider: "deepseek", mode: "api_key" };
+const CLOUD ={ provider: "openai", model: TRANSCRIBE_MODEL, profile: TRANSCRIBE_AUTH_PROFILE };
 /** The same row as every box in the field still carries it, before the profile. */
 const LEGACY_CLOUD = { provider: "openai", model: TRANSCRIBE_MODEL };
 const OURS = [CLOUD];
@@ -78,10 +80,34 @@ type AudioConfig = { baseUrl?: unknown; models?: unknown; [key: string]: unknown
  * (`_clawai_openai_route_is_ours`, `_clawai_proxy_base_url`).
  * `routeIsOurs: false` is the real script's starting value, i.e. a box whose openai slot belongs to its
  * owner or that has no ClawBox AI token at all.
+ *
+ * A box past that gate has signed in to ClawBox AI, and every such sign-in
+ * records the profile the cloud row names in `auth.profiles`. That record is
+ * added here unless the fixture brings its own (`clawaiProfile: null` leaves
+ * it out), and taken back off the answer so assertions see only the fixture.
+ *
+ * HOME is a sandbox with no Whisper in it unless `whisperHome` names one, so
+ * the block's look for the on-box engine never reads the machine running it.
  */
-function migrate(cfg: Config, routeIsOurs = true, v2 = false): { cfg: Config; changed: boolean; log: string } {
+interface MigrateOptions {
+  clawaiProfile?: Record<string, unknown> | null;
+  whisperHome?: { home: string; pythonPath: string };
+}
+
+function migrate(
+  cfg: Config,
+  routeIsOurs = true,
+  v2 = false,
+  opts: MigrateOptions = {},
+): { cfg: Config; changed: boolean; log: string } {
+  const profile = opts.clawaiProfile === undefined ? CLAWAI_PROFILE : opts.clawaiProfile;
+  const auth = (cfg.auth ?? {}) as { profiles?: Record<string, unknown> };
+  const injected = profile !== null && auth.profiles?.[TRANSCRIBE_AUTH_PROFILE] === undefined;
+  const input = injected
+    ? { ...cfg, auth: { ...auth, profiles: { ...auth.profiles, [TRANSCRIBE_AUTH_PROFILE]: profile } } }
+    : cfg;
   const file = path.join(dir, "config.json");
-  writeFileSync(file, JSON.stringify(cfg));
+  writeFileSync(file, JSON.stringify(input));
   const program = [
     "import json, sys",
     "cfg = json.load(open(sys.argv[1]))",
@@ -92,8 +118,41 @@ function migrate(cfg: Config, routeIsOurs = true, v2 = false): { cfg: Config; ch
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
-  const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
-  return { ...JSON.parse(lines[lines.length - 1]), log: lines.slice(0, -1).join("\n") };
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: opts.whisperHome?.home ?? dir };
+  if (opts.whisperHome) env.PYTHONPATH = opts.whisperHome.pythonPath;
+  else delete env.PYTHONPATH;
+  const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8", env }).trim().split("\n");
+  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean };
+  if (injected) {
+    const outAuth = out.cfg.auth as { profiles?: Record<string, unknown> };
+    const profiles = outAuth.profiles ?? {};
+    delete profiles[TRANSCRIBE_AUTH_PROFILE];
+    if (Object.keys(profiles).length === 0) delete outAuth.profiles;
+    if (Object.keys(outAuth).length === 0) delete out.cfg.auth;
+  }
+  return { ...out, log: lines.slice(0, -1).join("\n") };
+}
+
+/**
+ * A HOME where Whisper is installed the way install-voice.sh leaves it: the
+ * client script in the workspace, the whisper-server unit, and a
+ * `faster_whisper` package python3 can locate (an empty stand-in on
+ * PYTHONPATH — the block locates it and never imports it).
+ */
+function homeWithWhisper(): { home: string; pythonPath: string; row: Record<string, unknown> } {
+  const home = path.join(dir, "home");
+  const script = path.join(home, ".openclaw", "workspace", "scripts", "stt-client.py");
+  const unit = path.join(home, ".config", "systemd", "user", "whisper-server.service");
+  const pkg = path.join(dir, "site", "faster_whisper");
+  for (const file of [script, unit, path.join(pkg, "__init__.py")]) {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "");
+  }
+  return {
+    home,
+    pythonPath: path.join(dir, "site"),
+    row: { type: "cli", command: "/usr/bin/python3", args: [script, "{{MediaPath}}"], timeoutSeconds: 120 },
+  };
 }
 
 function audio(cfg: Config): AudioConfig | undefined {
@@ -237,7 +296,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
     // The proxy base url is taken from the deepseek entry upstream, so a box
     // provisioned against staging keeps talking to staging for audio too.
     const file = path.join(dir, "config.json");
-    writeFileSync(file, JSON.stringify({}));
+    writeFileSync(file, JSON.stringify({ auth: { profiles: { [TRANSCRIBE_AUTH_PROFILE]: CLAWAI_PROFILE } } }));
     const staging = "https://staging.clawbox.com/api/ai";
     const program = [
       "import json, sys",
@@ -248,7 +307,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
       POLICY,
       "print(json.dumps({'cfg': cfg, 'changed': changed}))",
     ].join("\n");
-    const out = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
+    const out = execFileSync("python3", ["-c", program, file], { encoding: "utf-8", env: { ...process.env, HOME: dir } })
+      .trim()
+      .split("\n");
     const { cfg } = JSON.parse(out[out.length - 1]) as { cfg: Config };
 
     expect(audio(cfg)).toEqual({ baseUrl: staging, models: OURS });
@@ -320,11 +381,48 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
       expect(log).toContain("Skipped ClawBox AI speech to text");
     });
 
-    it("seeds the cloud row alone on a fresh box; the on-box row is Settings' to add", () => {
-      // Only the route knows whether faster-whisper is installed here, and a
-      // CLI row pointing at nothing would cost every voice note its timeout.
+    it("seeds the cloud row alone on a fresh box with no Whisper", () => {
+      // A CLI row pointing at nothing would cost every voice note its timeout.
       const { cfg } = migrate({});
       expect(audio(cfg)!.models).toEqual(OURS);
+    });
+
+    it("seeds the on-box row FIRST on a fresh box where Whisper is installed", () => {
+      // The order `resolveSttPrimary` gives a box nobody has chosen for: the
+      // engine on the box, then the cloud as its fallback.
+      const whisper = homeWithWhisper();
+      const { cfg, changed, log } = migrate({}, true, true, { whisperHome: whisper });
+
+      expect(changed).toBe(true);
+      const media = (cfg.tools as { media: { models?: unknown; audio?: AudioConfig } }).media;
+      expect(media.models).toEqual([
+        { ...whisper.row, capabilities: ["audio"] },
+        { ...CLOUD, capabilities: ["audio"] },
+      ]);
+      expect(media.audio).toEqual({ baseUrl: PROXY });
+      expect(log).toContain("try the Whisper engine installed on this box first");
+      // …and the web server's own pass, which builds the same rows, has nothing to add.
+      expect(migrate(cfg, true, true, { whisperHome: whisper }).changed).toBe(false);
+    });
+
+    it("does not call Whisper installed without the engine itself", () => {
+      // Script and unit in place, faster-whisper not on python3's path: the
+      // check `localSttInstalled` makes too.
+      const whisper = homeWithWhisper();
+      rmSync(path.join(whisper.pythonPath, "faster_whisper"), { recursive: true });
+      const { cfg } = migrate({}, true, true, { whisperHome: whisper });
+
+      expect((cfg.tools as { media: { models?: unknown } }).media.models).toEqual([{ ...CLOUD, capabilities: ["audio"] }]);
+    });
+
+    it("builds the on-box row the TS side builds, field for field", () => {
+      const preference = readFileSync(path.resolve(process.cwd(), "src/lib/stt-preference.ts"), "utf-8");
+      const local = readFileSync(path.resolve(process.cwd(), "src/lib/stt-local.ts"), "utf-8");
+
+      expect(preference).toMatch(/command: PYTHON3,\s*args: \[sttClientScriptPath\(\), "\{\{MediaPath\}\}"\],\s*timeoutSeconds: 120,/);
+      expect(local).toContain('PYTHON3 = "/usr/bin/python3"');
+      expect(local).toContain('".openclaw", "workspace", "scripts", "stt-client.py"');
+      expect(local).toContain('".config", "systemd", "user", "whisper-server.service"');
     });
   });
 
@@ -454,5 +552,221 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2 homes", () => {
     // `baseUrl` lives at the same address in both generations and is still
     // written, which is what the in-flight comment says.
     expect((media?.audio as { baseUrl?: unknown } | undefined)?.baseUrl).toBe(PROXY);
+  });
+});
+
+/**
+ * A box whose owner signed in with ChatGPT. The cloud row is `openai` with our
+ * proxy as its endpoint, and the pinned core refuses that pair for an OAuth
+ * credential ("Custom endpoints and request overrides require an API-key
+ * profile", OpenClaw 2026.10.7 docs/nodes/audio.md). On the box this was found
+ * on, every Telegram voice note came back "OpenAI OAuth audio transcription
+ * requires the official endpoint without custom request overrides" — and this
+ * migration re-stamped the row at every start. src/lib/stt-channel.ts withholds
+ * the row on the same rule; the two must agree or each undoes the other.
+ */
+describe.skipIf(!hasPython3)("a box whose openai credential is a ChatGPT sign-in", () => {
+  const CHATGPT = { auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } } };
+  const V2_CLOUD = { ...CLOUD, capabilities: ["audio"] };
+  type Media = { models?: unknown; audio?: AudioConfig };
+  const media = (cfg: Config): Media | undefined => (cfg.tools as { media?: Media } | undefined)?.media;
+
+  it("seeds neither the cloud row nor our endpoint on a fresh box", () => {
+    const { cfg, changed } = migrate({ ...CHATGPT }, true, true);
+    expect(changed).toBe(false);
+    expect(cfg.tools).toBeUndefined();
+  });
+
+  it("withdraws the cloud row and our endpoint, keeping the on-box row in its place", () => {
+    const { cfg, changed, log } = migrate(
+      { ...CHATGPT, tools: { media: { audio: { baseUrl: PROXY, language: "bg" }, models: [V2_CLOUD, LOCAL_CLI] } } },
+      true,
+      true,
+    );
+    expect(changed).toBe(true);
+    expect(media(cfg)?.models).toEqual([LOCAL_CLI]);
+    expect(media(cfg)?.audio).toEqual({ language: "bg" });
+    expect(log).toContain("Withdrew the ClawBox AI transcription row");
+  });
+
+  it("withdraws the row a box in the field carries without a profile too", () => {
+    const { cfg } = migrate(
+      { ...CHATGPT, tools: { media: { audio: { baseUrl: PROXY }, models: [{ ...LEGACY_CLOUD, capabilities: ["audio"] }] } } },
+      true,
+      true,
+    );
+    expect(media(cfg)?.models).toEqual([]);
+    expect(media(cfg)?.audio).toEqual({});
+  });
+
+  it("is idempotent — the next start writes nothing", () => {
+    const once = migrate(
+      { ...CHATGPT, tools: { media: { audio: { baseUrl: PROXY }, models: [LOCAL_CLI, V2_CLOUD] } } },
+      true,
+      true,
+    );
+    const twice = migrate(once.cfg, true, true);
+    expect(twice.changed).toBe(false);
+    expect(twice.cfg).toEqual(once.cfg);
+  });
+
+  it("recognises the sign-in by its id when the profile names no provider", () => {
+    const { changed, cfg } = migrate(
+      { auth: { profiles: { "openai:chatgpt": { mode: "oauth" } } }, tools: { media: { audio: { baseUrl: PROXY }, models: [V2_CLOUD] } } },
+      true,
+      true,
+    );
+    expect(changed).toBe(true);
+    expect(media(cfg)?.models).toEqual([]);
+  });
+
+  it("keeps the row for an owner's own OpenAI API key, which is not a sign-in", () => {
+    const existing = { tools: { media: { audio: { baseUrl: PROXY }, models: [V2_CLOUD, LOCAL_CLI] } } };
+    const { cfg, changed } = migrate(
+      { auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } }, ...existing },
+      true,
+      true,
+    );
+    expect(changed).toBe(false);
+    expect(media(cfg)?.models).toEqual([V2_CLOUD, LOCAL_CLI]);
+  });
+
+  it("never touches an owner's own transcription route", () => {
+    const owner = { baseUrl: "https://whisper.lan/v1", models: [{ provider: "openai", model: "whisper-1" }] };
+    const { cfg, changed } = migrate({ ...CHATGPT, tools: { media: { audio: { ...owner } } } });
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+});
+
+/**
+ * Settings writes the on-box row alone when no ClawBox AI credential backs the
+ * cloud row (src/lib/stt-channel.ts) and takes our endpoint away with it. This
+ * migration used to put the endpoint straight back at the next start, and the
+ * web server's own pass then took it away again: one config write per boot for
+ * a field nothing reads.
+ */
+describe.skipIf(!hasPython3)("a list Settings wrote without the cloud row", () => {
+  it("is left without our endpoint", () => {
+    const { cfg, changed } = migrate({ tools: { media: { models: [LOCAL_CLI] } } }, true, true);
+    expect(changed).toBe(false);
+    expect((cfg.tools as { media: Record<string, unknown> }).media).toEqual({ models: [LOCAL_CLI] });
+  });
+
+  it("still gets our endpoint back beside a cloud row that lost it", () => {
+    const { cfg, changed } = migrate({ tools: { media: { models: [LOCAL_CLI, { ...CLOUD, capabilities: ["audio"] }] } } }, true, true);
+    expect(changed).toBe(true);
+    expect((cfg.tools as { media: { audio?: AudioConfig } }).media.audio).toEqual({ baseUrl: PROXY });
+  });
+});
+
+/**
+ * A box whose ClawBox AI sign-in left `deepseek:default` recorded as OAuth — a
+ * release that signed in by subscription wrote `mode: "oauth"` there. The cloud
+ * row names that profile as its bearer, the core took it for an OAuth
+ * credential, and every Telegram voice note came back "OpenAI OAuth audio
+ * transcription requires the official endpoint without custom request
+ * overrides" while the repair re-stamped the profile at every start.
+ * src/lib/stt-channel.ts leaves the row out on the same rule
+ * (`transcribeProfileProblem`), so this block must never put it back.
+ */
+describe.skipIf(!hasPython3)("a box whose ClawBox AI profile is not recorded as a key", () => {
+  const STALE = { provider: "deepseek", mode: "oauth" };
+  const V2_CLOUD = { ...CLOUD, capabilities: ["audio"] };
+  type Media = { models?: unknown; audio?: AudioConfig };
+  const media = (cfg: Config): Media | undefined => (cfg.tools as { media?: Media } | undefined)?.media;
+
+  it("seeds neither the cloud row nor our endpoint on a fresh box", () => {
+    const { cfg, changed } = migrate({}, true, true, { clawaiProfile: STALE });
+    expect(changed).toBe(false);
+    expect(cfg.tools).toBeUndefined();
+  });
+
+  it("seeds the on-box engine alone where Whisper is installed", () => {
+    const whisper = homeWithWhisper();
+    const { cfg, changed } = migrate({}, true, true, { clawaiProfile: STALE, whisperHome: whisper });
+    expect(changed).toBe(true);
+    expect(media(cfg)).toEqual({ models: [{ ...whisper.row, capabilities: ["audio"] }] });
+  });
+
+  it("withdraws the cloud row and our endpoint, keeping the on-box row, and says why", () => {
+    const { cfg, changed, log } = migrate(
+      { tools: { media: { audio: { baseUrl: PROXY }, models: [V2_CLOUD, LOCAL_CLI] } } },
+      true,
+      true,
+      { clawaiProfile: STALE },
+    );
+    expect(changed).toBe(true);
+    expect(media(cfg)?.models).toEqual([LOCAL_CLI]);
+    expect(media(cfg)?.audio).toEqual({});
+    expect(log).toContain("Withdrew the ClawBox AI transcription row");
+    expect(log).toContain("not an API key");
+  });
+
+  it("does not re-stamp the profile onto the row a box in the field carries — it withdraws it", () => {
+    const { cfg, log } = migrate(
+      { tools: { media: { audio: { baseUrl: PROXY }, models: [{ ...LEGACY_CLOUD, capabilities: ["audio"] }, LOCAL_CLI] } } },
+      true,
+      true,
+      { clawaiProfile: STALE },
+    );
+    expect(media(cfg)?.models).toEqual([LOCAL_CLI]);
+    expect(log).not.toContain("Gave the ClawBox AI transcription row its own auth profile");
+  });
+
+  it("leaves a list Settings wrote without the cloud row exactly as it is", () => {
+    const { cfg, changed } = migrate({ tools: { media: { models: [LOCAL_CLI] } } }, true, true, { clawaiProfile: STALE });
+    expect(changed).toBe(false);
+    expect(media(cfg)).toEqual({ models: [LOCAL_CLI] });
+  });
+
+  it("withdraws it the same way when the profile is not recorded at all", () => {
+    const { cfg, log } = migrate(
+      { tools: { media: { audio: { baseUrl: PROXY }, models: [V2_CLOUD] } } },
+      true,
+      true,
+      { clawaiProfile: null },
+    );
+    expect(media(cfg)?.models).toEqual([]);
+    expect(log).toContain("is not recorded");
+  });
+
+  it("is idempotent — the next start writes nothing", () => {
+    const once = migrate(
+      { tools: { media: { audio: { baseUrl: PROXY }, models: [LOCAL_CLI, V2_CLOUD] } } },
+      true,
+      true,
+      { clawaiProfile: STALE },
+    );
+    const twice = migrate(once.cfg, true, true, { clawaiProfile: STALE });
+    expect(twice.changed).toBe(false);
+    expect(twice.cfg).toEqual(once.cfg);
+  });
+
+  it("refuses exactly the profiles the TS side refuses, mode for mode", async () => {
+    // The two copies of the rule must agree or each boot undoes the other: this
+    // withdraws what the web server would write back, or keeps what it took out.
+    const { transcribeProfileProblem } = await import("@/lib/stt-preference");
+    const records: (Record<string, unknown> | null)[] = [
+      { provider: "deepseek", mode: "api_key" },
+      { provider: "deepseek", mode: "api-key" },
+      { provider: "deepseek", mode: " API_KEY " },
+      { provider: "deepseek", mode: "token" },
+      { provider: "deepseek", mode: "oauth" },
+      { provider: "deepseek", mode: "" },
+      { provider: "deepseek" },
+      null,
+    ];
+    for (const record of records) {
+      const tsKeeps = transcribeProfileProblem(record ? { [TRANSCRIBE_AUTH_PROFILE]: record } : {}) === null;
+      const { cfg } = migrate(
+        { tools: { media: { audio: { baseUrl: PROXY }, models: [V2_CLOUD] } } },
+        true,
+        true,
+        { clawaiProfile: record },
+      );
+      const shellKeeps = JSON.stringify(media(cfg)?.models) === JSON.stringify([V2_CLOUD]);
+      expect({ record, shellKeeps }).toEqual({ record, shellKeeps: tsKeeps });
+    }
   });
 });
