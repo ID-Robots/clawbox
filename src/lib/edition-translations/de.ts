@@ -857,6 +857,7 @@ export const de: Record<string, string> = {
   "codingAgent.team.adviceSingleRun": "Der Plan hatte eine Aufgabe, darum lief sie als ein gewöhnlicher Lauf — die günstigste Form. Für ein Ziel wie dieses ist ein einzelner Lauf beim nächsten Mal die günstigere Wahl.",
   "codingAgent.team.adviceOneTask": "Der Plan hat eine Aufgabe: Ein einzelner Lauf wäre günstiger gewesen als ein Team.",
   "codingAgent.team.adviceOverlap": "{n} % der Dateien, die die Aufgaben dieses Plans berühren, teilen sie mit einer anderen Aufgabe, darum können sie nicht nebeneinander laufen: Ein einzelner Lauf wäre wohl günstiger gewesen.",
+  "codingAgent.team.adviceOverlapRun": "{n} % der Dateien, die die Aufgaben dieses Plans berühren, teilen sie mit einer anderen Aufgabe, darum lief der Plan als ein gewöhnlicher Lauf statt als Team — die günstigere Form dafür.",
   "codingAgent.createNewProject": "App erstellen",
   "codingAgent.projectRuns": "Läufe",
   "codingAgent.otherRuns": "Andere Läufe",

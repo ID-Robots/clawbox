@@ -1357,27 +1357,33 @@ describe("a team that works", () => {
     expect(JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${board.id}.json`), "utf8")).status).toBe("done");
   });
 
-  it("raises an alert when a worker is refused an action or strays, rejects that task once, and stops the team at MAX_ALERTS", async () => {
+  it("raises an alert when a worker is refused an action or strays, rejects that task once, and stops the team at MAX_ALERTS — counting the strays, never the refusals", async () => {
     outcomes = [
-      { summary: PLAN },
-      // t1: strayed AND refused → two alerts, rejected, re-posted.
+      // One worker at a time: the order of the alerts is the order of the tasks.
+      { summary: shaped({ parallelism: 1, review: "each", rationale: "" }, PARALLEL_PLAN) },
+      // t1: strayed AND refused → two alerts, the stray counted; rejected, re-posted.
       { summary: "did stuff", filesTouched: ["index.html", "secrets.env"], permissionDenials: 1, deniedActions: ["Bash: curl x"] },
-      // t1 again: refused again → third alert → the team stops.
-      { summary: "did more", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: ["Bash: sudo", "Bash: rm"] },
+      // t1 again: refused and strayed again → the second counted alert; rejected for good.
+      { summary: "did more", filesTouched: ["index.html", "secrets.env"], permissionDenials: 2, deniedActions: ["Bash: sudo", "Bash: rm"] },
+      // t2 strays too → the third counted alert → the team stops.
+      { summary: "styles done", filesTouched: ["styles.css", "secrets.env"] },
     ];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toMatch(/after 3 alerts/);
-    expect(done.alerts).toBe(3);
+    expect(done.error).toBe("Stopped after 3 alerts.");
+    // Five on the record; the two refusals are rejections, not the team failing.
+    expect(done.alerts).toBe(5);
     const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
     expect(alerts[0]).toMatch(/refused 1 action\(s\): Bash: curl x/);
     expect(alerts[1]).toMatch(/outside its task: secrets\.env/);
     expect(alerts[2]).toMatch(/refused 2 action/);
+    expect(alerts[3]).toMatch(/outside its task: secrets\.env/);
+    expect(alerts[4]).toMatch(/Worker run-00000004 touched files outside its task: secrets\.env/);
     const t1 = done.tasks[0];
     expect(t1.attempts).toBe(2);
     expect(t1.review?.verdict).toBe("rejected");
-    expect(starts).toHaveLength(3);
+    expect(starts).toHaveLength(4);
     expect(String(starts[2].task)).toContain("A previous attempt was rejected");
   });
 
@@ -2242,7 +2248,8 @@ describe("the lead (coding_team_dynamic)", () => {
       { task_description: "Write styles.css", files_hint: ["styles.css"] },
       { task_description: "Write about.html", files_hint: ["about.html"] },
       { task_description: "Write the README", files_hint: ["README.md"] },
-      { task_description: "Check every page links styles.css", depends_on: ["t1", "t2", "t3", "t4"], files_hint: ["index.html", "about.html"] },
+      // One page named, not both: a plan whose tasks mostly name the same files runs as one run.
+      { task_description: "Check every page links styles.css", depends_on: ["t1", "t2", "t3", "t4"], files_hint: ["index.html"] },
     ])) }];
     // Each worker's outcome by its task, whatever order they start in.
     const byTask: Record<string, Record<string, unknown>> = {
@@ -3034,21 +3041,24 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
     expect(done.metrics.tokensUsed).toBe(109_000);
   });
 
-  it("says, on the board and in its advice, when a plan's tasks mostly touch the same files", async () => {
+  it("runs a plan whose tasks mostly touch the same files as ONE ordinary run, says so up front, and keeps the advice", async () => {
     outcomes = [
       { summary: JSON.stringify([
         { task_description: "Add the header to index.html", files_hint: ["index.html", "styles.css"] },
         { task_description: "Add the footer to index.html", depends_on: ["t1"], files_hint: ["index.html", "styles.css"] },
       ]) },
-      { summary: "header done", filesTouched: ["index.html"] },
-      { summary: "footer done", filesTouched: ["index.html"] },
+      { summary: "Header and footer done.", filesTouched: ["index.html"] },
     ];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
-    expect(done.singleRun).toBe(false);
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    expect(plumbing.ensureTeamBranch).not.toHaveBeenCalled();
+    expect(String(starts[1].task)).toContain("1. Add the header to index.html (files: index.html, styles.css)\n2. Add the footer to index.html");
+    expect(done.singleRun).toBe(true);
     expect(done.advice).toEqual({ reason: "overlap", overlap: 100 });
-    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too/)]));
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too: side by side they would only conflict, so its 2 tasks run as one ordinary run/)]));
+    expect(done.tasks.map((t) => [t.status, t.assigned_to, t.review?.verdict])).toEqual([["complete", "run-00000002", "accepted"], ["complete", "run-00000002", "accepted"]]);
   });
 });
 

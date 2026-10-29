@@ -1845,6 +1845,7 @@ const table: Record<string, string> = {
   "codingAgent.team.addedByLead": "Tillagd av ledaren",
   "codingAgent.team.adviceOneTask": "Planen har en uppgift: en enda körning hade varit billigare än ett team.",
   "codingAgent.team.adviceOverlap": "{n} % av filerna som planens uppgifter rör delas med en annan uppgift, så de kan inte köras sida vid sida: en enda körning hade troligen varit billigare.",
+  "codingAgent.team.adviceOverlapRun": "{n} % av filerna som planens uppgifter rör delas med en annan uppgift, så planen kördes som en vanlig körning i stället för som ett team — den billigare formen.",
   "codingAgent.team.adviceSingleRun": "Planen hade en uppgift, så den kördes som en vanlig körning — den billigaste formen. För ett mål som detta är en enda körning det billigare valet nästa gång.",
   "codingAgent.team.after": "efter {ids}",
   "codingAgent.team.alerts": "{n} varningar",
