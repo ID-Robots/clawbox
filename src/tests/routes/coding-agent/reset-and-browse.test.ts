@@ -266,9 +266,6 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // The team lead's switch is OFF when absent, so clearing it takes back
       // the owner's leave for a running team's plan to change under it.
       "coding_team_dynamic",
-      // The token diet (TASK-1749): a preference about what every run is
-      // told and given, so "start over" puts it back to today's behaviour.
-      "coding_agent_diet",
       // The owner's standing permission rules are consent too: each one is a
       // folder every later run may open, so "start over" takes them all back
       // rather than leaving a run started after the wizard with permissions

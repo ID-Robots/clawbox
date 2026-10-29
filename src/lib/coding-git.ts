@@ -210,10 +210,16 @@ export async function newestCommitSince(directory: string, sinceMs: number): Pro
  * never taken for its own under that helper's minute of slack. Never throws.
  */
 export async function headCommitShort(directory: string): Promise<string | null> {
-  const r = await git(path.resolve(directory), ["log", "-1", "--format=%h"]);
-  if (r.code !== 0 || !r.stdout) return null;
-  const sha = r.stdout.trim().split(/\s+/)[0];
-  return sha || null;
+  try {
+    const r = await git(path.resolve(directory), ["log", "-1", "--format=%h"]);
+    if (r.code !== 0 || !r.stdout) return null;
+    const sha = r.stdout.trim().split(/\s+/)[0];
+    return sha || null;
+  } catch {
+    // A spawn that throws (no git, a folder spawn cannot enter) is "nothing to
+    // name" here, never a reason to refuse the run that asked.
+    return null;
+  }
 }
 
 /** The commit message: what the run was, and what it said it did. */
