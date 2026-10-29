@@ -6632,9 +6632,12 @@ openclaw_refresh_fast_path_check() {
   # line them up with — but any plugin that lost its payload, reports an error
   # or waits for consent is doubt, and so is a repair ClawBox has on record.
   # No clock on the ask (the owner's rule for this file): the refresh below
-  # asks the same CLI the same way.
+  # asks the same CLI the same way. The READER runs as the clawbox account too:
+  # every path it opens — each payload root the CLI names, data/, the checkout
+  # — is that account's to write, and as root a symlink there would read a
+  # root-only file and echo its fields into a journal that account can read.
   verdict="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
-    | python3 -c '
+    | as_clawbox -H python3 -c '
 import json, os, sys
 
 target, repairs_path, email_pkg = sys.argv[1:4]

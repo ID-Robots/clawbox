@@ -125,6 +125,8 @@ function makeBox(opts: { core?: string; marker?: string | null } = {}): Box {
 // in the prefix it was handed, as the staged install expects.
 const AS_CLAWBOX = `as_clawbox() {
   while [ "\${1:-}" = "-H" ]; do shift; done
+  # The plugin-list reader, run as the account whose files it opens.
+  if [ "\${1:-}" = python3 ]; then event VERDICT_AS_CLAWBOX; "$@"; return; fi
   case "$*" in
     *"plugins list"*)
       event PLUGINS_LIST
@@ -275,6 +277,10 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
     expect(pathLine(r)).toContain(`all at ${TARGET}, and the gateway is serving`);
     // The plugin list is asked once, by the check — not by a refresh.
     expect(r.events.filter((e) => e === "PLUGINS_LIST")).toHaveLength(1);
+    // …and read as the clawbox account, never as root: every path the reader
+    // opens (payload roots the CLI names, data/, the checkout) is that
+    // account's to write.
+    expect(r.events).toContain("VERDICT_AS_CLAWBOX");
   });
 
   it("takes the full path on the first update and the fast path on the second", () => {
