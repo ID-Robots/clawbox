@@ -1845,6 +1845,7 @@ const table: Record<string, string> = {
   "codingAgent.team.addedByLead": "Aggiunta dal coordinatore",
   "codingAgent.team.adviceOneTask": "Il piano ha un solo compito: una sola esecuzione sarebbe costata meno di un team.",
   "codingAgent.team.adviceOverlap": "Il {n}% dei file toccati dai compiti di questo piano è condiviso con un altro compito, quindi non possono procedere in parallelo: una sola esecuzione probabilmente sarebbe costata meno.",
+  "codingAgent.team.adviceOverlapRun": "Il {n}% dei file toccati dalle attività di questo piano è condiviso con un'altra attività, quindi il piano è stato eseguito come un'unica esecuzione ordinaria invece che come team: la forma più economica.",
   "codingAgent.team.adviceSingleRun": "Il piano aveva un solo compito, quindi è stato eseguito come una normale esecuzione: la forma più economica. Per un obiettivo così, la prossima volta una sola esecuzione è la scelta più economica.",
   "codingAgent.team.after": "dopo {ids}",
   "codingAgent.team.alerts": "{n} avvisi",

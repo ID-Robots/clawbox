@@ -858,6 +858,7 @@ export const fr: Record<string, string> = {
   "codingAgent.team.adviceSingleRun": "Le plan comptait une seule tâche : elle a donc tourné comme une exécution ordinaire, la forme la moins chère. Pour un objectif de ce genre, une seule exécution est le choix le moins cher la prochaine fois.",
   "codingAgent.team.adviceOneTask": "Le plan compte une seule tâche : une seule exécution aurait coûté moins cher qu'une équipe.",
   "codingAgent.team.adviceOverlap": "{n} % des fichiers touchés par les tâches de ce plan sont partagés avec une autre tâche, elles ne peuvent donc pas tourner côte à côte : une seule exécution aurait sans doute coûté moins cher.",
+  "codingAgent.team.adviceOverlapRun": "{n} % des fichiers que touchent les tâches de ce plan sont partagés avec une autre tâche : le plan a donc tourné comme une seule exécution ordinaire plutôt qu'en équipe — la forme la moins chère pour lui.",
   "codingAgent.createNewProject": "Créer une app",
   "codingAgent.projectRuns": "Exécutions",
   "codingAgent.otherRuns": "Autres exécutions",
