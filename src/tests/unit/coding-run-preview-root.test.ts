@@ -87,6 +87,20 @@ describe("resuming a settled run on its own provider", () => {
     expect(cmd).not.toContain("CLAUDE_DS_PROVIDER");
   });
 
+  it("continues a settled OpenAI run's Codex thread in the coding agent's own Codex home", async () => {
+    delete process.env.NEXT_PUBLIC_CLAWBOX_ROOT;
+    const { livePreviewCommand } = await load();
+    expect(livePreviewCommand({ ...settled, provider: "openai" }))
+      .toBe("cd '/home/clawbox/Projects/x' && CODEX_HOME='/home/clawbox/clawbox/data/coding-agent-codex' \"$HOME/.local/bin/codex\" resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'");
+  });
+
+  it("opens nothing for a LIVE OpenAI run: its thread is still being written, and there is no transcript to tail", async () => {
+    const { livePreviewCommand } = await load();
+    expect(livePreviewCommand({ ...settled, live: true, provider: "openai" })).toBeNull();
+    // Nor a Claude resume of a Codex thread, settled or not.
+    expect(livePreviewCommand({ ...settled, sessionId: null, provider: "openai" })).toBeNull();
+  });
+
   it("tails a live run's transcript whatever its provider — the path already names the folder", async () => {
     delete process.env.NEXT_PUBLIC_CLAWBOX_ROOT;
     const { livePreviewCommand } = await load();

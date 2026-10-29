@@ -31,6 +31,7 @@
 import {
   ANTHROPIC_MODELS,
   CODING_PROVIDERS,
+  OPENAI_MODELS,
   defaultModelForProvider,
   economyModelForProvider,
   isCodingProvider,
@@ -105,8 +106,8 @@ export const ROLE_AUTO_FOLLOWS: Readonly<Partial<Record<ModelRole, ModelRole>>> 
 /**
  * The models a role may be pinned to on each provider.
  *
- * Anthropic: the coding fence itself (`ANTHROPIC_MODELS`), so a role can name
- * nothing a run could not. ClawBox AI: its flash tier alone — the one model
+ * Anthropic and OpenAI: the coding fence itself (`ANTHROPIC_MODELS`,
+ * `OPENAI_MODELS`), so a role can name nothing a run could not. ClawBox AI: its flash tier alone — the one model
  * every plan may use and the one a `clawbox-ai` record may carry
  * (`isRecordableModel`). Never the pro tier: it is Max-plan only, and a role
  * pinned to it would fail every run on any other plan.
@@ -114,6 +115,7 @@ export const ROLE_AUTO_FOLLOWS: Readonly<Partial<Record<ModelRole, ModelRole>>> 
 const ROLE_MODEL_OPTIONS: Readonly<Record<CodingProvider, readonly string[]>> = {
   "clawbox-ai": [economyModelForProvider("clawbox-ai")],
   anthropic: ANTHROPIC_MODELS,
+  openai: OPENAI_MODELS,
 };
 
 /** The models a role may name on this provider. */
@@ -141,6 +143,17 @@ export const RELATIVE_MODEL_COST: Readonly<Record<string, number>> = {
   "claude-opus-5": 20,
   "claude-opus-5-5": 20,
   "claude-fable-5-1": 40,
+  // OpenAI's: TIER ESTIMATES, not list prices — read off the Codex CLI's own
+  // catalogue descriptions (flagship, balanced everyday, fast and affordable)
+  // and set level with the Anthropic tier each one stands beside. OpenAI's
+  // prices for this generation were not checked from the box; correct these
+  // to rounded price ratios once they are.
+  "gpt-6-astra": 20,
+  "gpt-5.6-sol": 20,
+  "gpt-5.6-terra": 10,
+  "gpt-5.6-luna": 3,
+  "gpt-5.5": 10,
+  "gpt-5.2": 10,
 };
 
 /**
