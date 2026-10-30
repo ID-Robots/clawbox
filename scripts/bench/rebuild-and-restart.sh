@@ -20,6 +20,8 @@ PORT=${PORT:-3005}
 CDP_PORT=${CLAWBOX_KIOSK_CDP_PORT:-18801}
 
 if [ "${1:-}" != "--no-build" ]; then
+  # The root the browser bundle bakes in (NEXT_PUBLIC_CLAWBOX_ROOT): this checkout, as the updater passes it.
+  export CLAWBOX_ROOT="${CLAWBOX_ROOT:-$PWD}"
   bun run build || { echo "build failed — nothing restarted" >&2; exit 1; }
   [ -f .next/server/app/index.html ] || { echo ".next/server/app/index.html missing after the build — nothing restarted" >&2; exit 1; }
 fi
