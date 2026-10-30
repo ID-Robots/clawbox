@@ -186,7 +186,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.effortFailed": "Could not change the thinking effort.",
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.tokensWord": "tokens",
-  "codingAgent.updated": "updated",
   "codingAgent.githubOff": "not connected",
   "codingAgent.githubUnreachable": "GitHub unreachable",
   "codingAgent.githubNotRunnable": "gh installed but will not start — check its permissions",
@@ -230,8 +229,6 @@ export const codingAgentEn: Record<string, string> = {
   // The report dialog: a run's report.md (or any .md it wrote) drawn as
   // markdown over the app. {name} is the artifact's file name.
   "codingAgent.githubDeviceIntro": "Enter this code on github.com to connect your account:",
-  "codingAgent.githubDeviceOpen": "Open github.com/login/device",
-  "codingAgent.githubDeviceWaiting": "Waiting for the code to be entered…",
   "codingAgent.githubDeviceCancel": "Cancel",
   "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
   "codingAgent.githubStartFailed": "Could not start the GitHub login",
@@ -358,7 +355,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.alerts": "{n} alerts",
   "codingAgent.team.plannerRun": "Planner run",
   "codingAgent.team.planning": "The planner is reading the project and writing the plan…",
-  "codingAgent.team.after": "after {ids}",
   "codingAgent.team.held": "Held — {task} was reopened",
   "codingAgent.team.waitingFor": "Waiting for {ids} to be accepted",
   "codingAgent.team.log": "Log ({n})",
@@ -409,9 +405,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.adviceOverlap": "{n}% of the files this plan's tasks touch are shared with another task, so they cannot run side by side: a single run would likely have been cheaper.",
   "codingAgent.team.adviceOverlapRun": "{n}% of the files this plan's tasks touch are shared with another task, so the plan ran as one ordinary run instead of a team — the cheaper shape for it.",
   "codingAgent.createNewProject": "Create app",
-  "codingAgent.projectRuns": "Runs",
-  "codingAgent.otherRuns": "Other runs",
-  "codingAgent.gitTitle": "Git repository",
   // Count-neutral on purpose: "1 commits" would be wrong and the catalogue
   // has no plural mechanism.
   "codingAgent.gitCommits": "Commits: {n}",
@@ -537,7 +530,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.open": "Open",
   "codingAgent.copied": "Copied",
   "codingAgent.noCommits": "No commits yet",
-  "codingAgent.newApp": "New app",
   "codingAgent.newTitle": "A new app for your desktop",
   "codingAgent.newNameLabel": "Name",
   "codingAgent.newNamePlaceholder": "Invoice generator",
@@ -571,7 +563,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.newNameTooLong": "The name can be at most {max} characters.",
   "codingAgent.newWhatRequired": "Say what the app should do.",
   "codingAgent.newWhatTooLong": "Keep the description to {max} characters.",
-  "codingAgent.newHanded": "Handed to the assistant — continue in the chat.",
   // Shown on the standalone /app/coding page instead of the New button:
   // there is no chat there to hand the message to.
   "codingAgent.newNeedsDesktop": "A new app starts in the chat, which lives on the desktop. Open the Coding agent there to ask for one.",
@@ -775,19 +766,11 @@ export const codingAgentEn: Record<string, string> = {
 
   // ── Telling a run something while it works ────────────────────────────────
   //
-  // A delegated run cannot ask a question, and until this box could not be
-  // told anything either. "Queued" and "Delivered" are kept apart because they
-  // are different promises: one is "the run has it", the other is "it gets it
-  // at its next step".
-  "codingAgent.message.title": "Tell the agent",
-  "codingAgent.message.hint": "Send a correction or something it should know. It carries on from where it is \u2014 it does not start over.",
-  "codingAgent.message.placeholder": "Tell the agent\u2026",
-  "codingAgent.message.send": "Send",
-  "codingAgent.message.sending": "Sending\u2026",
-  "codingAgent.message.queued": "Queued",
-  "codingAgent.message.delivered": "Delivered",
-  "codingAgent.message.deliveredMidTurn": "Delivered mid-turn",
-  "codingAgent.message.failed": "Could not send that message to the run.",
+  // The telling happens in the chat (the run page's "Message in chat" seeds
+  // the composer, 2026-10-30; the app's own message box and its title, hint,
+  // Send and Queued/Delivered words went with it). What is left are the
+  // refusals `coding_run_message` and the steering route answer, worded for
+  // the owner (src/lib/coding-run-messages.ts).
   "codingAgent.message.errorEmpty": "Type something to send.",
   "codingAgent.message.errorTooLong": "That message is too long: at most {max} characters.",
   "codingAgent.message.errorNotPlainText": "A message must be plain text.",
@@ -900,7 +883,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.diagram.verdict": "Verdict",
   "codingAgent.diagram.sentBy": "Sent out by {run}",
   "codingAgent.diagram.openRun": "Open run page",
-  "codingAgent.diagram.message": "Message",
   "codingAgent.diagram.stopFailed": "Could not stop this agent.",
   "codingAgent.diagram.close": "Close",
   "codingAgent.diagram.details": "Details",

@@ -49,7 +49,7 @@ import {
   takePendingCodingRun,
   takePendingCodingTeam,
 } from "@/lib/ui-events";
-import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
+import { NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
@@ -328,13 +328,6 @@ function tokens(n: number): string {
 function firstLine(text: string, max = 100): string {
   return taskTitle(text, max);
 }
-
-/** Single-quote a value for the terminal command line. */
-function quoted(v: string): string {
-  return `'${v.replace(/'/g, "'\\''")}'`;
-}
-
-
 
 /**
  * How many projects home lists before "Show all (N)" — the owner's ask of
