@@ -40,7 +40,7 @@ const NAMES = ["coding_team_run", "coding_team_status", "coding_team_stop"];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
   const h = captureRegistrar(edition);
-  registerCodingTeamTools(h.reg, { codingAgent });
+  registerCodingTeamTools(h.reg, { codingAgent, edition });
   return h;
 }
 
@@ -65,8 +65,8 @@ const TEAM = {
   updatedAt: 1_700_000_001_000,
 };
 
-async function ok(name: string, args: Record<string, unknown>): Promise<string> {
-  const out = await harness().call(name, args);
+async function ok(name: string, args: Record<string, unknown>, edition: "openclaw" | "hermes" = "openclaw"): Promise<string> {
+  const out = await harness(edition).call(name, args);
   expect(out.isError, JSON.stringify(out)).toBe(false);
   return out.isError ? "" : out.text;
 }
@@ -115,6 +115,31 @@ describe("coding_team_run", () => {
     expect(text).toMatch(/coding_team_status/);
   });
 
+  it("tells the assistant the chat shows the team as a card, and carries the same facts as structuredContent", async () => {
+    apiPost.mockResolvedValue({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    const out = await harness().call("coding_team_run", { goal: "Build the invoice app", directory: "invoice" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/The chat shows this as a card .* do not poll/);
+    expect(out.result.structuredContent).toEqual({
+      kind: "coding_team", id: "team-k3x9q2ab", projectId: null, directory: TEAM.directory,
+      title: "Build the invoice app with a printable PDF", status: "running",
+    });
+    // Queued: the same shape, with the place in line.
+    apiPost.mockResolvedValue({ started: false, queued: true, team: { ...TEAM, status: "queued", queuePosition: 2, tasks: [] } });
+    const queued = await harness().call("coding_team_run", { goal: "Build the invoice app", directory: "invoice" });
+    expect(queued.isError).toBe(false);
+    if (queued.isError) return;
+    expect(queued.result.structuredContent).toMatchObject({ kind: "coding_team", id: "team-k3x9q2ab", status: "queued", queuePosition: 2 });
+    // The status tool carries none: only the two start tools do.
+    apiGet.mockResolvedValueOnce({ team: TEAM });
+    const status = await harness().call("coding_team_status", { team_id: TEAM.id, log: 0, wait_seconds: 0 });
+    expect(status.isError).toBe(false);
+    if (status.isError) return;
+    expect(status.result.structuredContent).toBeUndefined();
+    expect(status.text).toMatch(/The chat shows the team's card; do not paste the task list unless asked/);
+  });
+
   it("words the switch and a team already working as conflicts the assistant must not retry", async () => {
     apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "off", kind: "disabled" })));
     const off = await refused("coding_team_run", { goal: "g" });
@@ -137,13 +162,13 @@ describe("coding_team_status", () => {
     expect(await ok("coding_team_status", { log: 0 })).toMatch(/no coding teams/);
     apiGet.mockResolvedValueOnce({ teams: [TEAM] });
     const listed = JSON.parse(await ok("coding_team_status", { log: 0 }));
-    expect(listed).toEqual([{ team_id: TEAM.id, status: "working", goal: "Build the invoice app with a printable PDF", project_id: null, tasks: 2, complete: 1, alerts: 1 }]);
+    expect(listed).toEqual([{ team_id: TEAM.id, status: "working", phase: "working", tasks_done: 1, tasks_total: 2, goal: "Build the invoice app with a printable PDF", project_id: null, tasks: 2, complete: 1, alerts: 1 }]);
   });
 
   it("describes one team: goal, tasks with worker and result, alerts, and what to do next", async () => {
     apiGet.mockResolvedValueOnce({ team: TEAM });
-    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 1 });
-    expect(apiGet).toHaveBeenCalledWith("/setup-api/coding-agent/team", expect.objectContaining({ query: { id: TEAM.id } }));
+    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 1, wait_seconds: 0 });
+    expect(apiGet).toHaveBeenCalledWith("/setup-api/coding-agent/team", expect.objectContaining({ query: { id: TEAM.id, wait: 0 }, timeoutMs: 15_000 }));
     expect(text).toContain("Team team-k3x9q2ab: working");
     expect(text).toContain("- t1 [complete, accepted] — Scaffold index.html — worker run-00000002 — result: Built index.html; open it.");
     expect(text).toContain("- t2 [in_progress] — Wire app.js — worker run-00000003 — after t1");
@@ -154,6 +179,28 @@ describe("coding_team_status", () => {
     expect(await ok("coding_team_status", { team_id: TEAM.id, log: 0 })).toMatch(/Summarise the task results/);
     apiGet.mockResolvedValueOnce({ team: { ...TEAM, status: "failed", error: "Tasks t2 failed." } });
     expect(await ok("coding_team_status", { team_id: TEAM.id, log: 0 })).toMatch(/failed — Tasks t2 failed\./);
+  });
+
+  it("says the box posts when the team finishes — in the chat on OpenClaw, on the desktop on Hermes — instead of asking for another look", async () => {
+    for (const status of ["queued", "working"]) {
+      apiGet.mockResolvedValueOnce({ team: { ...TEAM, status } });
+      const openclaw = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+      expect(openclaw).toMatch(/ClawBox posts in this chat when the team finishes; do not poll it or schedule a watcher\./);
+      expect(openclaw).not.toMatch(/check again/);
+      apiGet.mockResolvedValueOnce({ team: { ...TEAM, status } });
+      const hermes = await ok("coding_team_status", { team_id: TEAM.id, log: 0 }, "hermes");
+      expect(hermes).toMatch(/ClawBox tells the user on the desktop when the team finishes/);
+      expect(hermes).not.toMatch(/posts in this chat/);
+    }
+    apiPost.mockResolvedValue({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    expect(await ok("coding_team_run", { goal: "Build the invoice app", directory: "invoice" })).toMatch(/ClawBox posts in this chat when the team finishes/);
+  });
+
+  it("blocks on wait_seconds through the route's own wait, with a timeout past it", async () => {
+    apiGet.mockResolvedValueOnce({ team: { ...TEAM, status: "done", alerts: 0 } });
+    expect(await ok("coding_team_status", { team_id: TEAM.id, log: 0, wait_seconds: 90 })).toMatch(/Summarise the task results/);
+    expect(apiGet).toHaveBeenCalledWith("/setup-api/coding-agent/team", expect.objectContaining({ query: { id: TEAM.id, wait: 90 }, timeoutMs: 105_000 }));
+    expect(harness().get("coding_team_status").description).toMatch(/wait_seconds ONLY when the user asked/);
   });
 
   it("answers NOT_FOUND for an id the box does not know", async () => {

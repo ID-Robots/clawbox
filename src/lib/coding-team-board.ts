@@ -49,7 +49,13 @@ export const MAX_TEAM_TASKS = 8;
 /** The audit log keeps this many entries; the oldest fall off. */
 export const MAX_LOG_ENTRIES = 400;
 export const MAX_GOAL_CHARS = 4_000;
-export const MAX_TASK_DESCRIPTION_CHARS = 2_000;
+/**
+ * A task description is the WHOLE brief its worker gets (TASK_RULES): the
+ * verify and commit steps and the goal's constraints live in it. At 2,000, 5
+ * of 6 descriptions of one live team were cut before their verify step;
+ * `workerTask` builds the worker's text to TEAM_TASK_CHARS, so this fits.
+ */
+export const MAX_TASK_DESCRIPTION_CHARS = 6_000;
 export const MAX_RESULT_CHARS = 6_000;
 /** The lead (the `coding_team_dynamic` switch) may add this many tasks over a team's whole life… */
 export const MAX_LEAD_ADDS = 3;
@@ -140,15 +146,6 @@ export interface RoleTokens {
 
 /** Tokens the team's runs spent by kind, by the role they ran in. */
 export type RoleTokenBreakdown = Record<keyof RoleTokens, TokenBreakdown>;
-
-/**
- * Which kind of worker a task wants. `bulk`: token-heavy and not critical —
- * scraping, mass data, repetitive edits, long test runs — so its worker may
- * start on the `bulk` role's provider and model (src/lib/coding-role-models.ts)
- * rather than the workers'. `worker` is every other task.
- */
-export type TaskRole = "worker" | "bulk";
-export const TASK_ROLES: readonly TaskRole[] = ["worker", "bulk"];
 
 /** Tokens the team's runs spent, by the account that paid for them (each run's own provider). */
 export type ProviderTokens = Record<CodingProvider, number>;
@@ -273,14 +270,15 @@ export interface TeamTask {
    * (MAX_TEAM_CI_ROUNDS), never against the task's two tries.
    */
   ciReoffers: number;
+  /**
+   * How many of its `attempts` the team stopped itself (`reopenAfterStop`):
+   * its worker was held — paused — past RUN_BUDGET_MS with nobody resuming
+   * it. Offered once more, never against the task's two tries; a board from
+   * before the field reads as 0.
+   */
+  budgetReoffers: number;
   created_at: number;
   updated_at: number;
-  /**
-   * `bulk` on a task the planner (or the lead) marked token-heavy and not
-   * critical: its worker starts on the bulk role's model. ABSENT on every
-   * other task — a worker's — and on every task of a board from before.
-   */
-  role?: TaskRole;
 }
 
 /** A task set back because a task it depends on was rejected or reopened (`holdTask`). */
@@ -295,8 +293,8 @@ export interface TaskHold {
 }
 
 /** A task's attempts that count toward its two tries — its holds are not its own failures. */
-export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number }): number {
-  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0));
+export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number; budgetReoffers?: number }): number {
+  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0) - (task.budgetReoffers ?? 0));
 }
 
 /**
@@ -368,8 +366,8 @@ export interface TeamRunRef {
    * The account the run was paid from, and its model there — from its record
    * when it started, the model brought up to what answered once it settled;
    * null where the provider's plan chose and nothing said which. `modelRole`
-   * is the role its model choice was made for: `planner` for the lead too,
-   * `bulk` for a worker on a bulk task. Each ABSENT on a board from before.
+   * is the role its model choice was made for: `planner` for the lead too.
+   * Each ABSENT on a board from before.
    */
   provider?: CodingProvider;
   model?: string | null;
@@ -399,7 +397,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "pr" | "repo_map";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "budget" | "pr" | "repo_map";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -648,7 +646,9 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
           if (isCodingProvider(ref.provider)) run.provider = ref.provider;
           const model = refModel(ref.model);
           if (model !== undefined) run.model = model;
-          if ((MODEL_ROLES as readonly unknown[]).includes(ref.modelRole)) run.modelRole = ref.modelRole as ModelRole;
+          // A ref from before 2026-10-30 may say `bulk`: that was a worker's run.
+          const modelRole = ref.modelRole === "bulk" ? "worker" : ref.modelRole;
+          if ((MODEL_ROLES as readonly unknown[]).includes(modelRole)) run.modelRole = modelRole as ModelRole;
           return [run];
         })
       : [],
@@ -792,10 +792,10 @@ function normalizeTask(raw: unknown): TeamTask | null {
     holds: typeof t.holds === "number" && Number.isInteger(t.holds) && t.holds >= 0 ? t.holds : 0,
     hold: normalizeHold(t.hold),
     ciReoffers: typeof t.ciReoffers === "number" && Number.isInteger(t.ciReoffers) && t.ciReoffers >= 0 ? t.ciReoffers : 0,
+    budgetReoffers: typeof t.budgetReoffers === "number" && Number.isInteger(t.budgetReoffers) && t.budgetReoffers >= 0 ? t.budgetReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
-    // Only a bulk task carries it; absent is a worker's, as on a board from before.
-    ...(t.role === "bulk" ? { role: "bulk" as const } : {}),
+    // A task's `role` (`bulk`, until 2026-10-30) is not read back: every task is a worker's.
   };
 }
 
@@ -885,8 +885,13 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
   return board;
 }
 
-/** The Planner sizes the team: how many workers side by side, and how the work is reviewed. Nobody else may, and only once. */
-export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): TeamShape {
+/**
+ * The Planner sizes the team: how many workers side by side, and how the work
+ * is reviewed. Nobody else may, and only once. `boxWidth` is how many runs the
+ * box lets go at once (the owner's Settings): the log line says so when the
+ * shape asks for more than that, since the extra workers only wait for a seat.
+ */
+export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape, boxWidth?: number): TeamShape {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "shape", `Only the planner shapes the team; ${describeActor(actor)} may not.`);
   if (board.shape) throw new Error("The team already has its shape.");
   if (!Number.isInteger(shape.parallelism) || shape.parallelism < 1) throw new Error("A team's parallelism is a whole number of at least 1.");
@@ -899,7 +904,7 @@ export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): Team
     ts: now,
     actor,
     type: "shape",
-    message: `Team shaped: ${shape.parallelism} side by side, review ${shape.review}${rationale ? ` — ${firstLine(rationale, MAX_RATIONALE_CHARS)}` : ""}`,
+    message: `Team shaped: ${shape.parallelism} side by side${typeof boxWidth === "number" && boxWidth < shape.parallelism ? ` (the box allows ${boxWidth} at once)` : ""}, review ${shape.review}${rationale ? ` — ${firstLine(rationale, MAX_RATIONALE_CHARS)}` : ""}`,
     payload: { parallelism: shape.parallelism, review: shape.review },
   });
   return board.shape;
@@ -930,7 +935,7 @@ export function setRepoMap(board: TeamBoard, actor: Actor, raw: unknown): RepoMa
 export function postTask(
   board: TeamBoard,
   actor: Actor,
-  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; role?: TaskRole },
+  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string },
 ): TeamTask {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "post_task", `Only the planner posts tasks; ${describeActor(actor)} may not.`);
   if (board.tasks.length >= MAX_TEAM_TASKS) throw new Error(`A team holds at most ${MAX_TEAM_TASKS} tasks.`);
@@ -945,8 +950,6 @@ export function postTask(
   const depends_on = [...new Set((input.depends_on ?? []).filter((d) => typeof d === "string" && TASK_ID_RE.test(d)))];
   const unknown = depends_on.filter((d) => !known.has(d));
   if (unknown.length) throw new Error(`A task depends on tasks that are not on the board: ${unknown.join(", ")}.`);
-  if (input.role !== undefined && !TASK_ROLES.includes(input.role)) throw new Error(`A task's role is ${TASK_ROLES.join(" or ")}.`);
-  const role = input.role === "bulk" ? { role: "bulk" as const } : {};
   const now = Date.now();
   const task: TeamTask = {
     task_id: `t${board.tasks.length + 1}`,
@@ -966,22 +969,21 @@ export function postTask(
     holds: 0,
     hold: null,
     ciReoffers: 0,
+    budgetReoffers: 0,
     created_at: now,
     updated_at: now,
-    ...role,
   };
   board.tasks.push(task);
   const note = (input.note ?? "").trim();
-  const bulk = task.role === "bulk" ? " (bulk)" : "";
   append(board, {
     ts: now,
     actor,
     type: "task",
     task_id: task.task_id,
     message: origin === "lead"
-      ? `Task ${task.task_id}${bulk} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
-      : `Task ${task.task_id}${bulk} posted: ${firstLine(description)}`,
-    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}), ...role },
+      ? `Task ${task.task_id} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
+      : `Task ${task.task_id} posted: ${firstLine(description)}`,
+    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}) },
   });
   return task;
 }
@@ -1146,6 +1148,27 @@ export function reopenForCi(board: TeamBoard, actor: Actor, taskId: string, note
   task.assigned_to = null;
   task.updated_at = now;
   append(board, { ts: now, actor, type: "ci", task_id: taskId, message: `Task ${taskId} re-offered for the pull request's failing checks: ${firstLine(notes)}` });
+  return task;
+}
+
+/**
+ * The team STOPPED a worker itself — held (paused) past RUN_BUDGET_MS with
+ * nobody resuming it — and offers the task once more: back to pending with
+ * the why as its notes, the system's (nobody judged the work), never against
+ * the task's two tries (`budgetReoffers`; the orchestrator offers it once).
+ * Its next worker reads the why as "a previous attempt was rejected".
+ */
+export function reopenAfterStop(board: TeamBoard, actor: Actor, taskId: string, notes: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "budget_reopen", `Only the system re-offers a task it stopped; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "in_progress") throw new Error(`Task ${taskId} is ${task.status}; only a task at work is re-offered after a stop.`);
+  const now = Date.now();
+  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.budgetReoffers += 1;
+  task.status = "pending";
+  task.assigned_to = null;
+  task.updated_at = now;
+  append(board, { ts: now, actor, type: "budget", task_id: taskId, message: `Task ${taskId} re-offered after the team stopped its worker: ${firstLine(notes)}` });
   return task;
 }
 

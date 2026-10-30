@@ -13,7 +13,7 @@
  * node is a role glyph, a short label, and its state twice — the colour of
  * its ring and the icon on its badge — so the chart reads without colour too.
  * The ones at work pulse (`ct-art-live`) and the edge into them flows
- * (`ct-art-flow`, stepped by CodingTeamTree's `useSteppedFlow`); both rules
+ * (`ct-art-flow`, stepped by `useSteppedFlow` in src/lib/coding-agent-flow.ts); both rules
  * live under `prefers-reduced-motion: no-preference`, so with motion off the
  * chart is the same chart, still.
  *
@@ -25,7 +25,7 @@
  * arrows while it is open. Escape closes it and gives focus back to the node.
  *
  * Nothing here polls. The chart is drawn from what its host already reads on
- * its own beat (the app's live poll, the Team card's) and redraws with it, so
+ * its own beat (the app's live poll, which the Team page draws from) and redraws with it, so
  * the open panel is as fresh as the page.
  */
 
@@ -53,11 +53,12 @@ import {
 } from "@/lib/coding-agent-graph";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
-import type { TeamTaskView, TeamView } from "./CodingTeamCard";
-import { useSteppedFlow } from "./CodingTeamTree";
+import { codingModelName } from "@/lib/coding-model-names";
+import type { TeamTaskView, TeamView } from "./CodingTeamPage";
+import { useSteppedFlow } from "@/lib/coding-agent-flow";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
-import CodingRunMessageBox from "./CodingRunMessageBox";
 import { BTN_DANGER, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
+import { dispatchOpenChat } from "@/lib/ui-events";
 
 /** What the chart and its panel read of a run — the app's own `Run` has all of it. */
 export interface DiagramRun extends GraphRun {
@@ -96,7 +97,7 @@ const PANEL_FILES = 6;
 
 /**
  * Each state's colour, over the app's dark ground: the product's coral for
- * work, the board's own tones for the rest (CodingTeamCard's STATUS_TONE).
+ * work, the board's own tones for the rest (CodingTeamPage's TEAM_STATUS_TONE).
  * Every one is a 300/400 tint, legible against the near-black window.
  */
 export const STATE_COLOR: Record<AgentState, string> = {
@@ -297,18 +298,37 @@ interface Props {
   header?: ReactNode;
   /** Inside a card of the host's already: no card of its own. */
   bare?: boolean;
+  /**
+   * The figure chips over the chart. Off for the solo run on its own page,
+   * whose figure tiles already hold the same numbers; a team chart keeps its
+   * task and role bars either way.
+   */
+  figures?: boolean;
+  /**
+   * The counted legend over the chart (what the colours mean). Off on the run
+   * page's helpers block (2026-10-30), where three nodes with their icons do
+   * not need a key and the legend was the widest line on a phone.
+   */
+  legend?: boolean;
+  /**
+   * The compact geometry whatever the width — home's Now cards (2026-10-30),
+   * where a team's chart is a glance at who is at work, sized to its content,
+   * and the full geometry would be a second rendering of the Team page's.
+   * The panel's beside/sheet choice still follows the measured width.
+   */
+  compact?: boolean;
   testId?: string;
   className?: string;
 }
 
-export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, testId = "coding-agent-diagram", className = "" }: Props) {
+export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, figures = true, legend = true, compact: forceCompact = false, testId = "coding-agent-diagram", className = "" }: Props) {
   const { t } = useT();
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const wrap = useRef<HTMLDivElement>(null);
   const svg = useRef<SVGSVGElement>(null);
   useSteppedFlow(svg);
   const width = useMeasuredWidth(wrap);
-  const compact = width > 0 && width < COMPACT_BELOW;
+  const compact = forceCompact || (width > 0 && width < COMPACT_BELOW);
 
   const lookup = useCallback(
     (id: string): DiagramRun | undefined => (source.kind === "run" && source.run.id === id ? source.run : runOf?.(id)),
@@ -367,20 +387,22 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
   const name = team ? firstLine(team.goal, 60) : source.kind === "run" ? firstLine(source.run.task, 60) : "";
 
   return (
-    <div ref={wrap} className={`${bare ? "" : `${CARD_SURFACE} px-4 py-3`} ${className}`} data-testid={testId} data-shape={graph.shape} data-layout={sheet ? "sheet" : "beside"}>
+    <div ref={wrap} className={`${bare ? "" : `${CARD_SURFACE} px-4 py-3`} ${className}`} data-testid={testId} data-shape={graph.shape} data-layout={sheet ? "sheet" : "beside"} data-compact={compact || undefined}>
       {header}
-      <DiagramFigures source={source} lookup={lookup} />
+      {figures && <DiagramFigures source={source} lookup={lookup} />}
       {/* What the colours mean, counted: the chart's own summary, and the words
           a state is never left without. */}
-      <ul className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-secondary)]" aria-label={t("codingAgent.diagram.legend")} data-testid={`${testId}-legend`}>
-        {counts.map(({ s, n }) => (
-          <li key={s} className="inline-flex items-center gap-1" data-state={s}>
-            <span className="material-symbols-rounded" style={{ fontSize: 13, color: STATE_COLOR[s] }} aria-hidden="true">{STATE_ICON[s]}</span>
-            <span>{t(`codingAgent.diagram.state.${s}`)}</span>
-            <span className="font-semibold text-[var(--text-primary)]">{n}</span>
-          </li>
-        ))}
-      </ul>
+      {legend && (
+        <ul className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-secondary)]" aria-label={t("codingAgent.diagram.legend")} data-testid={`${testId}-legend`}>
+          {counts.map(({ s, n }) => (
+            <li key={s} className="inline-flex items-center gap-1" data-state={s}>
+              <span className="material-symbols-rounded" style={{ fontSize: 13, color: STATE_COLOR[s] }} aria-hidden="true">{STATE_ICON[s]}</span>
+              <span>{t(`codingAgent.diagram.state.${s}`)}</span>
+              <span className="font-semibold text-[var(--text-primary)]">{n}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className={sheet ? "mt-3 flex flex-col gap-3" : "mt-3 flex items-start gap-4"}>
         <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain pb-1">
           <div
@@ -535,9 +557,24 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
  * chip said "0 turns" beside "5 files changed · 109k tokens" for the whole
  * length of the run. No number is the true answer until there is one; a run
  * that was resumed keeps the turns of the segments it has already finished.
+ * The run page's Steps tile asks the same question.
  */
-function turnsKnown(run: DiagramRun): boolean {
+export function turnsKnown(run: Pick<DiagramRun, "numTurns" | "status">): boolean {
   return (run.numTurns ?? 0) > 0 || !isLive(run.status);
+}
+
+/**
+ * "Opus 5.5 on Anthropic" — what a teammate runs on, from the board's cast
+ * list, on its panel. Its role is already the panel's title. Nothing on a
+ * board from before the fields were kept, or where the provider is not one
+ * the box knows.
+ */
+export function memberModelLine(t: Translate, m: { provider?: string | null; model?: string | null }): string | undefined {
+  if (!m.provider || !isCodingProvider(m.provider)) return undefined;
+  return t("codingAgent.memberModel", {
+    model: m.model ? codingModelName(m.model) : t("codingAgent.roleModelPlanDecides"),
+    provider: t(CODING_PROVIDER_NAME_KEY[m.provider]),
+  });
 }
 
 /** The chart's figures as chips and bars: how far the tasks are, what each role spent, how long it has been. Exported for the home's plain row of a lone run. */
@@ -639,7 +676,6 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
     if (sheet) panel.current?.scrollIntoView?.({ block: "nearest" });
   }, [sheet]);
   const { run, loading } = useRunRecord(node.runId, supplied, refreshKey);
-  const [messaging, setMessaging] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
   // A refused Stop says so where the owner is looking: above the buttons, and
@@ -665,6 +701,8 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
   const step = lines.length > 0 ? describeStep(t, lines[lines.length - 1]) : null;
   const files = run?.filesTouched ?? [];
   const openTarget = node.runId ?? node.parentRunId ?? null;
+  // What this member runs on, from the cast list — the one list of agents.
+  const modelLine = node.runId && team ? memberModelLine(t, team.runs?.find((r) => r.id === node.runId) ?? {}) : undefined;
 
   const stop = async () => {
     if (!run) return;
@@ -760,11 +798,12 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
         <p className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--text-primary)]" aria-live="polite" data-testid="coding-agent-node-panel-now">{nowLine}</p>
       </div>
 
-      {run && (
+      {(run || modelLine) && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)]" data-testid="coding-agent-node-panel-figures">
-          {turnsKnown(run) && <span className="rounded-full bg-white/[0.05] px-2 py-0.5" data-testid="coding-agent-node-panel-turns">{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>}
-          {(run.tokensUsed ?? 0) > 0 && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.team.metricTokens", { n: compactCount(run.tokensUsed ?? 0) })}</span>}
-          <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.diagram.files", { n: files.length })}</span>
+          {run && turnsKnown(run) && <span className="rounded-full bg-white/[0.05] px-2 py-0.5" data-testid="coding-agent-node-panel-turns">{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>}
+          {run && (run.tokensUsed ?? 0) > 0 && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.team.metricTokens", { n: compactCount(run.tokensUsed ?? 0) })}</span>}
+          {run && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.diagram.files", { n: files.length })}</span>}
+          {modelLine && <span className="rounded-full bg-white/[0.05] px-2 py-0.5 font-mono" data-testid="coding-agent-node-panel-model">{modelLine}</span>}
         </div>
       )}
 
@@ -844,10 +883,16 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
             {t("codingAgent.diagram.openRun")}
           </button>
         )}
+        {/* Steering goes through the chat (2026-10-30): the composer opens
+            with "Tell coding run <id>: " and the assistant delivers it with
+            coding_run_message — the text box this panel used to unfold is
+            gone, as is every other input in the app. Only for a session that
+            can still take a message, and never for the page's own run, whose
+            controls have the same button. */}
         {run && !isCurrent && holdsResumableSession(run.status) && (
-          <button type="button" className={BTN_SECONDARY} onClick={() => setMessaging((v) => !v)} aria-expanded={messaging} data-testid="coding-agent-node-panel-message">
+          <button type="button" className={BTN_SECONDARY} onClick={() => dispatchOpenChat({ draft: t("codingAgent.messageDraft", { id: run.id }) })} data-testid="coding-agent-node-panel-message">
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">chat</span>
-            {t("codingAgent.diagram.message")}
+            {t("codingAgent.messageInChat")}
           </button>
         )}
         {stoppable && (
@@ -857,7 +902,6 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
           </button>
         )}
       </div>
-      {messaging && run && <div className="mt-2"><CodingRunMessageBox runId={run.id} messages={run.messages} onSent={onChanged} /></div>}
     </section>
   );
 }

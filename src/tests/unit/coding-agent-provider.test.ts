@@ -67,6 +67,7 @@ import {
   defaultModelForProvider,
   isRecordableModel,
   modelsForProvider,
+  offeredProviders,
   resolveRunProvider,
   runsOnCodex,
 } from "@/lib/coding-provider";
@@ -176,6 +177,45 @@ describe("the vocabulary", () => {
     expect(resolveRunProvider("anthropic", "claude-opus-5", "clawbox-ai")).toEqual({
       ok: true, provider: "anthropic", model: "claude-opus-5",
     });
+  });
+});
+
+describe("what the panel is offered", () => {
+  // `status.providers` is what the settings panel draws — the account rows,
+  // the per-role selects and the OpenAI card. OpenAI runs on the Codex CLI,
+  // so on a box without it the row could only say "install the CLI": it is
+  // left out unless the owner already has the account (SCA A3, 2026-10-30).
+  const NONE = { codexInstalled: false, openaiConnected: false, connected: ["clawbox-ai"] as const, defaultProvider: "clawbox-ai" as const };
+
+  it("offers every provider on a box with the Codex CLI", () => {
+    expect(offeredProviders({ ...NONE, codexInstalled: true })).toEqual([...CODING_PROVIDERS]);
+  });
+
+  it("leaves OpenAI out on a box without the CLI that never asked for it, in the same order", () => {
+    expect(offeredProviders(NONE)).toEqual(["clawbox-ai", "anthropic"]);
+  });
+
+  it("keeps OpenAI where the owner already has it — a credential, the list, or the default", () => {
+    expect(offeredProviders({ ...NONE, openaiConnected: true })).toContain("openai");
+    expect(offeredProviders({ ...NONE, connected: ["clawbox-ai", "openai"] })).toContain("openai");
+    expect(offeredProviders({ ...NONE, defaultProvider: "openai" })).toContain("openai");
+  });
+
+  it("is what the status answers as providers, off the same readiness probe", async () => {
+    const lib = await import("@/lib/coding-agent");
+    getOpenAIConnection.mockResolvedValue({ ...OPENAI_OFF, codexInstalled: false });
+    configGetAll.mockResolvedValue({});
+    expect([...(await lib.getCodingAgentStatus()).providers]).toEqual(["clawbox-ai", "anthropic"]);
+    // The CLI arrives: offered on the next poll, nothing to restart.
+    getOpenAIConnection.mockResolvedValue(OPENAI_OFF);
+    expect([...(await lib.getCodingAgentStatus()).providers]).toEqual([...CODING_PROVIDERS]);
+    // Connected once, then the CLI went: still drawn, so the owner sees why it cannot run.
+    getOpenAIConnection.mockResolvedValue({ ...OPENAI_OFF, codexInstalled: false });
+    configGetAll.mockResolvedValue({ coding_agent_providers: ["clawbox-ai", "openai"] });
+    const status = await lib.getCodingAgentStatus();
+    expect(status.providers).toContain("openai");
+    expect(status.connectedProviders).toEqual(["clawbox-ai", "openai"]);
+    expect(status.readiness.providers.find((p) => p.id === "openai")!.problems.join(" ")).toMatch(/codex_cli/);
   });
 });
 

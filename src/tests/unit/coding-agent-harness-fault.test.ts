@@ -485,6 +485,50 @@ describe("a model error after the model has answered", () => {
   });
 });
 
+describe("the stderr tail of a harness that died with no result", () => {
+  it("leads with what ended a killed run, not the CLI's warning about the model string", async () => {
+    // run-1phttv83: exit 143 after 12.3M tokens, its work committed, and its
+    // whole error was '[claude-code:unrecognized_model] {…}' — the warning
+    // the CLI prints at start, true of a run that then worked for hours.
+    const lines = [INIT, answer([{ type: "text", text: "Looking around first." }], { input_tokens: 4_000, output_tokens: 120 })]
+      .map((l) => `'${l.replace(/'/g, "'\\''")}'`).join(" ");
+    installWrapper([
+      `printf '%s\\n' ${lines}`,
+      `echo '${UNRECOGNIZED}' >&2`,
+      "exit 143",
+    ].join("\n"));
+    enableAgent();
+    makeProject("site");
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.exitCode).toBe(143);
+    expect(run.error).toMatch(/^Claude Code was killed \(exit 143\) after [\d,]+ tokens\./);
+    expect(run.error).not.toContain("unrecognized_model");
+    // Not a harness fault, and not retried: a model answered this spawn.
+    expect(run.retries).toBe(0);
+    expect(run.failureKind).toBeNull();
+    expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeFalsy();
+  });
+
+  it("keeps that line when no model answered — the fault and the retry read it", async () => {
+    installWrapper([
+      `printf '%s\\n' '${INIT}'`,
+      `echo '${UNRECOGNIZED}' >&2`,
+      "exit 1",
+    ].join("\n"));
+    enableAgent();
+    makeProject("site");
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(1);
+    expect(run.failureKind).toBe("harness_not_ready");
+    expect(run.error).toContain("deepseek-v4-pro[1m]");
+    expect(run.error).not.toContain("was killed");
+  });
+});
+
 describe("the pre-flight check", () => {
   it("refuses the next run before spawning it, rather than after it dies", async () => {
     // The whole point. Before this, a box in this state produced a column of

@@ -124,7 +124,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Publishing to the ClawBox Store (`app_publish`) | when the owner switched the coding agent on | same |
-| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
+| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
 | Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
@@ -371,6 +371,17 @@ with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 `app_uninstall` · `webapp_create` · `webapp_update` · `code_project_init` ·
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
+
+`ui_open_app` takes, for the `coding` app only, one of `run_id`, `team_id` or
+`project_id`: the desktop opens the Coding Agent ON that run's page, that
+team, or that project's page (the ring's `open_app` carries a `target`;
+page.tsx hands the id to the app the way the chat's cards do). "Show me the
+run" is one call. `ui_open_card({ card: "new_app", project_id?, team? })`
+opens the chat's "A new app for your desktop" card for the user to fill in —
+`project_id` is the project's absolute folder, `team: true` switches the card
+to a coding team — and the request arrives as their next message; use it when
+the user wants a new app or a change and has not said the details, instead of
+asking several questions.
 
 An app `webapp_create` or `code_project_build` puts on the desktop without an
 icon gets one drawn by ClawBox AI's image model when the box is linked — after
@@ -746,7 +757,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
 `coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
-`coding_project_status` · `coding_secret_list`
+`coding_project_status` · `coding_project_import` · `coding_secret_list`
 
 | Tool | What it does |
 |---|---|
@@ -756,8 +767,9 @@ unnoticed is how a device ends up in a posture nobody chose.
 | `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
 | `coding_agent_resume` | The Resume button, for a `paused` or `gave_up` run the AGENT started — optionally telling it something first (`message`). |
 | `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. A queued run is not stopped: taking it out of the queue is the owner's. |
-| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs and pipeline default. |
+| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
+| `coding_project_import` | Bring an EXISTING project into the owner's project folder, only when the user asks: clone one of their GitHub repositories (`github_repo`, owner/name) or copy a folder on the box (`directory`, under the owner's home; `node_modules` left behind). Nothing is merged or overwritten; the reply ends `project_id: <id>`. The route's refusals come back typed — `exists`, `no_gh`/`not_connected` (connect GitHub in Settings), `refused` (outside the home, a credential store, the checkout), `too_big`/`no_space`. This replaced the app's Import panel on 2026-10-30; the app carries no inputs. |
 
 `app_publish` sits behind the same switch: it publishes one of the owner's
 projects that carries a `clawbox.json` to the ClawBox Store, through
@@ -877,7 +889,7 @@ shell tool, not less and not more:
   stays with the main loop, whose edits are what the record, the review
   pass and the commit see. A workflow counts as one helper of type
   `workflow` on the run record, billed live from its task_progress totals
-  so the owner's token ceiling holds during a fan-out; the Agent tool's
+  so the record's spend is current during a fan-out; the Agent tool's
   helpers are background tasks too on the installed CLI (2.1.259), kept
   "active" until their task_notification rather than their launch receipt,
   and a refused launch is taken back out of the counts;
@@ -902,8 +914,8 @@ shell tool, not less and not more:
   stored default project folder is used — the same fallback the run route
   documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
-  200 turns by default (10–2000), an optional token ceiling the device itself
-  enforces, an explicit environment (no session secret, no service tokens),
+  200 turns by default (10–2000), no token ceiling (the device-side one went
+  in SCA A2), an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it;
 - **`completed` means the DELIVERABLE exists** wherever a run HAS one, rather
@@ -916,13 +928,13 @@ shell tool, not less and not more:
   where one was possible, so the implication steps aside when the box recorded
   that its own pull-request flow could not run (no repository to branch, or
   `pr.phase === "failed"`), since nudging the harness for a pull request the
-  DEVICE cannot open would spend every attempt on the one thing the harness
-  cannot fix. When the check fails
-  the device resumes the run IN ITS OWN SESSION with a nudge naming what is
-  missing, up to `coding_agent_completion_attempts` (default 3, the run's own
-  first turn counted as one), and then settles it as `gave_up` — a status of
-  its own, because the session is intact and Resume is what helps, where
-  `failed` means the harness could not finish at all. `coding_agent_status`
+  DEVICE cannot open would hold the run to the one thing the harness cannot
+  fix. When the check fails the device settles the run as `gave_up` — a
+  status of its own, because the session is intact and Resume is what helps,
+  where `failed` means the harness could not finish at all. The box never
+  spends a second go unasked (the automatic completion-attempt loop went in
+  SCA A2): the owner's Resume carries on IN THE RUN'S OWN SESSION with a
+  nudge naming what is missing. `coding_agent_status`
   reports the bar, the verdict and the attempts, and says plainly not to start
   a fresh run for a `gave_up` one. There is deliberately no `command`
   deliverable on this tool surface: that kind has the box RUN something, which
@@ -941,8 +953,8 @@ status. What each row field means:
   reason>`, `merged into <base>`, `files removed; the work is kept on branch …`,
   or `removed with its branch — the run left nothing on it`. Bringing a branch
   home (`POST …/merge`) is the OWNER's button and refuses this bearer.
-- `attempts` — goes at the deliverable, the run's own first turn counted, out of
-  `coding_agent_completion_attempts`; `deliverable.met` is the device's verdict
+- `attempts` — goes at the deliverable, the run's own first turn counted, the
+  owner's Resumes after it; `deliverable.met` is the device's verdict
   and `missing` its reason — never a `command` deliverable's output, for the
   reason `coding_agent_status` withholds it.
 - `paused_because` — `paused on purpose`, or which allowance is used up and when
@@ -979,6 +991,17 @@ gesture, and stopping already covers ending a run.
 
 `coding_team_run` · `coding_team_status` · `coding_team_stop`
 
+A team the assistant starts shows up in the user's chat as a CARD — live, then
+settled — and so does every `coding_agent_run`; the two start tools say so in
+their prose ("the chat shows this as a card … do not describe progress yourself
+and do not poll") and are the only two tools whose result carries MCP
+`structuredContent` (`{ kind: "coding_run" | "coding_team", id, projectId,
+directory, title, status: "running" | "queued", queuePosition? }`), so a chat
+client can draw its own card without parsing the sentence. `coding_team_status`
+without a `team_id` lists `phase`, `tasks_done`, `tasks_total` and `pr_number`
+beside the older fields; with one, its closing line says the chat shows the
+team's card and not to paste the task list unless asked.
+
 The multi-agent shape of the coding agent (`src/lib/coding-team.ts`): one
 GOAL, a **planner** (a read-only run on the tier model whose final message
 must be a JSON array of tasks), **workers** (one ordinary run per task, each
@@ -988,7 +1011,8 @@ team's branch, up to `MAX_TEAM_WORKERS` (3) while the box has the memory,
 each merged home as it settles; a merge git cannot do alone is aborted and
 the task offered once more from the merged state; a code project keeps one
 worker at a time, in place), a **reviewer** (the v0 rule first — a refused
-action or a stray file rejects without a model — then a read-only run on
+write rejects without a model; a file outside the task's hint is a note the
+reviewer is told of — then a read-only run on
 the merged work that answers `{verdict, notes}`; a reviewer that gives no
 verdict is an alert and an acceptance by rule, never a silent pass), all on
 a **shared blackboard**
@@ -996,8 +1020,11 @@ a **shared blackboard**
 may not send — only the planner posts tasks, only the assigned worker moves
 one or submits a result, only the reviewer rules, only the owner stops — and
 logs every accepted message and every refusal (the audit trail). A worker
-that hit a permission denial or strayed outside its files raises an ALERT;
-three alerts stop the team. A reviewer the box has no room for yet waits
+refused a WRITE raises an ALERT (a refused read, or a file beside the
+task's hinted files, is a note); three alerts stop the team. A live worker
+has no wall clock — its idle timeout and the owner's ceilings bound it; one
+paused for an hour with nobody resuming it is stopped and its task offered
+once more. A reviewer the box has no room for yet waits
 for room rather than being skipped; one that cannot start at all (another
 run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans
@@ -1006,14 +1033,21 @@ several parts; `coding_agent_run` is still the tool for one focused change.
 and result — and for a pending one what it is waiting for, or why it was
 held — the alerts, the team's branch, its pull request, `agents` (planner,
 workers, reviewers, total — who worked), and what to tell the user; `log: 1`
-adds the last lines of the audit log. A task starts only once every
+adds the last lines of the audit log, and `wait_seconds` blocks until the
+team settles (up to two minutes, like `coding_agent_status`) for a user who
+asked to wait. Otherwise the assistant does NOT poll: the box tells the owner
+ONCE when a team settles — a desktop notice and the Telegram message, never
+one per member run — and on OpenClaw posts `[Coding team <id>] finished` into
+the main chat; a Hermes box has no way into its chat, so there the tool says
+to look again only when the user asks. A task starts only once every
 `depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
 reopened after a dependent started HOLDS the dependent — its worker stopped
 or its result set aside — said on the board, and it runs again on the new
 merged state. A team's runs never merge or push (`gh pr merge`, `gh api`,
-`git push` are refused to them); when the goal asks for a pull request the
-ORCHESTRATOR opens it once every task is accepted, the suite is green and the
-final review passed, re-offers the tasks a red CI points at (two rounds at
+`git push` are refused to them); when the goal asks for a pull request (and
+never when it says not to: "do not open a PR" is honoured as "do not merge"
+is) the ORCHESTRATOR opens it once every task is accepted, the suite is green
+and the final review passed, re-offers the tasks a red CI points at (two rounds at
 most) and merges only when the goal asks and every check passes. A second
 team is QUEUED behind the one working (`queue_position` in the list; the
 owner alone cancels one) and starts by itself, after a restart too. Every agent is a coding run, so the sandbox and
@@ -1024,9 +1058,8 @@ What a team COSTS is on its answer too. The planner and the reviewers (and
 the lead) run on the provider's cheaper model — `claude-sonnet-5` on
 Anthropic, `gpt-5.6-luna` on OpenAI, the plan's `deepseek-v4-flash` on ClawBox
 AI — at no more than
-`xhigh` effort; workers keep the owner's model and effort, and so does bulk
-work (a worker's token-heavy, non-critical task) until the owner says
-otherwise; the owner may pick the provider, the model and the effort per role
+`xhigh` effort; workers keep the owner's model and effort; the owner may pick
+the provider, the model and the effort per role
 in the Coding Agent settings (`coding_agent_role_models`,
 `src/lib/coding-role-models.ts`). The planner's
 plan carries a `repo_map` (files, entry points, test commands, gotchas) that
@@ -1301,7 +1334,6 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Owner's only | Route(s) | Why |
 |---|---|---|
 | Coding agent switch and settings, secrets, permissions, Anthropic/GitHub sign-in, reset | `coding-agent/enable`, `secrets`, `permissions`, `anthropic`, `github-login`, `reset` | consent to a delegated shell and to the owner's credentials |
-| Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
 | The file tree's writes, project import/delete | `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |

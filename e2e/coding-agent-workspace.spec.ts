@@ -3,7 +3,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 
 // The Coding Agent app's project page and run page, on a real desktop against
 // a mocked device: a project's files and changes beside its runs (the Claude
-// Code web layout), the one breadcrumb every page but home carries, the
+// Code web layout), the one header row every page carries, the
 // browser preview folded above a live run's terminal, the timeline, and
 // the window with both. The routes the workspace reads are answered here
 // rather than in the shared helper, because this is the only spec that walks
@@ -99,7 +99,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("a project's page carries its files and changes, and a run's page its breadcrumb, browser preview and live view", async ({ page }) => {
+test("a project's page carries its activity, its files read-only and its changes, and a run's page its header, browser preview and live view", async ({ page }) => {
   saves.length = 0;
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
@@ -115,38 +115,45 @@ test("a project's page carries its files and changes, and a run's page its bread
 
   // The project page: the git line, then the workspace.
   await expect(win.getByTestId("coding-agent-project-page")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-breadcrumb")).toContainText("My Site");
+  await expect(win.getByTestId("coding-agent-header")).toContainText("My Site");
   await expect(win.getByTestId("coding-agent-git-info")).toContainText("main");
-  await expect(win.getByTestId("coding-agent-project-copy")).toContainText(PROJECT.directory);
-  // The page opens on its team (the agents first); the runs and the files
-  // are one tab away.
-  await expect(win.getByTestId("coding-agent-workspace-team")).toHaveAttribute("aria-selected", "true");
+  // The page opens on its Activity (teams and runs, one list); the files
+  // and the changes are one tab away, and nothing on the page is an input.
+  await expect(win.getByTestId("coding-agent-workspace-runs")).toHaveAttribute("aria-selected", "true");
+  await expect(win.getByTestId("coding-agent-project-page").locator("input, textarea, select")).toHaveCount(0);
   await win.getByTestId("coding-agent-workspace-files").click();
+  // The folder is text in the Files header — no copy button, no input.
+  await expect(win.getByTestId("coding-agent-project-path")).toContainText(PROJECT.directory);
   const tree = win.getByTestId("coding-agent-file-tree");
   await expect(tree.getByTestId("coding-agent-tree-src")).toBeVisible();
   await tree.getByTestId("coding-agent-tree-src").click();
   await expect(tree.getByTestId("coding-agent-tree-src/app.js")).toBeVisible();
   await tree.getByTestId("coding-agent-tree-index.html").click();
   await expect(win.getByTestId("coding-agent-file-view")).toContainText("<p>there</p>");
-  // The file opens in the editor, coloured as HTML; an edit is saved through the route's PUT.
+  // The file opens READ-ONLY, coloured as HTML: no textarea, no Save — the
+  // Files app edits (Open in Files), and the tree route's PUT is never sent.
   const editor = win.getByTestId("coding-agent-file-editor");
   await expect(editor).toHaveAttribute("data-language", "markup");
   await expect(editor.locator(".tok-tag").first()).toBeVisible();
-  const input = win.getByTestId("coding-agent-file-editor-input");
-  await input.fill("<h1>Hi</h1>\n<p>edited</p>\n");
-  await expect(win.getByTestId("coding-agent-file-view")).toHaveAttribute("data-dirty", "true");
-  await win.getByTestId("coding-agent-file-save").click();
-  await expect(win.getByTestId("coding-agent-file-saved")).toBeVisible();
-  expect(saves).toEqual([{ projectId: null, directory: PROJECT.directory, file: "index.html", content: "<h1>Hi</h1>\n<p>edited</p>\n" }]);
+  await expect(win.getByTestId("coding-agent-file-editor-input")).toHaveCount(0);
+  await expect(win.getByTestId("coding-agent-file-save")).toHaveCount(0);
+  await expect(win.getByTestId("coding-agent-open-in-files")).toBeVisible();
+  expect(saves).toEqual([]);
 
+  // Changes: the working tree while the run works, stepped with Newer / Older
+  // rather than a picker.
   await win.getByTestId("coding-agent-workspace-changes").click();
   await expect(win.getByTestId("coding-agent-change-totals")).toContainText("Files changed: 1");
+  await expect(win.getByTestId("coding-agent-change-label")).toContainText("Uncommitted changes");
+  await expect(win.getByTestId("coding-agent-change-newer")).toBeDisabled();
+  await expect(win.getByTestId("coding-agent-change-older")).toBeEnabled();
+  await expect(win.getByTestId("coding-agent-change-picker")).toHaveCount(0);
   await win.getByTestId("coding-agent-change-index.html").click();
   const diff = win.getByTestId("coding-agent-diff");
   await expect(diff).toContainText("+<h1>Hi</h1>");
   await expect(diff.locator("[data-diff-line=del]")).toHaveText("-<h1>Hello</h1>");
 
-  // The run, from the project's own list — the Runs tab.
+  // The run, from the project's own list — the Activity tab.
   await win.getByTestId("coding-agent-workspace-runs").click();
   await win.getByTestId("coding-agent-details-run-e2e00001").click();
   const runPage = win.getByTestId("coding-agent-run-page");
@@ -161,12 +168,11 @@ test("a project's page carries its files and changes, and a run's page its bread
   await win.getByTestId("coding-agent-live-tab-browser").click();
   await expect(win.getByTestId("coding-agent-browser-preview")).toBeVisible();
   await expect(win.getByTestId("coding-agent-open-vnc")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-run-rail")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-run-live-view")).toHaveCount(0);
 
-  // Back leads to the project, and the first crumb home.
+  // The header names the project; its arrow leads to the project, and the
+  // project page's arrow home.
   await win.getByTestId("coding-agent-run-back").click();
   await expect(win.getByTestId("coding-agent-project-page")).toBeVisible();
-  await win.getByTestId("coding-agent-crumb-projects").click();
+  await win.getByTestId("coding-agent-project-back").click();
   await expect(win.getByTestId("coding-agent-project-site")).toBeVisible();
 });

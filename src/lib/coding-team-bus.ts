@@ -20,14 +20,12 @@
 import {
   type Actor,
   type ReviewMode,
-  type TaskRole,
   type TeamBoard,
   type TeamPr,
   type TeamTask,
   type UndeliveredNote,
   BoardAccessError,
   REVIEW_MODES,
-  TASK_ROLES,
   assignTask,
   holdTask,
   postMessage,
@@ -36,6 +34,7 @@ import {
   raiseAlert,
   recordFinalReview,
   recordTeamPr,
+  reopenAfterStop,
   reopenForCi,
   retireTask,
   reviewTask,
@@ -48,9 +47,9 @@ import {
 import { MAX_TEAM_MESSAGE_CHARS, NOTED_REFUSALS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
 
 export type TeamMessage =
-  /** `role: "bulk"`: a token-heavy, non-critical task, whose worker starts on the bulk role's model. */
-  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; role?: TaskRole }
-  | { type: "shape"; parallelism: number; review: ReviewMode; rationale: string }
+  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string }
+  /** The planner sizes the team; `box_width` is how many runs the box allows at once, for the log line (setShape). */
+  | { type: "shape"; parallelism: number; review: ReviewMode; rationale: string; box_width?: number }
   /** The planner's map of what the goal touches (setRepoMap): every worker and reviewer is handed it. */
   | { type: "repo_map"; files: string[]; entry_points: string[]; test_commands: string[]; gotchas: string[] }
   | { type: "assign"; task_id: string; worker_id: string }
@@ -62,6 +61,8 @@ export type TeamMessage =
   | { type: "hold"; task_id: string; dependency: string; reason: string }
   /** The team's pull request came back red: the system re-offers a task its failure points at (reopenForCi). */
   | { type: "ci_reopen"; task_id: string; notes: string }
+  /** The team stopped a worker held past its budget: the system re-offers the task once (reopenAfterStop). */
+  | { type: "budget_reopen"; task_id: string; notes: string }
   /** The system records where the team's pull request stands (recordTeamPr). */
   | { type: "pr"; pr: TeamPr; note: string }
   | { type: "final_review"; verdict: "accepted" | "rejected"; notes: string }
@@ -98,12 +99,12 @@ export function validateMessage(m: unknown): string | null {
       if (msg.files_hint !== undefined && (!Array.isArray(msg.files_hint) || !msg.files_hint.every((f) => typeof f === "string"))) return "files_hint must be a list of paths.";
       if (msg.origin !== undefined && msg.origin !== "plan" && msg.origin !== "lead") return "A task's origin is plan or lead.";
       if (msg.note !== undefined && typeof msg.note !== "string") return "A task's note must be text.";
-      if (msg.role !== undefined && !(TASK_ROLES as readonly unknown[]).includes(msg.role)) return `A task's role is ${TASK_ROLES.join(" or ")}.`;
       return null;
     case "shape":
       if (typeof msg.parallelism !== "number" || !Number.isInteger(msg.parallelism) || msg.parallelism < 1) return "A shape's parallelism is a whole number of at least 1.";
       if (!(REVIEW_MODES as readonly unknown[]).includes(msg.review)) return `A shape's review is ${REVIEW_MODES.join(", ")}.`;
       if (typeof msg.rationale !== "string") return "A shape needs its rationale (may be empty).";
+      if (msg.box_width !== undefined && (typeof msg.box_width !== "number" || !Number.isInteger(msg.box_width) || msg.box_width < 1)) return "A shape's box_width is a whole number of at least 1.";
       return null;
     case "repo_map":
       for (const field of ["files", "entry_points", "test_commands", "gotchas"]) {
@@ -118,6 +119,10 @@ export function validateMessage(m: unknown): string | null {
     case "ci_reopen":
       if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A CI re-offer needs a task_id.";
       if (typeof msg.notes !== "string" || !msg.notes.trim()) return "A CI re-offer needs the failure as its notes.";
+      return null;
+    case "budget_reopen":
+      if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A re-offer after a stop needs a task_id.";
+      if (typeof msg.notes !== "string" || !msg.notes.trim()) return "A re-offer after a stop needs the why as its notes.";
       return null;
     case "pr": {
       const pr = msg.pr as Record<string, unknown> | undefined;
@@ -203,7 +208,7 @@ export class TeamBus {
     try {
       switch (message.type) {
         case "task": task = postTask(this.board, actor, message); break;
-        case "shape": setShape(this.board, actor, { parallelism: message.parallelism, review: message.review, rationale: message.rationale }); break;
+        case "shape": setShape(this.board, actor, { parallelism: message.parallelism, review: message.review, rationale: message.rationale }, message.box_width); break;
         case "repo_map": setRepoMap(this.board, actor, { files: message.files, entry_points: message.entry_points, test_commands: message.test_commands, gotchas: message.gotchas }); break;
         case "assign": task = assignTask(this.board, actor, message.task_id, message.worker_id); break;
         case "status_update": task = updateStatus(this.board, actor, message.task_id, message.status); break;
@@ -212,6 +217,7 @@ export class TeamBus {
         case "retire": task = retireTask(this.board, actor, message.task_id, message.reason); break;
         case "hold": task = holdTask(this.board, actor, message.task_id, message.dependency, message.reason); break;
         case "ci_reopen": task = reopenForCi(this.board, actor, message.task_id, message.notes); break;
+        case "budget_reopen": task = reopenAfterStop(this.board, actor, message.task_id, message.notes); break;
         case "pr": recordTeamPr(this.board, actor, message.pr, message.note); break;
         case "final_review": recordFinalReview(this.board, actor, message.verdict, message.notes); break;
         case "alert": raiseAlert(this.board, actor, message.reason, message.task_id); break;

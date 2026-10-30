@@ -82,11 +82,6 @@ const CODING_STATUS = {
   effort: "ultracode",
   effortLevels: ["low", "max", "ultracode"],
   subagents: true,
-  maxTurns: 150,
-  minMaxTurns: 10,
-  maxMaxTurns: 2000,
-  tokenLimit: null,
-  minTokenLimit: 10_000,
   reviewPass: true,
 } as unknown as AgentStatus;
 

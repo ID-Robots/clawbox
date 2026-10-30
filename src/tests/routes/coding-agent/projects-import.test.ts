@@ -1,9 +1,11 @@
 /**
  * POST /setup-api/coding-agent/projects/import and
  * GET /setup-api/coding-agent/github-repos — the doors in front of
- * project-import.ts. Owner-only (the agent's bearer is refused), and the
- * import our page only: it writes into the owner's folder with the owner's
- * GitHub credential.
+ * project-import.ts. A signed-in person or the agent's own bearer (since
+ * 2026-10-30 the import is a sentence to the assistant — `coding_project_import`
+ * — the app's Import panel having gone), and for a browser our page only: it
+ * writes into the owner's folder with the owner's GitHub credential. The
+ * repository LISTING stays the owner's alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
@@ -60,11 +62,17 @@ afterEach(() => {
 });
 
 describe("the import's gates", () => {
-  it("refuses the agent's bearer and no session at all", async () => {
-    expect((await POST(post({ source: "folder", path: "/x" }, { bearer: MCP_TOKEN }))).status).toBe(403);
-    expect(await (await POST(post({ source: "folder", path: "/x" }, { bearer: MCP_TOKEN }))).json()).toMatchObject({ kind: "owner_only" });
+  it("refuses no credential at all, and a bearer that is not the box's own", async () => {
     expect((await POST(post({ source: "folder", path: "/x" }))).status).toBe(403);
+    expect(await (await POST(post({ source: "folder", path: "/x" }))).json()).toMatchObject({ kind: "owner_only" });
+    expect((await POST(post({ source: "folder", path: "/x" }, { bearer: "not-the-token-0123456789abcdef" }))).status).toBe(403);
     expect(importFolder).not.toHaveBeenCalled();
+  });
+
+  it("admits the agent's own bearer — the import is the assistant's tool now — with no Origin to check", async () => {
+    const res = await POST(post({ source: "github", repo: "yalexx/old-site" }, { bearer: MCP_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(importGitHubRepo).toHaveBeenCalledWith({ fullName: "yalexx/old-site", projectsRoot: "/home/clawbox/Projects" });
   });
 
   it("refuses another site's page, even with the owner's cookie", async () => {

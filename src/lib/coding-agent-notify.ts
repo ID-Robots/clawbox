@@ -42,6 +42,7 @@ import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
+import type { TeamBoard } from "@/lib/coding-team-board";
 import { formatResetClock } from "@/lib/anthropic-limit";
 import { OPEN_ANTHROPIC_ACCOUNTS_SETTINGS } from "@/lib/notify-action";
 
@@ -238,6 +239,21 @@ export async function codingAgentTelegramOff(): Promise<"env" | "pref" | null> {
   return null;
 }
 
+/** The Telegram leg of a finish notice, behind the owner's switch; never throws. */
+async function notifyTelegramUnlessOff(what: string, message: string): Promise<void> {
+  try {
+    const off = await codingAgentTelegramOff();
+    if (off) {
+      const by = off === "env" ? CODING_AGENT_TELEGRAM_ENV : `the ${CODING_AGENT_TELEGRAM_PREF} preference`;
+      console.info(`[coding-agent] telegram notice for ${what} switched off by ${by}; desktop notice only`);
+      return;
+    }
+    await notifyTelegram(message);
+  } catch (err) {
+    console.error("[coding-agent] telegram notice failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 /**
  * Fire both legs. Never throws; never blocks the caller on Telegram (the
  * Hermes CLI path alone can take seconds), which is why it is `void`ed from
@@ -246,17 +262,69 @@ export async function codingAgentTelegramOff(): Promise<"env" | "pref" | null> {
 export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
   await notifyDesktop(run, message);
-  try {
-    const off = await codingAgentTelegramOff();
-    if (off) {
-      const by = off === "env" ? CODING_AGENT_TELEGRAM_ENV : `the ${CODING_AGENT_TELEGRAM_PREF} preference`;
-      console.info(`[coding-agent] telegram notice for ${run.id} switched off by ${by}; desktop notice only`);
-      return;
-    }
-    await notifyTelegram(message);
-  } catch (err) {
-    console.error("[coding-agent] telegram notice failed:", err instanceof Error ? err.message : err);
+  await notifyTelegramUnlessOff(run.id, message);
+}
+
+/**
+ * A coding TEAM's notice: ONE per team, when it settles, and none from its
+ * member runs (coding-agent.ts sends no run notice while `run.team` is set).
+ * A team of five used to put five run cards on the desktop and say nothing
+ * about the team, so the assistant built itself a cron watcher per team.
+ *
+ * The same rule as the run's text, and the same reason: a fixed template
+ * with the status, the task counts and the branch the box itself named —
+ * never the goal, a task, a result, a review's notes or `board.error`, every
+ * one of which carries a model's words. Exported so the test can pin that.
+ */
+export function buildTeamAnnouncement(board: TeamBoard): string {
+  const where = board.projectId ? `project "${board.projectId}"` : "its folder";
+  // A retired task will never be done: counted, a finished team reads as unfinished.
+  const tasks = board.tasks.filter((t) => t.status !== "retired");
+  const done = tasks.filter((t) => t.status === "complete").length;
+  const notDone = tasks.filter((t) => t.status === "failed" || t.status === "rejected").length;
+  const counts = `${done} of ${tasks.length} task${tasks.length === 1 ? "" : "s"} done`
+    + (notDone > 0 ? `, ${notDone} failed` : "")
+    + (board.branch ? `, on branch ${board.branch}` : "")
+    + (board.pr ? `, pull request #${board.pr.number}` : "");
+  switch (board.status) {
+    case "done":
+      return `Coding team ${board.id} finished in ${where} (${counts}). Ask your assistant for the summary, or open the Coding Agent app.`;
+    case "stopped":
+      return `Coding team ${board.id} in ${where} was stopped (${counts}). What it merged is still there — open the Coding Agent app to see.`;
+    default:
+      return `Coding team ${board.id} in ${where} did not finish (${counts}). Open the Coding Agent app for the reason.`;
   }
+}
+
+/**
+ * The team's notice, both legs; never throws. On the desktop it is a
+ * `coding_team settled` ring action — the same top-right FINISH CARD a run
+ * gets, with an Open button that hands the app the team's id
+ * (`handoffCodingTeam`) — named after the team so a desktop that sees it
+ * twice shows it once. It used to be a plain toast, because the finish card
+ * could only hand over a run id; the chat's cards and the team hand-off made
+ * the card the right shape (2026-10-30).
+ */
+export async function announceCodingTeam(board: TeamBoard): Promise<void> {
+  const message = buildTeamAnnouncement(board);
+  // A retired task will never be done; counted, a finished team read as unfinished.
+  const tasks = board.tasks.filter((t) => t.status !== "retired");
+  try {
+    await pushPendingAction({
+      type: "coding_team",
+      phase: "settled",
+      teamId: board.id,
+      projectId: board.projectId,
+      status: board.status,
+      tasksDone: tasks.filter((t) => t.status === "complete").length,
+      tasksTotal: tasks.length,
+      ...(board.pr ? { prNumber: board.pr.number } : {}),
+      message: message.slice(0, MAX_TOAST_CHARS),
+    }, `coding-team:${board.id}`);
+  } catch (err) {
+    console.error("[coding-team] desktop notice failed:", err instanceof Error ? err.message : err);
+  }
+  await notifyTelegramUnlessOff(board.id, message);
 }
 
 /**

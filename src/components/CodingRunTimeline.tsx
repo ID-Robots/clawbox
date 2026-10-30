@@ -46,7 +46,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   startedWith: "codingAgent.stepStartedWith",
   continuing: "codingAgent.stepContinuing",
   thinking: "codingAgent.stepThinking",
-  tokenLimit: "codingAgent.stepTokenLimit",
   subagentStarted: "codingAgent.stepSubagentStarted",
   subagentFinished: "codingAgent.stepSubagentFinished",
   subagentRefused: "codingAgent.stepSubagentRefused",
@@ -63,6 +62,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   reattached: "codingAgent.stepReattached",
   startingFresh: "codingAgent.stepStartingFresh",
   noRepository: "codingAgent.stepNoRepository",
+  notRepositoryRoot: "codingAgent.stepNotRepositoryRoot",
   worktree: "codingAgent.stepWorktree",
   worktreeMerged: "codingAgent.stepWorktreeMerged",
   worktreeRemoved: "codingAgent.stepWorktreeRemoved",
@@ -102,7 +102,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   ownerEndedLeftovers: "codingAgent.stepOwnerEndedLeftovers",
   deliverableMet: "codingAgent.stepDeliverableMet",
   deliverableMissing: "codingAgent.stepDeliverableMissing",
-  anotherAttempt: "codingAgent.stepAnotherAttempt",
   droppedSteps: "codingAgent.stepDropped",
   secretsInjected: "codingAgent.stepSecretsInjected",
   secretsUnreadable: "codingAgent.stepSecretsUnreadable",
@@ -119,17 +118,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   messageMidTurn: "codingAgent.stepMessageMidTurn",
   messageToRun: "codingAgent.stepMessageToRun",
   teamMessageToAssistant: "codingAgent.stepTeamMessageToAssistant",
-  pipelineReview: "codingAgent.stepPipelineReview",
-  pipelineImprovement: "codingAgent.stepPipelineImprovement",
-  pipelineDeployPreview: "codingAgent.stepPipelineDeployPreview",
-  pipelineDeployProduction: "codingAgent.stepPipelineDeployProduction",
-  pipelineVerifyPreview: "codingAgent.stepPipelineVerifyPreview",
-  pipelineVerifyProduction: "codingAgent.stepPipelineVerifyProduction",
-  pipelineVerified: "codingAgent.stepPipelineVerified",
-  pipelineWaitingOwner: "codingAgent.stepPipelineWaitingOwner",
-  pipelineResumed: "codingAgent.stepPipelineResumed",
-  pipelineComplete: "codingAgent.stepPipelineComplete",
-  pipelineStopped: "codingAgent.stepPipelineStopped",
 };
 
 /**
@@ -179,7 +167,7 @@ export interface StartedOn {
 }
 
 /**
- * The first step as "Started with Opus 5.5 on Anthropic (Bulk work)" — or
+ * The first step as "Started with Sonnet 5 on Anthropic (Reviewer)" — or
  * null where the record cannot say more than the line does (no provider on a
  * record from before the field), and the plain step label stands.
  */
@@ -242,8 +230,8 @@ interface Props {
   startedAt?: number;
   /** The run is still going: the newest step is the one happening now. */
   live: boolean;
-  /** While live: the chat card's "Coding agent working" line — the dots, the tokens, the clock. */
-  working?: { label: string; busy: string; tokens?: string; duration?: string };
+  /** While live: the chat card's "Coding agent working" line — the dots alone; the figures are the rail's. */
+  working?: { label: string; busy: string };
   /** Inside another card (the live card's Timeline tab): no card of its own. */
   embedded?: boolean;
   /** A settled run's log: a card folded to its heading, opened on a click. */
@@ -328,7 +316,8 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
         {t("codingAgent.timelineTitle")}
         <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{lines.length}</span>
         {live && working && (
-          // The chat card's own sign of life, with the same figures beside it.
+          // The chat card's own sign of life. No figures beside it: the
+          // rail's tiles are the one home of the tokens and the clock.
           <span className="ml-auto normal-case tracking-normal font-normal text-[11px] text-amber-300 inline-flex items-center gap-2" data-testid="coding-agent-run-working">
             <span className="inline-flex items-center gap-1.5">
               {working.label}
@@ -338,8 +327,6 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
                 <span className="coding-agent-working-dot" style={{ animationDelay: "0.3s" }} />
               </span>
             </span>
-            {working.tokens && <span className="text-[var(--text-muted)]">· {working.tokens}</span>}
-            {working.duration && <span className="text-[var(--text-muted)]">· {working.duration}</span>}
           </span>
         )}
         {live && !working && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />}

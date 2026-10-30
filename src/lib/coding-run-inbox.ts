@@ -174,12 +174,27 @@ function shellWord(word: string): string {
  * and — for a coding team's run — the PreToolUse guard that denies any
  * command merging a pull request. `node` is the binary that runs the hook (the
  * web server's own); null `inbox` leaves the inbox hook out.
+ *
+ * The inbox hook fires after EVERY tool call (`matcher: "*"`, so a read-only
+ * run that never calls Bash is reached too), and the inbox is empty on nearly
+ * all of them: 0 mid-turn deliveries in 44 runs, 100 to 260 tool calls each,
+ * 80 to 160 ms and ~48 MB of Node per call. So the command the harness runs is
+ * a shell guard, built from `sh` builtins only, that looks for a pending file
+ * and execs Node only when there is one: `set --` expands the glob (an
+ * unmatched pattern stays literal, and `-e` is false for it), `exec` hands the
+ * hook's stdin on to the script, and the trailing `:` keeps the exit status 0
+ * on the empty path — the hook never fails the tool call it rides on.
  */
 export function runHookSettings(opts: { node: string; script?: string; inbox: string | null; mergeGuard: boolean }): string | null {
   const script = opts.script ?? runHookScriptPath();
   const hook = (...args: string[]) => ({ type: "command", command: [opts.node, script, ...args].map(shellWord).join(" "), timeout: 10 });
+  const inboxHook = (dir: string) => ({
+    type: "command",
+    command: `set -- ${shellWord(dir)}/pending/*.json; [ -e "$1" ] && exec ${[opts.node, script, "inbox", dir].map(shellWord).join(" ")}; :`,
+    timeout: 10,
+  });
   const hooks: Record<string, unknown[]> = {};
-  if (opts.inbox) hooks.PostToolUse = [{ matcher: "*", hooks: [hook("inbox", opts.inbox)] }];
+  if (opts.inbox) hooks.PostToolUse = [{ matcher: "*", hooks: [inboxHook(opts.inbox)] }];
   if (opts.mergeGuard) hooks.PreToolUse = [{ matcher: "Bash", hooks: [hook("merge-guard")] }];
   return Object.keys(hooks).length ? JSON.stringify({ hooks }) : null;
 }

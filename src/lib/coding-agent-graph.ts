@@ -50,8 +50,13 @@ export interface GraphTeam {
   id: string;
   status: TeamStatusView;
   plannerRunId: string | null;
-  /** The board's cast list, in the order the runs started. Absent from an older server. */
-  runs?: { id: string; role: "planner" | "worker" | "reviewer" | "lead"; taskId: string | null; tokens?: number }[];
+  /**
+   * The board's cast list, in the order the runs started. Absent from an older
+   * server. `provider`, `model` and `modelRole` are what each member runs on
+   * (coding-team-board.ts TeamRunRef), each absent on a board from before they
+   * were kept — the panel's model line then says nothing.
+   */
+  runs?: { id: string; role: "planner" | "worker" | "reviewer" | "lead"; taskId: string | null; tokens?: number; provider?: string | null; model?: string | null; modelRole?: string | null }[];
   tasks: {
     task_id: string;
     status: TaskStatusView;
@@ -62,6 +67,7 @@ export interface GraphTeam {
     attempts: number;
     holds?: number;
     ciReoffers?: number;
+    budgetReoffers?: number;
   }[];
   shape?: { review: "each" | "final" | "none" } | null;
   finalReview?: { verdict: "accepted" | "rejected" } | null;
@@ -297,7 +303,7 @@ export function teamGraph(team: GraphTeam, runOf: (id: string) => GraphRunInfo |
     const currentAttempt = currentWorker ? workers.indexOf(currentWorker) + 1 : 0;
     // An earlier attempt was superseded by a rejection — unless the task was
     // ever held or re-offered for CI, when it may have been set aside instead.
-    const earlierRejected = (task.holds ?? 0) + (task.ciReoffers ?? 0) === 0;
+    const earlierRejected = (task.holds ?? 0) + (task.ciReoffers ?? 0) + (task.budgetReoffers ?? 0) === 0;
     const reviewerLive = drawn.some((r) => r.role === "reviewer" && statusOf(r.id) === "running");
     const perTaskReview = !team.shape || team.shape.review === "each";
 

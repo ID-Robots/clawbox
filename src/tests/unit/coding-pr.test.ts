@@ -57,10 +57,12 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
 }));
 const commitRunWork = vi.hoisted(() => vi.fn());
 const newestCommitSince = vi.hoisted(() => vi.fn());
+const headCommitShort = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-git")>()),
   commitRunWork,
   newestCommitSince,
+  headCommitShort,
 }));
 
 const snap = (over: Partial<PrSnapshot> = {}): PrSnapshot => ({
@@ -360,6 +362,7 @@ describe("the pull request across the owner's gestures", () => {
     github.mergePullRequest.mockResolvedValue({ ok: false, detail: "not in this test" });
     commitRunWork.mockResolvedValue({ committed: true, sha: "abc1234", initialized: false });
     newestCommitSince.mockResolvedValue(null);
+    headCommitShort.mockResolvedValue(null);
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
   });
@@ -393,6 +396,53 @@ describe("the pull request across the owner's gestures", () => {
     expect(github.openPullRequest).not.toHaveBeenCalled();
   });
 
+  it("starts a run in a folder inside another repository with no pull request, never branches that repository, and settles completed", async () => {
+    // 39 of 44 live runs on the owner's box (2026-10-29) ended gave_up: the
+    // project folders sit under ~/Projects, which has a .git of its own, so
+    // the branch step forked the PARENT and the settle refused the commit as
+    // foreign_repo — and `pr.phase: "failed"` plus the refused commit held
+    // the run to a pull request the box could never open.
+    github.startRunBranch.mockResolvedValueOnce({
+      ok: false,
+      reason: "not_repository_root",
+      root: "/srv/projects",
+      detail: "This folder is part of the repository at /srv/projects rather than being one, so no branch is made there and there is no pull request to open.",
+    });
+    commitRunWork.mockResolvedValue({ committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." });
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    expect(started.pr).toBeNull();
+    const feed = started.progress.join("\n");
+    expect(feed).toContain("Part of the repository at /srv/projects, not a repository of its own: no branch is made there and there is no pull request to open");
+    expect(feed).not.toMatch(/No pull request/);
+    // Said once: the worktree step and the branch step answer the same fact.
+    expect(started.progress.filter((line) => line.startsWith("Part of the repository at ")).length).toBe(1);
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.pr).toBeNull();
+    expect(done.commitError).toMatch(/another git repository/);
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("starts no review pass over work the settle could not commit", async () => {
+    // 36 review passes (250M tokens) on the owner's box went over runs whose
+    // commit the box had already refused; each resumed into the same wall.
+    fs.writeFileSync(
+      path.join(root, "data", "config.json"),
+      JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_generate_images: false, coding_agent_auto_pr: true, coding_agent_review_rounds: 0, coding_agent_review_pass: true }),
+    );
+    github.startRunBranch.mockResolvedValueOnce({ ok: false, reason: "not_repository_root", root: "/srv/projects", detail: "part of the repository at /srv/projects" });
+    commitRunWork.mockResolvedValue({ committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." });
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.reviewPass).toBe(true);
+    // Once the commit attempt is over (the moment a pass would start), the run is still alone.
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Not committed/); }, { timeout: 10_000 });
+    expect(lib.listRuns().length).toBe(1);
+  });
+
   it("still reports a branch that could not be made for any other reason", async () => {
     github.startRunBranch.mockResolvedValueOnce({ ok: false, detail: "Pushing the branch was refused." });
     installFakeWrapper(finishingBody());
@@ -420,6 +470,34 @@ describe("the pull request across the owner's gestures", () => {
     // CodeRabbit gives the one review it gives a pull request.
     expect(github.openPullRequest).toHaveBeenCalledWith(expect.objectContaining({ branch: runBranchName(started.id), draft: true }));
     expect(lib.getRun(started.id)?.pr?.readyAt).toBeNull();
+  });
+
+  it("does not take the commit the folder already had when the run began for the run's own", async () => {
+    // newestCommitSince allows a minute of clock slack, so a worktree forked
+    // or a team's base merged seconds before the spawn answered as the run's
+    // own commit: 29 of 52 read-only runs on the owner's box "committed
+    // themselves" as the base commit. HEAD at the spawn is on the record.
+    commitRunWork.mockResolvedValue({ committed: false, reason: "no_changes" });
+    headCommitShort.mockResolvedValue("base1234");
+    newestCommitSince.mockResolvedValue("base1234");
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    expect(started.headAtStart).toBe("base1234");
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.commit).toBeNull();
+    expect(done.progress.join("\n")).not.toMatch(/Committed by the run itself/);
+  });
+
+  it("records no commit at all for a read-only run", async () => {
+    newestCommitSince.mockResolvedValue("own1234");
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "look around", projectId: "site", source: "owner", readOnly: true });
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.commit).toBeNull();
+    expect(commitRunWork).not.toHaveBeenCalled();
+    expect(newestCommitSince).not.toHaveBeenCalled();
   });
 
   // TASK-1366. Invented values throughout; what matters is where they end up.

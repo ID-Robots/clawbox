@@ -43,7 +43,6 @@
     { "key": "codingAgent.clawai", "locales": "*", "reason": "ClawBox AI is the product name." },
     { "key": "codingAgent.commitAuthorEmailPlaceholder", "locales": "*", "reason": "An example email address." },
     { "key": "codingAgent.effort.ultracode", "locales": "*", "reason": "Ultracode is a mode name the agent answers to." },
-    { "key": "codingAgent.folderPlaceholder", "locales": "*", "reason": "A filesystem path on the device." },
     { "key": "codingAgent.providerName.anthropic", "locales": "*", "reason": "Anthropic is a company name." },
     { "key": "codingAgent.providerName.clawboxAi", "locales": "*", "reason": "ClawBox AI is the product name." },
     { "key": "codingAgent.openaiKeyPlaceholder", "locales": "*", "reason": "The shape of an OpenAI API key." },

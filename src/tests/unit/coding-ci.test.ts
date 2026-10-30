@@ -4,7 +4,7 @@
  * coloured — and whether a team's goal asks for a pull request or a merge.
  */
 import { describe, expect, it } from "vitest";
-import { ciFailureLine, ciFiles, ciFixNotes, cleanActionsLog, goalWantsMerge, goalWantsPullRequest, MAX_CI_FIX_ATTEMPTS, MAX_TEAM_CI_ROUNDS, readCiFailure } from "@/lib/coding-ci";
+import { ciFailureLine, ciFiles, ciFixNotes, cleanActionsLog, goalRefusesPullRequest, goalWantsMerge, goalWantsPullRequest, MAX_CI_FIX_ATTEMPTS, MAX_TEAM_CI_ROUNDS, readCiFailure } from "@/lib/coding-ci";
 
 const line = (text: string, job = "test (20.x)", step = "Run tests") => `${job}\t${step}\t2026-10-11T10:00:00.1234567Z ${text}`;
 
@@ -121,8 +121,35 @@ describe("what a team's goal asks for", () => {
     ["Open a pull request and never, whatever the checks say, merge it", true, false],
     // …but not one in another clause, nor a word that only starts like one.
     ["Notify the team. Open a PR and merge it when CI is green", true, true],
+    // A goal that REFUSES a pull request asks for none (a live team's "Do not
+    // open a PR" used to open one).
+    ["Build the invoice app. Do not open a PR; leave the work on the branch", false, false],
+    ["Add dark mode, no pull request", false, false],
+    ["Refactor the parser without a PR", false, false],
+    ["Don't open a pull request, I will", false, false],
+    ["Do not touch the README. Open a PR when done", true, false],
   ])("%s → PR %s, merge %s", (goal, pr, merge) => {
     expect(goalWantsPullRequest(goal)).toBe(pr);
     expect(goalWantsMerge(goal)).toBe(merge);
+  });
+});
+
+/**
+ * A refusal outranks the owner's auto-PR switch (coding-team.ts opens none and
+ * says so; a single run skips its branch): a goal that says nothing about pull
+ * requests is NOT a refusal, so the switch still decides there.
+ */
+describe("goalRefusesPullRequest", () => {
+  it.each([
+    ["Do not open a pull request and do not merge.", true],
+    ["Add dark mode, no pull request", true],
+    ["Refactor the parser without a PR", true],
+    ["Don't open a PR; leave the work on the branch", true],
+    ["Build the invoice app and open a PR", false],
+    ["Make the button blue", false],
+    ["Do not touch the README. Open a PR when done", false],
+    ["Merge the two config files into one", false],
+  ])("%s → refuses %s", (goal, refuses) => {
+    expect(goalRefusesPullRequest(goal)).toBe(refuses);
   });
 });

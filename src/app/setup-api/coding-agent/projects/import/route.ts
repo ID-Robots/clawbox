@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasPersonSession } from "@/lib/owner-session";
+import { verifyMcpBearer } from "@/lib/mcp-token";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { getDefaultDirectory, listProjects } from "@/lib/coding-agent";
 import { importFolder, importGitHubRepo, type ImportOutcome, type ImportReason } from "@/lib/project-import";
@@ -31,13 +32,21 @@ const STATUS: Record<ImportReason, number> = {
  * Answers { project } — the row the projects listing shows for it — so the
  * app can open it at once.
  *
- * OWNER-ONLY and OUR PAGE ONLY, like the git DELETE and the GitHub login:
- * this writes into the owner's folder with the owner's GitHub credential,
- * and a cross-site page must not be able to fill their project folder.
+ * A PERSON signed in to this box, OR THE AGENT'S OWN BEARER — and, for a
+ * browser, OUR PAGE ONLY: this writes into the owner's folder with the
+ * owner's GitHub credential, and a cross-site page must not be able to fill
+ * their project folder. The bearer is admitted since 2026-10-30, when the
+ * Import panel left the Coding Agent app and "import my old-site repo"
+ * became a sentence to the assistant (`coding_project_import`): the import
+ * lands in the same project folder every run the agent starts already works
+ * in, it never merges or overwrites, and the library refuses the sources
+ * that matter (a folder outside the owner's home, a credential store, the
+ * checkout). `isSameOriginRequest` passes a caller that sends no Origin —
+ * the MCP server — and keeps refusing another site's page.
  */
 export async function POST(request: Request) {
-  if (!(await hasPersonSession(request))) {
-    return NextResponse.json({ error: "Importing a project needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
+  if (!(await hasPersonSession(request)) && !verifyMcpBearer(request.headers.get("authorization"))) {
+    return NextResponse.json({ error: "Importing a project needs a signed-in browser session or the box's own agent.", kind: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(request)) {
     return NextResponse.json({ error: "Importing a project only works from this ClawBox's own pages.", kind: "cross_origin" }, { status: 403 });

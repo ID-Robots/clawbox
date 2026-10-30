@@ -3,32 +3,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { holdsResumableSession, isHeld, isLive, isRollingPauseMeter, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
-import { formatFreesUpAt } from "@/lib/clawai-allowance";
+import { holdsResumableSession, isHeld, isLive, isSettled, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { pauseReasonText } from "@/lib/coding-pause-reason-copy";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import type { Deliverable, DeliverableVerdict, RunAttempt } from "@/lib/coding-deliverable";
 import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
-import CodingRunHistoryPage from "./CodingRunHistoryPage";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_PRIMARY_WIDE, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
-import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
-import { openNewAppCard } from "@/lib/ui-events";
+import { HARNESS_TEST_PROJECT } from "@/lib/coding-agent-harness-test";
+import { buildHarnessTestPrompt, dispatchChatMessage, openNewAppCard } from "@/lib/ui-events";
+import { buildRunNotesPrompt } from "@/lib/coding-project-prompts";
+import { renderText } from "@/lib/chat-markdown";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
-import CodingRunTimeline from "./CodingRunTimeline";
+import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
 import CodingRunCiCard, { type RunCiView } from "./CodingRunCiCard";
-import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
-import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { worktreeCardApplies, type RunWorktreeView } from "./CodingRunWorktreeCard";
-import CodingTaskDialog from "./CodingTaskDialog";
-import StorePublishDialog from "./StorePublishDialog";
+import CodingTaskDialog, { hasRunInputs, type RunInputs } from "./CodingTaskDialog";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
@@ -38,32 +36,28 @@ import { formatBytes } from "@/lib/format-bytes";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
-import CodingRunPipelineCard from "./CodingRunPipelineCard";
-import type { PipelineState } from "@/lib/coding-pipeline";
-import CodingRunTeamMembers from "./CodingRunTeamMembers";
-import CodingAgentRosterRow from "./CodingAgentRosterRow";
 import {
   OPEN_CODING_RUN_EVENT,
+  OPEN_CODING_TEAM_EVENT,
   dispatchOpenApp,
+  dispatchOpenChat,
   notifyCodingAgentChanged,
   notifyCodingRunStarted,
   onCodingAgentChanged,
   onStandaloneAppPage,
   standaloneAppHref,
   takePendingCodingRun,
+  takePendingCodingTeam,
 } from "@/lib/ui-events";
-import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
-import ImportProjectPanel, { type ImportResult } from "./ImportProjectPanel";
+import { NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
-import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
-import CodingTeamCard, { isTeamActive, type TeamView } from "./CodingTeamCard";
+import CodingTeamPage, { isTeamActive, TEAM_STATUS_TONE, type TeamView } from "./CodingTeamPage";
 import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
-import CodingRunNotesCard from "./CodingRunNotesCard";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
-import { DiagramDetails } from "./CodingAgentDiagram";
+import { turnsKnown } from "./CodingAgentDiagram";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import { taskTitle } from "@/lib/task-title";
@@ -107,8 +101,6 @@ interface Run {
   queued?: { at: number; position?: number } | null;
   /** Its pull request's FAILED CI, read — what the Fix CI card offers from. Absent from an older server. */
   ci?: RunCiView | null;
-  /** A Fix CI continuation of another run. */
-  ciFixOf?: { runId: string; attempt: number } | null;
   startedAt: number;
   completedAt: number | null;
   summary: string | null;
@@ -118,6 +110,10 @@ interface Run {
    *  record written before it was kept. */
   failureKind?: "harness_not_ready" | null;
   numTurns: number;
+  /** The step ceiling the run was started with (`--max-turns`). Absent on a record from before the field. */
+  maxTurns?: number;
+  /** The session did real work and can be carried on in — a run that hit a ceiling. Absent on a record from before the field. */
+  resumable?: boolean;
   /** The run's plan, as it last wrote it with TodoWrite. */
   todos?: { content?: string; status?: string; activeForm?: string }[];
   filesTouched: string[];
@@ -142,7 +138,7 @@ interface Run {
    *  an absent field simply draws no line. */
   provider?: CodingProviderId;
   /** On a team run, the role its provider and model were chosen for
-   *  (coding-role-models.ts: planner, worker, reviewer, bulk). Null on a solo
+   *  (coding-role-models.ts: planner, worker, reviewer). Null on a solo
    *  run; absent on a record written before the field. */
   modelRole?: ModelRole | null;
   /** The model it was STARTED with — not `model`, which is what answered. */
@@ -181,9 +177,6 @@ interface Run {
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
-  /** The delivery pipeline this run is the build stage of. Absent on a run
-   *  without one, and on a server that predates the feature. */
-  pipeline?: PipelineState | null;
   /** The run's evidence folder — screenshots, test output and its report.md.
    *  `markdown` is the kind that opens rendered in the app; every other
    *  non-image opens as the plain text the route serves it as. */
@@ -209,8 +202,6 @@ interface Run {
   deliverableCheck?: DeliverableVerdict | null;
   /** Every go at it, the run's own first turn included. */
   attempts?: RunAttempt[];
-  /** The ceiling that applied to this run. */
-  completionAttempts?: number;
   /** What the owner (or the assistant) has told this run while it works, and
    *  whether the harness has had each of them yet. Absent on a server that
    *  predates the queue, which is why the card reads it defensively. */
@@ -278,16 +269,10 @@ export function installedAppId(folder: string): string {
 /** One page of runs. The list is open by default now, so it has to be paged
  *  rather than unbounded — a long history should not push the settings off
  *  the top of the window. */
-/** "12s" / "3m 4s" — how long a helper has been out, or took. */
-function elapsedShort(from: number, to: number): string {
-  const sec = Math.max(0, Math.round((to - from) / 1000));
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  return `${m}m ${sec - m * 60}s`;
-}
-
 /** How many pictures a run's evidence card shows before it asks to be unfolded. */
 const ARTIFACT_PREVIEW = 4;
+/** How many changed files a settled run's What changed lists before "All N". */
+const CHANGED_FILES_PREVIEW = 6;
 const RUNS_PAGE = 10;
 const POLL_MS = 5_000;
 /**
@@ -344,24 +329,20 @@ function firstLine(text: string, max = 100): string {
   return taskTitle(text, max);
 }
 
-/** Single-quote a value for the terminal command line. */
-function quoted(v: string): string {
-  return `'${v.replace(/'/g, "'\\''")}'`;
-}
-
-
-
-/** The Settings link, whichever element it renders as. */
-const OPEN_SETTINGS_CLASS = BTN_SECONDARY;
-/** A sidebar entry: icon and label, the width of the rail, quiet until hovered or current. */
-const SIDEBAR_ITEM = "w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12.5px] text-[var(--text-secondary)] hover:bg-white/[0.06] hover:text-[var(--text-primary)] text-left cursor-pointer transition-colors";
-const SIDEBAR_ACTIVE = "bg-white/[0.08] text-[var(--text-primary)]";
-/** How many runs the sidebar lists; the pages list them all. */
-const SIDEBAR_RUNS = 12;
-/** Older runs a window keeps open copies of — the pages it has visited, not the history. */
+/**
+ * How many projects home lists before "Show all (N)" — the owner's ask of
+ * 2026-10-30 ("when we have many projects we need to scroll a lot — don't
+ * show all of them initially"). Collapsed again on every open of the app:
+ * no memory, no input.
+ */
+const PROJECTS_PAGE = 6;
+/** A 44 × 44 header control — the back arrow and the Settings gear. */
+const HEADER_ICON_BUTTON = "shrink-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-[var(--text-secondary)] hover:bg-white/[0.06] hover:text-[var(--text-primary)] cursor-pointer"
+  + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)]";
+/** Older runs a window keeps open copies of — the pages it has visited and the "Show older" pages it asked for, not the history. */
 const MAX_OLDER_RUNS_HELD = 100;
-/** The window width (px) from which the sidebar is shown beside the page. */
-const SIDEBAR_MIN_WIDTH = 860;
+/** Older runs one "Show older" fetches for a project's Runs tab (the route caps a page at 50). */
+const OLDER_PAGE = 20;
 
 /** A run pointed at a code project by id belongs to that project and no
  *  other — its folder is under the checkout, so matching it by directory as
@@ -373,6 +354,11 @@ function runBelongsTo(r: Run, pr: Project): boolean {
   // BELONGS to is the copy's project — matching `directory` alone would file
   // every such run under nothing.
   return (r.worktree?.project ?? r.directory) === pr.directory;
+}
+
+/** The project a team works in: a code project by its id, a folder by its path. */
+function teamBelongsTo(team: TeamView, pr: Project): boolean {
+  return pr.kind === "codeProject" ? team.projectId === pr.folder : team.directory === pr.directory;
 }
 
 /**
@@ -467,7 +453,7 @@ function useProjectGit(project: Project | null, version: number): GitInfo | null
  * around it, the icon took the whole width of the project row and pushed the
  * name and the chips onto the next line.
  */
-function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w-7 h-7" }) {
+function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w-7 h-7" | "w-10 h-10" }) {
   if (!project.iconUrl) return null;
   return (
     <span className={`${size} shrink-0 rounded-md overflow-hidden flex items-center justify-center`}>
@@ -483,12 +469,15 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
  * move while a run works, and in a grid where every value was the same 14 px
  * they had to be hunted for among a commit hash and a model identifier.
  *
- * Nothing here truncates. The tiles are ~118 px wide in the rail, and a
- * Bulgarian label ("Променени файлове", 128 px) and a Japanese hint ("思考中 ·
- * 166821 トークン") both overflowed it — ellipsised in every locale, with the
- * hint carrying no `title` and a phone offering no hover at all, so the figure
- * was simply unreadable. A tile that grows a line is the cheaper answer than a
- * figure nobody can read; the grid stretches its row to match.
+ * Nothing here truncates. The tiles were ~118 px wide in the rail they used to
+ * sit in, and a Bulgarian label ("Променени файлове", 128 px) and a Japanese
+ * hint ("思考中 · 166821 トークン") both overflowed it — ellipsised in every
+ * locale, with the hint carrying no `title` and a phone offering no hover at
+ * all, so the figure was simply unreadable. A tile that grows a line is the
+ * cheaper answer than a figure nobody can read; the grid stretches its row to
+ * match. Since 2026-10-30 the four tiles are a row of the run page's one
+ * column (2×2 on a phone, four across from `@md`) — still the ONE home of
+ * these numbers.
  */
 function StatTile({ label, value, hint, testId }: { label: string; value: ReactNode; hint?: string; testId?: string }) {
   return (
@@ -502,12 +491,13 @@ function StatTile({ label, value, hint, testId }: { label: string; value: ReactN
 
 /**
  * A figure that is looked UP rather than watched — the models that answered,
- * the commit, what was refused.
+ * the commit, what was refused: a `<dl>` row of the run page's closed Details
+ * fold (2026-10-30; the rail these rows sat in is gone).
  *
- * A row across the full width of the rail rather than a tile: the longest
- * value on the whole page is a model identifier, and in a ~118 px tile it had
- * nowhere to go. Here it has the rail's width and wraps at its own hyphens,
- * which is where a name like `deepseek-v4-pro[1m]` wants to break.
+ * A row across the full width rather than a tile: the longest value on the
+ * whole page is a model identifier, and in a ~118 px tile it had nowhere to
+ * go. Here it has the column's width and wraps at its own hyphens, which is
+ * where a name like `deepseek-v4-pro[1m]` wants to break.
  */
 function StatLine({ label, value, hint, note, mono = false, testId }: { label: string; value: string; hint?: string; note?: string; mono?: boolean; testId?: string }) {
   return (
@@ -523,31 +513,6 @@ function StatLine({ label, value, hint, note, mono = false, testId }: { label: s
   );
 }
 
-/**
- * How a run ENDED, not merely whether it is over.
- *
- * `isSettled` alone drew a run that failed exactly like one that succeeded —
- * a tick — next to a status chip reading "Did not finish" in red.
- */
-type RunOutcome = "working" | "completed" | "unfinished" | "waiting";
-
-function runOutcome(status: CodingRunStatus): RunOutcome {
-  if (isLive(status)) return "working";
-  if (status === "completed") return "completed";
-  // A run that gave up lands in "unfinished" through isSettled, which is right:
-  // it did not deliver. The deliverable card beside it is what says so in
-  // words, and the chip's own amber keeps it apart from a failure.
-  return isSettled(status) ? "unfinished" : "waiting";
-}
-
-/** The Agents card's glyph for the run itself, per outcome. */
-const MAIN_AGENT_GLYPH: Record<RunOutcome, { icon: string; className: string }> = {
-  working: { icon: "sync", className: "text-amber-400 animate-pulse" },
-  completed: { icon: "check_circle", className: "text-[var(--text-muted)]" },
-  unfinished: { icon: "error", className: "text-red-400/80" },
-  waiting: { icon: "schedule", className: "text-[var(--text-muted)]" },
-};
-
 /** Every run button's shape; the action's own colour is added per row. */
 const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
 
@@ -557,7 +522,7 @@ const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
  * (`coding-agent-<route>-<runId>`) and the key of the message shown when it
  * is refused.
  */
-const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | "start"; label: string; failed: string; className: string }>> = {
+const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | "start" | "continue"; label: string; failed: string; className: string }>> = {
   running: { route: "pause", label: "codingAgent.pause", failed: "codingAgent.pauseFailed", className: "border-white/10 text-[var(--text-primary)] hover:bg-white/5" },
   paused: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-sky-300/40 text-sky-300 hover:bg-sky-300/10" },
   // A run that gave up offers the same gesture, and for the same reason: its
@@ -566,30 +531,32 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
   // would start the task over.
   gave_up: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-amber-300/40 text-amber-300 hover:bg-amber-300/10" },
   draft: { route: "start", label: "codingAgent.startDraft", failed: "codingAgent.startFailed", className: "border-violet-300/40 text-violet-300 hover:bg-violet-300/10" },
+  // A run that hit a ceiling (the step limit, the cost ceiling) settles
+  // failed AND resumable: the session did real work and simply ran out of
+  // room. Continue is a continuation of it — `POST run { resumeRunId }`, the
+  // path Fix CI takes — which re-reads the settings and so gets a fresh
+  // ceiling; it is offered only while `resumable` says the session can take
+  // it (runControls), since a failure that is not a ceiling starts over.
+  failed: { route: "continue", label: "codingAgent.continueRun", failed: "codingAgent.continueFailed", className: "border-amber-300/40 text-amber-300 hover:bg-amber-300/10" },
 };
+
+/** What a Continue asks the harness for, in its own language — the session holds the task. */
+const CONTINUE_TASK = "Continue the task you were working on in this session: finish what remains, then report what you did.";
+
 
 /**
- * The sentence for each spent meter, keyed by the meter the record names.
- *
- * A table rather than a key built by hand from the meter string: the
- * catalogue parity test can only see keys that are written down, and a
- * `codingAgent.pausedAllowance${meter}` assembled at runtime would be
- * invisible to it — untranslated in nine languages, and nothing would say so.
+ * `meta` rides on the window's record (page.tsx `openApp(appId, forceNew,
+ * meta)`): what the app should open on when the desktop was asked for a
+ * place in it — `runId`, `teamId` or `projectId`, from `ui_open_app coding`
+ * with a target (mcp/tools/desktop.ts). Read once, on mount; the run and the
+ * team also arrive through the hand-off slots below, which an open window
+ * hears too.
  */
-const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
-  images: "codingAgent.pausedAllowanceImages",
-  speech: "codingAgent.pausedAllowanceSpeech",
-  weekly: "codingAgent.pausedAllowanceWeekly",
-  burst: "codingAgent.pausedAllowanceBurst",
-  embeddings: "codingAgent.pausedAllowanceEmbeddings",
-  anthropic: "codingAgent.pausedAllowanceAnthropic",
-};
-
-export default function CodingAgentApp() {
+export default function CodingAgentApp({ meta }: { meta?: Record<string, string> } = {}) {
   const { t, locale } = useT();
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
-  /** The recent coding teams, newest first — what the agent charts draw (home, a team run's page). */
+  /** The recent coding teams, newest first — what home's Now cards and the Team page draw. */
   const [teams, setTeams] = useState<TeamView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -603,6 +570,13 @@ export default function CodingAgentApp() {
   }, [error]);
   /** The run whose own page is open — a page now, not a row that unfolds. */
   const [openRunId, setOpenRunId] = useState<string | null>(null);
+  /**
+   * The team whose own page is open (CodingTeamPage, the redesign's step 5).
+   * Kept while one of its member runs is open from it, so Back from that run
+   * leads to the team rather than to the project; cleared by every other way
+   * of opening a run.
+   */
+  const [openTeamId, setOpenTeamId] = useState<string | null>(null);
   // The run whose page is in Live view — the browser it drives over its
   // terminal, filling the window. Keyed by the run rather than a flag, so
   // opening another run lands on its normal page and a run that settles
@@ -610,13 +584,20 @@ export default function CodingAgentApp() {
   // The browser preview above a live run's terminal, shown or folded.
   // The live card's tab — Timeline, Terminal or Browser, one at a time —
   // remembered per run, so another run's page opens on its timeline.
-  const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser" } | null>(null);
+  // `terminalSeen`: the terminal pane is mounted on the Terminal tab's first
+  // selection and kept from then on (it types its command once, and a
+  // remount would tail from the top) — not on every live run page, where
+  // most owners never open it and it cost a PTY and a tail each.
+  const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser"; terminalSeen: boolean } | null>(null);
+  /** How many MCP servers each project's runs start with, as its Setup tab's card last read them — the count on the tab. */
   /** The markdown artifact open in the preview dialog, if any. */
   // The run whose whole evidence list is unfolded. A run that screenshots
   // every step files dozens of pictures, and drawn in full they pushed the
   // summary and the files off the page; the card shows a few and the rest
   // on request. Keyed by run so the next run's page starts folded.
   const [artifactsOpenFor, setArtifactsOpenFor] = useState<string | null>(null);
+  // The run whose whole list of changed files is unfolded in What changed.
+  const [filesOpenFor, setFilesOpenFor] = useState<string | null>(null);
   // The run whose whole task is open in its dialog (null: none).
   const [taskOpenFor, setTaskOpenFor] = useState<string | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
@@ -645,8 +626,6 @@ export default function CodingAgentApp() {
    * folder) while every request it makes is keyed by the folder and the kind.
    */
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
-  /** The project the "Publish to ClawBox Store" dialog is open for — its folder AND directory, since one name can be two projects. */
-  const [publishTarget, setPublishTarget] = useState<{ folder: string; directory: string } | null>(null);
   /** Where the last removed project went — the line the list keeps afterwards. */
   const [removedProject, setRemovedProject] = useState<{ folder: string; trashPath: string } | null>(null);
   // Pull requests opened from a project's page this session, by folder.
@@ -678,26 +657,28 @@ export default function CodingAgentApp() {
   useEffect(() => () => { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); }, []);
   // Which face the window shows — see `view` below. The settings page sits
   // over whichever project was open, so Back returns there.
-  const [page, setPage] = useState<"home" | "settings" | "history">("home");
+  const [page, setPage] = useState<"home" | "settings">("home");
   /**
-   * Older runs this window has opened — from the Run history page, or by id
-   * for a run past the recent thirty. Kept beside `runs` rather than in it:
-   * the poll replaces `runs` wholesale, and these are not on that list.
+   * Older runs this window holds — the pages a project's "Show older" asked
+   * for, or one looked up by id for a run past the recent thirty. Kept beside
+   * `runs` rather than in it: the poll replaces `runs` wholesale, and these
+   * are not on that list. A project's Runs tab lists its own among them.
    */
   const [olderRuns, setOlderRuns] = useState<Run[]>([]);
-  /** An archived run to open the Run history page on, when a run page was asked for one. */
-  const [archivedOpenId, setArchivedOpenId] = useState<string | null>(null);
+  /** How far a project's "Show older" has paged: the box's total for the folder and how many were fetched. */
+  const [olderPage, setOlderPage] = useState<{ project: string; total: number; loaded: number } | null>(null);
+  const [olderBusy, setOlderBusy] = useState(false);
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
-  /** The tab a project page opens on when it was asked for by a team chart — read once, as the workspace mounts. */
-  const [workspaceTab, setWorkspaceTab] = useState<{ directory: string; tab: WorkspaceTab } | null>(null);
+  /** The tab a project page opens on when it was asked for by a run's **See the diff** (`ref`: that commit) — read once, as the workspace mounts. */
+  const [workspaceTab, setWorkspaceTab] = useState<{ directory: string; tab: WorkspaceTab; ref?: string } | null>(null);
   useEffect(() => {
     // One-shot: the workspace has read it by now, and the next visit to the
     // project opens on its own default again.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (workspaceTab && openProjectDir === workspaceTab.directory) setWorkspaceTab(null);
   }, [workspaceTab, openProjectDir]);
-  /** The Import panel on the home face: GitHub or a folder on the box. */
-  const [importOpen, setImportOpen] = useState(false);
+  /** The project whose Tools checklist (MCP servers) is unfolded — read only then. */
+  const [toolsOpenFor, setToolsOpenFor] = useState<string | null>(null);
   /** Bumped when this window changed the open project's git state itself
    *  (a backup), so the git block re-reads without a new commit. */
   const [gitVersion, setGitVersion] = useState(0);
@@ -784,9 +765,9 @@ export default function CodingAgentApp() {
       setProjects(Array.isArray(data.projects) ? data.projects : []);
       setProjectsDir(typeof data.directory === "string" ? data.directory : null);
     }));
-    // The teams, on the runs' own beat: the agent charts on home and on a
-    // team run's page are drawn from them, and a chart must move with the
-    // runs it shows. One list read — the Team tab's card reads the same one.
+    // The teams, on the runs' own beat: home's Now cards and the Team page
+    // are drawn from them, and a chart must move with the runs it shows. One
+    // list read; the Team page asks by id only for a board this list lacks.
     // Slim on a tick like the runs: a settled board's log and its tasks'
     // text were two thirds of a 694 KB read, for teams done days before.
     const teamsRead = read("teams", () => fetch(`/setup-api/coding-agent/team${tick ? "?slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
@@ -996,33 +977,15 @@ export default function CodingAgentApp() {
   };
 
   /**
-   * One tap of "is the harness healthy?": dispatch the canned smoke task into
-   * its scratch project through the same routes a real delegation uses, then
-   * open the live terminal view on it the moment its transcript exists. The
-   * result lands in Recent runs — evidence folder, summary and all.
+   * "Is the harness healthy?" is a question for the chat since 2026-10-30:
+   * the button hands the assistant the one message that makes the scratch
+   * folder and starts the canned smoke run (`buildHarnessTestPrompt`), and
+   * the run then appears as a card in the chat like every other. Until then
+   * the app posted to `browse` and `run` itself and opened a terminal on the
+   * transcript — the one place besides the wizard that started a run from
+   * the app, which the redesign ruled out (the chat composes, the app shows).
    */
-  const testHarness = async () => {
-    setBusy("harness-test");
-    setError(null);
-    try {
-      // Scaffold the scratch project; an "already exists" answer is fine and
-      // the run below is where a real failure would surface.
-      // In the owner's own project folder, not a ClawBox-internal one — see
-      // startHarnessTest.
-      const started = await startHarnessTest(status?.defaultDirectory ?? null, t);
-      if (!started.ok) throw new Error(started.error);
-      // The live view opens on the run as soon as its transcript exists.
-      pendingLiveOpen.current = started.runId;
-      // The chat's run card only probes when told: an open chat would
-      // otherwise miss a run started from here.
-      notifyCodingRunStarted();
-      void load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
+  const testHarnessInChat = () => dispatchChatMessage(buildHarnessTestPrompt());
 
   /**
    * Forget a recorded harness fault and re-read the box.
@@ -1053,23 +1016,6 @@ export default function CodingAgentApp() {
     }
   };
 
-  /** Open the live view once the run's transcript exists — the session id
-   *  lands a few seconds after spawn, and the poll above (`load` every
-   *  POLL_MS while a run is live) is already watching for it. A run that
-   *  settles before its transcript appears just skips the popup; it is in
-   *  the list either way. */
-  const pendingLiveOpen = useRef<string | null>(null);
-  useEffect(() => {
-    const id = pendingLiveOpen.current;
-    if (!id) return;
-    const run = runs.find((r) => r.id === id);
-    if (!run) return;
-    if (run.transcriptPath || run.status !== "running") {
-      pendingLiveOpen.current = null;
-      if (run.transcriptPath && run.status === "running") openInTerminal(run);
-    }
-  }, [runs]);
-
   /**
    * A run handed to this window from outside — the desktop's finish card, the
    * chat's run card — opens on its own page. Two handoffs, like Settings'
@@ -1081,7 +1027,7 @@ export default function CodingAgentApp() {
     // A handoff parked on `window` before this window existed; the effect is
     // the one place it can be read, and reading it is one render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (pending) { setOpenRunId(pending); setPage("home"); }
+    if (pending) { setOpenRunId(pending); setOpenTeamId(null); setPage("home"); }
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ runId?: unknown }>).detail;
       const id = detail?.runId;
@@ -1090,12 +1036,64 @@ export default function CodingAgentApp() {
         // window is up, so take it back rather than leave it for a later mount.
         takePendingCodingRun();
         setOpenRunId(id);
+        setOpenTeamId(null);
         setPage("home");
       }
     };
     window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
     return () => window.removeEventListener(OPEN_CODING_RUN_EVENT, handler);
   }, []);
+
+  /**
+   * The TEAM hand-off — the chat's team card, the desktop's team finish card,
+   * `ui_open_app coding` with a team — on the run's two paths: the `window`
+   * slot for a cold open, the event for a window already up. Kept as a
+   * pending id until the first read is in, then opened on the team's own
+   * page (CodingTeamPage), its project behind it when the list names one;
+   * a team the list no longer carries is read by id on the page itself.
+   */
+  const [pendingTeamId, setPendingTeamId] = useState<string | null>(null);
+  // The window's `meta` (see the props): read once, here, and never again.
+  const metaRef = useRef(meta);
+  useEffect(() => {
+    const first = metaRef.current;
+    const pending = takePendingCodingTeam() ?? (first?.teamId || null);
+    if (pending) setPendingTeamId(pending);
+    if (first?.runId && !takePendingCodingRun()) { setOpenRunId(first.runId); setPage("home"); }
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ teamId?: unknown }>).detail;
+      const id = detail?.teamId;
+      if (typeof id === "string" && id) {
+        takePendingCodingTeam();
+        setPendingTeamId(id);
+      }
+    };
+    window.addEventListener(OPEN_CODING_TEAM_EVENT, handler);
+    return () => window.removeEventListener(OPEN_CODING_TEAM_EVENT, handler);
+  }, []);
+  useEffect(() => {
+    if (!pendingTeamId || loading) return;
+    const team = teams.find((x) => x.id === pendingTeamId) ?? null;
+    const project = team ? projects.find((pr) => teamBelongsTo(team, pr)) ?? null : null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the hand-off lands once the lists are in
+    setPendingTeamId(null);
+    setOpenTeamId(pendingTeamId);
+    setOpenRunId(null);
+    setOpenProjectDir(project?.directory ?? null);
+    setPage("home");
+  }, [pendingTeamId, loading, teams, projects]);
+  /** `ui_open_app coding` with a project: its page, once the list names it — a code project by id, a folder by its name or path. */
+  const [pendingProjectId, setPendingProjectId] = useState<string | null>(() => meta?.projectId || null);
+  useEffect(() => {
+    if (!pendingProjectId || loading) return;
+    const project = projects.find((pr) => (pr.kind === "codeProject" && pr.folder === pendingProjectId) || pr.directory === pendingProjectId || pr.directory.split("/").pop() === pendingProjectId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- as above
+    setPendingProjectId(null);
+    if (!project) return;
+    setOpenRunId(null);
+    setPage("home");
+    setOpenProjectDir(project.directory);
+  }, [pendingProjectId, loading, projects]);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
   /** The project page's Create PR: the branch the project is on, against the remote's default. */
@@ -1118,32 +1116,6 @@ export default function CodingAgentApp() {
       setError(err instanceof Error ? err.message : t("codingAgent.prFailed"));
     } finally {
       setBusy(null);
-    }
-  };
-
-  /**
-   * The two things a person still does to a DELIVERY PIPELINE: press the
-   * production button it is waiting on, and call the rest of it off.
-   *
-   * One helper for both, because the route is the same and the card wants the
-   * same answer from each: the REASON on refusal, null when it worked. The
-   * confirmation lives in the card, which is where the sentence about what the
-   * world will see is; `confirm: true` is this box's echo of that gesture.
-   */
-  const steerPipeline = async (runId: string, action: "approve_production" | "stop"): Promise<string | null> => {
-    try {
-      const res = await fetch("/setup-api/coding-agent/pipeline", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId, action, ...(action === "approve_production" ? { confirm: true } : {}) }),
-      });
-      if (!res.ok) return await readError(res, String(res.status));
-      // The record now carries the new stage; nothing else would make the page
-      // look again inside the poll interval.
-      await load();
-      return null;
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err);
     }
   };
 
@@ -1184,10 +1156,12 @@ export default function CodingAgentApp() {
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
       setOpenRunId(null);
       // Said aloud, not just re-read here: the Run history card on this very
-      // page counts the runs this Clear just deleted or archived, and it
-      // re-reads on this event — without it the card kept "0 archived" and a
-      // disabled Clear archive over an archive the Clear had just filled.
+      // page counts the runs this Clear just deleted, and it re-reads on this
+      // event — without it the card kept the old figures.
       notifyCodingAgentChanged();
+      // The older runs went with the Clear; a "Show older" asks again.
+      setOlderRuns([]);
+      setOlderPage(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.clearFailed"));
@@ -1245,46 +1219,54 @@ export default function CodingAgentApp() {
    */
   const openNew = () => openNewAppCard();
 
-  // The sidebar is MEASURED in rather than hidden by CSS: a rail that is in
-  // the DOM but display:none still duplicates every project and run name the
-  // page shows, for a screen reader and for a test alike. Wide means the
-  // window can spare 15 rem for it beside a readable page.
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const [wide, setWide] = useState(false);
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    let ro: ResizeObserver | null = null;
-    try {
-      ro = new ResizeObserver((entries) => {
-        const width = entries[0]?.contentRect.width ?? el.clientWidth;
-        setWide(width >= SIDEBAR_MIN_WIDTH);
-      });
-      ro.observe(el);
-    } catch {
-      // A stubbed observer with no observe(): the page stays a column.
-    }
-    return () => { try { ro?.disconnect(); } catch { /* same stub */ } };
-    // Re-attached once the real panel renders: the first mount is the
-    // loading placeholder, which has no root to measure.
-  }, [loading]);
+  // Home lists PROJECTS_PAGE projects until "Show all"; a fresh mount is
+  // collapsed again, which is what "collapsed on every open" means.
+  const [projectsAll, setProjectsAll] = useState(false);
 
   const openProject = useMemo(
     () => (openProjectDir ? projects.find((pr) => pr.directory === openProjectDir) ?? null : null),
     [projects, openProjectDir],
   );
   const git = useProjectGit(openProject, gitVersion);
+  /**
+   * The open project's run notes (`<project>/.clawbox/run-notes.md`), read
+   * once per visit to the page and drawn read-only; "" when there are none,
+   * so no fold is drawn. Keyed on the project's scope, not the object: the
+   * poll replaces the projects list every tick.
+   */
+  const [notesFor, setNotesFor] = useState<{ directory: string; notes: string } | null>(null);
+  const openProjectDirectory = openProject?.directory ?? null;
+  const openProjectNotesQuery = openProject ? (openProject.kind === "codeProject" ? `projectId=${encodeURIComponent(openProject.folder)}` : `directory=${encodeURIComponent(openProject.directory)}`) : null;
+  useEffect(() => {
+    if (!openProjectDirectory || !openProjectNotesQuery) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch(`/setup-api/coding-agent/run-notes?${openProjectNotesQuery}`, { cache: "no-store" });
+        const data = await res.json().catch(() => null) as { notes?: string } | null;
+        if (!alive || !res.ok) return;
+        setNotesFor({ directory: openProjectDirectory, notes: typeof data?.notes === "string" ? data.notes : "" });
+      } catch {
+        /* no fold: the notes are a convenience, and the page stands without them */
+      }
+    })();
+    return () => { alive = false; };
+  }, [openProjectDirectory, openProjectNotesQuery]);
   /** The run whose page is open, once the list has it. A run that was cleared
    *  meanwhile simply has no page — the window falls back to where it was. */
   const openRun = useMemo(
     () => (openRunId ? runs.find((r) => r.id === openRunId) ?? olderRuns.find((r) => r.id === openRunId) ?? null : null),
     [runs, olderRuns, openRunId],
   );
-  // A run page asked for (a chat card, the desktop, the Run history page) for
-  // a run the recent list does not hold: an OLDER run a history mode kept, or
-  // one that has since moved to the archive. Asked of the box once per id —
-  // the runs route finds an older run by id, and the archive answers for the
-  // rest — rather than falling back to the home page as if it had been cleared.
+  /** The open team's board as the list holds it — null for one the list lacks, which the page reads by id. */
+  const openTeamRecord = useMemo(
+    () => (openTeamId ? teams.find((x) => x.id === openTeamId) ?? null : null),
+    [teams, openTeamId],
+  );
+  // A run page asked for (a chat card, the desktop) for a run the recent list
+  // does not hold: an OLDER run "keep everything" kept. Asked of the box once
+  // per id — the runs route finds an older run by id — rather than falling
+  // back to the home page as if it had been cleared.
   const lookedUp = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (loading || !openRunId || runs.some((r) => r.id === openRunId) || olderRuns.some((r) => r.id === openRunId)) return;
@@ -1298,13 +1280,6 @@ export default function CodingAgentApp() {
           const { run } = await res.json() as { run?: Run };
           // Held and live runs are the recent list's; the next poll has them.
           if (run && isSettled(run.status)) setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
-          return;
-        }
-        const archived = await fetch(`/setup-api/coding-agent/history?view=archive&id=${encodeURIComponent(id)}`, { cache: "no-store" });
-        if (archived.ok) {
-          setOpenRunId((current) => (current === id ? null : current));
-          setArchivedOpenId(id);
-          setPage("history");
         }
       } catch {
         // Nothing to add: the page falls back to where it was, as it always did.
@@ -1317,23 +1292,49 @@ export default function CodingAgentApp() {
    *  (the sidebar's recent runs reach every run). */
   // Live view: only for the run whose page is open, and only while it runs.
 
-  const visibleRuns = useMemo(() => (
-    openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
-  ), [runs, openProject]);
+  const visibleRuns = useMemo(() => {
+    if (!openProject) return [];
+    const live = runs.filter((r) => runBelongsTo(r, openProject));
+    // The project's older runs this window holds come after the polled list,
+    // newest first: the live list is always newer than what left it.
+    const seen = new Set(live.map((r) => r.id));
+    const older = olderRuns.filter((r) => !seen.has(r.id) && runBelongsTo(r, openProject)).sort((a, b) => b.startedAt - a.startedAt);
+    return [...live, ...older];
+  }, [runs, olderRuns, openProject]);
+  /** "Show older" on a project's Runs tab: the next page of the older runs "keep everything" kept for this folder. */
+  const showOlder = async () => {
+    if (!openProject) return;
+    const project = openProject.directory;
+    const loaded = olderPage?.project === project ? olderPage.loaded : 0;
+    setOlderBusy(true);
+    setError(null);
+    try {
+      // With the evidence listing: a row opens the ordinary run page, which draws it.
+      const res = await fetch(`/setup-api/coding-agent/runs?history=1&project=${encodeURIComponent(project)}&offset=${loaded}&limit=${OLDER_PAGE}&artifacts=1`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.history.loadFailed")));
+      const { runs: fetched, total } = await res.json() as { runs: Run[]; total: number };
+      setOlderRuns((prev) => [...fetched, ...prev.filter((r) => !fetched.some((f) => f.id === r.id))].slice(0, MAX_OLDER_RUNS_HELD));
+      setOlderPage({ project, total, loaded: loaded + fetched.length });
+      // Drawn at once, not behind another More.
+      setRunsShown((n) => n + fetched.length);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.history.loadFailed"));
+    } finally {
+      setOlderBusy(false);
+    }
+  };
   /**
-   * The rail's recent runs: EVERY held run — running, paused, drafted —
-   * whatever its age, ahead of the newest SIDEBAR_RUNS settled ones. A run
-   * waiting on the owner is never out of sight: a review pass paused one
-   * evening was, a dozen newer runs later, listed nowhere (its folder gone,
-   * so no project row either), with its Resume and Stop unreachable. The
-   * cap is the settled runs' alone, so a thirteenth held run is not hidden
-   * by the twelve before it either.
+   * Home's project rows: a project with a run or a team at work first, then
+   * the box's own order (newest commit, then name). A stable sort, so two
+   * projects with nothing at work keep the order the route gave them.
    */
-  const sidebarRuns = useMemo(() => {
-    const held = runs.filter((r) => isHeld(r.status));
-    const settled = runs.filter((r) => !isHeld(r.status));
-    return [...held, ...settled.slice(0, SIDEBAR_RUNS)];
-  }, [runs]);
+  const orderedProjects = useMemo(() => {
+    const atWork = (pr: Project) =>
+      pr.latestRun?.status === "running"
+      || runs.some((r) => runBelongsTo(r, pr) && isLive(r.status))
+      || teams.some((x) => isTeamActive(x.status) && (pr.kind === "codeProject" ? x.projectId === pr.folder : x.directory === pr.directory));
+    return [...projects].sort((a, b) => Number(atWork(b)) - Number(atWork(a)));
+  }, [projects, runs, teams]);
   /**
    * Which face the window shows. Three, exclusive: the settings page sits
    * over whichever project was open, and the project face carries its
@@ -1341,10 +1342,6 @@ export default function CodingAgentApp() {
    */
   const view = page === "settings"
     ? { face: "settings" as const }
-    // Like Settings, reachable whatever state setup is in: the history on the
-    // flash is the owner's whether or not the agent is configured today.
-    : page === "history"
-      ? { face: "history" as const }
     // Before anything else on this window: a box whose owner has not been
     // through setup has no folder for a run to work in and no consent for one
     // to start, so the home page would be a list of things that cannot happen.
@@ -1353,21 +1350,39 @@ export default function CodingAgentApp() {
       ? { face: "wizard" as const }
       : openRun
         ? { face: "run" as const, run: openRun }
-        : openProject
-          ? { face: "project" as const, project: openProject }
-          : { face: "home" as const };
+        : openTeamId
+          ? { face: "team" as const, teamId: openTeamId, team: openTeamRecord }
+          : openProject
+            ? { face: "project" as const, project: openProject }
+            : { face: "home" as const };
 
-  // Back (the phone's gesture, the browser's button, the phone window's
-  // chevron) walks up the same ladder the breadcrumbs draw, one level per
-  // press, instead of closing the app from a run page. See lib/mobile-back.
-  // Phone layout only, like Files: on a desktop Back belongs to the top window.
+  // Back = up one level. ONE ladder for the header's arrow, the phone
+  // window's chevron and the Android gesture: settings → home, team → its
+  // project, run → its project (or home for a run that belongs to none — a
+  // team worker in a worktree; leaving `openProjectDir` alone landed it on
+  // whichever project the owner had opened BEFORE) — or, for a member run
+  // opened from its team's page, back to the team — project → home. See
+  // lib/mobile-back. The gesture claims it in the phone layout only, like
+  // Files: on a desktop Back belongs to the top window.
   const phoneLayout = usePhoneLayout();
   const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
+  const runBackToTeam = openRun !== null && openTeamId !== null && openRun.team?.id === openTeamId;
+  const teamBackProjectDir = openTeamRecord ? (projects.find((pr) => teamBelongsTo(openTeamRecord, pr))?.directory ?? null) : openProjectDir;
+  const hasUp = view.face === "settings" || view.face === "run" || view.face === "team" || view.face === "project";
+  const goUp = () => {
+    if (view.face === "settings") { disarmClear(); setPage("home"); }
+    else if (view.face === "run") {
+      setOpenRunId(null);
+      if (!runBackToTeam) { setOpenTeamId(null); setOpenProjectDir(runBackProjectDir); }
+    }
+    else if (view.face === "team") { setOpenTeamId(null); setOpenProjectDir(teamBackProjectDir); }
+    else if (view.face === "project") setOpenProjectDir(null);
+  };
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
-  useMobileBack(phoneLayout && page === "history", () => { setArchivedOpenId(null); setPage("home"); });
-  useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
-  useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
-  useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
+  useMobileBack(phoneLayout && page === "home" && (openRun !== null || openTeamId !== null || openProject !== null), () => { setOpenRunId(null); setOpenTeamId(null); setOpenProjectDir(null); });
+  useMobileBack(phoneLayout && page === "home" && openRun === null && openTeamId !== null && teamBackProjectDir !== null, () => { setOpenTeamId(null); setOpenProjectDir(teamBackProjectDir); });
+  useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenTeamId(null); setOpenProjectDir(runBackProjectDir); });
+  useMobileBack(phoneLayout && page === "home" && runBackToTeam, () => setOpenRunId(null));
   // Registered last so it sits on top: with the delete dialog open, Back
   // closes the dialog rather than leaving the project underneath it.
   useMobileBack(phoneLayout && deleteTarget !== null, () => setDeleteTarget(null));
@@ -1411,25 +1426,28 @@ export default function CodingAgentApp() {
         ? t("codingAgent.team.roleLead", { task: team.taskId ?? "" })
         : t("codingAgent.team.roleWorker", { task: team.taskId ?? "" });
 
-  /** Open a run's page — from its row, a review chip, or the desktop. */
+  /** Open a run's page — from its row, a review chip, or the desktop. Not from a team's page: that keeps the team for Back. */
   const showRun = (id: string) => {
     setOpenRunId(id);
+    setOpenTeamId(null);
     setPage("home");
   };
-  /** A run by id, from the recent list or the older ones this window has opened — what an agent chart reads a node from. */
-  const runById = (id: string) => runs.find((r) => r.id === id) ?? olderRuns.find((r) => r.id === id);
-  /** The project a team works in: a code project by its id, a folder by its path — the Team card's own scope. */
-  const projectOfTeam = (team: TeamView) => projects.find((pr) => (team.projectId ? pr.kind === "codeProject" && pr.folder === team.projectId : pr.directory === team.directory)) ?? null;
-  /** A team chart's "Open team": its project's page, on the Team tab — or nothing to offer when the project is not on the list. */
-  const openTeamFor = (team: TeamView) => {
-    const project = projectOfTeam(team);
-    if (!project) return undefined;
-    return () => {
-      setWorkspaceTab({ directory: project.directory, tab: "team" });
-      setOpenRunId(null);
-      setPage("home");
-      setOpenProjectDir(project.directory);
-    };
+  /** The project a team works in: a code project by its id, a folder by its path. */
+  const projectOfTeam = (team: TeamView) => projects.find((pr) => teamBelongsTo(team, pr)) ?? null;
+  /** Open a team's own page (CodingTeamPage) — from home's Now card, an Activity row, a member run's chip — its project behind it for Back. */
+  const openTeam = (team: TeamView) => {
+    setOpenTeamId(team.id);
+    setOpenRunId(null);
+    setOpenProjectDir(projectOfTeam(team)?.directory ?? null);
+    setPage("home");
+  };
+  /** The same by id — a team the list no longer carries is read by id on the page, and Back leads to the project already open. */
+  const openTeamById = (id: string) => {
+    const team = teams.find((x) => x.id === id);
+    if (team) { openTeam(team); return; }
+    setOpenTeamId(id);
+    setOpenRunId(null);
+    setPage("home");
   };
 
   /** A chip naming another run: a button when that run is on the box, plain
@@ -1439,6 +1457,24 @@ export default function CodingAgentApp() {
     return runs.some((r) => r.id === id)
       ? <button type="button" onClick={() => showRun(id)} data-testid={testId} className={`${className} hover:bg-violet-400/10`}>{label}</button>
       : <span data-testid={testId} className={className}>{label}</span>;
+  };
+
+  /** Which run reviewed which: one pass over the list, read per row. */
+  const reviewerOf = new Map<string, Run>();
+  for (const r of runs) if (r.reviewOf) reviewerOf.set(r.reviewOf, r);
+  /** A run's relations as chips: the run it reviewed, the loop it belongs to,
+   *  the run that reviewed it. The same three on a row and on the run's page. */
+  const relationChips = (run: Run) => {
+    const reviewedBy = reviewerOf.get(run.id);
+    return (
+      <>
+        {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+        {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
+          ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
+          : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
+        {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
+      </>
+    );
   };
 
   /** The pull request as one chip: its phase, and while checks run, how many
@@ -1570,7 +1606,6 @@ export default function CodingAgentApp() {
     const deliverable = run.deliverable;
     if (!deliverable) return null;
     const check = run.deliverableCheck;
-    const attempts = run.attempts?.length ?? 0;
     const what = deliverable.kind === "pr"
       ? t("codingAgent.deliverablePr")
       : deliverable.kind === "paths"
@@ -1587,9 +1622,6 @@ export default function CodingAgentApp() {
             <span data-testid="coding-agent-deliverable-verdict">{t("codingAgent.deliverableMet")}</span>
             {" "}
             <span data-testid="coding-agent-deliverable-what">{what}</span>
-            {attempts > 1 && run.completionAttempts != null && (
-              <span data-testid="coding-agent-deliverable-attempts"> · {t("codingAgent.deliverableAttempts", { n: attempts, max: run.completionAttempts })}</span>
-            )}
           </span>
         </p>
       );
@@ -1608,11 +1640,6 @@ export default function CodingAgentApp() {
               ? t("codingAgent.deliverableMet")
               : t("codingAgent.deliverableMissing", { reason: check.missing ?? "" })}
         </p>
-        {attempts > 0 && run.completionAttempts != null && (
-          <p className="mt-1 text-[10px] text-[var(--text-muted)]" data-testid="coding-agent-deliverable-attempts">
-            {t("codingAgent.deliverableAttempts", { n: attempts, max: run.completionAttempts })}
-          </p>
-        )}
       </div>
     );
   };
@@ -1643,9 +1670,44 @@ export default function CodingAgentApp() {
   const removeRunCopy = (id: string) => runAction(id, "worktree", t("codingAgent.worktreeRemoveFailed"));
   /** Resume after "Allow next time" — the denials card's button. */
   const resumeRunNow = (id: string) => runAction(id, "resume", t("codingAgent.resumeFailed"));
+  /** The same, for the run whose page is open — the page's blocks are built as values before they are returned, and the compiler reads a closure over `run` there as render-time. */
+  const resumeOpenRun = () => { if (openRunId) void resumeRunNow(openRunId); };
+  /** A continuation started from a card on the run's page (Fix CI): the chat's card probes, the list re-reads, the new run's page opens. */
+  const onContinuationStarted = (id: string) => {
+    notifyCodingRunStarted();
+    void load();
+    showRun(id);
+  };
+  /**
+   * Carry a ceiling-hit run on: a NEW run continuing its session (the same
+   * POST the Fix CI card makes, without `fixCi`), then its page.
+   */
+  const continueRun = async (id: string) => {
+    const failText = t("codingAgent.continueFailed");
+    setBusy(id);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: CONTINUE_TASK, resumeRunId: id }),
+      });
+      if (!res.ok) throw new Error(await readError(res, failText));
+      const data = await res.json().catch(() => null) as { run?: { id?: string } } | null;
+      notifyCodingRunStarted();
+      await load();
+      if (data?.run?.id) showRun(data.run.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : failText);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const runControls = (run: Run, where: "row" | "page") => {
-    const action = RUN_ACTION[run.status];
+    // Continue is for a failure the session can take — a ceiling; any other
+    // failed run offers nothing here, as before.
+    const action = run.status === "failed" && run.resumable !== true ? undefined : RUN_ACTION[run.status];
     // Resume in a terminal is for a run that has STOPPED; a live run's
     // transcript is on its page already, with its own Open in Terminal.
     const canOpenTerminal = Boolean(run.sessionId) && run.status !== "running";
@@ -1672,7 +1734,7 @@ export default function CodingAgentApp() {
         {action && (
           <button
             type="button"
-            onClick={() => runAction(run.id, action.route, t(action.failed))}
+            onClick={() => (action.route === "continue" ? void continueRun(run.id) : runAction(run.id, action.route, t(action.failed)))}
             disabled={busy === run.id}
             data-testid={`coding-agent-${action.route}-${run.id}`}
             className={small ? `${RUN_BUTTON} ${action.className}` : `${BTN_BASE} border ${action.className}`}
@@ -1759,302 +1821,388 @@ export default function CodingAgentApp() {
 
 
   /**
-   * The runs a face lists, as one section: the toggle, the paged rows, the
-   * More button. On a project's page they are its own; on home, the ones
-   * filed under no project — those used to be computed and never drawn, so a
-   * run in a folder the projects list does not know was invisible.
+   * What happened in the open project — its teams and its runs as ONE list,
+   * the Activity tab the project page opens on: the ones at work first, then
+   * newest first, RUNS_PAGE rows at a time behind Show more, and the older
+   * runs "keep everything" kept after them, on request. A team's row opens
+   * the team's own page (CodingTeamPage); a run's row opens
+   * the run's page from anywhere on it and carries ONE control — Stop while
+   * it is live (pause, resume, the terminal, backup and the relation chips
+   * are the run page's since 2026-10-30; the row said each of them twice).
    */
-  /**
-   * The rows and the More button — the list itself. Home draws it under a
-   * toggle (the runs filed under no project); a project's page draws it
-   * inside its Runs tab, where it has the whole width.
-   */
-  const runsList = (
-    <>
-      {
-        visibleRuns.length === 0 ? (
-          <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
-        ) : (
-          <ul className="mt-2 flex flex-col gap-2" data-testid="coding-agent-runs">
-            {visibleRuns.slice(0, runsShown).map((run) => {
-              const tone = RUN_TONE[run.status];
-              // A draft has not run: its startedAt is when it was drafted
-              // (the runner overwrites it at start), so a duration would be
-              // time-since-drafting, which the "updated" line already says —
-              // and the effort it will run with is read at start.
-              const started = run.status !== "draft" && run.status !== "queued";
-              const reviewedBy = runs.find((r) => r.reviewOf === run.id);
-              return (
-                <li
-                  key={run.id}
-                  data-run-id={run.id}
-                  data-testid={`coding-agent-run-row-${run.id}`}
-                  className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
-                  onClick={(e) => {
-                    // The row is the way to the run; a control on it (Stop,
-                    // the terminal glyph, a chip to another run) is its own.
-                    if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
-                    showRun(run.id);
-                  }}
+  const projectTeams = openProject ? teams.filter((x) => teamBelongsTo(x, openProject)) : [];
+  type ActivityRow = { key: string; live: boolean; at: number; node: ReactNode };
+  const stopTeam = async (id: string) => {
+    setBusy(`team-${id}`);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/team/stop", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
+      if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
+      void load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+  /** The row's one control: Stop for a run that is working or paused, Cancel for one waiting its turn. Nothing on a settled run. */
+  const rowStop = (run: Run) => {
+    if (run.status === "queued") {
+      return (
+        <button
+          type="button"
+          onClick={() => runAction(run.id, "stop", t("codingAgent.cancelQueuedFailed"))}
+          disabled={busy === run.id}
+          data-testid={`coding-agent-cancel-queued-${run.id}`}
+          aria-label={`${t("codingAgent.cancelQueued")} · ${run.id}`}
+          className={`${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5`}
+        >
+          {t("codingAgent.cancelQueued")}
+        </button>
+      );
+    }
+    if (run.status !== "running" && run.status !== "paused") return null;
+    return (
+      <button
+        type="button"
+        onClick={() => runAction(run.id, "stop", t("codingAgent.stopFailed"))}
+        disabled={busy === run.id}
+        data-testid={`coding-agent-stop-${run.id}`}
+        className={`${RUN_BUTTON} border-red-400/40 text-red-300 hover:bg-red-500/10`}
+      >
+        {t("codingAgent.stop")}
+      </button>
+    );
+  };
+  const teamRows: ActivityRow[] = projectTeams.map((team) => {
+    const active = isTeamActive(team.status);
+    const live = active || team.status === "queued";
+    const tasks = team.tasks.filter((x) => x.status !== "retired");
+    const done = tasks.filter((x) => x.status === "complete" && (!x.review || x.review.verdict === "accepted")).length;
+    return {
+      key: `team-${team.id}`,
+      live,
+      at: team.updatedAt ?? team.createdAt,
+      node: (
+        <li
+          key={`team-${team.id}`}
+          data-team-id={team.id}
+          data-testid={`coding-team-row-${team.id}`}
+          className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
+          onClick={(e) => {
+            if ((e.target as HTMLElement).closest("button, a")) return;
+            openTeam(team);
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <span className="material-symbols-rounded text-violet-300 shrink-0 mt-0.5" style={{ fontSize: 18 }} aria-hidden="true">groups</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span
+                  className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${TEAM_STATUS_TONE[team.status]} ${active ? "coding-agent-pulse" : ""}`}
+                  data-testid={`coding-team-row-status-${team.id}`}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid={`coding-agent-status-${run.id}`}>
-                          {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
-                          {statusLabel(run.status)}
-                        </span>
-                        {run.status === "queued" && run.queued?.position && (
-                          <span className="text-[11px] text-indigo-200/90" data-testid={`coding-agent-queue-position-${run.id}`}>
-                            {t("codingAgent.queuePosition", { n: run.queued.position })}
-                          </span>
-                        )}
-                        {/* A run at high effort can be silent for minutes on
-                            its first turn. Show that it is thinking, so quiet
-                            never reads as stuck. */}
-                        {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
-                          <span
-                            data-testid="coding-agent-thinking"
-                            className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
-                          >
-                            {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
-                          </span>
-                        )}
-                        {prChip(run)}
-                        {/* A review pass names the run it reviewed, and that
-                            run names its reviewer. */}
-                        {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                  {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
-                    ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
-                    : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
-                        {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
-                      </div>
-                      <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
-                        {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
-                      </p>
-                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                        {started && t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
-                        {started && " · "}
-                        {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
-                        {started && run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
-                        {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
-                        {run.permissionDenials > 0 && (
-                          <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
-                        )}
-                      </p>
-                      {isLive(run.status) && (
-                        <RunProgressBar
-                          estimate={estimateRunProgress(run, now)}
-                          color={tone.color}
-                          timeLeft={t("codingAgent.timeLeft")}
-                          testId={`coding-agent-progress-${run.id}`}
-                          className="mt-1"
-                        />
-                      )}
-                      {/* How fresh this is. The models are on the run's page
-                          (the longest strings a row used to carry). */}
-                      {run.lastActivityAt && (
-                        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
-                          {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}
-                        </p>
-                      )}
-                    </div>
-                    {/* One row of controls: a live run's Pause/Stop as words,
-                        then the glyphs — terminal, back up, details — the
-                        same size, side by side. */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      {runControls(run, "row")}
-                      {/* The run's own page: its figures, its summary, its
-                          evidence. The row itself opens it too. */}
-                      <button
-                        type="button"
-                        onClick={() => showRun(run.id)}
-                        data-testid={`coding-agent-details-${run.id}`}
-                        title={t("codingAgent.showDetails")}
-                        aria-label={t("codingAgent.showDetails")}
-                        className={ROW_ICON_BUTTON}
-                      >
-                        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )
-      }
-      {visibleRuns.length > runsShown && (
+                  {active && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+                  {t(`codingAgent.team.status.${team.status}`)}
+                </span>
+                {tasks.length > 0 && (
+                  <span className="text-[11px] text-[var(--text-muted)]" data-testid={`coding-team-row-tasks-${team.id}`}>
+                    {t("codingAgent.teamTasksDone", { done, total: tasks.length })}
+                  </span>
+                )}
+                {team.pr && (
+                  <a
+                    href={team.pr.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    data-testid={`coding-team-row-pr-${team.id}`}
+                    className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40 hover:bg-violet-400/10"
+                  >
+                    {t("codingAgent.viewPr", { n: team.pr.number })}
+                  </a>
+                )}
+              </div>
+              <p className="text-xs text-[var(--text-primary)] mt-1 line-clamp-2 break-words">{firstLine(team.goal, 160)}</p>
+              {active && tasks.length > 0 && (
+                <div className="mt-1.5 h-1 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
+                  <div className="h-full rounded-full bg-violet-400/70 transition-[width]" style={{ width: `${Math.round((done / tasks.length) * 100)}%` }} />
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {live ? (
+                <button
+                  type="button"
+                  onClick={() => void stopTeam(team.id)}
+                  disabled={busy === `team-${team.id}`}
+                  data-testid={`coding-team-row-stop-${team.id}`}
+                  className={`${RUN_BUTTON} border-red-400/40 text-red-300 hover:bg-red-500/10`}
+                >
+                  {t("codingAgent.stop")}
+                </button>
+              ) : (
+                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
+              )}
+            </div>
+          </div>
+        </li>
+      ),
+    };
+  });
+  const runRows: ActivityRow[] = visibleRuns.map((run) => {
+    const tone = RUN_TONE[run.status];
+    // A draft has not run: its startedAt is when it was drafted (the runner
+    // overwrites it at start), so a duration would be time-since-drafting.
+    const started = run.status !== "draft" && run.status !== "queued";
+    const lastStep = run.status === "running" && run.progress.length > 0 ? run.progress[run.progress.length - 1] : null;
+    return {
+      key: run.id,
+      live: isLive(run.status) || run.status === "queued",
+      at: run.startedAt,
+      node: (
+        <li
+          key={run.id}
+          data-run-id={run.id}
+          data-testid={`coding-agent-run-row-${run.id}`}
+          className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
+          onClick={(e) => {
+            // The row is the way to the run; a control on it (Stop, a chip
+            // to a pull request) is its own.
+            if ((e.target as HTMLElement).closest("button, a")) return;
+            showRun(run.id);
+          }}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid={`coding-agent-status-${run.id}`}>
+                  {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+                  {statusLabel(run.status)}
+                </span>
+                {run.status === "queued" && run.queued?.position && (
+                  <span className="text-[11px] text-indigo-200/90" data-testid={`coding-agent-queue-position-${run.id}`}>
+                    {t("codingAgent.queuePosition", { n: run.queued.position })}
+                  </span>
+                )}
+                {/* A run at high effort can be silent for minutes on its
+                    first turn. Show that it is thinking, so quiet never
+                    reads as stuck. */}
+                {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
+                  <span
+                    data-testid="coding-agent-thinking"
+                    className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
+                  >
+                    {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
+                  </span>
+                )}
+                {prChip(run)}
+              </div>
+              <p className="text-xs text-[var(--text-primary)] mt-1 line-clamp-2 break-words">
+                {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 120)}
+              </p>
+              {/* One line under the task: what the run is doing NOW while it
+                  works, its figures once it has stopped. */}
+              <p className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate" data-testid={`coding-agent-run-meta-${run.id}`}>
+                {lastStep
+                  ? t("codingAgent.rowNow", { step: describeStep(t, lastStep).label })
+                  : started
+                    ? t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })
+                    : run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
+                {run.permissionDenials > 0 && (
+                  <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
+                )}
+              </p>
+              {isLive(run.status) && (
+                <RunProgressBar
+                  estimate={estimateRunProgress(run, now)}
+                  color={tone.color}
+                  timeLeft={t("codingAgent.timeLeft")}
+                  testId={`coding-agent-progress-${run.id}`}
+                  className="mt-1"
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {rowStop(run)}
+              {/* The run's own page. The row itself opens it too; this is the
+                  row's chevron, named in full for a screen reader. */}
+              <button
+                type="button"
+                onClick={() => showRun(run.id)}
+                data-testid={`coding-agent-details-${run.id}`}
+                title={t("codingAgent.showDetails")}
+                aria-label={t("codingAgent.showDetails")}
+                className={ROW_ICON_BUTTON}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
+              </button>
+            </div>
+          </div>
+        </li>
+      ),
+    };
+  });
+  // A stable sort: the ones at work first, then newest first, and two rows
+  // the comparison cannot tell apart keep the order the lists gave them.
+  const activityRows = [...teamRows, ...runRows].sort((a, b) => Number(b.live) - Number(a.live) || b.at - a.at);
+  const activityList = (
+    <>
+      {activityRows.length === 0 ? (
+        <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
+      ) : (
+        <ul className="mt-2 flex flex-col gap-2" data-testid="coding-agent-runs">
+          {activityRows.slice(0, runsShown).map((row) => row.node)}
+        </ul>
+      )}
+      {activityRows.length > runsShown && (
         <button
           type="button"
           onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
           data-testid="coding-agent-runs-more"
           className={`${BTN_SECONDARY} w-full mt-2`}
         >
-          {t("codingAgent.more")} ({visibleRuns.length - runsShown})
+          {t("codingAgent.more")} ({activityRows.length - runsShown})
         </button>
+      )}
+      {/* The runs past the newest thirty that "keep everything" kept for this
+          folder (`runs?history=1&project=`), a page at a time, once every row
+          the poll holds is on the page. Asked for, not read on open: the
+          history is a file per run, and most visits never want it. */}
+      {openProject && activityRows.length <= runsShown && (
+        olderPage?.project === openProject.directory && olderPage.loaded >= olderPage.total ? (
+          olderPage.total === 0 && (
+            <p className="text-[11px] text-[var(--text-muted)] mt-2 px-1 leading-relaxed" data-testid="coding-agent-older-empty">
+              {t("codingAgent.history.olderEmpty", { count: status?.historyLiveKept ?? 30 })}
+            </p>
+          )
+        ) : (
+          <button
+            type="button"
+            onClick={() => void showOlder()}
+            disabled={olderBusy}
+            data-testid="coding-agent-show-older"
+            className={`${BTN_SECONDARY} w-full mt-2`}
+          >
+            {t("codingAgent.history.showOlder")}
+            {olderPage?.project === openProject.directory && ` (${olderPage.total - olderPage.loaded})`}
+          </button>
+        )
       )}
     </>
   );
 
+  // The header row's title: the project's name as a button on a project's
+  // and a run's page (the way back up, and where the run lives), the run's
+  // own first line for a run that belongs to no project, the face's name
+  // otherwise.
+  const headerProject = view.face === "run"
+    ? projects.find((pr) => runBelongsTo(view.run, pr)) ?? null
+    : view.face === "team"
+      ? (view.team ? projectOfTeam(view.team) : null)
+      : view.face === "project" ? view.project : null;
+  const headerTitle = view.face === "settings"
+    ? t("codingAgent.openSettings")
+    : view.face === "run"
+      ? (view.run.reviewOf ? t("codingAgent.reviewPassTitle", { id: view.run.reviewOf }) : firstLine(view.run.task, 160))
+      : view.face === "team"
+        ? (view.team ? firstLine(view.team.goal, 160) : t("codingAgent.team.pageTitle"))
+        : t("codingAgent.title");
+  const backTestId = view.face === "settings" ? "coding-agent-settings-back" : view.face === "run" ? "coding-agent-run-back" : view.face === "team" ? "coding-agent-team-back" : "coding-agent-project-back";
+  const backLabel = (view.face === "run" || view.face === "team") && headerProject ? t("codingAgent.backTo", { name: headerProject.name }) : t("codingAgent.back");
+  // Home and the wizard carry the state chip; a project's or a run's page
+  // names the project instead, and the Settings page holds the switch itself.
+  const stateChip = (view.face === "home" || view.face === "wizard") && status && (
+    <span
+      data-testid="coding-agent-state"
+      className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 shrink-0 ${
+        status.enabled ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]" : "text-[var(--text-muted)] border-white/15"
+      }`}
+    >
+      <span
+        aria-hidden="true"
+        className={`w-1.5 h-1.5 rounded-full ${status.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`}
+      />
+      {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
+    </span>
+  );
+  // How wide the column may grow. One column at every width (2026-10-30: the
+  // 860-px sidebar and the breadcrumb row are gone — one chrome is what makes
+  // the phone and the wide window the same page); a project's page is wider
+  // for its file tree beside the viewer, and a run's page keeps its rail's
+  // width until the rail goes with the run page's own redesign.
+  const column = view.face === "project" ? "max-w-5xl" : view.face === "settings" ? "max-w-2xl" : "max-w-3xl";
+
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div ref={rootRef} className={`h-full flex ${APP_GROUND} text-white @container`} data-testid="coding-agent-panel" data-help-bounds>
-      {/* The sidebar — the Claude Code web layout's left rail: New, Home,
-          Settings, the projects, the recent runs. Only when the window is
-          wide enough to spare it (the phone and a small window keep the
-          lists on the pages themselves), and not while the wizard runs. */}
-      {wide && view.face !== "wizard" && (
-        <aside className={`flex w-[15rem] shrink-0 flex-col border-r ${RAIL_SURFACE} overflow-y-auto`} data-testid="coding-agent-sidebar">
-          <div className="px-3 pt-4 pb-2 space-y-1">
-            {!standalone && (
-              <button type="button" onClick={openNew} data-testid="coding-agent-sidebar-new" className={`${SIDEBAR_ITEM} text-[var(--text-primary)]`}>
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
-                {t("codingAgent.createNewProject")}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => { disarmClear(); setOpenRunId(null); setOpenProjectDir(null); setPage("home"); }}
-              aria-current={view.face === "home" ? "page" : undefined}
-              data-testid="coding-agent-sidebar-home"
-              className={`${SIDEBAR_ITEM} ${view.face === "home" ? SIDEBAR_ACTIVE : ""}`}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">home</span>
-              {t("codingAgent.navHome")}
-            </button>
-            <button
-              type="button"
-              onClick={() => { disarmClear(); setPage("settings"); }}
-              aria-current={view.face === "settings" ? "page" : undefined}
-              data-testid="coding-agent-sidebar-settings"
-              className={`${SIDEBAR_ITEM} ${view.face === "settings" ? SIDEBAR_ACTIVE : ""}`}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">settings</span>
-              {t("codingAgent.openSettings")}
-            </button>
-            <button
-              type="button"
-              onClick={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }}
-              aria-current={view.face === "history" ? "page" : undefined}
-              data-testid="coding-agent-sidebar-history"
-              className={`${SIDEBAR_ITEM} ${view.face === "history" ? SIDEBAR_ACTIVE : ""}`}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">manage_history</span>
-              {t("codingAgent.history.title")}
-            </button>
-          </div>
-          {/* No projects list here: the home page lists every project, and
-              the rail's copy of it (25 rows on the owner's box) was the
-              tallest thing in the window — "lean home", the owner's brief of
-              2026-10-28. */}
-          {runs.length > 0 && (
-            <div className="px-3 pt-3 pb-4">
-              <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("codingAgent.recentRuns")}</p>
-              <ul className="space-y-0.5" data-testid="coding-agent-sidebar-runs">
-                {sidebarRuns.map((run) => {
-                  const active = view.face === "run" && view.run.id === run.id;
-                  const tone = RUN_TONE[run.status];
-                  return (
-                    <li key={run.id}>
-                      <button
-                        type="button"
-                        onClick={() => showRun(run.id)}
-                        aria-current={active ? "page" : undefined}
-                        className={`${SIDEBAR_ITEM} ${active ? SIDEBAR_ACTIVE : ""}`}
-                        title={firstLine(run.task, 160)}
-                      >
-                        <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full shrink-0 ${isLive(run.status) ? "animate-pulse" : ""}`} style={{ background: tone.color }} />
-                        <span className="truncate">{run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 60)}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
-        </aside>
-      )}
-      {/* The content column scrolls on its own beside the sidebar. */}
-      <div className="flex-1 min-w-0 flex flex-col overflow-y-auto">
+    <div className={`h-full flex flex-col overflow-y-auto ${APP_GROUND} text-white @container`} data-testid="coding-agent-panel" data-help-bounds>
       {/* flex-1 so a face can ask for the remaining height — the wizard's
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
-      {/* A run's page is data — figures, files, a summary, an activity log —
-          and reads better wide; the home and project pages stay a column. */}
-      <div className={`mx-auto w-full ${view.face === "run" ? "max-w-6xl" : view.face === "project" ? "max-w-none" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
+      <div className={`mx-auto w-full ${column} ${PAGE_PAD} flex-1 flex flex-col min-h-0`}>
 
-        {/* One row: what this is, whether it is on, and everything you can do
-            from here. The primary action used to sit on its own line below,
-            left-aligned against nothing; paired with Settings it reads as a
-            toolbar and the page below it starts clean. */}
-        {/* The header row is the narrow window's: with the rail up it would
-            repeat the rail's New/Home/Settings and cost the page a row it
-            needs for files — and the window's own title bar already names
-            the app. The owner asked for no name and no state chip in the
-            rail either; the switch is one tap away in Settings. The setup
-            WIZARD has no rail at any width, so it keeps the row: without it
-            a wide window on the wizard had no way to Settings at all. */}
-        {(!wide || view.face === "wizard") && (
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-1 border-b border-white/[0.06]">
-          {/* Wraps: in a phone-wide window the buttons drop under the title
-              instead of the title folding onto two lines behind them. */}
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
-            <h1 className="whitespace-nowrap text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
-            {status && (
-              <span
-                data-testid="coding-agent-state"
-                className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 ${
-                  status.enabled ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]" : "text-[var(--text-muted)] border-white/15"
-                }`}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`w-1.5 h-1.5 rounded-full ${status.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`}
-                />
-                {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {/* Create app lives HERE now, beside Settings and the same size as
-                it, instead of as a lone banner-ish button under the header.
-                Home face only: on the settings and wizard faces there is
-                nothing for it to create into yet. */}
-            {view.face === "home" && !standalone && (
+        {/* ONE header row, 56 px, on every face at every width: the way up
+            (absent on home and on the wizard, which have no level above
+            them), the glyph, where you are, and Settings. It replaced the
+            narrow window's title row, the wide window's sidebar and the
+            breadcrumb trail on 2026-10-30 — three chromes for one app. Not
+            sticky: the phone window's own header sits above it, and a
+            second fixed bar would have cost the phone a sixth of its
+            height. */}
+        <div className="flex items-center gap-2 h-14 shrink-0" data-testid="coding-agent-header">
+          {hasUp && (
+            <button
+              type="button"
+              onClick={goUp}
+              aria-label={backLabel}
+              title={backLabel}
+              data-testid={backTestId}
+              className={`${HEADER_ICON_BUTTON} -ml-2`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">arrow_back</span>
+            </button>
+          )}
+          <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
+          <div className="min-w-0 flex-1 flex items-center gap-2">
+            {(view.face === "run" || view.face === "team") && headerProject ? (
               <button
                 type="button"
-                onClick={openNew}
-                data-testid="coding-agent-new"
-                className={BTN_PRIMARY}
+                onClick={() => { setOpenRunId(null); setOpenTeamId(null); setOpenProjectDir(headerProject.directory); }}
+                data-testid="coding-agent-crumb-project"
+                className="min-w-0 truncate text-left text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] hover:text-white cursor-pointer"
               >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
-                {t("codingAgent.createNewProject")}
+                {headerProject.name}
               </button>
+            ) : (
+              <h1 className="min-w-0 truncate text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
+                {headerProject ? headerProject.name : headerTitle}
+              </h1>
             )}
-          {/* The settings live IN this app: one button, on the desktop and on
+            {stateChip}
+          </div>
+          {/* The settings live IN this app: one gear, on the desktop and on
               /app/coding alike, so a phone that landed here from "Open in new
-              tab" reaches the switch without a desktop listening. */}
-          {/* Settings opens from here. The way BACK is the breadcrumb every
-              page but home carries (CodingAgentBreadcrumb) — one shape for
-              the settings page, a project's and a run's, where three
-              differently styled pills used to float — so this button never
-              has to flip between two meanings. */}
+              tab" reaches the switch without a desktop listening. The way
+              BACK is the header's arrow, so this button never has to flip
+              between two meanings. */}
           {view.face !== "settings" && (
             <button
               type="button"
               onClick={() => { disarmClear(); setPage("settings"); }}
+              aria-label={t("codingAgent.openSettings")}
+              title={t("codingAgent.openSettings")}
               data-testid="coding-agent-open-settings"
-              className={OPEN_SETTINGS_CLASS}
+              className={`${HEADER_ICON_BUTTON} -mr-2`}
             >
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
-              {t("codingAgent.openSettings")}
+              <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">settings</span>
             </button>
           )}
-          </div>
         </div>
-        )}
 
         {/* A refused action's sentence, ABOVE the page rather than under it.
             Drawn at the bottom of the panel, a refused Resume on a run's page
@@ -2070,23 +2218,13 @@ export default function CodingAgentApp() {
         )}
 
         {view.face === "settings" && (<>
-          <CodingAgentBreadcrumb
-            crumbs={[
-              { label: t("codingAgent.navHome"), onClick: () => { disarmClear(); setPage("home"); }, testId: "coding-agent-crumb-home" },
-              { label: t("codingAgent.openSettings") },
-            ]}
-            onBack={() => { disarmClear(); setPage("home"); }}
-            backLabel={t("codingAgent.back")}
-            navLabel={t("codingAgent.breadcrumbLabel")}
-            backTestId="coding-agent-settings-back"
-          />
           {/* pb-6 for the same reason coding-agent-run-page carries it: the
               owner tools are the last thing on this face, and the wrapper's
-              own py-4 left Reset / Test harness / Clear history sitting on
+              own py-4 left Reset / Test in the chat / Clear history sitting on
               the bottom edge of the scroll area. Same scale as the run page,
               not a new one. */}
-          <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
-            <CodingAgentSettingsPanel onOpenHistory={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }} />
+          <div className="mt-1 pb-6" data-testid="coding-agent-embedded-settings">
+            <CodingAgentSettingsPanel />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
                 its explanation on the question mark beside it. The headings
@@ -2101,13 +2239,17 @@ export default function CodingAgentApp() {
               </div>
 
               <div className="flex items-center gap-2" data-testid="coding-agent-harness-card">
+                {/* A hand-off, not a run start, so a run already in flight
+                    no longer greys it (the chat queues); only an agent that
+                    is switched off has nothing to hand the chat. */}
                 <button
                   type="button"
-                  onClick={() => void testHarness()}
-                  disabled={busy === "harness-test" || anyLive || !status?.enabled || !status?.ready}
+                  onClick={testHarnessInChat}
+                  disabled={!status?.enabled}
                   data-testid="coding-agent-harness-test"
                   className={`${BTN_SECONDARY} flex-1`}
                 >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
                   {t("codingAgent.harnessTest")}
                 </button>
                 <HelpTip
@@ -2141,95 +2283,81 @@ export default function CodingAgentApp() {
           </div>
         </>)}
 
-        {view.face === "history" && (<>
-          <CodingAgentBreadcrumb
-            crumbs={[
-              { label: t("codingAgent.navHome"), onClick: () => { setArchivedOpenId(null); setPage("home"); }, testId: "coding-agent-history-crumb-home" },
-              { label: t("codingAgent.history.title") },
-            ]}
-            onBack={() => { setArchivedOpenId(null); setPage("home"); }}
-            backLabel={t("codingAgent.back")}
-            navLabel={t("codingAgent.breadcrumbLabel")}
-            backTestId="coding-agent-history-back"
-          />
-          <CodingRunHistoryPage
-            // A fresh page per archived run asked for, so it opens on that run.
-            key={archivedOpenId ?? "lists"}
-            initialArchivedId={archivedOpenId}
-            liveKept={status?.historyLiveKept ?? 30}
-            onOpenRun={(row) => {
-              const run = row as unknown as Run;
-              setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
-              setOpenProjectDir(null);
-              setOpenRunId(run.id);
-              setPage("home");
-            }}
-          />
-        </>)}
-
         {view.face === "wizard" && status && (
           <CodingAgentSetupWizard
             status={status}
             // The wizard writes through the same routes this window reads, so
             // finishing is just "read yourself again": the flag comes back
-            // true and the face flips to home — or to the harness run's own
-            // page when the owner pressed "Try it once", which is where what
-            // they were promised (Claude Code starting, writing, reporting
-            // back) is actually shown.
-            onDone={(runId) => {
-              if (runId) { setOpenProjectDir(null); setOpenRunId(runId); }
-              void load();
-            }}
+            // true and the face flips to home. "Try it in the chat" hands
+            // the first run to the chat, where it appears as a card — the
+            // wizard no longer lands the owner on a run page of its own.
+            onDone={() => { void load(); }}
           />
         )}
 
         {view.face === "home" && (<>
         {/* The agents FIRST (the owner's brief, 2026-10-12: "when you open it
-            we first must see the agents, like a chart"): every team and run
-            at work as a chart — or the newest one that was. */}
+            we first must see the agents, like a chart"): a compact chart per
+            team at work, a plain row per solo run, the newest that was when
+            nothing works — and, with nothing ever run, one sentence and the
+            way to the chat. */}
         <CodingAgentLiveAgents
           runs={runs}
           teams={teams}
           onOpenRun={showRun}
-          openTeamFor={openTeamFor}
+          onOpenTeam={openTeam}
+          onAsk={standalone ? undefined : openNew}
           onChanged={() => { void load(); }}
           refreshKey={runs}
         />
         {/* Nothing at all when the harness is fine. A row that always says
-            "Ready" is a row that never tells the owner anything; the checklist
-            appears only when something is actually missing. */}
-        {readiness && !readiness.ready && (
-          <div className={`mt-3 ${CARD_SURFACE} px-3 py-2`}>
-            <ul className="space-y-1">
-              {checks.filter((c) => !c.ok).map((c) => (
-                <li key={c.label} className="flex items-center gap-2 text-xs">
-                  <span className="material-symbols-rounded text-red-400" style={{ fontSize: 16 }} aria-hidden="true">cancel</span>
-                  <span className="text-[var(--text-primary)]">{c.label}</span>
-                  <span className="text-[var(--text-muted)]">· {c.badText}</span>
-                </li>
-              ))}
-            </ul>
-            {readiness.problems.length > 0 && (
-              <p className="text-[11px] text-amber-400 mt-1.5 leading-relaxed" role="alert">
-                {readiness.problems.join(" ")}
-              </p>
-            )}
-            {/* Only for the one problem the owner can clear from here. The
-                other rows name something to install or a plan to connect, and
-                a button that re-read the same disk would just say no again. */}
-            {readiness.harnessHealthy === false && (
-              <button
-                type="button"
-                onClick={() => void retryHarness()}
-                disabled={busy === "harness-fault"}
-                data-testid="coding-agent-harness-retry"
-                className="mt-2 text-[11px] rounded-lg border border-amber-400/40 text-amber-300 px-2.5 py-1 hover:bg-amber-400/10 disabled:opacity-50"
-              >
-                {busy === "harness-fault" ? t("codingAgent.harnessRetrying") : t("codingAgent.harnessRetry")}
-              </button>
-            )}
-          </div>
-        )}
+            "Ready" is a row that never tells the owner anything. When
+            something IS missing: ONE row naming the first failing check
+            (2026-10-30 — the four-row checklist went), the box's own sentence
+            on how to fix it, Retry for the one fault clearable from here and
+            the way to Settings. */}
+        {readiness && !readiness.ready && (() => {
+          const failing = checks.find((c) => !c.ok);
+          const what = failing ? `${failing.label} · ${failing.badText}` : (readiness.problems[0] ?? "");
+          return (
+            <div className={`mt-3 ${CARD_SURFACE} px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-2`} data-testid="coding-agent-readiness">
+              <span className="material-symbols-rounded text-red-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">cancel</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-[var(--text-primary)]" data-testid="coding-agent-readiness-line">{t("codingAgent.notReady", { what })}</p>
+                {readiness.problems.length > 0 && (
+                  <p className="text-[11px] text-amber-400 mt-0.5 leading-relaxed" role="alert">
+                    {readiness.problems.join(" ")}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Only for the one problem the owner can clear from here. The
+                    other checks name something to install or a plan to connect,
+                    and a button that re-read the same disk would just say no
+                    again. */}
+                {readiness.harnessHealthy === false && (
+                  <button
+                    type="button"
+                    onClick={() => void retryHarness()}
+                    disabled={busy === "harness-fault"}
+                    data-testid="coding-agent-harness-retry"
+                    className={BTN_SECONDARY}
+                  >
+                    {busy === "harness-fault" ? t("codingAgent.harnessRetrying") : t("codingAgent.harnessRetry")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => { disarmClear(); setPage("settings"); }}
+                  data-testid="coding-agent-readiness-settings"
+                  className={BTN_QUIET}
+                >
+                  {t("codingAgent.openSettings")}
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* The projects, and the way to start one. */}
         <div className="mt-4" data-testid="coding-agent-projects-section">
@@ -2242,39 +2370,24 @@ export default function CodingAgentApp() {
                 </span>
               )}
             </h2>
-            {/* Bringing in what already exists: one of the owner's GitHub
-                repositories, or a folder on the box. Offered on the standalone
-                page too — nothing here needs the chat. */}
-            <button
-              type="button"
-              onClick={() => setImportOpen((v) => !v)}
-              aria-expanded={importOpen}
-              className={BTN_SECONDARY}
-              data-testid="coding-agent-import-toggle"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
-              {t("codingAgent.importButton")}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Create app: the hand-off to the chat's "A new app for your
+                  desktop" card. Beside the projects it creates into, since the
+                  header row carries the way up and Settings only. Not on
+                  /app/coding, where no desktop listens. */}
+              {!standalone && (
+                <button
+                  type="button"
+                  onClick={openNew}
+                  data-testid="coding-agent-new"
+                  className={BTN_PRIMARY}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
+                  {t("codingAgent.createNewProject")}
+                </button>
+              )}
+            </div>
           </div>
-
-          {importOpen && (
-            <ImportProjectPanel
-              onClose={() => setImportOpen(false)}
-              onOpenSettings={() => { disarmClear(); setImportOpen(false); setPage("settings"); }}
-              onImported={(result: ImportResult) => {
-                setImportOpen(false);
-                const name = result.project?.name ?? result.folder;
-                const lines = [t("codingAgent.importDone", { name })];
-                if (result.skipped.length > 0) lines.push(t("codingAgent.importSkipped", { folders: result.skipped.join(", ") }));
-                window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: lines.join(" "), type: "success" } }));
-                // The row is on the next read; the page opens on the folder
-                // now, and the project page reads its own git line.
-                void load();
-                setOpenRunId(null);
-                setOpenProjectDir(result.directory);
-              }}
-            />
-          )}
 
           {standalone && (
             <p className="mt-2 px-1 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-new-needs-desktop">
@@ -2335,8 +2448,9 @@ export default function CodingAgentApp() {
               )}
             </div>
           ) : (
+            <>
             <ul className="space-y-1.5 mt-2" data-testid="coding-agent-projects">
-              {projects.map((project) => {
+              {(projectsAll ? orderedProjects : orderedProjects.slice(0, PROJECTS_PAGE)).map((project) => {
                 const running = project.latestRun?.status === "running";
                 return (
                   <li
@@ -2344,10 +2458,11 @@ export default function CodingAgentApp() {
                     // owner's can share a name.
                     key={project.directory}
                     data-testid={`coding-agent-project-${project.folder}`}
-                    // The row opens the project, and it holds buttons of its
-                    // own (copy, Open), so it cannot be a <button> itself:
-                    // role and tabIndex make it a keyboard stop, and Enter
-                    // or Space opens it the way a click does.
+                    // The row opens the project. Not a <button> itself (a row
+                    // held buttons of its own once, and a <li> of role button
+                    // is what the tests and a screen reader know): role and
+                    // tabIndex make it a keyboard stop, and Enter or Space
+                    // opens it the way a click does.
                     role="button"
                     tabIndex={0}
                     onClick={() => setOpenProjectDir(project.directory)}
@@ -2358,7 +2473,7 @@ export default function CodingAgentApp() {
                         setOpenProjectDir(project.directory);
                       }
                     }}
-                    className={`${CARD_SURFACE} px-3 py-2 flex items-center justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
+                    className={`${CARD_SURFACE} px-3 py-2 min-h-[56px] @md:min-h-[48px] flex items-center justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
                   >
                     <div className="min-w-0 flex-1 flex items-center gap-2 flex-wrap">
                       {/* The picture the box drew for this project while a run
@@ -2370,8 +2485,9 @@ export default function CodingAgentApp() {
                           else that the desktop has it, else that it is a code
                           project (under the checkout, not in the owner's
                           folder). The ClawBox-app badge, the last commit's
-                          subject and the Store and Delete buttons left the row
-                          for the project's page — a row's job is to open it. */}
+                          subject, the Store and Delete buttons and (2026-10-30)
+                          the inline Open left the row for the project's page —
+                          a row's job is to open it. */}
                       {running ? (
                         <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
                           {t("codingAgent.runInProgress")}
@@ -2389,41 +2505,56 @@ export default function CodingAgentApp() {
                     <span className="text-[11px] text-[var(--text-muted)] shrink-0 self-center">
                       {project.lastCommit ? timeAgo(project.lastCommit.date, t) : t("codingAgent.noCommits")}
                     </span>
-                    {project.onDesktop && (
-                      <button
-                        type="button"
-                        // The desktop registers a deployed web app under
-                        // `installed-<folder>` (page.tsx, getAllApps); the
-                        // bare folder name matches no app there, and the
-                        // click did nothing at all.
-                        onClick={(e) => { e.stopPropagation(); void openOrAddProject(project); }}
-                        data-testid={`coding-agent-open-${project.folder}`}
-                        className={BTN_SECONDARY}
-                      >
-                        {t("codingAgent.open")}
-                      </button>
-                    )}
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                   </li>
                 );
               })}
             </ul>
+            {/* The rest of the projects, on request. The button says how many
+                there are in all, and the list folds back to the first page on
+                the next open of the app. */}
+            {projects.length > PROJECTS_PAGE && (
+              <button
+                type="button"
+                onClick={() => setProjectsAll((v) => !v)}
+                aria-expanded={projectsAll}
+                data-testid="coding-agent-projects-more"
+                className={`${BTN_SECONDARY} w-full mt-2`}
+              >
+                {projectsAll ? t("codingAgent.showFewerProjects") : t("codingAgent.showAllProjects", { count: projects.length })}
+              </button>
+            )}
+            </>
           )}
         </div>
         </>)}
+
+        {/* One team, on its own page: status, goal, phase, Stop, the real
+            chart, the tasks, the PR, the result, Details. The project is the
+            header row's title and the way back. */}
+        {view.face === "team" && (
+          <CodingTeamPage
+            key={view.teamId}
+            teamId={view.teamId}
+            team={view.team}
+            runs={runs}
+            // A member's page from here keeps the team for Back (see openTeamId).
+            onOpenRun={(id) => { setOpenRunId(id); setPage("home"); }}
+            onChanged={() => { void load(); }}
+            refreshKey={runs}
+          />
+        )}
 
         {/* One run, on its own page. */}
         {view.face === "run" && (() => {
           const run = view.run;
           const tone = RUN_TONE[run.status];
           const started = run.status !== "draft" && run.status !== "queued";
-          const mainOutcome = runOutcome(run.status);
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
           // Its project folder has been removed. The record is kept — see
           // missingProjectOf — so the page has to say so rather than draw a run
           // that appears to belong nowhere.
           const missingProject = missingProjectOf(run, projects, projectsDir);
-          const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
           const artifactsFolded = artifacts.length > ARTIFACT_PREVIEW && artifactsOpenFor !== run.id;
           // Folded: the first few of WHATEVER kind — a run with two pictures
@@ -2471,137 +2602,231 @@ export default function CodingAgentApp() {
               />
             </div>
           );
-          return (
-            <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
-              <CodingAgentBreadcrumb
-                crumbs={[
-                  { label: t("codingAgent.projectsTitle"), onClick: () => { setOpenRunId(null); setOpenProjectDir(null); }, testId: "coding-agent-crumb-projects" },
-                  ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
-                  { label: title },
-                ]}
-                // A run with no project of its own — a team worker in a
-                // worktree — goes back to Projects, which is what its
-                // breadcrumb says. Leaving `openProjectDir` alone landed it on
-                // whichever project the owner had opened BEFORE, a page with
-                // nothing to do with the run they came from.
-                onBack={() => { setOpenRunId(null); setOpenProjectDir(project ? project.directory : null); }}
-                backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
-                navLabel={t("codingAgent.breadcrumbLabel")}
-                backTestId="coding-agent-run-back"
-              />
-
-              {/* The agents first: this run's team with the run marked on it,
-                  or — solo — the run and the helpers it sent out. A node opens
-                  what that agent is doing now; the lists are in Details. */}
-              {started && (
-                <RunAgentsDiagram
-                  run={run}
-                  teams={teams}
-                  runOf={runById}
-                  onOpenRun={showRun}
-                  onChanged={() => { void load(); }}
-                  refreshKey={runs}
-                />
-              )}
-              {/* Who is working on this run, as a list — folded under the
-                  chart above (Details), which draws the same agents first.
-
-                  A run can be BOTH: a member of a coding team (planner,
-                  workers, reviewers) and the sender of its own Claude Code
-                  helpers. This card covers both — the team's members, then
-                  the run itself and every helper it sent out — and every one
-                  of them is the same row, so the eye reads one list rather
-                  than two widgets that happened to be stacked.
-
-                  No tally in the header: the tree pulses for whoever is at
-                  work and every row carries its own state, so a third
-                  statement of the same thing was only ever one more number to
-                  keep right — and on a team run it was wrong, counting the run
-                  and its helpers while six teammates worked beside it. */}
-              {started && (
-                <DiagramDetails testId="coding-agent-run-details">
-                <div className={`${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-agents">
-                  <p className={SECTION_LABEL}>{t("codingAgent.agentsTitle")}</p>
-                  {run.team && (
-                    <CodingRunTeamMembers
-                      key={`${run.id}/${run.team.id}`}
-                      teamId={run.team.id}
-                      runId={run.id}
-                      runs={runs.map((r) => ({ id: r.id, status: r.status }))}
-                      live={isLive(run.status)}
-                      onOpenRun={showRun}
-                      tree={false}
-                      cast={teams.find((x) => x.id === run.team!.id)?.runs ?? null}
-                    />
+          // The LIVE layout — a run at work or waiting its turn — against the
+          // SETTLED one, which a paused run and a draft share: nothing moves
+          // on them, and what they want is the same as a finished run's (why
+          // it stopped, then the way on).
+          const working = isLive(run.status) || run.status === "queued";
+          // A run that did not finish on its own: the reason goes under the
+          // status, loud. A finished run's refusals fold into Details.
+          const stoppedBadly = !working && run.status !== "completed" && run.status !== "draft";
+          const nowStep = activity.length > 0 ? describeStep(t, activity[activity.length - 1]) : null;
+          const command = isLive(run.status) && run.transcriptPath
+            ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
+            : null;
+          // The dialog: the rest of a long task, and the files the run was
+          // given. A one-line task that was handed nothing draws neither.
+          const taskDialog = fullTask ?? (hasRunInputs(run.inputs) && !run.reviewOf ? run.task : null);
+          const pullRequestOpen = Boolean(run.pr && run.pr.phase !== "failed");
+          const worktreeLine = Boolean(run.worktree && isSettled(run.status) && worktreeCardApplies(run.worktree, pullRequestOpen));
+          const webApp = Boolean(project && (project.onDesktop || project.app?.port));
+          const changedAnything = run.filesTouched.length > 0 || Boolean(run.commit) || Boolean(run.pr?.url) || worktreeLine || webApp;
+          /** What was refused, spelled out — and, where this box can answer it, an "Allow next time" beside it. Nothing when nothing was. */
+          const denials = (
+            <CodingRunDenials
+              runId={run.id}
+              inputs={run.inputs}
+              denials={run.denials}
+              deniedActions={run.deniedActions}
+              resumable={run.status === "paused"}
+              onAllowed={notifyCodingAgentChanged}
+              onResume={resumeOpenRun}
+            />
+          );
+          /** Why it stopped / Needs you: the error, why a pause is a pause, the refusals. */
+          const attention = (
+            <>
+              {run.error && (
+                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
+                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
+                  {/* The device's verdict FIRST, in the owner's own language,
+                      and only where the record says so — never guessed at from
+                      the English below. What the harness actually printed is
+                      an error code wrapped in JSON; it stays, because it names
+                      the model that was refused and that is what anyone
+                      looking into this needs, but it is no longer the first
+                      and only thing the owner is handed. */}
+                  {run.failureKind === "harness_not_ready" && (
+                    <p className="mt-1 text-xs text-amber-300 leading-relaxed" data-testid="coding-agent-run-harness-not-ready">
+                      {t("codingAgent.harnessNotReadyDetail")}
+                    </p>
                   )}
-                  <ul className="mt-2 space-y-0.5" data-testid="coding-agent-active-subagents">
-                    {/* A tick for a run that did not finish is a lie the
-                        status chip above already contradicts: only a
-                        completed run gets one, a failed or stopped one gets
-                        the error glyph, and a paused run or a draft is still
-                        waiting rather than done. */}
-                    <li className="min-w-0" data-testid="coding-agent-agent-main" data-outcome={mainOutcome}>
-                      <CodingAgentRosterRow
-                        icon={MAIN_AGENT_GLYPH[mainOutcome].icon}
-                        iconClassName={MAIN_AGENT_GLYPH[mainOutcome].className}
-                        testId="coding-agent-agent-main-row"
-                        name={t("codingAgent.agentMain")}
-                        // Its role on the board is the one thing about this run
-                        // that is written nowhere else on the page.
-                        what={run.team ? teamRole(run.team) : undefined}
-                        meta={duration(run)}
-                        fields={[
-                          { label: t("codingAgent.agentModel"), value: runModels(run) ?? "", mono: true },
-                          { label: t("codingAgent.statTokens"), value: (run.tokensUsed ?? 0) > 0 ? tokens(run.tokensUsed ?? 0) : "" },
-                          { label: t("codingAgent.agentState"), value: statusLabel(run.status) },
-                        ]}
-                      />
-                    </li>
-                    {run.activeSubagents?.map((a, i) => (
-                      <li key={`live-${i}`} className="min-w-0" data-testid="coding-agent-subagent-live">
-                        <CodingAgentRosterRow
-                          testId="coding-agent-subagent-live-row"
-                          icon="sync"
-                          iconClassName="text-sky-400 animate-pulse"
-                          name={a.type}
-                          nameClassName="text-sky-300"
-                          what={a.description}
-                          meta={t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, now) })}
-                          fields={[
-                            { label: t("codingAgent.agentAsked"), value: a.description },
-                            { label: t("codingAgent.agentState"), value: t("codingAgent.agentStillWorking") },
-                          ]}
-                        />
-                      </li>
-                    ))}
-                    {[...(run.subagents ?? [])].reverse().map((a, i) => (
-                      <li key={`done-${i}`} className="min-w-0" data-testid="coding-agent-subagent-done" data-refused={a.refused || undefined}>
-                        <CodingAgentRosterRow
-                          testId="coding-agent-subagent-done-row"
-                          icon={a.refused ? "block" : "check_circle"}
-                          iconClassName={a.refused ? "text-amber-400" : "text-emerald-400/80"}
-                          name={a.type}
-                          nameClassName={a.refused ? "text-amber-300" : "text-emerald-300/90"}
-                          what={a.description}
-                          meta={a.refused ? t("codingAgent.helperRefused") : t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, a.endedAt) })}
-                          fields={[
-                            { label: t("codingAgent.agentAsked"), value: a.description },
-                            // A refused helper says so on the row already, in
-                            // amber; the panel would only say it twice.
-                            !a.refused && { label: t("codingAgent.agentState"), value: t("codingAgent.agentFinished") },
-                          ]}
-                        />
-                      </li>
-                    ))}
-                  </ul>
+                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
                 </div>
-                </DiagramDetails>
               )}
+              {/* WHY it is paused, when the answer is not "somebody asked". A
+                  run refused because one of this box's allowances is spent
+                  settles exactly like an owner's pause, and read the generic
+                  "Paused — resume to continue" the owner's only move was to
+                  press Resume and buy the same refusal. The Resume control is
+                  in the controls below: the allowance does come back, and this
+                  says when. */}
+              {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
+                <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
+                  {/* The sentence is shared with the chat's run card
+                      (src/lib/coding-pause-reason-copy.ts), so the two
+                      surfaces cannot word the same pause two ways. */}
+                  <p className="text-[11px] text-[var(--text-secondary)] break-words">
+                    {pauseReasonText(run.pauseReason, t, locale)}
+                  </p>
+                </div>
+              )}
+              {denials}
+            </>
+          );
+          /** The four figures a run is watched BY, as 2×2 tiles (four across from `@md`) — the ONE home of these numbers. */
+          const figures = (
+            <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 gap-2" data-testid="coding-agent-run-figures">
+              {/* The CLI reports its turns with its final result: a live
+                  run's 0 is no count yet, not a count (turnsKnown). */}
+              <StatTile label={t("codingAgent.statSteps")} value={started && turnsKnown(run) ? (run.maxTurns ? `${run.numTurns} / ${run.maxTurns}` : String(run.numTurns)) : nothingYet} testId="coding-agent-stat-steps" />
+              <StatTile label={t("codingAgent.statFiles")} value={run.filesTouched.length > 0 ? String(run.filesTouched.length) : nothingYet} testId="coding-agent-stat-files" />
+              <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : nothingYet} />
+              <StatTile
+                label={t("codingAgent.statTokens")}
+                value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : nothingYet}
+                hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
+              />
+            </div>
+          );
+          /** Everything you can do to the run, 44-px buttons wrapping in a row. */
+          const controls = (
+            <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="coding-agent-run-actions">
+              {/* Continue in the chat: the face's one primary on a settled
+                  run — the Create card opens on this project with its last run
+                  in view, and the assistant starts the next one. Not on the
+                  standalone page, which mounts no chat. */}
+              {!working && !standalone && project && (
+                <button
+                  type="button"
+                  onClick={() => openNewAppCard({ project: project.directory })}
+                  data-testid="coding-agent-run-continue-chat"
+                  className={BTN_PRIMARY_WIDE}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
+                  {t("codingAgent.continueInChat")}
+                </button>
+              )}
+              {runControls(run, "page")}
+              {command && (
+                <button
+                  type="button"
+                  onClick={() => openInTerminal(run)}
+                  data-testid="coding-agent-run-terminal-open"
+                  className={BTN_SECONDARY}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
+                  {t("codingAgent.livePreviewOpenApp")}
+                </button>
+              )}
+              {/* Steering, while there is still something to steer — through
+                  the chat (2026-10-30): the composer opens with "Tell coding
+                  run <id>: " for the owner to finish, and the assistant
+                  delivers it with coding_run_message. The text box that sat
+                  here (CodingRunMessageBox) is gone with every other input in
+                  the app. A paused run, a draft and one that GAVE UP all still
+                  hold a session, and their queue goes in when they go back. */}
+              {!standalone && holdsResumableSession(run.status) && (
+                <button
+                  type="button"
+                  onClick={() => dispatchOpenChat({ draft: t("codingAgent.messageDraft", { id: run.id }) })}
+                  data-testid="coding-agent-run-message"
+                  className={BTN_SECONDARY}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">forum</span>
+                  {t("codingAgent.messageInChat")}
+                </button>
+              )}
+            </div>
+          );
+          /** The run's evidence: screenshots it took while verifying its work, its report.md, and whatever test output it saved — a grid, folded after a few. */
+          const evidence = artifacts.length > 0 && (
+            <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
+              <div className="flex items-center justify-between gap-2">
+                <p className={SECTION_LABEL}>
+                  {t("codingAgent.artifactsTitle")}
+                  <span className="ml-1.5 normal-case tracking-normal font-normal text-[var(--text-muted)]">({artifacts.length})</span>
+                </p>
+                {artifacts.length > ARTIFACT_PREVIEW && (
+                  <button
+                    type="button"
+                    onClick={() => setArtifactsOpenFor(artifactsFolded ? run.id : null)}
+                    aria-expanded={!artifactsFolded}
+                    data-testid="coding-agent-artifacts-toggle"
+                    className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                  >
+                    {artifactsFolded ? t("codingAgent.artifactsShowAll", { n: artifacts.length }) : t("codingAgent.artifactsShowFewer")}
+                  </button>
+                )}
+              </div>
+              {images.length > 0 && (
+                <div className="mt-2 grid grid-cols-2 @3xl:grid-cols-4 gap-2" data-testid="coding-agent-artifact-images">
+                  {images.map((a) => (
+                    <a
+                      key={a.name}
+                      href={artifactUrl(run.id, a.name)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
+                      className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25 bg-black/30"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
+                      <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="w-full h-36 object-cover object-top" />
+                      {/* The picture's alt is the link's name; the caption repeats it for the eye only. */}
+                      <span aria-hidden="true" className="block truncate px-2 py-1 text-[10px] text-[var(--text-muted)]">{a.name}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+              {clips.length > 0 && (
+                <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
+                  {clips.map((a) => (
+                    <div key={a.name} className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] text-[var(--text-secondary)] break-all">{a.name}</span>
+                      {formatBytes(a.bytes) && <span className="text-[11px] text-[var(--text-muted)]">· {formatBytes(a.bytes)}</span>}
+                      {/* No track: the clip is speech the run generated, and
+                          the text it was made from is in the run's report. The
+                          file name IS the label — several players can sit in
+                          this list, and "audio" three times over tells a
+                          screen-reader user nothing about which is which. */}
+                      <audio controls preload="none" aria-label={a.name} src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {files.length > 0 && (
+                <ul className="mt-2 space-y-0.5">
+                  {files.map((a) => (
+                    <li key={a.name} className="text-[11px]">
+                      <a
+                        href={artifactUrl(run.id, a.name)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                      >
+                        {a.name}
+                      </a>
+                      {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+          return (
+            <div className="mt-1 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id} data-live={working ? "true" : "false"}>
+              {/* ONE COLUMN (2026-10-30): status → task → Now → figures →
+                  controls → Needs you → live card → plan → helpers (only
+                  with helpers) → evidence → Details; settled: status → why
+                  it stopped → Result → What changed → Continue in the chat →
+                  figures → evidence → timeline → plan → helpers → Details.
+                  No rail, no grid, no chart card for a run without helpers:
+                  the owner's "the space in the run diagram is almost all
+                  empty". */}
 
-
-              {/* The header: what this run is, how it stands, and everything
-                  you can do to it. */}
-              <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
+              {/* 1. STATUS: what this run is and how it stands. */}
+              <div className={`${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-head">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid="coding-agent-run-status">
                     {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
@@ -2613,32 +2838,27 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                   {prChip(run)}
+                  {/* A member of a team: its place on the board, and the way
+                      to the team's own page (the chart lives there since the
+                      redesign's step 5, not on the member's page). */}
                   {run.team && (
-                    <span
-                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
-                      title={run.team.id}
-                      data-testid="coding-agent-run-team"
-                    >
-                      {teamRole(run.team)}
-                    </span>
-                  )}
-                  {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                  {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
-                    ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
-                    : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
-                  {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
-                  {project && (
                     <button
                       type="button"
-                      onClick={() => { setOpenRunId(null); setOpenProjectDir(project.directory); }}
-                      data-testid="coding-agent-run-project"
-                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40 hover:bg-sky-400/10 inline-flex items-center gap-1"
+                      onClick={() => openTeamById(run.team!.id)}
+                      title={run.team.id}
+                      data-testid="coding-agent-run-team"
+                      data-team-id={run.team.id}
+                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-1 py-0.5 inline-flex items-center gap-1 text-[var(--coral-bright)] border-[var(--coral-bright)]/40 hover:bg-[var(--coral-bright)]/10 cursor-pointer"
                     >
-                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">folder</span>
-                      {project.name}
+                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">groups</span>
+                      {teamRole(run.team)}
+                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">chevron_right</span>
                     </button>
                   )}
-                  {/* Its project folder was removed. The run itself is history
+                  {relationChips(run)}
+                  {/* The project is the header row's title (coding-agent-crumb-
+                      project); the clickable pill that repeated it here is
+                      gone. Its folder was removed: the run itself is history
                       and stays — this is the chip that says why there is
                       nothing to click through to. */}
                   {!project && missingProject && (
@@ -2652,27 +2872,49 @@ export default function CodingAgentApp() {
                   )}
                 </div>
                 {prDetail(run)}
-                <h2 className="mt-2 text-sm font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">{title}</h2>
+                {/* The title: the task's first line, three lines at most, and
+                    itself a tap target for the whole task when there is more. */}
+                <h2 className="mt-2 text-[15px] leading-snug font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">
+                  {taskDialog ? (
+                    <button
+                      type="button"
+                      onClick={() => setTaskOpenFor(run.id)}
+                      title={t("codingAgent.fullTask")}
+                      className="line-clamp-3 text-left hover:text-white cursor-pointer"
+                    >
+                      {title}
+                    </button>
+                  ) : (
+                    <span className="line-clamp-3">{title}</span>
+                  )}
+                </h2>
                 {/* The rest of the task opens in a dialog of its own, rendered
                     as Markdown — a `<details>` that unfolded raw text into the
-                    header card was the owner's complaint (2026-10-12). */}
-                {fullTask && (
+                    header card was the owner's complaint (2026-10-12). A real
+                    button, 44 px on a phone and the card's whole width there,
+                    directly under the title: the 11-px line it used to be was
+                    the owner's complaint of 2026-10-30 ("needs better
+                    visibility"). The dialog also lists the files the run was
+                    GIVEN, so a run handed a file opens it even when its task
+                    is one line. */}
+                {taskDialog && (
                   <button
                     type="button"
                     onClick={() => setTaskOpenFor(run.id)}
                     data-testid="coding-agent-run-task-open"
-                    className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-white"
+                    className={`${BTN_SECONDARY} mt-2 w-full @md:w-auto font-semibold text-[var(--text-primary)]`}
                   >
-                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_full</span>
+                    <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">open_in_full</span>
                     {t("codingAgent.fullTask")}
                   </button>
                 )}
-                {fullTask && taskOpenFor === run.id && (
-                  <CodingTaskDialog title={title} task={fullTask} runId={run.id} onClose={() => setTaskOpenFor(null)} />
+                {taskDialog && taskOpenFor === run.id && (
+                  <CodingTaskDialog title={title} task={taskDialog} runId={run.id} inputs={run.inputs} onClose={() => setTaskOpenFor(null)} />
                 )}
                 <p className="text-[11px] text-[var(--text-muted)] mt-1.5 flex items-center gap-1 flex-wrap">
                   <span>{run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}</span>
                   <span>· {t("codingAgent.startedAgo", { when: timeAgo(run.startedAt, t) })}</span>
+                  {started && !working && <span>· {duration(run)}</span>}
                   {started && run.effort && <span>· {t(`codingAgent.effort.${run.effort}`)}</span>}
                   {/* Whose account. Said on every run that has the field, not
                       only the Anthropic ones: on a box where the owner moved
@@ -2684,149 +2926,209 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                 </p>
-                {isLive(run.status) && (
-                  <RunProgressBar
-                    estimate={estimateRunProgress(run, now)}
-                    color={tone.color}
-                    timeLeft={t("codingAgent.timeLeft")}
-                    testId={`coding-agent-progress-${run.id}`}
-                    className="mt-2"
-                  />
-                )}
-                {/* A run that finished on its own keeps whatever it started:
-                    an app that serves itself on a port is meant to stay up,
-                    so the device says what survived instead of killing it
-                    unasked, and the owner ends it when they are done.
-
-                    Only once the run is OVER, though. A paused run also
-                    records what it left behind, and killRunLeftovers refuses
-                    one on purpose — the run is still the owner's to resume and
-                    those leftovers are the very thing a resume carries on
-                    against — so the button here could never do anything but
-                    show that refusal. The same guard hides the flag a resume
-                    carries into a running run, where it is stale as well. */}
-                {run.leftover && isSettled(run.status) && (
-                  <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-leftover">
-                    <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
-                    <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
-                    <button
-                      type="button"
-                      onClick={() => killLeftovers(run.id)}
-                      disabled={busy === run.id}
-                      data-testid={`coding-agent-kill-${run.id}`}
-                      className={`${BTN_SECONDARY} ml-auto`}
-                    >
-                      {t("codingAgent.killLeftover")}
-                    </button>
-                  </div>
-                )}
-                {/* WHERE THE RUN'S WORK IS, in one line: merged home, open as
-                    a pull request, or on its branch and why it is not in the
-                    project (the settle removes the copy either way and keeps
-                    the branch). Remove copy only while a copy is still on
-                    disk, which is now the exception. */}
-                {run.worktree && isSettled(run.status) && worktreeCardApplies(run.worktree, Boolean(run.pr && run.pr.phase !== "failed")) && (
-                  <CodingRunWorktreeCard
-                    runId={run.id}
-                    worktree={run.worktree}
-                    pullRequestOpen={Boolean(run.pr && run.pr.phase !== "failed")}
-                    busy={busy === run.id}
-                    onRemove={() => removeRunCopy(run.id)}
-                  />
-                )}
-                {/* WHY it is paused, when the answer is not "somebody asked".
-                    A run refused because one of this box's allowances is spent
-                    settles exactly like an owner's pause, and read the generic
-                    "Paused — resume to continue" the owner's only move was to
-                    press Resume and buy the same refusal. The Resume control
-                    stays exactly where it was, directly below: the allowance
-                    does come back, and this says when. */}
-                {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
-                  <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
-                    <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
-                    <p className="text-[11px] text-[var(--text-secondary)] break-words">
-                      {t(PAUSE_METER_KEY[run.pauseReason.meter])}
-                      {" "}
-                      {(() => {
-                        // ClawBox AI's rolling allowances free up as old usage
-                        // ages out, possibly days from now: said in the owner's
-                        // clock with the day in front. The per-day meters keep
-                        // the UTC hour they are counted in.
-                        // Every Anthropic account at its limit: nobody has to
-                        // press Resume — the box carries on by itself at the
-                        // first reset, and says so rather than inviting a click
-                        // that would only buy the same refusal.
-                        if (run.pauseReason.meter === "anthropic") {
-                          const at = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                          return at ? t("codingAgent.pausedAnthropicResumesAt", { time: at }) : t("codingAgent.pausedAnthropicResumes");
-                        }
-                        if (isRollingPauseMeter(run.pauseReason.meter)) {
-                          const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                          return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                        }
-                        const clock = pauseResetClock(run.pauseReason.resetsAt);
-                        // No reset time means the far side never said when —
-                        // so the card says "when it is back" rather than
-                        // inventing an hour the owner would plan around.
-                        return clock ? t("codingAgent.pausedAllowanceResets", { time: clock }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                      })()}
-                    </p>
-                  </div>
-                )}
-                {/* Steering, while there is still something to steer. Above
-                    the controls on purpose: Stop and Pause are what an owner
-                    reached for when a run went the wrong way, and the point of
-                    this box is that they no longer have to. The bar is the
-                    same one the library holds: a paused run, a draft and one
-                    that GAVE UP all still hold a session, and their queue goes
-                    in when they go back — which is exactly what "tell it what
-                    it missed, then Resume" needs. */}
-                {holdsResumableSession(run.status) && (
-                  <CodingRunMessageBox runId={run.id} messages={run.messages} onSent={() => { void load(); }} />
-                )}
-                <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
-                  {runControls(run, "page")}
-                  {project && (project.onDesktop || project.app?.port) && (
-                    <button
-                      type="button"
-                      onClick={() => void openOrAddProject(project)}
-                      className={BTN_SECONDARY}
-                      data-testid="coding-agent-project-open-app"
-                    >
-                      {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
-                    </button>
-                  )}
-                  {project?.app && (
-                    <button
-                      type="button"
-                      onClick={() => setPublishTarget({ folder: project.folder, directory: project.directory })}
-                      className={BTN_SECONDARY}
-                      data-testid="coding-agent-project-publish"
-                    >
-                      {t("codingAgent.publish")}
-                    </button>
-                  )}
-                </div>
               </div>
 
-              {/* Wide: the run's story in the middle — its terminal while it
-                  works, the summary, the plan, the log — and its data in a
-                  rail beside it: figures, files, evidence, refusals. The
-                  Claude Code web layout, in short. Narrow: one column. */}
-              <div className="@3xl:grid @3xl:grid-cols-[minmax(0,1fr)_296px] @3xl:gap-4 @3xl:items-start">
-                <div className="min-w-0">
-              {/* While the run works: ONE card with three tabs — the timeline
-                  (first, and the default), the terminal tailing the transcript,
-                  and the browser the run drives (a picture only, with a way to
-                  the VNC app for the real thing). One at a time: the three
-                  stacked were three screens tall. Once the run has settled,
-                  the timeline alone is the record. */}
+              {/* 2 (settled). WHY IT STOPPED — directly under the status and
+                  loud, only for a run that did not finish on its own: the
+                  error in the owner's language, why a pause is a pause, and
+                  the refusals with Allow next time + Resume. */}
+              {stoppedBadly && attention}
+
+              {/* 2 (live). NOW: the one line the owner opened this for, with
+                  the chat card's working dots and the progress bar — the
+                  first thing above the fold on a phone. */}
+              {working && (
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-now">
+                  <div className="flex items-start gap-2 flex-wrap text-[13px] leading-snug">
+                    <span className="shrink-0 font-semibold text-[var(--text-primary)]">{t("codingAgent.diagram.now")}:</span>
+                    <span className="min-w-0 flex-1 basis-40 text-[var(--text-secondary)] break-words" data-testid="coding-agent-run-now-step">
+                      {nowStep ? (
+                        <>
+                          {nowStep.label}
+                          {nowStep.detail && <span className="text-[var(--text-muted)]"> · {nowStep.detail}</span>}
+                        </>
+                      ) : (
+                        run.status === "queued" ? t("codingAgent.statusQueued") : t("codingAgent.diagram.nothingYet")
+                      )}
+                    </span>
+                    {isLive(run.status) && (
+                      <span className="ml-auto shrink-0 text-[11px] text-amber-300 inline-flex items-center gap-2" data-testid="coding-agent-run-working">
+                        {t("codingAgent.chatWorking")}
+                        <span className="coding-agent-working" role="img" aria-label={t("codingAgent.chatBusy")} title={t("codingAgent.chatBusy")}>
+                          <span className="coding-agent-working-dot" />
+                          <span className="coding-agent-working-dot" style={{ animationDelay: "0.15s" }} />
+                          <span className="coding-agent-working-dot" style={{ animationDelay: "0.3s" }} />
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                  {isLive(run.status) && (
+                    <RunProgressBar
+                      estimate={estimateRunProgress(run, now)}
+                      color={tone.color}
+                      timeLeft={t("codingAgent.timeLeft")}
+                      testId={`coding-agent-progress-${run.id}`}
+                      className="mt-2"
+                    />
+                  )}
+                </div>
+              )}
+
+              {/* 3 (live). FIGURES, then CONTROLS, then NEEDS YOU. */}
+              {working && figures}
+              {working && controls}
+              {working && attention}
+
+              {/* 3 (settled). RESULT first among the outcome cards (the
+                  2026-10-12 ruling): the run's closing message filed as
+                  Markdown, then the deliverable's verdict, the review loop
+                  and the pull request's CI with Fix CI. */}
+              {!working && summaryCard}
+              {!working && deliverableCard(run)}
+              {!working && reviewCard(run)}
+              {!working && run.ci && (
+                <CodingRunCiCard
+                  runId={run.id}
+                  ci={run.ci}
+                  settled={isSettled(run.status)}
+                  onStarted={onContinuationStarted}
+                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
+                />
+              )}
+
+              {/* 4 (settled). WHAT CHANGED: the files, the commit and the way
+                  to its diff, the pull request, where the work is, and the
+                  app on the desktop. Nothing of it: no card. */}
+              {!working && changedAnything && (
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-changed">
+                  <p className={SECTION_LABEL}>
+                    {t("codingAgent.whatChanged")}
+                    {run.filesTouched.length > 0 && (
+                      <span className="normal-case tracking-normal font-normal text-[var(--text-muted)]">({run.filesTouched.length})</span>
+                    )}
+                  </p>
+                  {run.filesTouched.length > 0 && (
+                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px] text-[var(--text-secondary)]" data-testid="coding-agent-run-changed-files">
+                      {(filesOpenFor === run.id ? run.filesTouched : run.filesTouched.slice(0, CHANGED_FILES_PREVIEW)).map((f) => (
+                        <li key={f} className="break-all">{f}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {run.filesTouched.length > CHANGED_FILES_PREVIEW && (
+                    <button
+                      type="button"
+                      onClick={() => setFilesOpenFor(filesOpenFor === run.id ? null : run.id)}
+                      aria-expanded={filesOpenFor === run.id}
+                      data-testid="coding-agent-run-changed-more"
+                      className="mt-1 text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                    >
+                      {filesOpenFor === run.id ? t("codingAgent.artifactsShowFewer") : t("codingAgent.allFiles", { n: run.filesTouched.length })}
+                    </button>
+                  )}
+                  {/* WHERE THE RUN'S WORK IS, in one line: merged home, open
+                      as a pull request, or on its branch and why it is not in
+                      the project (the settle removes the copy either way and
+                      keeps the branch). Remove copy only while a copy is still
+                      on disk, which is now the exception. */}
+                  {worktreeLine && (
+                    <div className="mt-1.5">
+                      <CodingRunWorktreeCard
+                        runId={run.id}
+                        worktree={run.worktree!}
+                        pullRequestOpen={pullRequestOpen}
+                        busy={busy === run.id}
+                        onRemove={() => removeRunCopy(run.id)}
+                      />
+                    </div>
+                  )}
+                  {(run.commit || run.pr?.url || webApp) && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {run.commit && (
+                        <span className={`${BTN_SECONDARY} font-mono cursor-default hover:bg-white/[0.06] hover:text-[var(--text-secondary)]`} data-testid="coding-agent-run-commit" title={run.commit}>
+                          {t("codingAgent.statCommit").toLowerCase()} {run.commit.slice(0, 7)}
+                        </span>
+                      )}
+                      {run.commit && project && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setWorkspaceTab({ directory: project.directory, tab: "changes", ref: run.commit ?? undefined });
+                            setOpenRunId(null);
+                            setOpenProjectDir(project.directory);
+                          }}
+                          data-testid="coding-agent-run-see-diff"
+                          className={BTN_SECONDARY}
+                        >
+                          <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">difference</span>
+                          {t("codingAgent.seeDiff")}
+                        </button>
+                      )}
+                      {run.pr?.url && (
+                        <a
+                          href={run.pr.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-testid="coding-agent-run-pr-open"
+                          className={BTN_SECONDARY}
+                        >
+                          {run.pr.number ? `PR #${run.pr.number}` : t("codingAgent.prOpening")}
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
+                        </a>
+                      )}
+                      {webApp && (
+                        <button
+                          type="button"
+                          onClick={() => void openOrAddProject(project!)}
+                          className={BTN_SECONDARY}
+                          data-testid="coding-agent-project-open-app"
+                        >
+                          {project!.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 5 (settled). CONTROLS: Continue in the chat, and whatever the
+                  held run still takes (Resume, Continue after a ceiling, Start
+                  or Discard a draft, the terminal, the backup); then figures. */}
+              {!working && controls}
+              {!working && figures}
+
+              {/* A run that finished on its own keeps whatever it started: an
+                  app that serves itself on a port is meant to stay up, so the
+                  device says what survived instead of killing it unasked, and
+                  the owner ends it when they are done. Only once the run is
+                  OVER: a paused run also records what it left behind, and
+                  killRunLeftovers refuses one on purpose — the run is still
+                  the owner's to resume and those leftovers are the very thing
+                  a resume carries on against. */}
+              {run.leftover && isSettled(run.status) && (
+                <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-leftover">
+                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
+                  <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
+                  <button
+                    type="button"
+                    onClick={() => killLeftovers(run.id)}
+                    disabled={busy === run.id}
+                    data-testid={`coding-agent-kill-${run.id}`}
+                    className={`${BTN_SECONDARY} ml-auto`}
+                  >
+                    {t("codingAgent.killLeftover")}
+                  </button>
+                </div>
+              )}
+
+              {/* 6 (live). THE LIVE CARD: three tabs — the timeline (first,
+                  and the default), the terminal tailing the transcript, and
+                  the browser the run drives (a picture only, with a way to the
+                  VNC app for the real thing). One at a time: the three stacked
+                  were three screens tall. */}
               {isLive(run.status) && (() => {
-                const command = run.transcriptPath
-                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
-                  : null;
                 const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
-                const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next });
+                const terminalSeen = liveTabFor?.id === run.id && liveTabFor.terminalSeen;
+                const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next, terminalSeen: terminalSeen || next === "terminal" });
                 const tabButton = (id: "timeline" | "terminal" | "browser", icon: string, label: string, disabled = false) => (
                   <button
                     type="button"
@@ -2845,34 +3147,27 @@ export default function CodingAgentApp() {
                 return (
                   <div className={`mt-3 ${CARD_SURFACE} overflow-hidden flex flex-col`} data-testid="coding-agent-live-card" data-tab={tab}>
                     <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
-                      <div className={`${SEGMENTED_TRACK} max-w-md`} role="tablist" aria-label={t("codingAgent.timelineTitle")}>
+                      {/* Three segments fit 390 px; the Open in Terminal that
+                          sat beside them is a control of the page now. */}
+                      <div className={SEGMENTED_TRACK} role="tablist" aria-label={t("codingAgent.timelineTitle")}>
                         {tabButton("timeline", "timeline", t("codingAgent.timelineTitle"))}
                         {tabButton("terminal", "terminal", t("codingAgent.livePreviewTitle"), !command)}
                         {tabButton("browser", "web", t("codingAgent.browserPreviewTitle"))}
                       </div>
-                      <span className="ml-auto" />
-                      {tab === "terminal" && command && (
-                        <button
-                          type="button"
-                          onClick={() => openInTerminal(run)}
-                          data-testid="coding-agent-run-terminal-open"
-                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
-                        >
-                          {t("codingAgent.livePreviewOpenApp")}
-                        </button>
-                      )}
                       {tab === "browser" && (
                         <button
                           type="button"
                           onClick={() => dispatchOpenApp("vnc")}
                           data-testid="coding-agent-open-vnc"
-                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                          className={`${BTN_QUIET} shrink-0`}
                         >
                           {t("codingAgent.openVnc")}
                         </button>
                       )}
                     </div>
-                    <div id="coding-agent-live-pane-timeline" role="tabpanel" hidden={tab !== "timeline"} className="px-4 py-3">
+                    {/* The timeline scrolls inside its own height on a phone,
+                        so the plan and the evidence stay a swipe away. */}
+                    <div id="coding-agent-live-pane-timeline" role="tabpanel" hidden={tab !== "timeline"} className="px-4 py-3 max-h-[60dvh] overflow-y-auto">
                       <CodingRunTimeline
                         lines={activity}
                         times={activityAt}
@@ -2881,18 +3176,15 @@ export default function CodingAgentApp() {
                         embedded
                         provider={run.provider}
                         modelRole={run.modelRole}
-                        working={{
-                          label: t("codingAgent.chatWorking"),
-                          busy: t("codingAgent.chatBusy"),
-                          tokens: (run.tokensUsed ?? 0) > 0 ? `${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}` : undefined,
-                          duration: started ? duration(run) : undefined,
-                        }}
                       />
                     </div>
-                    {command && (
-                      // Mounted whatever the tab, hidden otherwise: the terminal
-                      // types its command once, and a remount would tail from the top.
-                      <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+                    {command && terminalSeen && (
+                      // Mounted once the tab has been picked and kept, hidden,
+                      // from then on: the terminal types its command once, and a
+                      // remount would tail from the top (the preview replays the
+                      // last lines anyway, so a first pick mid-run misses nothing).
+                      // 360 px tall on a phone, 460 from `@md`.
+                      <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} className="h-[360px] @md:h-[460px]" style={{ background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
                         <TerminalApp key={run.id} initialCommand={command} />
                       </div>
                     )}
@@ -2904,53 +3196,26 @@ export default function CodingAgentApp() {
                   </div>
                 );
               })()}
-              {/* Settled: the summary is what the page is for, so it comes
-                  first; the timeline — the tallest thing on a finished run,
-                  sixty rows the owner scrolled past to reach one paragraph —
-                  is under it, folded. */}
-              {!isLive(run.status) && summaryCard}
-              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded provider={run.provider} modelRole={run.modelRole} />}
+              {/* A live run that already carries a closing message — one
+                  resumed over a settled session — shows it under the live
+                  card; most live runs have none yet and draw nothing here. */}
+              {working && (run.summary || reportFile) && summaryCard}
 
-              {deliverableCard(run)}
-              {reviewCard(run)}
-              {/* The pull request's failed CI, read, and the Fix CI it offers. */}
-              {run.ci && (
-                <CodingRunCiCard
-                  runId={run.id}
-                  ci={run.ci}
-                  settled={isSettled(run.status)}
-                  onStarted={(id) => {
-                    notifyCodingRunStarted();
-                    void load();
-                    showRun(id);
-                  }}
-                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
-                />
-              )}
-              {/* ABOVE the deployment card: the pipeline is the authority on
-                  whether this run is actually finished, and the deployment
-                  below is one of its stages. On the STANDALONE page the two
-                  buttons are left off — it has no project context and a
-                  production deploy is not something to offer from a page
-                  opened in a tab with nothing else on it. */}
-              {run.pipeline && (
-                <CodingRunPipelineCard
-                  runId={run.id}
-                  pipeline={run.pipeline}
-                  t={t}
-                  artifactUrl={(name) => artifactUrl(run.id, name)}
-                  onApproveProduction={standalone ? undefined : () => steerPipeline(run.id, "approve_production")}
-                  onStopPipeline={standalone ? undefined : () => steerPipeline(run.id, "stop")}
-                />
+              {/* 7 (settled). THE TIMELINE — the tallest thing on a finished
+                  run, sixty rows the owner scrolled past to reach one
+                  paragraph — folded, after the figures and before the plan. */}
+              {!working && (
+                <>
+                  {evidence}
+                  <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded provider={run.provider} modelRole={run.modelRole} />
+                </>
               )}
 
-              {isLive(run.status) && summaryCard}
-
-              {/* The plan, as the run last wrote it: open while the run works
-                  (what is left), folded once it has settled (every row ticked
-                  and struck through, which the summary already says). */}
+              {/* 8. THE PLAN, as the run last wrote it: open while the run
+                  works (what is left), folded once it has settled (every row
+                  ticked and struck through, which the summary already says). */}
               {todos.length > 0 && (
-                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan" open={isLive(run.status) || undefined}>
+                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan" open={working || undefined}>
                   <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
                     {t("codingAgent.planTitle")}
                     <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{todosDone}/{todos.length}</span>
@@ -2976,140 +3241,53 @@ export default function CodingAgentApp() {
                 </details>
               )}
 
-              {/* The run's evidence: screenshots it took while verifying its
-                  work, its report.md, and whatever test output it saved. Under
-                  the Agents card, across the whole column — the pictures were
-                  a stack of thumbnails in the rail, and the owner asked for
-                  room to see them. */}
-              {artifacts.length > 0 && (
-                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
-                  <div className="flex items-center justify-between gap-2">
-                    <p className={SECTION_LABEL}>
-                      {t("codingAgent.artifactsTitle")}
-                      <span className="ml-1.5 normal-case tracking-normal font-normal text-[var(--text-muted)]">({artifacts.length})</span>
-                    </p>
-                    {artifacts.length > ARTIFACT_PREVIEW && (
-                      <button
-                        type="button"
-                        onClick={() => setArtifactsOpenFor(artifactsFolded ? run.id : null)}
-                        aria-expanded={!artifactsFolded}
-                        data-testid="coding-agent-artifacts-toggle"
-                        className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
-                      >
-                        {artifactsFolded ? t("codingAgent.artifactsShowAll", { n: artifacts.length }) : t("codingAgent.artifactsShowFewer")}
-                      </button>
-                    )}
-                  </div>
-                  {images.length > 0 && (
-                    <div className="mt-2 grid grid-cols-2 @lg:grid-cols-3 @3xl:grid-cols-4 gap-2" data-testid="coding-agent-artifact-images">
-                      {images.map((a) => (
-                        <a
-                          key={a.name}
-                          href={artifactUrl(run.id, a.name)}
-                          target="_blank"
-                          rel="noreferrer"
-                          title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
-                          className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25 bg-black/30"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
-                          <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="w-full h-36 object-cover object-top" />
-                          {/* The picture's alt is the link's name; the caption repeats it for the eye only. */}
-                          <span aria-hidden="true" className="block truncate px-2 py-1 text-[10px] text-[var(--text-muted)]">{a.name}</span>
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                  {clips.length > 0 && (
-                    <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
-                      {clips.map((a) => (
-                        <div key={a.name} className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[11px] text-[var(--text-secondary)] break-all">{a.name}</span>
-                          {formatBytes(a.bytes) && <span className="text-[11px] text-[var(--text-muted)]">· {formatBytes(a.bytes)}</span>}
-                          {/* No track: the clip is speech the run generated, and
-                              the text it was made from is in the run's report.
-                              The file name IS the label — several players can
-                              sit in this list, and "audio" three times over
-                              tells a screen-reader user nothing about which
-                              is which (the same fix ChatPopup's audioLabel is). */}
-                          <audio controls preload="none" aria-label={a.name} src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {files.length > 0 && (
-                    <ul className="mt-2 space-y-0.5">
-                      {files.map((a) => (
-                        <li key={a.name} className="text-[11px]">
-                          <a
-                            href={artifactUrl(run.id, a.name)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
-                          >
-                            {a.name}
-                          </a>
-                          {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+              {/* 9. HELPERS — only when the run sent any out: the chart,
+                  content-sized, a node opening what that agent is doing now
+                  (the one list of agents on the page). For the common solo
+                  run this block does not exist, and a team member's page
+                  draws no team chart either (since step 5 the team chip above
+                  leads to the team's page, where the chart is). */}
+              {started && (
+                <RunAgentsDiagram
+                  run={run}
+                  onOpenRun={showRun}
+                  onChanged={() => { void load(); }}
+                  refreshKey={runs}
+                />
               )}
 
-
-              {run.error && (
-                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
-                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
-                  {/* The device's verdict FIRST, in the owner's own language,
-                      and only where the record says so — never guessed at from
-                      the English below. What the harness actually printed is
-                      an error code wrapped in JSON; it stays, because it names
-                      the model that was refused and that is what anyone
-                      looking into this needs, but it is no longer the first
-                      and only thing the owner is handed. */}
-                  {run.failureKind === "harness_not_ready" && (
-                    <p className="mt-1 text-xs text-amber-300 leading-relaxed" data-testid="coding-agent-run-harness-not-ready">
-                      {t("codingAgent.harnessNotReadyDetail")}
-                    </p>
-                  )}
-                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
-                </div>
+              {/* 10 (live). The review loop, the deliverable and the pull
+                  request's CI, where a run that is still going has them; then
+                  the evidence it has filed so far. */}
+              {working && deliverableCard(run)}
+              {working && reviewCard(run)}
+              {working && run.ci && (
+                <CodingRunCiCard
+                  runId={run.id}
+                  ci={run.ci}
+                  settled={false}
+                  onStarted={onContinuationStarted}
+                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
+                />
               )}
+              {working && evidence}
 
-                </div>
-                <aside className="min-w-0" data-testid="coding-agent-run-rail">
-              {/* The figures, in two weights.
-
-                  Eight tiles of identical weight is a wall: the steps someone
-                  watches tick sat at exactly the same size as a commit hash
-                  nobody reads twice, and the longest value on the page — a
-                  model identifier — was in the narrowest box of all. So the
-                  four figures a run is watched BY are tiles, and the
-                  three that are looked up once are quiet rows across the full
-                  width of the rail, where a model name has room to wrap at its
-                  own hyphens instead of breaking mid-word. */}
-              <div className="mt-3" data-testid="coding-agent-run-figures">
-                <div className="grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2">
-                  <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : nothingYet} />
-                  <StatTile label={t("codingAgent.statFiles")} value={run.filesTouched.length > 0 ? String(run.filesTouched.length) : nothingYet} testId="coding-agent-stat-files" />
-                  <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : nothingYet} />
-                  <StatTile
-                    label={t("codingAgent.statTokens")}
-                    value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : nothingYet}
-                    hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
-                  />
-                </div>
-                <dl className={`mt-2 ${CARD_SURFACE} px-3 divide-y divide-white/[0.05]`}>
+              {/* 11. DETAILS, closed: the figures that are looked up once
+                  rather than watched — the models that answered, the commit,
+                  what was refused, the run id — and, for a run that finished
+                  on its own, the refusals it carried on past. */}
+              <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-more">
+                <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
+                  {t("codingAgent.diagram.details")}
+                  <span className="normal-case tracking-normal font-normal text-[var(--text-muted)]">· {t("codingAgent.detailsHint")}</span>
+                </summary>
+                <dl className="mt-1 divide-y divide-white/[0.05]">
                   {/* What the run ASKED for, beside what actually answered: on
                       ClawBox AI the plan picks the model and these differ by
                       design, so the hint is the only place the owner's own
-                      choice is visible after the fact. Only when they DO
-                      differ — a run that got what it asked for drew the same
-                      identifier twice, one under the other. */}
-                  {/* And whose account they ran on — on a team run, beside the
-                      role the model was chosen for: a team's roles may sit on
-                      different accounts, and this is the one place a run's
-                      own record says which. */}
+                      choice is visible after the fact — only when they DO
+                      differ. And whose account they ran on: on a team run,
+                      beside the role the model was chosen for. */}
                   <StatLine
                     label={t("codingAgent.statModels")}
                     value={runModels(run) ?? nothingYet}
@@ -3124,175 +3302,131 @@ export default function CodingAgentApp() {
                   />
                   <StatLine label={t("codingAgent.statCommit")} value={run.commit ?? nothingYet} mono testId="coding-agent-stat-commit" />
                   {/* Only when something WAS refused: "Not allowed — 0" is a
-                      figure nobody has ever acted on, and the card below spells
-                      out every refusal there was. */}
+                      figure nobody has ever acted on. */}
                   {run.permissionDenials > 0 && (
                     <StatLine label={t("codingAgent.deniedTitle")} value={String(run.permissionDenials)} testId="coding-agent-stat-denied" />
                   )}
+                  <div className="flex items-baseline justify-between gap-3 py-1.5 min-w-0">
+                    <dt className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{t("codingAgent.runIdLabel")}</dt>
+                    <dd className="min-w-0 text-right">
+                      <button
+                        type="button"
+                        onClick={() => void copyFolder(run.id)}
+                        title={t("codingAgent.copyId")}
+                        aria-label={t("codingAgent.copyId")}
+                        data-testid="coding-agent-run-id-copy"
+                        className="inline-flex items-center gap-1 text-[11px] font-mono text-[var(--text-secondary)] hover:text-white break-all"
+                      >
+                        {run.id}
+                        <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
+                          {copiedFolder === run.id ? "check" : "content_copy"}
+                        </span>
+                        {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
+                      </button>
+                    </dd>
+                  </div>
                 </dl>
-                <button
-                  type="button"
-                  onClick={() => void copyFolder(run.id)}
-                  title={t("codingAgent.copyId")}
-                  aria-label={t("codingAgent.copyId")}
-                  data-testid="coding-agent-run-copy-id"
-                  className="mt-2 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
-                >
-                  {run.id}
-                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                    {copiedFolder === run.id ? "check" : "content_copy"}
-                  </span>
-                  {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
-                </button>
-              </div>
-
-              {/* The files this run was GIVEN, and the folder they are in —
-                  which is also where the owner puts one the run turns out to
-                  need. Above the refusals on purpose: the commonest refusal
-                  this feature answers is a read of a file that should have
-                  been handed over, and the answer is right here. */}
-              {((run.inputs?.files?.length ?? 0) > 0 || (run.inputs?.refused?.length ?? 0) > 0) && (
-                <CodingRunInputs inputs={run.inputs} />
-              )}
-
-              {/* What was refused, spelled out — and, where this box can
-                  answer it, an "Allow next time" beside it. */}
-              <CodingRunDenials
-                runId={run.id}
-                inputs={run.inputs}
-                denials={run.denials}
-                deniedActions={run.deniedActions}
-                resumable={run.status === "paused"}
-                onAllowed={() => notifyCodingAgentChanged()}
-                onResume={() => void resumeRunNow(run.id)}
-              />
-
-                </aside>
-              </div>
+                {/* A run that finished on its own past a refusal: what was
+                    refused, and Allow next time — here, not under the status,
+                    because nothing is waiting on it. */}
+                {!stoppedBadly && !working && denials}
+              </details>
             </div>
           );
         })()}
 
-        {/* One project, expanded: its data, its git state, its runs. */}
+        {/* One project, expanded: who it is, where its work is, what happened
+            in it. No inputs (2026-10-30): a run or a team is asked for in the
+            chat, notes and tools are read here and changed there, and the
+            Store is a sentence to the assistant (`app_publish`). */}
         {view.face === "project" && (() => {
           const p = view.project;
           const projectQuery = p.kind === "codeProject"
             ? `projectId=${encodeURIComponent(p.folder)}`
             : `directory=${encodeURIComponent(p.directory)}`;
           const projectLive = runs.some((r) => runBelongsTo(r, p) && isLive(r.status));
+          const teamLive = projectTeams.find((x) => isTeamActive(x.status)) ?? null;
           // The pull request for the branch the project is on: one opened from
           // this page, or one a run opened for that same branch.
           const runPr = git?.branch ? runs.find((r) => runBelongsTo(r, p) && r.pr?.url && r.pr.number && r.pr.branch === git.branch)?.pr : undefined;
           const projectPr = projectPrs[p.directory] ?? (runPr?.url && runPr.number ? { number: runPr.number, url: runPr.url } : null);
-          const lastSubject = git?.lastCommit?.subject ?? p.lastCommit?.subject ?? null;
           const lastDate = git?.lastCommit?.date ?? p.lastCommit?.date ?? null;
+          const notes = notesFor?.directory === p.directory ? notesFor.notes : "";
+          const pill = "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5";
           return (<>
-            <CodingAgentBreadcrumb
-              crumbs={[
-                { label: t("codingAgent.projectsTitle"), onClick: () => setOpenProjectDir(null), testId: "coding-agent-crumb-projects" },
-                { label: p.name },
-              ]}
-              onBack={() => setOpenProjectDir(null)}
-              backLabel={t("codingAgent.back")}
-            navLabel={t("codingAgent.breadcrumbLabel")}
-              backTestId="coding-agent-project-back"
-            />
-            <div className="mt-3 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
-              {/* One row: who this is and what it is. The folder under it is
-                  one tap to copy — the home row no longer carries that. */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <ProjectIcon project={p} size="w-7 h-7" />
-                <h2 className="text-sm font-semibold text-[var(--text-primary)] break-words">{p.name}</h2>
-                {p.kind === "codeProject" && (
-                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
-                    {t("codingAgent.codeProject")}
-                  </span>
-                )}
-                {/* A clawbox.json makes the folder a ClawBox APP, not just a
-                    folder with history; said here, not on the home row. */}
-                {p.app && (
-                  <span
-                    className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
-                    title={p.app.description ?? undefined}
-                    data-testid={`coding-agent-app-chip-${p.folder}`}
-                  >
-                    {t("codingAgent.clawboxApp")}
-                  </span>
-                )}
-                <div className="ml-auto flex items-center gap-1.5">
-                  {(p.onDesktop || p.app?.port) && (
-                    <button
-                      type="button"
-                      // Through the one helper, so this button knows about the
-                      // standalone page too — it dispatched the desktop-only
-                      // event directly and did nothing on `/app/coding`. A
-                      // project whose manifest declares a port but is not on
-                      // the desktop yet is put there first.
-                      onClick={() => void openOrAddProject(p)}
-                      data-testid="coding-agent-project-open"
-                      className={BTN_SECONDARY}
-                    >
-                      {p.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
-                    </button>
-                  )}
-                  {/* Only a ClawBox app (a clawbox.json at its root) can go to
-                      the Store. */}
-                  {p.app && (
-                    <button
-                      type="button"
-                      onClick={() => setPublishTarget({ folder: p.folder, directory: p.directory })}
-                      data-testid={`coding-agent-publish-${p.folder}`}
-                      title={t("codingAgent.publish")}
-                      aria-label={t("codingAgent.publishFor", { name: p.name })}
-                      className={BTN_QUIET}
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">storefront</span>
-                    </button>
-                  )}
-                  {/* Removing the folder. Quiet and an icon: everything that
-                      makes it safe is in the dialog behind it. */}
+            <div className="mt-1 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
+              {/* The title block: the picture, the name, ONE pill (a team at
+                  work, else a run at work, else that the desktop has it, else
+                  that it is a code project) and the ClawBox-app chip; then
+                  Open, the page's one primary — the whole width on a phone. */}
+              <div className="flex flex-col @md:flex-row @md:items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <ProjectIcon project={p} size="w-10 h-10" />
+                  <div className="min-w-0">
+                    <h2 className="text-base font-semibold text-[var(--text-primary)] break-words leading-tight">{p.name}</h2>
+                    <div className="mt-1 flex items-center gap-1.5 flex-wrap" data-testid="coding-agent-project-pills">
+                      {teamLive ? (
+                        <span className={`${pill} ${TEAM_STATUS_TONE[teamLive.status]} coding-agent-pulse`} data-testid="coding-agent-project-pill">
+                          <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />
+                          {t(`codingAgent.team.status.${teamLive.status}`)}
+                        </span>
+                      ) : projectLive ? (
+                        <span className={`${pill} text-amber-400 border-amber-400/40 coding-agent-pulse`} data-testid="coding-agent-project-pill">
+                          <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />
+                          {t("codingAgent.runInProgress")}
+                        </span>
+                      ) : p.onDesktop ? (
+                        <span className={`${pill} text-sky-300 border-sky-400/40`} data-testid="coding-agent-project-pill">{t("codingAgent.onDesktop")}</span>
+                      ) : p.kind === "codeProject" ? (
+                        <span className={`${pill} text-[var(--text-muted)] border-white/20`} data-testid="coding-agent-project-pill">{t("codingAgent.codeProject")}</span>
+                      ) : null}
+                      {/* A clawbox.json makes the folder a ClawBox APP, not just
+                          a folder with history; said here, not on the home row. */}
+                      {p.app && (
+                        <span
+                          className={`${pill} text-[var(--coral-bright)] border-[var(--coral-bright)]/40`}
+                          title={p.app.description ?? undefined}
+                          data-testid={`coding-agent-app-chip-${p.folder}`}
+                        >
+                          {t("codingAgent.clawboxApp")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {(p.onDesktop || p.app?.port) && (
                   <button
                     type="button"
-                    onClick={() => setDeleteTarget(p)}
-                    data-testid={`coding-agent-delete-${p.folder}`}
-                    title={t("codingAgent.delete.action")}
-                    aria-label={t("codingAgent.delete.actionFor", { name: p.name })}
-                    className={`${BTN_QUIET} hover:text-red-300`}
+                    // Through the one helper, so this button knows about the
+                    // standalone page too — it dispatched the desktop-only
+                    // event directly and did nothing on `/app/coding`. A
+                    // project whose manifest declares a port but is not on
+                    // the desktop yet is put there first.
+                    onClick={() => void openOrAddProject(p)}
+                    data-testid="coding-agent-project-open"
+                    className={BTN_PRIMARY_WIDE}
                   >
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">open_in_new</span>
+                    {p.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                   </button>
-                </div>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={() => void copyFolder(p.directory)}
-                title={t("codingAgent.copyFolder")}
-                aria-label={t("codingAgent.copyFolder")}
-                data-testid="coding-agent-project-copy"
-                className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
-              >
-                {p.directory}
-                <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                  {copiedFolder === p.directory ? "check" : "content_copy"}
-                </span>
-                {copiedFolder === p.directory && <span className="font-sans">{t("codingAgent.copied")}</span>}
-              </button>
-              {/* The git state on ONE line: branch, commits, the newest
-                  commit, and whether the folder has reached GitHub — the
-                  store road starts there. */}
+              {/* Where the work is, in THREE facts: the branch, the commits,
+                  when the newest was — and on the right whether the folder
+                  has reached GitHub. The newest commit's subject went: the
+                  Changes tab and the Activity rows say what changed. */}
               <div className={`mt-3 ${INSET_SURFACE} px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]`} data-testid="coding-agent-git-info">
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
                 {git?.branch && <span className="font-mono text-[var(--text-primary)]">{git.branch}</span>}
+                {git?.branch && <span aria-hidden="true">·</span>}
                 {git && <span>{t("codingAgent.gitCommits", { n: git.commits })}</span>}
-                <span className="break-all">
-                  {lastSubject && lastDate ? <>{firstLine(lastSubject, 70)} · {timeAgo(lastDate, t)}</> : t("codingAgent.noCommits")}
-                </span>
+                {git && <span aria-hidden="true">·</span>}
+                <span>{lastDate ? timeAgo(lastDate, t) : t("codingAgent.noCommits")}</span>
                 <span className="ml-auto flex items-center gap-2 flex-wrap justify-end">
                   {/* On GitHub: the repository's page, and the way to a pull
                       request for the branch the project is on (or the one
                       already open for it). Not yet: a quiet Back up, the one
-                      road there — the green button it used to be shouted over
-                      the whole page. */}
+                      road there. */}
                   {githubWebUrl(git?.remote) ? (
                     <>
                       <a
@@ -3344,60 +3478,117 @@ export default function CodingAgentApp() {
                   )}
                 </span>
               </div>
-              {/* What earlier runs here learned (src/lib/coding-run-notes.ts):
-                  every run and team role reads it; the owner reads, edits and
-                  clears it here. Keyed like the team card, by the whole scope. */}
-              <CodingRunNotesCard
-                key={`notes-${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                directory={p.directory}
-                projectId={p.kind === "codeProject" ? p.folder : null}
-              />
-              {/* Which MCP servers this project's runs start with
-                  (src/lib/project-mcp-servers.ts): the harness's configured
-                  servers and the ClawBox read-only tools, all unticked until
-                  the owner ticks one. Keyed by the project's scope — the same
-                  `folder` a run's secrets are scoped by. */}
-              <CodingProjectMcpServersCard key={`mcp-${p.folder}`} project={p.folder} />
-              {/* Four tabs, each with the whole width: the folder, what changed,
-                  the runs, the team. The runs sat in a 22rem rail before and
-                  their rows wrapped three deep. */}
+              {/* The hand-offs: the next run, or a team, is asked for in the
+                  chat's Create card with this project preselected — the card
+                  composes, the assistant carries it. Nothing here composes.
+                  Not on /app/coding, where no chat listens. */}
+              {!standalone && (
+                <div className="mt-3 flex flex-col @md:flex-row gap-2" data-testid="coding-agent-project-start">
+                  <button
+                    type="button"
+                    onClick={() => openNewAppCard({ project: p.directory })}
+                    data-testid="coding-agent-project-start-run"
+                    className={`${BTN_SECONDARY} @md:flex-1`}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
+                    {t("codingAgent.projectStartRun")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openNewAppCard({ project: p.directory, team: true })}
+                    data-testid="coding-agent-project-start-team"
+                    className={`${BTN_SECONDARY} @md:flex-1`}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">groups</span>
+                    {t("codingAgent.projectStartTeam")}
+                  </button>
+                </div>
+              )}
+              {/* Activity · Files · Changes. A team is a row in Activity and
+                  a page of its own (CodingTeamPage) — no Team tab. */}
               <CodingProjectWorkspace
                 key={`workspace-${projectQuery}`}
                 query={projectQuery}
                 initialTab={workspaceTab?.directory === p.directory ? workspaceTab.tab : undefined}
+                initialRef={workspaceTab?.directory === p.directory ? workspaceTab.ref ?? null : null}
                 live={projectLive}
                 fill
+                directory={p.directory}
                 filesDirectory={!standalone && p.kind === "folder" ? p.directory : undefined}
-                runsCount={visibleRuns.length}
-                runsLive={projectLive}
-                runs={<div className="pt-1" data-testid="coding-agent-project-runs">{runsList}</div>}
-                team={(
-                  /* Keyed by the WHOLE scope the card reads by — the folder
-                     and the code-project id — so a project that changes kind
-                     under the same folder is a fresh card, never one holding
-                     the previous team. */
-                  <div className="pt-1">
-                    <CodingTeamCard
-                      key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                      directory={p.directory}
-                      projectId={p.kind === "codeProject" ? p.folder : null}
-                      onOpenRun={(id) => showRun(id)}
-                      onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
-                      runs={runs}
-                    />
-                  </div>
-                )}
+                activityLive={projectLive || teamLive !== null}
+                activity={<div className="pt-1" data-testid="coding-agent-project-runs">{activityList}</div>}
               />
+              {/* What earlier runs here learned (src/lib/coding-run-notes.ts),
+                  read-only — every run and team role reads it, runs add to it,
+                  and a change is asked for in the chat, where the assistant
+                  edits the file with its own tools. Not drawn while empty. */}
+              {notes.trim() !== "" && (
+                <details className={`mt-4 ${CARD_SURFACE} px-3 py-2`} data-testid="coding-run-notes">
+                  <summary className="cursor-pointer select-none flex items-center gap-2 min-h-[32px] text-xs font-semibold text-[var(--text-primary)]">
+                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">sticky_note_2</span>
+                    {t("codingAgent.runNotes.title")}
+                    <span className="font-normal text-[var(--text-muted)]">· {t("codingAgent.runNotes.byRuns")}</span>
+                  </summary>
+                  <div className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)] break-words" data-testid="coding-run-notes-body">
+                    {renderText(notes, t("chat.table"))}
+                  </div>
+                  {!standalone && (
+                    <button
+                      type="button"
+                      onClick={() => dispatchChatMessage(buildRunNotesPrompt({ name: p.name, directory: p.directory }))}
+                      data-testid="coding-run-notes-ask"
+                      className={`${BTN_SECONDARY} mt-2`}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
+                      {t("codingAgent.runNotes.askToChange")}
+                    </button>
+                  )}
+                </details>
+              )}
+              {/* Which tools (MCP servers) this project's runs may use — the
+                  owner's consent, kept as the owner's own checklist
+                  (src/lib/project-mcp-servers.ts: the route refuses the
+                  agent, so no chat sentence can grant a run a tool the owner
+                  never ticked). Folded, and read only when unfolded. */}
+              <div className={`mt-2 ${CARD_SURFACE} px-3 py-2`} data-testid="coding-project-tools">
+                <div className="flex items-center gap-2 min-h-[32px]">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">hub</span>
+                  <span className="text-xs font-semibold text-[var(--text-primary)]">{t("codingAgent.mcp.toolsLine")}</span>
+                  <button
+                    type="button"
+                    onClick={() => setToolsOpenFor((cur) => (cur === p.directory ? null : p.directory))}
+                    aria-expanded={toolsOpenFor === p.directory}
+                    data-testid="coding-project-tools-change"
+                    className={`${BTN_QUIET} ml-auto`}
+                  >
+                    {toolsOpenFor === p.directory ? t("codingAgent.mcp.hide") : t("codingAgent.mcp.change")}
+                  </button>
+                </div>
+                {toolsOpenFor === p.directory && (
+                  <CodingProjectMcpServersCard key={`mcp-${p.folder}`} project={p.folder} />
+                )}
+              </div>
+              {/* The last row of the page: removing the folder. Quiet and
+                  last, like an iOS trailing destructive row; everything that
+                  makes it safe is in the dialog behind it. */}
+              <div className="mt-7 mb-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(p)}
+                  data-testid={`coding-agent-delete-${p.folder}`}
+                  title={t("codingAgent.delete.action")}
+                  aria-label={t("codingAgent.delete.actionFor", { name: p.name })}
+                  className={`${BTN_QUIET} text-red-300/80 hover:text-red-300 hover:bg-red-500/10`}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
+                  {t("codingAgent.delete.row")}
+                </button>
+              </div>
             </div>
           </>);
         })()}
 
       </div>
-      </div>
-
-      {publishTarget && (
-        <StorePublishDialog key={publishTarget.directory} projectId={publishTarget.folder} directory={publishTarget.directory} onClose={() => setPublishTarget(null)} />
-      )}
 
       {/* Mounted at the top level rather than inside the row, so the backdrop
           covers the window and the focus trap has the whole app behind it. */}

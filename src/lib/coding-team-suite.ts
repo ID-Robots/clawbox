@@ -19,11 +19,15 @@
  *     that only says "no test specified" is not) → that script, through bun
  *     when the project is locked with bun and through npm otherwise.
  * Each command found runs, in that order, in the harness's own sandbox and
- * inside SUITE_TIMEOUT_MS; the first red one is the verdict.
+ * inside its time box (the gate's SUITE_GATE_TIMEOUT_MS); the first red one is
+ * the verdict.
  *
  * RED: the command ran and exited non-zero, or it was still going at the
  * deadline — a hung suite is not a passing one, as a hung deliverable command
- * is not. NOT JUDGED, which changes nothing about the team: no sandbox on the
+ * is not. One that ran out of time quotes only a failure its output really
+ * named; with none, it says the suite may be too slow for the gate's box
+ * rather than quoting passing lines as "First failure" (team-qghtdsy3: two
+ * tasks rejected on a `stderr |` header of a passing test). NOT JUDGED, which changes nothing about the team: no sandbox on the
  * box, a runner the box does not have (exit 127), a Python suite in which no
  * test ran, and one whose only failures are test modules importing pytest,
  * which unittest cannot run and this box does not have. What was not judged is
@@ -35,8 +39,10 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { DELIVERABLE_COMMAND_TIMEOUT_MS, runSandboxed, type DeliverableSandbox, type SandboxedOutcome } from "@/lib/coding-deliverable-check";
 
-/** How long one test command gets: the deliverable command's box, measured on the Orin for real suites. */
+/** How long one test command gets by default: the deliverable command's box. */
 export const SUITE_TIMEOUT_MS = DELIVERABLE_COMMAND_TIMEOUT_MS;
+/** The team gate's own box: ClawBox's own suite needs 11 to 13 minutes on one runner, and the 5-minute box called it red while it was passing. */
+export const SUITE_GATE_TIMEOUT_MS = 15 * 60_000;
 /** How much of a suite's output is kept to read the failures from — its tail, where the summary is. */
 const SUITE_OUTPUT_CHARS = 64_000;
 /** How many failing tests a rejection names; the rest are counted. */
@@ -59,8 +65,10 @@ export type SuiteVerdict =
     failing: string[];
     /** Project-relative files the failure names — a traceback's frames, a failing spec's path. */
     files: string[];
-    /** The first failure's own words, or the output's last lines when no failure could be picked out. */
+    /** The first failure's own words, or the output's last lines when no failure could be picked out — empty for a suite that ran out of time naming none. */
     excerpt: string;
+    /** Set when the suite was still going at the deadline: the box it had, in minutes. */
+    deadlineMinutes?: number;
   }
   | { kind: "unjudged"; command: string; reason: string };
 
@@ -181,13 +189,20 @@ export function readSuiteOutput(command: string, ran: SandboxedOutcome, director
   const python = command.startsWith("python3 ");
   if (ran.error !== null) return { kind: "unjudged", command, reason: `it could not be started: ${ran.error}` };
   if (ran.timedOut) {
+    // Only a failure the output really named: the tail of a suite cut short
+    // is whatever test was running, passing or not — and a passing test's
+    // own `console.error(new Error(…))` is an "Error" line `firstFailure`
+    // would quote, so the excerpt follows a NAMED failing test or is empty
+    // (an excerpt alone also hid "No failing test was named; it may be too slow").
+    const failing = failingTests(output);
     return {
       kind: "fail",
       command,
       summary: `did not finish within ${timeoutMs >= 60_000 ? plural(Math.round(timeoutMs / 60_000), "minute") : plural(Math.round(timeoutMs / 1000), "second")}`,
-      failing: failingTests(output),
+      failing,
       files: namedFiles(output, directory),
-      excerpt: tailLines(output),
+      excerpt: failing.length ? firstFailure(output) : "",
+      deadlineMinutes: Math.max(1, Math.round(timeoutMs / 60_000)),
     };
   }
   // 127 is the shell's "command not found": the box has no runner for this
@@ -373,6 +388,12 @@ function redLine(v: Extract<SuiteVerdict, { kind: "fail" }>): string {
   return `${v.command} — ${v.summary}${v.failing.length ? `. Failing: ${namedTests(v.failing)}` : ""}`;
 }
 
+/** The first failure's words, or for a suite that ran out of time naming none, that it may only be too slow for the gate. */
+function firstWords(v: Extract<SuiteVerdict, { kind: "fail" }>): string {
+  if (v.excerpt) return `First failure: ${v.excerpt}`;
+  return v.deadlineMinutes ? `No failing test was named; it may be too slow for the gate's ${v.deadlineMinutes}-minute box.` : "";
+}
+
 /**
  * A red suite as a task's rejection — what its next attempt reads first
  * ("A previous attempt was rejected: …"): the command, the count, the failing
@@ -381,14 +402,15 @@ function redLine(v: Extract<SuiteVerdict, { kind: "fail" }>): string {
 export function suiteRejection(v: Extract<SuiteVerdict, { kind: "fail" }>): string {
   return [
     `The project's own tests fail on the merged result: ${redLine(v)}.`,
-    v.excerpt ? `First failure: ${v.excerpt}` : "",
+    firstWords(v),
     `Make the suite pass by fixing what is wrong — never by deleting or weakening a test that checks the goal — and run \`${v.command}\` yourself before you finish.`,
   ].filter(Boolean).join(" ");
 }
 
 /** The words a team fails with when its suite is still red and no task is left to offer it to. */
 export function suiteFailure(v: Extract<SuiteVerdict, { kind: "fail" }>): string {
-  return `The project's own tests fail on the merged result: ${redLine(v)}.${v.excerpt ? ` First failure: ${v.excerpt}` : ""}`;
+  const first = firstWords(v);
+  return `The project's own tests fail on the merged result: ${redLine(v)}.${first ? ` ${first}` : ""}`;
 }
 
 /** The one line the board gets about the suite; `reoffered` names the tasks a red one went back to. */

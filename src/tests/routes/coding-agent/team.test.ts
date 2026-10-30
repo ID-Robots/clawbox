@@ -5,6 +5,7 @@
  * their status, the board answered as-is.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { teamCard } from "@/lib/coding-agent-slim";
 
 const team = vi.hoisted(() => ({
   startTeam: vi.fn(),
@@ -12,6 +13,7 @@ const team = vi.hoisted(() => ({
   cancelQueuedTeam: vi.fn(),
   getTeam: vi.fn(),
   listTeams: vi.fn(),
+  waitForTeam: vi.fn(),
 }));
 vi.mock("@/lib/coding-team", () => team);
 const requireSession = vi.hoisted(() => vi.fn());
@@ -62,14 +64,30 @@ describe("GET", () => {
     expect((await res.json()).kind).toBe("not_found");
   });
 
+  it("holds ?id=&wait= open on waitForTeam, seconds capped at MAX_WAIT_MS, and reads at once without it", async () => {
+    const { MAX_WAIT_MS } = await import("@/lib/coding-agent");
+    team.waitForTeam.mockResolvedValue({ ...BOARD, status: "done" });
+    expect(await (await GET(req("team?id=team-abcd1234&wait=30"))).json()).toEqual({ team: { ...BOARD, status: "done" } });
+    expect(team.waitForTeam).toHaveBeenCalledWith("team-abcd1234", 30_000);
+    await GET(req("team?id=team-abcd1234&wait=9999"));
+    expect(team.waitForTeam).toHaveBeenLastCalledWith("team-abcd1234", MAX_WAIT_MS);
+    team.waitForTeam.mockClear();
+    await GET(req("team?id=team-abcd1234&wait=0"));
+    await GET(req("team?id=team-abcd1234&wait=nope"));
+    expect(team.waitForTeam).not.toHaveBeenCalled();
+    expect(team.getTeam).toHaveBeenCalled();
+  });
+
   it("answers a settled board slim on ?slim=1 — no log, its tasks' text gone — and a working one whole", async () => {
-    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted", notes: "fine", at: 1 } };
+    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted" as const, notes: "fine", at: 1 } };
     const done = { ...BOARD, id: "team-done00001", status: "done", log: [{ type: "note", message: "planned" }], tasks: [task] };
     const working = { ...BOARD, id: "team-work00001", status: "working", log: [{ type: "note", message: "planned" }], tasks: [task] };
     team.listTeams.mockReturnValue([done, working]);
     const slim = await (await GET(req("team?slim=1"))).json();
-    expect(slim.teams[0]).toEqual({ ...done, slim: true, log: [], tasks: [{ ...task, result: null, review: { verdict: "accepted", notes: "", at: 1 } }] });
-    expect(slim.teams[1]).toEqual(working);
+    // Every slim board carries `card` — the chat's team card reads it.
+    expect(slim.teams[0]).toEqual({ ...done, slim: true, log: [], tasks: [{ ...task, result: null, review: { verdict: "accepted", notes: "", at: 1 } }], card: teamCard(done) });
+    expect(slim.teams[1]).toEqual({ ...working, card: teamCard(working) });
+    expect(slim.teams[1].card).toMatchObject({ phase: "working", tasksDone: 1, tasksTotal: 1, prNumber: null });
     expect(await (await GET(req("team"))).json()).toEqual({ teams: [done, working] });
     // One board by id is never slim.
     team.getTeam.mockReturnValue(done);
@@ -83,12 +101,12 @@ describe("GET", () => {
     expect(body.team).toMatchObject({ shape: { parallelism: 1, review: "final" }, dynamic: true, metrics });
   });
 
-  it("answers each run's provider and model, a task's bulk role, and the cost by provider as the board keeps them", async () => {
+  it("answers each run's provider and model, and the cost by provider as the board keeps them", async () => {
     const runs = [
       { id: "run-00000001", role: "planner", taskId: null, tokens: 5_000, provider: "anthropic", model: "claude-fable-5-1", modelRole: "planner" },
-      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 80_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "bulk" },
+      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 80_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "worker" },
     ];
-    const tasks = [{ task_id: "t1", task_description: "Scrape", status: "complete", role: "bulk" }];
+    const tasks = [{ task_id: "t1", task_description: "Scrape", status: "complete" }];
     team.getTeam.mockReturnValueOnce({ ...BOARD, runs, tasks, metrics: { tokensUsed: 85_000, tokensByProvider: { "clawbox-ai": 80_000, anthropic: 5_000 } } });
     const body = await (await GET(req("team?id=team-abcd1234"))).json();
     expect(body.team.runs).toEqual(runs);

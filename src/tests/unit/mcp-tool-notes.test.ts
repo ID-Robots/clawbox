@@ -274,7 +274,6 @@ describe("the tool notes", () => {
       /output_mode "files_with_matches" first/,
       /old_text must match the file character for character/,
       /cannot open your media folder, so a path only mentioned in the task is never read/,
-      /this box cannot deploy, so the deploy and check stages are skipped/,
       /Set confirm only after a refusal AND the user's go-ahead/,
       /The typed text is never echoed back/,
     ]) {

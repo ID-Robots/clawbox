@@ -1,155 +1,25 @@
 /**
- * The coding agent's TOKEN DIET (TASK-1749): three independent knobs that cut
- * the fixed context every turn of a run re-sends.
+ * Two pure judgements about a coding run, shared by the runner and the tests
+ * so each reads one rule:
  *
- * Measured on a Jetson box (DeepSeek through claude-ds, first-turn context):
- * a full ultracode run 16,677 tokens; without the appended brief 13,975 (the
- * brief is ~2.7k); without the clawbox MCP server's 13 browser and media tools
- * 14,375 (~2.3k). Every turn carries that again, so the per-turn fixed context
- * is the main cost of a run — and Claude Code's own MCP tool search does not
- * switch on through the proxy, so dropping tools has to be done here.
+ * - `looksVisual`: does the run have a face? A run judged not visual holds
+ *   neither the clawbox MCP server's browser family nor the media tools, and
+ *   its brief has no browser block — decided ONCE per run at its first spawn
+ *   (`decideRunVisual`) and frozen on its record (CodingRun.visual).
+ * - `mentionsPullRequest`: the brief carries the auto-merge sentence only for
+ *   a run that can open a pull request or was asked about one.
  *
- * - `brief`: "full" is the original HEADLESS_BRIEF; "lean" is LEAN_HEADLESS_BRIEF —
- *   every rule that prevents a real failure, said in as few words as possible,
- *   with the browser/visual sentences split into a block of their own.
- * - `helpers`: "always" is the original delegation sentence (explorer before every
- *   edit, tester after each batch, reviewer before the report); "lean" says to
- *   run the checks in the run's own shell and to use the helpers only where
- *   they pay for themselves.
- * - `visualTools`: "always" gives every run the browser and media tools, as
- *   before the diet; "auto" gives them only to a run whose task or folder looks visual
- *   (`looksVisual`), decided ONCE per run and frozen on its record.
+ * What is left of the token diet (TASK-1749). Measured on a Jetson box
+ * (DeepSeek through claude-ds, first-turn context): a full run 16,677 tokens;
+ * without the appended brief 13,975 (the brief was ~2.7k); without the
+ * browser and media tools 14,375 (~2.3k) — and every turn carries that again.
+ * The diet's knobs (a full or lean brief, an always-delegate or lean helper
+ * sentence, a context cap, always-on visual tools) were measured and deleted:
+ * the lean brief, the lean helper sentence and the per-run visual decision
+ * are the only behaviour now (docs/agents/coding-agent.md keeps the numbers).
  *
- * Two baselines, never to be confused:
- * - DEFAULT_DIET (lean / lean / auto) is what the owner's SETTING reads as when
- *   nothing is stored — the defaults since TASK-1749's measurement on
- *   bench/diet (2026-10-18), so a new run on a box that never set the diet
- *   gets the lean brief, the lean helper sentence and the visual decision.
- * - LEGACY_DIET (full / always / always) is the behaviour before the diet
- *   existed: what a run RECORD without a `diet` field, and buildRunArgs or
- *   headlessBrief called without one, still mean — so a resume of a run started
- *   before the change keeps its prompt byte for byte (pinned by
- *   coding-agent-diet.test.ts).
- *
- * Pure: no fs, no config store — the reader, the patch validator and the
- * heuristic, so the route, the runner and the tests read one rule.
+ * Pure: no fs, no config store.
  */
-
-export const DIET_BRIEF_MODES = ["full", "lean"] as const;
-export const DIET_HELPER_MODES = ["always", "lean"] as const;
-export const DIET_VISUAL_TOOL_MODES = ["always", "auto"] as const;
-export const DIET_CONTEXT_MODES = ["full", "capped"] as const;
-
-export type DietBrief = (typeof DIET_BRIEF_MODES)[number];
-export type DietHelpers = (typeof DIET_HELPER_MODES)[number];
-export type DietVisualTools = (typeof DIET_VISUAL_TOOL_MODES)[number];
-export type DietContext = (typeof DIET_CONTEXT_MODES)[number];
-
-export interface CodingDiet {
-  brief: DietBrief;
-  helpers: DietHelpers;
-  visualTools: DietVisualTools;
-  /**
-   * "capped": Claude Code compacts the conversation once it nears
-   * CONTEXT_CAP_WINDOW tokens. On a 1M-token model ("full") its automatic
-   * compaction effectively never runs, so a long run re-sends a context of
-   * 150–200k tokens on every turn.
-   */
-  context: DietContext;
-}
-
-/** The compaction window a "capped" run is given (CLAUDE_CODE_AUTO_COMPACT_WINDOW). */
-export const CONTEXT_CAP_WINDOW = 128_000;
-
-/**
- * The behaviour before the diet existed, on every knob: what a run record
- * written without a `diet` field — and a prompt built without one — means.
- */
-export const LEGACY_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
-
-/**
- * The owner's setting when nothing is stored (TASK-1749): measured on
- * bench/diet (2026-10-18), the lean brief, the lean helper sentence and the
- * per-run visual decision did the same work for fewer tokens.
- */
-export const DEFAULT_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
-
-const ALLOWED: { readonly [K in keyof CodingDiet]: readonly CodingDiet[K][] } = {
-  brief: DIET_BRIEF_MODES,
-  helpers: DIET_HELPER_MODES,
-  visualTools: DIET_VISUAL_TOOL_MODES,
-  context: DIET_CONTEXT_MODES,
-};
-
-const DIET_KEYS = Object.keys(ALLOWED) as (keyof CodingDiet)[];
-
-function pick<K extends keyof CodingDiet>(key: K, value: unknown, fallback: Readonly<CodingDiet>): CodingDiet[K] {
-  return (ALLOWED[key] as readonly unknown[]).includes(value) ? (value as CodingDiet[K]) : fallback[key];
-}
-
-/**
- * A stored setting or a run record's frozen value, read strictly and never
- * thrown on: anything that is not an object is `fallback`, and each field this
- * build does not recognise falls back to ITS value in `fallback` alone.
- *
- * The fallback is explicit because the two callers mean different things: the
- * owner's stored SETTING falls back to DEFAULT_DIET (the lean defaults), a run
- * RECORD to LEGACY_DIET — a record written before the field existed was
- * started with the full prompt, and its resumes must keep it.
- */
-export function readDiet(raw: unknown, fallback: Readonly<CodingDiet>): CodingDiet {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...fallback };
-  const o = raw as Record<string, unknown>;
-  return {
-    brief: pick("brief", o.brief, fallback),
-    helpers: pick("helpers", o.helpers, fallback),
-    visualTools: pick("visualTools", o.visualTools, fallback),
-    context: pick("context", o.context, fallback),
-  };
-}
-
-/** True when every knob is at the setting's default (DEFAULT_DIET). */
-export function isDefaultDiet(diet: CodingDiet): boolean {
-  return DIET_KEYS.every((key) => diet[key] === DEFAULT_DIET[key]);
-}
-
-/** Why a patch was refused — stable, for the route's `code`. */
-export type DietPatchRefusal = "diet_not_object" | "diet_unknown_key" | "diet_invalid_value";
-
-export type DietPatchResult =
-  | { ok: true; patch: Partial<CodingDiet> }
-  | { ok: false; code: DietPatchRefusal; error: string };
-
-/**
- * The enable route's `{ diet: { brief?, helpers?, visualTools? } }`, checked
- * WHOLE before anything is saved: an unknown key or a value this build does
- * not offer refuses the edit, never repairs it.
- */
-export function validateDietPatch(raw: unknown): DietPatchResult {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: false, code: "diet_not_object", error: "The diet must be an object: { brief?, helpers?, visualTools?, context? }." };
-  }
-  const patch: Partial<CodingDiet> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!(DIET_KEYS as string[]).includes(key)) {
-      return { ok: false, code: "diet_unknown_key", error: `The diet has no setting "${key.slice(0, 40)}": use brief, helpers, visualTools or context.` };
-    }
-    const k = key as keyof CodingDiet;
-    if (!(ALLOWED[k] as readonly unknown[]).includes(value)) {
-      return { ok: false, code: "diet_invalid_value", error: `The diet's ${k} must be one of: ${ALLOWED[k].join(", ")}.` };
-    }
-    (patch as Record<string, unknown>)[k] = value;
-  }
-  return { ok: true, patch };
-}
-
-/**
- * A validated patch merged over what is stored — or over DEFAULT_DIET when
- * nothing is, so a partial patch on a fresh box keeps the other knobs lean.
- */
-export function mergeDiet(stored: unknown, patch: Partial<CodingDiet>): CodingDiet {
-  return readDiet({ ...readDiet(stored, DEFAULT_DIET), ...patch }, DEFAULT_DIET);
-}
 
 /**
  * Does the task text talk about a pull request? The lean brief carries the

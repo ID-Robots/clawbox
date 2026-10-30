@@ -533,7 +533,7 @@ describe("teamMetrics", () => {
     ];
     const task = (id: string, extra: Partial<import("@/lib/coding-team-board").TeamTask>) => ({
       task_id: id, task_description: id, assigned_to: null, status: "pending" as const, result: null, depends_on: [], files_hint: [], review: null,
-      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, ciReoffers: 0, created_at: 1, updated_at: 1, ...extra,
+      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, ciReoffers: 0, budgetReoffers: 0, created_at: 1, updated_at: 1, ...extra,
     });
     b.tasks = [
       task("t1", { status: "complete", attempts: 1, review: { verdict: "accepted", notes: "", at: 1 } }),
@@ -1012,5 +1012,21 @@ describe("the team's pull request on the board", () => {
     expect(lib.countedAttempts(t)).toBe(0);
     expect(b.log[b.log.length - 1]).toMatchObject({ type: "ci", actor: { kind: "system" }, task_id: "t1" });
     expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
+  });
+
+  it("re-offers a task whose worker the team stopped itself (held past its budget) — the system's, the why as its notes, never against its two tries", () => {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    expect(() => lib.reopenAfterStop(b, SYSTEM, "t1", "paused")).toThrow(/only a task at work/);
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    expect(() => lib.reopenAfterStop(b, REVIEWER, "t1", "paused")).toThrow(lib.BoardAccessError);
+    const t = lib.reopenAfterStop(b, SYSTEM, "t1", "The previous worker (run-aaaaaaaa) was paused for over 60 minutes and nobody resumed it, so the team stopped it.");
+    expect(t).toMatchObject({ status: "pending", assigned_to: null, budgetReoffers: 1, rejections: 0, review: { verdict: "rejected", notes: expect.stringMatching(/paused for over 60 minutes/) } });
+    expect(lib.countedAttempts(t)).toBe(0);
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "budget", actor: { kind: "system" }, task_id: "t1", message: expect.stringMatching(/^Task t1 re-offered after the team stopped its worker: /) });
+    // Round trip: the count survives the file, and a board from before it reads as none.
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.tasks[0].budgetReoffers).toBe(1);
   });
 });

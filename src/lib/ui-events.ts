@@ -2,6 +2,8 @@
 // Defining them in one place avoids typo drift between the dispatch and
 // listen sites.
 
+import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "./coding-agent-harness-test";
+
 export const OPEN_APP_EVENT = "clawbox:open-app";
 export const FIX_ERROR_EVENT = "clawbox:fix-error";
 /**
@@ -86,6 +88,44 @@ export function takePendingCodingRun(): string | null {
   const w = window as PendingRunWindow;
   const id = typeof w.__clawboxPendingCodingRun === "string" ? w.__clawboxPendingCodingRun : null;
   delete w.__clawboxPendingCodingRun;
+  return id;
+}
+
+/**
+ * "Open the Coding Agent app on this TEAM."
+ *
+ * The run trio above, for a coding team: the chat's team card and the
+ * desktop's team finish card end here, and the app opens on the team rather
+ * than on its home. The same two handoffs — the `window` slot survives a
+ * cold open, the event reaches an app already on screen — and the same
+ * take-once read on the app's side. The app opens the team's own page
+ * (CodingTeamPage, since the redesign's step 5), its project behind it.
+ */
+export const OPEN_CODING_TEAM_EVENT = "clawbox:open-coding-team";
+
+type PendingTeamWindow = Window & { __clawboxPendingCodingTeam?: unknown };
+
+/** The handoff WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingTeam(teamId: string): void {
+  if (typeof window === "undefined") return;
+  const w = window as PendingTeamWindow;
+  w.__clawboxPendingCodingTeam = teamId;
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_TEAM_EVENT, { detail: { teamId } }));
+}
+
+/** Open the Coding Agent app on a team, in the window's own size and place — never maximized, like the run's. */
+export function dispatchOpenCodingTeam(teamId: string): void {
+  if (typeof window === "undefined") return;
+  handoffCodingTeam(teamId);
+  dispatchOpenApp("coding");
+}
+
+/** The team handed off before the app mounted, taken exactly once. */
+export function takePendingCodingTeam(): string | null {
+  if (typeof window === "undefined") return null;
+  const w = window as PendingTeamWindow;
+  const id = typeof w.__clawboxPendingCodingTeam === "string" ? w.__clawboxPendingCodingTeam : null;
+  delete w.__clawboxPendingCodingTeam;
   return id;
 }
 
@@ -220,6 +260,29 @@ export function dispatchChatMessage(text: string): void {
   window.dispatchEvent(new CustomEvent<ChatMessageDetail>(CHAT_MESSAGE_EVENT, { detail: { text } }));
 }
 
+/**
+ * "Open the chat — and put these words in the composer, UNSENT."
+ *
+ * The run page's **Message in chat** (and the agent chart's panel) end here
+ * rather than at a text box of their own: the chat composes, the app shows
+ * (the 2026-10-30 redesign). `page.tsx` opens the popup; `ChatPopup` seeds
+ * its composer with `draft` and focuses it, and NOTHING is sent until the
+ * owner presses Send — a draft is a draft. `dispatchChatMessage` stays for a
+ * prompt that needs no editing.
+ */
+export const OPEN_CHAT_EVENT = "clawbox:open-chat";
+
+export interface OpenChatDetail {
+  /** Words for the composer, left for the owner to finish and send. */
+  draft?: string;
+}
+
+export function dispatchOpenChat(opts: OpenChatDetail = {}): void {
+  if (typeof window === "undefined") return;
+  const detail: OpenChatDetail = opts.draft ? { draft: opts.draft } : {};
+  window.dispatchEvent(new CustomEvent<OpenChatDetail>(OPEN_CHAT_EVENT, { detail }));
+}
+
 /** The starter a new app is scaffolded from — initProject's two templates. */
 /** The wizard's starters, in the order the select shows them; "nextjs" is the default. */
 export type NewAppTemplate = "nextjs" | "react" | "app" | "blank";
@@ -276,6 +339,29 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
   return [
     `Create a new ClawBox app called "${name}": ${what}.`,
     SCAFFOLD_SENTENCE[req.template],
+  ].join("\n");
+}
+
+/**
+ * The one message "Test in the chat" (Settings' owner tools) and "Try it in
+ * the chat" (the wizard's last step) hand to the chat.
+ *
+ * English and addressed to the assistant, like buildNewAppPrompt. Until the
+ * 2026-10-30 redesign both buttons posted to `coding-agent/browse` and
+ * `coding-agent/run` from the app itself; now the assistant does what the
+ * app did — makes the scratch folder inside the owner's default project
+ * folder and starts ONE run there with the canned task — so the run shows up
+ * where every other run does: as a card in the chat. The folder is named
+ * BARE on purpose: the run resolver reads a bare name as "inside the default
+ * project folder", which keeps the default the one place that decides where
+ * "inside" is.
+ */
+export function buildHarnessTestPrompt(): string {
+  return [
+    "Run the coding agent's harness self-test for me.",
+    `Inside my default project folder, create a folder named "${HARNESS_TEST_PROJECT}" if it is not there yet, then start exactly one coding run in it with coding_agent_run, directory "${HARNESS_TEST_PROJECT}", and this task, word for word:`,
+    HARNESS_TEST_TASK,
+    "Tell me when the run has started; when it finishes, tell me what it built and what the browser description confirmed.",
   ].join("\n");
 }
 
@@ -336,7 +422,12 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
   return [
     `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
     `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
-    "Tell me when it is running, and check on it later with coding_team_status; when it is done, summarise what each task did and what was verified.",
+    // How the assistant hears that the team finished differs per edition (a
+    // chat line on OpenClaw, the desktop on Hermes: TEAM_SETTLE_WORD in
+    // mcp/tools/coding-agent.ts), and this prompt knows no edition — the tool
+    // reply says it, so the prompt points there rather than promising a line
+    // a Hermes box never posts (the assistant would wait on it for ever).
+    "Tell me when it is running, and do not poll it — the coding_team_run reply says how you will hear that it finished; then read coding_team_status and summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
   ].join("\n");
 }
@@ -569,6 +660,29 @@ export function onCodingRunStarted(listener: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   window.addEventListener(CODING_RUN_STARTED_EVENT, listener);
   return () => window.removeEventListener(CODING_RUN_STARTED_EVENT, listener);
+}
+
+/**
+ * "A coding TEAM was just started, or just settled, somewhere this browser
+ * can see." The team's counterpart of CODING_RUN_STARTED_EVENT: the chat's
+ * cards poll the team list on the same beat as the runs, and this is the
+ * nudge that makes a team started from another device, or one the ring just
+ * reported settled, show up before the next slow poll. A signal, not data:
+ * the listener re-asks the team route.
+ */
+export const CODING_TEAM_CHANGED_EVENT = "clawbox:coding-team-changed";
+
+/** Emit the signal above — once the team route has ANSWERED, or when the desktop hears a team settled; never on the click. */
+export function notifyCodingTeamChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CODING_TEAM_CHANGED_EVENT));
+}
+
+/** Subscribe to "a coding team changed" and return the unsubscribe. */
+export function onCodingTeamChanged(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(CODING_TEAM_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(CODING_TEAM_CHANGED_EVENT, listener);
 }
 
 /**

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { clearFinishedRuns, getHistoryPolicy, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
+import { clearFinishedRuns, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
-import { slimRun } from "@/lib/coding-agent-slim";
+import { runSummaryLine, slimRun } from "@/lib/coding-agent-slim";
 import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -13,8 +13,11 @@ export const dynamic = "force-dynamic";
  *                            or `wait` elapses (capped), so a caller can
  *                            block instead of polling every few seconds.
  *
+ * Every run carries `summaryLine` — the first sentence of its result, at
+ * most 160 characters — beside the record, for the chat's settled card.
+ *
  * GET ?slim=1              → the list with every SETTLED run's free text
- *                            emptied (progress, result text, pipeline, allow
+ *                            emptied (progress, result text, allow
  *                            rules, denials) and `slim: true` on it — what the
  *                            Coding Agent app's 5 s live poll reads, merged
  *                            over the full records it holds
@@ -28,8 +31,7 @@ export const dynamic = "force-dynamic";
  *                            optionally one project folder's. `?id=` already
  *                            finds one of them on its own.
  *
- * DELETE                   → forget the finished runs; { cleared: n }. Under
- *                            the archive mode they are archived instead.
+ * DELETE                   → forget the finished runs; { cleared: n }.
  *
  * GET is read-only, and middleware's cookie-or-bearer gate is the whole gate
  * for it. The 404 carries a JSON { error } body on purpose — the MCP
@@ -57,7 +59,7 @@ export async function DELETE(request: Request) {
     );
   }
   try {
-    return NextResponse.json({ cleared: clearFinishedRuns(await getHistoryPolicy()) });
+    return NextResponse.json({ cleared: clearFinishedRuns() });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not clear the coding runs" },
@@ -71,10 +73,13 @@ export async function DELETE(request: Request) {
  *  the evidence-folder listing. Opt-in because listing is a readdir + a stat
  *  per file on every run returned, and this route is polled every 5s by two
  *  UIs, only one of which renders artifacts. */
-function withDerived<T extends { id: string } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
+function withDerived<T extends { id: string; summary?: string | null; resultText?: string | null } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
   return {
     ...run,
     transcriptPath: transcriptPath(run),
+    // The result's first sentence, for the chat's settled card: worked out
+    // here so the card never parses the result text (a slim read has none).
+    summaryLine: runSummaryLine(run),
     ...(withArtifacts ? { artifacts: listArtifacts(run.id) } : {}),
   };
 }

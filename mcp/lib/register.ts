@@ -66,6 +66,16 @@ type ContentPart =
 export interface ToolResult {
   content: ContentPart[];
   isError?: boolean;
+  /**
+   * A machine-readable copy of what the prose says, for the harness's UI —
+   * the MCP `structuredContent` field. Only `coding_agent_run` and
+   * `coding_team_run` set it (the id and status of what they started, so a
+   * chat client can draw its own card); no tool here declares an
+   * `outputSchema`, so the SDK passes it through unvalidated. The cap below
+   * leaves it alone: it is data the agent's host reads, not text the model
+   * does, and it is small by construction.
+   */
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface RegisteredToolInfo {

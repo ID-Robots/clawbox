@@ -51,6 +51,8 @@ const NAMES = [
   // TASK-899: every run at a glance, resuming one, the project matrix, and the
   // project matrix (src/tests/unit/mcp-coding-agent-state-tools.test.ts).
   "coding_run_list", "coding_agent_resume", "coding_project_status",
+  // 2026-10-30: the app's Import panel as a tool (src/tests/unit/mcp-coding-project-import.test.ts).
+  "coding_project_import",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
@@ -120,6 +122,23 @@ describe("registration", () => {
 });
 
 describe("coding_agent_run", () => {
+  it("tells the assistant the chat shows the run as a card, and carries the same facts as structuredContent", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/The chat shows this as a card .* do not describe progress yourself and do not poll/);
+    expect(out.result.structuredContent).toEqual({
+      kind: "coding_run", id: "run-k3x9q2ab", projectId: "site", directory: RUN.directory,
+      title: "Add a dark mode toggle", status: "running",
+    });
+    apiPost.mockResolvedValue({ started: false, queued: true, run: { ...RUN, status: "queued", queued: { at: 1, position: 3 } } });
+    const queued = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(queued.isError).toBe(false);
+    if (queued.isError) return;
+    expect(queued.result.structuredContent).toMatchObject({ kind: "coding_run", status: "queued", queuePosition: 3 });
+  });
+
   it("starts a run and hands back the id with the follow-up step", async () => {
     apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
     const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
@@ -726,7 +745,6 @@ describe("the deliverable", () => {
         deliverable: { kind: "paths", paths: ["app.js"] },
         deliverableCheck: { ok: true, missing: null, checkedAt: Date.now() },
         attempts: [{ startedAt: 1, endedAt: 2, reason: null }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
@@ -746,14 +764,13 @@ describe("the deliverable", () => {
         deliverable: { kind: "paths", paths: ["app.js"] },
         deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
         attempts: [{ startedAt: 1, endedAt: 2, reason: "app.js was not created." }, { startedAt: 3, endedAt: 4, reason: "app.js was not created." }, { startedAt: 5, endedAt: 6, reason: "app.js was not created." }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("app.js was not created.");
-    expect(out.text).toContain("after 3 of 3 attempts");
+    expect(out.text).toContain("after 3 attempts");
     // The advice that matters: the session holds the work, so Resume is the way
     // on and a fresh run would start the task over.
     expect(out.text).toMatch(/Do NOT start a fresh run/);
@@ -791,7 +808,6 @@ describe("what a command deliverable's failure tells the AGENT", () => {
           checkedAt: Date.now(),
         },
         attempts: [{ startedAt: 1, endedAt: 2, reason: "x" }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
@@ -819,7 +835,6 @@ describe("what a command deliverable's failure tells the AGENT", () => {
         deliverable: { kind: "paths", paths: ["app.js"] },
         deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
         attempts: [{ startedAt: 1, endedAt: 2, reason: "app.js was not created." }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });

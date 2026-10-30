@@ -9,9 +9,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
+import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 import CodingAgentDiagram, { DiagramDetails, SHEET_BELOW, type DiagramRun } from "@/components/CodingAgentDiagram";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "@/components/CodingAgentLiveAgents";
-import type { TeamView } from "@/components/CodingTeamCard";
+import type { TeamView } from "@/components/CodingTeamPage";
+import { OPEN_CHAT_EVENT } from "@/lib/ui-events";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -37,7 +39,7 @@ const TEAM: TeamView = {
     { id: "run-plan0001", role: "planner", taskId: null, tokens: 8_000 },
     { id: "run-work0001", role: "worker", taskId: "t1", tokens: 50_000 },
     { id: "run-revw0001", role: "reviewer", taskId: "t1", tokens: 6_000 },
-    { id: "run-work0002", role: "worker", taskId: "t2" },
+    { id: "run-work0002", role: "worker", taskId: "t2", provider: "anthropic", model: "claude-sonnet-5", modelRole: "worker" },
   ],
   tasks: [
     { task_id: "t1", task_description: "Scaffold index.html", assigned_to: "run-work0001", status: "complete", result: "Built index.html; open it.", depends_on: [], review: { verdict: "rejected", notes: "The header overlaps the table.", at: 1 }, reviewRunId: "run-revw0001", attempts: 1 },
@@ -213,16 +215,27 @@ describe("the panel: what an agent is doing now", () => {
     const figures = within(panel).getByTestId("coding-agent-node-panel-figures");
     expect(figures).toHaveTextContent(t("codingAgent.diagram.turns", { n: 7 }));
     expect(figures).toHaveTextContent(t("codingAgent.team.metricTokens", { n: "33k" }));
+    // What it runs on, from the cast list — the one list of agents there is.
+    expect(within(figures).getByTestId("coding-agent-node-panel-model")).toHaveTextContent(t("codingAgent.memberModel", { model: "Sonnet 5", provider: t(CODING_PROVIDER_NAME_KEY.anthropic) }));
     const files = within(panel).getByTestId("coding-agent-node-panel-files");
     expect(files).toHaveTextContent("src/file0.ts");
     expect(files).toHaveTextContent(t("codingAgent.diagram.moreFiles", { n: 2 }));
     expect(within(panel).getByTestId("coding-agent-node-panel-task")).toHaveTextContent("Wire app.js to the form");
     fireEvent.click(within(panel).getByTestId("coding-agent-node-panel-open"));
     expect(onOpenRun).toHaveBeenCalledWith("run-work0002");
-    // The owner may stop it; a message box opens on request.
+    // The owner may stop it; Message in chat drafts into the chat composer —
+    // no text box of the panel's own (2026-10-30), and nothing is sent.
     expect(await within(panel).findByTestId("coding-agent-node-panel-stop")).toBeInTheDocument();
-    fireEvent.click(within(panel).getByTestId("coding-agent-node-panel-message"));
-    expect(within(panel).getByRole("textbox")).toBeInTheDocument();
+    const opens: unknown[] = [];
+    const onOpen = (e: Event) => opens.push((e as CustomEvent).detail);
+    window.addEventListener(OPEN_CHAT_EVENT, onOpen);
+    try {
+      fireEvent.click(within(panel).getByTestId("coding-agent-node-panel-message"));
+      expect(opens).toEqual([{ draft: t("codingAgent.messageDraft", { id: "run-work0002" }) }]);
+      expect(within(panel).queryByRole("textbox")).toBeNull();
+    } finally {
+      window.removeEventListener(OPEN_CHAT_EVENT, onOpen);
+    }
   });
 
   it("opens a reviewer on Enter with its verdict and notes, and a worker's result on Space", () => {
@@ -428,44 +441,112 @@ describe("the chart of one run", () => {
     expect(within(panel).queryByTestId("coding-agent-node-panel-open")).toBeNull();
   });
 
-  it("draws a team run's TEAM on its page, the run marked, reading the board by id when the list lacks it", async () => {
+  it("draws no team chart on a team member's page — its team has a page of its own — and reads no board for it", async () => {
     const member = { ...RUNS["run-work0002"], team: { id: TEAM.id, role: "worker" as const, taskId: "t2" } };
-    render(<RunAgentsDiagram run={member} teams={[]} runOf={(id) => RUNS[id]} onOpenRun={vi.fn()} />);
-    // The run's own chart stands in until the board is read.
+    const { container } = render(<RunAgentsDiagram run={member} onOpenRun={vi.fn()} />);
+    // Since the redesign's step 5 the team chip in the run's status block
+    // leads to the Team page, where the chart is; nothing here, and no
+    // `GET team?id=` from this block.
+    expect(container).toBeEmptyDOMElement();
+    await act(async () => { await Promise.resolve(); });
+    expect(fetches.filter((f) => f.url.startsWith("/setup-api/coding-agent/team"))).toEqual([]);
+    expect(screen.queryByTestId("coding-agent-run-helpers")).toBeNull();
+  });
+
+  it("draws no chart at all for a solo run without helpers", () => {
+    const { container } = render(<RunAgentsDiagram run={RUNS["run-work0001"]} onOpenRun={vi.fn()} />);
+    // The owner's "the space in the run diagram is almost all empty": a
+    // one-node chart is nothing the status block does not say.
+    expect(screen.queryByTestId("coding-agent-run-diagram")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-run-helpers")).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("draws a solo run that sent helpers out as a Helpers block — no figure chips, no legend — and says nothing of a model the board never kept", () => {
+    const withHelpers = { ...RUNS["run-work0001"], subagents: [{ type: "Explore", description: "Map the folder", startedAt: NOW - 90_000, endedAt: NOW - 60_000, refused: false }] };
+    render(<RunAgentsDiagram run={withHelpers} onOpenRun={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-run-helpers")).toHaveAttribute("data-kind", "run");
     expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "run");
-    await waitFor(() => expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "team"));
-    expect(node("run-work0002")).toHaveAttribute("data-current", "true");
+    expect(screen.queryByTestId("coding-agent-diagram-figures")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-run-diagram-legend")).toBeNull();
+    expect(screen.getAllByTestId("coding-agent-node")).toHaveLength(2);
+    fireEvent.click(screen.getAllByTestId("coding-agent-node")[0]);
+    expect(within(screen.getByTestId("coding-agent-node-panel")).queryByTestId("coding-agent-node-panel-model")).toBeNull();
   });
 });
 
 describe("home: the agents first", () => {
-  const SOLO_LIVE = run("run-solo0002", { status: "running", completedAt: null, task: "Fix the login form" });
+  const SOLO_LIVE = run("run-solo0002", { status: "running", completedAt: null, task: "Fix the login form", progress: ["$ bun test"] });
 
-  it("draws every team and run at work, a team's runs inside its own chart only", () => {
+  it("draws a team at work as a card with the real chart, compact, and a solo run without helpers as a plain row; a team's runs only inside its card", () => {
     const teamRun = { ...RUNS["run-work0002"], team: { id: TEAM.id, role: "worker" as const, taskId: "t2" } };
-    render(<CodingAgentLiveAgents runs={[SOLO_LIVE, teamRun]} teams={[TEAM]} onOpenRun={vi.fn()} openTeamFor={() => vi.fn()} />);
+    const onOpenTeam = vi.fn();
+    render(<CodingAgentLiveAgents runs={[SOLO_LIVE, teamRun]} teams={[TEAM]} onOpenRun={vi.fn()} onOpenTeam={onOpenTeam} />);
     const section = screen.getByTestId("coding-agent-live-agents");
     expect(section).toHaveAttribute("data-live", "2");
-    expect(screen.getByTestId(`coding-agent-live-team-${TEAM.id}`)).toHaveAttribute("data-shape", "team");
-    expect(screen.getByTestId("coding-agent-live-run-run-solo0002")).toHaveAttribute("data-shape", "run");
+    const card = screen.getByTestId(`coding-agent-live-team-${TEAM.id}`);
+    expect(card).toHaveAttribute("data-shape", "team");
+    // ONE rendering of the chart on the card, the compact geometry, no legend
+    // and no figure chips (the heading says the tasks).
+    const chart = within(card).getByTestId(`coding-agent-live-chart-${TEAM.id}`);
+    expect(chart).toHaveAttribute("data-compact", "true");
+    expect(within(card).getAllByTestId("coding-agent-node").length).toBeGreaterThan(3);
+    expect(within(card).queryByTestId(`coding-agent-live-chart-${TEAM.id}-legend`)).toBeNull();
+    expect(within(card).queryByTestId("coding-agent-diagram-figures")).toBeNull();
+    expect(within(card).getByTestId(`coding-agent-live-open-team-${TEAM.id}`)).toHaveTextContent("Build the invoice app");
+    // The solo run is a row — one node is no chart — with its Now line.
+    const row = screen.getByTestId("coding-agent-live-run-run-solo0002");
+    expect(row).toHaveAttribute("data-plain", "true");
+    expect(row).not.toHaveAttribute("data-shape");
+    expect(within(row).getByTestId("coding-agent-live-now-run-solo0002")).toBeInTheDocument();
     expect(screen.queryByTestId("coding-agent-live-run-run-work0002")).toBeNull();
-    expect(screen.getByTestId(`coding-agent-live-open-team-${TEAM.id}`)).toHaveTextContent(t("codingAgent.diagram.openTeam"));
+    // The whole card is the way to the Team page.
+    fireEvent.click(within(card).getByTestId(`coding-agent-live-open-team-${TEAM.id}`));
+    expect(onOpenTeam).toHaveBeenCalledWith(TEAM);
+    fireEvent.click(card);
+    expect(onOpenTeam).toHaveBeenCalledTimes(2);
   });
 
-  it("shows the newest that was when nothing is at work, and a word when there was nothing", () => {
+  it("draws a solo run that sent helpers out as a compact chart card, and queued teams and runs as rows with their place in line", () => {
+    const withHelpers = run("run-help0001", { status: "running", completedAt: null, activeSubagents: [{ type: "Explore", description: "Map the folder", startedAt: NOW - 30_000 }] });
+    const queuedRun = { ...run("run-wait0001", { status: "queued", completedAt: null, task: "Waiting run" }), queued: { position: 2 } };
+    const queuedTeam = { ...TEAM, id: "team-wait0001", status: "queued" as const, queuePosition: 1, tasks: [], runs: [] };
+    render(<CodingAgentLiveAgents runs={[withHelpers, queuedRun]} teams={[queuedTeam]} onOpenRun={vi.fn()} onOpenTeam={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-live-run-run-help0001")).toHaveAttribute("data-shape", "run");
+    expect(screen.getByTestId("coding-agent-live-chart-run-help0001")).toHaveAttribute("data-compact", "true");
+    expect(screen.getByTestId("coding-agent-live-team-team-wait0001")).toHaveAttribute("data-queued", "true");
+    expect(screen.getByTestId("coding-agent-live-team-team-wait0001")).toHaveTextContent(t("codingAgent.team.queuePosition", { n: 1 }));
+    expect(screen.getByTestId("coding-agent-live-run-run-wait0001")).toHaveAttribute("data-queued", "true");
+    expect(screen.getByTestId("coding-agent-live-run-run-wait0001")).toHaveTextContent(t("codingAgent.team.queuePosition", { n: 2 }));
+    expect(screen.queryByTestId("coding-agent-live-queued")).toBeNull();
+    expect(screen.getByTestId("coding-agent-live-agents")).toHaveAttribute("data-queued", "2");
+  });
+
+  it("shows the newest that was as one row when nothing is at work, and one sentence with the way to the chat when there was nothing", () => {
     const old = run("run-old00001", { task: "An older run", completedAt: NOW - 5_000_000 });
     const settledTeam = { ...TEAM, status: "done" as const, updatedAt: NOW - 1_000 };
-    const view = render(<CodingAgentLiveAgents runs={[old]} teams={[settledTeam]} onOpenRun={vi.fn()} />);
+    const onAsk = vi.fn();
+    const view = render(<CodingAgentLiveAgents runs={[old]} teams={[settledTeam]} onOpenRun={vi.fn()} onOpenTeam={vi.fn()} onAsk={onAsk} />);
     expect(screen.getByTestId("coding-agent-live-agents")).toHaveAttribute("data-live", "0");
-    expect(screen.getByTestId(`coding-agent-live-team-${TEAM.id}`)).toBeInTheDocument();
+    const row = screen.getByTestId(`coding-agent-live-team-${TEAM.id}`);
+    expect(row).toHaveAttribute("data-plain", "true");
+    expect(within(row).queryByTestId(`coding-agent-live-chart-${TEAM.id}`)).toBeNull();
     expect(screen.queryByTestId("coding-agent-live-run-run-old00001")).toBeNull();
-    view.rerender(<CodingAgentLiveAgents runs={[]} teams={[]} onOpenRun={vi.fn()} />);
-    expect(screen.getByTestId("coding-agent-live-empty")).toHaveTextContent(t("codingAgent.diagram.empty"));
+    view.rerender(<CodingAgentLiveAgents runs={[]} teams={[]} onOpenRun={vi.fn()} onOpenTeam={vi.fn()} onAsk={onAsk} />);
+    const empty = screen.getByTestId("coding-agent-live-empty");
+    expect(empty).toHaveTextContent(t("codingAgent.nothingRunYet"));
+    // No drawing: the delegation art went with the fake team chart.
+    expect(empty.querySelector("svg")).toBeNull();
+    fireEvent.click(within(empty).getByTestId("coding-agent-live-ask"));
+    expect(onAsk).toHaveBeenCalledTimes(1);
+    // On the standalone page there is no chat to hand to: the sentence alone.
+    view.rerender(<CodingAgentLiveAgents runs={[]} teams={[]} onOpenRun={vi.fn()} onOpenTeam={vi.fn()} />);
+    expect(screen.queryByTestId("coding-agent-live-ask")).toBeNull();
   });
 
-  it("opens a live run's page from its chart's heading", () => {
+  it("opens a live run's page from its row", () => {
     const onOpenRun = vi.fn();
-    render(<CodingAgentLiveAgents runs={[SOLO_LIVE]} teams={[]} onOpenRun={onOpenRun} />);
+    render(<CodingAgentLiveAgents runs={[SOLO_LIVE]} teams={[]} onOpenRun={onOpenRun} onOpenTeam={vi.fn()} />);
     fireEvent.click(screen.getByTestId("coding-agent-live-open-run-run-solo0002"));
     expect(onOpenRun).toHaveBeenCalledWith("run-solo0002");
   });

@@ -1,40 +1,38 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { onCodingAgentChanged } from "@/lib/ui-events";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
-import StatusMessage from "./StatusMessage";
-import { BTN_DANGER, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
+import { BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 
 /**
  * The Run history card on the Coding Agent's settings page (TASK-1178): what
- * the box keeps of finished runs, what that weighs, whether the disk guard is
- * holding the history back, and the two whole-history actions — Export all and
- * Clear archive. Kept lean on purpose: the mode's hint is the one sentence
- * of explanation, and the page itself is reached from the app's rail.
+ * the box keeps of finished runs — Standard or Keep everything — what that
+ * weighs, whether the disk guard is holding the history back, and Export all
+ * history. Kept lean on purpose: the mode's hint is the one sentence of
+ * explanation, and the older runs themselves are on each project's Runs tab
+ * ("Show older"). The archive mode, its tab, its per-run zips and its Clear
+ * went in SCA2 C1 (2026-10-30).
  *
  * The SETTING is saved through the settings panel's own write chain (`onSave`,
  * POST /setup-api/coding-agent/enable) like every other setting there; the
  * figures come from GET /setup-api/coding-agent/history, read here and again
- * after every save and every clear.
+ * after every save.
  */
 
 /** The wire shape of GET /setup-api/coding-agent/history — RunHistorySummary. */
 export interface RunHistorySummaryWire {
   mode: HistoryRetentionMode;
-  limit: number;
-  limits: number[];
   liveKept: number;
-  counts: { live: number; older: number; archived: number };
+  counts: { live: number; older: number };
   usage: {
     runsFile: number;
     olderRuns: number;
     evidence: number;
     inputs: number;
     streams: number;
-    archive: number;
     transcripts: number;
     total: number;
     truncated: boolean;
@@ -43,45 +41,24 @@ export interface RunHistorySummaryWire {
   transcripts: { file: string; label: string; days: number | null; kept: boolean; readable: boolean }[];
 }
 
-const MODES: readonly HistoryRetentionMode[] = ["standard", "extended", "everything", "archive"];
+const MODES: readonly HistoryRetentionMode[] = ["standard", "everything"];
 const MODE_LABEL: Record<HistoryRetentionMode, string> = {
   standard: "codingAgent.history.modeStandard",
-  extended: "codingAgent.history.modeExtended",
   everything: "codingAgent.history.modeEverything",
-  archive: "codingAgent.history.modeArchive",
 };
 const MODE_HINT: Record<HistoryRetentionMode, string> = {
   standard: "codingAgent.history.modeStandardHint",
-  extended: "codingAgent.history.modeExtendedHint",
   everything: "codingAgent.history.modeEverythingHint",
-  archive: "codingAgent.history.modeArchiveHint",
 };
-
-/** How long the two-tap Clear archive stays armed — the app's CONFIRM_MS. */
-const CONFIRM_MS = 5_000;
-
-/**
- * How many older runs the NEXT run to join the list will take away under this
- * setting — the figure the card warns with, computed the way insertRun trims.
- */
-export function olderRunsOverLimit(mode: HistoryRetentionMode, limit: number, counts: RunHistorySummaryWire["counts"]): number {
-  if (mode === "everything") return 0;
-  if (mode === "extended") return Math.max(0, counts.older - Math.max(0, limit - counts.live));
-  return counts.older;
-}
 
 export default function CodingRunHistoryCard({
   mode,
-  limit,
-  limits,
   liveKept,
   saving,
   onSave,
   error,
 }: {
   mode: HistoryRetentionMode;
-  limit: number;
-  limits: number[];
   liveKept: number;
   saving: boolean;
   /** Save through the panel's chain; resolves null when the write was refused. */
@@ -92,25 +69,6 @@ export default function CodingRunHistoryCard({
   const { t, locale } = useT();
   const [summary, setSummary] = useState<RunHistorySummaryWire | null>(null);
   const [summaryFailed, setSummaryFailed] = useState(false);
-  const [clearing, setClearing] = useState(false);
-  const [clearNote, setClearNote] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const disarm = () => {
-    if (confirmTimer.current) clearTimeout(confirmTimer.current);
-    confirmTimer.current = null;
-    setConfirmClear(false);
-  };
-  const arm = () => {
-    if (confirmTimer.current) clearTimeout(confirmTimer.current);
-    confirmTimer.current = setTimeout(() => {
-      confirmTimer.current = null;
-      setConfirmClear(false);
-    }, CONFIRM_MS);
-    setConfirmClear(true);
-  };
-  useEffect(() => () => { if (confirmTimer.current) clearTimeout(confirmTimer.current); }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -127,30 +85,15 @@ export default function CodingRunHistoryCard({
   // the setting the server now holds. The card's first read, like the panel's:
   // it has no other moment to ask, and each answer is one render.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void refresh(); }, [refresh, mode, limit]);
+  useEffect(() => { void refresh(); }, [refresh, mode]);
   // And whenever the coding agent says it changed — the app's Clear history
-  // (on the same page) deletes or archives runs this card counts.
+  // (on the same page) deletes runs this card counts.
   useEffect(() => onCodingAgentChanged(() => { void refresh(); }), [refresh]);
 
-  const clearArchive = async () => {
-    setClearing(true);
-    setClearNote(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/history?view=archive", { method: "DELETE" });
-      const body = await res.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!res.ok) throw new Error(body.error || t("codingAgent.history.clearArchiveFailed"));
-      setClearNote({ type: "success", message: t("codingAgent.history.clearArchiveDone", { count: body.cleared ?? 0 }) });
-    } catch (err) {
-      setClearNote({ type: "error", message: err instanceof Error ? err.message : t("codingAgent.history.clearArchiveFailed") });
-    } finally {
-      setClearing(false);
-      void refresh();
-    }
-  };
-
   const bytes = (n: number | null | undefined) => formatBytes(n ?? null, locale) ?? "0 B";
-  const pending = summary ? olderRunsOverLimit(mode, limit, summary.counts) : 0;
-  const archived = summary?.counts.archived ?? 0;
+  // What the NEXT run to join the list will take away under this setting —
+  // under standard, every older run a "keep everything" spell left behind.
+  const pending = mode === "standard" ? summary?.counts.older ?? 0 : 0;
 
   return (
     <div className={CARD} data-testid="coding-agent-history-card">
@@ -179,40 +122,12 @@ export default function CodingRunHistoryCard({
         </select>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mt-1.5 leading-relaxed" data-testid="coding-agent-history-mode-hint">
-        {t(MODE_HINT[mode], { count: liveKept, limit })}
+        {t(MODE_HINT[mode], { count: liveKept })}
       </p>
-
-      {mode === "extended" && (
-        <div className="flex items-start justify-between gap-4 mt-3">
-          <label htmlFor="coding-agent-history-limit" className="text-xs font-medium text-[var(--text-secondary)]">
-            {t("codingAgent.history.limitLabel")}
-          </label>
-          <select
-            id="coding-agent-history-limit"
-            value={String(limit)}
-            disabled={saving}
-            data-testid="coding-agent-history-limit"
-            onChange={(e) => void onSave({ historyLimit: Number(e.target.value) })}
-            className={`text-base sm:text-xs ${FIELD} w-44`}
-          >
-            {limits.map((n) => (
-              <option key={n} value={n}>{t("codingAgent.history.limitOption", { count: n })}</option>
-            ))}
-          </select>
-        </div>
-      )}
 
       {pending > 0 && (
         <p className="text-[11px] text-amber-300 mt-2 leading-relaxed" data-testid="coding-agent-history-pending">
-          {mode === "archive"
-            ? t("codingAgent.history.pendingArchive", { count: pending })
-            : t("codingAgent.history.pendingDelete", { count: pending })}
-        </p>
-      )}
-
-      {mode === "archive" && (
-        <p className="text-[11px] text-[var(--text-muted)] mt-2 leading-relaxed" data-testid="coding-agent-history-archive-note">
-          {t("codingAgent.history.archiveTranscriptNote")}
+          {t("codingAgent.history.pendingDelete", { count: pending })}
         </p>
       )}
 
@@ -240,7 +155,7 @@ export default function CodingRunHistoryCard({
           <>
             {t("codingAgent.history.usage", { size: bytes(summary.usage.total) })}
             {" "}
-            {t("codingAgent.history.usageCounts", { live: summary.counts.live, older: summary.counts.older, archived: summary.counts.archived })}
+            {t("codingAgent.history.usageCounts", { live: summary.counts.live, older: summary.counts.older })}
             {summary.disk.freeBytes !== null && <> · {t("codingAgent.history.usageFree", { free: bytes(summary.disk.freeBytes) })}</>}
           </>
         ) : (
@@ -257,10 +172,8 @@ export default function CodingRunHistoryCard({
 
       {error}
 
-      {/* The two whole-history actions, each saying what it does in its own
-          label: Export all history is a download, Clear archive asks twice and
-          names the count. There is no "Open run history" button — the app's
-          rail has the page, and here it was one more thing to read past. */}
+      {/* The one whole-history action: Export all history is a download. The
+          owner's Clear history sits on the same settings page. */}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <a
           href="/setup-api/coding-agent/history/export"
@@ -271,22 +184,7 @@ export default function CodingRunHistoryCard({
           <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
           {t("codingAgent.history.exportAll")}
         </a>
-        <button
-          type="button"
-          onClick={() => { if (confirmClear) { disarm(); void clearArchive(); } else arm(); }}
-          onBlur={disarm}
-          disabled={clearing || archived === 0}
-          className={confirmClear ? BTN_DANGER : BTN_SECONDARY}
-          data-testid="coding-agent-history-clear-archive"
-        >
-          {confirmClear ? t("codingAgent.history.clearArchiveConfirm", { count: archived }) : t("codingAgent.history.clearArchive")}
-        </button>
       </div>
-      {clearNote && (
-        <div className="mt-2" data-testid="coding-agent-history-clear-note">
-          <StatusMessage type={clearNote.type} message={clearNote.message} />
-        </div>
-      )}
     </div>
   );
 }

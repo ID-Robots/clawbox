@@ -7,7 +7,6 @@ import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, type CodingProvider } from 
 import {
   MODEL_ROLES,
   ROLE_AUTO,
-  ROLE_AUTO_FOLLOWS,
   ROLE_DEFAULTS,
   ROLE_MODEL_TIERS,
   roleModelOptions,
@@ -23,9 +22,9 @@ import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import CodingAgentOpenAICard from "./CodingAgentOpenAICard";
 import CodingRunHistoryCard from "./CodingRunHistoryCard";
+import CodingAgentFolderPicker from "./CodingAgentFolderPicker";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
 import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
-import type { CodingDiet, DietBrief, DietHelpers, DietVisualTools } from "@/lib/coding-diet";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
@@ -116,24 +115,12 @@ export interface AgentStatus {
    *  (TASK-1366). Optional: an older server answers with none, and the control
    *  is then not drawn at all. */
   prBodyIncludesTask?: PrBodyTaskMode;
-  /** How many follow-up turns the review loop may hand the harness after the
-   *  pull request is opened. 0 is off. Optional: an older server answers with
-   *  none, and the card then shows no control rather than inventing a value. */
-  reviewRounds?: number;
-  minReviewRounds?: number;
-  maxReviewRounds?: number;
-  /** May the box merge a pull request its own review loop cleared? Optional,
-   *  and OFF when absent — it is a consent, not a preference. */
+  /** May the box merge a pull request its own review loop cleared? Optional:
+   *  an older server answers with none and the card then shows no control;
+   *  OFF when absent — it is a consent, not a preference. */
   autoMerge?: boolean;
-  /** How many goes a run with a deliverable gets at it, its own first turn
-   *  counted as one. Optional, for the reason `reviewRounds` is: an older
-   *  server answers with none and the control is then not drawn at all. */
-  completionAttempts?: number;
-  minCompletionAttempts?: number;
-  maxCompletionAttempts?: number;
-  /** How many runs may be going at once. Optional, for the reason
-   *  `completionAttempts` is: an older server answers with none and the
-   *  control is then not drawn at all. */
+  /** How many runs may be going at once. Optional: an older server answers
+   *  with none and the control is then not drawn at all. */
   maxParallelRuns?: number;
   minMaxParallelRuns?: number;
   maxMaxParallelRuns?: number;
@@ -141,8 +128,6 @@ export interface AgentStatus {
    *  the counted settings are: an older server answers with none and the Run
    *  history card is then not drawn at all. */
   historyRetention?: HistoryRetentionMode;
-  historyLimit?: number;
-  historyLimits?: number[];
   historyLiveKept?: number;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
@@ -176,11 +161,6 @@ export interface AgentStatus {
   /** The providers the owner connected (a subset of `providers`, never empty). Optional: a server from before the list answers without it, and the default provider reads as the one connected. */
   connectedProviders?: CodingProviderId[];
   subagents: boolean;
-  maxTurns: number;
-  minMaxTurns: number;
-  maxMaxTurns: number;
-  tokenLimit: number | null;
-  minTokenLimit: number;
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
   reviewPass: boolean;
@@ -193,7 +173,7 @@ export interface AgentStatus {
    * default (src/lib/coding-role-models.ts roleModelsView). Optional: a server
    * that predates the setting answers without it, and the section is not
    * drawn there; one that predates per-role providers answers without
-   * `provider`, or without the bulk role, and draws what it has.
+   * `provider`, and draws what it has.
    */
   roleModels?: Partial<Record<ModelRole, RoleModelsViewEntry>>;
   /** What each role starts on right now, whether that provider can run, and
@@ -201,21 +181,16 @@ export interface AgentStatus {
    *  an older server answers without it, and the rows then say nothing more
    *  than their two selects. */
   roleModelMap?: Partial<Record<ModelRole, RoleModelMapEntry>>;
-  /** May a run draw pictures, and may the box draw the project's icon and
-   *  favicon? Optional: an older server does not answer with it. ON by
+  /** May a run have this box draw pictures (and the box draw the project's
+   *  icon and favicon) and speak clips into its project? One switch since
+   *  SCA C3. Optional: an older server does not answer with it. ON by
    *  default, so the fallback below is `?? true`, not `?? false`. */
-  generateImages?: boolean;
-  /** May a run have this box speak a clip into its project? */
-  generateAudio?: boolean;
+  generateMedia?: boolean;
   /** Does a run verify its work in the Chromium on the box's own screen, or
    *  in an invisible one? Optional, and ON by default like the media
-   *  switches — a server that predates the field is a box already driving the
+   *  switch — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
-  /** The token diet (src/lib/coding-diet.ts), every knob the owner never set
-   *  at today's behaviour. Optional: an older server answers without it, and
-   *  the Token use group is then not drawn at all. */
-  diet?: CodingDiet;
   // The owner's standing permission rules are deliberately NOT here, though the
   // status payload carries them: CodingAgentRulesCard reads and writes its own
   // route. This panel serialises its setting writes through one chain so two
@@ -251,36 +226,12 @@ export interface RoleModelMapEntry {
  * one decision on screen, as they are one pair in the runner: "auto", a tier
  * on the team's own account ("standard", "economy"), or "provider/model".
  */
-/** What a role's row says the role IS, where its name alone does not: the planner is the lead too, and bulk work needs its examples. */
-const ROLE_HINT_KEY: Partial<Record<ModelRole, string>> = {
-  planner: "codingAgent.roleModelsRoleHint.planner",
-  bulk: "codingAgent.roleModelsRoleHint.bulk",
+/** What each role DOES, on its row label ("Workers: write your code") rather than only behind the help tip. */
+const ROLE_JOB_KEY: Record<ModelRole, string> = {
+  planner: "codingAgent.roleModelsRoleJob.planner",
+  worker: "codingAgent.roleModelsRoleJob.worker",
+  reviewer: "codingAgent.roleModelsRoleJob.reviewer",
 };
-
-/**
- * The token diet's three selects, in the order the Token use group draws them:
- * each knob's label, one-sentence hint, test id and the label of every mode.
- * Records over the mode types rather than imports of the mode lists, for the
- * PR_BODY_TASK_LABEL_KEY reason: a mode added in @/lib/coding-diet without a
- * label here fails the typecheck.
- */
-const DIET_BRIEF_LABEL_KEY: Record<DietBrief, string> = {
-  full: "codingAgent.dietBriefFull",
-  lean: "codingAgent.dietBriefLean",
-};
-const DIET_HELPERS_LABEL_KEY: Record<DietHelpers, string> = {
-  always: "codingAgent.dietHelpersAlways",
-  lean: "codingAgent.dietHelpersLean",
-};
-const DIET_VISUAL_TOOLS_LABEL_KEY: Record<DietVisualTools, string> = {
-  always: "codingAgent.dietVisualToolsAlways",
-  auto: "codingAgent.dietVisualToolsAuto",
-};
-const DIET_KNOBS: readonly { knob: keyof CodingDiet; id: string; labelKey: string; hintKey: string; options: Record<string, string> }[] = [
-  { knob: "brief", id: "coding-agent-diet-brief", labelKey: "codingAgent.dietBriefLabel", hintKey: "codingAgent.dietBriefHint", options: DIET_BRIEF_LABEL_KEY },
-  { knob: "helpers", id: "coding-agent-diet-helpers", labelKey: "codingAgent.dietHelpersLabel", hintKey: "codingAgent.dietHelpersHint", options: DIET_HELPERS_LABEL_KEY },
-  { knob: "visualTools", id: "coding-agent-diet-visual-tools", labelKey: "codingAgent.dietVisualToolsLabel", hintKey: "codingAgent.dietVisualToolsHint", options: DIET_VISUAL_TOOLS_LABEL_KEY },
-];
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
 const GITHUB_REPROBE_MS = 15_000;
@@ -289,18 +240,18 @@ const GITHUB_REPROBE_MS = 15_000;
 const CONFIRM_MS = 5_000;
 
 /**
- * Where a refusal is shown. The three typed fields carry theirs right under
- * the input that was refused; every other setting's lands at the foot of the
+ * Where a refusal is shown. The typed fields carry theirs right under the
+ * input that was refused; every other setting's lands at the foot of the
  * settings card, and GitHub's under the GitHub card. Before this the one
- * message sat below the GitHub card, a screen away from a Steps field that
- * still held the refused number.
+ * message sat below the GitHub card, a screen away from the field that
+ * still held the refused value.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
+type ErrorSlot = "dir" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it. The run history's is inside its own card.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns", "gitAuthor", "history"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "maxParallelRuns", "gitAuthor", "history"]);
 
 /**
  * The label of each choice for how much of the task a pull request carries,
@@ -336,16 +287,10 @@ export function devicePollSeconds(raw: unknown): number {
 // role so the many call sites below read unchanged.
 const SMALL_BUTTON = BTN_SECONDARY;
 
-// Accepted and unused: the app still passes `onOpenHistory`, from when the Run
-// history card carried an "Open run history" button. That button went with the
-// owner's "delete useless UI" — the rail's Run history entry opens the same
-// page — and the prop is kept in the type so the host needs no edit; nothing
-// here reads it. (`onReset` and `onStatus` were declared here too and never
-// passed by anyone; both are gone.)
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- accepted for the host, read by nothing
-export default function CodingAgentSettingsPanel(_props: {
-  onOpenHistory?: () => void;
-}) {
+// No props: the Run history card's "Open run history" button went with the
+// owner's "delete useless UI" (the rail's Run history entry opens the same
+// page), and `onOpenHistory`, `onReset` and `onStatus` went with it.
+export default function CodingAgentSettingsPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [github, setGithub] = useState<GitHubState | null>(null);
@@ -388,9 +333,9 @@ export default function CodingAgentSettingsPanel(_props: {
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
   // The typed fields are DRAFTS until saved, so typing does not fight the
   // status the route keeps returning.
-  const [dirDraft, setDirDraft] = useState<string | null>(null);
-  const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
-  const [tokensDraft, setTokensDraft] = useState<string | null>(null);
+  /** The folder picker is up (the 2026-10-30 redesign: the folder is chosen,
+   *  never typed — see CodingAgentFolderPicker). */
+  const [picking, setPicking] = useState(false);
   const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
   const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
@@ -411,9 +356,6 @@ export default function CodingAgentSettingsPanel(_props: {
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
       setStatus(next);
-      setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
-      setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
-      setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
       setAuthorNameDraft(prev => (prev === null ? (next.gitAuthorName ?? "") : prev));
       setAuthorEmailDraft(prev => (prev === null ? (next.gitAuthorEmail ?? "") : prev));
     } catch {
@@ -598,12 +540,14 @@ export default function CodingAgentSettingsPanel(_props: {
 
   const toggle = (next: boolean) => saveSetting({ enabled: next }, "switch", t("codingAgent.toggleFailed"));
 
-  const saveDirectory = async () => {
-    const value = (dirDraft ?? "").trim();
-    // "" clears it. The route answers the re-read status, so a symlink
-    // comes back as the folder it actually leads to.
-    const next = await saveSetting({ defaultDirectory: value === "" ? null : value }, "dir", t("codingAgent.folderFailed"));
-    if (next) setDirDraft(next.defaultDirectory ?? "");
+  /**
+   * The folder the picker chose, saved at once: there is no draft to keep,
+   * and the row redraws from the route's answer — a symlink comes back as the
+   * folder it actually leads to, which is what the row then shows.
+   */
+  const pickDirectory = (path: string) => {
+    setPicking(false);
+    void saveSetting({ defaultDirectory: path }, "dir", t("codingAgent.folderFailed"));
   };
 
   /**
@@ -627,37 +571,6 @@ export default function CodingAgentSettingsPanel(_props: {
       setAuthorNameDraft(next.gitAuthorName ?? "");
       setAuthorEmailDraft(next.gitAuthorEmail ?? "");
     }
-  };
-
-  // The two blur-saved fields go back to the stored value whenever what was
-  // typed is not saved — blank, or refused by the route. A draft left holding
-  // a refused number would re-post that refusal on every blur, and the
-  // message beside the field already says what was wrong with it. The folder
-  // field is different: it saves only on an explicit Save or Enter, so a
-  // mistyped path stays put to be corrected rather than retyped.
-  const saveTurns = async () => {
-    const stored = String(status?.maxTurns ?? "");
-    // A blank Steps field means nothing — unlike a blank token field, which
-    // is "no ceiling" — so it is never posted: Number("") is 0, which the
-    // route refuses.
-    if ((turnsDraft ?? "").trim() === "") {
-      setTurnsDraft(stored);
-      return;
-    }
-    const n = Number(turnsDraft);
-    if (!Number.isFinite(n) || n === status?.maxTurns) return;
-    const next = await saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
-    setTurnsDraft(next ? String(next.maxTurns) : stored);
-  };
-
-  const saveTokens = async () => {
-    const raw = (tokensDraft ?? "").trim();
-    const limit = raw === "" ? null : Number(raw);
-    if (limit !== null && !Number.isFinite(limit)) return;
-    if (limit === (status?.tokenLimit ?? null)) return;
-    const stored = status?.tokenLimit == null ? "" : String(status.tokenLimit);
-    const next = await saveSetting({ tokenLimit: limit }, "tokens", t("codingAgent.tokensFailed"));
-    setTokensDraft(next ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : stored);
   };
 
   /** The GitHub device flow, driven by this card so it works from a phone:
@@ -799,37 +712,44 @@ export default function CodingAgentSettingsPanel(_props: {
           </p>
         )}
 
-        {/* Where work goes when the assistant does not name a project. */}
-        <div className="mt-4">
-          <label htmlFor="coding-agent-dir" className="text-xs font-medium text-[var(--text-secondary)]">
-            {t("codingAgent.folderLabel")}
-          </label>
-          <div className="flex items-center gap-2 mt-1.5">
-            <input
-              id="coding-agent-dir"
-              type="text"
-              value={dirDraft ?? ""}
-              onChange={(e) => setDirDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveDirectory(); }}
-              placeholder={t("codingAgent.folderPlaceholder")}
-              spellCheck={false}
+        {/* Where work goes when the assistant does not name a project. The
+            path is TEXT and the choice is made in the picker (2026-10-30:
+            typing a path is not a thing an owner does on a phone); the id
+            stays on the element that carries the value, so the e2e reads it
+            with toHaveText. Browse stays live during a write — opening a
+            listing writes nothing — and a pick made meanwhile queues behind
+            the write like every other setting. */}
+        <div className="mt-4 flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.folderLabel")}</p>
+            <p
+              className={`mt-1 font-mono text-[12px] break-all ${status?.defaultDirectory ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
               data-testid="coding-agent-folder"
-              // text-base on a phone: an input under 16px makes iOS Safari
-              // zoom the page on focus, which scrolls the rest of the
-              // settings out of view.
-              className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
-            />
-            <button
-              type="button"
-              onClick={() => void saveDirectory()}
-              disabled={saving || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
-              className={BTN_SECONDARY}
+              data-value={status?.defaultDirectory ?? ""}
             >
-              {t("codingAgent.folderSave")}
-            </button>
+              {status?.defaultDirectory ?? t("codingAgent.folderUnset")}
+            </p>
           </div>
-          {errorIn("dir")}
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            disabled={!status}
+            data-testid="coding-agent-folder-browse"
+            className={BTN_SECONDARY}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">folder_open</span>
+            {t("codingAgent.browse")}
+          </button>
         </div>
+        {errorIn("dir")}
+        {picking && (
+          <CodingAgentFolderPicker
+            initialDir={status?.defaultDirectory ?? null}
+            onPick={pickDirectory}
+            onClose={() => setPicking(false)}
+            testId="coding-agent-folder-picker"
+          />
+        )}
 
         {/* WHICH ACCOUNT PAYS. Drawn only by a server that answers with the
             list, so an older box shows nothing rather than a picker with one
@@ -1052,96 +972,17 @@ export default function CodingAgentSettingsPanel(_props: {
           </summary>
           <div className="mt-5">
             <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupCeilings")}</p>
-            {/* The ceilings a run stops at — both the owner's to set. There is no
-                time limit and no price limit: a run ends when it finishes, runs
-                out of steps, hits a token ceiling if one is set, or goes quiet.
-                Saved on blur and on Enter, so a half-typed number is never sent. */}
-            <div className="grid grid-cols-2 gap-3 mt-4">
-              <div>
-                <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.turnsLabel")}
-                </label>
-                <input
-                  id="coding-agent-turns"
-                  type="number"
-                  inputMode="numeric"
-                  min={status?.minMaxTurns ?? 10}
-                  max={status?.maxMaxTurns ?? 2000}
-                  value={turnsDraft ?? ""}
-                  onChange={(e) => setTurnsDraft(e.target.value)}
-                  onBlur={() => void saveTurns()}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveTurns(); }}
-                  disabled={saving}
-                  data-testid="coding-agent-turns"
-                  className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-                />
-                {errorIn("turns")}
-              </div>
-              <div>
-                <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.tokensLabel")}
-                </label>
-                <input
-                  id="coding-agent-tokens"
-                  type="number"
-                  inputMode="numeric"
-                  min={status?.minTokenLimit ?? 10000}
-                  placeholder={t("codingAgent.tokensPlaceholder")}
-                  value={tokensDraft ?? ""}
-                  onChange={(e) => setTokensDraft(e.target.value)}
-                  onBlur={() => void saveTokens()}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveTokens(); }}
-                  disabled={saving}
-                  data-testid="coding-agent-tokens"
-                  className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-                />
-                {errorIn("tokens")}
-              </div>
-            </div>
-
-            {/* How many goes a run gets at the thing it was asked to DELIVER —
-                a ceiling on the run like the two above it, and hidden on a
-                server that answers with no field, like them. */}
-            {typeof status?.completionAttempts === "number" && (
-              <>
-                <div className="flex items-start justify-between gap-4 mt-4">
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <label htmlFor="coding-agent-completion-attempts" className="text-xs font-medium text-[var(--text-secondary)]">
-                      {t("codingAgent.completionAttemptsLabel")}
-                    </label>
-                    <HelpTip
-                      text={t("codingAgent.completionAttemptsHint")}
-                      label={t("codingAgent.completionAttemptsLabel")}
-                      testId="coding-agent-completion-attempts-help"
-                    />
-                  </div>
-                  {/* A select, for the reason the rounds above are one: six values,
-                      nothing to hold as a draft, nothing typeable the route refuses. */}
-                  <select
-                    id="coding-agent-completion-attempts"
-                    value={String(status.completionAttempts)}
-                    disabled={saving}
-                    data-testid="coding-agent-completion-attempts"
-                    onChange={(e) => void saveSetting({ completionAttempts: Number(e.target.value) }, "completionAttempts", t("codingAgent.completionAttemptsFailed"))}
-                    className={`text-base sm:text-xs ${FIELD} w-28`}
-                  >
-                    {Array.from(
-                      { length: (status.maxCompletionAttempts ?? 6) - (status.minCompletionAttempts ?? 1) + 1 },
-                      (_, i) => (status.minCompletionAttempts ?? 1) + i,
-                    ).map((n) => (
-                      <option key={n} value={n}>{String(n)}</option>
-                    ))}
-                  </select>
-                </div>
-                {errorIn("completionAttempts")}
-              </>
-            )}
-
+            {/* No step field since SCA3: the step ceiling is a safety net
+                (DEFAULT_MAX_TURNS, 2,000 for a writing run; a reading role's
+                cap is 100) rather than a setting, and a run that reaches it
+                offers Continue. There is no time limit, no price limit and
+                (since SCA A2) no token limit either: a run ends when it
+                finishes, hits the net, or goes quiet. */}
             {/* How many runs at once. Each one works in a copy of the project on
                 a branch of its own, so this is a question about the box's memory
                 rather than about the filesystem — which is why it is a number the
                 owner may raise and not a switch. Hidden on a server that answers
-                with no field, like the two above. */}
+                with no field. */}
             {typeof status?.maxParallelRuns === "number" && (
               <>
                 <div className="flex items-start justify-between gap-4 mt-4">
@@ -1207,48 +1048,14 @@ export default function CodingAgentSettingsPanel(_props: {
               </div>
             )}
 
-            {/* What happens to that pull request AFTER it is opened: CI going red,
-                review comments, a conflict with a sibling merge. Each round is one
-                follow-up turn in the run's own session, so the number is a budget
-                and not a timer. Hidden altogether on a server that does not answer
-                with the field — a control over a setting the box has no route for
-                would save nothing. */}
-            {typeof status?.reviewRounds === "number" && (
+            {/* May the box merge a pull request its own review loop cleared? A
+                consent, off until the owner says so. (The loop's round count
+                is no longer a setting since SCA C3: every pull request gets
+                DEFAULT_REVIEW_ROUNDS.) Hidden on a server that does not
+                answer with the field — a control over a setting the box has
+                no route for would save nothing. */}
+            {typeof status?.autoMerge === "boolean" && (
               <>
-                <div className="flex items-start justify-between gap-4 mt-4">
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <label htmlFor="coding-agent-review-rounds" className="text-xs font-medium text-[var(--text-secondary)]">
-                      {t("codingAgent.reviewRoundsLabel")}
-                    </label>
-                    <HelpTip
-                      text={t("codingAgent.reviewRoundsHint")}
-                      label={t("codingAgent.reviewRoundsLabel")}
-                      testId="coding-agent-review-rounds-help"
-                    />
-                  </div>
-                  {/* A select rather than a number field: the range is six values,
-                      so there is no draft to hold, nothing to save on blur, and
-                      nothing the owner can type that the route would refuse. */}
-                  <select
-                    id="coding-agent-review-rounds"
-                    value={String(status.reviewRounds)}
-                    disabled={saving}
-                    data-testid="coding-agent-review-rounds"
-                    onChange={(e) => void saveSetting({ reviewRounds: Number(e.target.value) }, "reviewRounds", t("codingAgent.reviewRoundsFailed"))}
-                    className={`text-base sm:text-xs ${FIELD} w-28`}
-                  >
-                    {Array.from(
-                      { length: (status.maxReviewRounds ?? 6) - (status.minReviewRounds ?? 0) + 1 },
-                      (_, i) => (status.minReviewRounds ?? 0) + i,
-                    ).map((n) => (
-                      <option key={n} value={n}>
-                        {n === 0 ? t("codingAgent.reviewRoundsOff") : String(n)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {errorIn("reviewRounds")}
-
                 <div className="flex items-start justify-between gap-4 mt-4">
                   <div className="min-w-0 flex items-center gap-1.5">
                     <span className="text-xs font-medium text-[var(--text-secondary)]">
@@ -1379,8 +1186,7 @@ export default function CodingAgentSettingsPanel(_props: {
                 comes back as the lead), a reviewer reads and judges; only
                 workers write the code — so the first two default to the
                 provider's cheaper model and at most Extra high effort, workers
-                keep the owner's own, and bulk work runs as the workers do until
-                the owner says otherwise. "Default" stores nothing: a box that
+                keep the owner's own. "Default" stores nothing: a box that
                 never opens this runs on the defaults, and the older
                 standard/economy choices read back as the same two options. */}
             {status?.roleModels && (
@@ -1402,8 +1208,6 @@ export default function CodingAgentSettingsPanel(_props: {
                   {MODEL_ROLES.filter((role) => status.roleModels![role]).map((role) => {
                     const current = status.roleModels![role]!;
                     const defaults = ROLE_DEFAULTS[role];
-                    // Bulk work with nothing stored is a worker's run, auto included.
-                    const followsWorkers = ROLE_AUTO_FOLLOWS[role] === "worker";
                     const roleName = t(`codingAgent.roleModels.${role}`);
                     const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
                       ? status.effortLevels
@@ -1416,19 +1220,19 @@ export default function CodingAgentSettingsPanel(_props: {
                     const offered = pinned ? roleModelOptions(pinned) : [];
                     const strayModel = pinned && current.model !== ROLE_AUTO && !offered.includes(current.model) && !(ROLE_MODEL_TIERS as readonly string[]).includes(current.model) ? current.model : null;
                     const resolved = status.roleModelMap?.[role];
-                    const hint = ROLE_HINT_KEY[role];
-                    const about = [
-                      hint ? t(hint) : null,
-                      resolved
-                        ? t("codingAgent.roleModelNow", {
-                          model: resolved.model ? codingModelName(resolved.model) : t("codingAgent.roleModelPlanDecides"),
-                          provider: providerName(resolved.provider),
-                        })
-                        : null,
-                    ].filter(Boolean).join(" · ");
+                    const about = resolved
+                      ? t("codingAgent.roleModelNow", {
+                        model: resolved.model ? codingModelName(resolved.model) : t("codingAgent.roleModelPlanDecides"),
+                        provider: providerName(resolved.provider),
+                      })
+                      : null;
                     return (
                       <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
-                        <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
+                        {/* The role and its job on one label line ("Workers:
+                            write your code"), the three selects under it. */}
+                        <p className="w-full text-[11px] text-[var(--text-secondary)]" data-testid={`coding-agent-role-${role}-label`}>
+                          {roleName}<span className="text-[var(--text-muted)]">: {t(ROLE_JOB_KEY[role])}</span>
+                        </p>
                         <select
                           value={current.provider}
                           disabled={saving}
@@ -1440,7 +1244,7 @@ export default function CodingAgentSettingsPanel(_props: {
                           onChange={(e) => void saveSetting({ roleModels: { [role]: { provider: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
                         >
-                          <option value={ROLE_AUTO}>{followsWorkers ? t("codingAgent.roleAutoAsWorkers") : t("codingAgent.roleProvider.auto")}</option>
+                          <option value={ROLE_AUTO}>{t("codingAgent.roleProvider.auto")}</option>
                           {connectedProviders.map((p) => (
                             <option key={p} value={p}>{providerName(p)}</option>
                           ))}
@@ -1457,11 +1261,9 @@ export default function CodingAgentSettingsPanel(_props: {
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
                         >
                           <option value={ROLE_AUTO}>
-                            {followsWorkers
-                              ? t("codingAgent.roleAutoAsWorkers")
-                              : pinned
-                                ? t("codingAgent.roleModel.autoForProvider")
-                                : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
+                            {pinned
+                              ? t("codingAgent.roleModel.autoForProvider")
+                              : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
                           </option>
                           {/* On the team's own account the older two choices
                               stand; pinned to an account, that account's
@@ -1486,19 +1288,16 @@ export default function CodingAgentSettingsPanel(_props: {
                           className={`text-base sm:text-xs ${FIELD} w-[9.5rem]`}
                         >
                           <option value={ROLE_AUTO}>
-                            {followsWorkers
-                              ? t("codingAgent.roleAutoAsWorkers")
-                              : defaults.effortCap
-                                ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
-                                : t("codingAgent.roleEffort.autoOwner")}
+                            {defaults.effortCap
+                              ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
+                              : t("codingAgent.roleEffort.autoOwner")}
                           </option>
                           {levels.map((level) => (
                             <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
                           ))}
                         </select>
-                        {/* What the role is and what it starts on right now —
-                            the answer the runner gives, so "Default" is never
-                            a mystery. */}
+                        {/* What the role starts on right now — the answer the
+                            runner gives, so "Default" is never a mystery. */}
                         {about && (
                           <p className="w-full text-[10px] text-[var(--text-muted)] leading-relaxed" data-testid={`coding-agent-role-${role}-about`}>
                             {about}
@@ -1535,83 +1334,31 @@ export default function CodingAgentSettingsPanel(_props: {
           </div>
           <div className="mt-5">
             <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupMedia")}</p>
-            {/* The two media switches. In the fold because they are about what
-                a run may SPEND rather than how it works, and both are
-                on unless the owner says otherwise — the pictures one also draws
-                the project's own icon and favicon. */}
+            {/* The media switch: pictures and speech together (SCA C3; it was
+                two). In the fold because it is about what a run may SPEND
+                rather than how it works, and on unless the owner says
+                otherwise — it also draws the project's own icon and favicon. */}
             <div className="flex items-start justify-between gap-4 mt-4">
               <div className="min-w-0 flex items-center gap-1.5">
                 <span className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.genImagesLabel")}
+                  {t("codingAgent.genMediaLabel")}
                 </span>
                 <HelpTip
-                  text={t("codingAgent.genImagesHint")}
-                  label={t("codingAgent.genImagesLabel")}
-                  testId="coding-agent-gen-images-help"
+                  text={t("codingAgent.genMediaHint")}
+                  label={t("codingAgent.genMediaLabel")}
+                  testId="coding-agent-gen-media-help"
                 />
               </div>
               <Switch
-                checked={status?.generateImages ?? true}
-                busy={busy === "genImages"}
+                checked={status?.generateMedia ?? true}
+                busy={busy === "genMedia"}
                 disabled={!status || saving}
-                label={t("codingAgent.genImagesLabel")}
-                testId="coding-agent-gen-images"
-                onChange={(next) => void saveSetting({ generateImages: next }, "genImages", t("codingAgent.genImagesFailed"))}
-              />
-            </div>
-
-            <div className="flex items-start justify-between gap-4 mt-4">
-              <div className="min-w-0 flex items-center gap-1.5">
-                <span className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.genAudioLabel")}
-                </span>
-                <HelpTip
-                  text={t("codingAgent.genAudioHint")}
-                  label={t("codingAgent.genAudioLabel")}
-                  testId="coding-agent-gen-audio-help"
-                />
-              </div>
-              <Switch
-                checked={status?.generateAudio ?? true}
-                busy={busy === "genAudio"}
-                disabled={!status || saving}
-                label={t("codingAgent.genAudioLabel")}
-                testId="coding-agent-gen-audio"
-                onChange={(next) => void saveSetting({ generateAudio: next }, "genAudio", t("codingAgent.genAudioFailed"))}
+                label={t("codingAgent.genMediaLabel")}
+                testId="coding-agent-gen-media"
+                onChange={(next) => void saveSetting({ generateMedia: next }, "genMedia", t("codingAgent.genMediaFailed"))}
               />
             </div>
           </div>
-          {/* The token diet: what every turn of a run re-sends. Each knob posts
-              itself alone — the route merges a partial diet over the stored
-              one — and its refusal lands on the card's foot like the other
-              switches'. Not drawn for a server that answers without `diet`. */}
-          {status?.diet && (
-            <div className="mt-5" data-testid="coding-agent-diet">
-              <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupTokens")}</p>
-              {DIET_KNOBS.map(({ knob, id, labelKey, hintKey, options }) => (
-                <div key={knob} className="flex items-start justify-between gap-4 mt-4">
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <label htmlFor={id} className="text-xs font-medium text-[var(--text-secondary)]">
-                      {t(labelKey)}
-                    </label>
-                    <HelpTip text={t(hintKey)} label={t(labelKey)} testId={`${id}-help`} />
-                  </div>
-                  <select
-                    id={id}
-                    value={status.diet![knob]}
-                    disabled={saving}
-                    data-testid={id}
-                    onChange={(e) => void saveSetting({ diet: { [knob]: e.target.value } }, "diet", t("codingAgent.dietFailed"))}
-                    className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
-                  >
-                    {Object.entries(options).map(([value, key]) => (
-                      <option key={value} value={value}>{t(key)}</option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-          )}
         </details>
 
         {errorIn("settings")}
@@ -1623,8 +1370,6 @@ export default function CodingAgentSettingsPanel(_props: {
       {status?.historyRetention && (
         <CodingRunHistoryCard
           mode={status.historyRetention}
-          limit={status.historyLimit ?? 100}
-          limits={status.historyLimits ?? [100, 300, 1000]}
           liveKept={status.historyLiveKept ?? 30}
           saving={saving}
           onSave={(patch) => saveSetting(patch, "history", t("codingAgent.history.saveFailed"))}
@@ -1656,7 +1401,10 @@ export default function CodingAgentSettingsPanel(_props: {
 
       {/* The owner's own OpenAI account — an API key or a ChatGPT sign-in —
           for runs on OpenAI, which run on the Codex CLI. Drawn on a server
-          that offers the provider at all, for the Anthropic card's reason. */}
+          that offers the provider at all, for the Anthropic card's reason.
+          The server offers it (status.providers, `offeredProviders`) only
+          where the Codex CLI is installed or the account is already set up,
+          so a box without the CLI has neither this card nor the row above. */}
       {(status?.providers ?? []).includes("openai") && (
         <CodingAgentOpenAICard onChanged={() => void refreshStatus()} />
       )}

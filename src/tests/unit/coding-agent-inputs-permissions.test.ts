@@ -172,7 +172,7 @@ describe("what the run is told", () => {
   it("tells the brief where inputs are, so a run stops hunting for the original", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(lib.HEADLESS_BRIEF).toContain("CLAWBOX_RUN_INPUTS_DIR");
-    expect(lib.HEADLESS_BRIEF).toContain("assistant's own media folder is NOT readable");
+    expect(lib.HEADLESS_BRIEF).toContain("if one is missing, say so rather than look elsewhere");
   });
 
   it("puts the folder in the run's own environment", async () => {

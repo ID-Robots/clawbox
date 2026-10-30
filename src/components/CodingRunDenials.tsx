@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ALLOW_RULE_REFUSAL_KEYS, isAllowRuleRefusal } from "@/lib/coding-permission-rules";
-import { type RunInputs } from "./CodingRunInputs";
+import { type RunInputs } from "./CodingTaskDialog";
 import { BTN_QUIET, BTN_SECONDARY, INSET_SURFACE } from "./coding-agent-ui";
 
 /**
@@ -216,7 +216,7 @@ export default function CodingRunDenials({
         })}
       </ul>
       {/* `role="alert"`, the app's own pattern for an async refusal
-          (ImportProjectPanel, NewAppWizardCard): this paragraph appears only
+          (NewAppWizardCard, as the former ImportProjectPanel did): this paragraph appears only
           after the save comes back, so with no live region a screen-reader
           owner presses Allow and is told nothing at all. */}
       {error && (

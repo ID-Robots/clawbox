@@ -221,9 +221,9 @@ describe("the runner's own sentences are keyed", () => {
   it.each([
     [RUNNER_STEP.thinking, "thinking"],
     [RUNNER_STEP.continuing, "continuing"],
-    [RUNNER_STEP.tokenLimit, "tokenLimit"],
     [RUNNER_STEP.resuming, "resuming"],
     [RUNNER_STEP.noRepository, "noRepository"],
+    [RUNNER_STEP.notRepositoryRoot("/srv/projects"), "notRepositoryRoot"],
     [RUNNER_STEP.merged, "merged"],
     [RUNNER_STEP.providerSilent, "providerSilent"],
     [RUNNER_STEP.paused, "paused"],

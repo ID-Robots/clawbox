@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   type OpenAppDetail,
   buildFixErrorPrompt,
+  buildHarnessTestPrompt,
   buildNewAppPrompt,
   CHAT_MESSAGE_EVENT,
   CODING_AGENT_CHANGED_EVENT,
@@ -30,6 +31,7 @@ import {
   OPEN_SETTINGS_SECTION_EVENT,
   standaloneSettingsHref,
   type ChatMessageDetail, buildTeamProjectPrompt } from "@/lib/ui-events";
+import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "@/lib/coding-agent-harness-test";
 
 describe("dispatchChatMessage", () => {
   it("dispatches CHAT_MESSAGE_EVENT with the text under detail.text, as dispatchFixError does for its context", () => {
@@ -93,6 +95,31 @@ describe("buildNewAppPrompt", () => {
     expect(fix).toContain("logs_tail");
     expect(build).not.toContain("logs_tail");
     expect(build).toContain("coding agent");
+  });
+});
+
+describe("buildHarnessTestPrompt", () => {
+  // What "Test in the chat" (Settings) and "Try it in the chat" (the wizard)
+  // hand to the chat since 2026-10-30, in place of posting to the run route.
+  it("asks for one run of the canned task in the bare-named scratch folder", () => {
+    const text = buildHarnessTestPrompt();
+    expect(text).toContain(`"${HARNESS_TEST_PROJECT}"`);
+    expect(text).toContain(HARNESS_TEST_TASK);
+    expect(text).toContain("coding_agent_run");
+    expect(text).toMatch(/exactly one coding run/);
+    // Bare, never a path: the resolver reads a bare name as "inside the
+    // default project folder".
+    expect(text).not.toContain(`/${HARNESS_TEST_PROJECT}`);
+  });
+
+  it("names itself a smoke test, so the brief does not inflate it", () => {
+    expect(buildHarnessTestPrompt()).toContain("smoke test");
+    expect(HARNESS_TEST_PROJECT).toBe("harness-test");
+  });
+
+  it("is English addressed to the assistant, and the same every time", () => {
+    expect(buildHarnessTestPrompt()).toBe(buildHarnessTestPrompt());
+    expect(buildHarnessTestPrompt().startsWith("Run the coding agent's harness self-test")).toBe(true);
   });
 });
 

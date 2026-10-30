@@ -492,21 +492,17 @@ describe("a run", () => {
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
   });
 
-  // TASK-1749: with nothing stored, a NEW run gets the lean defaults
-  // (DEFAULT_DIET) — the lean brief, the lean helper sentence and the per-run
-  // visual decision — frozen on its record. A record WITHOUT a diet keeps the
-  // legacy full prompt (routes/coding-agent/diet.test.ts).
-  it("gives a new run on a box that never set the diet the lean brief, lean helpers and the visual decision", async () => {
+  // TASK-1749: a NEW run gets the lean brief, the lean helper sentence and
+  // the per-run visual decision, frozen on its record (a record from before
+  // the decision reads as visual: routes/coding-agent/diet.test.ts).
+  it("gives a new run the lean brief, lean helpers and the visual decision", async () => {
     const dir = makeProject("parser");
     fs.rmSync(path.join(dir, "index.html"));
     fs.writeFileSync(path.join(dir, "main.py"), "print('hi')\n");
-    const { DEFAULT_DIET } = await import("@/lib/coding-diet");
     const plain = await finished((await lib.startRun({ task: "Fix the parser in main.py", projectId: "parser", source: "agent" })).id);
-    expect(plain.diet).toEqual(DEFAULT_DIET);
     expect(plain.visual).toBe(false);
     let argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
     let prompt = argv[argv.indexOf("--append-system-prompt") + 1];
-    expect(prompt).not.toContain(lib.HEADLESS_BRIEF);
     expect(prompt).not.toContain("Delegate instead of doing everything in one thread");
     expect([lib.leanHelpersBrief(false), lib.leanHelpersBrief(true)].some((s) => prompt.includes(s))).toBe(true);
     expect(prompt).not.toContain(lib.LEAN_VISUAL_BRIEF);
@@ -514,7 +510,6 @@ describe("a run", () => {
 
     makeProject("site");
     const visual = await finished((await lib.startRun({ task: "Fix the parser", projectId: "site", source: "agent" })).id);
-    expect(visual.diet).toEqual(DEFAULT_DIET);
     // The folder has an index.html: the run keeps the tools and the browser block.
     expect(visual.visual).toBe(true);
     argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
@@ -635,8 +630,10 @@ describe("a run", () => {
     makeProject("site");
     const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
     expect(first.status).toBe("failed");
-    // "steps" in the owner's words; the number is the run's own ceiling.
-    expect(first.error).toMatch(/60 steps/);
+    // "step limit" in the owner's words, the turns taken against the run's
+    // own ceiling, and the way on (the Continue action) named.
+    expect(first.error).toMatch(/step limit \(60 of \d+\)/);
+    expect(first.error).toMatch(/Continue/);
     expect(first.sessionId).toBe("sess-abc-123");
 
     installFakeWrapper(HAPPY_BODY);
@@ -704,6 +701,15 @@ describe("a run", () => {
     expect(round.task).toHaveLength(lib.MAX_BOX_TASK_CHARS);
     expect(round.task.endsWith("\n…(truncated)")).toBe(true);
     expect((await finished(round.id)).status).toBe("completed");
+
+    // A coding team's run is the box's too: its worker text is built to
+    // TEAM_TASK_CHARS, past the typed limit, and starts.
+    announce.mockClear();
+    const worker = await lib.startRun({ task: "w".repeat(lib.TEAM_TASK_CHARS), projectId: "site", source: "owner", team: { id: "team-abcdefgh", role: "worker", taskId: "t1" } });
+    expect(worker.task).toHaveLength(lib.TEAM_TASK_CHARS);
+    expect((await finished(worker.id)).status).toBe("completed");
+    // And it sends no finish notice of its own: the owner hears once, when the TEAM settles.
+    expect(announce).not.toHaveBeenCalled();
   });
 
   it("does not report a run finished on a result event alone — the process must exit", async () => {
@@ -780,10 +786,7 @@ describe("a run", () => {
       // The pass runs the verification itself and claims only what it ran.
       expect(task).toMatch(/Start by running the project's own verification/);
       expect(task).toMatch(/a result from the earlier session is not yours to claim/);
-      // The pass IS the review: it is told not to send the reviewer helper —
-      // in the lean helper sentence, since a box that never set the diet
-      // runs on the lean defaults (TASK-1749) and the pass inherits them.
-      expect(review.diet).toEqual(first.diet);
+      // The pass IS the review: it is told not to send the reviewer helper.
       expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain(lib.leanHelpersBrief(true));
 
       // The review pass itself completed and touched files — and must NOT
@@ -859,28 +862,6 @@ describe("a run", () => {
       const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
       await vi.waitFor(() => { expect(lib.getRun(done.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
       expect(allRuns().length).toBe(1);
-    });
-  });
-
-  describe("the token limit", () => {
-    it("settles as stopped, not completed, when the result event beat the kill", async () => {
-      installFakeClaude();
-      // One turn that alone exceeds the limit, with the result event right
-      // behind it in the same write: the process has said "success" before
-      // the device's kill lands. The device's verdict must stand — a record
-      // that read "completed" beside "Stopped at the token limit" was both.
-      const spent = JSON.stringify({
-        type: "assistant",
-        message: { usage: { input_tokens: 20_000, output_tokens: 10 }, content: [{ type: "text", text: "Done" }] },
-      });
-      installFakeWrapper([`printf '%s\\n' '${INIT}' '${spent}' '${RESULT}'`, "exit 0"].join("\n"));
-      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
-      makeProject("site");
-      const run = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
-      expect(run.status).toBe("stopped");
-      expect(run.error).toMatch(/Stopped at the token limit/);
-      expect(run.resumable).toBe(true);
-      expect(run.progress.join("\n")).toContain("Token limit reached");
     });
   });
 
@@ -1762,11 +1743,11 @@ describe("counting sub-agents", () => {
     expect(progress.match(/Sub-agent finished \(explorer\)/g) ?? []).toHaveLength(1);
   });
 
-  it("bills a workflow as it runs, from its task_progress totals, and stops at the ceiling", async () => {
+  it("bills a workflow as it runs, from its task_progress totals, by the delta each time", async () => {
     // The CLI reports a workflow's cumulative spend on every task_progress
-    // (0 → 2368 → 2368 in the probe); the ceiling must hold while the
-    // fan-out runs, not after it.
-    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
+    // (0 → 2368 → 2368 in the probe); the record's spend must be current
+    // while the fan-out runs, not after it.
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
     const WORKFLOW = JSON.stringify({
       type: "assistant",
       message: { content: [{ type: "tool_use", id: "call_w", name: "Workflow", input: { script: "export const meta = { name: \"sweep\", description: \"check\" }" } }] },
@@ -1781,17 +1762,14 @@ describe("counting sub-agents", () => {
       `echo '${progressAt(4_000)}'`,
       `echo '${progressAt(4_000)}'`,
       `echo '${progressAt(12_000)}'`,
-      "sleep 20",
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
       "exit 0",
     ].join("\n"));
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "sweep", projectId: "site", source: "agent" })).id);
-    expect(run.status).toBe("stopped");
-    expect(run.resumable).toBe(true);
+    expect(run.status).toBe("completed");
     // Deltas, never the running total twice: 0 + 4000 + 0 + 8000.
     expect(run.tokensUsed).toBe(12_000);
-    expect(run.error).toMatch(/Stopped at the token limit \(12,000 of 10,000\)/);
-    expect(run.progress.join("\n")).toContain("Token limit reached");
   });
 
   it("takes a refused launch back out of the counts", async () => {
@@ -2749,4 +2727,15 @@ it("preserves a final result beyond the display summary for machine consumers an
   const done = await finished(run.id);
   expect(done.summary).toHaveLength(6000);
   expect(done.resultText).toBe(full);
+});
+
+it("keeps no second copy of a result the summary already holds whole", async () => {
+  readyDevice();
+  makeProject("site");
+  installFakeWrapper(`echo '${INIT}'\necho '${JSON.stringify({ type: "result", subtype: "success", result: "Done: two files.", num_turns: 1 })}'\nexit 0`);
+  const run = await lib.startRun({ task: "Plan it", projectId: "site", source: "agent" });
+  const done = await finished(run.id);
+  expect(done.summary).toBe("Done: two files.");
+  // Readers take `resultText ?? summary`; a copy was a fifth of every flush.
+  expect(done.resultText).toBeNull();
 });

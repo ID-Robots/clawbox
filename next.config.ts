@@ -160,8 +160,11 @@ const nextConfig: NextConfig = {
     // The appliance root is not always /home/clawbox/clawbox (a dev box runs the
     // app from another user's home). Baked at build time because the coding-agent
     // run page builds its terminal command in the browser, where a runtime
-    // process.env read is not available.
-    NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+    // process.env read is not available. CLAWBOX_ROOT when the build is told
+    // (install.sh, the in-app updater), else the checkout the build runs from:
+    // a `bun run build` typed in a dev checkout used to bake the device path,
+    // and the run page's Terminal then ran a script that was not there.
+    NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || process.cwd(),
     // The in-app updater's own copy of scripts/preserve-local-edits.sh, carried
     // IN the build (src/lib/local-edits.ts). Its restart step saves the owner's
     // edits just before resetting a tree that step 1 has already moved to the

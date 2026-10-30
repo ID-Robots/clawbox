@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
-import { slimTeam } from "@/lib/coding-agent-slim";
-import { getTeam, listTeams, startTeam } from "@/lib/coding-team";
+import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS } from "@/lib/coding-agent";
+import { slimTeam, teamCard } from "@/lib/coding-agent-slim";
+import { pushPendingAction } from "@/lib/pending-actions";
+import { getTeam, listTeams, startTeam, waitForTeam } from "@/lib/coding-team";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
@@ -18,6 +19,11 @@ export const dynamic = "force-dynamic";
  *                                 provider and by kind (input, output, cache
  *                                 written, cache read) — wall time, team messages
  *                                 sent/to the lead/to a sibling/undelivered) as of now
+ * GET ?id=<team-id>&wait=<seconds> → the same, held open until the team settles
+ *                                 or `wait` elapses (capped at MAX_WAIT_MS), the
+ *                                 way the runs route does; the box tells the
+ *                                 owner (and, on OpenClaw, the assistant's chat)
+ *                                 when a team settles, so nothing need poll this
  * GET                           → { teams } — the recent boards, newest first
  * GET ?slim=1                   → the same with every SETTLED board's log
  *                                 emptied and its tasks' briefs cut short,
@@ -25,7 +31,11 @@ export const dynamic = "force-dynamic";
  *                                 true` on it — the app's live poll, merged
  *                                 over the boards it holds
  *                                 (src/lib/coding-agent-slim.ts); a team at
- *                                 work or queued is always whole
+ *                                 work or queued is always whole. Every slim
+ *                                 board carries `card` (`teamCard`): phase,
+ *                                 tasks done/total, the task titles, the pull
+ *                                 request number, the result's first sentence
+ *                                 and the agents — the chat's team card
  * POST { goal, projectId | directory } → 202 { started: true, team }, or —
  *                                 while another team works — 202 { started:
  *                                 false, queued: true, team } with the board in
@@ -51,7 +61,9 @@ export async function GET(request: Request) {
   const id = url.searchParams.get("id");
   const slim = url.searchParams.get("slim") === "1";
   if (id) {
-    const team = getTeam(id);
+    const waitRaw = Number(url.searchParams.get("wait") ?? "0");
+    const waitMs = Number.isFinite(waitRaw) ? Math.max(0, Math.min(waitRaw, MAX_WAIT_MS / 1000)) * 1000 : 0;
+    const team = waitMs > 0 ? await waitForTeam(id, waitMs) : getTeam(id);
     if (!team) return NextResponse.json({ error: "There is no coding team with that id.", kind: "not_found" }, { status: 404 });
     if (!owner && team.source === "owner") {
       return NextResponse.json({ error: "That team was started by the owner; only the owner can read it.", kind: "owner_only" }, { status: 403 });
@@ -59,7 +71,12 @@ export async function GET(request: Request) {
     return NextResponse.json({ team });
   }
   const teams = listTeams().filter((t) => owner || t.source === "agent");
-  return NextResponse.json({ teams: slim ? teams.map((t) => slimTeam(t)) : teams });
+  // `card` rides on every slim board — a team at work included — so the
+  // chat's team card and the app's Now section read the counts, the task
+  // titles, the pull request number and the result's first sentence without
+  // the board (src/lib/coding-agent-slim.ts `teamCard`). Nested under one
+  // key because `tasks` already names the board's own list.
+  return NextResponse.json({ teams: slim ? teams.map((t) => ({ ...slimTeam(t), card: teamCard(t) })) : teams });
 }
 
 export async function POST(request: Request) {
@@ -80,6 +97,14 @@ export async function POST(request: Request) {
       source: (await hasPersonSession(request)) ? "owner" : "agent",
     });
     const queued = team.status === "queued";
+    // Every open desktop hears that a team began (the run route does the
+    // same): the chat's team card is there within one poll, whoever asked.
+    void pushPendingAction(
+      { type: "coding_team", phase: queued ? "queued" : "started", teamId: team.id, projectId: team.projectId, goal: team.goal.split(/\r?\n/)[0].slice(0, 160) },
+      `coding-team:${team.id}`,
+    ).catch((err: unknown) => {
+      console.error("[coding-agent/team] desktop notice failed:", err instanceof Error ? err.message : err);
+    });
     return NextResponse.json({ started: !queued, queued, team }, { status: 202 });
   } catch (err) {
     if (err instanceof CodingAgentError) {

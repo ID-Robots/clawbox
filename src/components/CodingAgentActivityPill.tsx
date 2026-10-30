@@ -5,6 +5,7 @@ import { artifactUrl, type CodingAgentActivity, type CodingTodo } from "@/lib/us
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
 import { describeProgressLine, estimateRunProgress, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { taskTitle } from "@/lib/task-title";
+import { notifyCodingRunStarted } from "@/lib/ui-events";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 
 /**
@@ -120,7 +121,66 @@ export interface CodingAgentCardLabels extends Record<Exclude<CodingRunStatus, "
   busy?: string;
   /** The header's × — "Hide this card". Falls back to English. */
   dismiss?: string;
+  /** The chip on a run that waits on the owner — a refusal it cannot go on without. */
+  needsYou?: string;
+  /** A "{n} files" template for the settled card's meta line. */
+  files?: string;
+  /** A "PR #{n}" template for the settled card's chip. */
+  pr?: string;
+  /** The Pause / Resume control's name, its in-flight word, and the line shown when the route refuses. */
+  pause?: string;
+  resume?: string;
+  pausing?: string;
+  resuming?: string;
+  pauseFailed?: string;
+  resumeFailed?: string;
 }
+
+/**
+ * THE SETTLED STATE (the 2026-10-30 redesign)
+ *
+ * A run that is over — done, failed, stopped, gave up — is drawn as a
+ * RESULT, not as a stopped progress view: the status glyph and the title,
+ * then the result's first sentence (`summaryLine`, worked out by the runs
+ * route), a meta line of "2 files · 9 min" with a PR chip when the run
+ * opened one, and Open. A failed run shows its error's first line in the
+ * danger tone instead of a result. The expanded panel stays: the steps are
+ * the record of what it did. A paused run waiting on the owner carries the
+ * "Needs you" chip and the refused line as its body; Open lands on the run
+ * page, where the refusal card and its Allow next time are.
+ *
+ * Open and × are 44 × 44 targets (the mockup's `.ccard .x`), drawn with
+ * negative margins so the header row keeps the height of its text.
+ *
+ * PAUSE AND RESUME (the owner's ask of 2026-10-30: "also add pause resume in
+ * chat coding agent section")
+ *
+ * A run that sat paused — "Coding agent paused · 56m 24s" — offered nothing
+ * to resume it from the chat; the owner had to open the app. The header row
+ * now carries ONE control before Open: Pause while the run works, Resume
+ * while it is paused (or gave up — its session is intact, like the app's own
+ * Resume). The card runs in the owner's signed-in page, so it calls the
+ * routes the app calls (`POST coding-agent/pause` / `coding-agent/resume`
+ * with the run id), disables itself while the request is out, and shows the
+ * route's refusal as a line under the meta row. The status flips at once —
+ * the pause route only ASKS the harness to stop, so the record says
+ * "running" for a few more seconds — and the card holds that optimistic word
+ * until the poller brings a different status, or for 30 s at most, so a pause
+ * that never lands cannot leave the card lying. An icon with its name as the
+ * tooltip and accessible name, 44 × 44, in Open's tokens: a 390-px phone has
+ * no room in this row for another word.
+ *
+ * OWNER-ONLY: the control exists only when the host says the viewer may
+ * control the run (`canControl`, which CodingChatCards passes for the owner's
+ * own chat, `chatUser === null`). A signed-in person who is not the owner
+ * sees the card as before, with Open and ×. The route refuses a run the
+ * caller may not touch (403 `owner_only`) and the card shows that line too.
+ *
+ * A paused run also says WHY when the pause followed a spent allowance
+ * (`pausedWhy`, the host's sentence from `pauseReasonText`): until the meter
+ * is back, Resume only buys the same refusal, and the card should say so
+ * rather than invite the click.
+ */
 
 /** Plan items drawn before the list folds into "+N more". */
 const TODOS_SHOWN = 8;
@@ -214,8 +274,21 @@ function StepChip({ step, label, detail, onClick, title }: {
   return <span data-kind={step.kind} title={title} style={style}>{inner}</span>;
 }
 
+/** How long a Pause/Resume's optimistic status outlives a record that has not caught up. */
+const PENDING_STATUS_MS = 30_000;
+
+/** The route's `error` line, or the fallback — what the app's own controls show. */
+async function readErrorLine(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = (await res.json()) as { error?: unknown };
+    return typeof data.error === "string" && data.error ? data.error : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export default function CodingAgentActivityPill(
-  { run, labels, openLabel, onOpen, onPreview, onDismiss, autoHiding = false }: {
+  { run, labels, openLabel, onOpen, onPreview, onDismiss, autoHiding = false, canControl = false, onChanged, pausedWhy = null }: {
     run: CodingAgentActivity;
     /**
      * One per status, plus the owner-started variant of "running", plus the
@@ -242,9 +315,72 @@ export default function CodingAgentActivityPill(
      * at the end of that countdown; the chat owns the clock and the removal.
      */
     autoHiding?: boolean;
+    /**
+     * The viewer may pause and resume this run — the owner's own chat. Off by
+     * default: a card with no say shows no control (see the note at the top).
+     */
+    canControl?: boolean;
+    /** The run's state just changed at the card's hand; the host re-reads. */
+    onChanged?: () => void;
+    /** Why a paused run is paused, when an allowance ran out; null otherwise. */
+    pausedWhy?: string | null;
   },
 ) {
-  const live = run.status === "running";
+  // The status the card draws: the record's, or the word a Pause/Resume just
+  // bought until the record catches up (or 30 s pass — see the note at the
+  // top).
+  const [pending, setPending] = useState<{ from: CodingRunStatus; to: CodingRunStatus; at: number } | null>(null);
+  const [busy, setBusy] = useState<"pause" | "resume" | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
+  // The record moved on (to what was asked, or to anything else): the
+  // optimistic word has done its job and is dropped in the same render, so a
+  // later pause cannot meet a stale "running" from an earlier Resume.
+  if (pending !== null && run.status !== pending.from) setPending(null);
+  const status: CodingRunStatus = pending !== null && run.status === pending.from ? pending.to : run.status;
+  useEffect(() => {
+    // And it goes on its own when its time is up, record or no record.
+    if (!pending) return;
+    const id = setTimeout(() => setPending(null), Math.max(0, PENDING_STATUS_MS - (Date.now() - pending.at)));
+    return () => clearTimeout(id);
+  }, [pending]);
+  // What the one control does in this state, if anything.
+  const control: "pause" | "resume" | null = canControl
+    ? status === "running" ? "pause" : status === "paused" || status === "gave_up" ? "resume" : null
+    : null;
+  // The control's name: what it does, or what it is doing while the request is out.
+  const controlName = busy
+    ? (busy === "pause" ? (labels.pausing ?? "Pausing…") : (labels.resuming ?? "Resuming…"))
+    : control === "pause" ? (labels.pause ?? "Pause") : (labels.resume ?? "Resume");
+  const act = async (action: "pause" | "resume") => {
+    if (busy) return;
+    const from = run.status;
+    const fallback = action === "pause" ? (labels.pauseFailed ?? "The run could not be paused.") : (labels.resumeFailed ?? "The run could not be resumed.");
+    setBusy(action);
+    setControlError(null);
+    try {
+      const res = await fetch(`/setup-api/coding-agent/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId: run.id }),
+      });
+      if (!res.ok) throw new Error(await readErrorLine(res, fallback));
+      setPending({ from, to: action === "pause" ? "paused" : "running", at: Date.now() });
+      // A run is on its way again: the desktop and the app's own card listen
+      // for this, as they do when the app presses Resume. Either way the host
+      // re-reads so the record replaces the optimistic word.
+      if (action === "resume") notifyCodingRunStarted();
+      onChanged?.();
+    } catch (err) {
+      setControlError(err instanceof Error && err.message ? err.message : fallback);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const live = status === "running";
+  // Over, one way or another: the card reports a result rather than progress.
+  const settled = status === "completed" || status === "failed" || status === "stopped" || status === "gave_up";
+  const needsYou = run.needsYou === true && status === "paused";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!live) return;
@@ -254,12 +390,12 @@ export default function CodingAgentActivityPill(
   const [expanded, setExpanded] = useState(false);
   const toggle = () => setExpanded((v) => !v);
 
-  const tone = RUN_TONE[run.status];
+  const tone = RUN_TONE[status];
   // A run the OWNER started says so, so the assistant is not credited with
   // work the person at the desk kicked off.
   const label = live && run.source === "owner"
     ? labels.runningOwner
-    : run.status === "queued" ? (labels.queued ?? labels.draft) : labels[run.status];
+    : status === "queued" ? (labels.queued ?? labels.draft) : labels[status];
   const took = elapsed(run.startedAt, live ? now : (run.completedAt ?? now));
   const title = firstLine(run.task) || run.projectId || label;
 
@@ -273,7 +409,7 @@ export default function CodingAgentActivityPill(
   const screenshots = run.screenshots ?? [];
   const todos = run.todos ?? [];
   // How far along, honestly — off the run's own plan, or not at all.
-  const est = estimateRunProgress({ status: run.status, startedAt: run.startedAt, todos }, now);
+  const est = estimateRunProgress({ status, startedAt: run.startedAt, todos }, now);
   const todosDone = todos.filter((t) => t.status === "completed").length;
   const activeTodo = todos.find((t) => t.status === "in_progress") ?? null;
   // What the run says it is doing, in its own present tense.
@@ -317,14 +453,36 @@ export default function CodingAgentActivityPill(
     </span>,
   ];
   if (run.projectId) meta.push(<span key="project">{run.projectId}</span>);
-  if (subTotal > 0 && labels.agents) {
+  if (settled && labels.files && (run.filesTouched ?? 0) > 0) {
+    meta.push(<span key="files">{labels.files.replaceAll("{n}", String(run.filesTouched ?? 0))}</span>);
+  }
+  if (!settled && subTotal > 0 && labels.agents) {
     meta.push(<span key="agents">{labels.agents.replaceAll("{n}", String(subTotal))}</span>);
   }
-  if (used > 0 && labels.tokensWord) {
+  if (!settled && used > 0 && labels.tokensWord) {
     meta.push(<span key="tokens">{`${tokens(used)} ${labels.tokensWord}`}</span>);
   }
   // aria-hidden lives on the clock's own span below.
   meta.push(<span key="took" aria-hidden="true">{took}</span>);
+  if (settled && run.prNumber != null) {
+    meta.push(
+      <span
+        key="pr"
+        data-testid="coding-agent-activity-pr"
+        style={{ display: "inline-flex", alignItems: "center", height: 18, padding: "0 7px", borderRadius: 9, fontSize: 11, background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.8)" }}
+      >
+        {(labels.pr ?? "PR #{n}").replaceAll("{n}", String(run.prNumber))}
+      </span>,
+    );
+  }
+  // The settled card's one line: the result's first sentence, or — for a
+  // run that failed — its error's first line. A paused run that waits on the
+  // owner shows the refused action instead.
+  const resultLine = status === "failed"
+    ? (run.errorLine ?? run.summaryLine ?? null)
+    : settled ? (run.summaryLine ?? null) : null;
+  const bodyLine = needsYou ? (run.refusedLine ?? null) : resultLine;
+  const bodyTone = status === "failed" ? "#fca5a5" : needsYou ? "#fcd34d" : "rgba(255,255,255,0.8)";
 
   // The expanded panel's counters. Turns only once there are any: the runner
   // learns the count from the final result event, so a live run has 0, and
@@ -339,7 +497,7 @@ export default function CodingAgentActivityPill(
     <div
       data-testid="coding-agent-activity"
       data-run-id={run.id}
-      data-status={run.status}
+      data-status={status}
       data-expanded={expanded ? "true" : "false"}
       className={autoHiding ? "coding-agent-autohide" : undefined}
       role="status"
@@ -353,19 +511,21 @@ export default function CodingAgentActivityPill(
       // here so it does not also toggle — and so does the expanded panel as
       // a whole, which is for reading, not pressing.
       onClick={toggle}
+      // The Create card's surface (NewAppWizardCard): one family of cards in
+      // the transcript, the full width of it, the mockup's `.ccard`.
       style={{
         display: "flex",
         flexDirection: "column",
         gap: 4,
-        padding: "8px 12px",
-        borderRadius: 12,
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        padding: "10px 12px",
+        borderRadius: 14,
+        background: "rgba(0,0,0,0.35)",
+        border: "1px solid rgba(255,255,255,0.1)",
         color: "rgba(255,255,255,0.85)",
         fontSize: 12,
         maxWidth: "100%",
         minWidth: 220,
-        alignSelf: "flex-start",
+        alignSelf: "stretch",
         cursor: "pointer",
       }}
     >
@@ -407,6 +567,15 @@ export default function CodingAgentActivityPill(
           }}>
             {title}
           </span>
+          {needsYou ? (
+            // The run waits on the owner: the one chip the card ever wears.
+            <span
+              data-testid="coding-agent-activity-needs-you"
+              style={{ display: "inline-flex", alignItems: "center", height: 18, padding: "0 7px", borderRadius: 9, fontSize: 11, fontWeight: 600, background: "rgba(252,211,77,0.16)", color: "#fcd34d", flexShrink: 0 }}
+            >
+              {labels.needsYou ?? "Needs you"}
+            </span>
+          ) : null}
           <span
             className="material-symbols-rounded"
             aria-hidden="true"
@@ -415,6 +584,44 @@ export default function CodingAgentActivityPill(
             {expanded ? "expand_less" : "expand_more"}
           </span>
         </div>
+        {control ? (
+          // Pause / Resume: the one control the owner's chat gets over the run
+          // (see the note at the top). An icon in Open's tokens, 44 × 44, its
+          // name as the tooltip and the accessible name; disabled and named
+          // for its in-flight word while the request is out. It stops the
+          // click like Open does — pausing a run is not a request to expand
+          // its card.
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); void act(control); }}
+            disabled={busy !== null}
+            aria-busy={busy !== null || undefined}
+            title={controlName}
+            aria-label={controlName}
+            data-testid={`coding-agent-activity-${control}`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minHeight: 44,
+              minWidth: 44,
+              margin: "-12px 0",
+              padding: 0,
+              background: "rgba(52,211,153,0.12)",
+              border: "1px solid rgba(52,211,153,0.35)",
+              borderRadius: 8,
+              color: "#a7f3d0",
+              cursor: busy ? "progress" : "pointer",
+              opacity: busy ? 0.6 : 1,
+              font: "inherit",
+              flexShrink: 0,
+            }}
+          >
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>
+              {busy ? "hourglass_top" : control === "pause" ? "pause" : "play_arrow"}
+            </span>
+          </button>
+        ) : null}
         {onOpen ? (
           // View: the run's own page in the Coding Agent app, full-screen.
           // (The pill used to carry an underlined "open" link and a "Live
@@ -426,16 +633,23 @@ export default function CodingAgentActivityPill(
             title={openLabel}
             aria-label={openLabel}
             data-testid="coding-agent-activity-view"
+            // A 44 px target, the row's own height kept by the margin.
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minHeight: 44,
+              minWidth: 44,
+              margin: "-12px 0",
               background: "rgba(52,211,153,0.12)",
               border: "1px solid rgba(52,211,153,0.35)",
-              borderRadius: 6,
+              borderRadius: 8,
               color: "#a7f3d0",
               cursor: "pointer",
               font: "inherit",
-              fontSize: 11,
+              fontSize: 12,
               fontWeight: 600,
-              padding: "1px 7px",
+              padding: "0 10px",
               flexShrink: 0,
             }}
           >
@@ -443,10 +657,10 @@ export default function CodingAgentActivityPill(
           </button>
         ) : null}
         {onDismiss ? (
-          // ×: hide the card. It stops the click like the View button does —
-          // putting a card away is not a request to expand it first. A 28px
-          // box with the glyph centred: big enough to hit on a phone without
-          // making the header row taller than its text.
+          // ×: hide the card. It stops the click like the Open button does —
+          // putting a card away is not a request to expand it first. A 44 px
+          // box with the glyph centred — a thumb target — drawn with negative
+          // margins so the header row keeps the height of its text.
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onDismiss(); }}
@@ -457,9 +671,9 @@ export default function CodingAgentActivityPill(
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              width: 28,
-              height: 28,
-              margin: "-6px -6px -6px 0",
+              width: 44,
+              height: 44,
+              margin: "-12px -14px -12px 0",
               padding: 0,
               border: 0,
               borderRadius: 8,
@@ -483,6 +697,43 @@ export default function CodingAgentActivityPill(
           </span>
         ))}
       </div>
+      {bodyLine ? (
+        // The settled card's result, or a paused run's refused action — the
+        // one sentence that answers "is it done, and what came of it".
+        <div
+          data-testid="coding-agent-activity-result"
+          data-tone={status === "failed" ? "danger" : needsYou ? "attention" : "result"}
+          title={bodyLine}
+          style={{ fontSize: 12.5, lineHeight: 1.4, color: bodyTone, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
+        >
+          {bodyLine}
+        </div>
+      ) : null}
+      {status === "paused" && pausedWhy ? (
+        // WHY it is paused, when the answer is not "somebody asked": the
+        // allowance that ran out and when it is back. Resume buys the same
+        // refusal until then, so the card says so beside the control.
+        <div
+          data-testid="coding-agent-activity-pause-reason"
+          title={pausedWhy}
+          style={{ display: "flex", alignItems: "flex-start", gap: 5, fontSize: 11.5, lineHeight: 1.4, color: "#fcd34d" }}
+        >
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>hourglass_top</span>
+          <span>{pausedWhy}</span>
+        </div>
+      ) : null}
+      {controlError ? (
+        // The route refused the Pause or Resume — the owner's gate, a run that
+        // is gone, a harness that would not. Said here, under the row that
+        // asked, until the next press clears it.
+        <div
+          data-testid="coding-agent-activity-error"
+          role="alert"
+          style={{ fontSize: 11.5, lineHeight: 1.4, color: "#fca5a5" }}
+        >
+          {controlError}
+        </div>
+      ) : null}
       {live && !expanded && nowLine ? (
         // The run's own words for what it is on — the in-progress item of its
         // plan. Only while live and collapsed: expanded, the checklist below
@@ -667,7 +918,7 @@ export default function CodingAgentActivityPill(
           ) : null}
         </div>
       ) : null}
-      {subTotal > 0 ? (
+      {subTotal > 0 && !settled ? (
         // One dot per sub-agent, capped so a fan-out cannot flood the card;
         // filled + pulsing while that helper is still out, hollow once it is
         // back. The per-type breakdown rides on `title` — same vocabulary as

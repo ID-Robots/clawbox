@@ -8,7 +8,6 @@ import {
   clearHarnessFault,
   CodingAgentError,
   getCodingAgentStatus,
-  HISTORY_EXTENDED_LIMITS,
   HISTORY_RETENTION_MODES,
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
@@ -22,26 +21,19 @@ import {
   checkRoleModelsPatch,
   setDefaultDirectory,
   setEffort,
-  setMaxTurns,
   setAutoMerge,
   setAutoPr,
-  setCompletionAttempts,
-  setDiet,
   setMaxParallelRuns,
   setPrBodyIncludesTask,
-  setGenerateAudio,
-  setGenerateImages,
+  setGenerateMedia,
   setHistoryRetention,
   setRealBrowser,
   setReviewPass,
-  setReviewRounds,
   setRoleModels,
   setSetupComplete,
   setTeamDynamic,
-  setTokenLimit,
 } from "@/lib/coding-agent";
 import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
-import { validateDietPatch } from "@/lib/coding-diet";
 
 export const dynamic = "force-dynamic";
 
@@ -77,16 +69,17 @@ function forbidden() {
  * owner's Anthropic access (src/lib/coding-provider.ts). Storing it does not
  * require that provider to be connected — the owner may pick it before pasting
  * the key — but STARTING a run against it does.
- * POST { maxTurns: number } → how many steps a run gets.
- * POST { tokenLimit: number | null } → token ceiling, or null for none.
- * POST { generateImages: boolean } → may a run draw pictures with ClawBox AI,
- * and may the box draw the project's desktop icon and its favicon while a run
- * works. POST { generateAudio: boolean } → may a run have this box speak a
- * clip into its project. Both default ON; see their config keys in
- * @/lib/coding-agent for why these two are not consents.
+ * (`{ maxTurns }` is an unknown body since SCA3, 400, like `{ tokenLimit }`
+ * since SCA A2: the step ceiling is a safety net, DEFAULT_MAX_TURNS, not a
+ * setting.)
+ * POST { generateMedia: boolean } → may a run draw pictures with ClawBox AI
+ * (and the box draw the project's desktop icon and favicon while it works)
+ * and have this box speak clips into its project. ONE switch over the two
+ * keys since SCA C3 (`setGenerateMedia`); ON by default — see the keys in
+ * @/lib/coding-agent for why it is not a consent.
  * POST { realBrowser: boolean } → does a run verify its work in the Chromium
  * on the owner's screen, or in a headless one nobody sees? ON when absent, for
- * the same reason as the media switches.
+ * the same reason as the media switch.
  * POST { teamDynamic: boolean } → may a coding team's lead add or retire tasks
  * while the team runs (one short read-only run after each worker settles).
  * OFF when absent; a team reads it when it starts.
@@ -98,7 +91,7 @@ function forbidden() {
  * carries both, `providers` is applied FIRST and a `provider` outside the
  * resulting list is refused (400) before anything is written, never silently
  * overwritten.
- * POST { roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?,
+ * POST { roleModels: { planner?|worker?|reviewer?: { provider?, model?,
  * effort? } } } → what a coding team's roles run on (src/lib/coding-role-models.ts).
  * `provider` is "clawbox-ai" or "anthropic"; `model` is "standard", "economy"
  * or one model that provider offers (`roleModelOptions` — a model needs a
@@ -116,29 +109,23 @@ function forbidden() {
  * ~600 characters (the default), the whole task, or none of it. Whichever, it
  * is redacted before it is published (@/lib/publish-redaction); a value this
  * box does not offer is refused before anything is saved.
- * POST { reviewRounds: number } → how many follow-up turns the review loop may
- * hand the harness after the pull request is opened (failing check logs,
- * unresolved review comments, "rebase onto <base>"). 0 switches the loop off
- * and leaves the older checks-only watcher in charge; the range is refused
- * rather than clamped, so a caller learns what this box offers.
  * POST { autoMerge: boolean } → may the box squash-merge a pull request its
  * own review loop cleared? Off by default, and never into `main`. See
  * @/lib/coding-review-state for the decision.
  * POST { maxParallelRuns: number } → how many coding runs may be going at
  * once. Each run works in a git worktree of its own, so the limit is a
  * question about the box's memory rather than about the filesystem; the range
- * is refused rather than clamped, like the review rounds.
- * POST { completionAttempts: number } → how many goes a run with a deliverable
- * gets at it, its own first turn counted as one. Only ever spent by a run that
- * HAS a deliverable — one the caller named, or the pull request the auto-PR
- * switch implies — so a box that uses neither is unaffected. The range is
- * refused rather than clamped, like the review rounds.
- * POST { historyRetention: "standard"|"extended"|"everything"|"archive",
- * historyLimit?: 100|300|1000 } → what the box keeps of finished runs (see
- * @/lib/coding-run-history). Either field alone is accepted; a value this box
- * does not offer is refused before anything is saved. Choosing "everything"
- * also tells Claude Code to keep its transcripts (merged into its settings
- * files, never overwriting them); choosing anything else hands that back.
+ * is refused rather than clamped.
+ * (The review rounds are no longer a setting since SCA C3: a run gets
+ * DEFAULT_REVIEW_ROUNDS. The attempts at a deliverable and the token ceiling
+ * went altogether in SCA A2 — the box checks the bar once and the owner's
+ * Resume is the only second go — and the extended history's N went with its
+ * mode in SCA2 C1. A body naming any of them is answered 400.)
+ * POST { historyRetention: "standard"|"everything" } → what the box keeps of
+ * finished runs (see @/lib/coding-run-history); a value this box does not
+ * offer is refused before anything is saved. Choosing "everything" also tells
+ * Claude Code to keep its transcripts (merged into its settings files, never
+ * overwriting them); choosing standard hands that back.
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
  * shows the wizard instead of its home page until this is true; the reset
  * route is what puts it back to false).
@@ -157,16 +144,6 @@ function forbidden() {
  * credentials to an unattended shell, which is the fence the permission rules
  * and the import routes carry for the same reason. The status still REPORTS it
  * (`injectSecrets`), because reading is not the half that needs the fence.
- * POST { diet: { brief?: "full"|"lean", helpers?: "always"|"lean",
- * visualTools?: "always"|"auto", context?: "full"|"capped" } } → the token
- * diet (src/lib/coding-diet.ts): the brief a run is given, how it is told to
- * use its helpers, whether a run that does not look visual still holds the
- * browser and media tools, and whether its context window is capped. A
- * PARTIAL patch, merged over what is stored; every knob never set is today's
- * behaviour. The whole patch is refused, before anything in the body is saved,
- * on an unknown key or value, with a stable `code` (`diet_not_object`,
- * `diet_unknown_key`, `diet_invalid_value`). A run freezes the diet it started
- * with; the status reports the effective one as `diet`.
  * POST { reviewPass: boolean } → the automatic review pass: one extra run in
  * the same session after every completed run that changed project files
  * (the status payload reports it as `reviewPass`; a review run carries
@@ -206,17 +183,12 @@ export async function POST(request: Request) {
     enabled?: unknown;
     defaultDirectory?: unknown;
     effort?: unknown;
-    maxTurns?: unknown;
-    tokenLimit?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
     prBodyIncludesTask?: unknown;
-    reviewRounds?: unknown;
     autoMerge?: unknown;
-    completionAttempts?: unknown;
     maxParallelRuns?: unknown;
-    generateImages?: unknown;
-    generateAudio?: unknown;
+    generateMedia?: unknown;
     realBrowser?: unknown;
     teamDynamic?: unknown;
     setupComplete?: unknown;
@@ -226,20 +198,15 @@ export async function POST(request: Request) {
     gitAuthorName?: unknown;
     gitAuthorEmail?: unknown;
     historyRetention?: unknown;
-    historyLimit?: unknown;
     roleModels?: unknown;
-    diet?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
   const hasSetupComplete = typeof fields.setupComplete === "boolean";
   const hasAutoPr = typeof fields.autoPr === "boolean";
-  const hasReviewRounds = typeof fields.reviewRounds === "number";
   const hasAutoMerge = typeof fields.autoMerge === "boolean";
-  const hasCompletionAttempts = typeof fields.completionAttempts === "number";
   const hasMaxParallelRuns = typeof fields.maxParallelRuns === "number";
-  const hasGenImages = typeof fields.generateImages === "boolean";
-  const hasGenAudio = typeof fields.generateAudio === "boolean";
+  const hasGenMedia = typeof fields.generateMedia === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
   const hasTeamDynamic = typeof fields.teamDynamic === "boolean";
   // Only `true`. `false` is not the other half of a switch here — it would
@@ -248,16 +215,12 @@ export async function POST(request: Request) {
   const hasEffort = typeof fields.effort === "string";
   const hasProvider = typeof fields.provider === "string";
   const hasProviders = Array.isArray(fields.providers);
-  const hasTurns = typeof fields.maxTurns === "number";
-  // null is meaningful — it CLEARS the ceiling — so presence decides.
-  const hasTokens = "tokenLimit" in fields
-    && (typeof fields.tokenLimit === "number" || fields.tokenLimit === null);
   // `null` is meaningful here — it CLEARS the default — so presence is what
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
   // Both halves of the commit identity are optional and independently
-  // clearable, so — like the folder and the token ceiling — presence decides,
+  // clearable, so — like the folder — presence decides,
   // not truthiness: `null` and `""` are the request that CLEARS one.
   const hasGitAuthorName = "gitAuthorName" in fields
     && (typeof fields.gitAuthorName === "string" || fields.gitAuthorName === null);
@@ -266,31 +229,26 @@ export async function POST(request: Request) {
   // Presence decides, like the counted settings: a wrong TYPE is still a
   // request about the history, and is refused below rather than ignored.
   const hasHistoryRetention = "historyRetention" in fields;
-  const hasHistoryLimit = "historyLimit" in fields;
   // Presence decides here too, for the same reason as the history setting.
   const hasPrBodyIncludesTask = "prBodyIncludesTask" in fields;
   // A team's per-role model and effort (src/lib/coding-role-models.ts):
   // presence decides, and a wrong shape is refused below, whole.
   const hasRoleModels = "roleModels" in fields;
-  // The token diet: presence decides, and a wrong shape is refused below, whole.
-  const hasDiet = "diet" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !hasDiet && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasAutoMerge && !hasMaxParallelRuns && !hasGenMedia && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasRoleModels && !clearsFault) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string }, { provider: string }, { maxTurns: number }, "
-          + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
-          + "{ generateImages: boolean }, { generateAudio: boolean }, "
+          + "{ effort: string }, { provider: string }, "
+          + "{ reviewPass: boolean }, "
+          + "{ generateMedia: boolean }, "
           + "{ realBrowser: boolean }, { teamDynamic: boolean }, "
-          + "{ reviewRounds: number }, "
-          + "{ autoMerge: boolean }, { completionAttempts: number }, "
+          + "{ autoMerge: boolean }, "
           + "{ maxParallelRuns: number }, "
-          + "{ historyRetention: string, historyLimit?: number }, "
+          + "{ historyRetention: string }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
-          + "{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }, "
-          + "{ diet: { brief?, helpers?, visualTools?, context? } }, "
+          + "{ roleModels: { planner?|worker?|reviewer?: { provider?, model?, effort? } } }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -334,18 +292,6 @@ export async function POST(request: Request) {
       { error: `The run history setting must be one of: ${HISTORY_RETENTION_MODES.join(", ")}.`, kind: "invalid" },
       { status: 400 },
     );
-  }
-  if (hasHistoryLimit && !(HISTORY_EXTENDED_LIMITS as readonly unknown[]).includes(fields.historyLimit)) {
-    return NextResponse.json(
-      { error: `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`, kind: "invalid" },
-      { status: 400 },
-    );
-  }
-  if (hasDiet) {
-    const checked = validateDietPatch(fields.diet);
-    if (!checked.ok) {
-      return NextResponse.json({ error: checked.error, kind: "invalid", code: checked.code }, { status: 400 });
-    }
   }
   if (hasPrBodyIncludesTask && !(PR_BODY_TASK_MODES as readonly unknown[]).includes(fields.prBodyIncludesTask)) {
     return NextResponse.json(
@@ -433,10 +379,6 @@ export async function POST(request: Request) {
       const saved = await setCodingProvider(fields.provider as string);
       console.error(`[coding-agent] runs will be paid for by ${saved}, by the owner's choice`);
     }
-    if (hasTurns) {
-      const saved = await setMaxTurns(fields.maxTurns);
-      console.error(`[coding-agent] step limit set to ${saved} by the owner`);
-    }
     if (hasReviewPass) {
       const saved = await setReviewPass(fields.reviewPass);
       console.error(`[coding-agent] review pass switched ${saved ? "on" : "off"} by the owner`);
@@ -450,20 +392,9 @@ export async function POST(request: Request) {
       // A value from the setter's own fixed list by now.
       console.error(`[coding-agent] pull requests will carry the task as ${logSafe(saved)}, by the owner's choice`);
     }
-    if (hasReviewRounds) {
-      const saved = await setReviewRounds(fields.reviewRounds);
-      console.error(`[coding-agent] review rounds set to ${saved} by the owner`);
-    }
     if (hasAutoMerge) {
       const saved = await setAutoMerge(fields.autoMerge);
       console.error(`[coding-agent] merging a cleared pull request switched ${saved ? "on" : "off"} by the owner`);
-    }
-    if (hasCompletionAttempts) {
-      const saved = await setCompletionAttempts(fields.completionAttempts);
-      // `saved` is a whole number the setter validated, so it can carry no line
-      // break — but it is the REQUEST's value that decided it, and the log
-      // sanitiser is what says so at the point the record is written.
-      console.error(`[coding-agent] attempts at a run's deliverable set to ${logSafe(String(saved))} by the owner`);
     }
     if (hasMaxParallelRuns) {
       await setMaxParallelRuns(fields.maxParallelRuns);
@@ -481,33 +412,21 @@ export async function POST(request: Request) {
       // record that the owner changed it, which it still does.
       console.error("[coding-agent] the number of coding runs at once was changed by the owner");
     }
-    if (hasHistoryRetention || hasHistoryLimit) {
-      const { policy, transcripts } = await setHistoryRetention({
-        ...(hasHistoryRetention ? { mode: fields.historyRetention } : {}),
-        ...(hasHistoryLimit ? { limit: fields.historyLimit } : {}),
-      });
+    if (hasHistoryRetention) {
+      const { policy, transcripts } = await setHistoryRetention(fields.historyRetention);
       // Both are values from the setter's own fixed lists by now.
-      console.error(`[coding-agent] run history set to ${logSafe(policy.mode)}${policy.mode === "extended" ? ` (${logSafe(String(policy.limit))} runs)` : ""} by the owner`);
+      console.error(`[coding-agent] run history set to ${logSafe(policy.mode)} by the owner`);
       for (const t of transcripts) {
         if (t.state !== "already") console.error(`[coding-agent] Claude Code transcript period ${t.state}: ${logSafe(t.file)}`);
       }
     }
-    if (hasGenImages) {
-      const saved = await setGenerateImages(fields.generateImages);
-      console.error(`[coding-agent] generated pictures switched ${saved ? "on" : "off"} by the owner`);
-    }
-    if (hasGenAudio) {
-      const saved = await setGenerateAudio(fields.generateAudio);
-      console.error(`[coding-agent] generated audio switched ${saved ? "on" : "off"} by the owner`);
+    if (hasGenMedia) {
+      const saved = await setGenerateMedia(fields.generateMedia);
+      console.error(`[coding-agent] generated pictures and audio switched ${saved ? "on" : "off"} by the owner`);
     }
     if (hasRealBrowser) {
       const saved = await setRealBrowser(fields.realBrowser);
       console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
-    }
-    if (hasDiet) {
-      const saved = await setDiet(fields.diet);
-      // Values from the diet's own fixed lists by now.
-      console.error(`[coding-agent] token diet set by the owner: brief ${logSafe(saved.brief)}, helpers ${logSafe(saved.helpers)}, visual tools ${logSafe(saved.visualTools)}`);
     }
     if (hasTeamDynamic) {
       const saved = await setTeamDynamic(fields.teamDynamic);
@@ -520,10 +439,6 @@ export async function POST(request: Request) {
     if (hasSetupComplete) {
       const saved = await setSetupComplete(fields.setupComplete);
       console.error(`[coding-agent] setup wizard marked ${saved ? "finished" : "unfinished"} by the owner`);
-    }
-    if (hasTokens) {
-      const saved = await setTokenLimit(fields.tokenLimit as number | null);
-      console.error(`[coding-agent] token limit ${saved === null ? "cleared" : `set to ${saved}`} by the owner`);
     }
     if (hasEnabled) {
       await setCodingAgentEnabled(fields.enabled as boolean);

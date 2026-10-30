@@ -18,7 +18,6 @@ import {
   ULTRACODE_BRIEF,
   ULTRACODE_EFFORT,
 } from "@/lib/coding-agent";
-import { completionAttemptsFrom, DEFAULT_COMPLETION_ATTEMPTS, MAX_COMPLETION_ATTEMPTS } from "@/lib/coding-deliverable";
 import { EXPERIENCE_BLOCK_MAX_CHARS } from "@/lib/coding-experience";
 import { MAX_RUN_NOTES_CHARS, runNotesBlock } from "@/lib/coding-run-notes";
 
@@ -38,23 +37,20 @@ describe("the token diet's defaults", () => {
     expect(DEFAULT_EFFORT).toBe("xhigh");
   });
 
-  it("gives a run with a deliverable one attempt unless the owner asks for more", () => {
-    expect(DEFAULT_COMPLETION_ATTEMPTS).toBe(1);
-    expect(completionAttemptsFrom(undefined)).toBe(1);
-    expect(completionAttemptsFrom(3)).toBe(3);
+  it("spends no second go at a deliverable unasked — the loop is gone from the code and the docs", () => {
+    // SCA A2: one check, then the owner's Resume. Neither the code nor the
+    // agent docs may grow the budget back under another name.
+    const source = readFileSync(path.join(process.cwd(), "src/lib/coding-agent.ts"), "utf8");
+    expect(source).not.toContain("coding_agent_completion_attempts");
+    expect(source).not.toContain("startCompletionAttempt(");
+    for (const file of ["docs/agents/coding-agent.md", "mcp/README.md"]) {
+      const doc = readFileSync(path.join(process.cwd(), file), "utf8");
+      expect(doc, file).not.toContain("coding_agent_completion_attempts");
+      expect(doc, file).not.toMatch(/three goes|default 3/);
+    }
   });
 
-  it("is what the code's own comment and the agent docs say the defaults are", () => {
-    const source = readFileSync(path.join(process.cwd(), "src/lib/coding-agent.ts"), "utf8");
-    const key = source.indexOf("export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY");
-    const comment = source.slice(source.lastIndexOf("/**", key), key);
-    const words = ["Zero", "One", "Two", "Three", "Four", "Five", "Six"];
-    const word = words[DEFAULT_COMPLETION_ATTEMPTS];
-    expect(comment).toContain(`${word} by default`);
-    expect(comment).not.toMatch(new RegExp(`\\b(${words.filter((w) => w !== word).join("|")}) by default`));
-    // The ceiling counts the first turn too: "six in all", never six more.
-    expect(comment).toContain(`${words[MAX_COMPLETION_ATTEMPTS].toLowerCase()} in all`);
-
+  it("is what the agent docs say the default effort is", () => {
     const doc = readFileSync(path.join(process.cwd(), "docs/agents/coding-agent.md"), "utf8");
     expect(doc).toContain(`the default is \`${DEFAULT_EFFORT}\``);
     expect(doc).not.toMatch(/ultracode[^.]*\bthe default\)/);

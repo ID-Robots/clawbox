@@ -52,6 +52,16 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => {
   return { ...actual, ...runner };
 });
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
+// The notices, mocked: the finish notice is coding-agent-notify.test.ts's to
+// test, and a real one would reach the owner's own Telegram from a test.
+vi.mock("@/lib/coding-agent-notify", () => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn(async () => undefined),
+  announceAnthropicLimit: vi.fn(async () => undefined),
+}));
+// The gateway link a settled team's chat line goes over, mocked: a real one
+// would post into the owner's chat from a test.
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()), gatewayWsChatSendMain: vi.fn(async () => ({ sessionKey: "main" })) }));
 vi.mock("@/lib/coding-run-cpu", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-run-cpu")>();
   return { ...actual, onBatteryPower: vi.fn(async () => false) };
@@ -177,7 +187,7 @@ beforeEach(async () => {
   // Every role ready on the box's own provider.
   runner.teamRoleModelMap.mockImplementation(async () => {
     const ready = { provider: "clawbox-ai" as const, model: null, effort: "high" as const, auto: true, ready: true, problems: [], relativeCost: null };
-    return { planner: ready, worker: ready, reviewer: ready, bulk: ready };
+    return { planner: ready, worker: ready, reviewer: ready };
   });
   runner.getMaxParallelRuns.mockResolvedValue(16);
   runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: [], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
@@ -319,71 +329,53 @@ describe("D3: the reviewer gate and the team's pull request", () => {
     { task_description: "Make ↑ fly forward in the keyboard flight", files_hint: ["src/keyboard.js"] },
     { task_description: "Update the keyboard spec to the new sign", files_hint: ["spec/keyboard.spec.js"] },
   ];
-  const STATIC = JSON.stringify({ verdict: "accepted", notes: "Static review only: no git, Biome or Jest could be run." });
 
-  it("does not take a verdict that ran nothing as a review: it is offered once more, with a shell in a checkout of the merged work", async () => {
+  it("reviews each task ONCE, with a shell in a throwaway checkout of the merged work, and takes the checkout away after", async () => {
     script = {
       "planner#1": plan(PLAN),
       "t1#1": { summary: `↑ flies forward. ${testScriptSays()}`, writes: { "src/keyboard.js": "export const up = 1;\n" } },
       "t2#1": { summary: "spec updated", writes: { "spec/keyboard.spec.js": "expect(up).toBe(1);\n" }, when: merged("src/keyboard.js") },
-      "review:t1#1": { summary: STATIC },
-      "review:t1#2": { summary: JSON.stringify({ verdict: "accepted", notes: "Ran git diff develop and sh test.sh: 3 passing." }) },
+      "review:t1#1": { summary: JSON.stringify({ verdict: "accepted", notes: "Ran git diff develop and sh test.sh: 3 passing." }) },
     };
     const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard", source: "agent" })).id);
     expect(done.status).toBe("done");
     const reviewers = starts.filter((s) => s.key.startsWith("review:t1#"));
-    expect(reviewers).toHaveLength(2);
-    // The second look can run git and the tests: not read-only, in a worktree of the merged work.
-    expect(reviewers[1].readOnly).not.toBe(true);
-    expect(String(reviewers[1].directory)).toContain(`${path.sep}.clawbox${path.sep}worktrees${path.sep}`);
-    expect(String(reviewers[1].task)).toContain("Static review only");
+    expect(reviewers).toHaveLength(1);
+    // Not read-only — a team run that writes, which is what the merge deny-list
+    // and the hook's merge guard key on — in a worktree of the merged work, told
+    // where it stands and where the project's node_modules are.
+    const [reviewer] = reviewers;
+    expect(reviewer.readOnly).not.toBe(true);
+    expect(reviewer.team).toMatchObject({ role: "reviewer", taskId: "t1" });
+    expect(String(reviewer.directory)).toContain(`${path.sep}.clawbox${path.sep}worktrees${path.sep}review-t1-1`);
+    expect(String(reviewer.task)).toContain(`Your folder: ${reviewer.directory} — a throwaway checkout of the team's branch ${done.branch}, forked from ${done.base}. The project itself is at ${repo};`);
+    expect(String(reviewer.task)).toContain(`ln -s ${repo}/node_modules node_modules`);
+    expect(String(reviewer.extraBrief)).toContain("with a shell");
+    expect(String(reviewer.extraBrief)).not.toContain("Change NOTHING");
     expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "Ran git diff develop and sh test.sh: 3 passing." });
-    expect(messages(done)).toEqual(expect.arrayContaining([expect.stringMatching(/not reviewed/i)]));
     // The throwaway checkout is gone, its branch too.
     expect(git(repo, "worktree", "list")).not.toMatch(/review-t1/);
     expect(git(repo, "branch", "--list", "*review-t1*")).toBe("");
   });
 
-  it("accepts on the worker's own test evidence, labelled NOT REVIEWED, when the second look cannot run anything either — and never without it", async () => {
-    script = {
-      "planner#1": plan(PLAN),
-      "t1#1": { summary: `↑ flies forward. ${testScriptSays()}`, writes: { "src/keyboard.js": "export const up = 1;\n" } },
-      "t2#1": { summary: "spec updated", writes: { "spec/keyboard.spec.js": "expect(up).toBe(1);\n" } },
-      "t2#2": { summary: `spec updated. ${testScriptSays()}`, writes: { "spec/keyboard.spec.js": "expect(up).toBe(+1);\n" } },
-      "review:t1#1": { summary: STATIC },
-      "review:t1#2": { summary: STATIC },
-      "review:t2#1": { summary: STATIC },
-      "review:t2#2": { summary: STATIC },
-    };
-    const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard", source: "agent" })).id);
-    expect(done.status).toBe("done");
-    const [t1, t2] = done.tasks;
-    expect(t1.review?.verdict).toBe("accepted");
-    expect(t1.review?.notes).toMatch(/^NOT REVIEWED/);
-    expect(t1.review?.notes).toContain("3 passing");
-    // t2's first worker quoted no test run: rejected, and its redo (with evidence) reviewed again.
-    expect(t2.attempts).toBe(2);
-    expect(messages(done)).toEqual(expect.arrayContaining([expect.stringMatching(/^Task t2 rejected: NOT REVIEWED/)]));
-    expect(t2.review?.verdict).toBe("accepted");
-  });
-
-  it("never turns a reviewer's rejection into an acceptance on the worker's word, when no reviewer could run anything", async () => {
-    const REJECTED = JSON.stringify({ verdict: "rejected", notes: "src/keyboard.js still exports -1. Static review only: no git could be run." });
+  it("takes the reviewer's verdict as it is — a rejection stands, and a redo is reviewed again", async () => {
+    const REJECTED = JSON.stringify({ verdict: "rejected", notes: "src/keyboard.js still exports -1: sh test.sh fails." });
     script = {
       "planner#1": plan(PLAN),
       "t1#1": { summary: `↑ flies forward. ${testScriptSays()}`, writes: { "src/keyboard.js": "export const up = -1; // unchanged\n" } },
       "t1#2": { summary: `↑ flies forward now. ${testScriptSays()}`, writes: { "src/keyboard.js": "export const up = 1;\n" } },
       "t2#1": { summary: `spec updated. ${testScriptSays()}`, writes: { "spec/keyboard.spec.js": "expect(up).toBe(1);\n" } },
       "review:t1#1": { summary: REJECTED },
-      "review:t1#2": { summary: REJECTED },
     };
     const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard", source: "agent" })).id);
     expect(done.status).toBe("done");
     const t1 = done.tasks[0];
-    // The rejection stood, labelled; the redo was reviewed again and accepted.
     expect(t1.attempts).toBe(2);
-    expect(messages(done)).toEqual(expect.arrayContaining([expect.stringMatching(/^Task t1 rejected: NOT REVIEWED: src\/keyboard\.js still exports -1/)]));
+    expect(messages(done)).toEqual(expect.arrayContaining([expect.stringMatching(/^Task t1 rejected: src\/keyboard\.js still exports -1/)]));
     expect(t1.review?.verdict).toBe("accepted");
+    // One shell review per attempt, each in its own checkout, none left behind.
+    expect(starts.filter((s) => s.key.startsWith("review:t1#"))).toHaveLength(2);
+    expect(git(repo, "worktree", "list")).not.toMatch(/review-/);
   });
 
   it("publishes the team's branch as one pull request when every task is accepted, the way a single run does — and none when pull requests are off", async () => {

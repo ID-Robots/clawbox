@@ -5,22 +5,25 @@
  * nothing else: the thirty-first finished run was deleted with its evidence
  * folder and its inputs, and Claude Code deleted the run's transcript on its own
  * after thirty days. The owner's setting, `coding_agent_history_retention`,
- * picks one of four answers:
+ * picks one of two answers:
  *
  *  - `standard` (the default, and the behaviour every box had before): the
  *    newest HISTORY_LIVE_RUNS_KEPT runs; an older one is deleted.
- *  - `extended`: the newest N (HISTORY_EXTENDED_LIMITS), evidence and inputs
- *    kept with them.
  *  - `everything`: no run is ever deleted unless the owner clears it, and
  *    Claude Code is told to keep its transcripts too (`cleanupPeriodDays`).
- *  - `archive`: the newest thirty as in standard; an older run is MOVED into
- *    data/coding-agent-archive/<runId>/ — record, evidence, inputs, stream log
- *    and a copy of the transcript — browsable read-only and exported as .zip.
+ *
+ * Two earlier modes, `extended` (the newest N) and `archive` (a leaving run
+ * moved into a read-only bundle under data/coding-agent-archive/), went on
+ * 2026-10-30 (SCA2 C1): both read as `everything` now — the mode that KEEPS,
+ * since a stored value must never make the box keep less than it did — and
+ * coding-agent.ts rewrites the stored value once. An archive folder an
+ * earlier build filled is left where it is: nothing reads it, nothing
+ * deletes it, and it stays on the runs' deny list.
  *
  * WHY THE RUNS FILE STAYS AT THIRTY IN EVERY MODE. It is rewritten whole on
  * every progress flush (once a second while a run works), so a thousand
  * records in it would be a thousand records serialised and written to the
- * flash every second. Runs past the newest thirty that a mode keeps are
+ * flash every second. Runs past the newest thirty that `everything` keeps are
  * "older runs": one JSON file each under data/coding-agent-history/, with a
  * small index for paging, read only when somebody asks for them. Their
  * evidence and inputs stay exactly where they were, so an older run opens on
@@ -40,25 +43,15 @@ import fs from "fs";
 import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import {
-  ARTIFACT_NAME_RE,
-  artifactKind,
-  artifactsRoot,
-  INTERPRETER_TREES,
-  safeRunId,
-  type ArtifactKind,
-} from "@/lib/coding-agent-artifacts";
+import { artifactsRoot, INTERPRETER_TREES, safeRunId } from "@/lib/coding-agent-artifacts";
 import { inputsRoot, SHARED_INPUTS_DIR_NAME } from "@/lib/coding-run-inputs";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import { processStore } from "@/lib/process-store";
-import { taskTitle } from "@/lib/task-title";
 import type { ZipSource } from "@/lib/zip-writer";
 
 // ─── The setting ─────────────────────────────────────────────────────────────
 
 export const CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY = "coding_agent_history_retention";
-/** N for the extended mode. Kept when the mode changes, so switching back restores it. */
-export const CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY = "coding_agent_history_limit";
 /**
  * What the box changed in Claude Code's settings files to keep transcripts,
  * so leaving "keep everything" can put back exactly that and nothing else.
@@ -66,10 +59,11 @@ export const CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY = "coding_agent_history_limit
  */
 export const CODING_AGENT_HISTORY_PINS_CONFIG_KEY = "coding_agent_history_transcript_pins";
 
-export const HISTORY_RETENTION_MODES = ["standard", "extended", "everything", "archive"] as const;
+export const HISTORY_RETENTION_MODES = ["standard", "everything"] as const;
 export type HistoryRetentionMode = typeof HISTORY_RETENTION_MODES[number];
-export const HISTORY_EXTENDED_LIMITS = [100, 300, 1000] as const;
-export const DEFAULT_HISTORY_EXTENDED_LIMIT = 100;
+
+/** The modes this build no longer offers, and the one each reads as. */
+const RETIRED_HISTORY_MODES: ReadonlyMap<string, HistoryRetentionMode> = new Map([["extended", "everything"], ["archive", "everything"]]);
 
 /**
  * Runs the live list holds in EVERY mode — the thirty the box always kept.
@@ -79,47 +73,28 @@ export const HISTORY_LIVE_RUNS_KEPT = 30;
 
 export interface HistoryPolicy {
   mode: HistoryRetentionMode;
-  /** The extended mode's N. Carried in every mode; only read by extended. */
-  limit: number;
 }
 
-export const STANDARD_HISTORY_POLICY: HistoryPolicy = Object.freeze({ mode: "standard", limit: DEFAULT_HISTORY_EXTENDED_LIMIT });
+export const STANDARD_HISTORY_POLICY: HistoryPolicy = Object.freeze({ mode: "standard" });
 
 export function isHistoryRetentionMode(value: unknown): value is HistoryRetentionMode {
   return typeof value === "string" && (HISTORY_RETENTION_MODES as readonly string[]).includes(value);
 }
 
-export function isHistoryExtendedLimit(value: unknown): value is number {
-  return typeof value === "number" && (HISTORY_EXTENDED_LIMITS as readonly number[]).includes(value);
-}
-
 /**
- * The policy from the two raw config values. Anything this build does not
- * know reads as the default — a hand-edited or future value must never make
- * the box keep LESS than it did, and standard is what it always did.
+ * The policy from the raw config value. A retired mode reads as the nearer
+ * of the two that remain; anything this build does not know reads as the
+ * default — a hand-edited or future value must never make the box keep LESS
+ * than it did, and standard is what it always did.
  */
-export function historyPolicyFrom(rawMode: unknown, rawLimit: unknown): HistoryPolicy {
-  return {
-    mode: isHistoryRetentionMode(rawMode) ? rawMode : "standard",
-    limit: isHistoryExtendedLimit(rawLimit) ? rawLimit : DEFAULT_HISTORY_EXTENDED_LIMIT,
-  };
+export function historyPolicyFrom(rawMode: unknown): HistoryPolicy {
+  if (isHistoryRetentionMode(rawMode)) return { mode: rawMode };
+  return { mode: (typeof rawMode === "string" && RETIRED_HISTORY_MODES.get(rawMode)) || "standard" };
 }
 
-/** Does this mode keep runs past the live thirty as older runs (rather than delete or archive them)? */
+/** Does this mode keep runs past the live thirty as older runs (rather than delete them)? */
 export function keepsOlderRuns(policy: HistoryPolicy): boolean {
-  return policy.mode === "extended" || policy.mode === "everything";
-}
-
-/**
- * How many older runs this mode keeps beside `liveCount` records in the runs
- * file: N minus what the live list already holds for extended, no limit for
- * everything, none for standard and archive (whose older runs are deleted or
- * archived — including ones kept under a mode the owner has since left).
- */
-export function olderRunsCap(policy: HistoryPolicy, liveCount: number): number {
-  if (policy.mode === "everything") return Number.POSITIVE_INFINITY;
-  if (policy.mode === "extended") return Math.max(0, policy.limit - liveCount);
-  return 0;
+  return policy.mode === "everything";
 }
 
 // ─── The disk guard ──────────────────────────────────────────────────────────
@@ -232,12 +207,6 @@ function* walkFilesSync(root: string, skipTop: ReadonlySet<string> = new Set()):
   }
 }
 
-function treeBytesSync(root: string): number {
-  let bytes = 0;
-  for (const f of walkFilesSync(root)) bytes += f.size;
-  return bytes;
-}
-
 /** What a tree weighs, walked asynchronously so the owner's page does not stall the server. */
 async function treeBytes(root: string, skipTop: ReadonlySet<string> = new Set()): Promise<{ bytes: number; truncated: boolean }> {
   const pending: string[] = [root];
@@ -267,56 +236,6 @@ async function fileBytes(file: string): Promise<number> {
   return stat?.isFile() ? stat.size : 0;
 }
 
-/**
- * Move a file or folder, across filesystems if it has to. False when there is
- * nothing to move or the move failed — the caller records the absence.
- */
-function moveInto(source: string | null, target: string): boolean {
-  if (!source) return false;
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(source);
-  } catch {
-    return false;
-  }
-  // A link where a folder or a log should be is not the run's to move: the
-  // link goes, its target stays where it is.
-  if (stat.isSymbolicLink()) {
-    fs.rmSync(source, { force: true });
-    return false;
-  }
-  try {
-    fs.renameSync(source, target);
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EXDEV") {
-      console.error(`[coding-agent] could not archive ${source}:`, err instanceof Error ? err.message : err);
-      return false;
-    }
-  }
-  try {
-    fs.cpSync(source, target, { recursive: true, verbatimSymlinks: true });
-    fs.rmSync(source, { recursive: true, force: true });
-    return true;
-  } catch (err) {
-    console.error(`[coding-agent] could not archive ${source}:`, err instanceof Error ? err.message : err);
-    return false;
-  }
-}
-
-/** Copy one REGULAR file (never through a link). False when there is none. */
-function copyRegular(source: string | null, target: string): boolean {
-  if (!source) return false;
-  try {
-    if (!fs.lstatSync(source).isFile()) return false;
-    fs.copyFileSync(source, target);
-    fs.chmodSync(target, 0o600);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** A loosely-typed run record: the fields this module reads. coding-agent.ts owns the real shape. */
 export interface HistoryRecord {
   id: string;
@@ -334,10 +253,12 @@ export interface HistoryRecord {
  * A stored team role read back: one of the roles a run could have been
  * started under, else null — a run that was not a team's, a record from
  * before the field, or a hand edit. The one reader for the live record
- * (normalizeRun in coding-agent.ts) and for the archive here.
+ * (normalizeRun in coding-agent.ts).
  */
 export function readModelRole(raw: unknown): ModelRole | null {
-  return typeof raw === "string" && (MODEL_ROLES as readonly string[]).includes(raw) ? raw as ModelRole : null;
+  // `bulk` — a worker on a task marked token-heavy, until 2026-10-30 — was a worker's run.
+  const role = raw === "bulk" ? "worker" : raw;
+  return typeof role === "string" && (MODEL_ROLES as readonly string[]).includes(role) ? role as ModelRole : null;
 }
 
 function num(v: unknown): number | null {
@@ -356,7 +277,7 @@ function projectOf(record: HistoryRecord): string {
 
 const byNewest = <T extends { startedAt: number; id: string }>(a: T, b: T) => b.startedAt - a.startedAt || (a.id < b.id ? 1 : -1);
 
-// ─── Older runs (extended, everything) ──────────────────────────────────────
+// ─── Older runs (everything) ─────────────────────────────────────────────────
 
 const OLDER_RUNS_DIR = "coding-agent-history";
 const INDEX_FILE = "index.json";
@@ -484,356 +405,6 @@ export function removeOlderRun(runId: string): void {
     // olderRunIndex heals it on the next look.
   }
   invalidateUsage();
-}
-
-// ─── The archive (archive mode) ──────────────────────────────────────────────
-
-const ARCHIVE_DIR = "coding-agent-archive";
-const RUN_FILE = "run.json";
-const META_FILE = "archive.json";
-export const ARCHIVE_EVIDENCE_DIR = "evidence";
-export const ARCHIVE_INPUTS_DIR = "inputs";
-const ARCHIVE_TRANSCRIPT = "transcript.jsonl";
-const ARCHIVE_STREAM = "stream.jsonl";
-const ARCHIVE_STDERR = "stream.err";
-
-export function archiveRoot(): string {
-  return path.join(DATA_DIR, ARCHIVE_DIR);
-}
-
-function archiveDir(runId: string): string | null {
-  const safe = safeRunId(runId);
-  if (!safe) return null;
-  const root = path.resolve(archiveRoot());
-  const dir = path.resolve(root, safe);
-  return dir.startsWith(root + path.sep) ? dir : null;
-}
-
-/** Why a run is in the archive: it fell off the live list, or the owner cleared it there. */
-export type ArchiveReason = "trimmed" | "cleared";
-
-/** One archived run, as the index keeps it. */
-export interface ArchiveEntry {
-  id: string;
-  title: string;
-  status: string;
-  startedAt: number;
-  completedAt: number | null;
-  archivedAt: number;
-  directory: string;
-  project: string;
-  bytes: number;
-  /** Top-level files in its evidence folder. */
-  evidence: number;
-  /** Files it was given. */
-  inputs: number;
-  transcript: boolean;
-  stream: boolean;
-  reason: ArchiveReason;
-  /** The team role its provider and model were chosen for; null for any other run and for a bundle archived before the field. */
-  modelRole: ModelRole | null;
-}
-
-/** Where the parts of a run are before it is archived — coding-agent.ts knows these paths. */
-export interface ArchiveSources {
-  evidenceDir: string | null;
-  inputsDir: string | null;
-  streamLog: string | null;
-  stderrLog: string | null;
-  transcript: string | null;
-}
-
-function countTop(dir: string): number {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).length;
-  } catch {
-    return 0;
-  }
-}
-
-function archiveEntryOf(raw: unknown, id: string): ArchiveEntry | null {
-  if (!raw || typeof raw !== "object") return null;
-  const e = raw as Partial<ArchiveEntry>;
-  const startedAt = num(e.startedAt);
-  if (startedAt === null) return null;
-  return {
-    id,
-    title: str(e.title),
-    status: str(e.status),
-    startedAt,
-    completedAt: num(e.completedAt),
-    archivedAt: num(e.archivedAt) ?? startedAt,
-    directory: str(e.directory),
-    project: str(e.project),
-    bytes: num(e.bytes) ?? 0,
-    evidence: num(e.evidence) ?? 0,
-    inputs: num(e.inputs) ?? 0,
-    transcript: e.transcript === true,
-    stream: e.stream === true,
-    reason: e.reason === "cleared" ? "cleared" : "trimmed",
-    modelRole: readModelRole(e.modelRole),
-  };
-}
-
-/** Rebuild an entry from a bundle whose archive.json is missing — its run.json and what is on disk. */
-function archiveEntryFromBundle(dir: string, id: string): ArchiveEntry | null {
-  const meta = archiveEntryOf(readJson(path.join(dir, META_FILE)), id);
-  if (meta) return meta;
-  const record = readJson(path.join(dir, RUN_FILE)) as HistoryRecord | undefined;
-  if (!record || typeof record !== "object") return null;
-  const startedAt = num(record.startedAt);
-  if (startedAt === null) return null;
-  let archivedAt = startedAt;
-  try { archivedAt = fs.statSync(dir).mtimeMs; } catch { /* the start will do */ }
-  return {
-    id,
-    title: taskTitle(str(record.task), 120),
-    status: str(record.status),
-    startedAt,
-    completedAt: num(record.completedAt),
-    archivedAt,
-    directory: str(record.directory),
-    project: projectOf(record),
-    bytes: treeBytesSync(dir),
-    evidence: countTop(path.join(dir, ARCHIVE_EVIDENCE_DIR)),
-    inputs: countTop(path.join(dir, ARCHIVE_INPUTS_DIR)),
-    transcript: fs.existsSync(path.join(dir, ARCHIVE_TRANSCRIPT)),
-    stream: fs.existsSync(path.join(dir, ARCHIVE_STREAM)),
-    reason: "trimmed",
-    modelRole: readModelRole(record.modelRole),
-  };
-}
-
-/**
- * The archived runs, newest first, healed against the folder the same way
- * olderRunIndex is: the bundles on disk are the truth, the index a cache of
- * their archive.json files.
- */
-export function archiveIndex(): ArchiveEntry[] {
-  const root = archiveRoot();
-  let dirents: fs.Dirent[];
-  try {
-    dirents = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const onDisk = new Set(dirents.filter((d) => d.isDirectory() && safeRunId(d.name) === d.name).map((d) => d.name));
-  const raw = readJson(path.join(root, INDEX_FILE));
-  const listed = Array.isArray(raw)
-    ? raw.flatMap((e) => {
-      const id = typeof (e as ArchiveEntry)?.id === "string" ? (e as ArchiveEntry).id : "";
-      const entry = id && safeRunId(id) === id ? archiveEntryOf(e, id) : null;
-      return entry ? [entry] : [];
-    })
-    : [];
-  const kept = listed.filter((e) => onDisk.has(e.id));
-  const known = new Set(kept.map((e) => e.id));
-  let changed = kept.length !== (Array.isArray(raw) ? raw.length : -1);
-  for (const id of onDisk) {
-    if (known.has(id)) continue;
-    const entry = archiveEntryFromBundle(path.join(root, id), id);
-    if (entry) kept.push(entry);
-    changed = true;
-  }
-  kept.sort(byNewest);
-  if (changed) {
-    try {
-      writeJsonAtomic(path.join(root, INDEX_FILE), kept);
-    } catch (err) {
-      console.error("[coding-agent] could not rewrite the archive index:", err instanceof Error ? err.message : err);
-    }
-  }
-  return kept;
-}
-
-/**
- * Move a run that is leaving the live list into the archive.
- *
- * The RECORD is written first, into a staging folder: once it is there nothing
- * after it can lose the run, and a failure before it answers null so the caller
- * falls back to what standard does. Then the evidence folder and the inputs are
- * MOVED (a rename on the same filesystem — no second copy on the flash), the
- * stream logs moved if the box still has them, and the transcript COPIED: it is
- * Claude Code's file, in Claude Code's folder, and the box does not delete it.
- * The staging folder is renamed into place last, so the archive never lists a
- * half-made bundle.
- */
-export function archiveRun(record: HistoryRecord, sources: ArchiveSources, reason: ArchiveReason, now: number = Date.now()): ArchiveEntry | null {
-  const id = safeRunId(record.id);
-  const final = id ? archiveDir(id) : null;
-  const startedAt = num(record.startedAt);
-  if (!id || !final || startedAt === null) return null;
-  const root = archiveRoot();
-  const staging = path.join(root, `.${id}.partial`);
-  try {
-    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-    fs.rmSync(staging, { recursive: true, force: true });
-    fs.mkdirSync(staging, { mode: 0o700 });
-    writeJsonAtomic(path.join(staging, RUN_FILE), record);
-  } catch (err) {
-    console.error(`[coding-agent] could not archive ${id}:`, err instanceof Error ? err.message : err);
-    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* nothing to undo */ }
-    return null;
-  }
-
-  const evidenceMoved = moveInto(sources.evidenceDir, path.join(staging, ARCHIVE_EVIDENCE_DIR));
-  const inputsMoved = moveInto(sources.inputsDir, path.join(staging, ARCHIVE_INPUTS_DIR));
-  const streamMoved = moveInto(sources.streamLog, path.join(staging, ARCHIVE_STREAM));
-  moveInto(sources.stderrLog, path.join(staging, ARCHIVE_STDERR));
-  const transcriptCopied = copyRegular(sources.transcript, path.join(staging, ARCHIVE_TRANSCRIPT));
-
-  const entry: ArchiveEntry = {
-    id,
-    title: taskTitle(str(record.task), 120),
-    status: str(record.status),
-    startedAt,
-    completedAt: num(record.completedAt),
-    archivedAt: now,
-    directory: str(record.directory),
-    project: projectOf(record),
-    bytes: 0,
-    evidence: evidenceMoved ? countTop(path.join(staging, ARCHIVE_EVIDENCE_DIR)) : 0,
-    inputs: inputsMoved ? countTop(path.join(staging, ARCHIVE_INPUTS_DIR)) : 0,
-    transcript: transcriptCopied,
-    stream: streamMoved,
-    reason,
-    modelRole: readModelRole(record.modelRole),
-  };
-  try {
-    writeJsonAtomic(path.join(staging, META_FILE), entry);
-    entry.bytes = treeBytesSync(staging);
-    writeJsonAtomic(path.join(staging, META_FILE), entry);
-    fs.rmSync(final, { recursive: true, force: true });
-    fs.renameSync(staging, final);
-  } catch (err) {
-    // The record and the moved parts are in the staging folder; say where,
-    // because nothing lists a staging folder.
-    console.error(`[coding-agent] could not finish archiving ${id}; its parts are in ${staging}:`, err instanceof Error ? err.message : err);
-    return entry;
-  }
-  // A bundle of this id archived before (a run re-archived after a restore)
-  // is replaced, so its old index entry goes; the index then adopts the new
-  // bundle from its archive.json.
-  try {
-    const raw = readJson(path.join(root, INDEX_FILE));
-    if (Array.isArray(raw)) writeJsonAtomic(path.join(root, INDEX_FILE), raw.filter((e) => (e as ArchiveEntry)?.id !== id));
-  } catch {
-    // archiveIndex heals it below
-  }
-  archiveIndex();
-  invalidateUsage();
-  return entry;
-}
-
-export function listArchive(offset: number, limit: number): { entries: ArchiveEntry[]; total: number } {
-  const all = archiveIndex();
-  return { entries: all.slice(Math.max(0, offset), Math.max(0, offset) + Math.max(0, limit)), total: all.length };
-}
-
-export interface ArchivedFile {
-  name: string;
-  bytes: number;
-}
-
-export interface ArchivedRunDetail {
-  entry: ArchiveEntry;
-  /** The run record exactly as it was when archived. */
-  record: Record<string, unknown>;
-  evidence: (ArchivedFile & { kind: ArtifactKind })[];
-  inputs: ArchivedFile[];
-  transcriptBytes: number | null;
-  streamBytes: number | null;
-}
-
-/** The top-level regular files of a folder that pass the artifact-name rule, oldest first. */
-function listTopFiles(dir: string, max: number): (ArchivedFile & { modifiedAt: number })[] {
-  let names: string[];
-  try {
-    names = fs.readdirSync(dir);
-  } catch {
-    return [];
-  }
-  const out: (ArchivedFile & { modifiedAt: number })[] = [];
-  for (const name of names) {
-    if (!ARTIFACT_NAME_RE.test(name)) continue;
-    try {
-      const stat = fs.lstatSync(path.join(dir, name));
-      if (stat.isFile()) out.push({ name, bytes: stat.size, modifiedAt: stat.mtimeMs });
-    } catch {
-      // gone between the listing and the look
-    }
-  }
-  out.sort((a, b) => a.modifiedAt - b.modifiedAt || a.name.localeCompare(b.name));
-  return out.slice(-max);
-}
-
-function sizeOf(file: string): number | null {
-  try {
-    const stat = fs.lstatSync(file);
-    return stat.isFile() ? stat.size : null;
-  } catch {
-    return null;
-  }
-}
-
-export function readArchivedRun(runId: string): ArchivedRunDetail | null {
-  const dir = archiveDir(runId);
-  if (!dir || !fs.existsSync(/* turbopackIgnore: true */ dir)) return null;
-  const id = path.basename(dir);
-  const entry = archiveIndex().find((e) => e.id === id) ?? archiveEntryFromBundle(dir, id);
-  const record = readJson(path.join(dir, RUN_FILE));
-  if (!entry || !record || typeof record !== "object") return null;
-  return {
-    entry,
-    record: record as Record<string, unknown>,
-    evidence: listTopFiles(path.join(dir, ARCHIVE_EVIDENCE_DIR), 200).map(({ name, bytes }) => ({ name, bytes, kind: artifactKind(name) })),
-    inputs: listTopFiles(path.join(dir, ARCHIVE_INPUTS_DIR), 200).map(({ name, bytes }) => ({ name, bytes })),
-    transcriptBytes: sizeOf(path.join(dir, ARCHIVE_TRANSCRIPT)),
-    streamBytes: sizeOf(path.join(dir, ARCHIVE_STREAM)),
-  };
-}
-
-/**
- * One file of an archived run's evidence, for serving — the same rules as
- * artifactFilePath: a name that passes the artifact-name rule, and a realpath
- * that is exactly that name inside that folder (a link a run planted before
- * its folder was archived resolves elsewhere and is refused).
- */
-export function archivedEvidencePath(runId: string, name: string): string | null {
-  const dir = archiveDir(runId);
-  if (!dir || !ARTIFACT_NAME_RE.test(name)) return null;
-  const evidence = path.join(dir, ARCHIVE_EVIDENCE_DIR);
-  try {
-    const realDir = fs.realpathSync(evidence);
-    const real = fs.realpathSync(path.join(evidence, name));
-    if (real !== path.join(realDir, name)) return null;
-    if (!fs.statSync(real).isFile()) return null;
-    return real;
-  } catch {
-    return null;
-  }
-}
-
-/** Delete every archived run. Answers how many there were. */
-export function clearArchive(): number {
-  const root = archiveRoot();
-  const count = archiveIndex().length;
-  try {
-    fs.rmSync(root, { recursive: true, force: true });
-  } catch (err) {
-    console.error("[coding-agent] could not clear the archive:", err instanceof Error ? err.message : err);
-    throw err;
-  }
-  invalidateUsage();
-  return count;
-}
-
-/** The files of one archived run, named `<runId>/…`, for its .zip. Null when it is not archived. */
-export function archivedRunZipSources(runId: string): ZipSource[] | null {
-  const dir = archiveDir(runId);
-  if (!dir || !fs.existsSync(/* turbopackIgnore: true */ dir)) return null;
-  const id = path.basename(dir);
-  return [...walkFilesSync(dir)].map((f) => ({ name: `${id}/${f.rel}`, file: f.abs, size: f.size, mtimeMs: f.mtimeMs }));
 }
 
 // ─── Claude Code's own transcripts ───────────────────────────────────────────
@@ -1020,7 +591,6 @@ export interface HistoryUsage {
   evidence: number;
   inputs: number;
   streams: number;
-  archive: number;
   /** Claude Code's transcripts for every project — outside data/, so not in `total`. */
   transcripts: number;
   /** Everything under data/ that is run history. */
@@ -1047,25 +617,23 @@ export async function historyUsage(paths: { runsFile: string; streamsDir: string
   if (cache.usage && now - cache.usage.computedAt < USAGE_TTL_MS) return cache.usage;
   if (cache.pending) return cache.pending;
   const work = (async () => {
-    const [runsFile, olderRuns, evidence, inputs, streams, archive, ...transcripts] = await Promise.all([
+    const [runsFile, olderRuns, evidence, inputs, streams, ...transcripts] = await Promise.all([
       fileBytes(paths.runsFile),
       treeBytes(olderRunsRoot()),
       treeBytes(artifactsRoot()),
       treeBytes(inputsRoot(), new Set([SHARED_INPUTS_DIR_NAME])),
       treeBytes(paths.streamsDir),
-      treeBytes(archiveRoot()),
       ...[...new Set(paths.transcriptDirs)].map((d) => treeBytes(d)),
     ]);
-    const trees = [olderRuns, evidence, inputs, streams, archive, ...transcripts];
+    const trees = [olderRuns, evidence, inputs, streams, ...transcripts];
     const usage: HistoryUsage = {
       runsFile,
       olderRuns: olderRuns.bytes,
       evidence: evidence.bytes,
       inputs: inputs.bytes,
       streams: streams.bytes,
-      archive: archive.bytes,
       transcripts: transcripts.reduce((sum, t) => sum + t.bytes, 0),
-      total: runsFile + olderRuns.bytes + evidence.bytes + inputs.bytes + streams.bytes + archive.bytes,
+      total: runsFile + olderRuns.bytes + evidence.bytes + inputs.bytes + streams.bytes,
       truncated: trees.some((t) => t.truncated),
       computedAt: Date.now(),
     };
@@ -1091,7 +659,6 @@ export async function historyUsage(paths: { runsFile: string; streamsDir: string
  *   evidence/<runId>/…           evidence folders of the live and older runs
  *   inputs/<runId>/…             the files those runs were given
  *   transcripts/<runId>.jsonl    their Claude Code transcripts, where they still exist
- *   archive/<runId>/…            the archive, bundle by bundle
  *
  * Lazy: the zip writer pulls from this while it sends, so a large history is
  * walked as fast as the owner downloads it rather than all up front.
@@ -1122,11 +689,5 @@ export async function* historyExportSources(input: {
     } catch {
       // Claude Code has already let it go
     }
-  }
-  const archive = archiveRoot();
-  for (const f of walkFilesSync(archive, new Set([INDEX_FILE]))) {
-    // A staging folder is a bundle still being made (or one that failed): not the archive.
-    if (f.rel.startsWith(".")) continue;
-    yield { name: `archive/${f.rel}`, file: f.abs, size: f.size, mtimeMs: f.mtimeMs };
   }
 }

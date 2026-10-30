@@ -107,10 +107,9 @@ describe("registration", () => {
   });
 
   it("offers no tool for an owner's switch, nor any merge into the owner's project", () => {
-    // enable and the pipeline default are owner-session routes: a tool for
-    // either could only be refused, and would make the owner's answer
-    // temporary if it were not. A merge of a run's branch into the project
-    // folder is not a route at all any more (the settle does its own,
+    // enable is an owner-session route: a tool for it could only be refused,
+    // and would make the owner's answer temporary if it were not. A merge of
+    // a run's branch into the project folder is not a route at all any more (the settle does its own,
     // conservatively), and no tool may grow one.
     const names = harness().names();
     for (const word of ["enable", "merge", "promote", "permission", "toggle"]) {
@@ -131,7 +130,6 @@ describe("coding_run_list", () => {
           deliverable: { kind: "paths", paths: ["index.html"] },
           deliverableCheck: { ok: false, missing: "index.html was not created", checkedAt: 1 },
           attempts: [{ startedAt: 1, endedAt: 2, reason: "missing" }, { startedAt: 3, endedAt: null, reason: null }],
-          completionAttempts: 3,
           messages: [{ at: 1, text: "use blue", deliveredAt: null }],
         },
         { ...RUN, id: "run-live0001", status: "running", completedAt: null, unit: "clawbox-run-run-live0001.scope" },
@@ -149,7 +147,7 @@ describe("coding_run_list", () => {
       project: "site",
       branch: "clawbox/run-k3x9q2ab",
       copy: "kept, not merged home yet",
-      attempts: "2 of 3",
+      attempts: 2,
       deliverable: { kind: "files", files: ["index.html"], met: false, missing: "index.html was not created" },
       messages_waiting: 1,
     });
@@ -492,20 +490,14 @@ describe("coding_project_status", () => {
     expect(parsed.note).toMatch(/could not be read/);
   });
 
-  it("adds a named project's runs and pipeline default", async () => {
+  it("adds a named project's runs", async () => {
     apiGet.mockResolvedValue(PROJECTS);
-    apiTry.mockImplementation(async (path: string) => {
-      if (path === "/setup-api/coding-agent/runs") return { runs: [RUN] };
-      if (path === "/setup-api/coding-agent/pipeline") return { scope: "site", enabled: true };
-      return null;
-    });
+    apiTry.mockImplementation(async (path: string) => (path === "/setup-api/coding-agent/runs" ? { runs: [RUN] } : null));
     const on = await harness().call("coding_project_status", { project: "site" });
     if (on.isError) throw new Error("expected the project");
     const detail = JSON.parse(on.text) as Record<string, unknown>;
-    expect(detail).toMatchObject({ project: "site", delivery_pipeline_by_default: true });
+    expect(detail).toMatchObject({ project: "site" });
     expect((detail.runs as { run_id: string }[]).map((r) => r.run_id)).toEqual([RUN.id]);
-    expect(apiTry).toHaveBeenCalledWith("/setup-api/coding-agent/pipeline", expect.objectContaining({ query: { directory: "/home/clawbox/projects/site" } }));
-
   });
 
   it("says how many of a named project's runs it left out, by count or by size", async () => {
