@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
  *                            block instead of polling every few seconds.
  *
  * GET ?slim=1              → the list with every SETTLED run's free text
- *                            emptied (progress, result text, pipeline, allow
+ *                            emptied (progress, result text, allow
  *                            rules, denials) and `slim: true` on it — what the
  *                            Coding Agent app's 5 s live poll reads, merged
  *                            over the full records it holds

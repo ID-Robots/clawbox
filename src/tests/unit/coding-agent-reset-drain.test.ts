@@ -13,8 +13,8 @@
  * harness process still going, holding the previous test's module copy and the
  * shared hoisted mocks with it.
  *
- * What that cost: `coding-pipeline-driver.test.ts` ("the whole flow, end to
- * end") and `coding-agent-durable-completion.test.ts` went red in CI's full run
+ * What that cost: the delivery pipeline's driver test (since deleted) and
+ * `coding-agent-durable-completion.test.ts` went red in CI's full run
  * and green on their own — a leaked `announceCodingAgent` landing in the next
  * test's freshly cleared spy. Reproduced here on demand by asking the hook the
  * question directly instead of waiting for the machine to be slow enough.

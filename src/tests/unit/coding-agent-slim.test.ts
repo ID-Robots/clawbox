@@ -14,7 +14,6 @@ const SETTLED = {
   progress: ["Read index.html", "Wrote the toggle"],
   progressAt: [1, 2],
   resultText: "A long closing message",
-  pipeline: { phase: "done" },
   allowRules: ["Bash(git *)"],
   deniedActions: ["rm -rf"],
   denials: [{ tool: "Bash", at: 3 }],
@@ -37,7 +36,7 @@ const TEAM = {
 describe("slimRun", () => {
   it("empties a settled run's free text and marks it slim, keeping everything else", () => {
     const slim = slimRun(SETTLED);
-    expect(slim).toEqual({ ...SETTLED, slim: true, progress: [], progressAt: [], resultText: null, pipeline: null, allowRules: [], deniedActions: [], denials: [] });
+    expect(slim).toEqual({ ...SETTLED, slim: true, progress: [], progressAt: [], resultText: null, allowRules: [], deniedActions: [], denials: [] });
     expect(slim.summary).toBe(SETTLED.summary);
     expect(slim.pr).toEqual(SETTLED.pr);
     // The caller's record is left alone.

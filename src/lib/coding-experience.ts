@@ -22,8 +22,7 @@
  *
  * WHY STRICT. Every string here ends up in the instructions a model follows,
  * so a malformed request is refused at the door with a stable code rather than
- * repaired — the rule `readPipelineInput` and `readDeliverableInput` already
- * hold callers to. A rule is one line, so a line break inside one would let a
+ * repaired — the rule `readDeliverableInput` already holds callers to. A rule is one line, so a line break inside one would let a
  * caller forge a line of the prompt the box never wrote; the skill is a
  * document, so it may break lines but may not carry other control characters.
  * Neither may carry the block's own delimiters, which is what keeps the
@@ -83,7 +82,7 @@ export type ExperienceInputRefusal =
 
 /**
  * What a caller sent: nothing, a refusal, or the lessons. A result rather than
- * a throw, the shape `readPipelineInput` answers in, so `startRun` decides how
+ * a throw, the shape `readDeliverableInput` answers in, so `startRun` decides how
  * a refusal travels.
  */
 export type ExperienceInputResult =

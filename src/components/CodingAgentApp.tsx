@@ -38,8 +38,6 @@ import { formatBytes } from "@/lib/format-bytes";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
-import CodingRunPipelineCard from "./CodingRunPipelineCard";
-import type { PipelineState } from "@/lib/coding-pipeline";
 import {
   OPEN_CODING_RUN_EVENT,
   dispatchOpenApp,
@@ -181,9 +179,6 @@ interface Run {
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
-  /** The delivery pipeline this run is the build stage of. Absent on a run
-   *  without one, and on a server that predates the feature. */
-  pipeline?: PipelineState | null;
   /** The run's evidence folder — screenshots, test output and its report.md.
    *  `markdown` is the kind that opens rendered in the app; every other
    *  non-image opens as the plain text the route serves it as. */
@@ -1101,32 +1096,6 @@ export default function CodingAgentApp() {
       setError(err instanceof Error ? err.message : t("codingAgent.prFailed"));
     } finally {
       setBusy(null);
-    }
-  };
-
-  /**
-   * The two things a person still does to a DELIVERY PIPELINE: press the
-   * production button it is waiting on, and call the rest of it off.
-   *
-   * One helper for both, because the route is the same and the card wants the
-   * same answer from each: the REASON on refusal, null when it worked. The
-   * confirmation lives in the card, which is where the sentence about what the
-   * world will see is; `confirm: true` is this box's echo of that gesture.
-   */
-  const steerPipeline = async (runId: string, action: "approve_production" | "stop"): Promise<string | null> => {
-    try {
-      const res = await fetch("/setup-api/coding-agent/pipeline", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId, action, ...(action === "approve_production" ? { confirm: true } : {}) }),
-      });
-      if (!res.ok) return await readError(res, String(res.status));
-      // The record now carries the new stage; nothing else would make the page
-      // look again inside the poll interval.
-      await load();
-      return null;
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err);
     }
   };
 
@@ -2844,23 +2813,6 @@ export default function CodingAgentApp() {
                   runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
                 />
               )}
-              {/* ABOVE the deployment card: the pipeline is the authority on
-                  whether this run is actually finished, and the deployment
-                  below is one of its stages. On the STANDALONE page the two
-                  buttons are left off — it has no project context and a
-                  production deploy is not something to offer from a page
-                  opened in a tab with nothing else on it. */}
-              {run.pipeline && (
-                <CodingRunPipelineCard
-                  runId={run.id}
-                  pipeline={run.pipeline}
-                  t={t}
-                  artifactUrl={(name) => artifactUrl(run.id, name)}
-                  onApproveProduction={standalone ? undefined : () => steerPipeline(run.id, "approve_production")}
-                  onStopPipeline={standalone ? undefined : () => steerPipeline(run.id, "stop")}
-                />
-              )}
-
               {isLive(run.status) && summaryCard}
 
               {/* The plan, as the run last wrote it: open while the run works

@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
-import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
+import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline?, inputs?, experience?, fixCi? } → start a coding run.
+ * deliverable?, inputs?, experience?, fixCi? } → start a coding run.
  *
  * `fixCi: true` with `resumeRunId` is a "Fix CI" continuation: the run named
  * had its pull request fail its checks (the record's `ci`), and the box
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
 
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
-    provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
+    provider?: unknown; model?: unknown; deliverable?: unknown;
     inputs?: unknown; experience?: unknown; fixCi?: unknown;
   };
   try {
@@ -107,13 +107,6 @@ export async function POST(request: Request) {
       // `command` deliverable is allowed; it is derived above from the owner's
       // cookie, never from the body.
       deliverable: body.deliverable,
-      // Unvalidated for the same reason and by the same rule: `startRun` reads
-      // it through `readPipelineInput`, which throws `invalid` with a stable
-      // code rather than repairing, so a caller learns its request was refused
-      // instead of getting a pipeline that checks something else. Absent, the
-      // PROJECT's own default decides — which is why `undefined` has to survive
-      // this line rather than being normalised to null.
-      pipeline: body.pipeline,
       // Absolute paths of files this run is to be GIVEN. Passed through
       // unvalidated for the reason `deliverable` is: `startRun` reads the list
       // through the one reader and judges each path on its own, answering a
@@ -121,7 +114,7 @@ export async function POST(request: Request) {
       // The assistant needs this because it writes its generated media inside
       // its own state directory, which no run may read.
       inputs: body.inputs,
-      // Unvalidated for the reason `pipeline` is: `startRun` reads it through
+      // Unvalidated for the reason `deliverable` is: `startRun` reads it through
       // `readExperienceInput`, which refuses with a stable code, so nothing a
       // caller sent reaches the run's prompt before that reader has passed it.
       experience: body.experience,
@@ -136,7 +129,7 @@ export async function POST(request: Request) {
       // caller can tell "that pair is not on this box" from "that folder is not
       // allowed" — both are `kind: "invalid"`, and the MCP tool advises on the
       // wrong argument without it. Anything else answers exactly as before.
-      const code = err instanceof ProviderChoiceError || err instanceof PipelineChoiceError || err instanceof ExperienceChoiceError
+      const code = err instanceof ProviderChoiceError || err instanceof ExperienceChoiceError
         ? { code: err.code }
         : {};
       return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
