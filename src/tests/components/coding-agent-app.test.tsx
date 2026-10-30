@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentApp, { installedAppId } from "@/components/CodingAgentApp";
-import { CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT, NEW_APP_EVENT, OPEN_CODING_RUN_EVENT } from "@/lib/ui-events";
+import { CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT, NEW_APP_EVENT, OPEN_CHAT_EVENT, OPEN_CODING_RUN_EVENT } from "@/lib/ui-events";
 
 // One stable `t`, as the real hook provides (it is memoised on the locale
 // table) — a fresh function per render would be a different contract.
@@ -1233,10 +1233,12 @@ describe("CodingAgentApp", () => {
       fireEvent.click(screen.getByTestId("coding-agent-live-tab-terminal"));
       const terminal = await screen.findByTestId("coding-agent-run-terminal");
       expect(within(terminal).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
-      // The timeline sits ABOVE the summary while the run works too, live.
+      // The timeline is live; a run with no closing message yet draws no
+      // Summary card (2026-10-30: the result is a settled run's first card,
+      // and an empty one on a live page was a card saying nothing).
       const timeline = screen.getByTestId("coding-agent-run-activity");
       expect(timeline).toHaveAttribute("data-live", "true");
-      expect(timeline.compareDocumentPosition(screen.getByText(t("codingAgent.summaryTitle"))) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(screen.queryByText(t("codingAgent.summaryTitle"))).toBeNull();
       // The floating "Live view" is gone from the page's controls.
       expect(screen.queryByTestId("coding-agent-live-run-k3x9q2ab")).toBeNull();
       unmount();
@@ -1348,9 +1350,13 @@ describe("CodingAgentApp", () => {
       const tokens = screen.getByTestId("coding-agent-stat-tokens");
       expect(tokens).toHaveAttribute("data-value", "26000");
       expect(tokens.textContent).toBe("26k");
-      // The chart is up for a live run even before a helper is out — and the
+      // No chart for a run that sent no helper out (2026-10-30: a one-node
+      // chart in a full-width card was "the space in the run diagram is
+      // almost all empty"); the Now line is what the page opens on. And the
       // Steps tile prints no 0 while the CLI has not reported its turns.
-      expect(screen.getByTestId("coding-agent-run-diagram")).toBeInTheDocument();
+      expect(screen.queryByTestId("coding-agent-run-diagram")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-run-helpers")).toBeNull();
+      expect(screen.getByTestId("coding-agent-run-now")).toBeInTheDocument();
       expect(screen.getByTestId("coding-agent-stat-steps").textContent).toContain(t("codingAgent.statNone"));
       expect(screen.getByTestId("coding-agent-stat-steps").textContent).not.toContain("0");
     });
@@ -1372,7 +1378,8 @@ describe("CodingAgentApp", () => {
       // The chart draws the run itself and its three helpers — the one still
       // out at work, the refused one rejected, the explorer done. Nothing
       // lists them a second time: the Agents card under it is gone.
-      const chart = await screen.findByTestId("coding-agent-run-diagram");
+      const helpers = await screen.findByTestId("coding-agent-run-helpers");
+      const chart = within(helpers).getByTestId("coding-agent-run-diagram");
       expect(chart).toHaveAttribute("data-shape", "run");
       const nodes = within(chart).getAllByTestId("coding-agent-node");
       expect(nodes.map((n) => [n.getAttribute("data-role"), n.getAttribute("data-state")])).toEqual([
@@ -1380,9 +1387,17 @@ describe("CodingAgentApp", () => {
       ]);
       expect(nodes[0]).toHaveAttribute("data-current", "true");
       expect(screen.queryByTestId("coding-agent-run-agents")).toBeNull();
+      // One column (2026-10-30): no rail, no grid, the figures once as tiles,
+      // the looked-up facts in a closed Details fold — and the stale id of the
+      // old details row is still nowhere.
+      expect(screen.queryByTestId("coding-agent-run-rail")).toBeNull();
+      expect(screen.getAllByTestId("coding-agent-run-figures")).toHaveLength(1);
+      expect(screen.getByTestId("coding-agent-run-more")).not.toHaveAttribute("open");
       expect(screen.queryByTestId("coding-agent-run-details")).toBeNull();
-      // The solo run's figures are the rail's tiles alone: no chips over the chart.
+      // The solo run's figures are the page's tiles alone: no chips and no
+      // legend over the chart.
       expect(within(chart).queryByTestId("coding-agent-diagram-figures")).toBeNull();
+      expect(within(chart).queryByTestId("coding-agent-run-diagram-legend")).toBeNull();
       // A helper's errand opens on its node, where the roster row used to say it.
       fireEvent.click(nodes[3]);
       expect(within(screen.getByTestId("coding-agent-node-panel")).getByTestId("coding-agent-node-panel-now")).toHaveTextContent("Review the toggle");
@@ -1395,11 +1410,13 @@ describe("CodingAgentApp", () => {
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
       const figures = await screen.findByTestId("coding-agent-run-figures");
-      expect(within(figures).getByTestId("coding-agent-stat-commit").textContent).toContain(t("codingAgent.statNone"));
+      const details = screen.getByTestId("coding-agent-run-more");
+      expect(within(details).getByTestId("coding-agent-stat-commit").textContent).toContain(t("codingAgent.statNone"));
       expect(figures.textContent).not.toContain("—");
-      // Nothing was refused, so the rail carries no figure about it — the card
-      // below is where a refusal is spelled out.
-      expect(within(figures).queryByTestId("coding-agent-stat-denied")).toBeNull();
+      expect(details.textContent).not.toContain("—");
+      // Nothing was refused, so Details carries no figure about it — the
+      // refusal card is where a refusal is spelled out.
+      expect(within(details).queryByTestId("coding-agent-stat-denied")).toBeNull();
     });
 
     it("opens a run's own page from its row: figures, summary, files and evidence, and Back returns", async () => {
@@ -1422,23 +1439,27 @@ describe("CodingAgentApp", () => {
       const page = await screen.findByTestId("coding-agent-run-page");
       expect(page).toHaveAttribute("data-run-id", "run-k3x9q2ab");
       expect(screen.getByTestId("coding-agent-run-title").textContent).toBe("Add a dark mode toggle");
+      // The four figures a run is watched BY are tiles; the ones looked up
+      // once — the models, the commit — are in the closed Details fold.
       const figures = screen.getByTestId("coding-agent-run-figures").textContent ?? "";
       expect(figures).toContain("1.3M");
-      expect(figures).toContain("caea00d");
-      expect(figures).toContain("deepseek-v4-pro[1m] + deepseek-v4-flash");
-      // The helpers are named one row each in the Agents card now, so the rail
-      // no longer repeats them as a breakdown nobody could act on.
+      expect(figures).not.toContain("deepseek");
+      const details = screen.getByTestId("coding-agent-run-more").textContent ?? "";
+      expect(details).toContain("caea00d");
+      expect(details).toContain("deepseek-v4-pro[1m] + deepseek-v4-flash");
+      // The helpers are nodes of the chart, so nothing repeats them as a
+      // breakdown nobody could act on.
+      expect(details).not.toContain("2× explorer");
       expect(figures).not.toContain("2× explorer");
       expect(screen.getByTestId("coding-agent-summary").textContent).toContain("Added the toggle");
-      // The rail carries the COUNT, not the roster. A run that touched 29
-      // files filled the column with chips and told the reader nothing the
-      // figure did not — and the block repeated the tile's own label
-      // verbatim ("Files changed" was both `statFiles` and `filesTitle`).
-      // Not asserted as "the page never names a file": the summary above
-      // says "Added the toggle in index.html", and that sentence is the
-      // useful mention — it is the roster in the rail that went.
+      // The settled page says WHAT CHANGED: the files, the commit and the way
+      // to its diff — under the result, as the owner ordered the page.
       expect(screen.getByTestId("coding-agent-stat-files").textContent).toContain("1");
-      expect(screen.queryByTestId("coding-agent-run-files")).toBeNull();
+      const changed = screen.getByTestId("coding-agent-run-changed");
+      expect(within(changed).getByTestId("coding-agent-run-changed-files").textContent).toContain("index.html");
+      expect(within(changed).getByTestId("coding-agent-run-commit").textContent).toContain("caea00d");
+      expect(within(changed).getByTestId("coding-agent-run-see-diff")).toBeInTheDocument();
+      expect(screen.getByTestId("coding-agent-summary").compareDocumentPosition(changed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(screen.getByTestId("coding-agent-run-plan").textContent).toContain("Testing it");
       expect(screen.getByTestId("coding-agent-denied").textContent).toContain("curl http://example");
       expect(screen.getByRole("link", { name: "after.png" })).toHaveAttribute("href", expect.stringContaining("file=after.png"));
@@ -1450,8 +1471,10 @@ describe("CodingAgentApp", () => {
       // file itself is a plain link in the evidence list.
       expect(screen.queryByTestId("coding-agent-run-report")).toBeNull();
       expect(screen.getByRole("link", { name: "report.md" })).toHaveAttribute("href", expect.stringContaining("file=report.md"));
-      // The project it belongs to is one tap away, and Back is the way out.
-      expect(screen.getByTestId("coding-agent-run-project").textContent).toContain(SITE_PROJECT.name);
+      // The project it belongs to is the header's title, one tap away, and
+      // Back is the way out; the pill that repeated it in the status row is gone.
+      expect(screen.getByTestId("coding-agent-crumb-project").textContent).toContain(SITE_PROJECT.name);
+      expect(screen.queryByTestId("coding-agent-run-project")).toBeNull();
       fireEvent.click(screen.getByTestId("coding-agent-run-back"));
       expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
       expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
@@ -2267,11 +2290,13 @@ describe("the workspace, the breadcrumb and the live view", () => {
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
     const card = await screen.findByTestId("coding-agent-live-card");
-    // The timeline, first and selected, with the chat's working line — the
-    // dots alone; the tokens and the clock are the rail's tiles, once each.
+    // The timeline, first and selected. The chat's working line — the dots
+    // alone — sits on the Now line above the card (2026-10-30); the tokens
+    // and the clock are the page's tiles, once each.
     expect(card).toHaveAttribute("data-tab", "timeline");
     expect(screen.getByTestId("coding-agent-live-tab-timeline")).toHaveAttribute("aria-selected", "true");
-    const working = within(card).getByTestId("coding-agent-run-working");
+    expect(within(card).queryByTestId("coding-agent-run-working")).toBeNull();
+    const working = within(screen.getByTestId("coding-agent-run-now")).getByTestId("coding-agent-run-working");
     expect(working.textContent).toContain(t("codingAgent.chatWorking"));
     expect(working.textContent).not.toContain(t("codingAgent.tokensWord"));
     expect(screen.getByTestId("coding-agent-stat-tokens").textContent).toBe("332k");
@@ -2281,7 +2306,9 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
     expect(screen.queryByTestId("coding-agent-browser-preview")).toBeNull();
     expect(screen.queryByTestId("coding-agent-live-row")).toBeNull();
-    // The terminal tab: the transcript, and Open in Terminal beside the tabs.
+    // Open in Terminal is one of the page's controls, whichever tab is up.
+    expect(screen.getByTestId("coding-agent-run-terminal-open")).toBeInTheDocument();
+    // The terminal tab: the transcript.
     fireEvent.click(screen.getByTestId("coding-agent-live-tab-terminal"));
     expect(card).toHaveAttribute("data-tab", "terminal");
     expect(screen.getByTestId("coding-agent-run-terminal")).not.toHaveAttribute("hidden");
@@ -2566,7 +2593,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
     const figures = await screen.findByTestId("coding-agent-run-figures");
     // Nothing in the grid is cut with an ellipsis any more…
     expect(figures.querySelectorAll(".truncate")).toHaveLength(0);
-    const model = within(figures).getByText("deepseek-v4-pro[1m]");
+    const details = screen.getByTestId("coding-agent-run-more");
+    expect(details.querySelectorAll(".truncate")).toHaveLength(0);
+    const model = within(details).getByText("deepseek-v4-pro[1m]");
     expect(model.className).toContain("break-words");
     // …and the hint line, which never had one, carries the whole text on hover.
     const hint = within(figures).getByText(t("codingAgent.thinking", { n: 28_854 }));
@@ -2805,7 +2834,6 @@ describe("CodingAgentApp — the run page's honesty", () => {
       const page = await screen.findByTestId("coding-agent-run-page");
       expect(within(page).getByTestId("coding-agent-run-project-gone"))
         .toHaveTextContent(t("codingAgent.delete.projectGone", { folder: "site" }));
-      expect(within(page).queryByTestId("coding-agent-run-project")).toBeNull();
       // The header names the run itself, there being no project to name.
       expect(screen.queryByTestId("coding-agent-crumb-project")).toBeNull();
       expect(within(screen.getByTestId("coding-agent-header")).getByText("Add a dark mode toggle")).toBeInTheDocument();
@@ -2817,7 +2845,7 @@ describe("CodingAgentApp — the run page's honesty", () => {
       stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       const page = await openRunFromProject(RUN.id);
       expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
-      expect(within(page).getByTestId("coding-agent-run-project")).toBeInTheDocument();
+      expect(screen.getByTestId("coding-agent-crumb-project")).toHaveTextContent(SITE_PROJECT.name);
     });
 
     it("does not call the Test-harness scratch project removed", async () => {
@@ -3038,6 +3066,92 @@ describe("the live poll", () => {
     expect(runsReads()).toBe(before + 1);
     expect(reads("/setup-api/coding-agent/git")).toBe(2);
     expect(reads("/setup-api/coding-agent/projects")).toBe(2);
+  });
+});
+
+/**
+ * The run page as ONE column (2026-10-30): the chat composes, the app shows.
+ * What is pinned: a live run steers through the chat composer — a draft, not
+ * a send; a settled run offers Continue in the chat, which opens the Create
+ * card on the run's project; and the page carries no text input at all.
+ */
+describe("the run page's hand-offs to the chat", () => {
+  const LIVE_RUN = { ...RUN, status: "running", completedAt: null, summary: null, sessionId: "sess-1", transcriptPath: "/srv/clawbox/transcripts/run-k3x9q2ab.jsonl" };
+
+  it("drafts 'Tell coding run <id>: ' into the chat composer from Message in chat, and sends nothing itself", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE_RUN], { projects: [SITE_PROJECT] });
+    const opens: unknown[] = [];
+    const sends: unknown[] = [];
+    const onOpen = (e: Event) => opens.push((e as CustomEvent).detail);
+    const onSend = (e: Event) => sends.push((e as CustomEvent).detail);
+    window.addEventListener(OPEN_CHAT_EVENT, onOpen);
+    window.addEventListener(CHAT_MESSAGE_EVENT, onSend);
+    try {
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(page).toHaveAttribute("data-live", "true");
+      // No text box anywhere on the page: the message box is gone.
+      expect(page.querySelectorAll("input, textarea, select")).toHaveLength(0);
+      expect(screen.queryByTestId("coding-agent-run-message-input")).toBeNull();
+      const message = within(screen.getByTestId("coding-agent-run-actions")).getByTestId("coding-agent-run-message");
+      expect(message.textContent).toContain(t("codingAgent.messageInChat"));
+      fireEvent.click(message);
+      expect(opens).toEqual([{ draft: t("codingAgent.messageDraft", { id: RUN.id }) }]);
+      expect(sends).toEqual([]);
+      expect(posts.filter((p) => p.url.includes("/message"))).toEqual([]);
+      // A live run has nothing to continue yet.
+      expect(screen.queryByTestId("coding-agent-run-continue-chat")).toBeNull();
+    } finally {
+      window.removeEventListener(OPEN_CHAT_EVENT, onOpen);
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onSend);
+    }
+  });
+
+  it("offers a settled run Continue in the chat — the Create card on its project — and no Message, no inputs", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    const cards: unknown[] = [];
+    const onCard = (e: Event) => cards.push((e as CustomEvent).detail);
+    window.addEventListener(NEW_APP_EVENT, onCard);
+    try {
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(page).toHaveAttribute("data-live", "false");
+      expect(page.querySelectorAll("input, textarea, select")).toHaveLength(0);
+      expect(screen.queryByTestId("coding-agent-run-message")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-run-now")).toBeNull();
+      const cont = screen.getByTestId("coding-agent-run-continue-chat");
+      expect(cont.textContent).toContain(t("codingAgent.continueInChat"));
+      fireEvent.click(cont);
+      expect(cards).toEqual([{ project: SITE_PROJECT.directory }]);
+    } finally {
+      window.removeEventListener(NEW_APP_EVENT, onCard);
+    }
+  });
+
+  it("puts why it stopped directly under the status on a failed run, and the refusals of a finished one in Details", async () => {
+    const failed = { ...RUN, id: "run-failed01", status: "failed", error: "The model refused.", deniedActions: ["Bash: rm -rf /"] };
+    const done = { ...RUN, id: "run-done0001", deniedActions: ["Bash: curl http://example"] };
+    stubFetch({ enabled: true, readiness: READY }, [failed, done], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-failed01"));
+    let page = await screen.findByTestId("coding-agent-run-page");
+    const error = within(page).getByTestId("coding-agent-run-error");
+    const head = within(page).getByTestId("coding-agent-run-head");
+    // Error right after the status block, before anything else.
+    expect(head.nextElementSibling).toBe(error);
+    expect(within(screen.getByTestId("coding-agent-run-more")).queryByTestId("coding-agent-denied")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-done0001"));
+    page = await screen.findByTestId("coding-agent-run-page");
+    expect(within(page).queryByTestId("coding-agent-run-error")).toBeNull();
+    // It finished with one refusal: that is in the fold, not under the status.
+    expect(within(screen.getByTestId("coding-agent-run-more")).getByTestId("coding-agent-denied")).toBeInTheDocument();
   });
 });
 

@@ -55,6 +55,26 @@ function stubFetch(answer: (url: string, method: string) => Response) {
 }
 
 describe("the run page's refusal panel", () => {
+  const INPUTS_DIR = "/srv/clawbox/data/coding-agent-inputs/run-k3x9q2ab";
+  const INPUTS_SHARED = "/srv/clawbox/data/coding-agent-inputs/shared";
+  const protectedRead = [{ text: "Read: /srv/clawbox/.openclaw/media/chart.png", rule: null, refusal: "protected" }];
+
+  it("names the folders a run may read, so the owner knows where the file should have gone", () => {
+    stubFetch(() => json({}));
+    render(<CodingRunDenials runId="run-k3x9q2ab" inputs={{ dir: INPUTS_DIR, shared: INPUTS_SHARED }} denials={protectedRead} resumable={false} />);
+    const note = screen.getByTestId("coding-agent-denied-inputs");
+    expect(note).toHaveTextContent(INPUTS_DIR);
+    expect(note).toHaveTextContent(INPUTS_SHARED);
+  });
+
+  it("leaves the note off a record that cannot say where its inputs are", () => {
+    stubFetch(() => json({}));
+    render(<CodingRunDenials runId="run-k3x9q2ab" denials={protectedRead} resumable={false} />);
+    expect(screen.queryByTestId("coding-agent-denied-inputs")).toBeNull();
+    // The panel itself is unchanged.
+    expect(screen.getByTestId("coding-agent-denied")).toBeTruthy();
+  });
+
   it("draws nothing at all when a run was refused nothing", () => {
     stubFetch(() => json({}));
     const { container } = render(<CodingRunDenials runId="run-1" denials={[]} resumable={false} />);

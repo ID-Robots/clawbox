@@ -4,9 +4,44 @@ import { useId, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { renderText } from "@/lib/chat-markdown";
 import { copyToClipboard } from "@/lib/clipboard";
+import { formatBytes } from "@/lib/format-bytes";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { ClawKeepModalPortal } from "./clawkeep-ui";
-import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
+import { BTN_PRIMARY, BTN_SECONDARY, SECTION_LABEL } from "./coding-agent-ui";
+
+/**
+ * The files a run was GIVEN, and where they live — as the run record carries
+ * them. The assistant writes what it generates into its own state folder,
+ * which sits inside a credential store no run may read; the box copies what a
+ * run was handed out into a folder it can. Invisible machinery until something
+ * is missing — then the owner's question is "where do I put the file?", and
+ * the folder named here is the answer. A record written before the hand-over
+ * existed has no `inputs` at all, and the dialog says nothing about them.
+ */
+export interface RunInputs {
+  dir: string;
+  shared: string;
+  files?: { name: string; bytes: number }[];
+  refused?: { name: string; code: string }[];
+}
+
+/** The refusal codes the device stores, worded from the catalogue. Folded into
+ *  four sentences rather than one per code: "not absolute" and "outside the
+ *  folders this box copies from" are one fact to a reader — the path is not
+ *  somewhere the box takes files from. */
+const REFUSAL_KEYS: Record<string, string> = {
+  not_absolute: "codingAgent.inputsRefusedLocation",
+  outside_roots: "codingAgent.inputsRefusedLocation",
+  not_a_file: "codingAgent.inputsRefusedMissing",
+  too_large: "codingAgent.inputsRefusedSize",
+  too_many: "codingAgent.inputsRefusedSize",
+  copy_failed: "codingAgent.inputsRefusedFailed",
+};
+
+/** Whether a record has anything to say about its inputs: a file handed over, or one refused. */
+export function hasRunInputs(inputs: RunInputs | null | undefined): inputs is RunInputs {
+  return Boolean(inputs && typeof inputs.dir === "string" && inputs.dir && ((inputs.files?.length ?? 0) > 0 || (inputs.refused?.length ?? 0) > 0));
+}
 
 /**
  * The whole task a run was given, in a dialog of its own.
@@ -21,16 +56,25 @@ import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
  * behind inert), the text rendered as Markdown through the chat's renderer —
  * headings, lists, code and links become what they are, never HTML — and a
  * Copy for the owner who wants to paste it somewhere else.
+ *
+ * Under the task, the files the run was GIVEN (the "Inputs for this run" card
+ * the page used to draw, folded in here on 2026-10-30 — the run page is one
+ * column of what the run did, and what it was handed belongs with what it was
+ * told): the list, the refusals worded from the catalogue, and the two folders.
  */
-export default function CodingTaskDialog({ title, task, runId, onClose }: {
+export default function CodingTaskDialog({ title, task, runId, inputs = null, onClose }: {
   /** The first line, as the page draws it. */
   title: string;
   /** The task as the run was given it. */
   task: string;
   runId: string;
+  /** The files it was handed; nothing is drawn for a record without them. */
+  inputs?: RunInputs | null;
   onClose: () => void;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
+  const inputFiles = inputs?.files ?? [];
+  const refused = inputs?.refused ?? [];
   const titleId = useId();
   const panelRef = useModalDialog<HTMLDivElement>({ onClose });
   const [copied, setCopied] = useState(false);
@@ -82,6 +126,49 @@ export default function CodingTaskDialog({ title, task, runId, onClose }: {
             data-testid="coding-agent-task-dialog-body"
           >
             {renderText(task, t("chat.table"))}
+            {hasRunInputs(inputs) && (
+              <div className="mt-4 pt-3 border-t border-white/[0.06]" data-testid="coding-agent-inputs">
+                <p className={SECTION_LABEL}>
+                  {t("codingAgent.inputsTitle")}
+                  {inputFiles.length > 0 && (
+                    <span className="normal-case tracking-normal font-normal text-[var(--text-muted)]">({inputFiles.length})</span>
+                  )}
+                </p>
+                {inputFiles.length > 0 ? (
+                  <ul className="mt-1.5 space-y-1" data-testid="coding-agent-inputs-files">
+                    {inputFiles.map((f) => (
+                      <li key={f.name} className="flex items-baseline gap-2">
+                        <span className="text-[11px] font-mono text-[var(--text-secondary)] break-all">{f.name}</span>
+                        <span className="text-[11px] text-[var(--text-muted)]">{formatBytes(f.bytes, locale)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1.5 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-inputs-empty">
+                    {t("codingAgent.inputsEmpty")}
+                  </p>
+                )}
+                {refused.length > 0 && (
+                  <div className="mt-2" data-testid="coding-agent-inputs-refused">
+                    <p className="text-[11px] font-medium text-amber-400">{t("codingAgent.inputsRefusedTitle")}</p>
+                    <ul className="mt-1 space-y-1">
+                      {refused.map((r, i) => (
+                        <li key={`${r.name}-${i}`} className="text-[11px] text-[var(--text-muted)] break-all">
+                          <span className="font-mono text-[var(--text-secondary)]">{r.name}</span>
+                          {/* A code this build does not know says nothing rather
+                              than printing the code itself: the owner reads
+                              sentences, and a bare `outside_roots` is not one. */}
+                          {REFUSAL_KEYS[r.code] && <span> — {t(REFUSAL_KEYS[r.code])}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <p className="mt-2 text-[11px] text-[var(--text-muted)] opacity-70 leading-relaxed break-all">
+                  {t("codingAgent.inputsHint", { folder: inputs.dir, shared: inputs.shared })}
+                </p>
+              </div>
+            )}
           </div>
           <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-white/[0.06]">
             <button type="button" onClick={() => void copy()} data-testid="coding-agent-task-dialog-copy" className={BTN_SECONDARY}>

@@ -57,8 +57,8 @@ import { codingModelName } from "@/lib/coding-model-names";
 import type { TeamTaskView, TeamView } from "./CodingTeamCard";
 import { useSteppedFlow } from "./CodingTeamTree";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
-import CodingRunMessageBox from "./CodingRunMessageBox";
 import { BTN_DANGER, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
+import { dispatchOpenChat } from "@/lib/ui-events";
 
 /** What the chart and its panel read of a run — the app's own `Run` has all of it. */
 export interface DiagramRun extends GraphRun {
@@ -300,15 +300,21 @@ interface Props {
   bare?: boolean;
   /**
    * The figure chips over the chart. Off for the solo run on its own page,
-   * whose rail already holds the same numbers as tiles; a team chart keeps its
+   * whose figure tiles already hold the same numbers; a team chart keeps its
    * task and role bars either way.
    */
   figures?: boolean;
+  /**
+   * The counted legend over the chart (what the colours mean). Off on the run
+   * page's helpers block (2026-10-30), where three nodes with their icons do
+   * not need a key and the legend was the widest line on a phone.
+   */
+  legend?: boolean;
   testId?: string;
   className?: string;
 }
 
-export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, figures = true, testId = "coding-agent-diagram", className = "" }: Props) {
+export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, figures = true, legend = true, testId = "coding-agent-diagram", className = "" }: Props) {
   const { t } = useT();
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const wrap = useRef<HTMLDivElement>(null);
@@ -379,15 +385,17 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
       {figures && <DiagramFigures source={source} lookup={lookup} />}
       {/* What the colours mean, counted: the chart's own summary, and the words
           a state is never left without. */}
-      <ul className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-secondary)]" aria-label={t("codingAgent.diagram.legend")} data-testid={`${testId}-legend`}>
-        {counts.map(({ s, n }) => (
-          <li key={s} className="inline-flex items-center gap-1" data-state={s}>
-            <span className="material-symbols-rounded" style={{ fontSize: 13, color: STATE_COLOR[s] }} aria-hidden="true">{STATE_ICON[s]}</span>
-            <span>{t(`codingAgent.diagram.state.${s}`)}</span>
-            <span className="font-semibold text-[var(--text-primary)]">{n}</span>
-          </li>
-        ))}
-      </ul>
+      {legend && (
+        <ul className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-secondary)]" aria-label={t("codingAgent.diagram.legend")} data-testid={`${testId}-legend`}>
+          {counts.map(({ s, n }) => (
+            <li key={s} className="inline-flex items-center gap-1" data-state={s}>
+              <span className="material-symbols-rounded" style={{ fontSize: 13, color: STATE_COLOR[s] }} aria-hidden="true">{STATE_ICON[s]}</span>
+              <span>{t(`codingAgent.diagram.state.${s}`)}</span>
+              <span className="font-semibold text-[var(--text-primary)]">{n}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className={sheet ? "mt-3 flex flex-col gap-3" : "mt-3 flex items-start gap-4"}>
         <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain pb-1">
           <div
@@ -661,7 +669,6 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
     if (sheet) panel.current?.scrollIntoView?.({ block: "nearest" });
   }, [sheet]);
   const { run, loading } = useRunRecord(node.runId, supplied, refreshKey);
-  const [messaging, setMessaging] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
   // A refused Stop says so where the owner is looking: above the buttons, and
@@ -869,10 +876,16 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
             {t("codingAgent.diagram.openRun")}
           </button>
         )}
+        {/* Steering goes through the chat (2026-10-30): the composer opens
+            with "Tell coding run <id>: " and the assistant delivers it with
+            coding_run_message — the text box this panel used to unfold is
+            gone, as is every other input in the app. Only for a session that
+            can still take a message, and never for the page's own run, whose
+            controls have the same button. */}
         {run && !isCurrent && holdsResumableSession(run.status) && (
-          <button type="button" className={BTN_SECONDARY} onClick={() => setMessaging((v) => !v)} aria-expanded={messaging} data-testid="coding-agent-node-panel-message">
+          <button type="button" className={BTN_SECONDARY} onClick={() => dispatchOpenChat({ draft: t("codingAgent.messageDraft", { id: run.id }) })} data-testid="coding-agent-node-panel-message">
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">chat</span>
-            {t("codingAgent.diagram.message")}
+            {t("codingAgent.messageInChat")}
           </button>
         )}
         {stoppable && (
@@ -882,7 +895,6 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
           </button>
         )}
       </div>
-      {messaging && run && <div className="mt-2"><CodingRunMessageBox runId={run.id} messages={run.messages} onSent={onChanged} /></div>}
     </section>
   );
 }

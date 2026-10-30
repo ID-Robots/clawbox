@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ALLOW_RULE_REFUSAL_KEYS, isAllowRuleRefusal } from "@/lib/coding-permission-rules";
-import { type RunInputs } from "./CodingRunInputs";
+import { type RunInputs } from "./CodingTaskDialog";
 import { BTN_QUIET, BTN_SECONDARY, INSET_SURFACE } from "./coding-agent-ui";
 
 /**

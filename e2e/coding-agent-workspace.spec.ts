@@ -161,8 +161,6 @@ test("a project's page carries its files and changes, and a run's page its heade
   await win.getByTestId("coding-agent-live-tab-browser").click();
   await expect(win.getByTestId("coding-agent-browser-preview")).toBeVisible();
   await expect(win.getByTestId("coding-agent-open-vnc")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-run-rail")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-run-live-view")).toHaveCount(0);
 
   // The header names the project; its arrow leads to the project, and the
   // project page's arrow home.
