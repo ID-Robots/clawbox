@@ -188,7 +188,11 @@ export default function UpdateWhatsNewPanel({ panel, variant = "list", headingLe
   );
 }
 
-/** A screenshot from public/, gone rather than broken if the box cannot serve it. */
+/**
+ * A screenshot from public/, gone rather than broken if the box cannot serve
+ * it. Loaded eagerly, never lazily: this window stays open while the box
+ * restarts, and a card scrolled into view then would ask a server that is down.
+ */
 function CardImage({ src, className }: { src: string; className: string }) {
   const [failed, setFailed] = useState(false);
   if (failed) return null;
@@ -199,7 +203,7 @@ function CardImage({ src, className }: { src: string; className: string }) {
       alt=""
       width={1024}
       height={640}
-      loading="lazy"
+      loading="eager"
       decoding="async"
       draggable={false}
       onError={() => setFailed(true)}

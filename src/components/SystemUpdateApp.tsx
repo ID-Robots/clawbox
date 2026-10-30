@@ -1578,11 +1578,13 @@ function UpdateRunView({
           {whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />}
         </div>
       </div>
-      {/* Held to the bottom of the window while the steps scroll under it:
-          "don't power off" is the one line that must stay in sight. */}
+      {/* While the run is live it is held to the bottom of the window as the
+          steps scroll under it: "don't power off" is the one line that must
+          stay in sight. A finished run's restart note sits in the flow, over
+          nothing. */}
       {bar && (
         <div
-          className="sticky bottom-4 z-10 mt-7 flex items-center gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-5 py-4 text-xs text-[var(--text-secondary)] shadow-[0_-8px_24px_rgba(0,0,0,0.25)]"
+          className={`${status === "updating" ? "sticky bottom-4 z-10 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]" : ""} mt-7 flex items-center gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-5 py-4 text-xs text-[var(--text-secondary)]`}
           data-testid="update-run-notice"
         >
           <span className="material-symbols-rounded shrink-0 text-orange-400" aria-hidden="true" style={{ fontSize: 21 }}>{bar.icon}</span>
