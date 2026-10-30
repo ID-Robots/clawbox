@@ -1849,8 +1849,6 @@ const table: Record<string, string> = {
   "codingAgent.title": "编程助手",
   "codingAgent.toggleFailed": "无法更改编程助手的设置。",
   "codingAgent.tokensWord": "词元",
-  "codingAgent.turnsFailed": "无法更改步数上限。",
-  "codingAgent.turnsLabel": "每次运行的步数",
   "codingAgent.uncommitted": "未提交的更改",
   "codingAgent.updated": "更新于",
   "codingAgent.viewPr": "查看 PR #{n}",

@@ -647,8 +647,6 @@ export const ja: Record<string, string> = {
   "codingAgent.effort.low": "低",
   "codingAgent.effort.medium": "中",
   "codingAgent.effort.high": "高",
-  "codingAgent.turnsLabel": "1回あたりのステップ数",
-  "codingAgent.turnsFailed": "ステップ上限を変更できませんでした。",
   "codingAgent.stateOn": "オン",
   "codingAgent.stateOff": "オフ",
   "codingAgent.openSettings": "設定",

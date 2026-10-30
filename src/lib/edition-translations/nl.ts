@@ -646,8 +646,6 @@ export const nl: Record<string, string> = {
   "codingAgent.effort.low": "Laag",
   "codingAgent.effort.medium": "Gemiddeld",
   "codingAgent.effort.high": "Hoog",
-  "codingAgent.turnsLabel": "Stappen per run",
-  "codingAgent.turnsFailed": "Het stappenlimiet kon niet worden gewijzigd.",
   "codingAgent.stateOn": "Aan",
   "codingAgent.stateOff": "Uit",
   "codingAgent.openSettings": "Instellingen",

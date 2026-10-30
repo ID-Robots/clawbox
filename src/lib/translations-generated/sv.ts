@@ -1849,8 +1849,6 @@ const table: Record<string, string> = {
   "codingAgent.title": "Kodagent",
   "codingAgent.toggleFailed": "Kunde inte ändra kodagentens inställning.",
   "codingAgent.tokensWord": "tokens",
-  "codingAgent.turnsFailed": "Stegbegränsningen kunde inte ändras.",
-  "codingAgent.turnsLabel": "Steg per körning",
   "codingAgent.uncommitted": "Ej incheckade ändringar",
   "codingAgent.updated": "uppdaterad",
   "codingAgent.viewPr": "Visa PR #{n}",

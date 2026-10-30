@@ -632,8 +632,6 @@ export const bg: Record<string, string> = {
   "codingAgent.effort.low": "Ниско",
   "codingAgent.effort.medium": "Средно",
   "codingAgent.effort.high": "Високо",
-  "codingAgent.turnsLabel": "Стъпки на изпълнение",
-  "codingAgent.turnsFailed": "Ограничението за стъпки не можа да бъде променено.",
   "codingAgent.stateOn": "Включено",
   "codingAgent.stateOff": "Изключено",
   "codingAgent.openSettings": "Настройки",

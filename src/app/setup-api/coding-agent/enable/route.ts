@@ -21,7 +21,6 @@ import {
   checkRoleModelsPatch,
   setDefaultDirectory,
   setEffort,
-  setMaxTurns,
   setAutoMerge,
   setAutoPr,
   setMaxParallelRuns,
@@ -70,8 +69,9 @@ function forbidden() {
  * owner's Anthropic access (src/lib/coding-provider.ts). Storing it does not
  * require that provider to be connected — the owner may pick it before pasting
  * the key — but STARTING a run against it does.
- * POST { maxTurns: number } → how many steps a run gets (the token ceiling
- * went in SCA A2: `{ tokenLimit }` is an unknown body, 400).
+ * (`{ maxTurns }` is an unknown body since SCA3, 400, like `{ tokenLimit }`
+ * since SCA A2: the step ceiling is a safety net, DEFAULT_MAX_TURNS, not a
+ * setting.)
  * POST { generateMedia: boolean } → may a run draw pictures with ClawBox AI
  * (and the box draw the project's desktop icon and favicon while it works)
  * and have this box speak clips into its project. ONE switch over the two
@@ -183,7 +183,6 @@ export async function POST(request: Request) {
     enabled?: unknown;
     defaultDirectory?: unknown;
     effort?: unknown;
-    maxTurns?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
     prBodyIncludesTask?: unknown;
@@ -216,7 +215,6 @@ export async function POST(request: Request) {
   const hasEffort = typeof fields.effort === "string";
   const hasProvider = typeof fields.provider === "string";
   const hasProviders = Array.isArray(fields.providers);
-  const hasTurns = typeof fields.maxTurns === "number";
   // `null` is meaningful here — it CLEARS the default — so presence is what
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
@@ -236,12 +234,12 @@ export async function POST(request: Request) {
   // A team's per-role model and effort (src/lib/coding-role-models.ts):
   // presence decides, and a wrong shape is refused below, whole.
   const hasRoleModels = "roleModels" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasAutoMerge && !hasMaxParallelRuns && !hasGenMedia && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasRoleModels && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasAutoMerge && !hasMaxParallelRuns && !hasGenMedia && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasRoleModels && !clearsFault) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string }, { provider: string }, { maxTurns: number }, "
+          + "{ effort: string }, { provider: string }, "
           + "{ reviewPass: boolean }, "
           + "{ generateMedia: boolean }, "
           + "{ realBrowser: boolean }, { teamDynamic: boolean }, "
@@ -380,10 +378,6 @@ export async function POST(request: Request) {
     if (hasProvider) {
       const saved = await setCodingProvider(fields.provider as string);
       console.error(`[coding-agent] runs will be paid for by ${saved}, by the owner's choice`);
-    }
-    if (hasTurns) {
-      const saved = await setMaxTurns(fields.maxTurns);
-      console.error(`[coding-agent] step limit set to ${saved} by the owner`);
     }
     if (hasReviewPass) {
       const saved = await setReviewPass(fields.reviewPass);

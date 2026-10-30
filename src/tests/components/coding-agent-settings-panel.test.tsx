@@ -52,7 +52,6 @@ function stubFetch(
     readiness: { ready: boolean; problems: string[]; [field: string]: unknown };
     defaultDirectory?: string | null;
     effort?: string;
-    maxTurns?: number;
     reviewPass?: boolean;
     teamDynamic?: boolean;
     generateMedia?: boolean;
@@ -110,7 +109,6 @@ function stubFetch(
   posts = [];
   let stored: string | null = status.defaultDirectory ?? null;
   let effort = status.effort ?? "max";
-  let maxTurns = status.maxTurns ?? 150;
   let reviewPass = status.reviewPass ?? false;
   let teamDynamic = status.teamDynamic;
   // The two that are ON when the device has never stored them.
@@ -145,9 +143,6 @@ function stubFetch(
     effort,
     effortLevels: ["low", "xhigh", "max"],
     subagents: true,
-    maxTurns,
-    minMaxTurns: 10,
-    maxMaxTurns: 2000,
     reviewPass,
     // Absent unless the test says: an older server does not answer with it.
     ...(teamDynamic === undefined ? {} : { teamDynamic }),
@@ -204,13 +199,6 @@ function stubFetch(
         stored = body.defaultDirectory === null ? null : (opts.resolveTo ?? body.defaultDirectory);
       }
       if (typeof body.effort === "string") effort = body.effort;
-      if (typeof body.maxTurns === "number") {
-        // The route's own bounds, in its own words.
-        if (body.maxTurns < 10 || body.maxTurns > 2000) {
-          return json({ error: "Steps must be between 10 and 2000.", kind: "invalid" }, 400);
-        }
-        maxTurns = body.maxTurns;
-      }
       if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
       if (typeof body.teamDynamic === "boolean") teamDynamic = body.teamDynamic;
       if (typeof body.generateMedia === "boolean") generateMedia = body.generateMedia;
@@ -460,70 +448,17 @@ describe("effort and the ceilings", () => {
     await waitFor(() => expect(low).toHaveAttribute("aria-pressed", "true"));
   });
 
-  it("saves the step limit when the field is left, and only if it changed", async () => {
-    stubFetch({ enabled: true, readiness: READY, maxTurns: 150 });
+  it("offers no step field and no token field: the ceilings are a safety net, not a setting", async () => {
+    // SCA A2 took the device-side token limit out; SCA3 took the step count
+    // with it (DEFAULT_MAX_TURNS is the net, 2,000 for a writing run), so the
+    // Ceilings group holds only how many runs may go at once, when the
+    // server answers with it.
+    stubFetch({ enabled: true, readiness: READY, maxParallelRuns: 2 });
     render(<CodingAgentSettingsPanel />);
-    const turns = await screen.findByTestId("coding-agent-turns");
-    await waitFor(() => expect(turns).toHaveValue(150));
-
-    // Leaving it untouched is not a save. The handler is async, so the
-    // assertion waits for the tick in which a post would have gone out —
-    // checked synchronously it passed before the code under test had run.
-    fireEvent.blur(turns);
-    await flush();
-    expect(posts).toEqual([]);
-
-    fireEvent.change(turns, { target: { value: "40" } });
-    fireEvent.blur(turns);
-    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { maxTurns: 40 } }));
-  });
-
-  it("puts the stored step limit back when the field is left blank, rather than posting 0", async () => {
-    // Number("") is 0, which the route refuses — and a draft left blank would
-    // post that refusal again on every blur. A blank Steps field means
-    // nothing (unlike a blank token field, which means "no ceiling").
-    stubFetch({ enabled: true, readiness: READY, maxTurns: 150 });
-    render(<CodingAgentSettingsPanel />);
-    const turns = await screen.findByTestId("coding-agent-turns");
-    await waitFor(() => expect(turns).toHaveValue(150));
-
-    fireEvent.change(turns, { target: { value: "" } });
-    fireEvent.blur(turns);
-    await waitFor(() => expect(turns).toHaveValue(150));
-    expect(posts).toEqual([]);
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("puts the stored step limit back when the route refuses the typed one, and says so beside the field", async () => {
-    // The refused number used to stay in the field — re-posted on every
-    // later blur — with the message a card away, under GitHub.
-    stubFetch({ enabled: true, readiness: READY, maxTurns: 150 });
-    render(<CodingAgentSettingsPanel />);
-    const turns = await screen.findByTestId("coding-agent-turns");
-    await waitFor(() => expect(turns).toHaveValue(150));
-    const github = await screen.findByTestId("coding-agent-github-card");
-
-    fireEvent.change(turns, { target: { value: "5" } });
-    fireEvent.blur(turns);
-    const refusal = await screen.findByText(/between 10 and 2000/);
-    await waitFor(() => expect(turns).toHaveValue(150));
-    expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { maxTurns: 5 } }]);
-    // Under the Steps field, above the GitHub card.
-    expect(turns.parentElement).toContainElement(refusal);
-    expect(refusal.compareDocumentPosition(github) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-
-    // Leaving the field again posts nothing: the refused number is gone.
-    fireEvent.blur(turns);
-    await flush();
-    expect(posts).toHaveLength(1);
-  });
-
-  it("offers no token ceiling: the step count is the one field in the Ceilings group", async () => {
-    // SCA A2 took the device-side token limit out; the field went with it.
-    stubFetch({ enabled: true, readiness: READY });
-    render(<CodingAgentSettingsPanel />);
-    await screen.findByTestId("coding-agent-turns");
+    await screen.findByTestId("coding-agent-max-parallel-runs");
+    expect(screen.queryByTestId("coding-agent-turns")).toBeNull();
     expect(screen.queryByTestId("coding-agent-tokens")).toBeNull();
+    expect(screen.queryByLabelText(/steps per run/i)).toBeNull();
   });
 });
 
@@ -799,7 +734,6 @@ describe("one setting write at a time", () => {
   const STATUS = {
     enabled: true, ready: true, readiness: READY, running: 0, defaultDirectory: "/home/clawbox/projects",
     effort: "max", effortLevels: ["low", "xhigh", "max"], subagents: true,
-    maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
   };
 
   it("disables every setting control while a write is in flight, and queues rather than races a second", async () => {
@@ -819,7 +753,6 @@ describe("one setting write at a time", () => {
     // Everything that writes a setting is off until the route answers.
     expect(xhigh).toBeDisabled();
     expect(screen.getByRole("switch", { name: SWITCH })).toBeDisabled();
-    expect(screen.getByTestId("coding-agent-turns")).toBeDisabled();
     fireEvent.change(screen.getByTestId("coding-agent-folder"), { target: { value: "/home/clawbox/next" } });
     expect(screen.getByRole("button", { name: SAVE })).toBeDisabled();
 
@@ -855,7 +788,7 @@ describe("motion", () => {
     let releaseSwitch: (() => void) | null = null;
     const body = (enabled: boolean) => ({
       enabled, ready: true, readiness: READY, running: 0, defaultDirectory: null,
-      effort: "max", effortLevels: ["max"], maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
+      effort: "max", effortLevels: ["max"],
     });
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = input.toString();

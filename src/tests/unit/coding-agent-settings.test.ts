@@ -115,25 +115,37 @@ describe("effort", () => {
 
 
 describe("steps and tokens", () => {
-  it("defaults to the shipped step count and accepts a new one", async () => {
+  it("gives a writing run the safety net, and offers no setter for it", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(await lib.getMaxTurns()).toBe(lib.DEFAULT_MAX_TURNS);
-    // The number itself, so a change to the default is a deliberate edit here too.
-    expect(lib.DEFAULT_MAX_TURNS).toBe(200);
-    expect(await lib.setMaxTurns(500)).toBe(500);
-    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_TURNS_CONFIG_KEY, 500);
-  });
-
-  it("refuses a step count outside the range the CLI can use", async () => {
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.setMaxTurns(1)).rejects.toBeInstanceOf(lib.CodingAgentError);
-    await expect(lib.setMaxTurns(999_999)).rejects.toBeInstanceOf(lib.CodingAgentError);
-    await expect(lib.setMaxTurns("many" as unknown as number)).rejects.toBeInstanceOf(lib.CodingAgentError);
+    // The number itself, so a change to the net is a deliberate edit here
+    // too. 2,000 (SCA3) is a SAFETY NET, not a setting: the control left the
+    // panel and the route, and the figure is the one a runaway cannot pass
+    // rather than the one a task should fit under — the longest legitimate
+    // run on this box was 383 turns, which the measured 200 of TASK-1749
+    // would have failed. It equals MAX_MAX_TURNS, so a stored value can
+    // only lower it.
+    expect(lib.DEFAULT_MAX_TURNS).toBe(2000);
+    expect(lib.DEFAULT_MAX_TURNS).toBe(lib.MAX_MAX_TURNS);
+    expect("setMaxTurns" in lib).toBe(false);
     expect(configSet).not.toHaveBeenCalled();
   });
 
-  it("clamps a stored value rather than handing the CLI something it rejects", async () => {
+  it("keeps a reading role under its own cap of 100", async () => {
+    const { roleMaxTurns } = await import("@/lib/coding-role-models");
     const lib = await import("@/lib/coding-agent");
+    expect(roleMaxTurns("worker", lib.DEFAULT_MAX_TURNS)).toBe(2000);
+    expect(roleMaxTurns("planner", lib.DEFAULT_MAX_TURNS)).toBe(100);
+    expect(roleMaxTurns("reviewer", lib.DEFAULT_MAX_TURNS)).toBe(100);
+  });
+
+  it("honours a stored ceiling from before SCA3, clamped to what the CLI accepts", async () => {
+    // A box that set `coding_agent_max_turns` while the control existed keeps
+    // its value on read (Start over clears it: CODING_AGENT_RESET_KEYS).
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.CODING_AGENT_RESET_KEYS).toContain(lib.CODING_AGENT_TURNS_CONFIG_KEY);
+    configGet.mockResolvedValue(300);
+    expect(await lib.getMaxTurns()).toBe(300);
     configGet.mockResolvedValue(50_000);
     expect(await lib.getMaxTurns()).toBe(lib.MAX_MAX_TURNS);
     configGet.mockResolvedValue(1);
