@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getBackgroundTask, resetBackgroundTasksForTests } from "@/lib/background-tasks";
 
 /**
  * /setup-api/tts/install — the Local AI tab's Install on an absent Kokoro,
@@ -52,6 +53,9 @@ async function lines(res: Response): Promise<Record<string, unknown>[]> {
 
 beforeEach(() => {
   vi.resetModules();
+  // The install is a background task of the server, kept per PROCESS: one a
+  // test left running would be followed by the next test's POST.
+  resetBackgroundTasksForTests();
   ownerMock.mockReset().mockResolvedValue(true);
   followMock.mockReset();
   uninstallMock.mockReset().mockResolvedValue({ ok: true, freedBytes: 330 * 1024 * 1024 });
@@ -79,8 +83,8 @@ describe("POST /setup-api/tts/install", () => {
     const { POST } = await route();
     const res = await POST(post());
     expect(res.status).toBe(200);
-    expect(followMock.mock.calls[0][0]).toBe("voice_kokoro_install");
     const out = await lines(res);
+    expect(followMock.mock.calls[0][0]).toBe("voice_kokoro_install");
     expect(out.map((l) => l.status)).toContain("Kokoro GPU TTS installed");
     expect(out[out.length - 1]).toMatchObject({ success: true });
   });
@@ -112,7 +116,48 @@ describe("POST /setup-api/tts/install", () => {
     followMock.mockResolvedValue({ ok: false, error: "Kokoro GPU TTS NOT installed: no CUDA" });
     const { POST } = await route();
     const out = await lines(await POST(post()));
-    expect(out[out.length - 1]).toEqual({ error: "Kokoro GPU TTS NOT installed: no CUDA" });
+    expect(out[out.length - 1]).toMatchObject({ error: "Kokoro GPU TTS NOT installed: no CUDA" });
+  });
+});
+
+describe("POST /setup-api/tts/install as a background task", () => {
+  // The install belongs to the server, not to the request: Settings closing
+  // (the stream cancelled) must not end it or lose its record, and a reopened
+  // Settings asking again must follow the same install, not start a second
+  // root step under it or be told only `busy`.
+  it("runs on to its end after the stream that started it is cancelled", async () => {
+    let finish!: () => void;
+    followMock.mockImplementation((_step: string, opts: { onStatus: (line: string) => void }) =>
+      new Promise<{ ok: boolean }>((resolve) => {
+        opts.onStatus("building the CUDA stack");
+        finish = () => resolve({ ok: true });
+      }));
+    const { POST } = await route();
+    const res = await POST(post());
+    const reader = res.body!.getReader();
+    const first = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]) as { taskId: string };
+    await reader.cancel();
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
+    finish();
+    await vi.waitFor(() => expect(getBackgroundTask(first.taskId)?.state).toBe("succeeded"));
+    const task = getBackgroundTask(first.taskId)!;
+    expect(task.log).toContain("building the CUDA stack");
+    expect(task.result).toEqual({ status: "The voice on this box is installed." });
+  });
+
+  it("follows the running install when asked again, without a second root step", async () => {
+    let finish!: () => void;
+    followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
+    const { POST } = await route();
+    const first = await POST(post());
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
+    const again = await POST(post());
+    expect(again.status).toBe(200);
+    finish();
+    const [a, b] = await Promise.all([lines(first), lines(again)]);
+    expect(followMock).toHaveBeenCalledTimes(1);
+    expect(a[0].taskId).toBe(b[0].taskId);
+    expect(b[b.length - 1]).toMatchObject({ success: true, taskId: a[0].taskId });
   });
 });
 
@@ -219,6 +264,7 @@ describe("DELETE /setup-api/tts/install", () => {
     followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
     const { POST, DELETE } = await route();
     const installing = await POST(post());
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
     const res = await DELETE(del());
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("busy");

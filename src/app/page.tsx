@@ -32,6 +32,7 @@ import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } f
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
 import ToastHost from "@/components/ToastHost";
+import BackgroundTaskCards, { useBackgroundTasks } from "@/components/BackgroundTaskCards";
 import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import AgentBrowserIcon from "@/components/AgentBrowserIcon";
@@ -3295,6 +3296,11 @@ function ChromeDesktopInner() {
     setTimeout(() => { setUploadStatus(null); setUploadProgress(0); }, 3000);
   }, [uploadFileWithProgress]);
 
+  // Long work Settings started (an install, a model download), which runs on
+  // whether or not Settings is open: one card each, with its steps, bar, time
+  // left and log. Owner's routes started it, so the owner's desktop asks.
+  const backgroundTasks = useBackgroundTasks(ownerApis);
+
   // Is a top-right card on screen at all? Asked once, because it decides two
   // things: whether the column is drawn, and whether the chat is asked to
   // report where it is standing (a rect per pointer move of a drag is not a
@@ -3308,7 +3314,8 @@ function ChromeDesktopInner() {
     (updateAvailable && !updateNoticeHidden)
     || offerNoticeUp
     || pairingRequests.length > 0
-    || codingNotices.length > 0,
+    || codingNotices.length > 0
+    || backgroundTasks.tasks.length > 0,
   );
   // Beside the chat, not on top of it. The docked half is the strip the panel
   // reserves; the floating half is the popup's own rect, which lands in the
@@ -3620,6 +3627,7 @@ function ChromeDesktopInner() {
               </div>
             );
           })}
+          <BackgroundTaskCards tasks={backgroundTasks.tasks} onDismiss={backgroundTasks.dismiss} />
         </div>
       )}
       {/* Desktop wallpaper background (see `wallpaperLayers`). */}

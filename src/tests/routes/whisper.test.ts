@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetBackgroundTasksForTests } from "@/lib/background-tasks";
 
 /**
  * /setup-api/whisper — the speech-model size picker.
@@ -129,6 +130,9 @@ async function readStream(res: Response): Promise<Record<string, unknown>[]> {
 }
 
 beforeEach(() => {
+  // The engine install is a background task of the server, kept per PROCESS:
+  // one a test left running would be followed by the next test's POST.
+  resetBackgroundTasksForTests();
   owner.value = true;
   disk.free = 100 * 1024 * 1024 * 1024;
   state.installed = true;
@@ -355,8 +359,8 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     const { POST } = await load();
     const res = await POST(post({ action: "install-engine" }));
     expect(res.status).toBe(200);
-    expect(followMock.mock.calls[0][0]).toBe("voice_whisper_install");
     const out = await readStream(res);
+    expect(followMock.mock.calls[0][0]).toBe("voice_whisper_install");
     expect(out.map((l) => l.status)).toContain("  faster-whisper ready");
     expect(out[out.length - 1]).toMatchObject({ success: true });
     // Nothing of the size picker ran: no fetch, no unit write, no restart.
@@ -402,7 +406,7 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     followMock.mockResolvedValue({ ok: false, error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
     const { POST } = await load();
     const out = await readStream(await POST(post({ action: "install-engine" })));
-    expect(out[out.length - 1]).toEqual({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
+    expect(out[out.length - 1]).toMatchObject({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
     // An engine that did not land is not wired into anything.
     expect(reconcile).not.toHaveBeenCalled();
   });
@@ -507,6 +511,7 @@ describe("DELETE /setup-api/whisper", () => {
     followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
     const { POST, DELETE } = await load();
     const installing = await POST(post({ action: "install-engine" }));
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
     const res = await DELETE(del("base"));
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("busy");
@@ -594,6 +599,7 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
     const { POST, DELETE } = await load();
     const installing = await POST(post({ action: "install-engine" }));
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
     const res = await DELETE(del());
 
     expect(res.status).toBe(409);

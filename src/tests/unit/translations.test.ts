@@ -99,6 +99,8 @@ describe("translations", () => {
         "wifi",
         // Settings → System → Agent databases (OpenClaw database maintenance).
         "dbMaintenance",
+        // The desktop's corner card for long work Settings started (background tasks).
+        "backgroundTasks",
         "clawaiUsage",
         "update",
         "credentials",

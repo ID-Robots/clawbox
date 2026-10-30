@@ -11,6 +11,7 @@ import type {
   VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { cloudVoicesFor, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
+import { notifyBackgroundTaskStarted } from "@/lib/background-task-client";
 
 /**
  * Settings → Voice: three dropdowns and a sentence to hear.
@@ -332,6 +333,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         headers: { "Content-Type": "application/json" },
         body: "{}",
       });
+      // The install is a background task of the server: the desktop's corner
+      // card draws its steps and log while this waits for the verdict.
+      if (res.ok) notifyBackgroundTaskStarted();
       const lines = (await res.text()).split("\n").map((l) => l.trim()).filter(Boolean);
       let ok = false;
       for (const line of lines) {

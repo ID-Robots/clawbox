@@ -4,6 +4,7 @@ import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { NextResponse } from "next/server";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { getBackgroundTask, resetBackgroundTasksForTests } from "@/lib/background-tasks";
 // Imported rather than spelled out so a GGUF swap cannot leave this suite
 // asserting a filename the app no longer asks for.
 import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
@@ -119,6 +120,9 @@ describe("POST /setup-api/llamacpp/install", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // The install is a background task of the server, kept per PROCESS: one a
+    // test left running would be followed by the next test's POST.
+    resetBackgroundTasksForTests();
     const configureMod = await import("@/app/setup-api/ai-models/configure/route");
     mockConfigureAiModel = vi.mocked(configureMod.POST);
     mockFs.mkdir.mockResolvedValue(undefined);
@@ -180,6 +184,63 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(mockConfigureAiModel).toHaveBeenCalled();
     expect(text).toContain("already running");
     expect(text).toContain("\"success\":true");
+  });
+
+  describe("as a background task", () => {
+    // The install belongs to the server, not to the request that started it.
+    // It used to run inside the response stream, whose enqueue throws once the
+    // client is gone: a reload mid-install ended the flow at its next status
+    // line, and the runtime was never started nor configured.
+    function slowConfigure() {
+      let finish!: () => void;
+      mockConfigureAiModel.mockImplementation(() => new Promise((resolve) => {
+        finish = () => resolve(NextResponse.json({ success: true }));
+      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+      }));
+      return () => finish();
+    }
+
+    it("runs on to the configuration after its stream is cancelled", async () => {
+      const finish = slowConfigure();
+      const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      const reader = res.body!.getReader();
+      const first = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]) as { taskId: string };
+      await reader.cancel();
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      finish();
+      await vi.waitFor(() => expect(getBackgroundTask(first.taskId)?.state).toBe("succeeded"));
+      expect(getBackgroundTask(first.taskId)?.result).toMatchObject({ model: "gemma4-e2b-it-q4_0" });
+    });
+
+    it("follows the running install when the same install is asked for again", async () => {
+      const finish = slowConfigure();
+      const first = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      const again = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      expect(again.status).toBe(200);
+      finish();
+      const [a, b] = await Promise.all([readStream(first), readStream(again)]);
+      expect(mockConfigureAiModel).toHaveBeenCalledTimes(1);
+      const taskOf = (text: string) => (JSON.parse(text.split("\n")[0]) as { taskId: string }).taskId;
+      expect(taskOf(b)).toBe(taskOf(a));
+      expect(b).toContain("\"success\":true");
+    });
+
+    it("refuses different settings while one runs, naming the running task", async () => {
+      const finish = slowConfigure();
+      const first = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      const primary = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local", activate: true }));
+      expect(primary.status).toBe(409);
+      const body = await primary.json();
+      expect(body.code).toBe("busy");
+      expect(typeof body.taskId).toBe("string");
+      finish();
+      await readStream(first);
+    });
   });
 
   it("follows a gateway restart the configure answered early, and only then says configured", async () => {
