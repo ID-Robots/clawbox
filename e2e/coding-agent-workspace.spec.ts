@@ -3,7 +3,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 
 // The Coding Agent app's project page and run page, on a real desktop against
 // a mocked device: a project's files and changes beside its runs (the Claude
-// Code web layout), the one breadcrumb every page but home carries, the
+// Code web layout), the one header row every page carries, the
 // browser preview folded above a live run's terminal, the timeline, and
 // the window with both. The routes the workspace reads are answered here
 // rather than in the shared helper, because this is the only spec that walks
@@ -99,7 +99,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("a project's page carries its files and changes, and a run's page its breadcrumb, browser preview and live view", async ({ page }) => {
+test("a project's page carries its files and changes, and a run's page its header, browser preview and live view", async ({ page }) => {
   saves.length = 0;
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
@@ -115,7 +115,7 @@ test("a project's page carries its files and changes, and a run's page its bread
 
   // The project page: the git line, then the workspace.
   await expect(win.getByTestId("coding-agent-project-page")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-breadcrumb")).toContainText("My Site");
+  await expect(win.getByTestId("coding-agent-header")).toContainText("My Site");
   await expect(win.getByTestId("coding-agent-git-info")).toContainText("main");
   await expect(win.getByTestId("coding-agent-project-copy")).toContainText(PROJECT.directory);
   // The page opens on its team (the agents first); the runs and the files
@@ -164,9 +164,10 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(win.getByTestId("coding-agent-run-rail")).toBeVisible();
   await expect(win.getByTestId("coding-agent-run-live-view")).toHaveCount(0);
 
-  // Back leads to the project, and the first crumb home.
+  // The header names the project; its arrow leads to the project, and the
+  // project page's arrow home.
   await win.getByTestId("coding-agent-run-back").click();
   await expect(win.getByTestId("coding-agent-project-page")).toBeVisible();
-  await win.getByTestId("coding-agent-crumb-projects").click();
+  await win.getByTestId("coding-agent-project-back").click();
   await expect(win.getByTestId("coding-agent-project-site")).toBeVisible();
 });

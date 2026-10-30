@@ -15,7 +15,7 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
 import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
@@ -51,7 +51,6 @@ import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./Ne
 import ImportProjectPanel, { type ImportResult } from "./ImportProjectPanel";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
-import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
 import CodingTeamCard, { isTeamActive, type TeamView } from "./CodingTeamCard";
 import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
@@ -335,19 +334,20 @@ function quoted(v: string): string {
 
 
 
-/** The Settings link, whichever element it renders as. */
-const OPEN_SETTINGS_CLASS = BTN_SECONDARY;
-/** A sidebar entry: icon and label, the width of the rail, quiet until hovered or current. */
-const SIDEBAR_ITEM = "w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12.5px] text-[var(--text-secondary)] hover:bg-white/[0.06] hover:text-[var(--text-primary)] text-left cursor-pointer transition-colors";
-const SIDEBAR_ACTIVE = "bg-white/[0.08] text-[var(--text-primary)]";
-/** How many runs the sidebar lists; the pages list them all. */
-const SIDEBAR_RUNS = 12;
+/**
+ * How many projects home lists before "Show all (N)" — the owner's ask of
+ * 2026-10-30 ("when we have many projects we need to scroll a lot — don't
+ * show all of them initially"). Collapsed again on every open of the app:
+ * no memory, no input.
+ */
+const PROJECTS_PAGE = 6;
+/** A 44 × 44 header control — the back arrow and the Settings gear. */
+const HEADER_ICON_BUTTON = "shrink-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-[var(--text-secondary)] hover:bg-white/[0.06] hover:text-[var(--text-primary)] cursor-pointer"
+  + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)]";
 /** Older runs a window keeps open copies of — the pages it has visited and the "Show older" pages it asked for, not the history. */
 const MAX_OLDER_RUNS_HELD = 100;
 /** Older runs one "Show older" fetches for a project's Runs tab (the route caps a page at 50). */
 const OLDER_PAGE = 20;
-/** The window width (px) from which the sidebar is shown beside the page. */
-const SIDEBAR_MIN_WIDTH = 860;
 
 /** A run pointed at a code project by id belongs to that project and no
  *  other — its folder is under the checkout, so matching it by directory as
@@ -1200,29 +1200,9 @@ export default function CodingAgentApp() {
    */
   const openNew = () => openNewAppCard();
 
-  // The sidebar is MEASURED in rather than hidden by CSS: a rail that is in
-  // the DOM but display:none still duplicates every project and run name the
-  // page shows, for a screen reader and for a test alike. Wide means the
-  // window can spare 15 rem for it beside a readable page.
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const [wide, setWide] = useState(false);
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    let ro: ResizeObserver | null = null;
-    try {
-      ro = new ResizeObserver((entries) => {
-        const width = entries[0]?.contentRect.width ?? el.clientWidth;
-        setWide(width >= SIDEBAR_MIN_WIDTH);
-      });
-      ro.observe(el);
-    } catch {
-      // A stubbed observer with no observe(): the page stays a column.
-    }
-    return () => { try { ro?.disconnect(); } catch { /* same stub */ } };
-    // Re-attached once the real panel renders: the first mount is the
-    // loading placeholder, which has no root to measure.
-  }, [loading]);
+  // Home lists PROJECTS_PAGE projects until "Show all"; a fresh mount is
+  // collapsed again, which is what "collapsed on every open" means.
+  const [projectsAll, setProjectsAll] = useState(false);
 
   const openProject = useMemo(
     () => (openProjectDir ? projects.find((pr) => pr.directory === openProjectDir) ?? null : null),
@@ -1296,19 +1276,17 @@ export default function CodingAgentApp() {
     }
   };
   /**
-   * The rail's recent runs: EVERY held run — running, paused, drafted —
-   * whatever its age, ahead of the newest SIDEBAR_RUNS settled ones. A run
-   * waiting on the owner is never out of sight: a review pass paused one
-   * evening was, a dozen newer runs later, listed nowhere (its folder gone,
-   * so no project row either), with its Resume and Stop unreachable. The
-   * cap is the settled runs' alone, so a thirteenth held run is not hidden
-   * by the twelve before it either.
+   * Home's project rows: a project with a run or a team at work first, then
+   * the box's own order (newest commit, then name). A stable sort, so two
+   * projects with nothing at work keep the order the route gave them.
    */
-  const sidebarRuns = useMemo(() => {
-    const held = runs.filter((r) => isHeld(r.status));
-    const settled = runs.filter((r) => !isHeld(r.status));
-    return [...held, ...settled.slice(0, SIDEBAR_RUNS)];
-  }, [runs]);
+  const orderedProjects = useMemo(() => {
+    const atWork = (pr: Project) =>
+      pr.latestRun?.status === "running"
+      || runs.some((r) => runBelongsTo(r, pr) && isLive(r.status))
+      || teams.some((x) => isTeamActive(x.status) && (pr.kind === "codeProject" ? x.projectId === pr.folder : x.directory === pr.directory));
+    return [...projects].sort((a, b) => Number(atWork(b)) - Number(atWork(a)));
+  }, [projects, runs, teams]);
   /**
    * Which face the window shows. Three, exclusive: the settings page sits
    * over whichever project was open, and the project face carries its
@@ -1328,12 +1306,21 @@ export default function CodingAgentApp() {
           ? { face: "project" as const, project: openProject }
           : { face: "home" as const };
 
-  // Back (the phone's gesture, the browser's button, the phone window's
-  // chevron) walks up the same ladder the breadcrumbs draw, one level per
-  // press, instead of closing the app from a run page. See lib/mobile-back.
-  // Phone layout only, like Files: on a desktop Back belongs to the top window.
+  // Back = up one level. ONE ladder for the header's arrow, the phone
+  // window's chevron and the Android gesture: settings → home, run → its
+  // project (or home for a run that belongs to none — a team worker in a
+  // worktree; leaving `openProjectDir` alone landed it on whichever project
+  // the owner had opened BEFORE), project → home. See lib/mobile-back.
+  // The gesture claims it in the phone layout only, like Files: on a desktop
+  // Back belongs to the top window.
   const phoneLayout = usePhoneLayout();
   const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
+  const hasUp = view.face === "settings" || view.face === "run" || view.face === "project";
+  const goUp = () => {
+    if (view.face === "settings") { disarmClear(); setPage("home"); }
+    else if (view.face === "run") { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); }
+    else if (view.face === "project") setOpenProjectDir(null);
+  };
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
   useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
   useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
@@ -1920,154 +1907,108 @@ export default function CodingAgentApp() {
     </>
   );
 
+  // The header row's title: the project's name as a button on a project's
+  // and a run's page (the way back up, and where the run lives), the run's
+  // own first line for a run that belongs to no project, the face's name
+  // otherwise.
+  const headerProject = view.face === "run"
+    ? projects.find((pr) => runBelongsTo(view.run, pr)) ?? null
+    : view.face === "project" ? view.project : null;
+  const headerTitle = view.face === "settings"
+    ? t("codingAgent.openSettings")
+    : view.face === "run"
+      ? (view.run.reviewOf ? t("codingAgent.reviewPassTitle", { id: view.run.reviewOf }) : firstLine(view.run.task, 160))
+      : t("codingAgent.title");
+  const backTestId = view.face === "settings" ? "coding-agent-settings-back" : view.face === "run" ? "coding-agent-run-back" : "coding-agent-project-back";
+  const backLabel = view.face === "run" && headerProject ? t("codingAgent.backTo", { name: headerProject.name }) : t("codingAgent.back");
+  // Home and the wizard carry the state chip; a project's or a run's page
+  // names the project instead, and the Settings page holds the switch itself.
+  const stateChip = (view.face === "home" || view.face === "wizard") && status && (
+    <span
+      data-testid="coding-agent-state"
+      className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 shrink-0 ${
+        status.enabled ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]" : "text-[var(--text-muted)] border-white/15"
+      }`}
+    >
+      <span
+        aria-hidden="true"
+        className={`w-1.5 h-1.5 rounded-full ${status.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`}
+      />
+      {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
+    </span>
+  );
+  // How wide the column may grow. One column at every width (2026-10-30: the
+  // 860-px sidebar and the breadcrumb row are gone — one chrome is what makes
+  // the phone and the wide window the same page); a project's page is wider
+  // for its file tree beside the viewer, and a run's page keeps its rail's
+  // width until the rail goes with the run page's own redesign.
+  const column = view.face === "run" ? "max-w-6xl" : view.face === "project" ? "max-w-5xl" : view.face === "settings" ? "max-w-2xl" : "max-w-3xl";
+
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div ref={rootRef} className={`h-full flex ${APP_GROUND} text-white @container`} data-testid="coding-agent-panel" data-help-bounds>
-      {/* The sidebar — the Claude Code web layout's left rail: New, Home,
-          Settings, the projects, the recent runs. Only when the window is
-          wide enough to spare it (the phone and a small window keep the
-          lists on the pages themselves), and not while the wizard runs. */}
-      {wide && view.face !== "wizard" && (
-        <aside className={`flex w-[15rem] shrink-0 flex-col border-r ${RAIL_SURFACE} overflow-y-auto`} data-testid="coding-agent-sidebar">
-          <div className="px-3 pt-4 pb-2 space-y-1">
-            {!standalone && (
-              <button type="button" onClick={openNew} data-testid="coding-agent-sidebar-new" className={`${SIDEBAR_ITEM} text-[var(--text-primary)]`}>
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
-                {t("codingAgent.createNewProject")}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => { disarmClear(); setOpenRunId(null); setOpenProjectDir(null); setPage("home"); }}
-              aria-current={view.face === "home" ? "page" : undefined}
-              data-testid="coding-agent-sidebar-home"
-              className={`${SIDEBAR_ITEM} ${view.face === "home" ? SIDEBAR_ACTIVE : ""}`}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">home</span>
-              {t("codingAgent.navHome")}
-            </button>
-            <button
-              type="button"
-              onClick={() => { disarmClear(); setPage("settings"); }}
-              aria-current={view.face === "settings" ? "page" : undefined}
-              data-testid="coding-agent-sidebar-settings"
-              className={`${SIDEBAR_ITEM} ${view.face === "settings" ? SIDEBAR_ACTIVE : ""}`}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">settings</span>
-              {t("codingAgent.openSettings")}
-            </button>
-          </div>
-          {/* No projects list here: the home page lists every project, and
-              the rail's copy of it (25 rows on the owner's box) was the
-              tallest thing in the window — "lean home", the owner's brief of
-              2026-10-28. */}
-          {runs.length > 0 && (
-            <div className="px-3 pt-3 pb-4">
-              <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("codingAgent.recentRuns")}</p>
-              <ul className="space-y-0.5" data-testid="coding-agent-sidebar-runs">
-                {sidebarRuns.map((run) => {
-                  const active = view.face === "run" && view.run.id === run.id;
-                  const tone = RUN_TONE[run.status];
-                  return (
-                    <li key={run.id}>
-                      <button
-                        type="button"
-                        onClick={() => showRun(run.id)}
-                        aria-current={active ? "page" : undefined}
-                        className={`${SIDEBAR_ITEM} ${active ? SIDEBAR_ACTIVE : ""}`}
-                        title={firstLine(run.task, 160)}
-                      >
-                        <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full shrink-0 ${isLive(run.status) ? "animate-pulse" : ""}`} style={{ background: tone.color }} />
-                        <span className="truncate">{run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 60)}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
-        </aside>
-      )}
-      {/* The content column scrolls on its own beside the sidebar. */}
-      <div className="flex-1 min-w-0 flex flex-col overflow-y-auto">
+    <div className={`h-full flex flex-col overflow-y-auto ${APP_GROUND} text-white @container`} data-testid="coding-agent-panel" data-help-bounds>
       {/* flex-1 so a face can ask for the remaining height — the wizard's
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
-      {/* A run's page is data — figures, files, a summary, an activity log —
-          and reads better wide; the home and project pages stay a column. */}
-      <div className={`mx-auto w-full ${view.face === "run" ? "max-w-6xl" : view.face === "project" ? "max-w-none" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
+      <div className={`mx-auto w-full ${column} ${PAGE_PAD} flex-1 flex flex-col min-h-0`}>
 
-        {/* One row: what this is, whether it is on, and everything you can do
-            from here. The primary action used to sit on its own line below,
-            left-aligned against nothing; paired with Settings it reads as a
-            toolbar and the page below it starts clean. */}
-        {/* The header row is the narrow window's: with the rail up it would
-            repeat the rail's New/Home/Settings and cost the page a row it
-            needs for files — and the window's own title bar already names
-            the app. The owner asked for no name and no state chip in the
-            rail either; the switch is one tap away in Settings. The setup
-            WIZARD has no rail at any width, so it keeps the row: without it
-            a wide window on the wizard had no way to Settings at all. */}
-        {(!wide || view.face === "wizard") && (
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-1 border-b border-white/[0.06]">
-          {/* Wraps: in a phone-wide window the buttons drop under the title
-              instead of the title folding onto two lines behind them. */}
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
-            <h1 className="whitespace-nowrap text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
-            {status && (
-              <span
-                data-testid="coding-agent-state"
-                className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 ${
-                  status.enabled ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]" : "text-[var(--text-muted)] border-white/15"
-                }`}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`w-1.5 h-1.5 rounded-full ${status.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`}
-                />
-                {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {/* Create app lives HERE now, beside Settings and the same size as
-                it, instead of as a lone banner-ish button under the header.
-                Home face only: on the settings and wizard faces there is
-                nothing for it to create into yet. */}
-            {view.face === "home" && !standalone && (
+        {/* ONE header row, 56 px, on every face at every width: the way up
+            (absent on home and on the wizard, which have no level above
+            them), the glyph, where you are, and Settings. It replaced the
+            narrow window's title row, the wide window's sidebar and the
+            breadcrumb trail on 2026-10-30 — three chromes for one app. Not
+            sticky: the phone window's own header sits above it, and a
+            second fixed bar would have cost the phone a sixth of its
+            height. */}
+        <div className="flex items-center gap-2 h-14 shrink-0" data-testid="coding-agent-header">
+          {hasUp && (
+            <button
+              type="button"
+              onClick={goUp}
+              aria-label={backLabel}
+              title={backLabel}
+              data-testid={backTestId}
+              className={`${HEADER_ICON_BUTTON} -ml-2`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">arrow_back</span>
+            </button>
+          )}
+          <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
+          <div className="min-w-0 flex-1 flex items-center gap-2">
+            {view.face === "run" && headerProject ? (
               <button
                 type="button"
-                onClick={openNew}
-                data-testid="coding-agent-new"
-                className={BTN_PRIMARY}
+                onClick={() => { setOpenRunId(null); setOpenProjectDir(headerProject.directory); }}
+                data-testid="coding-agent-crumb-project"
+                className="min-w-0 truncate text-left text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] hover:text-white cursor-pointer"
               >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
-                {t("codingAgent.createNewProject")}
+                {headerProject.name}
               </button>
+            ) : (
+              <h1 className="min-w-0 truncate text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
+                {headerProject ? headerProject.name : headerTitle}
+              </h1>
             )}
-          {/* The settings live IN this app: one button, on the desktop and on
+            {stateChip}
+          </div>
+          {/* The settings live IN this app: one gear, on the desktop and on
               /app/coding alike, so a phone that landed here from "Open in new
-              tab" reaches the switch without a desktop listening. */}
-          {/* Settings opens from here. The way BACK is the breadcrumb every
-              page but home carries (CodingAgentBreadcrumb) — one shape for
-              the settings page, a project's and a run's, where three
-              differently styled pills used to float — so this button never
-              has to flip between two meanings. */}
+              tab" reaches the switch without a desktop listening. The way
+              BACK is the header's arrow, so this button never has to flip
+              between two meanings. */}
           {view.face !== "settings" && (
             <button
               type="button"
               onClick={() => { disarmClear(); setPage("settings"); }}
+              aria-label={t("codingAgent.openSettings")}
+              title={t("codingAgent.openSettings")}
               data-testid="coding-agent-open-settings"
-              className={OPEN_SETTINGS_CLASS}
+              className={`${HEADER_ICON_BUTTON} -mr-2`}
             >
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
-              {t("codingAgent.openSettings")}
+              <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">settings</span>
             </button>
           )}
-          </div>
         </div>
-        )}
 
         {/* A refused action's sentence, ABOVE the page rather than under it.
             Drawn at the bottom of the panel, a refused Resume on a run's page
@@ -2083,22 +2024,12 @@ export default function CodingAgentApp() {
         )}
 
         {view.face === "settings" && (<>
-          <CodingAgentBreadcrumb
-            crumbs={[
-              { label: t("codingAgent.navHome"), onClick: () => { disarmClear(); setPage("home"); }, testId: "coding-agent-crumb-home" },
-              { label: t("codingAgent.openSettings") },
-            ]}
-            onBack={() => { disarmClear(); setPage("home"); }}
-            backLabel={t("codingAgent.back")}
-            navLabel={t("codingAgent.breadcrumbLabel")}
-            backTestId="coding-agent-settings-back"
-          />
           {/* pb-6 for the same reason coding-agent-run-page carries it: the
               owner tools are the last thing on this face, and the wrapper's
               own py-4 left Reset / Test harness / Clear history sitting on
               the bottom edge of the scroll area. Same scale as the run page,
               not a new one. */}
-          <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
+          <div className="mt-1 pb-6" data-testid="coding-agent-embedded-settings">
             <CodingAgentSettingsPanel />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
@@ -2183,40 +2114,53 @@ export default function CodingAgentApp() {
           refreshKey={runs}
         />
         {/* Nothing at all when the harness is fine. A row that always says
-            "Ready" is a row that never tells the owner anything; the checklist
-            appears only when something is actually missing. */}
-        {readiness && !readiness.ready && (
-          <div className={`mt-3 ${CARD_SURFACE} px-3 py-2`}>
-            <ul className="space-y-1">
-              {checks.filter((c) => !c.ok).map((c) => (
-                <li key={c.label} className="flex items-center gap-2 text-xs">
-                  <span className="material-symbols-rounded text-red-400" style={{ fontSize: 16 }} aria-hidden="true">cancel</span>
-                  <span className="text-[var(--text-primary)]">{c.label}</span>
-                  <span className="text-[var(--text-muted)]">· {c.badText}</span>
-                </li>
-              ))}
-            </ul>
-            {readiness.problems.length > 0 && (
-              <p className="text-[11px] text-amber-400 mt-1.5 leading-relaxed" role="alert">
-                {readiness.problems.join(" ")}
-              </p>
-            )}
-            {/* Only for the one problem the owner can clear from here. The
-                other rows name something to install or a plan to connect, and
-                a button that re-read the same disk would just say no again. */}
-            {readiness.harnessHealthy === false && (
-              <button
-                type="button"
-                onClick={() => void retryHarness()}
-                disabled={busy === "harness-fault"}
-                data-testid="coding-agent-harness-retry"
-                className="mt-2 text-[11px] rounded-lg border border-amber-400/40 text-amber-300 px-2.5 py-1 hover:bg-amber-400/10 disabled:opacity-50"
-              >
-                {busy === "harness-fault" ? t("codingAgent.harnessRetrying") : t("codingAgent.harnessRetry")}
-              </button>
-            )}
-          </div>
-        )}
+            "Ready" is a row that never tells the owner anything. When
+            something IS missing: ONE row naming the first failing check
+            (2026-10-30 — the four-row checklist went), the box's own sentence
+            on how to fix it, Retry for the one fault clearable from here and
+            the way to Settings. */}
+        {readiness && !readiness.ready && (() => {
+          const failing = checks.find((c) => !c.ok);
+          const what = failing ? `${failing.label} · ${failing.badText}` : (readiness.problems[0] ?? "");
+          return (
+            <div className={`mt-3 ${CARD_SURFACE} px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-2`} data-testid="coding-agent-readiness">
+              <span className="material-symbols-rounded text-red-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">cancel</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-[var(--text-primary)]" data-testid="coding-agent-readiness-line">{t("codingAgent.notReady", { what })}</p>
+                {readiness.problems.length > 0 && (
+                  <p className="text-[11px] text-amber-400 mt-0.5 leading-relaxed" role="alert">
+                    {readiness.problems.join(" ")}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Only for the one problem the owner can clear from here. The
+                    other checks name something to install or a plan to connect,
+                    and a button that re-read the same disk would just say no
+                    again. */}
+                {readiness.harnessHealthy === false && (
+                  <button
+                    type="button"
+                    onClick={() => void retryHarness()}
+                    disabled={busy === "harness-fault"}
+                    data-testid="coding-agent-harness-retry"
+                    className={BTN_SECONDARY}
+                  >
+                    {busy === "harness-fault" ? t("codingAgent.harnessRetrying") : t("codingAgent.harnessRetry")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => { disarmClear(); setPage("settings"); }}
+                  data-testid="coding-agent-readiness-settings"
+                  className={BTN_QUIET}
+                >
+                  {t("codingAgent.openSettings")}
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* The projects, and the way to start one. */}
         <div className="mt-4" data-testid="coding-agent-projects-section">
@@ -2229,19 +2173,36 @@ export default function CodingAgentApp() {
                 </span>
               )}
             </h2>
-            {/* Bringing in what already exists: one of the owner's GitHub
-                repositories, or a folder on the box. Offered on the standalone
-                page too — nothing here needs the chat. */}
-            <button
-              type="button"
-              onClick={() => setImportOpen((v) => !v)}
-              aria-expanded={importOpen}
-              className={BTN_SECONDARY}
-              data-testid="coding-agent-import-toggle"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
-              {t("codingAgent.importButton")}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Create app: the hand-off to the chat's "A new app for your
+                  desktop" card. Beside the projects it creates into, since the
+                  header row carries the way up and Settings only. Not on
+                  /app/coding, where no desktop listens. */}
+              {!standalone && (
+                <button
+                  type="button"
+                  onClick={openNew}
+                  data-testid="coding-agent-new"
+                  className={BTN_PRIMARY}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
+                  {t("codingAgent.createNewProject")}
+                </button>
+              )}
+              {/* Bringing in what already exists: one of the owner's GitHub
+                  repositories, or a folder on the box. Offered on the standalone
+                  page too — nothing here needs the chat. */}
+              <button
+                type="button"
+                onClick={() => setImportOpen((v) => !v)}
+                aria-expanded={importOpen}
+                className={BTN_SECONDARY}
+                data-testid="coding-agent-import-toggle"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
+                {t("codingAgent.importButton")}
+              </button>
+            </div>
           </div>
 
           {importOpen && (
@@ -2322,8 +2283,9 @@ export default function CodingAgentApp() {
               )}
             </div>
           ) : (
+            <>
             <ul className="space-y-1.5 mt-2" data-testid="coding-agent-projects">
-              {projects.map((project) => {
+              {(projectsAll ? orderedProjects : orderedProjects.slice(0, PROJECTS_PAGE)).map((project) => {
                 const running = project.latestRun?.status === "running";
                 return (
                   <li
@@ -2331,10 +2293,11 @@ export default function CodingAgentApp() {
                     // owner's can share a name.
                     key={project.directory}
                     data-testid={`coding-agent-project-${project.folder}`}
-                    // The row opens the project, and it holds buttons of its
-                    // own (copy, Open), so it cannot be a <button> itself:
-                    // role and tabIndex make it a keyboard stop, and Enter
-                    // or Space opens it the way a click does.
+                    // The row opens the project. Not a <button> itself (a row
+                    // held buttons of its own once, and a <li> of role button
+                    // is what the tests and a screen reader know): role and
+                    // tabIndex make it a keyboard stop, and Enter or Space
+                    // opens it the way a click does.
                     role="button"
                     tabIndex={0}
                     onClick={() => setOpenProjectDir(project.directory)}
@@ -2345,7 +2308,7 @@ export default function CodingAgentApp() {
                         setOpenProjectDir(project.directory);
                       }
                     }}
-                    className={`${CARD_SURFACE} px-3 py-2 flex items-center justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
+                    className={`${CARD_SURFACE} px-3 py-2 min-h-[56px] @md:min-h-[48px] flex items-center justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
                   >
                     <div className="min-w-0 flex-1 flex items-center gap-2 flex-wrap">
                       {/* The picture the box drew for this project while a run
@@ -2357,8 +2320,9 @@ export default function CodingAgentApp() {
                           else that the desktop has it, else that it is a code
                           project (under the checkout, not in the owner's
                           folder). The ClawBox-app badge, the last commit's
-                          subject and the Store and Delete buttons left the row
-                          for the project's page — a row's job is to open it. */}
+                          subject, the Store and Delete buttons and (2026-10-30)
+                          the inline Open left the row for the project's page —
+                          a row's job is to open it. */}
                       {running ? (
                         <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
                           {t("codingAgent.runInProgress")}
@@ -2376,25 +2340,26 @@ export default function CodingAgentApp() {
                     <span className="text-[11px] text-[var(--text-muted)] shrink-0 self-center">
                       {project.lastCommit ? timeAgo(project.lastCommit.date, t) : t("codingAgent.noCommits")}
                     </span>
-                    {project.onDesktop && (
-                      <button
-                        type="button"
-                        // The desktop registers a deployed web app under
-                        // `installed-<folder>` (page.tsx, getAllApps); the
-                        // bare folder name matches no app there, and the
-                        // click did nothing at all.
-                        onClick={(e) => { e.stopPropagation(); void openOrAddProject(project); }}
-                        data-testid={`coding-agent-open-${project.folder}`}
-                        className={BTN_SECONDARY}
-                      >
-                        {t("codingAgent.open")}
-                      </button>
-                    )}
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                   </li>
                 );
               })}
             </ul>
+            {/* The rest of the projects, on request. The button says how many
+                there are in all, and the list folds back to the first page on
+                the next open of the app. */}
+            {projects.length > PROJECTS_PAGE && (
+              <button
+                type="button"
+                onClick={() => setProjectsAll((v) => !v)}
+                aria-expanded={projectsAll}
+                data-testid="coding-agent-projects-more"
+                className={`${BTN_SECONDARY} w-full mt-2`}
+              >
+                {projectsAll ? t("codingAgent.showFewerProjects") : t("codingAgent.showAllProjects", { count: projects.length })}
+              </button>
+            )}
+            </>
           )}
         </div>
         </>)}
@@ -2457,23 +2422,7 @@ export default function CodingAgentApp() {
             </div>
           );
           return (
-            <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
-              <CodingAgentBreadcrumb
-                crumbs={[
-                  { label: t("codingAgent.projectsTitle"), onClick: () => { setOpenRunId(null); setOpenProjectDir(null); }, testId: "coding-agent-crumb-projects" },
-                  ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
-                  { label: title },
-                ]}
-                // A run with no project of its own — a team worker in a
-                // worktree — goes back to Projects, which is what its
-                // breadcrumb says. Leaving `openProjectDir` alone landed it on
-                // whichever project the owner had opened BEFORE, a page with
-                // nothing to do with the run they came from.
-                onBack={() => { setOpenRunId(null); setOpenProjectDir(project ? project.directory : null); }}
-                backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
-                navLabel={t("codingAgent.breadcrumbLabel")}
-                backTestId="coding-agent-run-back"
-              />
+            <div className="mt-1 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
 
               {/* The agents first: this run's team with the run marked on it,
                   or — solo — the run and the helpers it sent out. A node opens
@@ -2537,18 +2486,37 @@ export default function CodingAgentApp() {
                   )}
                 </div>
                 {prDetail(run)}
-                <h2 className="mt-2 text-sm font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">{title}</h2>
+                {/* The title: the task's first line, three lines at most, and
+                    itself a tap target for the whole task when there is more. */}
+                <h2 className="mt-2 text-[15px] leading-snug font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">
+                  {fullTask ? (
+                    <button
+                      type="button"
+                      onClick={() => setTaskOpenFor(run.id)}
+                      title={t("codingAgent.fullTask")}
+                      className="line-clamp-3 text-left hover:text-white cursor-pointer"
+                    >
+                      {title}
+                    </button>
+                  ) : (
+                    <span className="line-clamp-3">{title}</span>
+                  )}
+                </h2>
                 {/* The rest of the task opens in a dialog of its own, rendered
                     as Markdown — a `<details>` that unfolded raw text into the
-                    header card was the owner's complaint (2026-10-12). */}
+                    header card was the owner's complaint (2026-10-12). A real
+                    button, 44 px on a phone and the card's whole width there,
+                    directly under the title: the 11-px line it used to be was
+                    the owner's complaint of 2026-10-30 ("needs better
+                    visibility"). */}
                 {fullTask && (
                   <button
                     type="button"
                     onClick={() => setTaskOpenFor(run.id)}
                     data-testid="coding-agent-run-task-open"
-                    className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-white"
+                    className={`${BTN_SECONDARY} mt-2 w-full @md:w-auto font-semibold text-[var(--text-primary)]`}
                   >
-                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_full</span>
+                    <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">open_in_full</span>
                     {t("codingAgent.fullTask")}
                   </button>
                 )}
@@ -3055,17 +3023,7 @@ export default function CodingAgentApp() {
           const lastSubject = git?.lastCommit?.subject ?? p.lastCommit?.subject ?? null;
           const lastDate = git?.lastCommit?.date ?? p.lastCommit?.date ?? null;
           return (<>
-            <CodingAgentBreadcrumb
-              crumbs={[
-                { label: t("codingAgent.projectsTitle"), onClick: () => setOpenProjectDir(null), testId: "coding-agent-crumb-projects" },
-                { label: p.name },
-              ]}
-              onBack={() => setOpenProjectDir(null)}
-              backLabel={t("codingAgent.back")}
-            navLabel={t("codingAgent.breadcrumbLabel")}
-              backTestId="coding-agent-project-back"
-            />
-            <div className="mt-3 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
+            <div className="mt-1 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
               {/* One row: who this is and what it is. The folder under it is
                   one tap to copy — the home row no longer carries that. */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -3275,7 +3233,6 @@ export default function CodingAgentApp() {
           </>);
         })()}
 
-      </div>
       </div>
 
       {publishTarget && (

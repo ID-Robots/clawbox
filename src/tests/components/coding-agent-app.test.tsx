@@ -604,16 +604,19 @@ describe("CodingAgentApp", () => {
     expect(screen.queryByText(/ready/i)).not.toBeInTheDocument();
   });
 
-  it("names only what is missing, and how to fix it", async () => {
+  it("names only what is missing, in ONE row, and how to fix it", async () => {
     stubFetch({ enabled: true, readiness: NOT_READY });
     render(<CodingAgentApp />);
-    // Claude Code is the missing one; the two that are fine are not listed.
-    expect(await screen.findByText(translations.en["codingAgent.claudeCode"])).toBeInTheDocument();
-    expect(screen.queryByText(translations.en["codingAgent.clawai"])).not.toBeInTheDocument();
+    // Claude Code is the missing one; the checks that are fine are not named.
+    const line = await screen.findByTestId("coding-agent-readiness-line");
+    expect(line.textContent).toBe(t("codingAgent.notReady", { what: `${t("codingAgent.claudeCode")} · ${t("codingAgent.missing")}` }));
+    expect(line.textContent).not.toContain(translations.en["codingAgent.clawai"]);
     expect(screen.getByRole("alert").textContent).toMatch(/Claude Code is not installed/);
-    // The harness row is fine here, so it is not listed either — the
-    // checklist only ever shows what is actually wrong.
-    expect(screen.queryByText(translations.en["codingAgent.harness"])).not.toBeInTheDocument();
+    // The harness is fine here, so it is not named either — the row only
+    // ever says what is actually wrong. And Settings is one tap away.
+    expect(line.textContent).not.toContain(translations.en["codingAgent.harness"]);
+    fireEvent.click(screen.getByTestId("coding-agent-readiness-settings"));
+    expect(await screen.findByTestId("coding-agent-embedded-settings")).toBeInTheDocument();
   });
 
   /**
@@ -627,15 +630,15 @@ describe("CodingAgentApp", () => {
       problems: ["The coding harness on this ClawBox is not ready: it could not get a model to answer."],
     };
 
-    it("gets a row of its own, with every check above it ticked", async () => {
+    it("is the row's subject when every check above it is ticked", async () => {
       stubFetch({ enabled: true, readiness: HARNESS_BROKEN });
       render(<CodingAgentApp />);
-      expect(await screen.findByText(translations.en["codingAgent.harness"])).toBeInTheDocument();
-      expect(screen.getByText(`· ${translations.en["codingAgent.harnessNotReady"]}`)).toBeInTheDocument();
+      const line = await screen.findByTestId("coding-agent-readiness-line");
+      expect(line.textContent).toBe(t("codingAgent.notReady", { what: `${t("codingAgent.harness")} · ${t("codingAgent.harnessNotReady")}` }));
       // The three that look at the disk are all fine, which is exactly why
-      // this needed a row rather than a line in someone else's.
-      expect(screen.queryByText(translations.en["codingAgent.claudeCode"])).not.toBeInTheDocument();
-      expect(screen.queryByText(translations.en["codingAgent.wrapper"])).not.toBeInTheDocument();
+      // this needed a check of its own rather than a line in someone else's.
+      expect(line.textContent).not.toContain(translations.en["codingAgent.claudeCode"]);
+      expect(line.textContent).not.toContain(translations.en["codingAgent.wrapper"]);
       expect(screen.getByRole("alert").textContent).toMatch(/could not get a model to answer/);
     });
 
@@ -645,8 +648,9 @@ describe("CodingAgentApp", () => {
       // than the silence it replaced.
       stubFetch({ enabled: true, readiness: NOT_READY });
       render(<CodingAgentApp />);
-      await screen.findByText(translations.en["codingAgent.claudeCode"]);
-      expect(screen.queryByText(translations.en["codingAgent.harness"])).not.toBeInTheDocument();
+      const line = await screen.findByTestId("coding-agent-readiness-line");
+      expect(line.textContent).toContain(translations.en["codingAgent.claudeCode"]);
+      expect(line.textContent).not.toContain(translations.en["codingAgent.harness"]);
     });
 
     it("offers a way out, because a refusal nobody can retry is a dead end", async () => {
@@ -666,7 +670,7 @@ describe("CodingAgentApp", () => {
       // button that re-read the same disk would only say no again.
       stubFetch({ enabled: true, readiness: NOT_READY });
       render(<CodingAgentApp />);
-      await screen.findByText(translations.en["codingAgent.claudeCode"]);
+      await screen.findByTestId("coding-agent-readiness-line");
       expect(screen.queryByTestId("coding-agent-harness-retry")).toBeNull();
     });
 
@@ -1022,8 +1026,10 @@ describe("CodingAgentApp", () => {
       }
     });
 
-    it("shows the sidebar in a wide window — projects and recent runs that open their pages", async () => {
-      // A window wide enough for the rail: the observer answers at once.
+    it("draws ONE header row at every width — no sidebar in a wide window, the gear on the right, the page a column", async () => {
+      // A window wide enough for the old 860-px rail: the observer answers at
+      // once. Since 2026-10-30 there is no rail at any width — one chrome is
+      // what makes the phone and the wide window the same page.
       const RO = class {
         private cb: ResizeObserverCallback;
         constructor(cb: ResizeObserverCallback) { this.cb = cb; }
@@ -1035,92 +1041,28 @@ describe("CodingAgentApp", () => {
       try {
         stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
         render(<CodingAgentApp />);
-        const sidebar = await screen.findByTestId("coding-agent-sidebar");
-        expect(within(sidebar).getByTestId("coding-agent-sidebar-home")).toHaveAttribute("aria-current", "page");
-        // With the rail up there is no header row — no title, no state chip,
-        // no Settings button: the rail has Settings, the window's title bar
-        // names the app, and the row cost the page a row it needs for files.
-        expect(screen.queryByTestId("coding-agent-open-settings")).toBeNull();
-        expect(screen.queryByTestId("coding-agent-state")).toBeNull();
-        expect(within(sidebar).queryByText(t("codingAgent.title"))).toBeNull();
-        expect(within(sidebar).getByTestId("coding-agent-sidebar-settings")).toBeInTheDocument();
-        // No projects list in the rail (lean home, 2026-10-28): the page
-        // lists them, and its row opens the project's page…
-        expect(within(sidebar).queryByTestId("coding-agent-sidebar-projects")).toBeNull();
-        expect(within(sidebar).queryByText(SITE_PROJECT.name)).toBeNull();
+        const header = await screen.findByTestId("coding-agent-header");
+        expect(screen.queryByTestId("coding-agent-sidebar")).toBeNull();
+        expect(screen.queryByTestId("coding-agent-sidebar-runs")).toBeNull();
+        // Home: the title, the state chip, Settings — and no way up, since
+        // there is no level above home.
+        expect(within(header).getByText(t("codingAgent.title"))).toBeInTheDocument();
+        expect(within(header).getByTestId("coding-agent-state")).toHaveTextContent(t("codingAgent.stateOn"));
+        expect(within(header).getByTestId("coding-agent-open-settings")).toHaveAttribute("aria-label", t("codingAgent.openSettings"));
+        expect(screen.queryByTestId("coding-agent-project-back")).toBeNull();
+        expect(screen.queryByTestId("coding-agent-run-back")).toBeNull();
+        // The project row opens the project's page…
         fireEvent.click(screen.getByTestId("coding-agent-project-site"));
         await screen.findByTestId("coding-agent-project-page");
-        // …whose folder fills the column, with the runs and the team as tabs.
+        // …whose header names it and leads home, with the runs and the team as tabs.
+        expect(within(screen.getByTestId("coding-agent-header")).getByText(SITE_PROJECT.name)).toBeInTheDocument();
+        expect(screen.queryByTestId("coding-agent-state")).toBeNull();
         expect(screen.getByTestId("coding-agent-workspace")).toHaveAttribute("data-fill", "true");
         expect(screen.getByTestId("coding-agent-workspace-runs")).toBeInTheDocument();
         expect(screen.getByTestId("coding-agent-workspace-team")).toBeInTheDocument();
-        // …and a run entry the run's page.
-        fireEvent.click(within(within(sidebar).getByTestId("coding-agent-sidebar-runs")).getByRole("button"));
-        expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", RUN.id);
-        // The run's data sits in the rail beside its story.
-        expect(within(screen.getByTestId("coding-agent-run-rail")).getByTestId("coding-agent-run-figures")).toBeInTheDocument();
-        // …but the evidence does not: it has the whole column, under the Agents card.
-        expect(within(screen.getByTestId("coding-agent-run-rail")).queryByTestId("coding-agent-artifacts")).toBeNull();
-        // Home brings the front page back.
-        fireEvent.click(within(sidebar).getByTestId("coding-agent-sidebar-home"));
-        expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
-      } finally {
-        vi.unstubAllGlobals();
-      }
-    });
-
-    it("keeps a held run at the top of the sidebar however many newer runs there are", async () => {
-      // A review pass paused one evening was, a dozen newer runs later,
-      // listed nowhere: its folder gone (so no project row), and the rail
-      // shows the newest twelve. A run waiting on the owner is never out of
-      // sight — held runs come first, whatever their age.
-      const RO = class {
-        private cb: ResizeObserverCallback;
-        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
-        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
-        unobserve() {}
-        disconnect() {}
-      };
-      vi.stubGlobal("ResizeObserver", RO);
-      try {
-        const newer = Array.from({ length: 14 }, (_, i) => ({ ...RUN, id: `run-newer${String(i).padStart(3, "0")}`, task: `Newer task ${i}`, startedAt: 2_000 + i }));
-        const paused = { ...RUN, id: "run-oldpause", task: "Paused long ago", status: "paused", completedAt: 900, startedAt: 800, directory: "/home/clawbox/Projects/gone", projectId: null };
-        stubFetch({ enabled: true, readiness: READY }, [...newer, paused], { projects: [SITE_PROJECT] });
-        render(<CodingAgentApp />);
-        const sidebar = await screen.findByTestId("coding-agent-sidebar");
-        const buttons = within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button");
-        // The paused run, then the twelve newest settled ones: the cap is theirs.
-        expect(buttons).toHaveLength(1 + 12);
-        expect(buttons[0]).toHaveTextContent("Paused long ago");
-        // …and opens its page, where Resume and Stop are.
-        fireEvent.click(buttons[0]);
-        expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-oldpause");
-        expect(screen.getByTestId("coding-agent-resume-run-oldpause")).toBeInTheDocument();
-      } finally {
-        vi.unstubAllGlobals();
-      }
-    });
-
-    it("never hides a held run behind the rail's cap — the cap is the settled runs' alone", async () => {
-      const RO = class {
-        private cb: ResizeObserverCallback;
-        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
-        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
-        unobserve() {}
-        disconnect() {}
-      };
-      vi.stubGlobal("ResizeObserver", RO);
-      try {
-        const held = Array.from({ length: 14 }, (_, i) => ({ ...RUN, id: `run-held${String(i).padStart(4, "0")}`, task: `Held task ${i}`, status: "draft", completedAt: null, startedAt: 5_000 + i }));
-        const settled = Array.from({ length: 15 }, (_, i) => ({ ...RUN, id: `run-done${String(i).padStart(4, "0")}`, task: `Done task ${i}`, startedAt: 1_000 + i }));
-        stubFetch({ enabled: true, readiness: READY }, [...held, ...settled], { projects: [SITE_PROJECT] });
-        render(<CodingAgentApp />);
-        const sidebar = await screen.findByTestId("coding-agent-sidebar");
-        const labels = within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button").map((b) => b.textContent);
-        // All fourteen held runs, then twelve settled ones.
-        expect(labels).toHaveLength(14 + 12);
-        expect(labels.slice(0, 14).every((l) => l?.includes("Held task"))).toBe(true);
-        expect(labels.slice(14).every((l) => l?.includes("Done task"))).toBe(true);
+        fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+        expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
+        expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
       } finally {
         vi.unstubAllGlobals();
       }
@@ -1881,17 +1823,59 @@ describe("projects", () => {
       expect(scratch.textContent).not.toContain(translations.en["codingAgent.onDesktop"]);
       // A folder of the owner's is not labelled; only a code project is (below).
       expect(site.textContent).not.toContain(translations.en["codingAgent.codeProject"]);
-      // Open exists only for a project the desktop knows.
+      // No Open on the row (2026-10-30): a row's job is to open the project's
+      // page, where Open lives — and exists only for a project the desktop knows.
+      expect(screen.queryByTestId("coding-agent-open-site")).not.toBeInTheDocument();
       expect(screen.queryByTestId("coding-agent-open-scratch")).not.toBeInTheDocument();
-
+      fireEvent.click(site);
+      await screen.findByTestId("coding-agent-project-page");
       // The id the DESKTOP matches on — page.tsx registers a deployed web app
       // as `installed-<folder>`. The bare folder name opened nothing.
-      fireEvent.click(screen.getByTestId("coding-agent-open-site"));
+      fireEvent.click(screen.getByTestId("coding-agent-project-open"));
       expect(apps).toEqual([installedAppId("site")]);
       expect(apps).toEqual(["installed-site"]);
     } finally {
       window.removeEventListener("clawbox:open-app", onApp);
     }
+  });
+
+  it("lists six projects and the rest behind Show all (N), which becomes Show fewer", async () => {
+    // The owner's ask of 2026-10-30: "when we have many projects we need to
+    // scroll a lot — don't show all of them initially".
+    const seven = Array.from({ length: 7 }, (_, i) => ({
+      ...PROJECT, folder: `p${i}`, directory: `/home/clawbox/Projects/p${i}`, name: `Project ${i}`, onDesktop: false,
+      lastCommit: { subject: "x", date: Date.now() - (i + 1) * 3600_000 },
+    }));
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: seven });
+    render(<CodingAgentApp />);
+    await screen.findByTestId("coding-agent-projects");
+    expect(screen.getAllByTestId(/^coding-agent-project-p\d$/)).toHaveLength(6);
+    expect(screen.queryByTestId("coding-agent-project-p6")).toBeNull();
+    const more = screen.getByTestId("coding-agent-projects-more");
+    expect(more.textContent).toBe(t("codingAgent.showAllProjects", { count: 7 }));
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(more);
+    expect(screen.getAllByTestId(/^coding-agent-project-p\d$/)).toHaveLength(7);
+    expect(more.textContent).toBe(t("codingAgent.showFewerProjects"));
+    expect(more).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(more);
+    expect(screen.getAllByTestId(/^coding-agent-project-p\d$/)).toHaveLength(6);
+  });
+
+  it("offers no Show all for six projects or fewer, and lists a project at work first", async () => {
+    const six = Array.from({ length: 6 }, (_, i) => ({
+      ...PROJECT, folder: `p${i}`, directory: `/home/clawbox/Projects/p${i}`, name: `Project ${i}`, onDesktop: false,
+      lastCommit: { subject: "x", date: Date.now() - (i + 1) * 3600_000 },
+      // The oldest by commit has a run at work: it comes first.
+      latestRun: i === 5 ? { id: "run-k3x9q2ab", status: "running", task: "x", startedAt: Date.now(), completedAt: null } : null,
+    }));
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: six });
+    render(<CodingAgentApp />);
+    await screen.findByTestId("coding-agent-projects");
+    expect(screen.queryByTestId("coding-agent-projects-more")).toBeNull();
+    const names = screen.getAllByTestId(/^coding-agent-project-p\d$/).map((el) => el.getAttribute("data-testid"));
+    expect(names[0]).toBe("coding-agent-project-p5");
+    expect(names.slice(1)).toEqual(["coding-agent-project-p0", "coding-agent-project-p1", "coding-agent-project-p2", "coding-agent-project-p3", "coding-agent-project-p4"]);
   });
 
   it("lists a code project — where the New app wizard's handoff lands — and says which it is", async () => {
@@ -2149,7 +2133,7 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(screen.getByTestId("coding-agent-change-totals").textContent).toContain(t("codingAgent.filesChanged", { n: 1 }));
   });
 
-  it("names the trail above a run — Projects › project › run — and Back leads to the project, even for a run handed in from outside", async () => {
+  it("names the run's project in the header as a button, and the arrow leads to the project, even for a run handed in from outside", async () => {
     stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     await screen.findByTestId("coding-agent-project-site");
@@ -2157,35 +2141,38 @@ describe("the workspace, the breadcrumb and the live view", () => {
     // project page was opened first.
     act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: RUN.id } })); });
     await screen.findByTestId("coding-agent-run-page");
-    const crumbs = screen.getByTestId("coding-agent-breadcrumb");
-    expect(within(crumbs).getByTestId("coding-agent-crumb-projects").textContent).toBe(t("codingAgent.projectsTitle"));
-    expect(within(crumbs).getByTestId("coding-agent-crumb-project").textContent).toBe(SITE_PROJECT.name);
-    expect(within(crumbs).getByText("Add a dark mode toggle")).toHaveAttribute("aria-current", "page");
+    const header = screen.getByTestId("coding-agent-header");
+    expect(within(header).getByTestId("coding-agent-crumb-project").textContent).toBe(SITE_PROJECT.name);
+    // No breadcrumb trail and no Projects crumb: the header is the one chrome.
+    expect(screen.queryByTestId("coding-agent-breadcrumb")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-crumb-projects")).toBeNull();
     // The arrow says where it goes, for a screen reader too.
-    expect(screen.getByTestId("coding-agent-run-back")).toHaveAttribute("aria-label", t("codingAgent.backTo", { name: SITE_PROJECT.name }));
-    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+    expect(within(header).getByTestId("coding-agent-run-back")).toHaveAttribute("aria-label", t("codingAgent.backTo", { name: SITE_PROJECT.name }));
+    // The project's name is the other way there.
+    fireEvent.click(within(header).getByTestId("coding-agent-crumb-project"));
     expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
     expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
-    // And the first crumb goes all the way home.
-    fireEvent.click(screen.getByTestId("coding-agent-crumb-projects"));
+    // And the project page's arrow goes home.
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
     expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
     expect(await screen.findByTestId("coding-agent-project-site")).toBeInTheDocument();
   });
 
-  it("uses the same breadcrumb on the settings page, with the header's Settings button gone while it is open", async () => {
+  it("names Settings in the header with the gear gone while it is open, and its arrow leads home", async () => {
     stubFetch({ enabled: true, readiness: READY });
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
     await screen.findByTestId("coding-agent-embedded-settings");
     expect(screen.queryByTestId("coding-agent-open-settings")).toBeNull();
-    const crumbs = screen.getByTestId("coding-agent-breadcrumb");
-    expect(within(crumbs).getByText(t("codingAgent.openSettings"))).toHaveAttribute("aria-current", "page");
-    fireEvent.click(within(crumbs).getByTestId("coding-agent-crumb-home"));
+    const header = screen.getByTestId("coding-agent-header");
+    expect(within(header).getByText(t("codingAgent.openSettings"))).toBeInTheDocument();
+    expect(within(header).getByTestId("coding-agent-settings-back")).toHaveAttribute("aria-label", t("codingAgent.back"));
+    fireEvent.click(within(header).getByTestId("coding-agent-settings-back"));
     expect(screen.queryByTestId("coding-agent-embedded-settings")).toBeNull();
     expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
   });
 
-  it("keeps the header row on the setup wizard even in a wide window — the wizard has no rail, and Settings is the way out", async () => {
+  it("keeps the header row on the setup wizard in a wide window — the state chip, Settings, and no sidebar", async () => {
     const RO = class {
       private cb: ResizeObserverCallback;
       constructor(cb: ResizeObserverCallback) { this.cb = cb; }
@@ -2200,12 +2187,15 @@ describe("the workspace, the breadcrumb and the live view", () => {
       expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
       expect(screen.getByTestId("coding-agent-state")).toHaveTextContent(t("codingAgent.stateOff"));
       expect(screen.queryByTestId("coding-agent-sidebar")).toBeNull();
+      // Nothing above the wizard: no arrow.
+      expect(screen.queryByTestId("coding-agent-settings-back")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-project-back")).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("keeps the header row in a narrow window, where there is no rail to carry it", async () => {
+  it("keeps the same header row in a narrow window", async () => {
     stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
@@ -2804,32 +2794,23 @@ describe("CodingAgentApp — the run page's honesty", () => {
       // the listing, the page says so rather than drawing a run that appears to
       // belong nowhere — which is also what a team worker looks like.
       //
-      // Reached from the SIDEBAR's recent runs, which is the one surface that
-      // lists a run whatever project it belonged to, so the rail is brought up
-      // the way the sidebar test does.
-      const RO = class {
-        private cb: ResizeObserverCallback;
-        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
-        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
-        unobserve() {}
-        disconnect() {}
-      };
-      vi.stubGlobal("ResizeObserver", RO);
-      try {
-        stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SHOP] });
-        render(<CodingAgentApp />);
-        const sidebar = await screen.findByTestId("coding-agent-sidebar");
-        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button")[0]);
+      // Reached the way the chat's card and the desktop's finish card reach
+      // a run whatever project it belonged to: the hand-off event (no project
+      // row lists it, and the sidebar that did is gone).
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SHOP] });
+      render(<CodingAgentApp />);
+      await screen.findByTestId("coding-agent-project-shop");
+      act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: RUN.id } })); });
 
-        const page = await screen.findByTestId("coding-agent-run-page");
-        expect(within(page).getByTestId("coding-agent-run-project-gone"))
-          .toHaveTextContent(t("codingAgent.delete.projectGone", { folder: "site" }));
-        expect(within(page).queryByTestId("coding-agent-run-project")).toBeNull();
-        // The run itself still renders in full.
-        expect(within(page).getByTestId("coding-agent-run-title")).toBeInTheDocument();
-      } finally {
-        vi.unstubAllGlobals();
-      }
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(within(page).getByTestId("coding-agent-run-project-gone"))
+        .toHaveTextContent(t("codingAgent.delete.projectGone", { folder: "site" }));
+      expect(within(page).queryByTestId("coding-agent-run-project")).toBeNull();
+      // The header names the run itself, there being no project to name.
+      expect(screen.queryByTestId("coding-agent-crumb-project")).toBeNull();
+      expect(within(screen.getByTestId("coding-agent-header")).getByText("Add a dark mode toggle")).toBeInTheDocument();
+      // The run itself still renders in full.
+      expect(within(page).getByTestId("coding-agent-run-title")).toBeInTheDocument();
     });
 
     it("says nothing about a missing project for a run that belongs to one", async () => {
@@ -2844,24 +2825,12 @@ describe("CodingAgentApp — the run page's honesty", () => {
       // smoke run matches no row BY DESIGN. Reading that as "its project was
       // removed" claimed a folder was gone that the box had just made.
       const smoke = { ...RUN, id: "run-smoke0002", projectId: "harness-test", directory: "/home/clawbox/clawbox/data/code-projects/harness-test" };
-      const RO = class {
-        private cb: ResizeObserverCallback;
-        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
-        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
-        unobserve() {}
-        disconnect() {}
-      };
-      vi.stubGlobal("ResizeObserver", RO);
-      try {
-        stubFetch({ enabled: true, readiness: READY }, [smoke], { projects: [SHOP] });
-        render(<CodingAgentApp />);
-        const sidebar = await screen.findByTestId("coding-agent-sidebar");
-        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button")[0]);
-        const page = await screen.findByTestId("coding-agent-run-page");
-        expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
-      } finally {
-        vi.unstubAllGlobals();
-      }
+      stubFetch({ enabled: true, readiness: READY }, [smoke], { projects: [SHOP] });
+      render(<CodingAgentApp />);
+      await screen.findByTestId("coding-agent-project-shop");
+      act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: smoke.id } })); });
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
     });
 
     async function openRunFromProject(id: string) {
@@ -3088,7 +3057,17 @@ describe("the whole task", () => {
     // The title is the first line; the rest is behind the button, not on the page.
     expect(within(page).getByTestId("coding-agent-run-title").textContent).toBe("Add a dark mode toggle");
     expect(screen.queryByTestId("coding-agent-task-dialog")).toBeNull();
-    fireEvent.click(within(page).getByTestId("coding-agent-run-task-open"));
+    // A real 44-px button with the glyph (the owner's "needs better
+    // visibility", 2026-10-30), not the 11-px line it used to be.
+    const open = within(page).getByTestId("coding-agent-run-task-open");
+    expect(open.tagName).toBe("BUTTON");
+    expect(open.className).toContain("min-h-[44px]");
+    expect(open.className).toContain("w-full");
+    expect(open.querySelector(".material-symbols-rounded")?.textContent).toBe("open_in_full");
+    expect(open.textContent).toContain(t("codingAgent.fullTask"));
+    // The clamped title is a tap target for the same dialog.
+    expect(within(page).getByTestId("coding-agent-run-title").querySelector("button")).not.toBeNull();
+    fireEvent.click(open);
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAccessibleName("Add a dark mode toggle");
     expect(within(dialog).getByTestId("coding-agent-task-dialog-body").querySelector("h2")?.textContent).toBe("What is left");
@@ -3103,6 +3082,8 @@ describe("the whole task", () => {
     fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
     const page = await screen.findByTestId("coding-agent-run-page");
     expect(within(page).queryByTestId("coding-agent-run-task-open")).toBeNull();
+    // …and the title is plain text, not a button to nothing.
+    expect(within(page).getByTestId("coding-agent-run-title").querySelector("button")).toBeNull();
   });
 });
 

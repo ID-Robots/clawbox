@@ -573,6 +573,10 @@ export const de: Record<string, string> = {
   "codingAgent.harnessNotReady": "nicht bereit",
   "codingAgent.harnessNotReadyDetail": "Das Coding-Harness dieser ClawBox konnte kein Modell zu einer Antwort bewegen. Das liegt am Gerät, nicht an Ihrer Aufgabe — prüfen Sie unter Einstellungen → KI-Modelle, ob ClawBox AI verbunden ist und ob Ihr Tarif das Modell abdeckt, das das Harness anfordert, und starten Sie den Lauf dann erneut.",
   "codingAgent.harnessRetry": "Erneut versuchen",
+  "codingAgent.clearRuns": "Verlauf löschen",
+  "codingAgent.showAllProjects": "Alle anzeigen ({count})",
+  "codingAgent.showFewerProjects": "Weniger anzeigen",
+  "codingAgent.notReady": "Nicht bereit: {what}",
   "codingAgent.harnessRetrying": "Wird geprüft…",
   "codingAgent.harnessRetryFailed": "Die ClawBox konnte nicht aufgefordert werden, das Harness erneut zu versuchen.",
   // Welches Konto einen Lauf bezahlt: der eigene Plan dieser ClawBox oder der
@@ -670,7 +674,6 @@ export const de: Record<string, string> = {
   "codingAgent.backupBusy": "Sichern…",
   "codingAgent.backupDone": "Auf {repo} gesichert",
   "codingAgent.backupFailed": "Sicherung auf GitHub fehlgeschlagen.",
-  "codingAgent.recentRuns": "Letzte Läufe",  "codingAgent.clearRuns": "Verlauf löschen",
   "codingAgent.clearRunsHint": "Entfernt abgeschlossene Läufe und ihre Nachweis-Ordner aus der Liste. Laufende, pausierte und als Entwurf gespeicherte Läufe bleiben erhalten — sie halten weiterhin eine Sitzung, die Sie fortsetzen können.",
   "codingAgent.clearConfirm": "Löschen — erneut tippen",
   "codingAgent.clearFailed": "Der Verlauf konnte nicht gelöscht werden.",
@@ -754,7 +757,6 @@ export const de: Record<string, string> = {
   "codingAgent.stop": "Stoppen",
   "codingAgent.back": "Zurück",
   "codingAgent.backTo": "Zurück zu {name}",
-  "codingAgent.breadcrumbLabel": "Brotkrumen-Navigation",
   "codingAgent.workspaceTitle": "Projekt-Arbeitsbereich",
   "codingAgent.filesTab": "Dateien",
   "codingAgent.changesTab": "Änderungen",
@@ -933,7 +935,6 @@ export const de: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Projekte",
-  "codingAgent.navHome": "Start",
   "codingAgent.projectFolderUnset": "Wählen Sie in den Einstellungen einen Projektordner, dann erscheint hier jedes Projekt mit eigener Git-Historie.",
   "codingAgent.noProjects": "Noch keine Projekte. Tippen Sie auf „Neue App“ oder bitten Sie Ihren Assistenten, etwas in {folder} zu bauen.",
   "codingAgent.onDesktop": "auf dem Desktop",

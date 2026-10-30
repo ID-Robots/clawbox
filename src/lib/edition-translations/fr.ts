@@ -574,6 +574,10 @@ export const fr: Record<string, string> = {
   "codingAgent.harnessNotReady": "pas prêt",
   "codingAgent.harnessNotReadyDetail": "L'environnement de codage de cette ClawBox n'a obtenu de réponse d'aucun modèle. Le problème vient de l'appareil, pas de votre tâche : vérifiez dans Réglages → Modèles d'IA que ClawBox AI est connectée et que votre forfait couvre le modèle demandé, puis relancez l'exécution.",
   "codingAgent.harnessRetry": "Réessayer",
+  "codingAgent.clearRuns": "Effacer l'historique",
+  "codingAgent.showAllProjects": "Tout afficher ({count})",
+  "codingAgent.showFewerProjects": "Afficher moins",
+  "codingAgent.notReady": "Pas prêt : {what}",
   "codingAgent.harnessRetrying": "Vérification…",
   "codingAgent.harnessRetryFailed": "Impossible de demander à la ClawBox de réessayer.",
   // Quel compte paie une exécution : le forfait de cette ClawBox, ou l'accès
@@ -671,7 +675,6 @@ export const fr: Record<string, string> = {
   "codingAgent.backupBusy": "Sauvegarde…",
   "codingAgent.backupDone": "Sauvegardé sur {repo}",
   "codingAgent.backupFailed": "Impossible de sauvegarder sur GitHub.",
-  "codingAgent.recentRuns": "Exécutions récentes",  "codingAgent.clearRuns": "Effacer l'historique",
   "codingAgent.clearRunsHint": "Retire de la liste les exécutions terminées et leurs dossiers de preuves. Les exécutions en cours, en pause ou en brouillon sont conservées — elles gardent une session que vous pouvez reprendre.",
   "codingAgent.clearConfirm": "Effacer — touchez encore",
   "codingAgent.clearFailed": "Impossible d'effacer l'historique.",
@@ -755,7 +758,6 @@ export const fr: Record<string, string> = {
   "codingAgent.stop": "Arrêter",
   "codingAgent.back": "Retour",
   "codingAgent.backTo": "Retour à {name}",
-  "codingAgent.breadcrumbLabel": "Fil d'Ariane",
   "codingAgent.workspaceTitle": "Espace de travail du projet",
   "codingAgent.filesTab": "Fichiers",
   "codingAgent.changesTab": "Modifications",
@@ -934,7 +936,6 @@ export const fr: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Projets",
-  "codingAgent.navHome": "Accueil",
   "codingAgent.projectFolderUnset": "Choisissez un dossier de projets dans les Réglages : chaque projet doté de son propre historique git apparaîtra ici.",
   "codingAgent.noProjects": "Aucun projet pour l'instant. Touchez « Nouvelle app » ou demandez à votre assistant de construire quelque chose dans {folder}.",
   "codingAgent.onDesktop": "sur le bureau",

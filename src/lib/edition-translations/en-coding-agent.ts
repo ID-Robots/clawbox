@@ -97,6 +97,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.harnessNotReady": "not ready",
   "codingAgent.harnessNotReadyDetail": "The coding harness on this ClawBox could not get a model to answer. This is a problem with the device, not with your task — check in Settings → AI Models that ClawBox AI is connected and that your plan covers the model the harness asks for, then start the run again.",
   "codingAgent.harnessRetry": "Try again",
+  "codingAgent.showAllProjects": "Show all ({count})",
+  "codingAgent.showFewerProjects": "Show fewer",
+  "codingAgent.notReady": "Not ready: {what}",
   "codingAgent.harnessRetrying": "Checking…",
   "codingAgent.harnessRetryFailed": "The ClawBox could not be asked to try the harness again.",
   // WHICH ACCOUNT PAYS for a run: the box's own ClawBox AI plan, or the
@@ -200,7 +203,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.backupBusy": "Backing up…",
   "codingAgent.backupDone": "Backed up to {repo}",
   "codingAgent.backupFailed": "Could not back up to GitHub.",
-  "codingAgent.recentRuns": "Recent runs",
   "codingAgent.more": "Show more",
   "codingAgent.clearRuns": "Clear history",
   "codingAgent.clearRunsHint": "Removes finished runs and their evidence folders from the list. Runs that are live, paused or drafted are kept — they still hold a session you can resume.",
@@ -314,7 +316,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.stop": "Stop",
   "codingAgent.back": "Back",
   "codingAgent.backTo": "Back to {name}",
-  "codingAgent.breadcrumbLabel": "Breadcrumb",
   "codingAgent.workspaceTitle": "Project workspace",
   "codingAgent.filesTab": "Files",
   "codingAgent.changesTab": "Changes",
@@ -503,7 +504,6 @@ export const codingAgentEn: Record<string, string> = {
   // mascot chat: the assistant scaffolds, delegates and verifies, and the
   // owner carries on there. `newHanded` is the last thing the card says.
   "codingAgent.projectsTitle": "Projects",
-  "codingAgent.navHome": "Home",
   "codingAgent.projectFolderUnset": "Choose a project folder in Settings, and every project with its own git history will be listed here.",
   "codingAgent.noProjects": "No projects yet. Tap New app, or ask your assistant to build something in {folder}.",
   "codingAgent.onDesktop": "on desktop",

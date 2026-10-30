@@ -574,6 +574,10 @@ export const nl: Record<string, string> = {
   "codingAgent.harnessNotReady": "niet gereed",
   "codingAgent.harnessNotReadyDetail": "De codeeromgeving van deze ClawBox kreeg geen enkel model aan het antwoorden. Dit ligt aan het apparaat, niet aan je taak — controleer bij Instellingen → AI-modellen of ClawBox AI verbonden is en of je abonnement het gevraagde model dekt, en start de run daarna opnieuw.",
   "codingAgent.harnessRetry": "Opnieuw proberen",
+  "codingAgent.clearRuns": "Geschiedenis wissen",
+  "codingAgent.showAllProjects": "Alles tonen ({count})",
+  "codingAgent.showFewerProjects": "Minder tonen",
+  "codingAgent.notReady": "Niet klaar: {what}",
   "codingAgent.harnessRetrying": "Controleren…",
   "codingAgent.harnessRetryFailed": "De ClawBox kon niet worden gevraagd het opnieuw te proberen.",
   // Welk account een run betaalt: het eigen abonnement van deze ClawBox, of de
@@ -671,7 +675,6 @@ export const nl: Record<string, string> = {
   "codingAgent.backupBusy": "Back-up bezig…",
   "codingAgent.backupDone": "Geback-upt naar {repo}",
   "codingAgent.backupFailed": "Back-up naar GitHub mislukt.",
-  "codingAgent.recentRuns": "Recente runs",  "codingAgent.clearRuns": "Geschiedenis wissen",
   "codingAgent.clearRunsHint": "Verwijdert afgeronde runs en hun bewijsmappen uit de lijst. Actieve, gepauzeerde en concept-runs blijven staan — die houden nog een sessie vast die je kunt hervatten.",
   "codingAgent.clearConfirm": "Wissen — tik nogmaals",
   "codingAgent.clearFailed": "De geschiedenis kon niet worden gewist.",
@@ -755,7 +758,6 @@ export const nl: Record<string, string> = {
   "codingAgent.stop": "Stoppen",
   "codingAgent.back": "Terug",
   "codingAgent.backTo": "Terug naar {name}",
-  "codingAgent.breadcrumbLabel": "Kruimelpad",
   "codingAgent.workspaceTitle": "Projectwerkruimte",
   "codingAgent.filesTab": "Bestanden",
   "codingAgent.changesTab": "Wijzigingen",
@@ -934,7 +936,6 @@ export const nl: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Projecten",
-  "codingAgent.navHome": "Start",
   "codingAgent.projectFolderUnset": "Kies in Instellingen een projectmap; elk project met een eigen git-geschiedenis verschijnt dan hier.",
   "codingAgent.noProjects": "Nog geen projecten. Tik op 'Nieuwe app' of vraag je assistent iets te bouwen in {folder}.",
   "codingAgent.onDesktop": "op het bureaublad",
