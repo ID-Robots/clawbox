@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { isCodingRunStatus, parsePauseReason, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { onCodingRunStarted, onCodingTeamChanged } from "@/lib/ui-events";
 import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding-pr-state";
 import { samePlainData } from "@/lib/same-plain-data";
@@ -150,6 +150,13 @@ export interface CodingAgentActivity {
   needsYou?: boolean;
   /** The newest refused action, in the owner's words, when the run needs them for one. */
   refusedLine?: string | null;
+  /**
+   * WHY a paused run is paused (coding-agent-status.ts `CodingPauseReason`):
+   * the card explains an `allowance` pause — which meter ran out and when it
+   * is back — since Resume only buys the same refusal until then. Null for an
+   * owner's pause, a run never paused, or a record from before the field.
+   */
+  pauseReason?: CodingPauseReason | null;
 }
 
 /**
@@ -199,6 +206,7 @@ interface RunPayload {
   error?: unknown;
   denials?: { text?: unknown }[];
   deniedActions?: unknown;
+  pauseReason?: unknown;
   /** The pull request this run's work went into, when the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
@@ -308,6 +316,7 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     errorLine: firstLineOf(r.error),
     needsYou: r.status === "paused",
     refusedLine: refusedLineOf(r),
+    pauseReason: parsePauseReason(r.pauseReason),
   };
 }
 

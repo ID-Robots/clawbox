@@ -2197,7 +2197,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
         {/* The coding cards, after the pills and before the reply in flight:
             a team's card, then each run's — they stay once the work ends and
             report the outcome (CodingChatCards.tsx). */}
-        {chatUser === null && <CodingChatCards cards={codingCards} openFromChat={openFromChat} />}
+        {chatUser === null && <CodingChatCards cards={codingCards} openFromChat={openFromChat} canControl />}
         {chatUser === null && codingCards.autoHiddenCount > 0 && (
           <div data-testid="coding-agent-restore-row" style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}>
             <button

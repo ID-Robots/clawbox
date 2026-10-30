@@ -186,7 +186,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.effortFailed": "Could not change the thinking effort.",
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.tokensWord": "tokens",
-  "codingAgent.updated": "updated",
   "codingAgent.githubOff": "not connected",
   "codingAgent.githubUnreachable": "GitHub unreachable",
   "codingAgent.githubNotRunnable": "gh installed but will not start — check its permissions",
@@ -230,8 +229,6 @@ export const codingAgentEn: Record<string, string> = {
   // The report dialog: a run's report.md (or any .md it wrote) drawn as
   // markdown over the app. {name} is the artifact's file name.
   "codingAgent.githubDeviceIntro": "Enter this code on github.com to connect your account:",
-  "codingAgent.githubDeviceOpen": "Open github.com/login/device",
-  "codingAgent.githubDeviceWaiting": "Waiting for the code to be entered…",
   "codingAgent.githubDeviceCancel": "Cancel",
   "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
   "codingAgent.githubStartFailed": "Could not start the GitHub login",
@@ -313,7 +310,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.workspaceTitle": "Project workspace",
   "codingAgent.filesTab": "Files",
   "codingAgent.changesTab": "Changes",
-  "codingAgent.teamTab": "Team",
   "codingAgent.activityTab": "Activity",
   "codingAgent.filesBack": "Back to the files",
   "codingAgent.diffBack": "Back to the changed files",
@@ -354,14 +350,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.change.conflict": "Conflict",
   "codingAgent.browserPreviewTitle": "Browser preview",
   "codingAgent.openVnc": "Open VNC",
-  "codingAgent.team.help": "A planner splits the goal into tasks, workers do them side by side, and a reviewer checks each result.",
-  "codingAgent.team.plan": "Plan with the assistant",
   "codingAgent.team.stop": "Stop the team",
   "codingAgent.team.stopFailed": "Could not stop the team.",
   "codingAgent.team.alerts": "{n} alerts",
   "codingAgent.team.plannerRun": "Planner run",
   "codingAgent.team.planning": "The planner is reading the project and writing the plan…",
-  "codingAgent.team.after": "after {ids}",
   "codingAgent.team.held": "Held — {task} was reopened",
   "codingAgent.team.waitingFor": "Waiting for {ids} to be accepted",
   "codingAgent.team.log": "Log ({n})",
@@ -396,8 +389,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.roleWorker": "Team worker · {task}",
   "codingAgent.team.roleReviewer": "Team reviewer · {task}",
   "codingAgent.team.branch": "on branch {branch}, from {base}",
-  "codingAgent.team.messagesTitle": "Messages ({n})",
-  "codingAgent.team.inboxTitle": "Inbox for the lead ({n})",
   "codingAgent.team.messageToLead": "to the lead",
   "codingAgent.team.messageToAssistant": "to the assistant",
   "codingAgent.team.messageToRun": "to {run}",
@@ -414,9 +405,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.adviceOverlap": "{n}% of the files this plan's tasks touch are shared with another task, so they cannot run side by side: a single run would likely have been cheaper.",
   "codingAgent.team.adviceOverlapRun": "{n}% of the files this plan's tasks touch are shared with another task, so the plan ran as one ordinary run instead of a team — the cheaper shape for it.",
   "codingAgent.createNewProject": "Create app",
-  "codingAgent.projectRuns": "Runs",
-  "codingAgent.otherRuns": "Other runs",
-  "codingAgent.gitTitle": "Git repository",
   // Count-neutral on purpose: "1 commits" would be wrong and the catalogue
   // has no plural mechanism.
   "codingAgent.gitCommits": "Commits: {n}",
@@ -474,6 +462,8 @@ export const codingAgentEn: Record<string, string> = {
   // its status chip, the phase line, each task's state, why a team stopped, and
   // the desktop's team finish card (page.tsx), whose Open hands the app the team.
   "codingAgent.chatNeedsYou": "Needs you",
+  "codingAgent.chatPausing": "Pausing…",
+  "codingAgent.chatResuming": "Resuming…",
   "codingAgent.chatFiles": "{n} files",
   "codingAgent.chatPr": "PR #{n}",
   "codingAgent.chatTeam.queued": "Queued",
@@ -540,7 +530,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.open": "Open",
   "codingAgent.copied": "Copied",
   "codingAgent.noCommits": "No commits yet",
-  "codingAgent.newApp": "New app",
   "codingAgent.newTitle": "A new app for your desktop",
   "codingAgent.newNameLabel": "Name",
   "codingAgent.newNamePlaceholder": "Invoice generator",
@@ -574,7 +563,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.newNameTooLong": "The name can be at most {max} characters.",
   "codingAgent.newWhatRequired": "Say what the app should do.",
   "codingAgent.newWhatTooLong": "Keep the description to {max} characters.",
-  "codingAgent.newHanded": "Handed to the assistant — continue in the chat.",
   // Shown on the standalone /app/coding page instead of the New button:
   // there is no chat there to hand the message to.
   "codingAgent.newNeedsDesktop": "A new app starts in the chat, which lives on the desktop. Open the Coding agent there to ask for one.",
@@ -778,19 +766,11 @@ export const codingAgentEn: Record<string, string> = {
 
   // ── Telling a run something while it works ────────────────────────────────
   //
-  // A delegated run cannot ask a question, and until this box could not be
-  // told anything either. "Queued" and "Delivered" are kept apart because they
-  // are different promises: one is "the run has it", the other is "it gets it
-  // at its next step".
-  "codingAgent.message.title": "Tell the agent",
-  "codingAgent.message.hint": "Send a correction or something it should know. It carries on from where it is \u2014 it does not start over.",
-  "codingAgent.message.placeholder": "Tell the agent\u2026",
-  "codingAgent.message.send": "Send",
-  "codingAgent.message.sending": "Sending\u2026",
-  "codingAgent.message.queued": "Queued",
-  "codingAgent.message.delivered": "Delivered",
-  "codingAgent.message.deliveredMidTurn": "Delivered mid-turn",
-  "codingAgent.message.failed": "Could not send that message to the run.",
+  // The telling happens in the chat (the run page's "Message in chat" seeds
+  // the composer, 2026-10-30; the app's own message box and its title, hint,
+  // Send and Queued/Delivered words went with it). What is left are the
+  // refusals `coding_run_message` and the steering route answer, worded for
+  // the owner (src/lib/coding-run-messages.ts).
   "codingAgent.message.errorEmpty": "Type something to send.",
   "codingAgent.message.errorTooLong": "That message is too long: at most {max} characters.",
   "codingAgent.message.errorNotPlainText": "A message must be plain text.",
@@ -855,14 +835,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.resetTitle": "Start over",
   "codingAgent.resetHint": "Turns the coding agent off and runs the setup wizard again. GitHub and run history are kept.",
   "codingAgent.resetButton": "Reset",
-  "codingAgent.artCoder": "Coder",
-  "codingAgent.artReviewer": "Reviewer",
-  "codingAgent.artBrowser": "Browser",
-  "codingAgent.team.artMain": "Assistant",
-  "codingAgent.team.artWorkers": "Workers",
-  "codingAgent.team.artPlanner": "Planner",
-  "codingAgent.team.artReviewers": "Reviewers",
-  "codingAgent.team.artLead": "Lead",
   // The agent chart (CodingAgentDiagram.tsx): the Coding Agent's first view —
   // one node per agent, its state in colour AND icon, and the panel a node opens.
   "codingAgent.diagram.label": "Agents — {name}",
@@ -911,14 +883,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.diagram.verdict": "Verdict",
   "codingAgent.diagram.sentBy": "Sent out by {run}",
   "codingAgent.diagram.openRun": "Open run page",
-  "codingAgent.diagram.openTeam": "Open team",
-  "codingAgent.diagram.message": "Message",
   "codingAgent.diagram.stopFailed": "Could not stop this agent.",
   "codingAgent.diagram.close": "Close",
   "codingAgent.diagram.details": "Details",
   "codingAgent.diagram.liveTitle": "At work now",
   "codingAgent.diagram.latestTitle": "Most recent",
-  "codingAgent.diagram.empty": "No agents are at work. When a run or a team starts, its agents appear here as a chart.",
   "codingAgent.resetConfirm": "Reset everything — tap again",
   "codingAgent.resetFailed": "Could not reset the coding agent.",
   // The owner's secret store (src/lib/project-secrets.ts): the card, its
@@ -1066,4 +1035,24 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Removing a project folder needs a signed-in browser session.",
   "codingAgent.delete.refusal.crossOrigin": "A project folder can only be removed from this ClawBox's own pages.",
   "codingAgent.delete.refusal.trashFailed": "This ClawBox could not move that folder aside, so nothing was removed.",
+  "codingAgent.team.pageTitle": "Coding team",
+  "codingAgent.team.loading": "Reading this team's board…",
+  "codingAgent.team.startedAgo": "Started {when}",
+  "codingAgent.team.created": "Created {when}",
+  "codingAgent.team.showWholeGoal": "Show the whole goal",
+  "codingAgent.team.tasksTitle": "Tasks",
+  "codingAgent.team.taskWorker": "worker: {state}",
+  "codingAgent.team.taskReviewer": "reviewer: {state}",
+  "codingAgent.team.reviewWaiting": "waiting",
+  "codingAgent.team.stopConfirm": "Tap again to stop",
+  "codingAgent.team.cancelConfirm": "Tap again to cancel",
+  "codingAgent.team.phase.queued": "Waiting its turn",
+  "codingAgent.team.phase.planning": "Planning the tasks",
+  "codingAgent.team.phase.working": "Working · {done} of {total} tasks done",
+  "codingAgent.team.phase.reviewing": "Reviewing · {done} of {total} tasks done",
+  "codingAgent.team.phase.done": "Done · {done} of {total} tasks",
+  "codingAgent.team.phase.failed": "Failed · {done} of {total} tasks done",
+  "codingAgent.team.phase.stopped": "Stopped · {done} of {total} tasks done",
+  "codingAgent.nothingRunYet": "Nothing has run yet. Ask the assistant for an app or a change.",
+  "codingAgent.askInChat": "Ask in the chat",
 };

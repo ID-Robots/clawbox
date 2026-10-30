@@ -7,6 +7,7 @@ import { useCodingRunAutoHide } from "@/lib/use-coding-run-auto-hide";
 import { useDismissedCodingRuns } from "@/lib/use-dismissed-coding-runs";
 import { dispatchOpenApp, dispatchOpenCodingRun, dispatchOpenCodingTeam, NEW_APP_EVENT } from "@/lib/ui-events";
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
+import { pauseReasonText } from "@/lib/coding-pause-reason-copy";
 import CodingAgentActivityPill, { type CodingAgentCardLabels } from "./CodingAgentActivityPill";
 import CodingTeamActivityCard, { type CodingTeamCardLabels } from "./CodingTeamActivityCard";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from "./NewAppWizardCard";
@@ -142,6 +143,13 @@ export function runCardLabels(t: T): CodingAgentCardLabels {
     needsYou: t("codingAgent.chatNeedsYou"),
     files: t("codingAgent.chatFiles"),
     pr: t("codingAgent.chatPr"),
+    // The Pause / Resume control: the app's own words for the same routes.
+    pause: t("codingAgent.pause"),
+    resume: t("codingAgent.resume"),
+    pausing: t("codingAgent.chatPausing"),
+    resuming: t("codingAgent.chatResuming"),
+    pauseFailed: t("codingAgent.pauseFailed"),
+    resumeFailed: t("codingAgent.resumeFailed"),
     // One word per kind of step the card can draw as a chip — the owner's
     // language for what the harness names by tool.
     steps: {
@@ -193,16 +201,24 @@ export function teamCardLabels(t: T): CodingTeamCardLabels {
  * The cards, teams before runs. `onDismissRun` lets a host wrap the put-away
  * with its own focus management (ChatPopup moves the keyboard to the
  * neighbouring card); without it the card asks the state directly.
+ *
+ * `canControl` is the host's word that the viewer is the OWNER (`chatUser ===
+ * null`): only then does a run's card carry Pause / Resume, which call the
+ * run routes with the owner's session. Off by default — a card with no say
+ * shows no control — so a host that forgets it hides the control rather than
+ * showing one that 403s.
  */
-export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun }: {
+export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun, canControl = false }: {
   cards: CodingChatCardsState;
   /** Open something outside the chat — and, on a phone, close the chat around it. */
   openFromChat: (open: () => void) => void;
   /** The chat's one full-size image preview, for a run's screenshots. */
   onPreview?: (src: string, alt: string) => void;
   onDismissRun?: (id: string) => void;
+  /** The viewer may pause and resume the runs: the owner's own chat. */
+  canControl?: boolean;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const runLabels = useMemo(() => runCardLabels(t), [t]);
   const teamLabels = useMemo(() => teamCardLabels(t), [t]);
   const openLabel = t("codingAgent.liveView");
@@ -214,9 +230,9 @@ export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun }
           team={team}
           labels={teamLabels}
           openLabel={openLabel}
-          // Open: the Coding Agent app on the team — its page once it has one
-          // (plan step 5); until then its project's Team tab (CodingAgentApp
-          // `openTeamFor`). A normal window, like the run's.
+          // Open: the Coding Agent app on the team's own page (CodingTeamPage;
+          // the app takes the id from the hand-off slot or the event). A
+          // normal window, like the run's.
           onOpen={() => openFromChat(() => dispatchOpenCodingTeam(team.id))}
           onDismiss={() => cards.dismiss(teamCardKey(team.id))}
           autoHiding={cards.finishing.has(teamCardKey(team.id))}
@@ -236,6 +252,13 @@ export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun }
           onPreview={onPreview}
           onDismiss={() => (onDismissRun ?? cards.dismiss)(run.id)}
           autoHiding={cards.finishing.has(run.id)}
+          // Pause / Resume for the owner, and a re-read once one went through
+          // so the record replaces the card's optimistic word.
+          canControl={canControl}
+          onChanged={cards.nudge}
+          // Why a paused run is paused, when an allowance ran out — the same
+          // sentence the run page shows (coding-pause-reason-copy.ts).
+          pausedWhy={run.status === "paused" ? pauseReasonText(run.pauseReason, t, locale) : null}
         />
       ))}
     </>

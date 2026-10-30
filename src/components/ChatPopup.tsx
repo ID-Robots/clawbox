@@ -8495,6 +8495,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             onPreview={(src, alt) => setPreview({ src, alt })}
             // Put away with the keyboard moved to the neighbouring card first.
             onDismissRun={dismissCodingRun}
+            // Pause / Resume on a run's card: the owner's chat only.
+            canControl={chatUser === null}
           />
         )}
 

@@ -39,11 +39,8 @@ import { dispatchOpenApp } from "@/lib/ui-events";
 import { BTN_QUIET, CARD_SURFACE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { setVisibleInterval } from "@/lib/visible-interval";
 
-/**
- * `team` stays until the team has a page of its own (redesign step 5): the
- * tab is a plain list of the project's teams, the last in the row.
- */
-export type WorkspaceTab = "activity" | "files" | "changes" | "team";
+/** Three tabs. The Team tab went with the redesign's step 5: a team is a row in Activity and a page of its own (CodingTeamPage). */
+export type WorkspaceTab = "activity" | "files" | "changes";
 
 interface Props {
   /** `projectId=<id>` for a code project, `directory=<abs>` for a folder —
@@ -66,8 +63,6 @@ interface Props {
   activity?: ReactNode;
   /** Something in it is at work: the tab carries a live dot. */
   activityLive?: boolean;
-  /** The coding team's card, as a tab. Absent: no tab. */
-  team?: ReactNode;
 }
 
 /** How often the change list is re-read while a run is writing. */
@@ -84,15 +79,15 @@ const STATUS_GLYPH: Record<ChangeStatus, { letter: string; className: string }> 
 /** A pane header's glyph button — the way back to the other pane on a phone, Open in Files. */
 const PANE_BUTTON = `${BTN_QUIET} min-h-[36px] @md:min-h-[28px] px-2 text-[11px]`;
 
-export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, directory, filesDirectory, activity, activityLive = false, team }: Props) {
+export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, directory, filesDirectory, activity, activityLive = false }: Props) {
   const { t } = useT();
   // The project page opens on its ACTIVITY — what happened and what is
   // happening here, teams and runs in one list — then the files and the
   // changes one tab away; a host that hands no activity (a run's own page)
   // opens on the files.
   const [tab, setTab] = useState<WorkspaceTab>(initialTab ?? (activity ? "activity" : "files"));
-  // A host may ask for a tab after mount too — a team's row in Activity, a
-  // chart's Open team on home — through the same prop, one shot at a time.
+  // A host may ask for a tab after mount too — a run's **See the diff**
+  // opening Changes on its commit — through the same prop, one shot at a time.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (initialTab) setTab(initialTab);
@@ -121,7 +116,7 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
   );
   return (
     <div className={`mt-3 ${fill ? "flex-1 min-h-0 flex flex-col" : ""}`} data-testid="coding-agent-workspace" data-fill={fill || undefined}>
-      <div className={`${SEGMENTED_TRACK} ${activity || team ? "max-w-xl" : "max-w-xs"}`} role="tablist" aria-label={t("codingAgent.workspaceTitle")}>
+      <div className={`${SEGMENTED_TRACK} ${activity ? "max-w-xl" : "max-w-xs"}`} role="tablist" aria-label={t("codingAgent.workspaceTitle")}>
         {/* Activity first and by default: the teams and the runs of this
             project, live first. The id is the Runs tab's old one, since the
             list it holds is the same list. */}
@@ -134,7 +129,6 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
         )}
         {tabButton("files", "folder_open", t("codingAgent.filesTab"), "coding-agent-workspace-files")}
         {tabButton("changes", "difference", t("codingAgent.changesTab"), "coding-agent-workspace-changes")}
-        {team && tabButton("team", "groups", t("codingAgent.teamTab"), "coding-agent-workspace-team")}
       </div>
       {/* The panes stay mounted: a tree that was opened three folders deep
           would otherwise fold every time the owner glanced at the diff. */}
@@ -149,11 +143,6 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
       <div role="tabpanel" id="coding-agent-workspace-pane-changes" aria-labelledby="coding-agent-workspace-tab-changes" hidden={tab !== "changes"} className={panelClass}>
         <ChangesPane query={query} live={live} initialRef={initialRef} active={tab === "changes"} paneClass={paneClass} fill={fill} />
       </div>
-      {team && (
-        <div role="tabpanel" id="coding-agent-workspace-pane-team" aria-labelledby="coding-agent-workspace-tab-team" hidden={tab !== "team"} className={fill ? "flex-1 min-h-0 overflow-y-auto" : undefined}>
-          {team}
-        </div>
-      )}
     </div>
   );
 }

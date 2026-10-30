@@ -61,11 +61,11 @@ vi.mock("@/lib/client-kv", () => ({
 
 import { CodingChatCards, teamCardKey, useCodingChatCards } from "@/components/CodingChatCards";
 
-function Host({ openFromChat = (open: () => void) => open() }: { openFromChat?: (open: () => void) => void }) {
+function Host({ openFromChat = (open: () => void) => open(), canControl }: { openFromChat?: (open: () => void) => void; canControl?: boolean }) {
   const cards = useCodingChatCards(true);
   return (
     <div data-testid="host">
-      <CodingChatCards cards={cards} openFromChat={openFromChat} />
+      <CodingChatCards cards={cards} openFromChat={openFromChat} canControl={canControl} />
       <span data-testid="auto-hidden">{cards.autoHiddenCount}</span>
     </div>
   );
@@ -147,6 +147,28 @@ describe("CodingChatCards", () => {
     expect(stored).toEqual([teamCardKey("team-k3x9q2ab"), "run-view0001"]);
     // Put away with × is not what the 🤖 chip brings back.
     expect(screen.getByTestId("auto-hidden")).toHaveTextContent("0");
+  });
+
+  it("Pause / Resume on a run's card only when the host says the viewer is the owner (canControl), and why a paused run is paused", () => {
+    render(<Host />);
+    expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
+    cleanup();
+    render(<Host canControl />);
+    expect(screen.getByTestId("coding-agent-activity-pause")).toHaveAttribute("aria-label", translations.en["codingAgent.pause"]);
+    cleanup();
+    // A paused run whose allowance ran out: Resume, and the run page's own sentence beside it.
+    feed.runs = [{ ...RUN, status: "paused", needsYou: true, pauseReason: { kind: "allowance", meter: "images", resetsAt: "2026-10-31T09:00:00.000Z", message: "quota" } }];
+    render(<Host canControl />);
+    expect(screen.getByTestId("coding-agent-activity-resume")).toHaveAttribute("aria-label", translations.en["codingAgent.resume"]);
+    // The mocked `t` leaves `{time}` in place; the whole sentence is pinned
+    // by src/tests/unit/coding-pause-reason-copy.test.ts.
+    expect(screen.getByTestId("coding-agent-activity-pause-reason")).toHaveTextContent(translations.en["codingAgent.pausedAllowanceImages"]);
+    // Both chats hand the host the owner's word, and only that.
+    for (const file of ["src/components/ChatPopup.tsx", "src/components/ChatApp.tsx"]) {
+      const src = fs.readFileSync(path.join(process.cwd(), file), "utf-8");
+      // Tempered: the element's props hold arrows (`=>`), so "up to the `/>`" rather than "no `>`".
+      expect(src, file).toMatch(/<CodingChatCards\b(?:(?!\/>)[\s\S])*?\bcanControl(=\{chatUser === null\}|\s)/);
+    }
   });
 
   it("shows nothing for a run that belongs to a team — the team's card shows it", () => {

@@ -8,7 +8,7 @@ import { useT } from "@/lib/i18n";
  * right where the sealed snapshots stack up. A packet travels the whole way,
  * left to right, and the shield pulses as it takes each one in.
  *
- * A deliberate sibling of CodingAgentDelegationArt and MemoryShardArt: same
+ * A deliberate sibling of MemoryShardArt: same
  * viewBox, stroke weights and muted palette over the product's coral, a
  * diagram rather than an illustration. Where the coding agent FANS OUT and
  * the memory shard CONVERGES, this one PASSES THROUGH — nothing reaches the

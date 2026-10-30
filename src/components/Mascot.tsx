@@ -96,7 +96,7 @@ export const AMBIENT_ANIMATIONS: ReadonlySet<string> = new Set([
  * are one recalc per step (15 a second). So the animations are looked up once
  * per commit — a render is what adds or drops one, or swaps the body's — and
  * picked by `animationName`, which reads without a flush. (The same trap the
- * team tree's stepped connectors hit, CodingTeamTree.tsx.)
+ * agent chart's stepped connectors hit, src/lib/coding-agent-flow.ts.)
  *
  * `activeRef` is the commit's own answer. A commit that ends the rest runs its
  * layout effects at once but this effect's cleanup only later, and a step in

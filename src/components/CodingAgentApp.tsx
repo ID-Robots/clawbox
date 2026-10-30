@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { holdsResumableSession, isHeld, isLive, isRollingPauseMeter, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
-import { formatFreesUpAt } from "@/lib/clawai-allowance";
+import { holdsResumableSession, isHeld, isLive, isSettled, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { pauseReasonText } from "@/lib/coding-pause-reason-copy";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import type { Deliverable, DeliverableVerdict, RunAttempt } from "@/lib/coding-deliverable";
 import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
@@ -49,11 +49,11 @@ import {
   takePendingCodingRun,
   takePendingCodingTeam,
 } from "@/lib/ui-events";
-import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
+import { NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
-import CodingTeamCard, { isTeamActive, TEAM_STATUS_TONE, type TeamView } from "./CodingTeamCard";
+import CodingTeamPage, { isTeamActive, TEAM_STATUS_TONE, type TeamView } from "./CodingTeamPage";
 import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
@@ -329,13 +329,6 @@ function firstLine(text: string, max = 100): string {
   return taskTitle(text, max);
 }
 
-/** Single-quote a value for the terminal command line. */
-function quoted(v: string): string {
-  return `'${v.replace(/'/g, "'\\''")}'`;
-}
-
-
-
 /**
  * How many projects home lists before "Show all (N)" — the owner's ask of
  * 2026-10-30 ("when we have many projects we need to scroll a lot — don't
@@ -550,22 +543,6 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
 /** What a Continue asks the harness for, in its own language — the session holds the task. */
 const CONTINUE_TASK = "Continue the task you were working on in this session: finish what remains, then report what you did.";
 
-/**
- * The sentence for each spent meter, keyed by the meter the record names.
- *
- * A table rather than a key built by hand from the meter string: the
- * catalogue parity test can only see keys that are written down, and a
- * `codingAgent.pausedAllowance${meter}` assembled at runtime would be
- * invisible to it — untranslated in nine languages, and nothing would say so.
- */
-const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
-  images: "codingAgent.pausedAllowanceImages",
-  speech: "codingAgent.pausedAllowanceSpeech",
-  weekly: "codingAgent.pausedAllowanceWeekly",
-  burst: "codingAgent.pausedAllowanceBurst",
-  embeddings: "codingAgent.pausedAllowanceEmbeddings",
-  anthropic: "codingAgent.pausedAllowanceAnthropic",
-};
 
 /**
  * `meta` rides on the window's record (page.tsx `openApp(appId, forceNew,
@@ -579,7 +556,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   const { t, locale } = useT();
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
-  /** The recent coding teams, newest first — what the agent charts draw (home, a team run's page). */
+  /** The recent coding teams, newest first — what home's Now cards and the Team page draw. */
   const [teams, setTeams] = useState<TeamView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -593,6 +570,13 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   }, [error]);
   /** The run whose own page is open — a page now, not a row that unfolds. */
   const [openRunId, setOpenRunId] = useState<string | null>(null);
+  /**
+   * The team whose own page is open (CodingTeamPage, the redesign's step 5).
+   * Kept while one of its member runs is open from it, so Back from that run
+   * leads to the team rather than to the project; cleared by every other way
+   * of opening a run.
+   */
+  const [openTeamId, setOpenTeamId] = useState<string | null>(null);
   // The run whose page is in Live view — the browser it drives over its
   // terminal, filling the window. Keyed by the run rather than a flag, so
   // opening another run lands on its normal page and a run that settles
@@ -685,7 +669,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   const [olderPage, setOlderPage] = useState<{ project: string; total: number; loaded: number } | null>(null);
   const [olderBusy, setOlderBusy] = useState(false);
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
-  /** The tab a project page opens on when it was asked for by a team chart or a run's **See the diff** (`ref`: that commit) — read once, as the workspace mounts. */
+  /** The tab a project page opens on when it was asked for by a run's **See the diff** (`ref`: that commit) — read once, as the workspace mounts. */
   const [workspaceTab, setWorkspaceTab] = useState<{ directory: string; tab: WorkspaceTab; ref?: string } | null>(null);
   useEffect(() => {
     // One-shot: the workspace has read it by now, and the next visit to the
@@ -781,9 +765,9 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
       setProjects(Array.isArray(data.projects) ? data.projects : []);
       setProjectsDir(typeof data.directory === "string" ? data.directory : null);
     }));
-    // The teams, on the runs' own beat: the agent charts on home and on a
-    // team run's page are drawn from them, and a chart must move with the
-    // runs it shows. One list read — the Team tab's card reads the same one.
+    // The teams, on the runs' own beat: home's Now cards and the Team page
+    // are drawn from them, and a chart must move with the runs it shows. One
+    // list read; the Team page asks by id only for a board this list lacks.
     // Slim on a tick like the runs: a settled board's log and its tasks'
     // text were two thirds of a 694 KB read, for teams done days before.
     const teamsRead = read("teams", () => fetch(`/setup-api/coding-agent/team${tick ? "?slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
@@ -1043,7 +1027,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
     // A handoff parked on `window` before this window existed; the effect is
     // the one place it can be read, and reading it is one render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (pending) { setOpenRunId(pending); setPage("home"); }
+    if (pending) { setOpenRunId(pending); setOpenTeamId(null); setPage("home"); }
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ runId?: unknown }>).detail;
       const id = detail?.runId;
@@ -1052,6 +1036,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         // window is up, so take it back rather than leave it for a later mount.
         takePendingCodingRun();
         setOpenRunId(id);
+        setOpenTeamId(null);
         setPage("home");
       }
     };
@@ -1063,10 +1048,9 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
    * The TEAM hand-off — the chat's team card, the desktop's team finish card,
    * `ui_open_app coding` with a team — on the run's two paths: the `window`
    * slot for a cold open, the event for a window already up. Kept as a
-   * pending id until the team list holds the team, then opened: until the
-   * team has a page of its own (the redesign's step 5) it lands on its
-   * project's Team tab, the way a team chart's "Open team" does
-   * (`openTeamFor`). A team whose project is not on the list opens nothing.
+   * pending id until the first read is in, then opened on the team's own
+   * page (CodingTeamPage), its project behind it when the list names one;
+   * a team the list no longer carries is read by id on the page itself.
    */
   const [pendingTeamId, setPendingTeamId] = useState<string | null>(null);
   // The window's `meta` (see the props): read once, here, and never again.
@@ -1089,16 +1073,14 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   }, []);
   useEffect(() => {
     if (!pendingTeamId || loading) return;
-    const team = teams.find((x) => x.id === pendingTeamId);
-    if (!team) return;
-    const project = projects.find((pr) => (team.projectId ? pr.kind === "codeProject" && pr.folder === team.projectId : pr.directory === team.directory));
+    const team = teams.find((x) => x.id === pendingTeamId) ?? null;
+    const project = team ? projects.find((pr) => teamBelongsTo(team, pr)) ?? null : null;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- the hand-off lands once the lists are in
     setPendingTeamId(null);
-    if (!project) return;
-    setWorkspaceTab({ directory: project.directory, tab: "team" });
+    setOpenTeamId(pendingTeamId);
     setOpenRunId(null);
+    setOpenProjectDir(project?.directory ?? null);
     setPage("home");
-    setOpenProjectDir(project.directory);
   }, [pendingTeamId, loading, teams, projects]);
   /** `ui_open_app coding` with a project: its page, once the list names it — a code project by id, a folder by its name or path. */
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(() => meta?.projectId || null);
@@ -1276,6 +1258,11 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
     () => (openRunId ? runs.find((r) => r.id === openRunId) ?? olderRuns.find((r) => r.id === openRunId) ?? null : null),
     [runs, olderRuns, openRunId],
   );
+  /** The open team's board as the list holds it — null for one the list lacks, which the page reads by id. */
+  const openTeamRecord = useMemo(
+    () => (openTeamId ? teams.find((x) => x.id === openTeamId) ?? null : null),
+    [teams, openTeamId],
+  );
   // A run page asked for (a chat card, the desktop) for a run the recent list
   // does not hold: an OLDER run "keep everything" kept. Asked of the box once
   // per id — the runs route finds an older run by id — rather than falling
@@ -1363,28 +1350,39 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
       ? { face: "wizard" as const }
       : openRun
         ? { face: "run" as const, run: openRun }
-        : openProject
-          ? { face: "project" as const, project: openProject }
-          : { face: "home" as const };
+        : openTeamId
+          ? { face: "team" as const, teamId: openTeamId, team: openTeamRecord }
+          : openProject
+            ? { face: "project" as const, project: openProject }
+            : { face: "home" as const };
 
   // Back = up one level. ONE ladder for the header's arrow, the phone
-  // window's chevron and the Android gesture: settings → home, run → its
-  // project (or home for a run that belongs to none — a team worker in a
-  // worktree; leaving `openProjectDir` alone landed it on whichever project
-  // the owner had opened BEFORE), project → home. See lib/mobile-back.
-  // The gesture claims it in the phone layout only, like Files: on a desktop
-  // Back belongs to the top window.
+  // window's chevron and the Android gesture: settings → home, team → its
+  // project, run → its project (or home for a run that belongs to none — a
+  // team worker in a worktree; leaving `openProjectDir` alone landed it on
+  // whichever project the owner had opened BEFORE) — or, for a member run
+  // opened from its team's page, back to the team — project → home. See
+  // lib/mobile-back. The gesture claims it in the phone layout only, like
+  // Files: on a desktop Back belongs to the top window.
   const phoneLayout = usePhoneLayout();
   const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
-  const hasUp = view.face === "settings" || view.face === "run" || view.face === "project";
+  const runBackToTeam = openRun !== null && openTeamId !== null && openRun.team?.id === openTeamId;
+  const teamBackProjectDir = openTeamRecord ? (projects.find((pr) => teamBelongsTo(openTeamRecord, pr))?.directory ?? null) : openProjectDir;
+  const hasUp = view.face === "settings" || view.face === "run" || view.face === "team" || view.face === "project";
   const goUp = () => {
     if (view.face === "settings") { disarmClear(); setPage("home"); }
-    else if (view.face === "run") { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); }
+    else if (view.face === "run") {
+      setOpenRunId(null);
+      if (!runBackToTeam) { setOpenTeamId(null); setOpenProjectDir(runBackProjectDir); }
+    }
+    else if (view.face === "team") { setOpenTeamId(null); setOpenProjectDir(teamBackProjectDir); }
     else if (view.face === "project") setOpenProjectDir(null);
   };
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
-  useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
-  useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
+  useMobileBack(phoneLayout && page === "home" && (openRun !== null || openTeamId !== null || openProject !== null), () => { setOpenRunId(null); setOpenTeamId(null); setOpenProjectDir(null); });
+  useMobileBack(phoneLayout && page === "home" && openRun === null && openTeamId !== null && teamBackProjectDir !== null, () => { setOpenTeamId(null); setOpenProjectDir(teamBackProjectDir); });
+  useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenTeamId(null); setOpenProjectDir(runBackProjectDir); });
+  useMobileBack(phoneLayout && page === "home" && runBackToTeam, () => setOpenRunId(null));
   // Registered last so it sits on top: with the delete dialog open, Back
   // closes the dialog rather than leaving the project underneath it.
   useMobileBack(phoneLayout && deleteTarget !== null, () => setDeleteTarget(null));
@@ -1428,25 +1426,28 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         ? t("codingAgent.team.roleLead", { task: team.taskId ?? "" })
         : t("codingAgent.team.roleWorker", { task: team.taskId ?? "" });
 
-  /** Open a run's page — from its row, a review chip, or the desktop. */
+  /** Open a run's page — from its row, a review chip, or the desktop. Not from a team's page: that keeps the team for Back. */
   const showRun = (id: string) => {
     setOpenRunId(id);
+    setOpenTeamId(null);
     setPage("home");
   };
-  /** A run by id, from the recent list or the older ones this window has opened — what an agent chart reads a node from. */
-  const runById = (id: string) => runs.find((r) => r.id === id) ?? olderRuns.find((r) => r.id === id);
-  /** The project a team works in: a code project by its id, a folder by its path — the Team card's own scope. */
-  const projectOfTeam = (team: TeamView) => projects.find((pr) => (team.projectId ? pr.kind === "codeProject" && pr.folder === team.projectId : pr.directory === team.directory)) ?? null;
-  /** A team chart's "Open team": its project's page, on the Team tab — or nothing to offer when the project is not on the list. */
-  const openTeamFor = (team: TeamView) => {
-    const project = projectOfTeam(team);
-    if (!project) return undefined;
-    return () => {
-      setWorkspaceTab({ directory: project.directory, tab: "team" });
-      setOpenRunId(null);
-      setPage("home");
-      setOpenProjectDir(project.directory);
-    };
+  /** The project a team works in: a code project by its id, a folder by its path. */
+  const projectOfTeam = (team: TeamView) => projects.find((pr) => teamBelongsTo(team, pr)) ?? null;
+  /** Open a team's own page (CodingTeamPage) — from home's Now card, an Activity row, a member run's chip — its project behind it for Back. */
+  const openTeam = (team: TeamView) => {
+    setOpenTeamId(team.id);
+    setOpenRunId(null);
+    setOpenProjectDir(projectOfTeam(team)?.directory ?? null);
+    setPage("home");
+  };
+  /** The same by id — a team the list no longer carries is read by id on the page, and Back leads to the project already open. */
+  const openTeamById = (id: string) => {
+    const team = teams.find((x) => x.id === id);
+    if (team) { openTeam(team); return; }
+    setOpenTeamId(id);
+    setOpenRunId(null);
+    setPage("home");
   };
 
   /** A chip naming another run: a button when that run is on the box, plain
@@ -1824,7 +1825,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
    * the Activity tab the project page opens on: the ones at work first, then
    * newest first, RUNS_PAGE rows at a time behind Show more, and the older
    * runs "keep everything" kept after them, on request. A team's row opens
-   * the Team tab (its page comes with redesign step 5); a run's row opens
+   * the team's own page (CodingTeamPage); a run's row opens
    * the run's page from anywhere on it and carries ONE control — Stop while
    * it is live (pause, resume, the terminal, backup and the relation chips
    * are the run page's since 2026-10-30; the row said each of them twice).
@@ -1895,7 +1896,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
           className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
           onClick={(e) => {
             if ((e.target as HTMLElement).closest("button, a")) return;
-            setWorkspaceTab({ directory: openProject!.directory, tab: "team" });
+            openTeam(team);
           }}
         >
           <div className="flex items-start gap-3">
@@ -2102,14 +2103,18 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // otherwise.
   const headerProject = view.face === "run"
     ? projects.find((pr) => runBelongsTo(view.run, pr)) ?? null
-    : view.face === "project" ? view.project : null;
+    : view.face === "team"
+      ? (view.team ? projectOfTeam(view.team) : null)
+      : view.face === "project" ? view.project : null;
   const headerTitle = view.face === "settings"
     ? t("codingAgent.openSettings")
     : view.face === "run"
       ? (view.run.reviewOf ? t("codingAgent.reviewPassTitle", { id: view.run.reviewOf }) : firstLine(view.run.task, 160))
-      : t("codingAgent.title");
-  const backTestId = view.face === "settings" ? "coding-agent-settings-back" : view.face === "run" ? "coding-agent-run-back" : "coding-agent-project-back";
-  const backLabel = view.face === "run" && headerProject ? t("codingAgent.backTo", { name: headerProject.name }) : t("codingAgent.back");
+      : view.face === "team"
+        ? (view.team ? firstLine(view.team.goal, 160) : t("codingAgent.team.pageTitle"))
+        : t("codingAgent.title");
+  const backTestId = view.face === "settings" ? "coding-agent-settings-back" : view.face === "run" ? "coding-agent-run-back" : view.face === "team" ? "coding-agent-team-back" : "coding-agent-project-back";
+  const backLabel = (view.face === "run" || view.face === "team") && headerProject ? t("codingAgent.backTo", { name: headerProject.name }) : t("codingAgent.back");
   // Home and the wizard carry the state chip; a project's or a run's page
   // names the project instead, and the Settings page holds the switch itself.
   const stateChip = (view.face === "home" || view.face === "wizard") && status && (
@@ -2164,10 +2169,10 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
           )}
           <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
           <div className="min-w-0 flex-1 flex items-center gap-2">
-            {view.face === "run" && headerProject ? (
+            {(view.face === "run" || view.face === "team") && headerProject ? (
               <button
                 type="button"
-                onClick={() => { setOpenRunId(null); setOpenProjectDir(headerProject.directory); }}
+                onClick={() => { setOpenRunId(null); setOpenTeamId(null); setOpenProjectDir(headerProject.directory); }}
                 data-testid="coding-agent-crumb-project"
                 className="min-w-0 truncate text-left text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] hover:text-white cursor-pointer"
               >
@@ -2292,13 +2297,16 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
 
         {view.face === "home" && (<>
         {/* The agents FIRST (the owner's brief, 2026-10-12: "when you open it
-            we first must see the agents, like a chart"): every team and run
-            at work as a chart — or the newest one that was. */}
+            we first must see the agents, like a chart"): a compact chart per
+            team at work, a plain row per solo run, the newest that was when
+            nothing works — and, with nothing ever run, one sentence and the
+            way to the chat. */}
         <CodingAgentLiveAgents
           runs={runs}
           teams={teams}
           onOpenRun={showRun}
-          openTeamFor={openTeamFor}
+          onOpenTeam={openTeam}
+          onAsk={standalone ? undefined : openNew}
           onChanged={() => { void load(); }}
           refreshKey={runs}
         />
@@ -2521,6 +2529,22 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         </div>
         </>)}
 
+        {/* One team, on its own page: status, goal, phase, Stop, the real
+            chart, the tasks, the PR, the result, Details. The project is the
+            header row's title and the way back. */}
+        {view.face === "team" && (
+          <CodingTeamPage
+            key={view.teamId}
+            teamId={view.teamId}
+            team={view.team}
+            runs={runs}
+            // A member's page from here keeps the team for Back (see openTeamId).
+            onOpenRun={(id) => { setOpenRunId(id); setPage("home"); }}
+            onChanged={() => { void load(); }}
+            refreshKey={runs}
+          />
+        )}
+
         {/* One run, on its own page. */}
         {view.face === "run" && (() => {
           const run = view.run;
@@ -2640,32 +2664,11 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
               {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
                 <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
                   <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
+                  {/* The sentence is shared with the chat's run card
+                      (src/lib/coding-pause-reason-copy.ts), so the two
+                      surfaces cannot word the same pause two ways. */}
                   <p className="text-[11px] text-[var(--text-secondary)] break-words">
-                    {t(PAUSE_METER_KEY[run.pauseReason.meter])}
-                    {" "}
-                    {(() => {
-                      // ClawBox AI's rolling allowances free up as old usage
-                      // ages out, possibly days from now: said in the owner's
-                      // clock with the day in front. The per-day meters keep
-                      // the UTC hour they are counted in. Every Anthropic
-                      // account at its limit: nobody has to press Resume — the
-                      // box carries on by itself at the first reset, and says
-                      // so rather than inviting a click that would only buy
-                      // the same refusal.
-                      if (run.pauseReason.meter === "anthropic") {
-                        const at = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                        return at ? t("codingAgent.pausedAnthropicResumesAt", { time: at }) : t("codingAgent.pausedAnthropicResumes");
-                      }
-                      if (isRollingPauseMeter(run.pauseReason.meter)) {
-                        const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                        return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                      }
-                      const clock = pauseResetClock(run.pauseReason.resetsAt);
-                      // No reset time means the far side never said when — so
-                      // the card says "when it is back" rather than inventing
-                      // an hour the owner would plan around.
-                      return clock ? t("codingAgent.pausedAllowanceResets", { time: clock }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                    })()}
+                    {pauseReasonText(run.pauseReason, t, locale)}
                   </p>
                 </div>
               )}
@@ -2835,14 +2838,22 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                     </span>
                   )}
                   {prChip(run)}
+                  {/* A member of a team: its place on the board, and the way
+                      to the team's own page (the chart lives there since the
+                      redesign's step 5, not on the member's page). */}
                   {run.team && (
-                    <span
-                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
+                    <button
+                      type="button"
+                      onClick={() => openTeamById(run.team!.id)}
                       title={run.team.id}
                       data-testid="coding-agent-run-team"
+                      data-team-id={run.team.id}
+                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-1 py-0.5 inline-flex items-center gap-1 text-[var(--coral-bright)] border-[var(--coral-bright)]/40 hover:bg-[var(--coral-bright)]/10 cursor-pointer"
                     >
+                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">groups</span>
                       {teamRole(run.team)}
-                    </span>
+                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">chevron_right</span>
+                    </button>
                   )}
                   {relationChips(run)}
                   {/* The project is the header row's title (coding-agent-crumb-
@@ -3230,15 +3241,15 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                 </details>
               )}
 
-              {/* 9. HELPERS — only when the run sent any out, or belongs to a
-                  team: the chart, content-sized, a node opening what that
-                  agent is doing now (the one list of agents on the page). For
-                  the common solo run this block does not exist. */}
+              {/* 9. HELPERS — only when the run sent any out: the chart,
+                  content-sized, a node opening what that agent is doing now
+                  (the one list of agents on the page). For the common solo
+                  run this block does not exist, and a team member's page
+                  draws no team chart either (since step 5 the team chip above
+                  leads to the team's page, where the chart is). */}
               {started && (
                 <RunAgentsDiagram
                   run={run}
-                  teams={teams}
-                  runOf={runById}
                   onOpenRun={showRun}
                   onChanged={() => { void load(); }}
                   refreshKey={runs}
@@ -3493,8 +3504,8 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                   </button>
                 </div>
               )}
-              {/* Activity · Files · Changes (and, until the team has a page
-                  of its own, a plain Team tab last). */}
+              {/* Activity · Files · Changes. A team is a row in Activity and
+                  a page of its own (CodingTeamPage) — no Team tab. */}
               <CodingProjectWorkspace
                 key={`workspace-${projectQuery}`}
                 query={projectQuery}
@@ -3506,22 +3517,6 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                 filesDirectory={!standalone && p.kind === "folder" ? p.directory : undefined}
                 activityLive={projectLive || teamLive !== null}
                 activity={<div className="pt-1" data-testid="coding-agent-project-runs">{activityList}</div>}
-                team={(
-                  /* Keyed by the WHOLE scope the card reads by — the folder
-                     and the code-project id — so a project that changes kind
-                     under the same folder is a fresh card, never one holding
-                     the previous team. A plain list: no shape drawing. */
-                  <div className="pt-1">
-                    <CodingTeamCard
-                      key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                      teams={projectTeams}
-                      onChanged={() => { void load(); }}
-                      onOpenRun={(id) => showRun(id)}
-                      runs={runs}
-                      plain
-                    />
-                  </div>
-                )}
               />
               {/* What earlier runs here learned (src/lib/coding-run-notes.ts),
                   read-only — every run and team role reads it, runs add to it,
