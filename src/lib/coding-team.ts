@@ -87,6 +87,7 @@ import {
   queueRunMessage,
   readTokenBreakdown,
   resolveWorkingDirectory,
+  RUN_IDLE_TIMEOUT_MS,
   SlotsFullError,
   startRun,
   stopRun,
@@ -120,7 +121,7 @@ import {
   type TeamRole,
 } from "@/lib/coding-team-messages";
 import { buildCommitMessage } from "@/lib/coding-git";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, SUITE_GATE_TIMEOUT_MS, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
@@ -274,6 +275,12 @@ interface LiveTeam {
 }
 
 const live = new Map<string, LiveTeam>();
+/**
+ * Boards the boot sweep is closing, by id: read as they stand under it
+ * (`settleOrphan` leaves them), counted as the team at work (`activeTeamId`),
+ * and stopped through `stopTeam` while it waits.
+ */
+const sweeping = new Map<string, { stopRequested: boolean }>();
 
 /**
  * Teams that may wait at once behind the one working. One team works at a
@@ -298,6 +305,9 @@ const worker = (id: string): Actor => ({ kind: "worker", id });
 
 export function activeTeamId(): string | null {
   for (const [id, team] of live) if (!isSettledStatus(team.board.status)) return id;
+  // A board the boot sweep is closing holds the box too: its workers may
+  // still be running in their scopes (`closeOrphanedTeams`).
+  for (const id of sweeping.keys()) return id;
   return null;
 }
 
@@ -521,6 +531,20 @@ export function stopTeam(id: string): TeamView {
     const board = loadBoard(id);
     if (!board) throw new CodingAgentError("not_found", "There is no coding team with that id.");
     if (isSettledStatus(board.status)) return snapshot(board);
+    // The boot sweep is closing it: the workers it is waiting for are
+    // stopped — the owner's gesture — and the sweep settles it `stopped`
+    // once they are, after their work is harvested (`closeOrphanedTeam`).
+    const sweep = sweeping.get(id);
+    if (sweep) {
+      sweep.stopRequested = true;
+      for (const ref of board.runs) {
+        const run = getRun(ref.id);
+        if (run && !isSettled(run.status)) {
+          try { stopRun(ref.id); } catch { /* already settled */ }
+        }
+      }
+      return snapshot(board);
+    }
     // Nothing is running: taking it out of the queue is the owner's (cancelQueuedTeam).
     if (board.status === "queued") {
       throw new CodingAgentError("invalid", "That team is queued and has not started. Only the owner can cancel a queued team, from the Coding Agent app.");
@@ -575,6 +599,182 @@ export function listTeams(limit = 20): TeamView[] {
 /** The team a run belongs to, for the run page's chip. */
 export function teamOfRun(run: Pick<CodingRun, "team">): TeamView | null {
   return run.team ? getTeam(run.team.id) : null;
+}
+
+// ─── The closing sweep (boot) ────────────────────────────────────────────────
+
+const RESTARTED = "The web server restarted while the team was working.";
+/** How long the sweep waits for a member run that is still going: the run's own idle timeout, which is what bounds a live run. */
+let sweepWaitMs = RUN_IDLE_TIMEOUT_MS;
+export function _setSweepWaitForTests(ms: number): void {
+  sweepWaitMs = ms;
+}
+
+/**
+ * Close every team the web server restarted under — at boot, after
+ * `reconcileAfterRestart` has said which runs survived in their scopes and
+ * before the queue pump (src/instrumentation.ts), one board at a time: the
+ * one-team rule holds through it, since a worker of such a board may still be
+ * running. Four of twenty-four boards failed on a restart while their workers
+ * went on in their scopes (one for 53 minutes after its team "failed"), and
+ * their worktrees were stranded with the work in them. Each board, in turn
+ * (`closeOrphanedTeam`): wait for its members that are still going — bounded
+ * by the run idle timeout, never a stop; harvest and merge each finished
+ * worker's branch into the team branch with the ordinary helpers (a merge
+ * git cannot do alone is aborted, never guessed at); remove the worktrees of
+ * settled runs, their branches kept; then settle `failed` with an error that
+ * names the branches holding the work, and send the ONE team notice. The
+ * team does not resume — re-entering `runTeam` mid-phase is a larger change
+ * (plan, section 6). Never throws: a board the sweep could not read or close
+ * is still settled, so nothing is left "working" with nobody working.
+ */
+export async function closeOrphanedTeams(): Promise<number> {
+  const orphans = listBoards()
+    .filter((b) => !isSettledStatus(b.status) && b.status !== "queued" && !live.has(b.id))
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (!orphans.length) return 0;
+  // Claimed together before any is waited on: a read of the second board
+  // while the first's workers are awaited must not settle it under the sweep.
+  for (const b of orphans) sweeping.set(b.id, { stopRequested: false });
+  let closed = 0;
+  try {
+    for (const board of orphans) {
+      try {
+        await closeOrphanedTeam(board, sweeping.get(board.id) ?? { stopRequested: false });
+        closed += 1;
+      } catch (err) {
+        console.error(`[coding-team] could not close ${board.id} after the restart:`, err instanceof Error ? err.message : err);
+        const now = loadBoard(board.id);
+        if (now && !isSettledStatus(now.status)) {
+          setTeamStatus(now, SYSTEM, "failed", `${RESTARTED} Its worktrees could not be closed: ${firstLine(err instanceof Error ? err.message : String(err), 300)}`);
+          saveBoard(now);
+          announceTeamSettled(now);
+        }
+      } finally {
+        sweeping.delete(board.id);
+      }
+    }
+  } finally {
+    for (const b of orphans) sweeping.delete(b.id);
+  }
+  return closed;
+}
+
+/** One orphaned board closed — see `closeOrphanedTeams`. */
+async function closeOrphanedTeam(board: TeamBoard, sweep: { stopRequested: boolean }): Promise<void> {
+  const bus = new TeamBus(board);
+  bus.send(SYSTEM, { type: "note", text: `${RESTARTED} Closing it: finished work is merged, the rest stays on its branches.` });
+
+  // (1) The members still going, in their own scopes: waited for, never killed.
+  const unsettled = await awaitMembers(board, bus);
+
+  // (2) and (3) Each worker's worktree, from the board's own record of it.
+  const merged: string[] = [];
+  const kept: string[] = [];
+  const leftInPlace: string[] = [];
+  if (board.branch) {
+    for (const task of board.tasks) {
+      if (!task.worktree || !task.branch) continue;
+      const runId = workerRunOf(board, task.task_id);
+      if (runId && unsettled.has(runId)) {
+        // Its run is still going: nothing of it is touched.
+        leftInPlace.push(`${task.branch} (${runId}, still running)`);
+        continue;
+      }
+      if (!fs.existsSync(task.worktree)) continue;
+      const run = runId ? getRun(runId) : null;
+      const harvested = await harvestWorktree(task.worktree, buildCommitMessage({ runId: runId ?? board.id, task: task.task_description, summary: run?.summary ?? null }));
+      if (!harvested.ok) {
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Could not commit what ${runId ?? "the worker"} left in its worktree: ${firstLine(harvested.detail, 200)}` });
+      } else if (harvested.files.length) {
+        const n = harvested.files.length;
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Committed ${n} uncommitted file(s) ${runId ?? "the worker"} left behind on ${task.branch}: ${harvested.files.slice(0, 5).join(", ")}${n > 5 ? ", …" : ""}` });
+      }
+      const ahead = await changedFiles(board.directory, task.branch);
+      if (run?.status === "completed" && harvested.ok && ahead.length) {
+        const result = await mergeWorkerBranch(board.directory, task.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
+        if (result.ok) {
+          if (result.merged) merged.push(task.branch);
+          bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: result.merged ? `Merged ${task.branch} into ${board.branch} (${runId}).` : `${task.branch} added nothing to ${board.branch}.` });
+        } else {
+          kept.push(task.branch);
+          bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `${result.conflict ? "Merge conflict" : "Merge failed"} for ${task.branch}, left unmerged: ${firstLine(result.detail, 200)}` });
+        }
+      } else if (ahead.length) {
+        // Unfinished, or a run that ended any other way: its work is on its
+        // branch for the owner to judge, never merged by guess.
+        kept.push(task.branch);
+      }
+      await removeWorktree(board.directory, task.worktree);
+    }
+    // A task's shell reviewer worked in a throwaway checkout of the team
+    // branch: the folder goes once its run has settled; the branch stays.
+    for (const task of board.tasks) {
+      if (!task.reviewRunId || unsettled.has(task.reviewRunId)) continue;
+      const checkout = path.join(board.directory, WORKTREES_DIR, `review-${task.task_id}-${task.attempts}`);
+      if (fs.existsSync(checkout)) await removeWorktree(board.directory, checkout);
+    }
+  }
+
+  // (4) Settled, with the branches named — unless the owner settled it meanwhile.
+  const now = loadBoard(board.id);
+  if (now && isSettledStatus(now.status)) return;
+  const branches = [
+    merged.length ? `Finished work was merged into ${board.branch}: ${merged.join(", ")}.` : null,
+    kept.length ? `Unmerged work is on ${kept.join(", ")}.` : null,
+    leftInPlace.length ? `Left in place: ${leftInPlace.join(", ")}.` : null,
+  ].filter((w): w is string => w !== null);
+  // On the log whichever way it settles: a stop keeps no `error`.
+  if (branches.length) bus.send(SYSTEM, { type: "note", text: branches.join(" ") });
+  if (sweep.stopRequested) setTeamStatus(board, OWNER, "stopped", "Stopped by the owner");
+  else setTeamStatus(board, SYSTEM, "failed", [RESTARTED, ...branches].join(" "));
+  saveBoard(board);
+  announceTeamSettled(board);
+}
+
+/**
+ * Wait for the board's member runs that have not settled — reattached to
+ * their scopes by `reconcileAfterRestart`, or held — up to the run idle
+ * timeout, together; what each spent goes on the cast list. Answers the ids
+ * still unsettled at the deadline: those are left as they are, their
+ * worktrees untouched. Never stops a run: a worker still working is work.
+ */
+async function awaitMembers(board: TeamBoard, bus: TeamBus): Promise<Set<string>> {
+  const unsettled = new Set<string>();
+  const going = board.runs.map((r) => r.id).filter((id) => {
+    const run = getRun(id);
+    return run !== null && !isSettled(run.status);
+  });
+  if (!going.length) return unsettled;
+  bus.send(SYSTEM, { type: "note", text: `Waiting for ${going.join(", ")} to finish (still running in their own scopes), up to ${Math.round(sweepWaitMs / 60_000)} minutes.` });
+  const deadline = Date.now() + sweepWaitMs;
+  await Promise.all(going.map(async (id) => {
+    for (;;) {
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        unsettled.add(id);
+        return;
+      }
+      const run = await waitForRun(id, Math.min(WAIT_SLICE_MS, left));
+      if (!run || isSettled(run.status)) {
+        noteTokens(board, run);
+        return;
+      }
+      // waitForRun answers at once for a run that is not running: a held one
+      // (paused) is looked at again in a moment rather than spun on.
+      if (!isLive(run.status)) await sleep(HELD_POLL_MS);
+    }
+  }));
+  return unsettled;
+}
+
+/** The run of a task's current attempt: the last worker on the cast list with that task. */
+function workerRunOf(board: TeamBoard, taskId: string): string | null {
+  for (let i = board.runs.length - 1; i >= 0; i--) {
+    const ref = board.runs[i];
+    if (ref.role === "worker" && ref.taskId === taskId) return ref.id;
+  }
+  return null;
 }
 
 // ─── Team messages (coding-team-messages.ts) ─────────────────────────────────
@@ -2657,9 +2857,14 @@ function isSettledStatus(status: TeamBoard["status"]): boolean {
   return isSettledTeamStatus(status);
 }
 
-/** A board that says "working" with nobody working — the web server restarted under it. A queued one is not: it waits on disk for its turn. */
+/**
+ * A board that says "working" with nobody working — the web server restarted
+ * under it and the boot sweep (`closeOrphanedTeams`) has not reached it. A
+ * queued one is not: it waits on disk for its turn. One the sweep is closing
+ * is read as it stands: the sweep settles it, with the branches named.
+ */
 function settleOrphan(board: TeamBoard): TeamBoard {
-  if (isSettledStatus(board.status) || live.has(board.id) || board.status === "queued") return board;
+  if (isSettledStatus(board.status) || live.has(board.id) || sweeping.has(board.id) || board.status === "queued") return board;
   setTeamStatus(board, SYSTEM, "failed", "The web server restarted while the team was working.");
   saveBoard(board);
   return board;

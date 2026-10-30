@@ -1963,6 +1963,139 @@ describe("the gates", () => {
   });
 });
 
+describe("the closing sweep at boot (closeOrphanedTeams)", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /**
+   * What a restart leaves of a team mid-work: a `working` board with a team
+   * branch, t1 finished by its worker (run-00000002) with its worktree still
+   * there, t2 in progress with its worker (run-00000003) going on in its
+   * scope, and nobody in this process running it.
+   */
+  async function interrupted(source: "owner" | "agent" = "owner"): Promise<Board> {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    const dir = path.join(root, "site");
+    const board = createBoard({ goal: "Build it", projectId: null, directory: dir, source }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Scaffold index.html", files_hint: ["index.html"] });
+    const t2 = postTask(board, { kind: "planner" }, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    board.status = "working";
+    board.branch = `clawbox/${board.id}`;
+    for (const [task, n] of [[t1, 2], [t2, 3]] as const) {
+      task.worktree = path.join(dir, ".clawbox", "worktrees", `${task.task_id}-1`);
+      task.branch = `clawbox/${board.id}-${task.task_id}-1`;
+      task.attempts = 1;
+      task.assigned_to = `run-0000000${n}`;
+      fs.mkdirSync(task.worktree, { recursive: true });
+    }
+    t1.status = "complete";
+    t2.status = "in_progress";
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" }, { id: "run-00000003", role: "worker", taskId: "t2" });
+    saveBoard(board);
+    // The runs as the reconciliation left them: the planner and t1's worker
+    // settled, t2's worker reattached and still running.
+    seq = 3;
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PLAN, directory: dir, tokensUsed: 10 });
+    runs.set("run-00000002", { id: "run-00000002", status: "completed", summary: "index done", directory: t1.worktree, filesTouched: ["index.html"], tokensUsed: 20 });
+    runs.set("run-00000003", { id: "run-00000003", status: "running", summary: null, directory: t2.worktree, filesTouched: [], waits: 0, outcomeAt: 0 });
+    return board;
+  }
+
+  it("waits for the worker still going, merges the finished branch, removes the worktrees without their branches, settles failed naming the branches, and tells the owner once", async () => {
+    const board = await interrupted("agent");
+    // t2's worker settles on its second wait, completed — it was the box's work, not the restart's.
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "app done", filesTouched: ["app.js"], tokensUsed: 30 }];
+    plumbing.harvestWorktree.mockImplementation(async (wt: string) => (wt.endsWith("t1-1") ? { ok: true, files: ["index.html"] } : { ok: true, files: [] }));
+    const sweep = team.closeOrphanedTeams();
+    // Under the sweep the board is the team at work and is read as it stands, never settled by the lazy read.
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    expect(team.activeTeamId()).toBe(board.id);
+    expect(team.getTeam(board.id)?.status).toBe("working");
+    expect(team.listTeams().find((t) => t.id === board.id)?.status).toBe("working");
+    expect(await sweep).toBe(1);
+
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The web server restarted while the team was working. Finished work was merged into clawbox/${board.id}: clawbox/${board.id}-t1-1, clawbox/${board.id}-t2-1.`);
+    // Both worktrees were harvested and merged — t2's only once its run had settled — and removed, their branches kept.
+    expect(plumbing.harvestWorktree.mock.calls.map((c) => c[0])).toEqual([path.join(root, "site/.clawbox/worktrees/t1-1"), path.join(root, "site/.clawbox/worktrees/t2-1")]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t1-1`, `clawbox/${board.id}-t2-1`]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    for (const call of plumbing.removeWorktree.mock.calls) expect(call[2]).toBeUndefined();
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    // The tokens of the worker it waited for are on the cast list; the log says what happened.
+    expect(done.runs.find((r) => r.id === "run-00000003")?.tokens).toBe(30);
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^The web server restarted while the team was working\. Closing it/),
+      "Waiting for run-00000003 to finish (still running in their own scopes), up to 30 minutes.",
+      `Committed 1 uncommitted file(s) run-00000002 left behind on clawbox/${board.id}-t1-1: index.html`,
+      `Merged clawbox/${board.id}-t1-1 into clawbox/${board.id} (run-00000002).`,
+    ]));
+    // ONE team notice, and — the assistant's team, on OpenClaw — the chat line.
+    expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1);
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    expect(team.activeTeamId()).toBeNull();
+    // Nothing left to close.
+    expect(await team.closeOrphanedTeams()).toBe(0);
+  });
+
+  it("leaves a worker still going at the deadline in place, keeps an unmerged branch out of the team branch, and aborts a conflict rather than guess", async () => {
+    const board = await interrupted();
+    team._setSweepWaitForTests(50);
+    // t2's worker never settles inside the sweep's wait; t1's merge conflicts.
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    merges = [{ ok: false, conflict: true }];
+    expect(await team.closeOrphanedTeams()).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The web server restarted while the team was working. Unmerged work is on clawbox/${board.id}-t1-1. Left in place: clawbox/${board.id}-t2-1 (run-00000003, still running).`);
+    // Only t1's worktree was touched; t2's — a live run's — was not, and its run was not stopped.
+    expect(plumbing.harvestWorktree.mock.calls.map((c) => c[0])).toEqual([path.join(root, "site/.clawbox/worktrees/t1-1")]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(plumbing.removeWorktree.mock.calls[0][1]).toBe(path.join(root, "site/.clawbox/worktrees/t1-1"));
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Merge conflict for clawbox\/team-[a-z0-9]{8}-t1-1, left unmerged: CONFLICT/),
+    ]));
+    expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1);
+  });
+
+  it("is stopped by the owner while it waits: the workers are stopped, their work harvested, and the team settles stopped", async () => {
+    const board = await interrupted();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    const sweep = team.closeOrphanedTeams();
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    const stopped = team.stopTeam(board.id);
+    expect(stopped.status).toBe("working");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    expect(await sweep).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("stopped");
+    expect(done.error).toBeNull();
+    // The branches are on the log, since a stop keeps no error.
+    expect(done.log.slice(-2)).toMatchObject([
+      { type: "note", message: `Finished work was merged into clawbox/${board.id}: clawbox/${board.id}-t1-1. Unmerged work is on clawbox/${board.id}-t2-1.` },
+      { actor: { kind: "owner" }, message: "Team → stopped: Stopped by the owner" },
+    ]);
+    // The stopped worker's branch is kept unmerged, its worktree removed.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t1-1`]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
+  });
+
+  it("closes nothing that is queued, settled or at work in this process", async () => {
+    const { createBoard, saveBoard, setTeamStatus } = await import("@/lib/coding-team-board");
+    const queued = createBoard({ goal: "g", projectId: null, directory: "/srv/p", source: "owner" }, { kind: "owner" });
+    setTeamStatus(queued, { kind: "system" }, "queued", "Waiting");
+    saveBoard(queued);
+    expect(await team.closeOrphanedTeams()).toBe(0);
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+    expect(notify.announceCodingTeam).not.toHaveBeenCalled();
+  });
+});
+
 describe("the words", () => {
   // Bench, 2026-09-22/23: a worker in a worktree read its hinted styles.css at
   // `<project>/styles.css`, was refused, and the refusal failed the task.
