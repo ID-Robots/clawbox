@@ -870,7 +870,7 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
 
       {recent.length > 0 && (
         <div className="mt-3">
-          <CodingRunTimeline lines={recent} times={recentTimes} startedAt={run?.startedAt} live={live} embedded testId="coding-agent-node-panel-steps" />
+          <CodingRunTimeline lines={recent} times={recentTimes} startedAt={run?.startedAt} live={live} embedded folded testId="coding-agent-node-panel-steps" />
         </div>
       )}
 
