@@ -218,7 +218,7 @@ describe("a team's text", () => {
     // A `coding_team settled` ring action, not a toast: the desktop draws the
     // same top-right finish card a run gets, whose Open hands the app the team.
     expect(payload.type).toBe("coding_team");
-    expect(payload.event).toBe("settled");
+    expect(payload.phase).toBe("settled");
     expect(payload.teamId).toBe("team-k3x9q2ab");
     expect(payload.projectId).toBe("site");
     expect(payload.status).toBe("done");
