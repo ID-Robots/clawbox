@@ -50,6 +50,9 @@ const UPDATE_KEYS = [
   // Its "What's new" panel (TASK-1205).
   "update.whatsNewTitle", "update.whatsNewTitleGeneric", "update.whatsNewIntro",
   "update.whatsNewGeneric", "update.whatsNewReleaseNotes", "update.whatsNewChannel",
+  // The run view of the System Update window: step count, log, failure copy.
+  "update.stepsComplete", "update.stepStopped", "update.reconnectNote",
+  "update.highlights", "update.updateLog", "update.noFailureReason",
   // A branch or an update refused for installing an older harness than the
   // one that wrote the box's data, and its override.
   "update.harnessDowngrade.titleBranch", "update.harnessDowngrade.titleUpdate",
