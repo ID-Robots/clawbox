@@ -50,13 +50,33 @@ export function useBackgroundTasks(enabled: boolean): {
     if (!enabled) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // ONE loop. A kick that lands while a poll is in flight is remembered and
+    // answered by one more poll right after it — starting a second `tick` then
+    // left two loops running for good, one more per such kick.
+    let polling = false;
+    let kicked = false;
     const tick = async () => {
-      await refresh();
+      if (polling) {
+        kicked = true;
+        return;
+      }
+      polling = true;
+      try {
+        await refresh();
+      } finally {
+        polling = false;
+      }
       if (cancelled) return;
+      if (kicked) {
+        kicked = false;
+        void tick();
+        return;
+      }
       timer = setTimeout(tick, runningRef.current ? FAST_POLL_MS : SLOW_POLL_MS);
     };
     const kick = () => {
       if (timer) clearTimeout(timer);
+      timer = null;
       void tick();
     };
     void tick();
@@ -107,7 +127,13 @@ const BackgroundTaskCard = memo(function BackgroundTaskCard({
   const logRef = useRef<HTMLPreElement | null>(null);
   const running = task.state === "running";
   const failed = task.state === "failed" || task.state === "interrupted";
-  const percent = task.percent === null ? null : Math.max(0, Math.min(100, task.percent));
+  const rawPercent = task.percent === null ? null : Math.max(0, Math.min(100, task.percent));
+  // A figure only where something was measured: bytes in the running step, or
+  // steps already behind it. A step that reports lines but no bytes (a build,
+  // a pip install) is most of every install, and "0%" over it read as stuck —
+  // the bar goes indeterminate there instead.
+  const measured = task.total !== null && task.total > 0;
+  const percent = rawPercent !== null && (measured || rawPercent > 0) ? rawPercent : null;
   const eta = formatEtaParts(task.etaSeconds);
   const current = task.steps.find((s) => s.state === "running") ?? null;
   const stepIndex = current ? task.steps.indexOf(current) + 1 : null;

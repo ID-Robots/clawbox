@@ -9,7 +9,7 @@
  * asks at once when a surface says it started something.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import BackgroundTaskCards, { useBackgroundTasks } from "@/components/BackgroundTaskCards";
 import {
@@ -68,6 +68,19 @@ describe("BackgroundTaskCards", () => {
     expect(screen.getByTestId("background-task-log-toggle")).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByTestId("background-task-log-toggle"));
     expect(screen.queryByTestId("background-task-log")).toBeNull();
+  });
+
+  it("never paints 0 % over a step that measures nothing", () => {
+    // Every phase-1 install spends most of its time in one step that reports
+    // lines but no bytes (a build, a pip install): the weighted share is 0 for
+    // all of it, and "0%" under a build line saying 87 % read as stuck.
+    renderCards([task({ percent: 0, etaSeconds: null, completed: null, total: null })]);
+    expect(screen.getByTestId("background-task-percent")).not.toHaveTextContent("0%");
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+    // Bytes measured: 0 % is then a real figure, and said.
+    cleanup();
+    renderCards([task({ percent: 0, etaSeconds: null, completed: 0, total: 1000 })]);
+    expect(screen.getByTestId("background-task-percent")).toHaveTextContent("0%");
   });
 
   it("draws no ETA where the server gave none", () => {
@@ -146,5 +159,39 @@ describe("useBackgroundTasks", () => {
     expect(result.current.tasks).toHaveLength(0);
     const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
     expect(JSON.parse(String(post?.[1]?.body))).toEqual({ id: "t1", action: "dismiss" });
+  });
+
+  it("never runs two polls at once, however often a surface says it started something", async () => {
+    // A stream names its task on its first AND its closing line, and Settings
+    // fires the event for each: a kick that landed while a poll was in flight
+    // used to start a second polling loop beside the first, for good.
+    let inFlight = 0;
+    let most = 0;
+    const pending: Array<() => void> = [];
+    const fetchMock = vi.fn<(url: string) => Promise<Response>>(() => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      return new Promise((resolve) => {
+        pending.push(() => {
+          inFlight -= 1;
+          resolve(new Response(JSON.stringify({ tasks: [task()] })));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderHook(() => useBackgroundTasks(true));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => {
+      notifyBackgroundTaskStarted("t1");
+      notifyBackgroundTaskStarted("t1");
+    });
+    expect(most).toBe(1);
+    // The kicks are not lost: one more poll follows the one in flight.
+    await act(async () => { pending.shift()?.(); });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await act(async () => { pending.shift()?.(); });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(most).toBe(1);
   });
 });
