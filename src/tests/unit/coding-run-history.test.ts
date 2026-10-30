@@ -124,7 +124,9 @@ describe("older runs", () => {
 
 describe("a stored team role", () => {
   it("reads as one of the roles a choice is made for, or none", () => {
-    for (const role of ["planner", "worker", "reviewer", "bulk"]) expect(lib.readModelRole(role)).toBe(role);
+    for (const role of ["planner", "worker", "reviewer"]) expect(lib.readModelRole(role)).toBe(role);
+    // A record from before 2026-10-30 may still say "bulk": it was a worker's run.
+    expect(lib.readModelRole("bulk")).toBe("worker");
     for (const junk of ["lead", "Planner", "", 1, null, undefined, {}]) expect(lib.readModelRole(junk)).toBeNull();
   });
 });
