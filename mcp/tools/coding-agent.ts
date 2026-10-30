@@ -1525,7 +1525,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     "Bring an existing project into the owner's project folder, so it is listed in coding_project_status and runs can work in it: clone one of their GitHub repositories (github_repo) or copy a folder already on this ClawBox (directory). Only when the USER asks; nothing is merged or overwritten. Answers the new project's id.",
     {
       github_repo: zOptText(200, "The repository to clone as owner/name, from the GitHub account connected in Settings. Give this OR directory."),
-      directory: zOptText(512, "An absolute folder on this ClawBox (under the owner's home) to copy into the project folder; node_modules is left behind."),
+      directory: zOptText(512, "An absolute folder on this ClawBox (under the owner's home) to copy into the project folder; node_modules stays behind."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
     async ({ github_repo, directory }: { github_repo?: string; directory?: string }) => {
