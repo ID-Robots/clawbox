@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "Boxen sparade sina inställningar, så chattmodellen ändrades inte. Försök igen om en stund.",
   "chat.modelUnavailableAccountNoQuota": "Ditt {provider}-konto har ingen API-kvot just nu ({provider} sätter den efter hur mycket du har spenderat). Lägg till kredit på {console} eller byt leverantör.",
   "chat.modelUnavailableAddCredit": "Lägg till kredit på {console} för att använda {model}.",
+  "chat.modelUnavailableClawaiSignIn": "Logga in på ClawBox AI igen",
   "chat.modelUnavailableNoQuota": "Meddelandet gick inte fram — {model} är inte tillgänglig för det här {provider}-kontot: förfrågningsgränsen är 0, så det finns ännu ingen API-kredit eller kvot för modellen. Välj en annan modell i sidhuvudet eller lägg till kredit på {console} och skicka det sedan igen.",
   "chat.modelUnavailableNone": "Ingen annan modell från {provider} är tillgänglig för det här kontot — välj en annan leverantör i chattens sidhuvud.",
   "chat.modelUnavailableNotFound": "{provider} erbjuder inte längre {model} till det här kontot.",

@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "La box enregistrait ses réglages, le modèle de chat n'a donc pas changé. Réessayez dans un instant.",
   "chat.modelUnavailableAccountNoQuota": "Votre compte {provider} n'a pas de quota d'API pour le moment ({provider} le fixe selon vos dépenses). Ajoutez du crédit sur {console} ou changez de fournisseur.",
   "chat.modelUnavailableAddCredit": "Pour utiliser {model}, ajoutez du crédit sur {console}.",
+  "chat.modelUnavailableClawaiSignIn": "Se reconnecter à ClawBox AI",
   "chat.modelUnavailableNoQuota": "Ce message n'est pas passé — {model} n'est pas disponible sur ce compte {provider} : sa limite de requêtes est de 0, il n'y a donc pas encore de crédit API ni de quota pour lui. Choisissez un autre modèle dans l'en-tête ou ajoutez du crédit sur {console}, puis renvoyez-le.",
   "chat.modelUnavailableNone": "Aucun autre modèle {provider} n'est disponible sur ce compte — choisissez un autre fournisseur dans l'en-tête du chat.",
   "chat.modelUnavailableNotFound": "{provider} ne propose plus {model} à ce compte.",

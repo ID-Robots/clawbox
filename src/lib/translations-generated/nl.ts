@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "De box was zijn instellingen aan het opslaan, dus het chatmodel is niet gewijzigd. Probeer het zo meteen opnieuw.",
   "chat.modelUnavailableAccountNoQuota": "Je {provider}-account heeft op dit moment geen API-quotum ({provider} stelt het in op basis van je uitgaven). Voeg tegoed toe op {console} of kies een andere provider.",
   "chat.modelUnavailableAddCredit": "Voeg tegoed toe op {console} om {model} te gebruiken.",
+  "chat.modelUnavailableClawaiSignIn": "Opnieuw aanmelden bij ClawBox AI",
   "chat.modelUnavailableNoQuota": "Dat bericht is niet verstuurd — {model} is niet beschikbaar voor dit {provider}-account: de aanvraaglimiet is 0, dus er is nog geen API-tegoed of quotum voor dit model. Kies bovenaan een ander model of voeg tegoed toe op {console} en verstuur het daarna opnieuw.",
   "chat.modelUnavailableNone": "Er is geen ander model van {provider} beschikbaar voor dit account — kies bovenaan de chat een andere provider.",
   "chat.modelUnavailableNotFound": "{provider} biedt {model} niet meer aan voor dit account.",

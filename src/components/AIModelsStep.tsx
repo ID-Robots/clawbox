@@ -669,8 +669,19 @@ export default function AIModelsStep({
   // depend on them directly instead of on the whole result object.
   const { start: startClawaiLogin, stop: stopClawaiLogin, reset: resetClawaiLogin } = clawaiLogin;
 
+  // The box MOVED to ClawBox AI — a sign-in finished here or elsewhere — so a
+  // device login still running is over. A move, never a first reading: Settings
+  // opened on the ClawBox AI sign-in (the pitch card's Connect, a chat's "Sign
+  // in to ClawBox AI again") starts the login before the status read lands, and
+  // on a box whose stale config still names ClawBox AI that first answer is
+  // `clawai` — which aborted the start it had just made (seen on a board,
+  // 2026-10-30: `POST /clawai/start 200 … aborted`, no code on screen, a
+  // Connect button that "did nothing at all").
+  const previousCurrentProviderRef = useRef<string | null>(null);
   useEffect(() => {
-    if (normalizedCurrentProvider !== "clawai") return;
+    const previous = previousCurrentProviderRef.current;
+    previousCurrentProviderRef.current = normalizedCurrentProvider;
+    if (normalizedCurrentProvider !== "clawai" || previous === null || previous === "clawai") return;
     stopClawaiLogin();
     resetClawaiLogin();
     setSaving(false);

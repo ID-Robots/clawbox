@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "Кутията записваше настройките си, затова чат моделът не беше сменен. Опитайте пак след малко.",
   "chat.modelUnavailableAccountNoQuota": "Вашият акаунт в {provider} в момента няма API квота ({provider} я определя според разходите ви). Добавете кредит на {console} или сменете доставчика.",
   "chat.modelUnavailableAddCredit": "За да използвате {model}, добавете кредит в {console}.",
+  "chat.modelUnavailableClawaiSignIn": "Влезте отново в ClawBox AI",
   "chat.modelUnavailableNoQuota": "Съобщението не беше изпратено — {model} не е достъпен за този акаунт в {provider}: лимитът на заявките му е 0, т.е. все още няма API кредит или квота за него. Изберете друг модел в горната лента или добавете кредит в {console}, след което го изпратете отново.",
   "chat.modelUnavailableNone": "Няма друг модел на {provider}, достъпен за този акаунт — изберете друг доставчик в горната лента на чата.",
   "chat.modelUnavailableNotFound": "{provider} вече не предлага {model} за този акаунт.",

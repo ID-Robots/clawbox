@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "ボックスが設定を保存していたため、チャットモデルは切り替わりませんでした。少し待ってからもう一度お試しください。",
   "chat.modelUnavailableAccountNoQuota": "お使いの {provider} アカウントには現在 API クォータがありません（{provider} は利用額に応じて設定します）。{console} でクレジットを追加するか、プロバイダーを切り替えてください。",
   "chat.modelUnavailableAddCredit": "{model} を使うには、{console} でクレジットを追加してください。",
+  "chat.modelUnavailableClawaiSignIn": "ClawBox AI にもう一度サインイン",
   "chat.modelUnavailableNoQuota": "メッセージを送信できませんでした — この {provider} アカウントでは {model} を利用できません。リクエスト上限が 0 で、このモデル用の API クレジットやクォータがまだありません。ヘッダーで別のモデルを選ぶか、{console} でクレジットを追加してから、もう一度送信してください。",
   "chat.modelUnavailableNone": "このアカウントで利用できる {provider} のモデルは他にありません — チャットのヘッダーで別のプロバイダーを選んでください。",
   "chat.modelUnavailableNotFound": "{provider} はこのアカウントに {model} を提供しなくなりました。",

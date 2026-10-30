@@ -338,6 +338,50 @@ describe("AIModelsStep variants", () => {
     );
   });
 
+  // Settings opened ON the ClawBox AI sign-in starts the login before its
+  // status read lands, and a box whose stale config still names ClawBox AI
+  // answers `clawai`. That first answer used to stop the login it had just
+  // started: on a board the start request went out and was aborted, and the
+  // Connect button "did nothing at all" (2026-10-30).
+  it("keeps the device code an offer started when the first status read names ClawBox AI", async () => {
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    let startSignal: AbortSignal | undefined;
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: [] }) } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/clawai/start")) {
+        startSignal = init?.signal ?? undefined;
+        await startGate;
+        return {
+          ok: true,
+          json: async () => ({ user_code: "WXYZ-9876", verification_url: "https://clawbox.com/portal/connect", interval: 5 }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    const props = {
+      embedded: true,
+      providerIds: ["clawai", "openai", "anthropic", "google", "openrouter"],
+      defaultProviderId: "clawai",
+      openClawAIOfferRequest: 1,
+      title: "Connect AI Provider",
+      description: "Primary provider",
+    };
+
+    const { findByText, rerender } = render(<AIModelsStep {...props} currentProviderId={null} />);
+    await waitFor(() => expect(startSignal).toBeDefined());
+    // The status read answers while the start is still out.
+    rerender(<AIModelsStep {...props} currentProviderId="clawai" />);
+    await act(async () => { releaseStart(); await Promise.resolve(); });
+
+    expect(startSignal?.aborted).toBe(false);
+    expect(await findByText("WXYZ-9876")).toBeInTheDocument();
+  });
+
   it("forwards the selected ClawBox AI tier to the start endpoint", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
