@@ -1,14 +1,14 @@
 /**
  * The owner's run-history setting through the runs store itself (TASK-1178):
- * what happens to the run that leaves the newest thirty in each mode, what a
- * later mode does to runs an earlier one kept, the disk guard, the owner's
- * Clear, the setting's own door, and Claude Code's transcript period.
+ * what happens to the run that leaves the newest thirty in each of the two
+ * modes, what standard does to runs "keep everything" kept, the disk guard,
+ * the owner's Clear, the setting's own door, the one-time rewrite of a
+ * retired mode (SCA2 C1), and Claude Code's transcript period.
  *
  * Runs are SEEDED into the runs file and the trim is driven by drafting a run
  * (createDraftRun → insertRun), which spawns nothing: the thirty-first record
  * is what matters here, not a harness. One test starts a real (fake) harness,
- * for the one decision the settle makes — keeping the stream log for the
- * archive.
+ * for the settle's part — the stream log goes in every mode.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -44,7 +44,6 @@ const runsFile = () => path.join(data, "coding-agent-runs.json");
 const evidenceOf = (id: string) => path.join(data, "coding-agent-artifacts", id);
 const inputsOf = (id: string) => path.join(data, "coding-agent-inputs", id);
 const olderFile = (id: string) => path.join(data, "coding-agent-history", `${id}.json`);
-const bundleOf = (id: string) => path.join(data, "coding-agent-archive", id);
 const onDisk = (): { id: string; status: string }[] => JSON.parse(fs.readFileSync(runsFile(), "utf-8"));
 const idOf = (n: number) => `run-${String(n).padStart(8, "0")}`;
 
@@ -140,8 +139,8 @@ describe("standard — the default", () => {
     expect(fs.existsSync(evidenceOf(ids[29]))).toBe(false);
     expect(fs.existsSync(inputsOf(ids[29]))).toBe(false);
     expect(fs.existsSync(evidenceOf(ids[28]))).toBe(true);
-    // Nothing new on the flash: no older runs, no archive, and the transcript
-    // is Claude Code's to expire, as it always was.
+    // Nothing new on the flash: no older runs, and the transcript is Claude
+    // Code's to expire, as it always was.
     expect(fs.existsSync(path.join(data, "coding-agent-history"))).toBe(false);
     expect(fs.existsSync(path.join(data, "coding-agent-archive"))).toBe(false);
     expect(fs.existsSync(transcriptOf(29))).toBe(true);
@@ -172,22 +171,21 @@ describe("standard — the default", () => {
   });
 
   it("never drops a held run, in any mode", async () => {
-    for (const mode of ["standard", "extended", "archive"]) {
+    for (const mode of ["standard", "everything"]) {
       writeConfig({ coding_agent_history_retention: mode });
       const ids = seedLive(0, 29, { status: "paused" });
       await lib._resetCodingAgentStateForTests();
       await draft();
       expect(onDisk()).toHaveLength(31);
       expect(fs.existsSync(evidenceOf(ids[29]))).toBe(true);
-      expect(fs.existsSync(bundleOf(ids[29]))).toBe(false);
       expect(fs.existsSync(olderFile(ids[29]))).toBe(false);
     }
   });
 });
 
-describe("extended", () => {
+describe("keep everything", () => {
   it("keeps the run leaving the live thirty as an older run, evidence and inputs in place", async () => {
-    writeConfig({ coding_agent_history_retention: "extended", coding_agent_history_limit: 100 });
+    writeConfig({ coding_agent_history_retention: "everything" });
     const ids = seedLive(0, 29);
     await draft();
     // The runs file is still thirty records: the older run is in a file of its own.
@@ -202,22 +200,13 @@ describe("extended", () => {
     expect(lib.listOlderRuns()).toMatchObject({ total: 1, runs: [{ id: ids[29] }] });
   });
 
-  it("trims the older runs to N, oldest first, with their evidence", async () => {
-    writeConfig({ coding_agent_history_retention: "extended", coding_agent_history_limit: 100 });
+  it("never deletes a run", async () => {
+    writeConfig({ coding_agent_history_retention: "everything" });
     seedLive(0, 29);
-    const older = seedOlder(30, 100);
-    expect(history.olderRunIndex()).toHaveLength(71);
+    seedOlder(30, 200);
     await draft();
-    // 30 in the runs file + 70 older = the 100 the owner chose.
-    const index = history.olderRunIndex();
-    expect(index).toHaveLength(70);
-    expect(index[0].id).toBe(idOf(29));
-    for (const gone of older.slice(-2)) {
-      expect(fs.existsSync(olderFile(gone))).toBe(false);
-      expect(fs.existsSync(evidenceOf(gone))).toBe(false);
-      expect(fs.existsSync(inputsOf(gone))).toBe(false);
-    }
-    expect(fs.existsSync(evidenceOf(older[older.length - 3]))).toBe(true);
+    expect(history.olderRunIndex()).toHaveLength(172);
+    expect(fs.existsSync(evidenceOf(idOf(200)))).toBe(true);
   });
 
   it("pages the older runs newest first and narrows them to a project", async () => {
@@ -234,52 +223,37 @@ describe("extended", () => {
   });
 });
 
-describe("keep everything", () => {
-  it("never deletes a run", async () => {
-    writeConfig({ coding_agent_history_retention: "everything" });
-    seedLive(0, 29);
-    seedOlder(30, 200);
-    await draft();
-    expect(history.olderRunIndex()).toHaveLength(172);
-    expect(fs.existsSync(evidenceOf(idOf(200)))).toBe(true);
-  });
-});
+describe("a retired mode (SCA2 C1)", () => {
+  const config = () => JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf-8"));
 
-describe("archive", () => {
-  it("moves the leaving run into the archive with its evidence, inputs, stream log and a transcript copy", async () => {
-    writeConfig({ coding_agent_history_retention: "archive" });
-    const ids = seedLive(0, 29);
-    const streams = path.join(data, "coding-agent-streams");
-    fs.mkdirSync(streams, { recursive: true });
-    fs.writeFileSync(path.join(streams, `${ids[29]}.jsonl`), '{"type":"result"}\n');
-    await draft();
-    expect(onDisk()).toHaveLength(30);
-    const bundle = bundleOf(ids[29]);
-    expect(JSON.parse(fs.readFileSync(path.join(bundle, "run.json"), "utf-8"))).toMatchObject({ id: ids[29], task: "Task number 29", status: "completed" });
-    expect(fs.readFileSync(path.join(bundle, "evidence", "shot.png"), "utf-8")).toBe("png 29");
-    expect(fs.readFileSync(path.join(bundle, "inputs", "in.txt"), "utf-8")).toBe("input 29");
-    expect(fs.readFileSync(path.join(bundle, "stream.jsonl"), "utf-8")).toBe('{"type":"result"}\n');
-    expect(fs.readFileSync(path.join(bundle, "transcript.jsonl"), "utf-8")).toBe('{"n":29}\n');
-    expect(fs.existsSync(evidenceOf(ids[29]))).toBe(false);
-    expect(fs.existsSync(inputsOf(ids[29]))).toBe(false);
-    expect(fs.existsSync(transcriptOf(29))).toBe(true);
-    expect(history.archiveIndex().map((e) => e.id)).toEqual([ids[29]]);
-    // Off the live list — the archive is where it is read now.
-    expect(lib.getRun(ids[29])).toBeNull();
-    expect(history.readArchivedRun(ids[29])!.entry.reason).toBe("trimmed");
-  });
-
-  it("archives the older runs an earlier mode kept, at the next run", async () => {
-    writeConfig({ coding_agent_history_retention: "archive" });
-    seedLive(0, 29);
-    const older = seedOlder(30, 34);
-    await draft();
-    expect(fs.existsSync(path.join(data, "coding-agent-history", "index.json")) ? history.olderRunIndex() : []).toEqual([]);
-    expect(history.archiveIndex().map((e) => e.id).sort()).toEqual([idOf(29), ...older].sort());
-    for (const id of older) {
-      expect(fs.existsSync(path.join(bundleOf(id), "evidence", "shot.png"))).toBe(true);
-      expect(fs.existsSync(olderFile(id))).toBe(false);
+  it("reads extended and archive as everything, and rewrites the setting once, the retired N with it", async () => {
+    for (const retired of ["extended", "archive"]) {
+      writeConfig({ coding_agent_history_retention: retired, coding_agent_history_limit: 300 });
+      await lib._resetCodingAgentStateForTests();
+      expect((await lib.getHistoryPolicy()).mode, retired).toBe("everything");
+      expect(config(), retired).toEqual({ coding_agent_history_retention: "everything" });
+      // And behaves as everything: the leaving run is kept, not deleted.
+      const ids = seedLive(0, 29);
+      await draft();
+      expect(fs.existsSync(olderFile(ids[29])), retired).toBe(true);
     }
+  });
+
+  it("reads a value it does not know as standard, and clears it", async () => {
+    writeConfig({ coding_agent_history_retention: "forever" });
+    expect((await lib.getHistoryPolicy()).mode).toBe("standard");
+    expect(config()).toEqual({});
+    // Nothing to rewrite for a current value, or an absent one.
+    writeConfig({ coding_agent_history_retention: "everything", other: 1 });
+    expect((await lib.getHistoryPolicy()).mode).toBe("everything");
+    expect(config()).toEqual({ coding_agent_history_retention: "everything", other: 1 });
+  });
+
+  it("the status reads a retired mode the same way", async () => {
+    writeConfig({ coding_agent_history_retention: "archive" });
+    const status = await lib.getCodingAgentStatus();
+    expect(status.historyRetention).toBe("everything");
+    expect((status as unknown as Record<string, unknown>).historyLimit).toBeUndefined();
   });
 });
 
@@ -288,7 +262,7 @@ describe("leaving a mode that kept more", () => {
     writeConfig({ coding_agent_history_retention: "everything" });
     seedLive(0, 29);
     const older = seedOlder(30, 39);
-    await lib.setHistoryRetention({ mode: "standard" });
+    await lib.setHistoryRetention("standard");
     // Saved, and nothing deleted yet: a mis-tap can still be taken back.
     expect(history.olderRunIndex()).toHaveLength(10);
     await draft();
@@ -305,68 +279,52 @@ describe("the disk guard", () => {
     })) as unknown as typeof fs.statfsSync);
   }
 
-  it("deletes the leaving run as standard would, instead of keeping or archiving it", async () => {
-    for (const mode of ["extended", "everything", "archive"]) {
-      writeConfig({ coding_agent_history_retention: mode, coding_agent_history_limit: 1000 });
-      const ids = seedLive(0, 29);
-      await lib._resetCodingAgentStateForTests();
-      const spy = lowDisk();
-      await draft();
-      spy.mockRestore();
-      expect(fs.existsSync(olderFile(ids[29])), mode).toBe(false);
-      expect(fs.existsSync(bundleOf(ids[29])), mode).toBe(false);
-      expect(fs.existsSync(evidenceOf(ids[29])), mode).toBe(false);
-    }
+  it("deletes the leaving run as standard would, instead of keeping it", async () => {
+    writeConfig({ coding_agent_history_retention: "everything" });
+    const ids = seedLive(0, 29);
+    const spy = lowDisk();
+    await draft();
+    spy.mockRestore();
+    expect(fs.existsSync(olderFile(ids[29]))).toBe(false);
+    expect(fs.existsSync(evidenceOf(ids[29]))).toBe(false);
   });
 
   it("stops the history growing without purging what is already kept", async () => {
-    writeConfig({ coding_agent_history_retention: "archive" });
+    writeConfig({ coding_agent_history_retention: "everything" });
     seedLive(0, 29);
     const older = seedOlder(30, 34);
     lowDisk();
     await draft();
-    // Older runs a previous mode kept are neither archived nor deleted while
-    // the disk is low: moving them is not what the guard is for.
+    // Older runs already kept are not deleted while the disk is low: purging
+    // them is not what the guard is for.
     expect(history.olderRunIndex().map((e) => e.id)).toEqual(older);
-    expect(history.archiveIndex()).toEqual([]);
     expect((await lib.runHistorySummary()).disk.low).toBe(true);
   });
 });
 
 describe("the owner's Clear", () => {
-  it("archives the finished runs — live and older — under archive, and keeps what is held", async () => {
-    writeConfig({ coding_agent_history_retention: "archive" });
-    const live = seedLive(0, 3);
-    const records = onDisk();
-    records[0].status = "paused";
-    fs.writeFileSync(runsFile(), JSON.stringify(records));
-    const older = seedOlder(4, 5);
-    await lib.getHistoryPolicy();
-    expect(lib.clearFinishedRuns(await lib.getHistoryPolicy())).toBe(5);
-    expect(onDisk().map((r) => r.id)).toEqual([live[0]]);
-    expect(history.archiveIndex().map((e) => e.id).sort()).toEqual([...live.slice(1), ...older].sort());
-    expect(history.readArchivedRun(live[1])!.entry.reason).toBe("cleared");
-  });
-
   it("shows what it freed at once, not after the usage cache expires", async () => {
     seedLive(0, 2);
     const before = await lib.runHistorySummary();
     expect(before.usage!.evidence).toBeGreaterThan(0);
-    expect(lib.clearFinishedRuns(await lib.getHistoryPolicy())).toBe(3);
+    expect(lib.clearFinishedRuns()).toBe(3);
     const after = await lib.runHistorySummary();
     expect(after.usage!.evidence).toBe(0);
     expect(after.counts.live).toBe(0);
   });
 
-  it("deletes them, older runs included, under the other modes", async () => {
+  it("deletes the finished runs, older runs included, and keeps what is held", async () => {
     writeConfig({ coding_agent_history_retention: "everything" });
-    const live = seedLive(0, 2);
-    const older = seedOlder(3, 4);
-    expect(lib.clearFinishedRuns(await lib.getHistoryPolicy())).toBe(5);
-    expect(onDisk()).toEqual([]);
+    const live = seedLive(0, 3);
+    const records = onDisk();
+    records[0].status = "paused";
+    fs.writeFileSync(runsFile(), JSON.stringify(records));
+    const older = seedOlder(4, 5);
+    expect(lib.clearFinishedRuns()).toBe(5);
+    expect(onDisk().map((r) => r.id)).toEqual([live[0]]);
     expect(history.olderRunIndex()).toEqual([]);
-    for (const id of [...live, ...older]) expect(fs.existsSync(evidenceOf(id))).toBe(false);
-    expect(fs.existsSync(path.join(data, "coding-agent-archive"))).toBe(false);
+    for (const id of [...live.slice(1), ...older]) expect(fs.existsSync(evidenceOf(id))).toBe(false);
+    expect(fs.existsSync(evidenceOf(live[0]))).toBe(true);
   });
 });
 
@@ -375,40 +333,42 @@ describe("the setting's door", () => {
   const own = () => path.join(home, ".claude", "settings.json");
   const readJson = (file: string) => JSON.parse(fs.readFileSync(file, "utf-8"));
 
-  it("refuses what the box does not offer, before saving anything", async () => {
-    await expect(lib.setHistoryRetention({ mode: "forever" })).rejects.toThrow(/one of: standard, extended, everything, archive/);
-    await expect(lib.setHistoryRetention({ mode: "extended", limit: 50 })).rejects.toThrow(/one of: 100, 300, 1000/);
+  it("refuses what the box does not offer — the retired modes included — before saving anything", async () => {
+    for (const bad of ["forever", "extended", "archive", 3, undefined]) {
+      await expect(lib.setHistoryRetention(bad)).rejects.toThrow(/one of: standard, everything/);
+    }
     expect(JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf-8"))).toEqual({});
   });
 
   it("tells Claude Code to keep transcripts under keep everything, and hands the period back after", async () => {
     fs.mkdirSync(path.dirname(ds()), { recursive: true });
     fs.writeFileSync(ds(), JSON.stringify({ model: "deepseek-v4-flash" }));
-    const change = await lib.setHistoryRetention({ mode: "everything" });
+    const change = await lib.setHistoryRetention("everything");
     expect(change.policy.mode).toBe("everything");
     expect(change.transcripts.map((t) => t.state)).toEqual(["kept", "kept"]);
     expect(readJson(ds())).toEqual({ model: "deepseek-v4-flash", cleanupPeriodDays: 36_500 });
     expect(readJson(own())).toEqual({ cleanupPeriodDays: 36_500 });
     const status = await lib.getCodingAgentStatus();
-    expect(status).toMatchObject({ historyRetention: "everything", historyLimit: 100, historyLiveKept: 30 });
-    // The choices went with the select (SCA C3).
+    expect(status).toMatchObject({ historyRetention: "everything", historyLiveKept: 30 });
+    // The extended N went with its mode (SCA2 C1), its choices before it (SCA C3).
+    expect((status as { historyLimit?: unknown }).historyLimit).toBeUndefined();
     expect((status as { historyLimits?: unknown }).historyLimits).toBeUndefined();
 
-    const back = await lib.setHistoryRetention({ mode: "extended", limit: 300 });
-    expect(back.policy).toEqual({ mode: "extended", limit: 300 });
+    const back = await lib.setHistoryRetention("standard");
+    expect(back.policy).toEqual({ mode: "standard" });
     expect(readJson(ds())).toEqual({ model: "deepseek-v4-flash" });
     expect(readJson(own())).toEqual({});
   });
 
   it("start over puts the setting back and hands Claude Code its period back", async () => {
-    await lib.setHistoryRetention({ mode: "everything" });
+    await lib.setHistoryRetention("everything");
     await lib.resetCodingAgentSetup();
     expect((await lib.getHistoryPolicy()).mode).toBe("standard");
     expect(readJson(ds())).toEqual({});
   });
 });
 
-describe("the settle under archive", () => {
+describe("the settle", () => {
   function readyDevice(): void {
     const bin = path.join(home, ".local", "bin");
     fs.mkdirSync(bin, { recursive: true });
@@ -418,15 +378,15 @@ describe("the settle under archive", () => {
     fs.writeFileSync(path.join(bin, "claude-ds"), ["#!/usr/bin/env bash", readFirstTurn(), `echo '${init}'`, `echo '${result}'`, "exit 0"].join("\n"), { mode: 0o755 });
   }
 
-  it("keeps a settled run's stream log for the archive, and only under archive", async () => {
-    for (const mode of ["archive", "standard"]) {
+  it("removes a settled run's stream log in every mode — the archive that kept it is gone", async () => {
+    for (const mode of ["everything", "standard"]) {
       readyDevice();
       writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_history_retention: mode });
       const started = await lib.startRun({ task: `settle under ${mode}`, projectId: "site", source: "agent" });
       const done = await lib.waitForRun(started.id, 15_000);
       expect(done?.status, mode).toBe("completed");
       await lib._resetCodingAgentStateForTests();
-      expect(fs.existsSync(path.join(data, "coding-agent-streams", `${started.id}.jsonl`)), mode).toBe(mode === "archive");
+      expect(fs.existsSync(path.join(data, "coding-agent-streams", `${started.id}.jsonl`)), mode).toBe(false);
     }
   });
 });

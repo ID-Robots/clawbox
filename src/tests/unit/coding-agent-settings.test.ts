@@ -698,11 +698,12 @@ describe("the knobs SCA C3 took off the settings page", () => {
   it("are no longer on the status, which carries one media switch instead", async () => {
     const lib = await import("@/lib/coding-agent");
     const status = await lib.getCodingAgentStatus() as unknown as Record<string, unknown>;
-    for (const gone of ["reviewRounds", "minReviewRounds", "maxReviewRounds", "completionAttempts", "minCompletionAttempts", "maxCompletionAttempts", "historyLimits", "generateImages", "generateAudio", "tokenLimit", "minTokenLimit"]) {
+    // The extended history's N itself went with its mode (SCA2 C1); the token ceiling went in SCA A2.
+    for (const gone of ["reviewRounds", "minReviewRounds", "maxReviewRounds", "completionAttempts", "minCompletionAttempts", "maxCompletionAttempts", "historyLimits", "historyLimit", "generateImages", "generateAudio", "tokenLimit", "minTokenLimit"]) {
       expect(status[gone], gone).toBeUndefined();
     }
     expect(status.generateMedia).toBe(true);
-    expect(status.historyLimit).toBe(100);
+    expect(status.historyRetention).toBe("standard");
   });
 
   it("read as one switch that is on only when both keys are", async () => {
@@ -715,10 +716,12 @@ describe("the knobs SCA C3 took off the settings page", () => {
 
   it("keep their keys on the reset list, since the code still reads them", async () => {
     const lib = await import("@/lib/coding-agent");
-    for (const key of [lib.CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, lib.CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY, lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]) {
+    for (const key of [lib.CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY, lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]) {
       expect(lib.CODING_AGENT_RESET_KEYS).toContain(key);
     }
-    for (const dead of ["coding_agent_completion_attempts", "coding_agent_token_limit"]) {
+    // Read by nothing since SCA A2 (attempts, token ceiling) and SCA2 C1 (the
+    // extended history's N, cleared by the one-time rewrite of a retired mode).
+    for (const dead of ["coding_agent_completion_attempts", "coding_agent_token_limit", "coding_agent_history_limit"]) {
       expect(lib.CODING_AGENT_RESET_KEYS).not.toContain(dead);
     }
   });
