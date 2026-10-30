@@ -91,7 +91,7 @@ function forbidden() {
  * carries both, `providers` is applied FIRST and a `provider` outside the
  * resulting list is refused (400) before anything is written, never silently
  * overwritten.
- * POST { roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?,
+ * POST { roleModels: { planner?|worker?|reviewer?: { provider?, model?,
  * effort? } } } → what a coding team's roles run on (src/lib/coding-role-models.ts).
  * `provider` is "clawbox-ai" or "anthropic"; `model` is "standard", "economy"
  * or one model that provider offers (`roleModelOptions` — a model needs a
@@ -250,7 +250,7 @@ export async function POST(request: Request) {
           + "{ historyRetention: string }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
-          + "{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }, "
+          + "{ roleModels: { planner?|worker?|reviewer?: { provider?, model?, effort? } } }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },

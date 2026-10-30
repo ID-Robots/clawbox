@@ -338,7 +338,9 @@ export interface HistoryRecord {
  * (normalizeRun in coding-agent.ts) and for the archive here.
  */
 export function readModelRole(raw: unknown): ModelRole | null {
-  return typeof raw === "string" && (MODEL_ROLES as readonly string[]).includes(raw) ? raw as ModelRole : null;
+  // `bulk` — a worker on a task marked token-heavy, until 2026-10-30 — was a worker's run.
+  const role = raw === "bulk" ? "worker" : raw;
+  return typeof role === "string" && (MODEL_ROLES as readonly string[]).includes(role) ? role as ModelRole : null;
 }
 
 function num(v: unknown): number | null {

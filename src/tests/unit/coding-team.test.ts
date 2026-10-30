@@ -119,7 +119,6 @@ function roleMap(over: { [R in keyof RoleModelMap]?: Partial<RoleModelMap[R]> } 
     planner: { ...base, ...flash, ...over.planner },
     worker: { ...base, ...over.worker },
     reviewer: { ...base, ...flash, ...over.reviewer },
-    bulk: { ...base, ...over.bulk },
   };
 }
 
@@ -1964,6 +1963,139 @@ describe("the gates", () => {
   });
 });
 
+describe("the closing sweep at boot (closeOrphanedTeams)", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /**
+   * What a restart leaves of a team mid-work: a `working` board with a team
+   * branch, t1 finished by its worker (run-00000002) with its worktree still
+   * there, t2 in progress with its worker (run-00000003) going on in its
+   * scope, and nobody in this process running it.
+   */
+  async function interrupted(source: "owner" | "agent" = "owner"): Promise<Board> {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    const dir = path.join(root, "site");
+    const board = createBoard({ goal: "Build it", projectId: null, directory: dir, source }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Scaffold index.html", files_hint: ["index.html"] });
+    const t2 = postTask(board, { kind: "planner" }, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    board.status = "working";
+    board.branch = `clawbox/${board.id}`;
+    for (const [task, n] of [[t1, 2], [t2, 3]] as const) {
+      task.worktree = path.join(dir, ".clawbox", "worktrees", `${task.task_id}-1`);
+      task.branch = `clawbox/${board.id}-${task.task_id}-1`;
+      task.attempts = 1;
+      task.assigned_to = `run-0000000${n}`;
+      fs.mkdirSync(task.worktree, { recursive: true });
+    }
+    t1.status = "complete";
+    t2.status = "in_progress";
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" }, { id: "run-00000003", role: "worker", taskId: "t2" });
+    saveBoard(board);
+    // The runs as the reconciliation left them: the planner and t1's worker
+    // settled, t2's worker reattached and still running.
+    seq = 3;
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PLAN, directory: dir, tokensUsed: 10 });
+    runs.set("run-00000002", { id: "run-00000002", status: "completed", summary: "index done", directory: t1.worktree, filesTouched: ["index.html"], tokensUsed: 20 });
+    runs.set("run-00000003", { id: "run-00000003", status: "running", summary: null, directory: t2.worktree, filesTouched: [], waits: 0, outcomeAt: 0 });
+    return board;
+  }
+
+  it("waits for the worker still going, merges the finished branch, removes the worktrees without their branches, settles failed naming the branches, and tells the owner once", async () => {
+    const board = await interrupted("agent");
+    // t2's worker settles on its second wait, completed — it was the box's work, not the restart's.
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "app done", filesTouched: ["app.js"], tokensUsed: 30 }];
+    plumbing.harvestWorktree.mockImplementation(async (wt: string) => (wt.endsWith("t1-1") ? { ok: true, files: ["index.html"] } : { ok: true, files: [] }));
+    const sweep = team.closeOrphanedTeams();
+    // Under the sweep the board is the team at work and is read as it stands, never settled by the lazy read.
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    expect(team.activeTeamId()).toBe(board.id);
+    expect(team.getTeam(board.id)?.status).toBe("working");
+    expect(team.listTeams().find((t) => t.id === board.id)?.status).toBe("working");
+    expect(await sweep).toBe(1);
+
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The web server restarted while the team was working. Finished work was merged into clawbox/${board.id}: clawbox/${board.id}-t1-1, clawbox/${board.id}-t2-1.`);
+    // Both worktrees were harvested and merged — t2's only once its run had settled — and removed, their branches kept.
+    expect(plumbing.harvestWorktree.mock.calls.map((c) => c[0])).toEqual([path.join(root, "site/.clawbox/worktrees/t1-1"), path.join(root, "site/.clawbox/worktrees/t2-1")]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t1-1`, `clawbox/${board.id}-t2-1`]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    for (const call of plumbing.removeWorktree.mock.calls) expect(call[2]).toBeUndefined();
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    // The tokens of the worker it waited for are on the cast list; the log says what happened.
+    expect(done.runs.find((r) => r.id === "run-00000003")?.tokens).toBe(30);
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^The web server restarted while the team was working\. Closing it/),
+      "Waiting for run-00000003 to finish (still running in their own scopes), up to 30 minutes.",
+      `Committed 1 uncommitted file(s) run-00000002 left behind on clawbox/${board.id}-t1-1: index.html`,
+      `Merged clawbox/${board.id}-t1-1 into clawbox/${board.id} (run-00000002).`,
+    ]));
+    // ONE team notice, and — the assistant's team, on OpenClaw — the chat line.
+    expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1);
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    expect(team.activeTeamId()).toBeNull();
+    // Nothing left to close.
+    expect(await team.closeOrphanedTeams()).toBe(0);
+  });
+
+  it("leaves a worker still going at the deadline in place, keeps an unmerged branch out of the team branch, and aborts a conflict rather than guess", async () => {
+    const board = await interrupted();
+    team._setSweepWaitForTests(50);
+    // t2's worker never settles inside the sweep's wait; t1's merge conflicts.
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    merges = [{ ok: false, conflict: true }];
+    expect(await team.closeOrphanedTeams()).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The web server restarted while the team was working. Unmerged work is on clawbox/${board.id}-t1-1. Left in place: clawbox/${board.id}-t2-1 (run-00000003, still running).`);
+    // Only t1's worktree was touched; t2's — a live run's — was not, and its run was not stopped.
+    expect(plumbing.harvestWorktree.mock.calls.map((c) => c[0])).toEqual([path.join(root, "site/.clawbox/worktrees/t1-1")]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(plumbing.removeWorktree.mock.calls[0][1]).toBe(path.join(root, "site/.clawbox/worktrees/t1-1"));
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Merge conflict for clawbox\/team-[a-z0-9]{8}-t1-1, left unmerged: CONFLICT/),
+    ]));
+    expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1);
+  });
+
+  it("is stopped by the owner while it waits: the workers are stopped, their work harvested, and the team settles stopped", async () => {
+    const board = await interrupted();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    const sweep = team.closeOrphanedTeams();
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    const stopped = team.stopTeam(board.id);
+    expect(stopped.status).toBe("working");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    expect(await sweep).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("stopped");
+    expect(done.error).toBeNull();
+    // The branches are on the log, since a stop keeps no error.
+    expect(done.log.slice(-2)).toMatchObject([
+      { type: "note", message: `Finished work was merged into clawbox/${board.id}: clawbox/${board.id}-t1-1. Unmerged work is on clawbox/${board.id}-t2-1.` },
+      { actor: { kind: "owner" }, message: "Team → stopped: Stopped by the owner" },
+    ]);
+    // The stopped worker's branch is kept unmerged, its worktree removed.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t1-1`]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
+  });
+
+  it("closes nothing that is queued, settled or at work in this process", async () => {
+    const { createBoard, saveBoard, setTeamStatus } = await import("@/lib/coding-team-board");
+    const queued = createBoard({ goal: "g", projectId: null, directory: "/srv/p", source: "owner" }, { kind: "owner" });
+    setTeamStatus(queued, { kind: "system" }, "queued", "Waiting");
+    saveBoard(queued);
+    expect(await team.closeOrphanedTeams()).toBe(0);
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+    expect(notify.announceCodingTeam).not.toHaveBeenCalled();
+  });
+});
+
 describe("the words", () => {
   // Bench, 2026-09-22/23: a worker in a worktree read its hinted styles.css at
   // `<project>/styles.css`, was refused, and the refusal failed the task.
@@ -3241,114 +3373,69 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
   });
 });
 
-describe("per-role models: bulk tasks, each run's own account, the cost by provider", () => {
+describe("per-role models: each run's own account, the cost by provider", () => {
   const roleOfStart = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
   const NOT_CONNECTED = "Anthropic is not connected on this ClawBox.";
-  /** A team on two accounts: its bulk work on ClawBox AI's flash tier, everything else on Anthropic. */
+  /** A team on two accounts: its workers on ClawBox AI's flash tier, everything else on Anthropic. */
   const MIXED = roleMap({
     planner: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
-    worker: { provider: "anthropic", model: "claude-opus-5-5", relativeCost: 20, auto: false },
+    worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false },
     reviewer: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
-    bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false },
   });
   /** The runner as it starts a team's fresh run: on its role's provider and model, the record saying so. */
   function startsOnRole(map: RoleModelMap) {
     runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
-      const t = input.team as { role: string; bulk?: boolean };
-      const modelRole = t.role === "lead" ? "planner" : t.role === "worker" && t.bulk === true ? "bulk" : (t.role as "planner" | "worker" | "reviewer");
+      const t = input.team as { role: string };
+      const modelRole = t.role === "lead" ? "planner" : (t.role as "planner" | "worker" | "reviewer");
       const r = map[modelRole];
       return Object.assign(fakeRun(input), { provider: r.provider, requestedModel: r.model, modelRole, model: null, modelsUsed: [] });
     });
   }
-  const BULK_PLAN = JSON.stringify([
+  /** A plan still writing the task `role` of before 2026-10-30: the words are not read. */
+  const PLAN = JSON.stringify([
     { task_description: "Scrape the catalogue into data/items.json", files_hint: ["data/items.json"], role: "bulk" },
     { task_description: "Build the page from data/items.json", depends_on: ["t1"], files_hint: ["index.html"], role: "worker" },
   ]);
   const ACCEPTED = JSON.stringify({ verdict: "accepted", notes: "" });
 
-  it("starts a bulk task's worker on the bulk role, keeps every run's own provider and model, and splits the cost by provider", async () => {
+  it("keeps every run's own provider and model, splits the cost by provider, and reads no task role off a plan", async () => {
     runner.teamRoleModelMap.mockImplementation(async () => MIXED);
     startsOnRole(MIXED);
     outcomes = [
-      { summary: BULK_PLAN, tokensUsed: 5_000 },
+      { summary: PLAN, tokensUsed: 5_000 },
       { summary: "Scraped 400 items.\nCould not finish: two pages timed out.", filesTouched: ["data/items.json"], tokensUsed: 80_000, model: "deepseek-v4-flash" },
-      { summary: "Built the page.", filesTouched: ["index.html"], tokensUsed: 30_000, model: "claude-opus-5-5", modelsUsed: ["claude-haiku-4-5", "claude-opus-5-5"] },
+      { summary: "Built the page.", filesTouched: ["index.html"], tokensUsed: 30_000, model: "deepseek-v4-flash" },
     ];
     reviews = [{ summary: ACCEPTED, tokensUsed: 2_000 }, { summary: ACCEPTED, tokensUsed: 3_000 }];
     const board = await team.startTeam({ goal: "Scrape the catalogue and build a page from it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
     expect(starts.map(roleOfStart)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
-    // The plan's mark is on the board, and only the bulk task's worker asked for the bulk role.
-    expect(done.tasks.map((t) => [t.task_id, t.role])).toEqual([["t1", "bulk"], ["t2", undefined]]);
+    // The plan's `role` words reach neither the board nor a worker's start.
+    expect(done.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
     expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => w.team)).toEqual([
-      { id: board.id, role: "worker", taskId: "t1", bulk: true },
+      { id: board.id, role: "worker", taskId: "t1" },
       { id: board.id, role: "worker", taskId: "t2" },
     ]);
-    // The planner was told what each role runs on and costs: bulk is a real choice on this box.
-    const brief = String(starts[0].extraBrief);
-    expect(brief).toContain("- bulk: deepseek-v4-flash on ClawBox AI, ~1x");
-    expect(brief).toContain("- worker: claude-opus-5-5 on Anthropic, ~20x");
-    expect(brief).toContain("- planner (and the lead): claude-sonnet-5 on Anthropic, ~10x");
-    expect(brief).toContain('"role": "worker" | "bulk"');
+    // The planner's brief carries no cost table and no word of bulk.
+    expect(String(starts[0].extraBrief)).not.toMatch(/Team models|bulk|~\d+x/);
     // Every run keeps its own account and model — what answered, once it settled.
     const cast = done.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole]);
     expect(cast).toEqual([
       ["planner", null, "anthropic", "claude-sonnet-5", "planner"],
-      ["worker", "t1", "clawbox-ai", "deepseek-v4-flash", "bulk"],
+      ["worker", "t1", "clawbox-ai", "deepseek-v4-flash", "worker"],
       ["reviewer", "t1", "anthropic", "claude-sonnet-5", "reviewer"],
-      ["worker", "t2", "anthropic", "claude-opus-5-5", "worker"],
+      ["worker", "t2", "clawbox-ai", "deepseek-v4-flash", "worker"],
       ["reviewer", "t2", "anthropic", "claude-sonnet-5", "reviewer"],
     ]);
-    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 80_000, anthropic: 40_000, openai: 0 });
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 110_000, anthropic: 10_000, openai: 0 });
     expect(done.metrics.tokensUsed).toBe(120_000);
     // And the same off disk.
     const { loadBoard } = await import("@/lib/coding-team-board");
     const disk = loadBoard(board.id)!;
     expect(disk.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole])).toEqual(cast);
     expect(disk.metrics.tokensByProvider).toEqual(done.metrics.tokensByProvider);
-    expect(disk.tasks[0].role).toBe("bulk");
-    expect(disk.tasks[1]).not.toHaveProperty("role");
-  });
-
-  it("works a bulk task with an ordinary worker when the bulk role's account cannot run — with a note, never a refused team", async () => {
-    const map = roleMap({ bulk: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false, ready: false, problems: [NOT_CONNECTED] } });
-    runner.teamRoleModelMap.mockImplementation(async () => map);
-    startsOnRole(map);
-    outcomes = [{ summary: BULK_PLAN }, { summary: "Scraped.", filesTouched: ["data/items.json"] }, { summary: "Built.", filesTouched: ["index.html"] }];
-    const board = await team.startTeam({ goal: "Scrape and build", directory: "site", source: "owner" });
-    const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    expect(done.alerts).toBe(0);
-    // The planner was told before it planned.
-    expect(String(starts[0].extraBrief)).toContain(`- bulk: claude-sonnet-5 on Anthropic, ~10x — UNAVAILABLE: ${NOT_CONNECTED} A task marked bulk runs as an ordinary worker until it is.`);
-    expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => (w.team as { bulk?: boolean }).bulk)).toEqual([undefined, undefined]);
-    expect(done.runs.find((r) => r.role === "worker" && r.taskId === "t1")).toMatchObject({ provider: "clawbox-ai", modelRole: "worker" });
-    expect(done.log.filter((e) => e.type === "note" && /marked bulk/.test(e.message)).map((e) => [e.task_id, e.message])).toEqual([
-      ["t1", `Task t1 is marked bulk, but the bulk role's provider is unavailable — Anthropic cannot run right now: ${NOT_CONNECTED} It runs as an ordinary worker, on the workers' model.`],
-    ]);
-    // Still the plan's bulk task: the mark stays, only the worker changed.
-    expect(done.tasks[0].role).toBe("bulk");
-  });
-
-  it("falls back the same way when the bulk spawn itself is refused for its account", async () => {
-    const { CodingAgentError } = await import("@/lib/coding-agent");
-    runner.teamRoleModelMap.mockImplementation(async () => MIXED);
-    startsOnRole(MIXED);
-    const onRole = runner.startRun.getMockImplementation()!;
-    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
-      if ((input.team as { bulk?: boolean }).bulk) throw new CodingAgentError("not_ready", "ClawBox AI is not connected.");
-      return onRole(input);
-    });
-    outcomes = [{ summary: BULK_PLAN }, { summary: "Scraped.", filesTouched: ["data/items.json"] }, { summary: "Built.", filesTouched: ["index.html"] }];
-    const board = await team.startTeam({ goal: "Scrape and build", directory: "site", source: "owner" });
-    const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    const t1 = runner.startRun.mock.calls.map(([input]) => input.team as { role: string; taskId: string | null }).filter((t) => t.role === "worker" && t.taskId === "t1");
-    expect(t1).toEqual([{ id: board.id, role: "worker", taskId: "t1", bulk: true }, { id: board.id, role: "worker", taskId: "t1" }]);
-    expect(done.runs.find((r) => r.role === "worker" && r.taskId === "t1")).toMatchObject({ provider: "anthropic", model: "claude-opus-5-5", modelRole: "worker" });
-    expect(done.log.map((e) => e.message)).toContain("Task t1 is marked bulk, but the bulk role's provider is unavailable — ClawBox AI is not connected. It runs as an ordinary worker, on the workers' model.");
-    expect(done.alerts).toBe(0);
+    expect(disk.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
   });
 
   it("refuses the team before any spawn when its planner, workers or reviewers cannot run — not_ready, naming the role, the provider and why", async () => {

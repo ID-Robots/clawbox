@@ -619,15 +619,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.roleEffort.autoCapped": "Default (at most {level})",
   "codingAgent.roleEffort.autoOwner": "Default (your effort)",
   "codingAgent.roleModelsFailed": "Could not save the team role setting.",
-  // Per-role provider and model (coding-role-models.ts): the bulk role, the
-  // account groups in each row's model select with their relative cost, what
-  // each role starts on now, and why an account's choices are disabled.
-  "codingAgent.roleModels.bulk": "Bulk work",
+  // Per-role provider and model (coding-role-models.ts): what each role does
+  // and starts on now, and why an account's choices are disabled.
   "codingAgent.roleModelsRoleJob.planner": "plans the work and leads the team",
   "codingAgent.roleModelsRoleJob.worker": "write your code",
   "codingAgent.roleModelsRoleJob.reviewer": "check tasks before they are accepted, when the plan asks for a review",
-  "codingAgent.roleModelsRoleJob.bulk": "token-heavy, non-critical tasks: scraping, mass data, repetitive edits, long test runs",
-  "codingAgent.roleAutoAsWorkers": "Default (as the workers)",
   "codingAgent.roleModelNow": "Now: {model} on {provider}",
   "codingAgent.roleModelPlanDecides": "the plan's model",
   "codingAgent.roleModelCannotStart": "This role's runs cannot start until {provider} is ready.",
@@ -639,7 +635,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.modelRole.planner": "Planner",
   "codingAgent.modelRole.worker": "Worker",
   "codingAgent.modelRole.reviewer": "Reviewer",
-  "codingAgent.modelRole.bulk": "Bulk work",
   "codingAgent.stepStarted": "Started",
   "codingAgent.stepStartedWith": "Started with {model}",
   "codingAgent.stepStartedOn": "Started on {provider}",
@@ -649,7 +644,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.runModelVia": "on {provider}",
   "codingAgent.runModelViaRole": "on {provider} · role: {role}",
   "codingAgent.memberModel": "{model} on {provider}",
-  "codingAgent.memberModelRole": "{model} on {provider} · {role}",
   "codingAgent.team.tokensByProvider": "By account: {split}",
   "codingAgent.runNotes.title": "Run notes",
   "codingAgent.runNotes.lines": "Lines: {n}",

@@ -98,12 +98,12 @@ describe("GET", () => {
     expect(body.team).toMatchObject({ shape: { parallelism: 1, review: "final" }, dynamic: true, metrics });
   });
 
-  it("answers each run's provider and model, a task's bulk role, and the cost by provider as the board keeps them", async () => {
+  it("answers each run's provider and model, and the cost by provider as the board keeps them", async () => {
     const runs = [
       { id: "run-00000001", role: "planner", taskId: null, tokens: 5_000, provider: "anthropic", model: "claude-fable-5-1", modelRole: "planner" },
-      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 80_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "bulk" },
+      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 80_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "worker" },
     ];
-    const tasks = [{ task_id: "t1", task_description: "Scrape", status: "complete", role: "bulk" }];
+    const tasks = [{ task_id: "t1", task_description: "Scrape", status: "complete" }];
     team.getTeam.mockReturnValueOnce({ ...BOARD, runs, tasks, metrics: { tokensUsed: 85_000, tokensByProvider: { "clawbox-ai": 80_000, anthropic: 5_000 } } });
     const body = await (await GET(req("team?id=team-abcd1234"))).json();
     expect(body.team.runs).toEqual(runs);

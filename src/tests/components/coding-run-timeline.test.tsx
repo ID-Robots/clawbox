@@ -162,7 +162,7 @@ describe("the model a run started with, and its account", () => {
     "codingAgent.stepStartedWithRole": "Gestartet mit {model} bei {provider} ({role})",
     "codingAgent.providerName.anthropic": "Anthropic",
     "codingAgent.providerName.clawboxAi": "ClawBox AI",
-    "codingAgent.modelRole.bulk": "Massenarbeit",
+    "codingAgent.modelRole.reviewer": "Prüfer",
     "codingAgent.modelRole.planner": "Planer",
   };
   const first = () => screen.getAllByTestId("coding-agent-run-activity-step")[0].textContent ?? "";
@@ -174,10 +174,10 @@ describe("the model a run started with, and its account", () => {
     expect(first()).not.toContain("(");
   });
 
-  it("adds the role the model was chosen for on a team run — a bulk task on the plan's flash tier", () => {
+  it("adds the role the model was chosen for on a team run — a reviewer on the plan's flash tier", () => {
     pack = ON;
-    render(<CodingRunTimeline lines={[RUNNER_STEP.started("deepseek-v4-flash")]} live={false} provider="clawbox-ai" modelRole="bulk" />);
-    expect(first()).toContain("Gestartet mit DeepSeek Flash bei ClawBox AI (Massenarbeit)");
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started("deepseek-v4-flash")]} live={false} provider="clawbox-ai" modelRole="reviewer" />);
+    expect(first()).toContain("Gestartet mit DeepSeek Flash bei ClawBox AI (Prüfer)");
     // The raw line is still the one behind the step.
     fireEvent.click(screen.getAllByTestId("coding-agent-run-activity-step")[0]);
     expect(within(screen.getByTestId("coding-agent-run-activity-detail")).getByText(RUNNER_STEP.started("deepseek-v4-flash"))).toBeTruthy();

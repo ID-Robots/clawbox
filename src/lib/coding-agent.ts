@@ -1610,9 +1610,8 @@ export interface CodingRun {
   /**
    * The role whose provider and model choice this run started under
    * (src/lib/coding-role-models.ts): `planner` for a team's planner and its
-   * lead, `bulk` for a worker on a task marked token-heavy. Frozen at start
-   * like `provider`. Null for a run that is not a team's, and on a record from
-   * before the field.
+   * lead. Frozen at start like `provider`. Null for a run that is not a
+   * team's, and on a record from before the field.
    */
   modelRole: ModelRole | null;
   /**
@@ -2596,13 +2595,6 @@ export interface RunTeam {
   /** `lead`: the planner back for a moment after a worker settled, deciding whether the plan still fits (read-only, like the planner and the reviewer). */
   role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
-  /**
-   * A worker on a task the plan marks token-heavy and not critical — scraping,
-   * mass data, repetitive edits, long test runs: it starts on the `bulk`
-   * role's provider and model rather than the workers'. Absent for every
-   * other run, and read back only when `true`.
-   */
-  bulk?: boolean;
 }
 
 /**
@@ -4297,9 +4289,7 @@ function normalizeTeam(raw: unknown): RunTeam | null {
     id: t.id,
     role: t.role,
     taskId: typeof t.taskId === "string" ? t.taskId : null,
-    // Only a worker's, and only `true`: absent stays absent, so a record from
-    // before the field reads back exactly as it was written.
-    ...(t.role === "worker" && t.bulk === true ? { bulk: true } : {}),
+    // A record from before 2026-10-30 may carry `bulk: true`: not read back.
   };
 }
 
@@ -12751,7 +12741,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // choice, else the run being resumed, else — for a team's fresh run — its
   // role's, else the owner's default; the order applyProviderChoice and the
   // role step apply below, which have the last word.
-  const modelRole = input.team ? modelRoleOf(input.team.role, input.team.bulk === true) : null;
+  const modelRole = input.team ? modelRoleOf(input.team.role) : null;
   const intendedProvider = isCodingProvider(input.provider)
     ? input.provider
     : previous?.provider ?? await ownerOrRoleProvider(modelRole);
@@ -12836,9 +12826,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
     // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
     // a planner, a lead and a reviewer the provider's cheaper model and at most
-    // `xhigh` unless the owner chose otherwise; a worker the owner's own, and a
-    // worker on a bulk task the `bulk` role's. A role the owner put on another
-    // provider moves there, model and all — the readiness check below is that
+    // `xhigh` unless the owner chose otherwise; a worker the owner's own. A
+    // role the owner put on another provider moves there, model and all — the
+    // readiness check below is that
     // provider's, and the spawn's environment and credential are that
     // provider's alone (buildRunEnv, prepareRunAccount: both read the record).
     // A resume — a review round included — keeps the provider and model its

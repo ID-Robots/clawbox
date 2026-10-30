@@ -584,14 +584,14 @@ describe("whether a single run was cheaper", () => {
 
 /**
  * A team's roles may run on different accounts — the planner on Anthropic, a
- * bulk task on the plan's flash tier — so the chart's figures split its tokens
+ * worker on the plan's flash tier — so the chart's figures split its tokens
  * by account beside the split by role.
  */
 describe("tokens by account", () => {
   const RUNS = [
     { id: "run-00000001", role: "planner" as const, taskId: null, tokens: 12_000, provider: "anthropic" as const, model: "claude-fable-5-1", modelRole: "planner" as const },
     { id: "run-00000002", role: "worker" as const, taskId: "t1", tokens: 140_000, provider: "anthropic" as const, model: "claude-opus-5-5", modelRole: "worker" as const },
-    { id: "run-00000003", role: "worker" as const, taskId: "t2", tokens: 11_000, provider: "clawbox-ai" as const, model: "deepseek-v4-flash", modelRole: "bulk" as const },
+    { id: "run-00000003", role: "worker" as const, taskId: "t2", tokens: 11_000, provider: "clawbox-ai" as const, model: "deepseek-v4-flash", modelRole: "worker" as const },
   ];
   const split = (s: string) => t("codingAgent.team.tokensByProvider", { split: s });
 

@@ -489,9 +489,27 @@ export async function register() {
         })
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          require('./lib/coding-team').startNextQueuedTeam().catch((err: unknown) => {
-            console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
-          })
+          const codingTeam = require('./lib/coding-team')
+          // The teams the restart interrupted are CLOSED first: their workers
+          // that survived in their scopes are waited for (never killed), each
+          // finished worker's branch is merged into the team branch, the
+          // worktrees go and the board settles with the branches named — a
+          // board used to be failed on its next read while its workers went on
+          // for an hour and their worktrees were stranded. Chained before the
+          // queue pump, since those workers still hold the box.
+          codingTeam
+            .closeOrphanedTeams()
+            .then((closed: number) => {
+              if (closed > 0) console.log(`[instrumentation] ${closed} coding team(s) the previous server was running were closed`)
+            })
+            .catch((err: unknown) => {
+              console.error('[instrumentation] Could not close the interrupted coding teams:', err instanceof Error ? err.message : err)
+            })
+            .finally(() => {
+              codingTeam.startNextQueuedTeam().catch((err: unknown) => {
+                console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
+              })
+            })
         } catch (err) {
           console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
         }

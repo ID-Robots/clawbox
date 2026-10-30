@@ -225,7 +225,7 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
 
   it("answers the choices in the status, `auto` on a box that never chose, and saves an edit", async () => {
     const auto = { provider: "auto", model: "auto", effort: "auto" };
-    expect((await lib.getCodingAgentStatus()).roleModels).toEqual({ planner: auto, worker: auto, reviewer: auto, bulk: auto });
+    expect((await lib.getCodingAgentStatus()).roleModels).toEqual({ planner: auto, worker: auto, reviewer: auto });
     await lib.setRoleModels({ planner: { model: "standard" } });
     expect((await lib.getCodingAgentStatus()).roleModels.planner).toEqual({ provider: "auto", model: "standard", effort: "auto" });
     await expect(lib.setRoleModels({ planner: { model: "cheapest" } })).rejects.toMatchObject({ kind: "invalid" });
@@ -235,10 +235,12 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
     expect(await lib.checkRoleModelsPatch({ planner: { model: "claude-fable-5-1" } })).toMatch(/roleModels\.planner\.provider/);
     await lib.setRoleModels({ planner: { provider: "anthropic" } });
     expect(await lib.checkRoleModelsPatch({ planner: { model: "claude-fable-5-1" } })).toBeNull();
-    await lib.setRoleModels({ planner: { model: "claude-fable-5-1" }, bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
+    await lib.setRoleModels({ planner: { model: "claude-fable-5-1" }, reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
     const saved = (await lib.getCodingAgentStatus()).roleModels;
     expect(saved.planner).toEqual({ provider: "anthropic", model: "claude-fable-5-1", effort: "auto" });
-    expect(saved.bulk).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "auto" });
+    expect(saved.reviewer).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "auto" });
+    // The bulk role went on 2026-10-30: an edit naming it is an unknown role.
+    expect(await lib.checkRoleModelsPatch({ bulk: { provider: "clawbox-ai" } })).toMatch(/Unknown role "bulk"/);
   });
 
   it("moves a role the owner put on another provider there, and refuses it while that provider is not connected", async () => {
@@ -290,16 +292,11 @@ describe("a team's roles on their own providers", () => {
     expect(handed(worker.id, "env")).not.toMatch(/^CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE=/m);
   });
 
-  it("starts a bulk task on the bulk role's choice, keeps the role on the record, and reads one from before the field as none", async () => {
+  it("keeps the role on the record, reads one from before the field as none, and a `bulk` from before 2026-10-30 as a worker's", async () => {
     makePlainProject("plain");
-    writeConfig({ coding_agent_role_models: { bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } } });
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     expect(worker).toMatchObject({ requestedModel: null, modelRole: "worker" });
     await finished(worker.id);
-    const bulk = await lib.startRun({ task: "scrape t2", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t2", bulk: true } });
-    expect(bulk).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "xhigh", modelRole: "bulk", team: { bulk: true } });
-    await finished(bulk.id);
-    expect(handed(bulk.id, "model")).toBe("deepseek-v4-flash");
     const lead = await lib.startRun({ task: "decide", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "lead", taskId: "t1" } });
     expect(lead.modelRole).toBe("planner");
     await finished(lead.id);
@@ -310,22 +307,24 @@ describe("a team's roles on their own providers", () => {
     // On disk, as written.
     const onDisk = JSON.parse(fs.readFileSync(runsFile(), "utf8")) as Record<string, unknown>[];
     const byId = Object.fromEntries(onDisk.map((r) => [r.id as string, r]));
-    expect(byId[bulk.id]).toMatchObject({ modelRole: "bulk", team: { role: "worker", taskId: "t2", bulk: true } });
     expect(byId[worker.id].modelRole).toBe("worker");
     expect(byId[solo.id].modelRole).toBeNull();
 
     // Read back after a restart: a record from before the field, and one with
-    // a role this code never writes, read as none — never a refusal.
+    // a role this code never writes, read as none — never a refusal. A record
+    // from before 2026-10-30 (`modelRole: "bulk"`, `team.bulk: true`) is a
+    // worker's, and its team reads back without the flag.
     delete byId[worker.id].modelRole;
     byId[lead.id].modelRole = "lead";
+    byId[solo.id].modelRole = "bulk";
+    byId[solo.id].team = { id: TEAM, role: "worker", taskId: "t2", bulk: true };
     fs.writeFileSync(runsFile(), JSON.stringify(onDisk));
     await lib._resetCodingAgentStateForTests();
-    expect(lib.getRun(bulk.id)).toMatchObject({ modelRole: "bulk", team: { bulk: true } });
     expect(lib.getRun(worker.id)!.modelRole).toBeNull();
-    // A worker's team reads back without a `bulk` it never had.
     expect(lib.getRun(worker.id)!.team).toEqual({ id: TEAM, role: "worker", taskId: "t1" });
     expect(lib.getRun(lead.id)!.modelRole).toBeNull();
-    expect(lib.getRun(solo.id)!.modelRole).toBeNull();
+    expect(lib.getRun(solo.id)!.modelRole).toBe("worker");
+    expect(lib.getRun(solo.id)!.team).toEqual({ id: TEAM, role: "worker", taskId: "t2" });
   });
 
   it("judges the gate on the role's own provider, not the owner's default", async () => {
@@ -337,10 +336,6 @@ describe("a team's roles on their own providers", () => {
     expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null });
     await finished(worker.id);
     expect(handed(worker.id, "provider")).toBe("clawbox-ai");
-    // A bulk task with nothing of its own goes where the workers go.
-    const bulk = await lib.startRun({ task: "scrape t2", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t2", bulk: true } });
-    expect(bulk).toMatchObject({ provider: "clawbox-ai", modelRole: "bulk" });
-    await finished(bulk.id);
     // The planner is on the team's own provider — the unconnected one — and is
     // refused with THAT account's sentence.
     const refused = lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
@@ -391,25 +386,25 @@ describe("a team's roles on their own providers", () => {
     expect(defaults.planner).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 });
     expect(defaults.worker).toEqual({ provider: "clawbox-ai", model: null, effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: null });
     expect(defaults.reviewer).toEqual(defaults.planner);
-    expect(defaults.bulk).toEqual(defaults.worker);
+    expect(Object.keys(defaults)).toEqual(["planner", "worker", "reviewer"]);
 
     // The older `{ model: tier }` shape reads exactly as it did.
     await lib.setRoleModels({ worker: { model: "economy" } });
     expect((await lib.teamRoleModelMap()).worker).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", auto: false, relativeCost: 1 });
 
     // Mixed, with the planner on an account this box has not connected.
-    await lib.setRoleModels({ worker: { model: "auto" }, planner: { provider: "anthropic", model: "claude-fable-5-1" }, bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
+    await lib.setRoleModels({ worker: { model: "auto" }, planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
     const map = await lib.teamRoleModelMap();
     expect(map).toEqual((await lib.getCodingAgentStatus()).roleModelMap);
     expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 40 });
     expect(map.planner.problems.join(" ")).toMatch(/Anthropic account is not connected/);
-    expect(map.bulk).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 1 });
+    expect(map.reviewer).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 1 });
     expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: null, auto: true });
 
     // And it is what the runs get.
-    const bulk = await lib.startRun({ task: "scrape t2", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t2", bulk: true } });
-    expect(bulk).toMatchObject({ provider: map.bulk.provider, requestedModel: map.bulk.model, effort: map.bulk.effort });
-    await finished(bulk.id);
+    const reviewer = await lib.startRun({ task: "review t2", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "reviewer", taskId: "t2" } });
+    expect(reviewer).toMatchObject({ provider: map.reviewer.provider, requestedModel: map.reviewer.model, effort: map.reviewer.effort });
+    await finished(reviewer.id);
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     expect(worker).toMatchObject({ provider: map.worker.provider, requestedModel: map.worker.model, effort: map.worker.effort });
     await finished(worker.id);

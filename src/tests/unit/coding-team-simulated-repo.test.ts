@@ -187,7 +187,7 @@ beforeEach(async () => {
   // Every role ready on the box's own provider.
   runner.teamRoleModelMap.mockImplementation(async () => {
     const ready = { provider: "clawbox-ai" as const, model: null, effort: "high" as const, auto: true, ready: true, problems: [], relativeCost: null };
-    return { planner: ready, worker: ready, reviewer: ready, bulk: ready };
+    return { planner: ready, worker: ready, reviewer: ready };
   });
   runner.getMaxParallelRuns.mockResolvedValue(16);
   runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: [], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });

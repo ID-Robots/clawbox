@@ -35,7 +35,7 @@ const runner = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/coding-agent")>()), ...runner }));
 /** Every role ready on the box's own provider — the team's pre-flight; the host's readiness probe is not the fixture. */
-const READY_ROLES = Object.fromEntries(["planner", "worker", "reviewer", "bulk"].map((role) => [role, { provider: "clawbox-ai", model: null, effort: "high", auto: true, ready: true, problems: [], relativeCost: null }]));
+const READY_ROLES = Object.fromEntries(["planner", "worker", "reviewer"].map((role) => [role, { provider: "clawbox-ai", model: null, effort: "high", auto: true, ready: true, problems: [], relativeCost: null }]));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 vi.mock("@/lib/coding-team-worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-team-worktree")>()),

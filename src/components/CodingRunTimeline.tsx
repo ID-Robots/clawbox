@@ -167,7 +167,7 @@ export interface StartedOn {
 }
 
 /**
- * The first step as "Started with Opus 5.5 on Anthropic (Bulk work)" — or
+ * The first step as "Started with Sonnet 5 on Anthropic (Reviewer)" — or
  * null where the record cannot say more than the line does (no provider on a
  * record from before the field), and the plain step label stands.
  */

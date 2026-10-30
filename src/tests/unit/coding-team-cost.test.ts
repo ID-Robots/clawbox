@@ -88,8 +88,8 @@ describe("the planner's repo map", () => {
     expect(planner.PLANNER_BRIEF).toMatch(/test_commands/);
     expect(planner.PLANNER_BRIEF).toMatch(/ONE task runs as a single ordinary run/);
     expect(planner.PLANNER_BRIEF).toMatch(/edit mostly the same files/);
-    // The other lever on cost: token-heavy, non-critical work marked bulk, for a cheaper model.
-    expect(planner.PLANNER_BRIEF).toMatch(/"bulk" marks a task that is token-heavy and not critical .* so its worker may run on a cheaper model/);
+    // The other lever of before — a task marked bulk for a cheaper model — went on 2026-10-30.
+    expect(planner.PLANNER_BRIEF).not.toMatch(/bulk/);
   });
 
   it("goes on the board through the bus, once, as the planner's alone — and survives a reload", () => {
@@ -158,7 +158,7 @@ describe("tokens per provider", () => {
     const b = fresh();
     b.runs.push(
       { id: "run-00000001", role: "planner", taskId: null, tokens: 12_000, provider: "anthropic", model: "claude-fable-5-1", modelRole: "planner" },
-      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 90_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "bulk" },
+      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 90_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "worker" },
       { id: "run-00000003", role: "worker", taskId: "t2", tokens: 50_000, provider: "clawbox-ai", model: null, modelRole: "worker" },
       { id: "run-00000004", role: "reviewer", taskId: "t1", tokens: 8_000, provider: "anthropic", model: "claude-sonnet-5", modelRole: "reviewer" },
       { id: "run-00000005", role: "lead", taskId: "t2", tokens: 3_000, provider: "anthropic", model: "claude-fable-5-1", modelRole: "planner" },
@@ -192,6 +192,7 @@ describe("tokens per provider", () => {
     raw.runs = [
       { id: "run-00000001", role: "planner", taskId: null, tokens: 4_000 },
       { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000, provider: "mistral", model: "gpt x", modelRole: "boss" },
+      // `bulk` was a role until 2026-10-30: a worker's.
       { id: "run-00000003", role: "worker", taskId: "t2", tokens: 7_000, provider: "anthropic", model: 42, modelRole: "bulk" },
     ];
     fs.writeFileSync(file, JSON.stringify(raw));
@@ -199,7 +200,7 @@ describe("tokens per provider", () => {
     expect(back.runs).toEqual([
       { id: "run-00000001", role: "planner", taskId: null, tokens: 4_000 },
       { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000 },
-      { id: "run-00000003", role: "worker", taskId: "t2", tokens: 7_000, provider: "anthropic", modelRole: "bulk" },
+      { id: "run-00000003", role: "worker", taskId: "t2", tokens: 7_000, provider: "anthropic", modelRole: "worker" },
     ]);
     expect(back.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 7_000, openai: 0 });
     expect(back.metrics.tokensUsed).toBe(17_000);
@@ -282,28 +283,23 @@ describe("tokens by kind", () => {
   });
 });
 
-describe("a bulk task", () => {
-  it("keeps its role on the board through the bus and a reload; a worker's task carries none", () => {
+describe("a task's role (the bulk mark, until 2026-10-30)", () => {
+  it("is not kept: a task posted with one carries none, and one on a stored board reads back without it", () => {
     const b = fresh();
     const teamBus = new bus.TeamBus(b);
-    teamBus.send(PLANNER, { type: "task", task_description: "Scrape the catalogue", files_hint: ["data/"], role: "bulk" });
-    teamBus.send(PLANNER, { type: "task", task_description: "Build the page", files_hint: ["index.html"], role: "worker" });
-    expect(b.tasks.map((t) => t.role)).toEqual(["bulk", undefined]);
-    expect(b.tasks[1]).not.toHaveProperty("role");
+    teamBus.send(PLANNER, { type: "task", task_description: "Scrape the catalogue", files_hint: ["data/"], ...({ role: "bulk" } as object) });
+    teamBus.send(PLANNER, { type: "task", task_description: "Build the page", files_hint: ["index.html"] });
+    expect(b.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
     const posted = b.log.filter((e) => e.type === "task");
-    expect(posted.map((e) => e.message)).toEqual(["Task t1 (bulk) posted: Scrape the catalogue", "Task t2 posted: Build the page"]);
-    expect(posted[0].payload).toMatchObject({ role: "bulk" });
-    expect(posted[1].payload).not.toHaveProperty("role");
+    expect(posted.map((e) => e.message)).toEqual(["Task t1 posted: Scrape the catalogue", "Task t2 posted: Build the page"]);
+    expect(posted[0].payload).not.toHaveProperty("role");
+    board.saveBoard(b);
+    const file = path.join(root, "data", "coding-team", `${b.id}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as { tasks: Record<string, unknown>[] };
+    raw.tasks[0].role = "bulk";
+    fs.writeFileSync(file, JSON.stringify(raw));
     const back = board.loadBoard(b.id)!;
-    expect(back.tasks[0].role).toBe("bulk");
-    expect(back.tasks[1]).not.toHaveProperty("role");
-  });
-
-  it("is refused a role off the list, on the bus and on the board alike", () => {
-    const b = fresh();
-    expect(bus.validateMessage({ type: "task", task_description: "x", role: "boss" })).toBe("A task's role is worker or bulk.");
-    expect(() => board.postTask(b, PLANNER, { task_description: "x", role: "boss" as never })).toThrow("A task's role is worker or bulk.");
-    expect(b.tasks).toEqual([]);
+    expect(back.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
   });
 });
 

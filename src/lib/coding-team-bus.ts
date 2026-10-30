@@ -20,14 +20,12 @@
 import {
   type Actor,
   type ReviewMode,
-  type TaskRole,
   type TeamBoard,
   type TeamPr,
   type TeamTask,
   type UndeliveredNote,
   BoardAccessError,
   REVIEW_MODES,
-  TASK_ROLES,
   assignTask,
   holdTask,
   postMessage,
@@ -49,8 +47,7 @@ import {
 import { MAX_TEAM_MESSAGE_CHARS, NOTED_REFUSALS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
 
 export type TeamMessage =
-  /** `role: "bulk"`: a token-heavy, non-critical task, whose worker starts on the bulk role's model. */
-  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; role?: TaskRole }
+  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string }
   /** The planner sizes the team; `box_width` is how many runs the box allows at once, for the log line (setShape). */
   | { type: "shape"; parallelism: number; review: ReviewMode; rationale: string; box_width?: number }
   /** The planner's map of what the goal touches (setRepoMap): every worker and reviewer is handed it. */
@@ -102,7 +99,6 @@ export function validateMessage(m: unknown): string | null {
       if (msg.files_hint !== undefined && (!Array.isArray(msg.files_hint) || !msg.files_hint.every((f) => typeof f === "string"))) return "files_hint must be a list of paths.";
       if (msg.origin !== undefined && msg.origin !== "plan" && msg.origin !== "lead") return "A task's origin is plan or lead.";
       if (msg.note !== undefined && typeof msg.note !== "string") return "A task's note must be text.";
-      if (msg.role !== undefined && !(TASK_ROLES as readonly unknown[]).includes(msg.role)) return `A task's role is ${TASK_ROLES.join(" or ")}.`;
       return null;
     case "shape":
       if (typeof msg.parallelism !== "number" || !Number.isInteger(msg.parallelism) || msg.parallelism < 1) return "A shape's parallelism is a whole number of at least 1.";

@@ -11,9 +11,7 @@
  * reviewer default to the provider's CHEAPER model (`ECONOMY_MODELS`:
  * `claude-sonnet-5` on Anthropic, the plan's flash tier on ClawBox AI) and to
  * at most `xhigh` effort — never MORE than the owner's own. Workers keep the
- * owner's model and effort. A `bulk` task — a worker's task the planner marks
- * as token-heavy and not critical: scraping, mass data, repetitive edits, long
- * test runs — runs exactly as a worker does until the owner says otherwise.
+ * owner's model and effort.
  *
  * The owner may override any of three halves per role in the Coding Agent
  * settings (`coding_agent_role_models`): the PROVIDER that pays for the role's
@@ -43,11 +41,12 @@ export const CODING_AGENT_ROLE_MODELS_CONFIG_KEY = "coding_agent_role_models";
 
 /**
  * The roles a choice is made for. The lead is the planner's: same run, back
- * for a moment. `bulk` is a worker on a task the plan marks token-heavy and
- * non-critical, so the owner can send it to a cheaper model than the code
- * that matters.
+ * for a moment. (A fourth, `bulk` — a worker on a task the plan marked
+ * token-heavy — was deleted on 2026-10-30: no board ever marked a task bulk,
+ * and a stored `bulk` choice is dropped by `roleModelsFrom` like any unknown
+ * role.)
  */
-export const MODEL_ROLES = ["planner", "worker", "reviewer", "bulk"] as const;
+export const MODEL_ROLES = ["planner", "worker", "reviewer"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
 /** `standard`: the owner's own model for the provider. `economy`: the provider's cheaper one. */
@@ -98,7 +97,6 @@ export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { model: RoleModelTier; e
   planner: { model: "economy", effortCap: "xhigh", turnsCap: 100 },
   worker: { model: "standard", effortCap: null, turnsCap: null },
   reviewer: { model: "economy", effortCap: "xhigh", turnsCap: 100 },
-  bulk: { model: "standard", effortCap: null, turnsCap: null },
 };
 
 /** The steps a role's run gets: the owner's ceiling, or the role's cap where it has one. */
@@ -106,19 +104,6 @@ export function roleMaxTurns(role: ModelRole, ownerMaxTurns: number): number {
   const cap = ROLE_DEFAULTS[role].turnsCap;
   return cap === null ? ownerMaxTurns : Math.min(ownerMaxTurns, cap);
 }
-
-/**
- * A role whose unset halves are another role's: a bulk task with nothing
- * stored runs exactly as a worker does — the workers' own choice included —
- * so a team that never marks or configures bulk work costs what it did.
- *
- * Two halves follow, each on its own: the provider and model AS ONE PAIR (a
- * model id means nothing without its provider, so a bulk role that names
- * either takes neither from the workers), and the effort.
- */
-export const ROLE_AUTO_FOLLOWS: Readonly<Partial<Record<ModelRole, ModelRole>>> = {
-  bulk: "worker",
-};
 
 /**
  * The models a role may be pinned to on each provider.
@@ -186,15 +171,9 @@ export function relativeModelCost(provider: CodingProvider, model: string | null
   return Object.prototype.hasOwnProperty.call(RELATIVE_MODEL_COST, id) ? RELATIVE_MODEL_COST[id] : null;
 }
 
-/**
- * A team run's role, as the choice is made for it.
- *
- * @param bulk the worker's task is marked token-heavy and non-critical
- */
-export function modelRoleOf(teamRole: "planner" | "worker" | "reviewer" | "lead", bulk = false): ModelRole {
-  if (teamRole === "lead") return "planner";
-  if (teamRole === "worker" && bulk) return "bulk";
-  return teamRole;
+/** A team run's role, as the choice is made for it: the lead's is the planner's. */
+export function modelRoleOf(teamRole: "planner" | "worker" | "reviewer" | "lead"): ModelRole {
+  return teamRole === "lead" ? "planner" : teamRole;
 }
 
 function isTier(value: unknown): value is RoleModelTier {
@@ -220,8 +199,9 @@ export function weakerEffort(a: RoleEffort, b: RoleEffort): RoleEffort {
 
 /**
  * The stored choices, read back: only the fields this module could have
- * written survive; anything else on a hand-edited config is no choice at all
- * (the role's default), never an error that stops a team. A model id without
+ * written survive; anything else on a hand-edited config — a role this build
+ * no longer has (`bulk`) included — is no choice at all (the role's default),
+ * never an error that stops a team. A model id without
  * its provider, or one its provider no longer offers, is dropped on its own —
  * the provider the owner chose stays, on its default model.
  */
@@ -327,9 +307,7 @@ export interface RoleRun {
   tier: ResolvedRoleTier;
   /**
    * True when nothing stored chose the provider or the model: the role's
-   * default tier on the team's own provider. A bulk role with nothing of its
-   * own answers what the workers do, so it is auto exactly where they are.
-   * The effort half says nothing here.
+   * default tier on the team's own provider. The effort half says nothing here.
    */
   auto: boolean;
 }
@@ -357,16 +335,9 @@ export function resolveRoleRun(
   stored: RoleModels,
 ): RoleRun {
   const own = stored[role] ?? {};
-  const follows = ROLE_AUTO_FOLLOWS[role];
-  // A follower's unset halves are its leader's, the leader's stored choice
-  // included — so the whole answer is the leader's, `auto` and all.
-  const modelRole = own.provider === undefined && own.model === undefined && follows ? follows : role;
-  const effortRole = own.effort === undefined && follows ? follows : role;
-
-  const modelChoice = stored[modelRole] ?? {};
-  const auto = modelChoice.provider === undefined && modelChoice.model === undefined;
-  const provider = modelChoice.provider ?? ownerProvider;
-  const value = modelChoice.model ?? (modelChoice.provider ? "standard" : ROLE_DEFAULTS[modelRole].model);
+  const auto = own.provider === undefined && own.model === undefined;
+  const provider = own.provider ?? ownerProvider;
+  const value = own.model ?? (own.provider ? "standard" : ROLE_DEFAULTS[role].model);
   let model: string | null;
   let tier: ResolvedRoleTier;
   if (value === "economy") {
@@ -385,8 +356,8 @@ export function resolveRoleRun(
 
   // The cap holds against a stored effort too (see ROLE_DEFAULTS): the
   // owner's choice can lower a planner or a reviewer, never lift it past xhigh.
-  const cap = ROLE_DEFAULTS[effortRole].effortCap;
-  const chosen = stored[effortRole]?.effort ?? ownerEffort;
+  const cap = ROLE_DEFAULTS[role].effortCap;
+  const chosen = own.effort ?? ownerEffort;
   const effort = cap ? weakerEffort(chosen, cap) : chosen;
   return { provider, model, effort, tier, auto };
 }

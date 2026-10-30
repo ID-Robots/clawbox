@@ -2,7 +2,7 @@
  * Which account, which model, and how hard it thinks, for each role of a
  * coding team (src/lib/coding-role-models.ts): a planner and a reviewer
  * default to the provider's cheaper model at no more than `xhigh`, a worker
- * keeps the owner's model and effort, a bulk task runs as a worker does, and
+ * keeps the owner's model and effort, and
  * the owner may override the provider, the model and the effort per role — a
  * box that never chose stores nothing and runs on the defaults, and a box that
  * stored the older tier-only shape runs exactly as it did.
@@ -17,7 +17,6 @@ import {
   relativeModelCost,
   resolveRoleRun,
   ROLE_AUTO,
-  ROLE_AUTO_FOLLOWS,
   ROLE_DEFAULTS,
   ROLE_EFFORT_LEVELS,
   roleMaxTurns,
@@ -52,21 +51,17 @@ describe("the vocabulary", () => {
     expect(isRecordableModel("anthropic", null)).toBe(false);
   });
 
-  it("has four roles, bulk among them, and bulk follows the workers", () => {
-    expect([...MODEL_ROLES]).toEqual(["planner", "worker", "reviewer", "bulk"]);
-    expect(ROLE_AUTO_FOLLOWS).toEqual({ bulk: "worker" });
+  it("has three roles; a stored `bulk` — the fourth, until 2026-10-30 — is dropped as unknown", () => {
+    expect([...MODEL_ROLES]).toEqual(["planner", "worker", "reviewer"]);
+    expect(roleModelsFrom({ bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" }, worker: { effort: "low" } })).toEqual({ worker: { effort: "low" } });
+    expect(applyRoleModelsPatch({}, { bulk: { provider: "clawbox-ai" } })).toEqual({ ok: false, error: 'Unknown role "bulk". Use one of: planner, worker, reviewer.' });
   });
 
-  it("gives the lead the planner's choice, and a worker on bulk work the bulk role's", () => {
+  it("gives the lead the planner's choice", () => {
     expect(modelRoleOf("lead")).toBe("planner");
+    expect(modelRoleOf("planner")).toBe("planner");
     expect(modelRoleOf("reviewer")).toBe("reviewer");
     expect(modelRoleOf("worker")).toBe("worker");
-    expect(modelRoleOf("worker", false)).toBe("worker");
-    expect(modelRoleOf("worker", true)).toBe("bulk");
-    // Only a worker's task is ever bulk work: the flag means nothing to the rest.
-    expect(modelRoleOf("planner", true)).toBe("planner");
-    expect(modelRoleOf("reviewer", true)).toBe("reviewer");
-    expect(modelRoleOf("lead", true)).toBe("planner");
   });
 
   it("orders effort for the cap", () => {
@@ -175,28 +170,10 @@ describe("the defaults — a box that never chose", () => {
     expect(resolveRoleRun("worker", "anthropic", "claude-opus-5", "high", {}).model).toBe("claude-opus-5");
   });
 
-  it("runs bulk work exactly as a worker's — whatever the workers' own choice is", () => {
-    const workerChoices: RoleModels[] = [
-      {},
-      { worker: { model: "economy" } },
-      { worker: { effort: "low" } },
-      { worker: { provider: "anthropic" } },
-      { worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" } },
-      { worker: { provider: "anthropic", model: "claude-fable-5-1" }, planner: { model: "standard" } },
-    ];
-    for (const stored of workerChoices) {
-      for (const [provider, model] of [["anthropic", DEFAULT_ANTHROPIC_MODEL], ["clawbox-ai", null]] as const) {
-        expect(resolveRoleRun("bulk", provider, model, "ultracode", stored), JSON.stringify(stored))
-          .toEqual(resolveRoleRun("worker", provider, model, "ultracode", stored));
-      }
-    }
-  });
-
   it("says so in the table the panel draws from", () => {
     expect(ROLE_DEFAULTS.planner).toEqual({ model: "economy", effortCap: "xhigh", turnsCap: 100 });
     expect(ROLE_DEFAULTS.reviewer).toEqual({ model: "economy", effortCap: "xhigh", turnsCap: 100 });
     expect(ROLE_DEFAULTS.worker).toEqual({ model: "standard", effortCap: null, turnsCap: null });
-    expect(ROLE_DEFAULTS.bulk).toEqual(ROLE_DEFAULTS.worker);
   });
 });
 
@@ -214,10 +191,8 @@ describe("the caps on a role that reads", () => {
     }
   });
 
-  it("leaves a worker, and bulk work following it, on whatever the owner stored", () => {
+  it("leaves a worker on whatever the owner stored", () => {
     expect(resolveRoleRun("worker", "clawbox-ai", null, "low", { worker: { effort: "ultracode" } }).effort).toBe("ultracode");
-    expect(resolveRoleRun("bulk", "clawbox-ai", null, "low", { worker: { effort: "ultracode" } }).effort).toBe("ultracode");
-    expect(resolveRoleRun("bulk", "clawbox-ai", null, "low", { bulk: { effort: "max" } }).effort).toBe("max");
   });
 
   it("caps a planner's and a reviewer's steps at 100, and lets the owner's ceiling stand below it", () => {
@@ -227,10 +202,8 @@ describe("the caps on a role that reads", () => {
       expect(roleMaxTurns(role, 40)).toBe(40);
     }
     // The owner's ceiling is sized for the roles that write.
-    for (const role of ["worker", "bulk"] as const) {
-      expect(roleMaxTurns(role, 2000)).toBe(2000);
-      expect(roleMaxTurns(role, 40)).toBe(40);
-    }
+    expect(roleMaxTurns("worker", 2000)).toBe(2000);
+    expect(roleMaxTurns("worker", 40)).toBe(40);
   });
 });
 
@@ -245,7 +218,6 @@ describe("old settings — the tier-only shape a box may already hold", () => {
       planner: { provider: ROLE_AUTO, model: "standard", effort: ROLE_AUTO },
       worker: { provider: ROLE_AUTO, model: "economy", effort: "low" },
       reviewer: { provider: ROLE_AUTO, model: ROLE_AUTO, effort: "max" },
-      bulk: { provider: ROLE_AUTO, model: ROLE_AUTO, effort: ROLE_AUTO },
     });
   });
 
@@ -257,26 +229,20 @@ describe("old settings — the tier-only shape a box may already hold", () => {
     expect(resolveRoleRun("reviewer", "clawbox-ai", null, "low", stored)).toEqual({ provider: "clawbox-ai", tier: "economy", model: "deepseek-v4-flash", effort: "xhigh", auto: true });
     expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "low", auto: false });
   });
-
-  it("sends bulk work where the old worker choice sent workers", () => {
-    const stored = roleModelsFrom(OLD);
-    expect(resolveRoleRun("bulk", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "low", auto: false });
-  });
 });
 
 describe("a provider and a model per role — mixed providers", () => {
-  // The owner's example: planner on Fable, workers on Auto, bulk work on the
+  // The owner's example: planner on Fable, workers on Auto, reviewers on the
   // ClawBox AI flash tier — while the team itself runs on Anthropic.
   const MIXED: RoleModels = {
     planner: { provider: "anthropic", model: "claude-fable-5-1" },
-    bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
+    reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
   };
 
   it("puts each role on its own provider and model", () => {
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "chosen", model: "claude-fable-5-1", effort: "xhigh", auto: false });
     expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "ultracode", auto: true });
-    expect(resolveRoleRun("bulk", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "clawbox-ai", tier: "chosen", model: "deepseek-v4-flash", effort: "ultracode", auto: false });
-    expect(resolveRoleRun("reviewer", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "xhigh", auto: true });
+    expect(resolveRoleRun("reviewer", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "clawbox-ai", tier: "chosen", model: "deepseek-v4-flash", effort: "xhigh", auto: false });
   });
 
   it("does the same on a team whose own provider is the other one", () => {
@@ -299,16 +265,6 @@ describe("a provider and a model per role — mixed providers", () => {
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "high", stored)).toMatchObject({ provider: "clawbox-ai", model: null, tier: "standard" });
   });
 
-  it("lets bulk follow the workers' explicit choice, half by half", () => {
-    const stored: RoleModels = { worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" }, bulk: { effort: "low" } };
-    // The workers' provider and model (a choice, so not auto), bulk's own effort.
-    expect(resolveRoleRun("bulk", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "clawbox-ai", tier: "chosen", model: "deepseek-v4-flash", effort: "low", auto: false });
-    expect(resolveRoleRun("bulk", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", { worker: { effort: "medium" } }).effort).toBe("medium");
-    // A choice of bulk's own outranks the workers', half by half.
-    const own: RoleModels = { worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" }, bulk: { provider: "anthropic" } };
-    expect(resolveRoleRun("bulk", "clawbox-ai", null, "ultracode", own)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "medium", auto: false });
-  });
-
   it("never runs a model on a provider that does not offer it, even from a hand-built map", () => {
     const stored = { planner: { provider: "clawbox-ai", model: "claude-fable-5-1" } } as RoleModels;
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "high", stored)).toMatchObject({ provider: "clawbox-ai", model: null, tier: "standard" });
@@ -327,14 +283,14 @@ describe("the owner's edits", () => {
     expect(applyRoleModelsPatch(second.value, { planner: { effort: null } })).toEqual({ ok: true, value: { reviewer: { effort: "low" } } });
   });
 
-  it("stores a provider and a model together, for any role, bulk included", () => {
+  it("stores a provider and a model together, for any role", () => {
     expect(applyRoleModelsPatch({}, {
       planner: { provider: "anthropic", model: "claude-fable-5-1" },
-      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" },
+      reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" },
       worker: { provider: "anthropic" },
     })).toEqual({ ok: true, value: {
       planner: { provider: "anthropic", model: "claude-fable-5-1" },
-      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" },
+      reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "medium" },
       worker: { provider: "anthropic" },
     } });
   });
@@ -377,12 +333,12 @@ describe("the owner's edits", () => {
       { planner: { provider: "anthropic", model: "deepseek-v4-flash" } },
       { planner: { provider: "openai", model: "claude-opus-5-5" } },
       { planner: { provider: "anthropic", model: "gpt-6-astra" } },
-      { bulk: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      { reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
       { planner: { provider: ROLE_AUTO, model: "claude-opus-5-5" } },
       // A model id with no provider anywhere.
       { worker: { model: "claude-fable-5-1" } },
       // A good role beside a bad one: none of it is saved.
-      { planner: { provider: "anthropic", model: "claude-fable-5-1" }, bulk: { provider: "anthropic", model: "deepseek-v4-flash" } },
+      { planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "anthropic", model: "deepseek-v4-flash" } },
     ];
     for (const patch of bad) {
       const out = applyRoleModelsPatch({}, patch);
@@ -412,22 +368,22 @@ describe("the owner's edits", () => {
     expect(roleModelsFrom({
       planner: { model: "claude-fable-5-1" },
       reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro", effort: "high" },
-      bulk: { provider: "openai", model: "gpt-5" },
-      worker: { provider: "anthropic", model: "claude-fable-5-1" },
+      worker: { provider: "openai", model: "gpt-5" },
+      // A role until 2026-10-30: a choice stored for it goes whole.
+      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
       lead: { provider: "mistral" },
     })).toEqual({
       reviewer: { provider: "clawbox-ai", effort: "high" },
       // OpenAI is a provider the box knows; "gpt-5" is not on its list.
-      bulk: { provider: "openai" },
-      worker: { provider: "anthropic", model: "claude-fable-5-1" },
+      worker: { provider: "openai" },
     });
   });
 
   it("answers every role and every half to the panel, `auto` where nothing is stored", () => {
-    const view = roleModelsView({ reviewer: { model: "standard" }, bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
+    const view = roleModelsView({ reviewer: { model: "standard" }, worker: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
     expect(Object.keys(view)).toEqual([...MODEL_ROLES]);
     expect(view.planner).toEqual({ provider: ROLE_AUTO, model: ROLE_AUTO, effort: ROLE_AUTO });
     expect(view.reviewer).toEqual({ provider: ROLE_AUTO, model: "standard", effort: ROLE_AUTO });
-    expect(view.bulk).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: ROLE_AUTO });
+    expect(view.worker).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: ROLE_AUTO });
   });
 });

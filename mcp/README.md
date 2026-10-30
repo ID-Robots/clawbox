@@ -1035,9 +1035,8 @@ What a team COSTS is on its answer too. The planner and the reviewers (and
 the lead) run on the provider's cheaper model — `claude-sonnet-5` on
 Anthropic, `gpt-5.6-luna` on OpenAI, the plan's `deepseek-v4-flash` on ClawBox
 AI — at no more than
-`xhigh` effort; workers keep the owner's model and effort, and so does bulk
-work (a worker's token-heavy, non-critical task) until the owner says
-otherwise; the owner may pick the provider, the model and the effort per role
+`xhigh` effort; workers keep the owner's model and effort; the owner may pick
+the provider, the model and the effort per role
 in the Coding Agent settings (`coding_agent_role_models`,
 `src/lib/coding-role-models.ts`). The planner's
 plan carries a `repo_map` (files, entry points, test commands, gotchas) that
