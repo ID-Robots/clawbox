@@ -1849,8 +1849,6 @@ const table: Record<string, string> = {
   "codingAgent.title": "Кодиращ агент",
   "codingAgent.toggleFailed": "Настройката на кодиращия агент не можа да бъде променена.",
   "codingAgent.tokensWord": "токена",
-  "codingAgent.turnsFailed": "Ограничението за стъпки не можа да бъде променено.",
-  "codingAgent.turnsLabel": "Стъпки на изпълнение",
   "codingAgent.uncommitted": "Незаписани промени",
   "codingAgent.updated": "обновено",
   "codingAgent.viewPr": "Виж PR #{n}",

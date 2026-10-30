@@ -1849,8 +1849,6 @@ const table: Record<string, string> = {
   "codingAgent.title": "Codeeragent",
   "codingAgent.toggleFailed": "De instelling van de codeeragent kon niet worden gewijzigd.",
   "codingAgent.tokensWord": "tokens",
-  "codingAgent.turnsFailed": "Het stappenlimiet kon niet worden gewijzigd.",
-  "codingAgent.turnsLabel": "Stappen per run",
   "codingAgent.uncommitted": "Niet-gecommitte wijzigingen",
   "codingAgent.updated": "bijgewerkt",
   "codingAgent.viewPr": "PR #{n} bekijken",

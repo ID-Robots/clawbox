@@ -656,8 +656,6 @@ export const zh: Record<string, string> = {
   "codingAgent.effort.low": "低",
   "codingAgent.effort.medium": "中",
   "codingAgent.effort.high": "高",
-  "codingAgent.turnsLabel": "每次运行的步数",
-  "codingAgent.turnsFailed": "无法更改步数上限。",
   "codingAgent.stateOn": "开",
   "codingAgent.stateOff": "关",
   "codingAgent.openSettings": "设置",

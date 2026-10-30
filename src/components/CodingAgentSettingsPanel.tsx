@@ -160,9 +160,6 @@ export interface AgentStatus {
   /** The providers the owner connected (a subset of `providers`, never empty). Optional: a server from before the list answers without it, and the default provider reads as the one connected. */
   connectedProviders?: CodingProviderId[];
   subagents: boolean;
-  maxTurns: number;
-  minMaxTurns: number;
-  maxMaxTurns: number;
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
   reviewPass: boolean;
@@ -242,18 +239,18 @@ const GITHUB_REPROBE_MS = 15_000;
 const CONFIRM_MS = 5_000;
 
 /**
- * Where a refusal is shown. The three typed fields carry theirs right under
- * the input that was refused; every other setting's lands at the foot of the
+ * Where a refusal is shown. The typed fields carry theirs right under the
+ * input that was refused; every other setting's lands at the foot of the
  * settings card, and GitHub's under the GitHub card. Before this the one
- * message sat below the GitHub card, a screen away from a Steps field that
- * still held the refused number.
+ * message sat below the GitHub card, a screen away from the field that
+ * still held the refused value.
  */
-type ErrorSlot = "dir" | "turns" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
+type ErrorSlot = "dir" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it. The run history's is inside its own card.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "maxParallelRuns", "gitAuthor", "history"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "maxParallelRuns", "gitAuthor", "history"]);
 
 /**
  * The label of each choice for how much of the task a pull request carries,
@@ -336,7 +333,6 @@ export default function CodingAgentSettingsPanel() {
   // The typed fields are DRAFTS until saved, so typing does not fight the
   // status the route keeps returning.
   const [dirDraft, setDirDraft] = useState<string | null>(null);
-  const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
   const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
   const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
@@ -358,7 +354,6 @@ export default function CodingAgentSettingsPanel() {
       const next = await s.json() as AgentStatus;
       setStatus(next);
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
-      setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
       setAuthorNameDraft(prev => (prev === null ? (next.gitAuthorName ?? "") : prev));
       setAuthorEmailDraft(prev => (prev === null ? (next.gitAuthorEmail ?? "") : prev));
     } catch {
@@ -572,27 +567,6 @@ export default function CodingAgentSettingsPanel() {
       setAuthorNameDraft(next.gitAuthorName ?? "");
       setAuthorEmailDraft(next.gitAuthorEmail ?? "");
     }
-  };
-
-  // The two blur-saved fields go back to the stored value whenever what was
-  // typed is not saved — blank, or refused by the route. A draft left holding
-  // a refused number would re-post that refusal on every blur, and the
-  // message beside the field already says what was wrong with it. The folder
-  // field is different: it saves only on an explicit Save or Enter, so a
-  // mistyped path stays put to be corrected rather than retyped.
-  const saveTurns = async () => {
-    const stored = String(status?.maxTurns ?? "");
-    // A blank Steps field means nothing — unlike a blank token field, which
-    // is "no ceiling" — so it is never posted: Number("") is 0, which the
-    // route refuses.
-    if ((turnsDraft ?? "").trim() === "") {
-      setTurnsDraft(stored);
-      return;
-    }
-    const n = Number(turnsDraft);
-    if (!Number.isFinite(n) || n === status?.maxTurns) return;
-    const next = await saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
-    setTurnsDraft(next ? String(next.maxTurns) : stored);
   };
 
   /** The GitHub device flow, driven by this card so it works from a phone:
@@ -987,38 +961,17 @@ export default function CodingAgentSettingsPanel() {
           </summary>
           <div className="mt-5">
             <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupCeilings")}</p>
-            {/* The one ceiling a run stops at, the owner's to set. There is no
-                time limit, no price limit and (since SCA A2) no token limit: a
-                run ends when it finishes, runs out of steps, or goes quiet.
-                Saved on blur and on Enter, so a half-typed number is never sent. */}
-            <div className="grid grid-cols-2 gap-3 mt-4">
-              <div>
-                <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.turnsLabel")}
-                </label>
-                <input
-                  id="coding-agent-turns"
-                  type="number"
-                  inputMode="numeric"
-                  min={status?.minMaxTurns ?? 10}
-                  max={status?.maxMaxTurns ?? 2000}
-                  value={turnsDraft ?? ""}
-                  onChange={(e) => setTurnsDraft(e.target.value)}
-                  onBlur={() => void saveTurns()}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveTurns(); }}
-                  disabled={saving}
-                  data-testid="coding-agent-turns"
-                  className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-                />
-                {errorIn("turns")}
-              </div>
-            </div>
-
+            {/* No step field since SCA3: the step ceiling is a safety net
+                (DEFAULT_MAX_TURNS, 2,000 for a writing run; a reading role's
+                cap is 100) rather than a setting, and a run that reaches it
+                offers Continue. There is no time limit, no price limit and
+                (since SCA A2) no token limit either: a run ends when it
+                finishes, hits the net, or goes quiet. */}
             {/* How many runs at once. Each one works in a copy of the project on
                 a branch of its own, so this is a question about the box's memory
                 rather than about the filesystem — which is why it is a number the
                 owner may raise and not a switch. Hidden on a server that answers
-                with no field, like the two above. */}
+                with no field. */}
             {typeof status?.maxParallelRuns === "number" && (
               <>
                 <div className="flex items-start justify-between gap-4 mt-4">

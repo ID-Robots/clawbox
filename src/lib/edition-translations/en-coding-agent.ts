@@ -183,8 +183,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.effort.ultracode": "Ultracode",
   "codingAgent.effortFailed": "Could not change the thinking effort.",
   // The ceilings a run stops at. Neither has a time or a price behind it.
-  "codingAgent.turnsLabel": "Steps per run",
-  "codingAgent.turnsFailed": "Could not change the step limit.",
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.tokensWord": "tokens",
   "codingAgent.updated": "updated",

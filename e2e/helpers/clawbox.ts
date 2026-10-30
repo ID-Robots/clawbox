@@ -672,8 +672,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       effortLevels: ["low", "medium", "high", "xhigh", "max"],
       subagents: codingAgent.subagents,
       maxTurns: codingAgent.maxTurns,
-      minMaxTurns: 10,
-      maxMaxTurns: 1000,
     };
   };
 
@@ -1692,7 +1690,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       if (payload.defaultDirectory !== undefined) codingAgent.defaultDirectory = payload.defaultDirectory;
       if (typeof payload.effort === "string") codingAgent.effort = payload.effort;
       if (typeof payload.subagents === "boolean") codingAgent.subagents = payload.subagents;
-      if (typeof payload.maxTurns === "number") codingAgent.maxTurns = payload.maxTurns;
       await fulfillJson(route, buildCodingAgentStatus());
       return;
     }

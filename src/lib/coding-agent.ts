@@ -543,16 +543,21 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
 export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** How often the idle check runs. */
 const IDLE_CHECK_MS = 60_000;
-/** Default agent turns before Claude Code stops itself (`error_max_turns`).
- *  The owner can change it; a long project needs more than a short one.
- *  Raised from 150 to 400 (owner's decision, 2026-09-15): a delivery run that
- *  builds, verifies in the browser and opens a pull request was hitting the
- *  ceiling on ordinary tasks. Lowered to 200 (TASK-1749): measured on
- *  bench/diet 2026-10-18, the longest run of nine specs, a full-stack XL build
- *  included, needed 72 turns; a runaway at 400 turns of ~150k context is ~60M
- *  tokens, and 200 halves that worst case while leaving ~3x headroom. Owners
- *  can raise it (up to MAX_MAX_TURNS). */
-export const DEFAULT_MAX_TURNS = 200;
+/** The step ceiling a writing run gets (`--max-turns`; Claude Code stops
+ *  itself with `error_max_turns`). A SAFETY NET, not a setting (owner's
+ *  ruling, SCA3): the control left the settings panel and the enable route,
+ *  and the number is the one a runaway cannot pass rather than the one a
+ *  long task should fit under — a run that reaches it settles `failed` +
+ *  `resumable`, and Continue gives it a fresh ceiling in the same session.
+ *  History: 150 → 400 (2026-09-15, delivery runs hit it on ordinary tasks)
+ *  → 200 (TASK-1749, measured 72 turns on the longest of nine bench specs)
+ *  → 2,000 (SCA3): the 200 was a knob the owner raised when a run needed
+ *  more, and the longest legitimate run on this box so far was 383 turns
+ *  (team-ac2dlilw's worker), which 200 would have failed; 2,000 is
+ *  MAX_MAX_TURNS, so a stored `coding_agent_max_turns` can only LOWER it.
+ *  Reading roles (planner, reviewer) keep their own cap of 100 through
+ *  `roleMaxTurns`. */
+export const DEFAULT_MAX_TURNS = 2_000;
 
 /** A run's tokens by the four ways a provider bills them — see CodingRun.tokenBreakdown. */
 export interface TokenBreakdown {
@@ -575,6 +580,10 @@ export function readTokenBreakdown(raw: unknown): TokenBreakdown {
 
 /** How many per-spawn figures a record keeps. */
 export const MAX_SPAWN_TOKENS_KEPT = 20;
+/** The range a STORED `coding_agent_max_turns` is clamped into: the key is
+ *  honoured on read for a box that set it while the control existed, is
+ *  cleared by Start over (CODING_AGENT_RESET_KEYS), and is written by nothing
+ *  since SCA3. */
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
@@ -2471,11 +2480,9 @@ export interface CodingAgentStatus {
   roleModelMap: TeamRoleModelMap;
   /** Folders in the default project folder the assistant may work in. */
   projectFolders: string[];
-  /** The ceilings a run stops at, so the app can show them without guessing. */
-  /** Agent steps a run gets, and the range the owner may choose from. */
+  /** The step ceiling a writing run gets — DEFAULT_MAX_TURNS, a safety net
+   *  the owner does not set (SCA3), so no range comes with it. */
   maxTurns: number;
-  minMaxTurns: number;
-  maxMaxTurns: number;
   /** Silence, not total time, is what ends a run. */
   runIdleTimeoutMs: number;
   /** False until the owner finishes the setup wizard — the app shows the
@@ -3397,21 +3404,11 @@ export async function resetCodingAgentSetup(): Promise<number> {
   return clearFinishedRuns();
 }
 
-/** The owner's turn ceiling, clamped to something the CLI will accept. */
+/** The writing roles' step ceiling: DEFAULT_MAX_TURNS, or a stored
+ *  `coding_agent_max_turns` from before SCA3 clamped to what the CLI accepts.
+ *  There is no setter any more — see DEFAULT_MAX_TURNS. */
 export async function getMaxTurns(): Promise<number> {
   return maxTurnsFrom(await configGet(CODING_AGENT_TURNS_CONFIG_KEY));
-}
-
-export async function setMaxTurns(turns: unknown): Promise<number> {
-  if (typeof turns !== "number" || !Number.isFinite(turns)) {
-    throw new CodingAgentError("invalid", "Steps must be a number.");
-  }
-  const n = Math.round(turns);
-  if (n < MIN_MAX_TURNS || n > MAX_MAX_TURNS) {
-    throw new CodingAgentError("invalid", `Steps must be between ${MIN_MAX_TURNS} and ${MAX_MAX_TURNS}.`);
-  }
-  await configSet(CODING_AGENT_TURNS_CONFIG_KEY, n);
-  return n;
 }
 
 
@@ -4221,9 +4218,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // Off the same snapshot and the readiness above: no second probe per poll.
     roleModelMap: roleModelMapFrom(config, readiness),
     projectFolders,
+    // The ceiling a writing run gets — a safety net the panel no longer
+    // edits (SCA3), so no range travels with it.
     maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
-    minMaxTurns: MIN_MAX_TURNS,
-    maxMaxTurns: MAX_MAX_TURNS,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
     // An EXPLICIT flag always wins; `enabled` only stands in when there is no
     // flag at all.
@@ -12825,8 +12822,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (modelRole) {
       const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRoleModels());
       settings.effort = role.effort;
-      // A reading role's step cap (ROLE_DEFAULTS.turnsCap): the owner's
-      // ceiling is sized for the worker that writes.
+      // A reading role's step cap (ROLE_DEFAULTS.turnsCap): the safety net
+      // (DEFAULT_MAX_TURNS) is sized for the worker that writes.
       settings.maxTurns = roleMaxTurns(modelRole, settings.maxTurns);
       if (!inherited) {
         settings.provider = role.provider;

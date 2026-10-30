@@ -1849,8 +1849,6 @@ const table: Record<string, string> = {
   "codingAgent.title": "コーディングエージェント",
   "codingAgent.toggleFailed": "コーディングエージェントの設定を変更できませんでした。",
   "codingAgent.tokensWord": "トークン",
-  "codingAgent.turnsFailed": "ステップ上限を変更できませんでした。",
-  "codingAgent.turnsLabel": "1回あたりのステップ数",
   "codingAgent.uncommitted": "未コミットの変更",
   "codingAgent.updated": "更新",
   "codingAgent.viewPr": "PR #{n} を見る",

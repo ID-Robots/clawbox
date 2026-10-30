@@ -642,8 +642,6 @@ export const sv: Record<string, string> = {
   "codingAgent.effort.low": "Låg",
   "codingAgent.effort.medium": "Medel",
   "codingAgent.effort.high": "Hög",
-  "codingAgent.turnsLabel": "Steg per körning",
-  "codingAgent.turnsFailed": "Stegbegränsningen kunde inte ändras.",
   "codingAgent.stateOn": "På",
   "codingAgent.stateOff": "Av",
   "codingAgent.openSettings": "Inställningar",

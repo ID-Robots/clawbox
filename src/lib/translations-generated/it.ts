@@ -1849,8 +1849,6 @@ const table: Record<string, string> = {
   "codingAgent.title": "Agente di codice",
   "codingAgent.toggleFailed": "Impossibile modificare l'impostazione dell'agente di codice.",
   "codingAgent.tokensWord": "token",
-  "codingAgent.turnsFailed": "Non è stato possibile cambiare il limite di passi.",
-  "codingAgent.turnsLabel": "Passi per esecuzione",
   "codingAgent.uncommitted": "Modifiche non ancora nel commit",
   "codingAgent.updated": "aggiornato",
   "codingAgent.viewPr": "Vedi PR #{n}",

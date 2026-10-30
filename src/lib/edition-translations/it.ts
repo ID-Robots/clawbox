@@ -657,8 +657,6 @@ export const it: Record<string, string> = {
   "codingAgent.effort.low": "Basso",
   "codingAgent.effort.medium": "Medio",
   "codingAgent.effort.high": "Alto",
-  "codingAgent.turnsLabel": "Passi per esecuzione",
-  "codingAgent.turnsFailed": "Non è stato possibile cambiare il limite di passi.",
   "codingAgent.stateOn": "Attivo",
   "codingAgent.stateOff": "Disattivo",
   "codingAgent.openSettings": "Impostazioni",
