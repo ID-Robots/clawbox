@@ -144,7 +144,7 @@ const STORED_FAILURE_PREFACE_RE = /^\s*Your request couldn['\u2019]t be complete
  * tone and button the live error frame paints (`chatFailureNote`), tagged with
  * the failed run so the live copy and this one are never shown side by side.
  * Never the row's own text: it quotes the gateway's error for an operator,
- * device path and CLI instruction included (TASK-440).
+ * device path and CLI instruction included.
  */
 function storedRunFailure(m: Record<string, unknown>, words: ChatFailureWords | undefined): HistoryMessage | null {
   if (m.customType !== RUN_FAILED_BEFORE_REPLY || m.display === false) return null;
