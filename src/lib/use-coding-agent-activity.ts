@@ -494,6 +494,11 @@ export function useCodingAgentActivity(active: boolean): {
   // Member runs seen without their team, and for how many polls: shown on
   // their own only once the hold has passed (MEMBER_HOLD_POLLS).
   const orphanPolls = useRef(new Map<string, number>());
+  // When each announced start's request arrived, by run id: the record that
+  // takes its card over is stamped when it is WRITTEN — after the checks,
+  // the worktree, a wait on the folder's lock — and its clock must not jump
+  // back by that much in front of the owner.
+  const requestedAt = useRef(new Map<string, number>());
   // Bumped by nudge(); the effect below re-runs and probes immediately.
   const [probe, setProbe] = useState(0);
   // When this conversation started caring. A run older than this belongs to a
@@ -534,6 +539,7 @@ export function useCodingAgentActivity(active: boolean): {
       setRuns((prev) => (prev.length === 0 ? prev : []));
       setTeams((prev) => (prev.length === 0 ? prev : []));
       orphanPolls.current.clear();
+      requestedAt.current.clear();
       openedAtRef.current = 0;
       return;
     }
@@ -625,7 +631,9 @@ export function useCodingAgentActivity(active: boolean): {
           const byId = new Map(prev.map((r) => [r.id, r]));
           const orphans = orphanPolls.current;
           for (const raw of fetched) {
-            const run = toActivity(raw);
+            const record = toActivity(raw);
+            const asked = requestedAt.current.get(record.id);
+            const run = asked !== undefined && asked < record.startedAt ? { ...record, startedAt: asked } : record;
             // A team's member run is the team card's to show, never a card of
             // its own. Its team may land in the list a poll after the run
             // does, so a member whose team is not listed yet is HELD for a
@@ -662,6 +670,7 @@ export function useCodingAgentActivity(active: boolean): {
               || start.requestedAt >= openedAtRef.current - RECENT_MS;
             if (!mine) continue;
             const run = startActivity(start);
+            requestedAt.current.set(start.id, start.requestedAt);
             byId.set(start.id, known && samePlainData(known, run) ? known : run);
           }
           // A start that is neither on its way nor recorded any more went

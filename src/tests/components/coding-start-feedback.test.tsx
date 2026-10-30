@@ -147,6 +147,10 @@ describe("useCodingAgentActivity while something starts", () => {
     expect(runPolls(fetchMock)).toBe(2);
     expect(result.current.runs).toHaveLength(1);
     expect(result.current.runs[0]).toMatchObject({ id: "run-abc12345", announced: false, startStep: null, sessionId: "sess-1" });
+    // The record is stamped when it was written; the card's clock keeps
+    // counting from the request rather than jumping back by the start's work.
+    expect(RECORD.startedAt).toBeGreaterThan(START.requestedAt);
+    expect(result.current.runs[0].startedAt).toBe(START.requestedAt);
   });
 
   it("keeps a refused start's card with its reason after the box forgets it, and drops a start that vanished", async () => {
