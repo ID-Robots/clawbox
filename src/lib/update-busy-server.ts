@@ -16,8 +16,18 @@ import {
 /** One gateway read must not hold an update or a refusal for long. */
 const GATEWAY_READ_TIMEOUT_MS = 5_000;
 
+/**
+ * The drain's own calls answer slower by design: with final chat writes or
+ * other protected work pending, the core holds `gateway.suspend.status` (and
+ * preparation) for up to 15 s before it answers. Cut at 5 s, a drain doing
+ * exactly its job read as a gateway that had gone away.
+ */
+const GATEWAY_SUSPEND_TIMEOUT_MS = 30_000;
+
 export const gatewayCall: GatewayCall = (method, params) =>
-  gatewayWsCall(method, params, { timeoutMs: GATEWAY_READ_TIMEOUT_MS });
+  gatewayWsCall(method, params, {
+    timeoutMs: method.startsWith("gateway.suspend.") ? GATEWAY_SUSPEND_TIMEOUT_MS : GATEWAY_READ_TIMEOUT_MS,
+  });
 
 /**
  * The gateway's runs in flight, from `sessions.list` with `activeOnly` (only

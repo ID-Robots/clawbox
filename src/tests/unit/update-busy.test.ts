@@ -262,13 +262,39 @@ describe("drainGatewayForStop", () => {
       .toMatchObject({ kind: "ready", suspensionId: "s2" });
   });
 
-  it("stops draining a gateway that has stopped answering, holding nothing", async () => {
+  it("rides out a status answer that came too slowly — the core holds it up to 15 s for pending writes", async () => {
     const clock = fakeClock();
     const gw = gateway({
       "gateway.suspend.prepare": [{ status: "draining", suspensionId: "s1", activeCount: 1, retryAfterMs: 5_000 }],
-      "gateway.suspend.status": [new Error("connect ECONNREFUSED")],
+      "gateway.suspend.status": [
+        new Error("gateway.suspend.status timed out after 30000ms"),
+        { status: "draining", activeCount: 1, retryAfterMs: 5_000 },
+        new Error("gateway closed during call"),
+        { status: "ready" },
+      ],
+    });
+    expect(await drainGatewayForStop({ call: gw.call, requestId: ID, maxMs: GATEWAY_DRAIN_MAX_MS, ...clock }))
+      .toMatchObject({ kind: "ready", suspensionId: "s1" });
+  });
+
+  it("stops draining a gateway that keeps not answering, holding nothing", async () => {
+    const clock = fakeClock();
+    const gw = gateway({
+      "gateway.suspend.prepare": [{ status: "draining", suspensionId: "s1", activeCount: 1, retryAfterMs: 5_000 }],
+      "gateway.suspend.status": [new Error("connect ECONNREFUSED"), new Error("connect ECONNREFUSED"), new Error("connect ECONNREFUSED")],
     });
     expect(await drainGatewayForStop({ call: gw.call, requestId: ID, maxMs: GATEWAY_DRAIN_MAX_MS, ...clock }))
       .toEqual({ kind: "unavailable", reason: "connect ECONNREFUSED" });
+    expect(gw.calls.filter(([m]) => m === "gateway.suspend.status")).toHaveLength(3);
+  });
+
+  it("ends at once on a refusal that is not retryable", async () => {
+    const clock = fakeClock();
+    const gw = gateway({
+      "gateway.suspend.prepare": [{ status: "draining", suspensionId: "s1", activeCount: 1, retryAfterMs: 5_000 }],
+      "gateway.suspend.status": [rpcError("CONFLICT")],
+    });
+    expect(await drainGatewayForStop({ call: gw.call, requestId: ID, maxMs: GATEWAY_DRAIN_MAX_MS, ...clock }))
+      .toEqual({ kind: "unavailable", reason: "CONFLICT" });
   });
 });

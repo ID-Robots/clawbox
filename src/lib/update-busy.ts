@@ -203,6 +203,13 @@ export interface DrainOptions extends Clock {
 /** Renew a draining lease once less than this is left of its two minutes. */
 const LEASE_RENEW_MARGIN_MS = 45_000;
 
+/**
+ * Transport failures in a row (a timeout, a dropped socket) a held drain rides
+ * out before it decides the gateway has gone. One slow or lost answer is not a
+ * gateway that exited, and ending the drain on it stops the gateway mid-drain.
+ */
+const DRAIN_TRANSPORT_FAILURES_TOLERATED = 3;
+
 function drainState(answer: Record<string, unknown>): { status: string; suspensionId: string | null; active: number; retryAfterMs: number; expiresAtMs: number | null } {
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   return {
@@ -246,6 +253,7 @@ export async function drainGatewayForStop(options: DrainOptions): Promise<DrainO
     return { kind: "unavailable", reason: `the gateway answered "${state.status || "nothing"}" to a drain request` };
   }
   let suspensionId = state.suspensionId;
+  let transportFailures = 0;
   for (;;) {
     const waitedMs = now() - startedAt;
     if (state.status === "ready") return { kind: "ready", suspensionId, waitedMs };
@@ -273,10 +281,13 @@ export async function drainGatewayForStop(options: DrainOptions): Promise<DrainO
         state = again;
         suspensionId = again.suspensionId;
       }
+      transportFailures = 0;
     } catch (err) {
-      // A retryable refusal keeps the drain going; a gateway that stopped
-      // answering has nothing left to drain or to hold.
+      // A retryable refusal keeps the drain going; so does a transport failure
+      // or two. A gateway that keeps not answering has nothing left to drain
+      // or to hold, and any other refusal ends the drain.
       if ((err as { code?: unknown }).code === "UNAVAILABLE") continue;
+      if ((err as { name?: unknown }).name !== "GatewayRpcError" && ++transportFailures < DRAIN_TRANSPORT_FAILURES_TOLERATED) continue;
       return { kind: "unavailable", reason: errorText(err) };
     }
   }

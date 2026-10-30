@@ -47,7 +47,7 @@ export default function UpdateBusyNotice({
       <p className="text-sm font-semibold text-amber-100">{title}</p>
       <p className="mt-1 text-sm leading-relaxed text-amber-100/80">
         {mode === "ask"
-          ? tr("update.busy.body", "The update stops the assistant, which would cut them short. Wait for them to finish, or update anyway.")
+          ? tr("update.busy.body", "The update stops the assistant, which would cut that work short. Wait for it to finish, or update anyway.")
           : hint}
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -58,7 +58,7 @@ export default function UpdateBusyNotice({
             data-testid="update-busy-wait"
             className="px-4 py-2 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-100 text-sm font-semibold hover:bg-amber-500/30 cursor-pointer"
           >
-            {tr("update.busy.wait", "Wait for them")}
+            {tr("update.busy.wait", "Wait until done")}
           </button>
         )}
         <button

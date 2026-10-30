@@ -20,7 +20,7 @@ import {
 import { UPDATE_IGNORE_BUSY_FLAG } from "@/lib/update-busy";
 import UpdateBusyNotice from "@/components/UpdateBusyNotice";
 
-/** How often "Wait for them" asks the box again whether its agent runs have finished. */
+/** How often "Wait until done" asks the box again whether its agent runs have finished. */
 const BUSY_RETRY_MS = 15_000;
 
 /** The run total of a busy `update/run` refusal (issue #1269); 1 when it does not say. */
@@ -256,7 +256,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [forceConfirm, setForceConfirm] = useState(false);
   // An update the server would not start because agent runs are active (issue
   // #1269): it stops the assistant, which ends them. `waiting` is the owner's
-  // "Wait for them" — the page asks again until they have finished and the
+  // "Wait until done" — the page asks again until they have finished and the
   // update starts by itself. `allowDowngrade` is carried so the answer starts
   // the update the owner actually asked for.
   const [busy, setBusy] = useState<{ active: number; waiting: boolean; allowDowngrade: boolean } | null>(null);
@@ -440,7 +440,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     }
   }, [startPolling, tr]);
 
-  // "Wait for them": ask again, quietly, until the box has no agent run left
+  // "Wait until done": ask again, quietly, until the box has no agent run left
   // and the update starts — the screen stays on the notice, never flickering
   // into "updating" for a refusal. Anything but another busy refusal ends the
   // wait the way a click would have.
@@ -748,7 +748,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 <UpdateBusyNotice
                   active={busy.active}
                   mode={busy.waiting ? "waiting" : "ask"}
-                  hint={tr("update.busy.waitingHint", "The update starts by itself once they finish.")}
+                  hint={tr("update.busy.waitingHint", "The update starts by itself once that work is done.")}
                   onWait={() => setBusy((prev) => (prev ? { ...prev, waiting: true } : prev))}
                   onUpdateAnyway={() => void triggerUpdate(busy.allowDowngrade, true)}
                 />

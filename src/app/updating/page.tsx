@@ -200,9 +200,9 @@ function UpdatingScreen() {
       active={busyActive}
       mode={busyAnswer === "wait" ? "waiting" : "ask"}
       hint={minutesLeft !== null
-        ? tr("update.busy.runnerHint", "The update stops the assistant once they finish, or after {minutes} min at the latest.")
+        ? tr("update.busy.runnerHint", "The update stops the assistant once that work is done, or after {minutes} min at the latest.")
           .replaceAll("{minutes}", String(minutesLeft))
-        : tr("update.busy.body", "The update stops the assistant, which would cut them short. Wait for them to finish, or update anyway.")}
+        : tr("update.busy.body", "The update stops the assistant, which would cut that work short. Wait for it to finish, or update anyway.")}
       onWait={() => setBusyAnswer("wait")}
       onUpdateAnyway={updateAnyway}
     />

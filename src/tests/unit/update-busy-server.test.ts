@@ -9,7 +9,7 @@ const { mockGatewayWsCall, mockRunningCount } = vi.hoisted(() => ({
 vi.mock("@/lib/openclaw-gateway-ws", () => ({ gatewayWsCall: mockGatewayWsCall }));
 vi.mock("@/lib/coding-agent", () => ({ runningCount: mockRunningCount }));
 
-import { activeAgentWork, resumeGatewayAdmission } from "@/lib/update-busy-server";
+import { activeAgentWork, gatewayCall, resumeGatewayAdmission } from "@/lib/update-busy-server";
 
 const rpcError = (code: string) => Object.assign(new Error(code), { name: "GatewayRpcError", code });
 
@@ -50,11 +50,25 @@ describe("activeAgentWork", () => {
   });
 });
 
+describe("gatewayCall", () => {
+  it("gives the drain's own calls longer than the 15 s the core may hold them, and reads 5 s", async () => {
+    mockGatewayWsCall.mockReset().mockResolvedValue({});
+    await gatewayCall("gateway.suspend.status", { suspensionId: "s1" });
+    await gatewayCall("gateway.suspend.prepare", { requestId: "r" });
+    await gatewayCall("sessions.list", {});
+    expect(mockGatewayWsCall.mock.calls.map(([method, , options]) => [method, options])).toEqual([
+      ["gateway.suspend.status", { timeoutMs: 30_000 }],
+      ["gateway.suspend.prepare", { timeoutMs: 30_000 }],
+      ["sessions.list", { timeoutMs: 5_000 }],
+    ]);
+  });
+});
+
 describe("resumeGatewayAdmission", () => {
   it("asks the gateway to reopen admission, and stays quiet when it cannot", async () => {
     mockGatewayWsCall.mockReset().mockResolvedValueOnce({ ok: true, status: "running", resumed: true });
     await resumeGatewayAdmission("s1");
-    expect(mockGatewayWsCall).toHaveBeenCalledWith("gateway.suspend.resume", { suspensionId: "s1" }, { timeoutMs: 5_000 });
+    expect(mockGatewayWsCall).toHaveBeenCalledWith("gateway.suspend.resume", { suspensionId: "s1" }, { timeoutMs: 30_000 });
     mockGatewayWsCall.mockRejectedValueOnce(rpcError("INVALID_REQUEST"));
     await expect(resumeGatewayAdmission("gone")).resolves.toBeUndefined();
   });
