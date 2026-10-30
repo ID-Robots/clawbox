@@ -24,14 +24,21 @@ of them kept failing.
     `system_stats`, `system_info`, `system_power`, `disk_usage`, `disk_cleanup`,
     `update_check`, `logs_tail`, `screen_capture`, `backup_status`,
     `telegram_status`, `email_send`, `wifi_scan`, `wifi_status`, `vnc_status`,
-    `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
+    `preferences_get`, `preferences_set`, `ui_open_app` (with `run_id` /
+    `team_id` / `project_id` for the `coding` app, a `target` on the ring's
+    `open_app`), `ui_open_card` (`new_app`: the chat's Create card, an
+    `open_card` ring action `page.tsx` opens the chat for), `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`,
     `describe_image`, `memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`
     (read-only; installs and the plan stay the owner's), the `memory_shard_*`
     management tools (incremental passes on its own; a full re-embed, a
     provider move or a reset only with `confirm: true` after the owner's yes),
-    `coding_agent_run/status/stop`, `coding_run_message`, `coding_run_list`,
+    `coding_agent_run/status/stop` (`coding_agent_run` and `coding_team_run`
+    are the ONLY tools whose result carries MCP `structuredContent` —
+    `{ kind, id, projectId, directory, title, status, queuePosition? }`, `ToolResult.structuredContent`
+    in `mcp/lib/register.ts`; their prose tells the assistant the chat shows
+    the card and not to poll), `coding_run_message`, `coding_run_list`,
     `coding_agent_resume`, `coding_project_status`, `coding_secret_list`
     (registered only while the owner's switch is on
     and the `claude-ds` harness is ready — probed at startup, and unlike

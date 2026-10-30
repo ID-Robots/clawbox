@@ -115,6 +115,31 @@ describe("coding_team_run", () => {
     expect(text).toMatch(/coding_team_status/);
   });
 
+  it("tells the assistant the chat shows the team as a card, and carries the same facts as structuredContent", async () => {
+    apiPost.mockResolvedValue({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    const out = await harness().call("coding_team_run", { goal: "Build the invoice app", directory: "invoice" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/The chat shows this as a card .* do not poll/);
+    expect(out.result.structuredContent).toEqual({
+      kind: "coding_team", id: "team-k3x9q2ab", projectId: null, directory: TEAM.directory,
+      title: "Build the invoice app with a printable PDF", status: "running",
+    });
+    // Queued: the same shape, with the place in line.
+    apiPost.mockResolvedValue({ started: false, queued: true, team: { ...TEAM, status: "queued", queuePosition: 2, tasks: [] } });
+    const queued = await harness().call("coding_team_run", { goal: "Build the invoice app", directory: "invoice" });
+    expect(queued.isError).toBe(false);
+    if (queued.isError) return;
+    expect(queued.result.structuredContent).toMatchObject({ kind: "coding_team", id: "team-k3x9q2ab", status: "queued", queuePosition: 2 });
+    // The status tool carries none: only the two start tools do.
+    apiGet.mockResolvedValueOnce({ team: TEAM });
+    const status = await harness().call("coding_team_status", { team_id: TEAM.id, log: 0, wait_seconds: 0 });
+    expect(status.isError).toBe(false);
+    if (status.isError) return;
+    expect(status.result.structuredContent).toBeUndefined();
+    expect(status.text).toMatch(/The chat shows the team's card; do not paste the task list unless asked/);
+  });
+
   it("words the switch and a team already working as conflicts the assistant must not retry", async () => {
     apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "off", kind: "disabled" })));
     const off = await refused("coding_team_run", { goal: "g" });
@@ -137,7 +162,7 @@ describe("coding_team_status", () => {
     expect(await ok("coding_team_status", { log: 0 })).toMatch(/no coding teams/);
     apiGet.mockResolvedValueOnce({ teams: [TEAM] });
     const listed = JSON.parse(await ok("coding_team_status", { log: 0 }));
-    expect(listed).toEqual([{ team_id: TEAM.id, status: "working", goal: "Build the invoice app with a printable PDF", project_id: null, tasks: 2, complete: 1, alerts: 1 }]);
+    expect(listed).toEqual([{ team_id: TEAM.id, status: "working", phase: "working", tasks_done: 1, tasks_total: 2, goal: "Build the invoice app with a printable PDF", project_id: null, tasks: 2, complete: 1, alerts: 1 }]);
   });
 
   it("describes one team: goal, tasks with worker and result, alerts, and what to do next", async () => {

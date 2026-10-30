@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { clearFinishedRuns, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
-import { slimRun } from "@/lib/coding-agent-slim";
+import { runSummaryLine, slimRun } from "@/lib/coding-agent-slim";
 import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +12,9 @@ export const dynamic = "force-dynamic";
  * GET ?id=…&wait=<seconds> → the same, but held open until the run finishes
  *                            or `wait` elapses (capped), so a caller can
  *                            block instead of polling every few seconds.
+ *
+ * Every run carries `summaryLine` — the first sentence of its result, at
+ * most 160 characters — beside the record, for the chat's settled card.
  *
  * GET ?slim=1              → the list with every SETTLED run's free text
  *                            emptied (progress, result text, allow
@@ -70,10 +73,13 @@ export async function DELETE(request: Request) {
  *  the evidence-folder listing. Opt-in because listing is a readdir + a stat
  *  per file on every run returned, and this route is polled every 5s by two
  *  UIs, only one of which renders artifacts. */
-function withDerived<T extends { id: string } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
+function withDerived<T extends { id: string; summary?: string | null; resultText?: string | null } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
   return {
     ...run,
     transcriptPath: transcriptPath(run),
+    // The result's first sentence, for the chat's settled card: worked out
+    // here so the card never parses the result text (a slim read has none).
+    summaryLine: runSummaryLine(run),
     ...(withArtifacts ? { artifacts: listArtifacts(run.id) } : {}),
   };
 }

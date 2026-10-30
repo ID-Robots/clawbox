@@ -297,15 +297,30 @@ export function buildTeamAnnouncement(board: TeamBoard): string {
 }
 
 /**
- * The team's notice, both legs; never throws. On the desktop it is the plain
- * notice toast (the run card's Open button hands the app a RUN id, and a team
- * has none to hand it), named after the team so a desktop that sees it twice
- * shows it once.
+ * The team's notice, both legs; never throws. On the desktop it is a
+ * `coding_team settled` ring action — the same top-right FINISH CARD a run
+ * gets, with an Open button that hands the app the team's id
+ * (`handoffCodingTeam`) — named after the team so a desktop that sees it
+ * twice shows it once. It used to be a plain toast, because the finish card
+ * could only hand over a run id; the chat's cards and the team hand-off made
+ * the card the right shape (2026-10-30).
  */
 export async function announceCodingTeam(board: TeamBoard): Promise<void> {
   const message = buildTeamAnnouncement(board);
+  // A retired task will never be done; counted, a finished team read as unfinished.
+  const tasks = board.tasks.filter((t) => t.status !== "retired");
   try {
-    await pushPendingAction({ type: "notify", message: message.slice(0, MAX_TOAST_CHARS) }, `coding-team:${board.id}`);
+    await pushPendingAction({
+      type: "coding_team",
+      event: "settled",
+      teamId: board.id,
+      projectId: board.projectId,
+      status: board.status,
+      tasksDone: tasks.filter((t) => t.status === "complete").length,
+      tasksTotal: tasks.length,
+      ...(board.pr ? { prNumber: board.pr.number } : {}),
+      message: message.slice(0, MAX_TOAST_CHARS),
+    }, `coding-team:${board.id}`);
   } catch (err) {
     console.error("[coding-team] desktop notice failed:", err instanceof Error ? err.message : err);
   }

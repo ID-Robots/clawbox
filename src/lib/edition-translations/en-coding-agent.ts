@@ -473,7 +473,35 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.showDetails": "Show details",
   "codingAgent.hideDetails": "Hide details",
   "codingAgent.noticeOpenRun": "Open the run",
-  "codingAgent.liveView": "View",
+  // The chat card's one button (2026-10-30: "View" became "Open" — it opens
+  // the run or the team in the Coding Agent app, in a normal window).
+  "codingAgent.liveView": "Open",
+  // The chat's run card, settled: "2 files · 9 min" and a PR chip; paused on a
+  // refusal: the "Needs you" chip. The chat's TEAM card (CodingTeamActivityCard):
+  // its status chip, the phase line, each task's state, why a team stopped, and
+  // the desktop's team finish card (page.tsx), whose Open hands the app the team.
+  "codingAgent.chatNeedsYou": "Needs you",
+  "codingAgent.chatFiles": "{n} files",
+  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatTeam.queued": "Queued",
+  "codingAgent.chatTeam.planning": "Planning",
+  "codingAgent.chatTeam.working": "Working",
+  "codingAgent.chatTeam.reviewing": "Reviewing",
+  "codingAgent.chatTeam.done": "Done",
+  "codingAgent.chatTeam.failed": "Failed",
+  "codingAgent.chatTeam.stopped": "Stopped",
+  "codingAgent.chatTeam.tasks": "{done} of {total} tasks",
+  "codingAgent.chatTeam.reason": "Stopped: {reason}",
+  "codingAgent.chatTeam.taskPending": "waiting",
+  "codingAgent.chatTeam.taskWorking": "in progress",
+  "codingAgent.chatTeam.taskDone": "done",
+  "codingAgent.chatTeam.taskAccepted": "reviewed, approved",
+  "codingAgent.chatTeam.taskRejected": "sent back",
+  "codingAgent.chatTeam.taskFailed": "failed",
+  "codingAgent.chatTeam.noticeFinished": "Coding team finished",
+  "codingAgent.chatTeam.noticeFailed": "Coding team did not finish",
+  "codingAgent.chatTeam.noticeStopped": "Coding team stopped",
+  "codingAgent.chatTeam.noticeOpen": "Open the team",
   "codingAgent.livePreviewTitle": "Live terminal",
   "codingAgent.livePreviewOpenApp": "Open in Terminal",
   "codingAgent.fullTask": "Show the whole task",

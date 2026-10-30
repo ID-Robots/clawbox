@@ -39,6 +39,7 @@ import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
 import {
   OPEN_CODING_RUN_EVENT,
+  OPEN_CODING_TEAM_EVENT,
   dispatchOpenApp,
   notifyCodingAgentChanged,
   notifyCodingRunStarted,
@@ -46,6 +47,7 @@ import {
   onStandaloneAppPage,
   standaloneAppHref,
   takePendingCodingRun,
+  takePendingCodingTeam,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import ImportProjectPanel, { type ImportResult } from "./ImportProjectPanel";
@@ -556,7 +558,15 @@ const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
   anthropic: "codingAgent.pausedAllowanceAnthropic",
 };
 
-export default function CodingAgentApp() {
+/**
+ * `meta` rides on the window's record (page.tsx `openApp(appId, forceNew,
+ * meta)`): what the app should open on when the desktop was asked for a
+ * place in it — `runId`, `teamId` or `projectId`, from `ui_open_app coding`
+ * with a target (mcp/tools/desktop.ts). Read once, on mount; the run and the
+ * team also arrive through the hand-off slots below, which an open window
+ * hears too.
+ */
+export default function CodingAgentApp({ meta }: { meta?: Record<string, string> } = {}) {
   const { t, locale } = useT();
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -1075,6 +1085,60 @@ export default function CodingAgentApp() {
     window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
     return () => window.removeEventListener(OPEN_CODING_RUN_EVENT, handler);
   }, []);
+
+  /**
+   * The TEAM hand-off — the chat's team card, the desktop's team finish card,
+   * `ui_open_app coding` with a team — on the run's two paths: the `window`
+   * slot for a cold open, the event for a window already up. Kept as a
+   * pending id until the team list holds the team, then opened: until the
+   * team has a page of its own (the redesign's step 5) it lands on its
+   * project's Team tab, the way a team chart's "Open team" does
+   * (`openTeamFor`). A team whose project is not on the list opens nothing.
+   */
+  const [pendingTeamId, setPendingTeamId] = useState<string | null>(null);
+  // The window's `meta` (see the props): read once, here, and never again.
+  const metaRef = useRef(meta);
+  useEffect(() => {
+    const first = metaRef.current;
+    const pending = takePendingCodingTeam() ?? (first?.teamId || null);
+    if (pending) setPendingTeamId(pending);
+    if (first?.runId && !takePendingCodingRun()) { setOpenRunId(first.runId); setPage("home"); }
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ teamId?: unknown }>).detail;
+      const id = detail?.teamId;
+      if (typeof id === "string" && id) {
+        takePendingCodingTeam();
+        setPendingTeamId(id);
+      }
+    };
+    window.addEventListener(OPEN_CODING_TEAM_EVENT, handler);
+    return () => window.removeEventListener(OPEN_CODING_TEAM_EVENT, handler);
+  }, []);
+  useEffect(() => {
+    if (!pendingTeamId || loading) return;
+    const team = teams.find((x) => x.id === pendingTeamId);
+    if (!team) return;
+    const project = projects.find((pr) => (team.projectId ? pr.kind === "codeProject" && pr.folder === team.projectId : pr.directory === team.directory));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the hand-off lands once the lists are in
+    setPendingTeamId(null);
+    if (!project) return;
+    setWorkspaceTab({ directory: project.directory, tab: "team" });
+    setOpenRunId(null);
+    setPage("home");
+    setOpenProjectDir(project.directory);
+  }, [pendingTeamId, loading, teams, projects]);
+  /** `ui_open_app coding` with a project: its page, once the list names it — a code project by id, a folder by its name or path. */
+  const [pendingProjectId, setPendingProjectId] = useState<string | null>(() => meta?.projectId || null);
+  useEffect(() => {
+    if (!pendingProjectId || loading) return;
+    const project = projects.find((pr) => (pr.kind === "codeProject" && pr.folder === pendingProjectId) || pr.directory === pendingProjectId || pr.directory.split("/").pop() === pendingProjectId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- as above
+    setPendingProjectId(null);
+    if (!project) return;
+    setOpenRunId(null);
+    setPage("home");
+    setOpenProjectDir(project.directory);
+  }, [pendingProjectId, loading, projects]);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
   /** The project page's Create PR: the branch the project is on, against the remote's default. */

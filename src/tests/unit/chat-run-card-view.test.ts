@@ -7,7 +7,7 @@
  * window to full screen, over a size and place the owner had chosen, and a
  * window already up lost both. The maximize CAPABILITY stays in ui-events —
  * the desktop's finish card or a future caller may want it — but the chat
- * must not ask for it. Two pins: the call site in ChatPopup, and the event
+ * must not ask for it. Two pins: the call site in CodingChatCards, and the event
  * `dispatchOpenCodingRun` sends when nothing is asked, which is what the
  * desktop reads.
  */
@@ -22,13 +22,16 @@ import {
   type OpenAppDetail,
 } from "@/lib/ui-events";
 
-const CHAT_POPUP = fs.readFileSync(path.join(process.cwd(), "src/components/ChatPopup.tsx"), "utf-8");
+// The call site moved with the cards into the host both chats render
+// (src/components/CodingChatCards.tsx, 2026-10-30); the pin moved with it.
+const CHAT_POPUP = fs.readFileSync(path.join(process.cwd(), "src/components/CodingChatCards.tsx"), "utf-8");
 
 describe("the chat's View button on a coding run card", () => {
   it("hands the run over without asking for a maximize", () => {
-    // The one call site: the card's onOpen. A run id and nothing else — the
-    // phone's close of the full-screen chat around it (`openFromChat`) is
-    // pinned in src/tests/components/chat-run-card-view-phone.test.tsx.
+    // The one call site: the card's onOpen in the shared host. A run id and
+    // nothing else — the phone's close of the full-screen chat around it
+    // (`openFromChat`, the host's prop) is pinned in
+    // src/tests/components/chat-run-card-view-phone.test.tsx.
     // Whitespace-tolerant: a formatter re-wrapping the JSX is not a change.
     expect(CHAT_POPUP).toMatch(/onOpen\s*=\s*\{\s*\(\s*\)\s*=>\s*openFromChat\(\s*\(\s*\)\s*=>\s*dispatchOpenCodingRun\(\s*run\.id\s*\)\s*\)\s*\}/);
     // And no other chat-side caller sneaks the option back in.

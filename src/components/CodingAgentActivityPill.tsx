@@ -120,7 +120,30 @@ export interface CodingAgentCardLabels extends Record<Exclude<CodingRunStatus, "
   busy?: string;
   /** The header's × — "Hide this card". Falls back to English. */
   dismiss?: string;
+  /** The chip on a run that waits on the owner — a refusal it cannot go on without. */
+  needsYou?: string;
+  /** A "{n} files" template for the settled card's meta line. */
+  files?: string;
+  /** A "PR #{n}" template for the settled card's chip. */
+  pr?: string;
 }
+
+/**
+ * THE SETTLED STATE (the 2026-10-30 redesign)
+ *
+ * A run that is over — done, failed, stopped, gave up — is drawn as a
+ * RESULT, not as a stopped progress view: the status glyph and the title,
+ * then the result's first sentence (`summaryLine`, worked out by the runs
+ * route), a meta line of "2 files · 9 min" with a PR chip when the run
+ * opened one, and Open. A failed run shows its error's first line in the
+ * danger tone instead of a result. The expanded panel stays: the steps are
+ * the record of what it did. A paused run waiting on the owner carries the
+ * "Needs you" chip and the refused line as its body; Open lands on the run
+ * page, where the refusal card and its Allow next time are.
+ *
+ * Open and × are 44 × 44 targets (the mockup's `.ccard .x`), drawn with
+ * negative margins so the header row keeps the height of its text.
+ */
 
 /** Plan items drawn before the list folds into "+N more". */
 const TODOS_SHOWN = 8;
@@ -245,6 +268,9 @@ export default function CodingAgentActivityPill(
   },
 ) {
   const live = run.status === "running";
+  // Over, one way or another: the card reports a result rather than progress.
+  const settled = run.status === "completed" || run.status === "failed" || run.status === "stopped" || run.status === "gave_up";
+  const needsYou = run.needsYou === true && run.status === "paused";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!live) return;
@@ -317,14 +343,36 @@ export default function CodingAgentActivityPill(
     </span>,
   ];
   if (run.projectId) meta.push(<span key="project">{run.projectId}</span>);
-  if (subTotal > 0 && labels.agents) {
+  if (settled && labels.files && (run.filesTouched ?? 0) > 0) {
+    meta.push(<span key="files">{labels.files.replaceAll("{n}", String(run.filesTouched ?? 0))}</span>);
+  }
+  if (!settled && subTotal > 0 && labels.agents) {
     meta.push(<span key="agents">{labels.agents.replaceAll("{n}", String(subTotal))}</span>);
   }
-  if (used > 0 && labels.tokensWord) {
+  if (!settled && used > 0 && labels.tokensWord) {
     meta.push(<span key="tokens">{`${tokens(used)} ${labels.tokensWord}`}</span>);
   }
   // aria-hidden lives on the clock's own span below.
   meta.push(<span key="took" aria-hidden="true">{took}</span>);
+  if (settled && run.prNumber != null) {
+    meta.push(
+      <span
+        key="pr"
+        data-testid="coding-agent-activity-pr"
+        style={{ display: "inline-flex", alignItems: "center", height: 18, padding: "0 7px", borderRadius: 9, fontSize: 11, background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.8)" }}
+      >
+        {(labels.pr ?? "PR #{n}").replaceAll("{n}", String(run.prNumber))}
+      </span>,
+    );
+  }
+  // The settled card's one line: the result's first sentence, or — for a
+  // run that failed — its error's first line. A paused run that waits on the
+  // owner shows the refused action instead.
+  const resultLine = run.status === "failed"
+    ? (run.errorLine ?? run.summaryLine ?? null)
+    : settled ? (run.summaryLine ?? null) : null;
+  const bodyLine = needsYou ? (run.refusedLine ?? null) : resultLine;
+  const bodyTone = run.status === "failed" ? "#fca5a5" : needsYou ? "#fcd34d" : "rgba(255,255,255,0.8)";
 
   // The expanded panel's counters. Turns only once there are any: the runner
   // learns the count from the final result event, so a live run has 0, and
@@ -353,19 +401,21 @@ export default function CodingAgentActivityPill(
       // here so it does not also toggle — and so does the expanded panel as
       // a whole, which is for reading, not pressing.
       onClick={toggle}
+      // The Create card's surface (NewAppWizardCard): one family of cards in
+      // the transcript, the full width of it, the mockup's `.ccard`.
       style={{
         display: "flex",
         flexDirection: "column",
         gap: 4,
-        padding: "8px 12px",
-        borderRadius: 12,
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        padding: "10px 12px",
+        borderRadius: 14,
+        background: "rgba(0,0,0,0.35)",
+        border: "1px solid rgba(255,255,255,0.1)",
         color: "rgba(255,255,255,0.85)",
         fontSize: 12,
         maxWidth: "100%",
         minWidth: 220,
-        alignSelf: "flex-start",
+        alignSelf: "stretch",
         cursor: "pointer",
       }}
     >
@@ -407,6 +457,15 @@ export default function CodingAgentActivityPill(
           }}>
             {title}
           </span>
+          {needsYou ? (
+            // The run waits on the owner: the one chip the card ever wears.
+            <span
+              data-testid="coding-agent-activity-needs-you"
+              style={{ display: "inline-flex", alignItems: "center", height: 18, padding: "0 7px", borderRadius: 9, fontSize: 11, fontWeight: 600, background: "rgba(252,211,77,0.16)", color: "#fcd34d", flexShrink: 0 }}
+            >
+              {labels.needsYou ?? "Needs you"}
+            </span>
+          ) : null}
           <span
             className="material-symbols-rounded"
             aria-hidden="true"
@@ -426,16 +485,23 @@ export default function CodingAgentActivityPill(
             title={openLabel}
             aria-label={openLabel}
             data-testid="coding-agent-activity-view"
+            // A 44 px target, the row's own height kept by the margin.
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minHeight: 44,
+              minWidth: 44,
+              margin: "-12px 0",
               background: "rgba(52,211,153,0.12)",
               border: "1px solid rgba(52,211,153,0.35)",
-              borderRadius: 6,
+              borderRadius: 8,
               color: "#a7f3d0",
               cursor: "pointer",
               font: "inherit",
-              fontSize: 11,
+              fontSize: 12,
               fontWeight: 600,
-              padding: "1px 7px",
+              padding: "0 10px",
               flexShrink: 0,
             }}
           >
@@ -443,10 +509,10 @@ export default function CodingAgentActivityPill(
           </button>
         ) : null}
         {onDismiss ? (
-          // ×: hide the card. It stops the click like the View button does —
-          // putting a card away is not a request to expand it first. A 28px
-          // box with the glyph centred: big enough to hit on a phone without
-          // making the header row taller than its text.
+          // ×: hide the card. It stops the click like the Open button does —
+          // putting a card away is not a request to expand it first. A 44 px
+          // box with the glyph centred — a thumb target — drawn with negative
+          // margins so the header row keeps the height of its text.
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onDismiss(); }}
@@ -457,9 +523,9 @@ export default function CodingAgentActivityPill(
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              width: 28,
-              height: 28,
-              margin: "-6px -6px -6px 0",
+              width: 44,
+              height: 44,
+              margin: "-12px -14px -12px 0",
               padding: 0,
               border: 0,
               borderRadius: 8,
@@ -483,6 +549,18 @@ export default function CodingAgentActivityPill(
           </span>
         ))}
       </div>
+      {bodyLine ? (
+        // The settled card's result, or a paused run's refused action — the
+        // one sentence that answers "is it done, and what came of it".
+        <div
+          data-testid="coding-agent-activity-result"
+          data-tone={run.status === "failed" ? "danger" : needsYou ? "attention" : "result"}
+          title={bodyLine}
+          style={{ fontSize: 12.5, lineHeight: 1.4, color: bodyTone, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
+        >
+          {bodyLine}
+        </div>
+      ) : null}
       {live && !expanded && nowLine ? (
         // The run's own words for what it is on — the in-progress item of its
         // plan. Only while live and collapsed: expanded, the checklist below
@@ -667,7 +745,7 @@ export default function CodingAgentActivityPill(
           ) : null}
         </div>
       ) : null}
-      {subTotal > 0 ? (
+      {subTotal > 0 && !settled ? (
         // One dot per sub-agent, capped so a fan-out cannot flood the card;
         // filled + pulsing while that helper is still out, hollow once it is
         // back. The per-type breakdown rides on `title` — same vocabulary as

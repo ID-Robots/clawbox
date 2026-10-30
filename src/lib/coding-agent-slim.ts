@@ -159,3 +159,128 @@ export function mergeSlimTeams<T extends SlimmableTeam>(held: readonly T[], inco
     };
   });
 }
+
+// ── What the CHAT's cards read ───────────────────────────────────────────────
+//
+// The chat shows every run and team as a card (CodingChatCards.tsx), polled
+// on the same beat as the Coding Agent app. A card needs a line, not a board:
+// the result's first sentence, how many tasks are done, whether there is a
+// pull request. These are worked out here, server side, so the chat never
+// parses a result text or walks a task list, and so the runs route and the
+// team route hand out the same shape the app's own Now section can read.
+
+/** The longest line a card draws: the result's first sentence, an error's first line. */
+export const CARD_LINE_CHARS = 160;
+
+/**
+ * The first sentence of a text, cut to `max` characters. Markdown headings
+ * and list marks on the first line come off, so "## Done" reads as "Done";
+ * a text with no sentence end is its first line.
+ */
+export function firstSentence(text: string | null | undefined, max = CARD_LINE_CHARS): string | null {
+  if (typeof text !== "string") return null;
+  const line = text.split(/\r?\n/).map((l) => l.replace(/^\s*(?:#{1,6}\s+|[-*•]\s+|\d+\.\s+)?/, "").trim()).find((l) => l.length > 0);
+  if (!line) return null;
+  const m = /^(.+?[.!?])(?:\s|$)/.exec(line);
+  const sentence = (m ? m[1] : line).trim();
+  return sentence.length > max ? sentence.slice(0, max - 1).trimEnd() + "…" : sentence;
+}
+
+/** A run's result in one line — `resultText ?? summary`, first sentence — or null before it has one. */
+export function runSummaryLine(run: { summary?: string | null; resultText?: string | null }): string | null {
+  return firstSentence(run.resultText ?? run.summary);
+}
+
+/** One task of a team, as the card lists it. */
+export interface TeamCardTask {
+  id: string;
+  title: string;
+  status: string;
+  verdict: "accepted" | "rejected" | null;
+  workerRunId: string | null;
+  reviewerRunId: string | null;
+}
+
+/** One of the team's runs: who, and whether it is still at work. */
+export interface TeamCardAgent {
+  role: "planner" | "worker" | "reviewer" | "lead";
+  runId: string;
+  state: "active" | "done";
+}
+
+/** What the chat's team card and Home's Now section draw without the board. */
+export interface TeamCard {
+  /** The team's status word; the card's chip. */
+  phase: string;
+  tasksDone: number;
+  tasksTotal: number;
+  /** In outline order (the board's), at most TEAM_CARD_TASKS. */
+  tasks: TeamCardTask[];
+  prNumber: number | null;
+  /** The final review's first sentence, or the error's, or null. */
+  resultLine: string | null;
+  agents: TeamCardAgent[];
+}
+
+/** Tasks a card lists; the board keeps them all. */
+export const TEAM_CARD_TASKS = 20;
+/** A task's title on a card: the brief's first line, this long. */
+const TEAM_CARD_TITLE_CHARS = 80;
+
+type CardableTask = {
+  task_id: string;
+  task_description: string;
+  status: string;
+  assigned_to?: string | null;
+  reviewRunId?: string | null;
+  review?: { verdict: "accepted" | "rejected" } | null;
+};
+
+type CardableTeam = {
+  status: string;
+  tasks: readonly CardableTask[];
+  runs?: readonly { id: string; role: TeamCardAgent["role"]; taskId: string | null }[];
+  pr?: { number: number } | null;
+  finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
+  error?: string | null;
+};
+
+/**
+ * The card's figures from a board, however whole or slim the board is.
+ *
+ * A retired task will never be done, so it is neither counted nor listed
+ * (the finish notice counts the same way). An agent is `active` while the
+ * board still expects something of it: the planner while the team plans, a
+ * worker while its task is in progress, a reviewer while its task is
+ * complete and unruled; every other run on the cast list is done.
+ */
+export function teamCard(team: CardableTeam): TeamCard {
+  const tasks = team.tasks.filter((t) => t.status !== "retired");
+  const done = tasks.filter((t) => t.status === "complete").length;
+  const byId = new Map(tasks.map((t) => [t.task_id, t]));
+  const agents: TeamCardAgent[] = (team.runs ?? []).map((run) => {
+    const task = run.taskId ? byId.get(run.taskId) : undefined;
+    let active = false;
+    if (run.role === "planner") active = team.status === "planning";
+    else if (run.role === "worker") active = !!task && task.status === "in_progress" && task.assigned_to === run.id;
+    else if (run.role === "reviewer") active = !!task && task.status === "complete" && !task.review && task.reviewRunId === run.id;
+    const settled = team.status === "done" || team.status === "failed" || team.status === "stopped";
+    return { role: run.role, runId: run.id, state: active && !settled ? "active" : "done" };
+  });
+  return {
+    phase: team.status,
+    tasksDone: done,
+    tasksTotal: tasks.length,
+    tasks: tasks.slice(0, TEAM_CARD_TASKS).map((t) => ({
+      id: t.task_id,
+      title: firstSentence(t.task_description, TEAM_CARD_TITLE_CHARS) ?? t.task_id,
+      status: t.status,
+      verdict: t.review?.verdict ?? null,
+      workerRunId: t.assigned_to ?? null,
+      reviewerRunId: t.reviewRunId ?? null,
+    })),
+    prNumber: team.pr?.number ?? null,
+    resultLine: firstSentence(team.finalReview?.notes) ?? firstSentence(team.error),
+    agents,
+  };
+}

@@ -9,7 +9,7 @@ import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import WhatsNewCard from "@/components/WhatsNewCard";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, notifyCodingTeamChanged, handoffCodingRun, handoffCodingTeam, openNewAppCard, type OpenAppDetail } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { useWhatsNew } from "@/lib/use-whats-new";
@@ -484,7 +484,10 @@ const WindowContent = memo(function WindowContent({ app, meta, windowId, termina
         />
       );
     case "coding":
-      return <CodingAgentApp />;
+      // The window's `meta` names what the app should open on — a run, a
+      // team or a project (`ui_open_app coding` with a target, page.tsx's
+      // ring handler) — strings only, the way a Terminal's command rides.
+      return <CodingAgentApp meta={meta} />;
     case "store":
       return (
         <AppStore
@@ -2496,17 +2499,22 @@ function ChromeDesktopInner() {
     return () => window.removeEventListener("clawbox:open-terminal", handleOpenTerminal);
   }, []);
 
-  /** Finished coding runs waiting to be seen, newest first. */
-  const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
+  /**
+   * Finished coding runs AND teams waiting to be seen, newest first. `id` is
+   * the run's or the team's; `kind` says which, and so where Open lands (the
+   * run's page, or the team — `handoffCodingRun` / `handoffCodingTeam`). A
+   * team's finish used to be a plain toast (2026-10-30).
+   */
+  const [codingNotices, setCodingNotices] = useState<{ id: string; kind: "run" | "team"; status: string; projectId: string | null; message: string }[]>([]);
   // A finish card leaves on its own after a while — the owner asked for every
   // top-right card to "hide after some time" — and the run is always one
-  // click away in the app. Keyed by run id so a card re-shown by a ring
-  // replay keeps its clock and never gets two.
-  const dismissCodingNotice = useCallback((runId: string) => {
-    setCodingNotices(prev => prev.filter(n => n.runId !== runId));
+  // click away in the app. Keyed by id so a card re-shown by a ring replay
+  // keeps its clock and never gets two.
+  const dismissCodingNotice = useCallback((id: string) => {
+    setCodingNotices(prev => prev.filter(n => n.id !== id));
   }, []);
   const codingNoticeKeys = useMemo(
-    () => (noticesHeld ? [] : codingNotices.map(n => n.runId)),
+    () => (noticesHeld ? [] : codingNotices.map(n => n.id)),
     [codingNotices, noticesHeld],
   );
   useAutoHide(codingNoticeKeys, dismissCodingNotice);
@@ -2542,7 +2550,45 @@ function ChromeDesktopInner() {
     let seen = new Set<string>();
     const handle = (action: Record<string, unknown>) => {
       if (action.type === "open_app" && typeof action.appId === "string") {
-        openAppRef.current(action.appId);
+        // `ui_open_app coding` may name WHERE in the app to land — a run, a
+        // team or a project (mcp/tools/desktop.ts). The run and the team go
+        // through the same hand-offs the chat cards use, so a cold open and an
+        // open window both land there; the project rides on the window's meta.
+        const target = action.target && typeof action.target === "object" ? action.target as Record<string, unknown> : null;
+        const meta: Record<string, string> = {};
+        if (target) {
+          if (typeof target.runId === "string" && target.runId) { handoffCodingRun(target.runId); meta.runId = target.runId; }
+          else if (typeof target.teamId === "string" && target.teamId) { handoffCodingTeam(target.teamId); meta.teamId = target.teamId; }
+          else if (typeof target.projectId === "string" && target.projectId) meta.projectId = target.projectId;
+        }
+        openAppRef.current(action.appId, false, Object.keys(meta).length ? meta : undefined);
+      } else if (action.type === "open_card" && action.card === "new_app") {
+        // The assistant opens the Create card itself (`ui_open_card`): the chat
+        // has to be open before the card inside it can be seen, and the card
+        // takes what it should open on — a project, the team switch.
+        setChatOpen(true);
+        openNewAppCard({
+          ...(typeof action.project === "string" && action.project ? { project: action.project } : {}),
+          ...(action.team === true ? { team: true } : {}),
+        });
+      } else if (action.type === "coding_run") {
+        // A run began (the run route says so, whoever asked): the chat's cards
+        // re-ask the box at once instead of waiting for their slow poll.
+        notifyCodingRunStarted();
+      } else if (action.type === "coding_team" && typeof action.teamId === "string") {
+        // A team began or settled (the team route and coding-team.ts say so).
+        // Settled: the same top-right FINISH CARD a run gets, with Open landing
+        // on the team; a toast could hand the app nothing. Either way the
+        // chat's team card re-asks the box.
+        const teamId = action.teamId;
+        if (action.event === "settled") {
+          setCodingNotices(prev => (
+            prev.some(n => n.id === teamId)
+              ? prev
+              : [{ id: teamId, kind: "team" as const, status: String(action.status ?? ""), projectId: typeof action.projectId === "string" ? action.projectId : null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
+          ));
+        }
+        notifyCodingTeamChanged();
       } else if (action.type === "register_webapp" && typeof action.appId === "string" && action.name && action.url) {
         const appId = action.appId;
         setInstalledApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
@@ -2562,9 +2608,9 @@ function ChromeDesktopInner() {
         // that slides away. Newest first, deduped by run id.
         const runId = action.runId;
         setCodingNotices(prev => (
-          prev.some(n => n.runId === runId)
+          prev.some(n => n.id === runId)
             ? prev
-            : [{ runId, status: String(action.status ?? ""), projectId: typeof action.projectId === "string" ? action.projectId : null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
+            : [{ id: runId, kind: "run" as const, status: String(action.status ?? ""), projectId: typeof action.projectId === "string" ? action.projectId : null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
         ));
         // A notice here can be the first this browser hears of a run — one
         // started from another device, or the server-side review pass that
@@ -3465,18 +3511,22 @@ function ChromeDesktopInner() {
           {codingNotices.map((notice) => {
             const failed = notice.status === "failed";
             const stopped = notice.status === "stopped";
+            const team = notice.kind === "team";
             const accent = failed ? "#f87171" : stopped ? "#cbd5e1" : "#4ade80";
-            const glyph = failed ? "error" : stopped ? "stop_circle" : "task_alt";
-            const title = failed
-              ? t("codingAgent.chatFailed")
-              : stopped ? t("codingAgent.chatStopped") : t("codingAgent.chatFinished");
+            const glyph = failed ? "error" : stopped ? "stop_circle" : team ? "groups" : "task_alt";
+            const title = team
+              ? (failed ? t("codingAgent.chatTeam.noticeFailed") : stopped ? t("codingAgent.chatTeam.noticeStopped") : t("codingAgent.chatTeam.noticeFinished"))
+              : failed
+                ? t("codingAgent.chatFailed")
+                : stopped ? t("codingAgent.chatStopped") : t("codingAgent.chatFinished");
             return (
               <div
-                key={notice.runId}
+                key={notice.id}
                 className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
                 data-testid="coding-agent-notice"
+                data-kind={notice.kind}
               >
                 <div className="flex items-start gap-3 px-4 py-3">
                   <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: `${accent}26`, border: `1px solid ${accent}4d` }}>
@@ -3485,11 +3535,11 @@ function ChromeDesktopInner() {
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-semibold text-white">{title}</div>
                     {notice.projectId && <div className="text-xs text-white/60 mt-0.5 truncate">{notice.projectId}</div>}
-                    <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">{notice.runId}</div>
+                    <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">{notice.id}</div>
                   </div>
                   <button
                     type="button"
-                    onClick={() => dismissCodingNotice(notice.runId)}
+                    onClick={() => dismissCodingNotice(notice.id)}
                     className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
                     aria-label={t("codingAgent.noticeDismiss")}
                   >
@@ -3497,16 +3547,20 @@ function ChromeDesktopInner() {
                   </button>
                 </div>
                 <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
-                  {/* Straight to the run's own page, not the app's home:
-                      the handoff names the run, then the app opens on it. */}
+                  {/* Straight to the run's own page — or the team — not the
+                      app's home: the handoff names it, then the app opens on it. */}
                   <button
                     type="button"
-                    onClick={() => { handoffCodingRun(notice.runId); openApp("coding"); dismissCodingNotice(notice.runId); }}
+                    onClick={() => {
+                      if (team) handoffCodingTeam(notice.id); else handoffCodingRun(notice.id);
+                      openApp("coding");
+                      dismissCodingNotice(notice.id);
+                    }}
                     data-testid="coding-agent-notice-open"
                     className="flex-1 px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 14 }}>smart_toy</span>
-                    {t("codingAgent.noticeOpenRun")}
+                    {t(team ? "codingAgent.chatTeam.noticeOpen" : "codingAgent.noticeOpenRun")}
                   </button>
                 </div>
               </div>

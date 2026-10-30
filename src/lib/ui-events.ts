@@ -89,6 +89,44 @@ export function takePendingCodingRun(): string | null {
   return id;
 }
 
+/**
+ * "Open the Coding Agent app on this TEAM."
+ *
+ * The run trio above, for a coding team: the chat's team card and the
+ * desktop's team finish card end here, and the app opens on the team rather
+ * than on its home. The same two handoffs — the `window` slot survives a
+ * cold open, the event reaches an app already on screen — and the same
+ * take-once read on the app's side. Until the team has a page of its own,
+ * the app lands on the team's project with its Team tab selected.
+ */
+export const OPEN_CODING_TEAM_EVENT = "clawbox:open-coding-team";
+
+type PendingTeamWindow = Window & { __clawboxPendingCodingTeam?: unknown };
+
+/** The handoff WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingTeam(teamId: string): void {
+  if (typeof window === "undefined") return;
+  const w = window as PendingTeamWindow;
+  w.__clawboxPendingCodingTeam = teamId;
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_TEAM_EVENT, { detail: { teamId } }));
+}
+
+/** Open the Coding Agent app on a team, in the window's own size and place — never maximized, like the run's. */
+export function dispatchOpenCodingTeam(teamId: string): void {
+  if (typeof window === "undefined") return;
+  handoffCodingTeam(teamId);
+  dispatchOpenApp("coding");
+}
+
+/** The team handed off before the app mounted, taken exactly once. */
+export function takePendingCodingTeam(): string | null {
+  if (typeof window === "undefined") return null;
+  const w = window as PendingTeamWindow;
+  const id = typeof w.__clawboxPendingCodingTeam === "string" ? w.__clawboxPendingCodingTeam : null;
+  delete w.__clawboxPendingCodingTeam;
+  return id;
+}
+
 
 
 /**
@@ -574,6 +612,29 @@ export function onCodingRunStarted(listener: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   window.addEventListener(CODING_RUN_STARTED_EVENT, listener);
   return () => window.removeEventListener(CODING_RUN_STARTED_EVENT, listener);
+}
+
+/**
+ * "A coding TEAM was just started, or just settled, somewhere this browser
+ * can see." The team's counterpart of CODING_RUN_STARTED_EVENT: the chat's
+ * cards poll the team list on the same beat as the runs, and this is the
+ * nudge that makes a team started from another device, or one the ring just
+ * reported settled, show up before the next slow poll. A signal, not data:
+ * the listener re-asks the team route.
+ */
+export const CODING_TEAM_CHANGED_EVENT = "clawbox:coding-team-changed";
+
+/** Emit the signal above — once the team route has ANSWERED, or when the desktop hears a team settled; never on the click. */
+export function notifyCodingTeamChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CODING_TEAM_CHANGED_EVENT));
+}
+
+/** Subscribe to "a coding team changed" and return the unsubscribe. */
+export function onCodingTeamChanged(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(CODING_TEAM_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(CODING_TEAM_CHANGED_EVENT, listener);
 }
 
 /**

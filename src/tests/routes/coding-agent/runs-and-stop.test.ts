@@ -8,6 +8,7 @@
  * an hour. Stop is gated in-handler like every other state change.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runSummaryLine } from "@/lib/coding-agent-slim";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import { saveEnv } from "@/tests/helpers/env";
 
@@ -64,7 +65,8 @@ describe("GET runs", () => {
     expect(res.status).toBe(200);
     // The route decorates each run with where its transcript lives, so the
     // app can offer a live preview without knowing Claude Code's layout.
-    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null }] });
+    // `summaryLine` rides on every run for the chat's settled card.
+    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null, summaryLine: runSummaryLine(RUN) }] });
     expect(listRuns).toHaveBeenCalledWith(30);
   });
 
@@ -73,11 +75,11 @@ describe("GET runs", () => {
     const live = { ...settled, id: "run-live00001", status: "running" };
     listRuns.mockReturnValue([settled, live]);
     const slim = await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=30&artifacts=1&slim=1"))).json();
-    expect(slim.runs[0]).toEqual({ ...settled, transcriptPath: null, artifacts: [], slim: true, progress: [], progressAt: [], resultText: null, allowRules: [], deniedActions: [], denials: [] });
-    expect(slim.runs[1]).toEqual({ ...live, transcriptPath: null, artifacts: [] });
+    expect(slim.runs[0]).toEqual({ ...settled, transcriptPath: null, artifacts: [], slim: true, progress: [], progressAt: [], resultText: null, allowRules: [], deniedActions: [], denials: [], summaryLine: runSummaryLine({ ...settled, resultText: null }) });
+    expect(slim.runs[1]).toEqual({ ...live, transcriptPath: null, artifacts: [], summaryLine: runSummaryLine(live) });
     // Without the flag every record is whole, as the mount read and the read after a run settles need it.
     const whole = await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=30"))).json();
-    expect(whole.runs).toEqual([{ ...settled, transcriptPath: null }, { ...live, transcriptPath: null }]);
+    expect(whole.runs).toEqual([{ ...settled, transcriptPath: null, summaryLine: runSummaryLine(settled) }, { ...live, transcriptPath: null, summaryLine: runSummaryLine(live) }]);
     // One run by id is never slim: that is how a run page fills itself.
     getRun.mockReturnValue(settled);
     expect((await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab&slim=1"))).json()).run.progress).toEqual(["Read index.html"]);
@@ -85,7 +87,7 @@ describe("GET runs", () => {
 
   it("returns one run by id without waiting when wait is absent", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab"));
-    expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null } });
+    expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null, summaryLine: runSummaryLine(RUN) } });
     expect(waitForRun).not.toHaveBeenCalled();
   });
 

@@ -13,12 +13,10 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
-import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
-import { useCodingRunAutoHide } from '@/lib/use-coding-run-auto-hide'
-import { useDismissedCodingRuns } from '@/lib/use-dismissed-coding-runs'
+import { isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { CodingChatCards, NewAppCardSlot, NewAppToggleButton, useCodingChatCards, useNewAppCard } from '@/components/CodingChatCards'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
-import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import {
   AGENT_STARTING_DEADLINE_MS,
   AGENT_STARTING_RETRY_DELAYS_MS,
@@ -86,7 +84,7 @@ import {
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { modelFallbackNotice, ModelFallbackWatch, openProvidersSettings, reportModelFallback, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, dispatchOpenSettingsSection, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
+import { CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenSettingsSection, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { sameSpokenWords, shortSpeechTextFor, shortSpeechTextFromStream } from '@/lib/short-speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
@@ -619,7 +617,6 @@ import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-pre
 import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_CHAT_MODEL_LABEL, isClawboxAiProvider } from '@/lib/clawbox-ai-models'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
-import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import VoiceSecureNotice from '@/components/VoiceSecureNotice'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
@@ -1272,59 +1269,31 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   useEffect(() => {
     if (sending && (streaming || toolCalls.length > 0)) setTurnHeardFrom(true)
   }, [sending, streaming, toolCalls])
-  // A delegated coding run outlives the tool call that started it, so this is
-  // driven by the device's run record rather than the tool pills. Only probed
-  // while the chat is open, and only polled while a run is actually in flight.
-  const { runs: codingRuns, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
-  // Every run — live or settled — renders as a card IN the transcript, where
-  // the conversation that started it lives. A pinned bar above the messages
-  // was tried and rejected by the owner: it covered the chat rather than
-  // being part of it.
+  // The coding cards — one per run of its own and one per team, live then
+  // settled — in the transcript's main tab. A delegated run outlives the tool
+  // call that started it, so they are driven by the device's records rather
+  // than the tool pills; the host (src/components/CodingChatCards.tsx, shared
+  // with the full-page chat) owns the one poller, the owner's put-away set
+  // (the × on a card, kept in the kv store for good) and the clock that lets
+  // a card whose work finished cleanly leave on its own behind the 🤖 chip.
   //
-  // But a card is put away when the OWNER says so. A run lasts many minutes
-  // and its card is the last thing in the transcript, so it sat under every
-  // new message for the whole of that time. The × on a card puts its run id
-  // here, FOR GOOD — finished or still in flight; the owner follows a run from
-  // the Coding Agent app, not from a card they said to hide. A dismissed run's
-  // card is simply not rendered. Keyed by run id like `expandedLong` is keyed
-  // by message, and kept here rather than in the card for the same reason the
-  // card's own expanded flag is NOT here: the state has to outlive the card,
-  // which unmounts when it is dismissed. And it has to outlive this popup too:
-  // the set used to be React state emptied every time the chat closed and lost
-  // on a reload, and the 🤖 chip brought these cards back along with the ones
-  // that left on their own, so a card the owner hid came back. It is the
-  // owner's kv store now, read again whenever the chat opens — see
-  // src/lib/use-dismissed-coding-runs.ts — and nothing here brings one back.
-  const { dismissed: dismissedCodingRuns, dismiss: dismissRunCard } = useDismissedCodingRuns(isOpen)
-  // A card whose run the chat saw finish CLEANLY also goes on its own, five
-  // seconds after it turned green — nothing is left for anyone to do about
-  // it. Anything still going, or needing the owner — a pull request still in
-  // review or left for the owner included — stays. THESE are what the 🤖 chip
-  // at the end of the transcript brings back, and only these: the owner did
-  // not ask for them to go. See src/lib/use-coding-run-auto-hide.ts.
-  //
-  // The owner did not ask for this one to go, so it must not take the
-  // keyboard with it: a card that holds the focus (Tab onto its View, say)
-  // hands it to the 🤖 chip, which appears in the same render and is the way
-  // back to the card. Checked as the clock runs out, while the card is still
-  // in the document; moved once the chip is.
+  // The owner did not ask for an auto-hidden card to go, so it must not take
+  // the keyboard with it: a card that holds the focus (Tab onto its Open,
+  // say) hands it to the 🤖 chip, which appears in the same render and is the
+  // way back to the card. Checked as the clock runs out, while the card is
+  // still in the document; moved once the chip is.
   const restoreChipRef = useRef<HTMLButtonElement>(null)
   const focusRestoreChipRef = useRef(false)
-  const {
-    finishing: finishingCodingRuns,
-    hidden: autoHiddenCodingRuns,
-    restore: restoreAutoHiddenCodingRuns,
-  } = useCodingRunAutoHide(codingRuns, (id) => {
-    const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"]')
-    if (focused?.getAttribute('data-run-id') === id) focusRestoreChipRef.current = true
+  const codingCards = useCodingChatCards(isOpen, (id) => {
+    const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"], [data-testid="coding-team-activity"]')
+    if (focused?.getAttribute('data-run-id') === id || (focused?.getAttribute('data-team-id') && `team:${focused.getAttribute('data-team-id')}` === id)) focusRestoreChipRef.current = true
   })
-  // The cards on screen, and whether the restore chip has anything to restore
-  // — measured against the runs the hook still holds, so a stale id from a
-  // run the hook let go cannot leave a chip that restores nothing, and a card
-  // the owner put away with × after it had left on its own (or that left on
-  // its own while put away) does not count: the chip would not bring it back.
-  const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id) && !autoHiddenCodingRuns.has(run.id))
-  const autoHiddenCodingRunCount = codingRuns.filter(run => autoHiddenCodingRuns.has(run.id) && !dismissedCodingRuns.has(run.id)).length
+  const nudgeCodingAgent = codingCards.nudge
+  const dismissedCodingRuns = codingCards.dismissed
+  const dismissRunCard = codingCards.dismiss
+  const autoHiddenCodingRuns = codingCards.hidden
+  const restoreAutoHiddenCodingRuns = codingCards.restore
+  const autoHiddenCodingRunCount = codingCards.autoHiddenCount
   useLayoutEffect(() => {
     if (!focusRestoreChipRef.current) return
     focusRestoreChipRef.current = false
@@ -1391,76 +1360,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     open()
     if (mobile) onClose()
   }, [mobile, onClose])
-  const codingAgentCard = (run: CodingAgentActivity) => (
-    <CodingAgentActivityPill
-      key={run.id}
-      run={run}
-      labels={{
-        running: t("codingAgent.chatWorking"),
-        runningOwner: t("codingAgent.chatWorkingOwner"),
-        completed: t("codingAgent.chatFinished"),
-        failed: t("codingAgent.chatFailed"),
-        stopped: t("codingAgent.chatStopped"),
-        paused: t("codingAgent.chatPaused"),
-        draft: t("codingAgent.chatDraft"),
-        // Waiting for a slot: the box runs as many at once as the owner allows.
-        queued: t("codingAgent.chatQueued"),
-        // A run that worked and did not leave the deliverable behind: its own
-        // word, because "did not finish" would read as a fault and the one
-        // thing that helps here is opening it and resuming.
-        gave_up: t("codingAgent.chatGaveUp"),
-        timeLeft: t("codingAgent.timeLeft"),
-        // A template, not a sentence: the card fills in the count.
-        agents: t("codingAgent.chatAgents"),
-        tokensWord: t("codingAgent.tokensWord"),
-        // The expanded "live work" panel and the tooltip on its header.
-        liveWork: t("codingAgent.chatLiveWork"),
-        showDetails: t("codingAgent.showDetails"),
-        hideDetails: t("codingAgent.hideDetails"),
-        thinking: t("codingAgent.thinking"),
-        filesTouched: t("codingAgent.chatFilesTouched"),
-        turns: t("codingAgent.chatTurns"),
-        // The run's own plan on the card, and the word beside the three dots
-        // that say a live run is still working.
-        plan: t("codingAgent.chatPlan"),
-        done: t("codingAgent.chatDone"),
-        now: t("codingAgent.chatNow"),
-        more: t("codingAgent.chatMore"),
-        busy: t("codingAgent.chatBusy"),
-        // The header's ×.
-        dismiss: t("codingAgent.chatDismiss"),
-        // One word per kind of step the card can draw as a chip — the
-        // owner's language for what the harness names by tool.
-        steps: {
-          screenshot: t("codingAgent.chatScreenshot"),
-          lookingAtPage: t("codingAgent.chatLookingAtPage"),
-          openingPage: t("codingAgent.chatOpeningPage"),
-          drivingPage: t("codingAgent.chatDrivingPage"),
-          closingPage: t("codingAgent.chatClosingPage"),
-          write: t("codingAgent.chatWrite"),
-          edit: t("codingAgent.chatEdit"),
-          read: t("codingAgent.chatRead"),
-          plan: t("codingAgent.chatPlan"),
-        },
-      }}
-      // View: the run's own page in the Coding Agent app — the live terminal
-      // is embedded there while it runs. In a NORMAL window: the button asked
-      // for a maximize once, which threw a window the owner had sized and
-      // placed to full screen on every press; a window already up keeps its
-      // size and place now, and the chat is in the corner for a reason.
-      openLabel={t("codingAgent.liveView")}
-      onOpen={() => openFromChat(() => dispatchOpenCodingRun(run.id))}
-      // A run's screenshot opens in the SAME full-size preview the generated
-      // and attached images use (the portal at the end of this component),
-      // not a second lightbox of the card's own.
-      onPreview={(src, alt) => setPreview({ src, alt })}
-      // Put the card away for good — the 🤖 chip at the end of the transcript
-      // does not bring it back. See `dismissedCodingRuns` above.
-      onDismiss={() => dismissCodingRun(run.id)}
-      // Counting down to leaving on its own: the card fades out at the end.
-      autoHiding={finishingCodingRuns.has(run.id)}
-    />
-  )
   // The questions the agent is currently parked on, newest last.
   //
   // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
@@ -1643,94 +1542,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   }, [])
 
   // ── The Create button's wizard ──
-  // The same card the Coding Agent app opens: name, what it should do, which
-  // starter. Create hands ONE message to this very chat (through the window
-  // event the popup already listens for), so the request lands as the owner's
-  // turn and the assistant takes it from there. `maxTaskChars` is read from
-  // the run route once, when the card opens; until it answers the card uses
-  // the route's own default, and the route still refuses anything longer.
-  const [showNewApp, setShowNewApp] = useState(false)
-  // What the last opener asked the card to open on: the Coding Agent's
-  // project page hands over its project and the team switch.
-  const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
-  const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
-  // The ONE read of the Coding Agent's status this surface makes: the card's
-  // task ceiling comes off it, and so does the + button's gate below, so the
-  // two cannot disagree about what the box says. Answers the payload, or null
-  // for a route that could not be read — it never throws, because a caller
-  // falls back to opening the card rather than leaving the button dead.
-  const readCodingAgentStatus = useCallback(async (): Promise<Record<string, unknown> | null> => {
-    try {
-      const res = await fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
-      if (!res.ok) return null
-      const data: unknown = await res.json()
-      if (!data || typeof data !== 'object') return null
-      const n = (data as { maxTaskChars?: unknown }).maxTaskChars
-      if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
-      return data as Record<string, unknown>
-    } catch {
-      return null // the card keeps the default ceiling
-    }
-  }, [])
-  // Open the card as asked, no questions. This is the Coding Agent's OWN
-  // hand-off (its home's Create button, a project page's Plan), and that app
-  // already sits behind its wizard — gating it here would be a second gate
-  // on the same door, and a slower one.
-  const openNewApp = useCallback(() => {
-    // The fetch sits BESIDE the setter, not inside the updater: React may run
-    // an updater more than once per call, and one click must cost one request.
-    if (newAppMaxChars === null) void readCodingAgentStatus()
-    setShowNewApp(true)
-  }, [newAppMaxChars, readCodingAgentStatus])
-  // Closing forgets what the last opener asked for (a project, the team
-  // switch): the next "+" must open a fresh card, not the previous
-  // project's team form.
-  const closeNewApp = useCallback(() => { setShowNewApp(false); setNewAppOptions({}) }, [])
-  // Whether the + button is still deciding where to land: a second press
-  // while the status is in flight must cost no second request, and must not
-  // toggle the card back shut the moment the first press opens it.
-  const newAppGateRef = useRef(false)
-  // The + button. Opening first asks whether the Coding Agent's setup is
-  // finished: the card composes a message that asks the assistant to
-  // DELEGATE the build, and until the owner has been through that app's
-  // wizard (or while its switch is off) the delegation is refused — so the
-  // press used to open a form whose only outcome was a refusal. It lands on
-  // the Coding Agent app instead, in a plain window, where the wizard (or the
-  // switch) is the first thing on screen. Asked on EVERY press rather than
-  // once, because the answer changes in the other window: a wizard finished
-  // there must count on the next press, without a reload. A status the box
-  // cannot read opens the card — never a dead button — and so does one that
-  // predates the field, since only an explicit `false` is a refusal.
-  const toggleNewApp = useCallback(() => {
-    if (showNewApp) { closeNewApp(); return }
-    if (newAppGateRef.current) return
-    newAppGateRef.current = true
-    void readCodingAgentStatus().then(status => {
-      newAppGateRef.current = false
-      if (status && (status.setupComplete === false || status.enabled === false)) {
-        // A plain window — and on a phone the chat gets out of its way.
-        openFromChat(() => dispatchOpenApp('coding'))
-        return
-      }
-      setShowNewApp(true)
-    })
-  }, [showNewApp, closeNewApp, readCodingAgentStatus, openFromChat])
-
-  // The Coding Agent hands "Create app" over to here: the card composes one
-  // message for the assistant, so it belongs in the conversation that will
-  // carry the reply, not in a second window that cannot show it.
-  useEffect(() => {
-    const onNewApp = (e: Event) => {
-      const detail = (e as CustomEvent<{ project?: unknown; team?: unknown } | undefined>).detail
-      setNewAppOptions({
-        project: typeof detail?.project === 'string' ? detail.project : undefined,
-        team: detail?.team === true,
-      })
-      openNewApp()
-    }
-    window.addEventListener(NEW_APP_EVENT, onNewApp)
-    return () => window.removeEventListener(NEW_APP_EVENT, onNewApp)
-  }, [openNewApp])
+  // The same card the Coding Agent app opens, over the composer: name, what
+  // it should do, which starter. Create hands ONE message to this very chat
+  // (through the window event the popup already listens for). Its state, the
+  // `+` button's gate and the app's NEW_APP_EVENT hand-off are the shared
+  // host's (src/components/CodingChatCards.tsx), so the full-page chat has
+  // the same card.
+  const newApp = useNewAppCard(openFromChat)
+  const showNewApp = newApp.show
+  const closeNewApp = newApp.close
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -8644,7 +8464,17 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             and not `codingRuns`. `activeTabKey === null` is the predicate the
             strip itself already uses for "main is selected" (the main session's
             key is stored as null), so this is the same test, not a new one. */}
-        {activeTabKey === null && shownCodingRuns.map(codingAgentCard)}
+        {activeTabKey === null && (
+          <CodingChatCards
+            cards={codingCards}
+            openFromChat={openFromChat}
+            // A run's screenshot opens in the SAME full-size preview the generated
+            // and attached images use (the portal at the end of this component).
+            onPreview={(src, alt) => setPreview({ src, alt })}
+            // Put away with the keyboard moved to the neighbouring card first.
+            onDismissRun={dismissCodingRun}
+          />
+        )}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one
@@ -9117,20 +8947,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
 
       {/* The New app card, over the composer. Same ground and hairline as the
           composer so it reads as part of it, not as a dialog over the chat. */}
-      {showNewApp && (
-        <div data-testid="chat-new-app" style={{ padding: '10px 14px 0', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-          <NewAppWizardCard
-            key={`${newAppOptions.project ?? ''}|${newAppOptions.team ? 'team' : ''}`}
-            initialProject={newAppOptions.project}
-            initialTeam={newAppOptions.team}
-            maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
-            onClose={closeNewApp}
-            // In the chat it floats over the composer like a popover, so it
-            // behaves like one: click away (or Escape) and it goes.
-            closeOnOutsideClick
-          />
-        </div>
-      )}
+      <NewAppCardSlot card={newApp} />
 
       {/* Desktop keeps the full-width text box over its action/settings row.
           Phones put attachment and mic/send beside the text, settings below. */}
@@ -9246,25 +9063,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
-        <button
-          onClick={toggleNewApp}
-          title={t("codingAgent.createNewProject")}
-          aria-label={t("codingAgent.createNewProject")}
-          aria-pressed={showNewApp}
-          data-testid="chat-new-app-toggle"
-          style={{
-            width: 36, height: 36, borderRadius: 10, border: 'none',
-            background: showNewApp ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
-            color: showNewApp ? '#f97316' : 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0, transition: 'all 0.15s',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = showNewApp ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = showNewApp ? '#f97316' : 'rgba(255,255,255,0.4)' }}
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 22 }}>add</span>
-        </button>
+        <NewAppToggleButton card={newApp} />
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made

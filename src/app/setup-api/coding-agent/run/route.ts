@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
+import { pushPendingAction } from "@/lib/pending-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -121,6 +122,16 @@ export async function POST(request: Request) {
       // Only ever `true` or absent: what failed is the box's to append, from
       // its own record of the named run — never the caller's.
       ...(body.fixCi === true ? { fixCi: true } : {}),
+    });
+    // Every open desktop hears that a run began — the ROUTE says so, not the
+    // MCP tool, so a run started from another device, the owner's own click
+    // or the review pass shows up as a chat card within one poll. The
+    // desktop only nudges its poll on it; the run record stays the truth.
+    void pushPendingAction(
+      { type: "coding_run", event: queued ? "queued" : "started", runId: run.id, projectId: run.projectId, ...(run.team ? { teamId: run.team.id } : {}) },
+      `coding-run:${run.id}`,
+    ).catch((err: unknown) => {
+      console.error("[coding-agent/run] desktop notice failed:", err instanceof Error ? err.message : err);
     });
     return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
   } catch (err) {
