@@ -3,6 +3,13 @@ export const dynamic = "force-dynamic";
 import { spawn } from "child_process";
 import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
+import {
+  BackgroundTaskFailure,
+  backgroundTaskResponse,
+  runningBackgroundTask,
+  startBackgroundTask,
+} from "@/lib/background-tasks";
+import { WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { checkInstallDisk, checkInstallDisks, dirBytes, diskRefusal } from "@/lib/install-disk";
@@ -67,8 +74,14 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
 
 /** One fetch at a time: two would write the same Hub cache entry. */
 let inFlight = false;
-/** One engine install at a time: two would fight over pip and the CTranslate2 build tree. */
+/**
+ * One engine install at a time: two would fight over pip and the CTranslate2
+ * build tree. Held for the whole install task, not only its start, so the size
+ * fetch and both removals keep refusing while it runs.
+ */
 let engineInFlight = false;
+/** The engine install's background-task group (src/lib/background-tasks.ts). */
+const WHISPER_ENGINE_GROUP = "whisper-engine";
 /**
  * Not below config/clawbox-root-update@.service's TimeoutStartSec (2 h), so
  * systemd, not this stream, owns the kill — the rule the tts/install route
@@ -246,11 +259,18 @@ export async function POST(req: Request) {
  * every write here (the guard ran before this was reached), and refused while
  * the engine is already installed: the SIZES are the picker's job, and
  * re-running the engine install over a working one is what the Terminal is
- * for. The root unit runs on if the client leaves; the in-flight flag is
- * released only at its real end, so a second click cannot start a second
- * build under the first.
+ * for. The in-flight flag is released only at the install's real end, so a
+ * second click cannot start a second build under the first.
+ *
+ * A BACKGROUND TASK of the server, which this response only follows: closing
+ * Settings, a reload or a dropped tunnel leaves the build and its progress
+ * record running, the desktop's corner card keeps drawing it, and a POST while
+ * it runs — a reopened Settings — follows the same task instead of `busy`.
  */
 async function installEngine(): Promise<Response> {
+  const running = runningBackgroundTask(WHISPER_ENGINE_GROUP);
+  if (running) return backgroundTaskResponse(running.id);
+
   // Reserved BEFORE the first await, and shared with the engine removal and a
   // size fetch: two requests that arrive together must not both pass this and
   // start two pip installs and two CTranslate2 builds in the same paths. Every
@@ -283,38 +303,42 @@ async function installEngine(): Promise<Response> {
     return diskRefusal(disk ?? (await checkInstallDisks(whisperEngineInstallParts())));
   }
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+  const start = startBackgroundTask({
+    kind: WHISPER_ENGINE_INSTALL_KIND,
+    group: WHISPER_ENGINE_GROUP,
+    title: "Installing speech (Whisper)",
+    status: "Installing speech on this box (faster-whisper)…",
+    steps: [
+      { id: "install", label: "Build faster-whisper and fetch the base model", weight: 9 },
+      { id: "wire", label: "Switch voice notes to it", weight: 1 },
+    ],
+    async run(task) {
       try {
-        emit(controller, { status: "Installing speech on this box (faster-whisper)…" });
+        task.step("install");
         const result = await followRootStep("voice_whisper_install", {
           timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
           label: "the speech install",
-          onStatus: (line) => emit(controller, { status: line }),
+          onStatus: (line) => task.status(line),
         });
-        if (!result.ok) {
-          emit(controller, { error: result.error || "The speech install did not finish." });
-        } else {
-          const wired = await wireLocalTranscription();
-          if (!wired) {
-            emit(controller, {
-              status: "Channel voice notes could not be switched to it yet — they will be at the next restart.",
-            });
-          }
-          emit(controller, { success: true, status: "Speech on this box is installed." });
+        if (!result.ok) throw new BackgroundTaskFailure(result.error || "The speech install did not finish.");
+        task.step("wire");
+        const wired = await wireLocalTranscription();
+        if (!wired) {
+          task.status("Channel voice notes could not be switched to it yet — they will be at the next restart.");
         }
-      } catch (err) {
-        emit(controller, { error: err instanceof Error ? err.message : "The speech install failed." });
+        return { status: "Speech on this box is installed." };
       } finally {
         engineInFlight = false;
-        try { controller.close(); } catch { /* already closed */ }
       }
     },
   });
-
-  return new Response(stream, {
-    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
-  });
+  if (!start.started) {
+    // Not reachable while the flag above is held, but a task that never ran
+    // would never give it back.
+    engineInFlight = false;
+    return backgroundTaskResponse(start.running.id);
+  }
+  return backgroundTaskResponse(start.task.id);
 }
 
 export async function DELETE(req: Request) {

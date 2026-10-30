@@ -48,7 +48,11 @@ function readNumber(value: unknown): number | undefined {
  * `null` while the stream goes on — including for a line that is not JSON,
  * which is a torn write rather than a failure.
  */
-function consume(line: string, onProgress: (p: InstallProgress) => void): InstallOutcome | null {
+function consume(
+  line: string,
+  onProgress: (p: InstallProgress) => void,
+  onTask?: (taskId: string) => void,
+): InstallOutcome | null {
   if (!line) return null;
   let payload: Record<string, unknown>;
   try {
@@ -57,6 +61,9 @@ function consume(line: string, onProgress: (p: InstallProgress) => void): Instal
     return null;
   }
   if (payload === null || typeof payload !== "object") return null;
+  // A route whose work is a background task names it on the first line, so the
+  // reader can follow the same work again once this stream is gone.
+  if (typeof payload.taskId === "string" && payload.taskId) onTask?.(payload.taskId);
 
   const status = typeof payload.status === "string" ? payload.status : undefined;
   const completed = readNumber(payload.completed);
@@ -79,6 +86,7 @@ function consume(line: string, onProgress: (p: InstallProgress) => void): Instal
 export async function readInstallStream(
   res: Response,
   onProgress: (progress: InstallProgress) => void,
+  onTask?: (taskId: string) => void,
 ): Promise<InstallOutcome> {
   const reader = res.body?.getReader();
   if (!reader) return { ok: false };
@@ -92,12 +100,12 @@ export async function readInstallStream(
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
       newline = buffer.indexOf("\n");
-      const outcome = consume(line, onProgress);
+      const outcome = consume(line, onProgress, onTask);
       if (outcome) return outcome;
     }
     if (done) break;
   }
   // The closing line may arrive without its newline; it still decides the
   // outcome — dropping it turned a finished multi-minute install into an error.
-  return consume(buffer.trim(), onProgress) ?? { ok: false };
+  return consume(buffer.trim(), onProgress, onTask) ?? { ok: false };
 }

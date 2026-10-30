@@ -6,6 +6,8 @@ import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
 import { readInstallStream } from "@/lib/install-stream";
+import { fetchBackgroundTasks, followBackgroundTask, notifyBackgroundTaskStarted } from "@/lib/background-task-client";
+import { KOKORO_INSTALL_KIND, LLAMACPP_INSTALL_KIND, WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { isConfigBusyPayload } from "@/lib/config-conflict";
 import { ConfirmDialog } from "@/components/clawkeep-ui";
 import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
@@ -165,6 +167,16 @@ const post = (url: string, body: unknown) =>
   fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 const del = (url: string) => fetch(url, { method: "DELETE" });
 
+/**
+ * The installs that run as background tasks of the server, and the row each
+ * belongs to: a Settings reopened while one runs follows it again on that row.
+ */
+const BACKGROUND_TASK_ROWS: Record<string, string> = {
+  [LLAMACPP_INSTALL_KIND]: "llamacpp",
+  [WHISPER_ENGINE_INSTALL_KIND]: "whisper",
+  [KOKORO_INSTALL_KIND]: "kokoro",
+};
+
 /** An engine whose extra settings are worth drawing: here, and not switched off. */
 const usable = (entry: LocalModelEntry) => entry.installed && entry.enabled !== false;
 
@@ -226,6 +238,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // The last progress line of a streaming action, by row.
   const [progress, setProgress] = useState<Record<string, string>>({});
+  // Rows whose action is a background task of the server: it runs on with
+  // Settings closed, and the row says so.
+  const [backgroundRows, setBackgroundRows] = useState<ReadonlySet<string>>(() => new Set());
+  // Tasks this mount already followed, so a re-read never follows one twice.
+  const followedTasksRef = useRef(new Set<string>());
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [focusedItem, setFocusedItem] = useState(0);
   // The Uninstall waiting on the owner's yes. The action is kept with the
@@ -397,6 +414,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       if (action.streams) {
         const outcome = await readInstallStream(res, (line) => {
           if (line.status) setProgress((p) => ({ ...p, [entry.id]: line.status as string }));
+        }, (taskId) => {
+          followedTasksRef.current.add(taskId);
+          setBackgroundRows((rows) => new Set(rows).add(entry.id));
+          // The desktop's corner card asks at once rather than at its next poll.
+          notifyBackgroundTaskStarted(taskId);
         });
         if (!outcome.ok) setError(outcome.error ?? t("localModels.error.changeFailed"));
         // A successful install/activation changes the device pairing. Tell
@@ -435,11 +457,46 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         delete rest[entry.id];
         return rest;
       });
+      setBackgroundRows((rows) => {
+        if (!rows.has(entry.id)) return rows;
+        const next = new Set(rows);
+        next.delete(entry.id);
+        return next;
+      });
       // refresh() waits for the last in-flight action; roles are cheap.
       void refresh();
       void refreshRoles();
     }
   }, [applySnapshot, failureText, locale, refresh, refreshRoles, t]);
+
+  // RE-ATTACH. An install started here runs as a background task of the
+  // server (src/lib/background-tasks.ts), so a Settings closed mid-install comes
+  // back to a row that is still installing: each running task is followed again
+  // on its row, through the same reader, spinner and verdict as the click that
+  // started it. Once the inventory has arrived, because the row is drawn from it.
+  const hasSnapshot = snapshot !== null;
+  useEffect(() => {
+    if (!active || !hasSnapshot) return;
+    let cancelled = false;
+    void fetchBackgroundTasks().then((tasks) => {
+      if (cancelled || !tasks) return;
+      for (const task of tasks) {
+        const rowId = BACKGROUND_TASK_ROWS[task.kind];
+        if (task.state !== "running" || !rowId) continue;
+        if (followedTasksRef.current.has(task.id) || pendingRef.current.has(rowId)) continue;
+        const entry = snapshotRef.current?.models.find((m) => m.id === rowId);
+        if (!entry) continue;
+        followedTasksRef.current.add(task.id);
+        void runAction(entry, {
+          id: "install",
+          labelKey: "localModels.menu.install",
+          streams: true,
+          run: () => followBackgroundTask(task.id),
+        });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [active, hasSnapshot, runAction]);
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
@@ -751,6 +808,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                       {busy && progress[entry.id] && (
                         <p className="text-xs text-[var(--text-secondary)] mt-1 break-words" data-testid={`local-model-progress-${entry.id}`}>
                           {progress[entry.id]}
+                        </p>
+                      )}
+                      {busy && backgroundRows.has(entry.id) && (
+                        <p className="text-xs text-[var(--text-secondary)] mt-0.5" data-testid={`local-model-background-${entry.id}`}>
+                          {t("backgroundTasks.closeHint")}
                         </p>
                       )}
                     </div>

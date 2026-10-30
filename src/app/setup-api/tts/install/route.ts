@@ -2,6 +2,13 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { POST as selectVoice } from "@/app/setup-api/tts/route";
+import {
+  BackgroundTaskFailure,
+  backgroundTaskResponse,
+  runningBackgroundTask,
+  startBackgroundTask,
+} from "@/lib/background-tasks";
+import { KOKORO_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { uninstallKokoro } from "@/lib/kokoro-uninstall";
 import { hasPersonSession } from "@/lib/owner-session";
@@ -27,25 +34,28 @@ import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
  * Answers the llama.cpp install route's shape, which the tab already reads:
  * `{status}` lines while it runs, then ONE closing `{success: true}` or
  * `{error}`.
+ *
+ * The install is a BACKGROUND TASK of the server (src/lib/background-tasks.ts),
+ * not of this request: the stream only follows it. Closing Settings, reloading
+ * the page or losing the tunnel leaves the install and its progress record
+ * running, the desktop's corner card keeps drawing it, and a reopened Settings
+ * follows the same task again (`/setup-api/background-jobs/tasks/follow`). A
+ * POST while one runs re-attaches to it rather than answering `busy`.
  */
 
-const encoder = new TextEncoder();
+/** The install and the removal never run together: they write the same stamp, cache and unit. */
+const KOKORO_GROUP = "voice-kokoro";
+
 /**
  * Not below config/clawbox-root-update@.service's TimeoutStartSec (2 h), so
- * systemd, not this stream, owns the kill: a stream that gave up first would
+ * systemd, not this follow, owns the kill: a follow that gave up first would
  * show a red error over an install that was still running and about to
  * finish. Same rule the llama.cpp install route keeps.
  */
 const INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
-function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
-  // A cancelled stream refuses further writes; the install itself goes on
-  // (a root unit), and the follow below has to reach its real end.
-  try { controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`)); } catch { /* client gone */ }
-}
-
-/** One install at a time: two would fight over pip, the GPU and the config file. */
-let inFlight = false;
+/** The removal's flag: an install started under it would write what it deletes. */
+let removing = false;
 
 export async function POST(req: Request) {
   // EVERY EDITION. The step is `step_openclaw_tts --kokoro`, which installs
@@ -62,37 +72,30 @@ export async function POST(req: Request) {
   if (!isSameOriginRequest(req)) {
     return NextResponse.json({ error: "Installing the voice only works from this ClawBox's own pages.", kind: "cross_origin" }, { status: 403 });
   }
-  if (inFlight) {
+  if (removing) {
     return NextResponse.json({ error: "The voice is being installed or removed right now.", code: "busy" }, { status: 409 });
   }
-  inFlight = true;
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        emit(controller, { status: "Installing the voice on this box (Kokoro)…" });
-        const result = await followRootStep("voice_kokoro_install", {
-          timeoutMs: INSTALL_TIMEOUT_MS,
-          label: "the voice install",
-          onStatus: (line) => emit(controller, { status: line }),
-        });
-        if (!result.ok) {
-          emit(controller, { error: result.error || "The voice install did not finish." });
-        } else {
-          emit(controller, { success: true, status: "The voice on this box is installed." });
-        }
-      } catch (err) {
-        emit(controller, { error: err instanceof Error ? err.message : "The voice install failed." });
-      } finally {
-        inFlight = false;
-        try { controller.close(); } catch { /* already closed */ }
-      }
+  const start = startBackgroundTask({
+    kind: KOKORO_INSTALL_KIND,
+    group: KOKORO_GROUP,
+    title: "Installing the voice (Kokoro)",
+    status: "Installing the voice on this box (Kokoro)…",
+    steps: [{ id: "install", label: "Install Kokoro and register the voice" }],
+    async run(task) {
+      task.step("install");
+      const result = await followRootStep("voice_kokoro_install", {
+        timeoutMs: INSTALL_TIMEOUT_MS,
+        label: "the voice install",
+        onStatus: (line) => task.status(line),
+      });
+      if (!result.ok) throw new BackgroundTaskFailure(result.error || "The voice install did not finish.");
+      return { status: "The voice on this box is installed." };
     },
   });
-
-  return new Response(stream, {
-    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
-  });
+  // Already running: this request follows that install instead of starting a
+  // second root step under it — which is what a reopened Settings asks for.
+  return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
 }
 
 /**
@@ -122,13 +125,12 @@ export async function DELETE(req: Request) {
   if (!isSameOriginRequest(req)) {
     return NextResponse.json({ error: "Removing the voice only works from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
   }
-  if (inFlight) {
+  // Checked and set with no await between them, so an install cannot start in
+  // the gap: it would write the stamp, the cache and the unit this is deleting.
+  if (removing || runningBackgroundTask(KOKORO_GROUP)) {
     return NextResponse.json({ error: "The voice is being installed right now.", code: "busy" }, { status: 409 });
   }
-
-  // The POST's own flag, held for the whole removal: an install started now
-  // would write the stamp, the cache and the unit this is deleting.
-  inFlight = true;
+  removing = true;
   try {
     // Read BEFORE the removal: afterwards the status route reports the engine
     // as unconfigured and the stored pick is the only trace that it was chosen.
@@ -159,7 +161,7 @@ export async function DELETE(req: Request) {
       );
     }
   } finally {
-    inFlight = false;
+    removing = false;
   }
 }
 

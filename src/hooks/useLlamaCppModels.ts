@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
+import { notifyBackgroundTaskStarted } from "@/lib/background-task-client";
 
 export interface LlamaCppModel {
   id: string;
@@ -81,6 +82,9 @@ export function useLlamaCppModels(callbacks: LlamaCppCallbacks, configureScope: 
         onSaveError(data.error || "Failed to install llama.cpp");
         return;
       }
+      // The install is a background task of the server: on the desktop its
+      // corner card follows it too, and goes on after this window closes.
+      notifyBackgroundTaskStarted();
 
       const reader = res.body?.getReader();
       if (!reader) {
