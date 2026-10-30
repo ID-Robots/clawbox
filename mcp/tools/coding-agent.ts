@@ -25,7 +25,8 @@ import { basename } from "path";
 import { apiGet, apiPost, apiTry } from "../lib/api";
 import { ApiError, classifyError, redact, ToolError, type ErrorRule, type ToolErrorCode } from "../lib/errors";
 import { json, LIST_MAX_CHARS, text, type Ed, type Registrar } from "../lib/register";
-import { zBool, zEnumOf, zInt, zOptText, zText } from "../lib/schema";
+import { z } from "zod";
+import { zBool, zEnumOf, zInt, zOptText, zText, type Shape } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
@@ -85,6 +86,18 @@ import {
   TEAM_MESSAGE_TARGETS,
   TEAM_MESSAGE_WINDOW_MS,
 } from "../../src/lib/coding-team-messages";
+// Pure too: the coding team's agent-settable settings — the field list, the
+// choices and the refusal kind — so the settings tools name what the route
+// takes (src/lib/coding-settings-patch.ts) without importing the runner.
+import {
+  AGENT_EFFORT_LEVELS,
+  AGENT_HISTORY_RETENTION_MODES,
+  OWNER_SETTING_KIND,
+  ROLE_RESET_WORDS,
+  SETTINGS_PAGE_SENTENCE,
+} from "../../src/lib/coding-settings-shape";
+import { MODEL_ROLES, ROLE_AUTO, ROLE_EFFORT_LEVELS, ROLE_MODEL_TIERS, type ModelRole } from "../../src/lib/coding-role-models";
+import { PR_BODY_TASK_MODES } from "../../src/lib/coding-pr-body";
 import { teamRunContext } from "../lib/run-context";
 
 const MAX_TASK_CHARS = 4_000;
@@ -915,6 +928,174 @@ function projectRow(project: ProjectPayload, runs: RunPayload[] | null): Record<
 }
 
 /** Resume refusals that are the device's own sentence, not a canned one. */
+// ─── The coding team's settings: payloads and rendering ─────────────────────
+
+/** One role as the settings route answers it: every half, "auto" where nothing is stored. */
+interface RoleChoicePayload {
+  provider: string;
+  model: string;
+  effort: string;
+}
+
+/** What a role resolves to right now, per the route's `roleModelMap`. */
+interface RoleRunPayload {
+  provider: string;
+  model: string | null;
+  effort: string;
+  auto: boolean;
+  ready: boolean;
+  problems: string[];
+  relativeCost: number | null;
+}
+
+/** GET /setup-api/coding-agent/settings (src/lib/coding-settings-patch.ts CodingSettingsView). */
+interface SettingsPayload {
+  effort: string;
+  effortLevels: string[];
+  roleModels: Partial<Record<ModelRole, RoleChoicePayload>>;
+  roleModelMap: Partial<Record<ModelRole, RoleRunPayload>>;
+  roleModelTiers: string[];
+  roleEffortLevels: string[];
+  connectedProviders: string[];
+  providerModels: Record<string, string[]>;
+  reviewPass: boolean;
+  autoPr: boolean;
+  autoMerge: boolean;
+  prBodyIncludesTask: string;
+  prBodyTaskModes: string[];
+  teamDynamic: boolean;
+  maxParallelRuns: number;
+  minMaxParallelRuns: number;
+  maxMaxParallelRuns: number;
+  historyRetention: string;
+  historyRetentionModes: string[];
+  generateMedia: boolean;
+  gitAuthorName: string | null;
+  gitAuthorEmail: string | null;
+}
+
+/** POST's answer: what moved, what happened to Claude Code's transcript period, the set re-read. */
+interface SettingsChangePayload {
+  changed?: string[];
+  transcripts?: { file: string; state: string }[];
+  settings?: SettingsPayload;
+}
+
+/**
+ * The upper bound the SCHEMA allows for runs at once — the largest host's
+ * ceiling (coding-agent.ts MAX_MAX_PARALLEL_RUNS_BIG_HOST). The box's own range
+ * is narrower on a Jetson, and the route refuses past it in words; the schema
+ * only stops a number no box could take.
+ */
+const MAX_PARALLEL_RUNS_CEILING = 16;
+
+/** coding-git-identity.ts MAX_GIT_IDENTITY_CHARS; the route refuses longer in words. */
+const MAX_GIT_AUTHOR_CHARS = 200;
+
+/** The settings route's refusals the agent must not retry. */
+const SETTINGS_RULES: ErrorRule[] = [
+  {
+    status: 400,
+    match: new RegExp(`"kind":\\s*"${OWNER_SETTING_KIND}"`),
+    code: "CONFLICT",
+    message: "That setting is the owner's alone — the switch, the project folder, the connected accounts, the browser, the permission rules, the secrets and the wizard are not the assistant's to change.",
+    next: `Do not retry. Tell the user: ${SETTINGS_PAGE_SENTENCE}`,
+  },
+  {
+    status: 403,
+    code: "CONFLICT",
+    message: "This ClawBox did not let the assistant at the coding team's settings.",
+    next: `Do not retry. ${SETTINGS_PAGE_SENTENCE}`,
+  },
+];
+
+/** The three halves of one role, as `<role>_provider` / `<role>_model` / `<role>_effort`. */
+function roleHalfParams(role: ModelRole, who: string): Shape {
+  const reset = ROLE_RESET_WORDS.join("/");
+  return {
+    [`${role}_provider`]: zEnumOf([...ROLE_RESET_WORDS, ...CODING_PROVIDERS], `The account that pays for ${who}; must be connected. ${reset}: the team's own.`).optional(),
+    [`${role}_model`]: zOptText(64, `Model for ${who}: ${ROLE_MODEL_TIERS.join("/")}, a model id its provider offers, or ${reset}.`),
+    [`${role}_effort`]: zEnumOf([...ROLE_RESET_WORDS, ...ROLE_EFFORT_LEVELS], `Effort for ${who}; ${reset} follows the owner's. A reader never goes above xhigh.`).optional(),
+  };
+}
+
+/** `"default"` is the panel's `"auto"`; everything else is sent as given. */
+function roleHalfValue(value: unknown): unknown {
+  return typeof value === "string" && (ROLE_RESET_WORDS as readonly string[]).includes(value.trim().toLowerCase()) ? ROLE_AUTO : value;
+}
+
+/** The route's body from the tool's flat arguments: only what was given. */
+export function settingsBodyFrom(args: Record<string, unknown>): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  const given = (key: string) => args[key] !== undefined && args[key] !== null;
+  if (given("effort")) body.effort = args.effort;
+  const roles: Record<string, Record<string, unknown>> = {};
+  for (const role of MODEL_ROLES) {
+    for (const half of ["provider", "model", "effort"] as const) {
+      const key = `${role}_${half}`;
+      if (!given(key)) continue;
+      (roles[role] ??= {})[half] = roleHalfValue(args[key]);
+    }
+  }
+  if (Object.keys(roles).length) body.roleModels = roles;
+  const direct: Record<string, string> = {
+    review_pass: "reviewPass",
+    auto_pr: "autoPr",
+    auto_merge: "autoMerge",
+    pr_body_includes_task: "prBodyIncludesTask",
+    team_dynamic: "teamDynamic",
+    max_parallel_runs: "maxParallelRuns",
+    history_retention: "historyRetention",
+    generate_media: "generateMedia",
+    git_author_name: "gitAuthorName",
+    git_author_email: "gitAuthorEmail",
+  };
+  for (const [param, field] of Object.entries(direct)) {
+    if (given(param)) body[field] = args[param];
+  }
+  return body;
+}
+
+const onOff = (v: boolean) => (v ? "on" : "off");
+
+/**
+ * The settings as one short readable block: every value with its choices
+ * beside it, each role's stored choice and what it runs on right now, and the
+ * words a role's halves take — so the assistant can offer the owner valid
+ * options without a second call.
+ */
+export function describeSettings(s: SettingsPayload): string {
+  const lines: string[] = ["Coding team settings (the owner's preferences; coding_settings_set changes them):"];
+  lines.push(`- effort: ${s.effort} — choices: ${(s.effortLevels ?? []).join(", ")}`);
+  for (const role of MODEL_ROLES) {
+    const stored = s.roleModels?.[role];
+    const run = s.roleModelMap?.[role];
+    const chosen = stored ? `provider ${stored.provider}, model ${stored.model}, effort ${stored.effort}` : "auto";
+    const runs = run
+      ? ` → runs on ${run.provider}${run.model ? ` ${run.model}` : ""} at ${run.effort}${run.ready ? "" : ` (NOT READY: ${run.problems.join("; ") || "its provider cannot run"})`}`
+      : "";
+    lines.push(`- ${role}: ${chosen}${runs}`);
+  }
+  lines.push(
+    `- review_pass: ${onOff(s.reviewPass)} · auto_pr: ${onOff(s.autoPr)} · auto_merge: ${onOff(s.autoMerge)} · pr_body_includes_task: ${s.prBodyIncludesTask} (${(s.prBodyTaskModes ?? []).join(", ")})`,
+  );
+  lines.push(
+    `- team_dynamic: ${onOff(s.teamDynamic)} · max_parallel_runs: ${s.maxParallelRuns} (${s.minMaxParallelRuns}–${s.maxMaxParallelRuns} on this box) · history_retention: ${s.historyRetention} (${(s.historyRetentionModes ?? []).join(", ")}) · generate_media: ${onOff(s.generateMedia)}`,
+  );
+  const author = s.gitAuthorName || s.gitAuthorEmail
+    ? `${s.gitAuthorName ?? "(no name)"} <${s.gitAuthorEmail ?? "no e-mail"}>`
+    : "not set (a project's own identity, else the box's placeholder)";
+  lines.push(`- git_author: ${author}`);
+  const models = Object.entries(s.providerModels ?? {}).map(([p, ids]) => `${p}: ${ids.join(", ")}`).join("; ");
+  lines.push(
+    `Role choices — provider: ${ROLE_AUTO} or a connected account (${(s.connectedProviders ?? []).join(", ")}); `
+    + `model: ${ROLE_AUTO}, ${(s.roleModelTiers ?? []).join(", ")} or a model of that provider (${models}); `
+    + `effort: ${ROLE_AUTO} or ${(s.roleEffortLevels ?? []).join(", ")} — a planner or reviewer never runs above xhigh. `
+    + "The switch, project folder, connected accounts, browser, permission rules and secrets are the owner's, in the Coding Agent app's Settings.",
+  );
+  return redact(lines.join("\n"));
+}
+
 const RESUME_NEXT =
   "Do not retry. Tell the user what the ClawBox said; the run's page in the Coding Agent app shows the same.";
 
@@ -1557,6 +1738,78 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         `It is a coding project now — name it to coding_agent_run as project_id "${id}" (or by its directory). project_id: ${id}`,
       ].filter(Boolean);
       return text(redact(parts.join(" ")));
+    },
+  );
+
+  // ─── The coding TEAM's settings ───────────────────────────────────────────
+  //
+  // The owner's preferences about their coding agent, as a pair of tools
+  // (owner's ask, 2026-10-30): read them with the valid choices beside each,
+  // change any subset. Backed by /setup-api/coding-agent/settings
+  // (src/lib/coding-settings-patch.ts), which admits this process's bearer
+  // for exactly the AGENT-SETTABLE set — and refuses, by name, the owner's
+  // consent surfaces: the switch, the working folder, the connected accounts,
+  // the browser on the owner's screen, the permission rules, the secrets, the
+  // wizard. Those stay on the enable route, which refuses the bearer, so no
+  // prompt-injected agent can grant itself what the owner did not.
+  reg.tool(
+    "coding_settings_get",
+    "Read the owner's coding-team settings — effort, each role's provider, model and effort, the review pass, pull requests and merging, runs at once, history, media, the commit identity — with the valid choices beside each. Call it before coding_settings_set, or when the user asks how their coding agent is set up.",
+    {},
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: LIST_MAX_CHARS },
+    async () => {
+      const settings = await apiGet<SettingsPayload>("/setup-api/coding-agent/settings", { timeoutMs: 15_000, rules: SETTINGS_RULES });
+      return text(describeSettings(settings));
+    },
+  );
+
+  reg.tool(
+    "coding_settings_set",
+    "Change the owner's coding-team settings: effort, a role's provider/model/effort (planner_*, worker_*, reviewer_*), review pass, auto PR and merge, PR body, dynamic team, runs at once, history, media, commit identity. Only the fields given change. They are the owner's preferences: confirm before changing effort, a model or runs at once unless the user just asked for exactly that.",
+    {
+      effort: zEnumOf(AGENT_EFFORT_LEVELS, "How hard every run thinks. Costs more at each step up.").optional(),
+      ...roleHalfParams("planner", "the planner (and the team's lead)"),
+      ...roleHalfParams("worker", "the workers, which write the code"),
+      ...roleHalfParams("reviewer", "the reviewer of each task"),
+      review_pass: z.boolean().optional().describe("One extra review run after every completed run that changed files."),
+      auto_pr: z.boolean().optional().describe("Branch, open a pull request and wait for its checks after a run."),
+      auto_merge: z.boolean().optional().describe("May the box squash-merge a pull request its own review loop cleared? Never into main."),
+      pr_body_includes_task: zEnumOf(PR_BODY_TASK_MODES, "How much of the task a pull request carries: a summary, all of it (redacted), or none.").optional(),
+      team_dynamic: z.boolean().optional().describe("May a team's lead add or retire tasks while the team runs?"),
+      max_parallel_runs: z.number().int().min(1).max(MAX_PARALLEL_RUNS_CEILING).optional().describe("How many coding runs may go at once; coding_settings_get says this box's range."),
+      history_retention: zEnumOf(AGENT_HISTORY_RETENTION_MODES, "What the box keeps of finished runs; \"everything\" also keeps Claude Code's transcripts.").optional(),
+      generate_media: z.boolean().optional().describe("May a run have the box draw pictures and speak clips into its project?"),
+      git_author_name: z.string().max(MAX_GIT_AUTHOR_CHARS).optional().describe("Who the box commits as when the project has no identity of its own. \"\" clears it."),
+      git_author_email: z.string().max(MAX_GIT_AUTHOR_CHARS).optional().describe("The e-mail of that commit identity. \"\" clears it."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async (args: Record<string, unknown>) => {
+      const body = settingsBodyFrom(args);
+      if (Object.keys(body).length === 0) {
+        throw new ToolError(
+          "BAD_ARGUMENT",
+          "Name at least one setting to change.",
+          "Call coding_settings_get to see the settings and their valid choices, then call again with the ones to change.",
+        );
+      }
+      let data: SettingsChangePayload;
+      try {
+        data = await apiPost<SettingsChangePayload>("/setup-api/coding-agent/settings", body, { timeoutMs: 30_000, rules: SETTINGS_RULES });
+      } catch (err) {
+        // A value the box refused: its own sentence says what was wrong and
+        // what it offers (the route answers in the settings panel's words).
+        if (err instanceof ApiError && err.status === 400) {
+          throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "This ClawBox refused one of the values.", "Call coding_settings_get for the valid choices and call again with one of them. Do not retry the same value.");
+        }
+        throw err;
+      }
+      const changed = Array.isArray(data.changed) ? data.changed.map(String) : [];
+      const transcripts = Array.isArray(data.transcripts) ? data.transcripts.filter((t) => t && t.state !== "already") : [];
+      const head = changed.length ? `Changed: ${changed.join(", ")}.` : "Nothing changed.";
+      const tail = transcripts.length
+        ? ` Claude Code's transcript period was ${transcripts.map((t) => t.state).join(", ")} in its settings file.`
+        : "";
+      return text(`${head}${tail}\n\n${data.settings ? describeSettings(data.settings) : ""}`.trimEnd());
     },
   );
 }

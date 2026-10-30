@@ -41,6 +41,8 @@ export const CLAWBOX_READ_ONLY_TOOLS = [
   "coding_project_status",
   "coding_run_list",
   "coding_secret_list",
+  // The coding team's settings, read (2026-10-30; coding_settings_set writes).
+  "coding_settings_get",
   "coding_team_status",
   "device_status",
   "disk_usage",

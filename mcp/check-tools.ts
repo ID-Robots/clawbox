@@ -228,6 +228,11 @@ const PROBE_GATED_COMMON = [
   // app's Import panel as a tool (2026-10-30), under the coding agent's gate
   // like the runs it exists for.
   "coding_project_import",
+  // The coding team's settings, read and changed (2026-10-30): the owner's
+  // preferences about the agent, behind the agent's own gate — a box whose
+  // coding agent is off has no team to tune, and the route admits the bearer
+  // for the settable set alone.
+  "coding_settings_get", "coding_settings_set",
   // Deploying what a run built is the other half of handing it the task, so it
   // is behind the same switch: a box whose coding agent is off has nothing the
   // Following every run, resuming one, and the project matrix: the same family

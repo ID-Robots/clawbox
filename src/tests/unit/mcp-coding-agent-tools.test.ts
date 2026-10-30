@@ -53,6 +53,8 @@ const NAMES = [
   "coding_run_list", "coding_agent_resume", "coding_project_status",
   // 2026-10-30: the app's Import panel as a tool (src/tests/unit/mcp-coding-project-import.test.ts).
   "coding_project_import",
+  // 2026-10-30: the coding team's settings (src/tests/unit/mcp-coding-settings-tools.test.ts).
+  "coding_settings_get", "coding_settings_set",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {

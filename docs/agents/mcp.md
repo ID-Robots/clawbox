@@ -43,6 +43,13 @@ of them kept failing.
     (the app's Import panel as a tool since 2026-10-30: a GitHub repository
     or a folder on the box into the project folder; `POST
     coding-agent/projects/import` admits the MCP bearer for it),
+    `coding_settings_get`, `coding_settings_set` (the coding TEAM's
+    settings since 2026-10-30 — effort, each role's provider/model/effort,
+    review pass, auto PR and merge, PR body, dynamic team, runs at once,
+    history, media, commit identity — through `GET/POST
+    coding-agent/settings`, which admits the bearer for exactly that set and
+    refuses the owner's consent surfaces by name; `coding-settings-patch.ts`
+    in coding-agent.md),
     `coding_secret_list`
     (registered only while the owner's switch is on
     and the `claude-ds` harness is ready — probed at startup, and unlike
