@@ -429,7 +429,7 @@ describe("AIModelsStep variants", () => {
       await act(async () => { refuseStart(); await Promise.resolve(); });
       // …and so does the reason it was refused.
       expect(await findByText(/ClawBox AI is not reachable right now/)).toBeInTheDocument();
-      expect(scrolled).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
+      expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });
     } finally {
       Element.prototype.scrollIntoView = originalScroll;
     }

@@ -1185,10 +1185,16 @@ export default function AIModelsStep({
   // A ClawBox AI sign-in that failed says why just under its card, which on
   // the Providers page is below the fold: the owner who pressed a button
   // elsewhere (the pitch card, a chat's "Sign in to ClawBox AI again") would
-  // otherwise see nothing happen at all.
+  // otherwise see nothing happen at all. Brought into view at once and again
+  // while the page settles: on a board (2026-10-30) the provider rows above it
+  // finished loading after the scroll and pushed the line 54 px back out.
   const statusRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (status?.type === "error" && selected?.id === "clawai") statusRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    if (status?.type !== "error" || selected?.id !== "clawai") return;
+    const show = () => statusRef.current?.scrollIntoView?.({ block: "nearest" });
+    show();
+    const timers = [300, 900, 1800].map((ms) => window.setTimeout(show, ms));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [status, selected?.id]);
   // Filter out subscription option for providers whose OAuth isn't configured on the backend
   const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
