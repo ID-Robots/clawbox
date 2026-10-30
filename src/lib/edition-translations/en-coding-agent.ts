@@ -64,8 +64,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.openSettings": "Settings",
 
   "codingAgent.folderLabel": "Project folder",
-  "codingAgent.folderPlaceholder": "/home/clawbox/Projects",
-  "codingAgent.folderSave": "Save",
+  "codingAgent.folderUnset": "Not chosen yet",
   "codingAgent.folderFailed": "Could not save the default folder.",
   // The settings card's fold and its four group labels. Everything a box is
   // set up with stays in the open; the rest is behind "Advanced", closed by
@@ -239,13 +238,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Cancel",
   "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
   "codingAgent.githubStartFailed": "Could not start the GitHub login",
-  "codingAgent.harnessTest": "Test harness",
-  "codingAgent.harnessTestTitle": "Test harness",
-  "codingAgent.harnessTestHint": "Starts one small, real run in a scratch project to prove the delegated shell works end to end: Claude Code launches, writes a file, drives the browser and reports back. It costs a run like any other, and it needs the agent switched on and ready.",
-  "codingAgent.harnessTestFailed": "Could not start the harness test",
+  "codingAgent.harnessTest": "Test in the chat",
+  "codingAgent.harnessTestTitle": "Test in the chat",
+  "codingAgent.harnessTestHint": "Hands the chat one message asking the assistant to run a small, real task in a scratch project, so you can see the delegated shell work end to end: Claude Code launches, writes a file, drives the browser and reports back. The run appears as a card in the chat and costs a run like any other.",
   // The test runs in a folder inside the owner's project folder, so it has
   // nowhere to go until one is chosen (src/lib/coding-agent-harness-test.ts).
-  "codingAgent.harnessTestNoFolder": "Choose a project folder first.",
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
 
@@ -792,17 +789,13 @@ export const codingAgentEn: Record<string, string> = {
 
 
   "codingAgent.wizardProjectTitle": "Project folder and effort",
-  "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to pick one, or type an absolute path.",
-  "codingAgent.wizardBrowse": "Browse",
+  "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to choose another one; a folder that is not there yet is created when you continue.",
+  "codingAgent.browse": "Browse",
   "codingAgent.wizardBrowseFailed": "Could not read that folder.",
   "codingAgent.wizardPickerUp": "Up one folder",
   "codingAgent.wizardPickerUse": "Use this folder",
   "codingAgent.wizardPickerClose": "Close",
   "codingAgent.wizardPickerEmpty": "No folders here.",
-  "codingAgent.wizardCreateFolder": "Create folder",
-  "codingAgent.wizardCreateFolderPlaceholder": "New folder name",
-  "codingAgent.wizardCreateFolderSave": "Create",
-  "codingAgent.wizardCreateFolderFailed": "Could not create the folder.",
   // Said plainly and up front: Ultracode is the best answer this box can give
   // and the most expensive one, and an owner who finds that out from a bill
   // was told too late.
@@ -821,9 +814,8 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.wizardBrowserContinue": "Continue anyway",
 
   "codingAgent.wizardHarnessTitle": "Try it once",
-  "codingAgent.wizardHarnessHint": "Run a small, real task in a scratch project to prove the whole chain works: Claude Code starts, writes a file, drives the browser and reports back. It costs one run. You can skip this and start it any time from the Test harness card in Settings.",
-  "codingAgent.wizardHarnessRun": "Run the test",
-  "codingAgent.wizardHarnessStarting": "Starting…",
+  "codingAgent.wizardHarnessHint": "Ask the assistant for a small, real task in a scratch project to prove the whole chain works: Claude Code starts, writes a file, drives the browser and reports back. It costs one run, and it appears as a card in the chat. You can skip this and ask any time with Test in the chat in Settings.",
+  "codingAgent.wizardTryInChat": "Try it in the chat",
   "codingAgent.wizardHarnessSkip": "Skip and finish",
 
   // ── Reset ─────────────────────────────────────────────────────────────────

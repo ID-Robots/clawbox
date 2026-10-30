@@ -9,7 +9,7 @@
  * than on screen.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSettingsPanel from "@/components/CodingAgentSettingsPanel";
 import { CODING_AGENT_CHANGED_EVENT } from "@/lib/ui-events";
@@ -183,6 +183,7 @@ function stubFetch(
     if (url.startsWith("/setup-api/coding-agent/projects")) {
       return json({ directory: null, projects: [] });
     }
+    if (url.startsWith("/setup-api/coding-agent/browse")) return json(browseListing(url));
     if (url.startsWith("/setup-api/coding-agent/git")) {
       if (opts.gitThrows) throw new TypeError("Failed to fetch");
       if (opts.gitStatus && opts.gitStatus !== 200) return json({ error: "gh fell over" }, opts.gitStatus);
@@ -263,7 +264,25 @@ afterEach(() => {
 });
 
 const SWITCH = translations.en["codingAgent.switchLabel"];
-const SAVE = translations.en["codingAgent.folderSave"];
+
+/** The browse root — the owner's home — with one project folder in it. */
+const BROWSE_ROOT = "/home/clawbox";
+/**
+ * The folder picker's route, as the box answers it: the folder asked for (or
+ * the root), its parent, and the one folder under the root. `/home/clawbox/link`
+ * is the folder the tests pick; the enable route resolves it to wherever it
+ * leads (`resolveTo`).
+ */
+function browseListing(url: string) {
+  const dir = new URL(url, "http://box").searchParams.get("dir");
+  const path = dir ?? BROWSE_ROOT;
+  return {
+    root: BROWSE_ROOT,
+    path,
+    parent: path === BROWSE_ROOT ? null : BROWSE_ROOT,
+    entries: path === BROWSE_ROOT ? [{ name: "link", path: `${BROWSE_ROOT}/link` }] : [],
+  };
+}
 
 /** Let a handler's promise chain settle: a save that WOULD have posted has by now. */
 async function flush() {
@@ -337,44 +356,74 @@ describe("the owner's switch", () => {
 });
 
 describe("the default project folder", () => {
-  it("shows what the device has stored", async () => {
+  // The 2026-10-30 redesign: the folder is TEXT plus Browse — no typed path
+  // (not a thing an owner does on a phone) and no Save. The picker is the one
+  // way to change it, and a pick is saved the moment it is made.
+  it("shows what the device has stored, as text, with no field to type in", async () => {
     stubFetch({ enabled: true, readiness: READY, defaultDirectory: "/home/clawbox/projects" });
     render(<CodingAgentSettingsPanel />);
-    await waitFor(() => expect(screen.getByTestId("coding-agent-folder")).toHaveValue("/home/clawbox/projects"));
+    const folder = await screen.findByTestId("coding-agent-folder");
+    await waitFor(() => expect(folder).toHaveTextContent("/home/clawbox/projects"));
+    expect(folder).toHaveAttribute("data-value", "/home/clawbox/projects");
+    expect(folder.tagName).not.toBe("INPUT");
+    expect(screen.getByTestId("coding-agent-folder-browse")).toBeEnabled();
+    expect(screen.queryByTestId("coding-agent-folder-picker")).toBeNull();
   });
 
-  it("saves what was typed, and renders back what the device recorded", async () => {
+  it("says when none is chosen yet", async () => {
+    stubFetch({ enabled: true, readiness: READY, defaultDirectory: null });
+    render(<CodingAgentSettingsPanel />);
+    const folder = await screen.findByTestId("coding-agent-folder");
+    await waitFor(() => expect(folder).toHaveTextContent(translations.en["codingAgent.folderUnset"]));
+    expect(folder).toHaveAttribute("data-value", "");
+  });
+
+  it("opens the picker where the stored folder is, and lists the box's folders", async () => {
+    stubFetch({ enabled: true, readiness: READY, defaultDirectory: "/home/clawbox/projects" });
+    render(<CodingAgentSettingsPanel />);
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-browse"));
+    const picker = await screen.findByTestId("coding-agent-folder-picker");
+    expect(within(picker).getByRole("dialog")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("coding-agent-folder-picker-path")).toHaveTextContent("/home/clawbox/projects"));
+    // Up leads to the root, which lists the one folder in it.
+    fireEvent.click(screen.getByTestId("coding-agent-folder-picker-up"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-folder-picker-path")).toHaveTextContent(BROWSE_ROOT));
+    expect(screen.getByTestId("coding-agent-folder-picker-entry")).toHaveTextContent("link");
+    // The picker is a sheet with no field in it: existing folders only.
+    expect(picker.querySelectorAll("input, textarea, select")).toHaveLength(0);
+  });
+
+  it("saves the picked folder at once, and renders back what the device recorded", async () => {
     // The route resolves symlinks, so what comes back may not be what was
-    // typed — the field must show the device's answer, not the draft.
+    // picked — the row must show the device's answer.
     stubFetch({ enabled: true, readiness: READY }, { resolveTo: "/home/clawbox/real" });
     render(<CodingAgentSettingsPanel />);
-    const field = await screen.findByTestId("coding-agent-folder");
-    fireEvent.change(field, { target: { value: "/home/clawbox/link" } });
-    fireEvent.click(screen.getByRole("button", { name: SAVE }));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-browse"));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-picker-entry"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-folder-picker-path")).toHaveTextContent("/home/clawbox/link"));
+    fireEvent.click(screen.getByTestId("coding-agent-folder-picker-use"));
 
     await waitFor(() => expect(posts).toContainEqual({
       url: "/setup-api/coding-agent/enable", body: { defaultDirectory: "/home/clawbox/link" },
     }));
-    await waitFor(() => expect(field).toHaveValue("/home/clawbox/real"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-folder")).toHaveTextContent("/home/clawbox/real"));
+    expect(screen.queryByTestId("coding-agent-folder-picker")).toBeNull();
   });
 
-  it("clears the default with an empty field, rather than saving a blank path", async () => {
+  it("closes the picker without saving anything", async () => {
     stubFetch({ enabled: true, readiness: READY, defaultDirectory: "/home/clawbox/projects" });
     render(<CodingAgentSettingsPanel />);
-    const field = await screen.findByTestId("coding-agent-folder");
-    await waitFor(() => expect(field).toHaveValue("/home/clawbox/projects"));
-    fireEvent.change(field, { target: { value: "  " } });
-    fireEvent.click(screen.getByRole("button", { name: SAVE }));
-    await waitFor(() => expect(posts).toContainEqual({
-      url: "/setup-api/coding-agent/enable", body: { defaultDirectory: null },
-    }));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-browse"));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-picker-close"));
+    expect(screen.queryByTestId("coding-agent-folder-picker")).toBeNull();
+    expect(posts.filter((p) => p.url === "/setup-api/coding-agent/enable")).toEqual([]);
   });
 
   it("shows the device's own refusal when the folder is not allowed", async () => {
     stubFetch({ enabled: true, readiness: READY }, { rejectDir: "The ClawBox OS checkout itself is off limits." });
     render(<CodingAgentSettingsPanel />);
-    fireEvent.change(await screen.findByTestId("coding-agent-folder"), { target: { value: "/home/clawbox/clawbox" } });
-    fireEvent.click(screen.getByRole("button", { name: SAVE }));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-browse"));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-picker-use"));
     expect(await screen.findByText(/off limits/)).toBeInTheDocument();
   });
 });
@@ -778,6 +827,7 @@ describe("one setting write at a time", () => {
       const url = input.toString();
       if (url.startsWith("/setup-api/coding-agent/status")) return json(statusBody);
       if (url.startsWith("/setup-api/coding-agent/git")) return json(GH_OFF);
+      if (url.startsWith("/setup-api/coding-agent/browse")) return json(browseListing(url));
       if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
         posts.push({ url, body: JSON.parse(String(init.body)) });
         return await new Promise<Response>((resolve) => {
@@ -820,12 +870,17 @@ describe("one setting write at a time", () => {
     expect(xhigh).toBeDisabled();
     expect(screen.getByRole("switch", { name: SWITCH })).toBeDisabled();
     expect(screen.getByTestId("coding-agent-turns")).toBeDisabled();
-    fireEvent.change(screen.getByTestId("coding-agent-folder"), { target: { value: "/home/clawbox/next" } });
-    expect(screen.getByRole("button", { name: SAVE })).toBeDisabled();
 
-    // Enter in the folder field (still typeable) is the one way a second
-    // write can be asked for mid-flight. It waits; it is not posted.
-    fireEvent.keyDown(screen.getByTestId("coding-agent-folder"), { key: "Enter" });
+    // Browse stays live (opening a listing writes nothing), so a folder
+    // picked mid-flight is the one way a second write can be asked for. It
+    // waits; it is not posted.
+    fireEvent.click(screen.getByTestId("coding-agent-folder-browse"));
+    // The sheet opens at the stored folder; the one the test picks is a
+    // sibling under the root.
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-picker-up"));
+    fireEvent.click(await screen.findByTestId("coding-agent-folder-picker-entry"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-folder-picker-path")).toHaveTextContent("/home/clawbox/link"));
+    fireEvent.click(screen.getByTestId("coding-agent-folder-picker-use"));
     await flush();
     expect(posts).toHaveLength(1);
 
@@ -834,13 +889,13 @@ describe("one setting write at a time", () => {
     // Now the queued write goes out — after the first, never beside it.
     expect(posts).toEqual([
       { url: "/setup-api/coding-agent/enable", body: { effort: "low" } },
-      { url: "/setup-api/coding-agent/enable", body: { defaultDirectory: "/home/clawbox/next" } },
+      { url: "/setup-api/coding-agent/enable", body: { defaultDirectory: "/home/clawbox/link" } },
     ]);
     expect(xhigh).toBeDisabled();
 
-    await route.answer({ ...STATUS, effort: "low", defaultDirectory: "/home/clawbox/next" });
+    await route.answer({ ...STATUS, effort: "low", defaultDirectory: "/home/clawbox/link" });
     // The latest answer is what is on screen, and the controls are back.
-    expect(screen.getByTestId("coding-agent-folder")).toHaveValue("/home/clawbox/next");
+    expect(screen.getByTestId("coding-agent-folder")).toHaveTextContent("/home/clawbox/link");
     expect(low).toHaveAttribute("aria-pressed", "true");
     expect(xhigh).toBeEnabled();
     expect(screen.getByRole("switch", { name: SWITCH })).toBeEnabled();

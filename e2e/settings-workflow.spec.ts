@@ -243,7 +243,8 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   const codingAgent = codingWindow.getByTestId("coding-agent-settings-panel");
   const agentSwitch = codingAgent.getByRole("switch", { name: "Let the assistant delegate coding work" });
   await expect(agentSwitch).toHaveAttribute("aria-checked", "false");
-  await expect(codingAgent.getByTestId("coding-agent-folder")).toHaveValue("/home/clawbox/projects");
+  // The folder is text plus Browse since 2026-10-30 — no field to read a value from.
+  await expect(codingAgent.getByTestId("coding-agent-folder")).toHaveText("/home/clawbox/projects");
   await expect(codingAgent.getByTestId("coding-agent-effort-max")).toBeVisible();
   await agentSwitch.click();
   await expect(agentSwitch).toHaveAttribute("aria-checked", "true");

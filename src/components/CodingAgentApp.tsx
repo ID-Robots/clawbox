@@ -17,8 +17,8 @@ import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
 import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_PRIMARY_WIDE, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
-import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
-import { dispatchChatMessage, openNewAppCard } from "@/lib/ui-events";
+import { HARNESS_TEST_PROJECT } from "@/lib/coding-agent-harness-test";
+import { buildHarnessTestPrompt, dispatchChatMessage, openNewAppCard } from "@/lib/ui-events";
 import { buildRunNotesPrompt } from "@/lib/coding-project-prompts";
 import { renderText } from "@/lib/chat-markdown";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
@@ -976,33 +976,15 @@ export default function CodingAgentApp() {
   };
 
   /**
-   * One tap of "is the harness healthy?": dispatch the canned smoke task into
-   * its scratch project through the same routes a real delegation uses, then
-   * open the live terminal view on it the moment its transcript exists. The
-   * result lands in Recent runs — evidence folder, summary and all.
+   * "Is the harness healthy?" is a question for the chat since 2026-10-30:
+   * the button hands the assistant the one message that makes the scratch
+   * folder and starts the canned smoke run (`buildHarnessTestPrompt`), and
+   * the run then appears as a card in the chat like every other. Until then
+   * the app posted to `browse` and `run` itself and opened a terminal on the
+   * transcript — the one place besides the wizard that started a run from
+   * the app, which the redesign ruled out (the chat composes, the app shows).
    */
-  const testHarness = async () => {
-    setBusy("harness-test");
-    setError(null);
-    try {
-      // Scaffold the scratch project; an "already exists" answer is fine and
-      // the run below is where a real failure would surface.
-      // In the owner's own project folder, not a ClawBox-internal one — see
-      // startHarnessTest.
-      const started = await startHarnessTest(status?.defaultDirectory ?? null, t);
-      if (!started.ok) throw new Error(started.error);
-      // The live view opens on the run as soon as its transcript exists.
-      pendingLiveOpen.current = started.runId;
-      // The chat's run card only probes when told: an open chat would
-      // otherwise miss a run started from here.
-      notifyCodingRunStarted();
-      void load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
+  const testHarnessInChat = () => dispatchChatMessage(buildHarnessTestPrompt());
 
   /**
    * Forget a recorded harness fault and re-read the box.
@@ -1032,23 +1014,6 @@ export default function CodingAgentApp() {
       setBusy(null);
     }
   };
-
-  /** Open the live view once the run's transcript exists — the session id
-   *  lands a few seconds after spawn, and the poll above (`load` every
-   *  POLL_MS while a run is live) is already watching for it. A run that
-   *  settles before its transcript appears just skips the popup; it is in
-   *  the list either way. */
-  const pendingLiveOpen = useRef<string | null>(null);
-  useEffect(() => {
-    const id = pendingLiveOpen.current;
-    if (!id) return;
-    const run = runs.find((r) => r.id === id);
-    if (!run) return;
-    if (run.transcriptPath || run.status !== "running") {
-      pendingLiveOpen.current = null;
-      if (run.transcriptPath && run.status === "running") openInTerminal(run);
-    }
-  }, [runs]);
 
   /**
    * A run handed to this window from outside — the desktop's finish card, the
@@ -2171,7 +2136,7 @@ export default function CodingAgentApp() {
         {view.face === "settings" && (<>
           {/* pb-6 for the same reason coding-agent-run-page carries it: the
               owner tools are the last thing on this face, and the wrapper's
-              own py-4 left Reset / Test harness / Clear history sitting on
+              own py-4 left Reset / Test in the chat / Clear history sitting on
               the bottom edge of the scroll area. Same scale as the run page,
               not a new one. */}
           <div className="mt-1 pb-6" data-testid="coding-agent-embedded-settings">
@@ -2190,13 +2155,17 @@ export default function CodingAgentApp() {
               </div>
 
               <div className="flex items-center gap-2" data-testid="coding-agent-harness-card">
+                {/* A hand-off, not a run start, so a run already in flight
+                    no longer greys it (the chat queues); only an agent that
+                    is switched off has nothing to hand the chat. */}
                 <button
                   type="button"
-                  onClick={() => void testHarness()}
-                  disabled={busy === "harness-test" || anyLive || !status?.enabled || !status?.ready}
+                  onClick={testHarnessInChat}
+                  disabled={!status?.enabled}
                   data-testid="coding-agent-harness-test"
                   className={`${BTN_SECONDARY} flex-1`}
                 >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
                   {t("codingAgent.harnessTest")}
                 </button>
                 <HelpTip
@@ -2235,14 +2204,10 @@ export default function CodingAgentApp() {
             status={status}
             // The wizard writes through the same routes this window reads, so
             // finishing is just "read yourself again": the flag comes back
-            // true and the face flips to home — or to the harness run's own
-            // page when the owner pressed "Try it once", which is where what
-            // they were promised (Claude Code starting, writing, reporting
-            // back) is actually shown.
-            onDone={(runId) => {
-              if (runId) { setOpenProjectDir(null); setOpenRunId(runId); }
-              void load();
-            }}
+            // true and the face flips to home. "Try it in the chat" hands
+            // the first run to the chat, where it appears as a card — the
+            // wizard no longer lands the owner on a run page of its own.
+            onDone={() => { void load(); }}
           />
         )}
 

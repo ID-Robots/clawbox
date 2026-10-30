@@ -15,10 +15,11 @@
  * rather than on screen.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSetupWizard from "@/components/CodingAgentSetupWizard";
 import type { AgentStatus } from "@/components/CodingAgentSettingsPanel";
+import { CHAT_MESSAGE_EVENT, buildHarnessTestPrompt } from "@/lib/ui-events";
 
 // One stable `t`, as the real hook provides — a fresh function per render
 // would be a different contract.
@@ -101,6 +102,21 @@ function stubDevice(
         clawaiAccountTier: plan === "flash" || plan === "pro" ? plan : null,
       });
     }
+    if (url.startsWith("/setup-api/coding-agent/browse")) {
+      // The picker's listing: the folder asked for, or the root when it is
+      // not there yet (the proposed ~/Projects before anything saved it).
+      const dir = new URL(url, "http://box").searchParams.get("dir");
+      if (dir && dir !== "/home/clawbox/Projects" && dir !== "/home/clawbox") {
+        return json({ error: "Folder not found", kind: "not_found" }, 404);
+      }
+      const path = dir ?? "/home/clawbox";
+      return json({
+        root: "/home/clawbox",
+        path,
+        parent: path === "/home/clawbox" ? null : "/home/clawbox",
+        entries: path === "/home/clawbox" ? [{ name: "Projects", path: "/home/clawbox/Projects" }] : [],
+      });
+    }
     if (url.startsWith("/setup-api/coding-agent/git")) {
       const connected = opts.githubConnected ?? false;
       return json({
@@ -146,6 +162,28 @@ const browserSettings = () =>
     .map((c) => c.body);
 
 
+/** Walk the wizard as an owner does, up to the project step. */
+async function reachProjectStep(onDone = vi.fn()) {
+  render(<CodingAgentSetupWizard status={STATUS} onDone={onDone} />);
+  // The first step is behind the paid-plan gate, and the gate's own poll has
+  // to answer before the button is anything but disabled — the hook starts
+  // every mount at "not signed in" and only the first tick settles it.
+  const enable = screen.getByTestId("coding-agent-wizard-enable");
+  await waitFor(() => expect(enable).not.toBeDisabled());
+  fireEvent.click(enable);
+  fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
+  await screen.findByTestId("coding-agent-wizard-folder");
+  return onDone;
+}
+
+/** Every chat hand-off heard while the test ran, newest last. */
+function listenForChat() {
+  const heard: string[] = [];
+  const onMessage = (e: Event) => heard.push((e as CustomEvent<{ text: string }>).detail.text);
+  window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
+  return { heard, stop: () => window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage) };
+}
+
 /** Walk the wizard as an owner does, up to the browser step. */
 async function reachBrowserStep() {
   render(<CodingAgentSetupWizard status={STATUS} onDone={vi.fn()} />);
@@ -185,7 +223,7 @@ describe("the browser step", () => {
     await waitFor(() => expect(browserSettings()).toEqual([{ realBrowser: true }]));
     await waitFor(() => expect(browserActions()).toEqual(["open-browser"]));
     // And on to the last step, which is where the flow ends.
-    expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
     expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 4, total: 4 }))).toBeInTheDocument();
   });
 
@@ -197,7 +235,7 @@ describe("the browser step", () => {
     fireEvent.click(screen.getByTestId("coding-agent-wizard-browser-enable"));
 
     await waitFor(() => expect(browserActions()).toEqual(["open-browser", "install-chromium", "open-browser"]));
-    expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
   });
 
   it("keeps the answer and offers a way on when the window will not open", async () => {
@@ -214,7 +252,7 @@ describe("the browser step", () => {
     expect(screen.getByTestId("coding-agent-wizard-browser-enable")).toBeEnabled();
 
     fireEvent.click(screen.getByTestId("coding-agent-wizard-browser-continue"));
-    expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
   });
 
   it("offers the way on when the setting itself is refused, and never opens a window it did not record", async () => {
@@ -226,7 +264,7 @@ describe("the browser step", () => {
     expect(browserActions()).toEqual([]);
 
     fireEvent.click(screen.getByTestId("coding-agent-wizard-browser-continue"));
-    expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
   });
 
   it("skips by recording the other answer, without touching the screen", async () => {
@@ -238,6 +276,159 @@ describe("the browser step", () => {
     // Skip is an ANSWER, not a deferral: nothing is launched, and the owner
     // still lands on the last step.
     expect(browserActions()).toEqual([]);
-    expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
+  });
+});
+
+describe("the project step", () => {
+  // The 2026-10-30 redesign: the folder is TEXT plus Browse — no typed path,
+  // no "Create folder" field; a folder that is not there yet is made at the
+  // proposed name when the step saves — and the review pass is a Switch.
+  it("shows the proposed folder as text and no field to type in", async () => {
+    stubDevice();
+    await reachProjectStep();
+    const folder = screen.getByTestId("coding-agent-wizard-folder");
+    expect(folder).toHaveTextContent("/home/clawbox/Projects");
+    expect(folder).toHaveAttribute("data-value", "/home/clawbox/Projects");
+    expect(folder.tagName).not.toBe("INPUT");
+    expect(screen.getByTestId("coding-agent-wizard")?.querySelectorAll("input, textarea, select")).toHaveLength(0);
+    expect(screen.queryByTestId("coding-agent-wizard-newfolder")).toBeNull();
+  });
+
+  it("opens the picker from Browse, as a sheet with no field, and takes the folder picked", async () => {
+    stubDevice();
+    await reachProjectStep();
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-browse"));
+    const picker = await screen.findByTestId("coding-agent-wizard-picker");
+    expect(within(picker).getByRole("dialog")).toBeInTheDocument();
+    expect(picker.querySelectorAll("input, textarea, select")).toHaveLength(0);
+    // It opens where the proposed folder is; Up is the root.
+    await waitFor(() => expect(screen.getByTestId("coding-agent-wizard-picker-path")).toHaveTextContent("/home/clawbox/Projects"));
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-picker-up"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-wizard-picker-path")).toHaveTextContent("/home/clawbox"));
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-picker-use"));
+    expect(screen.queryByTestId("coding-agent-wizard-picker")).toBeNull();
+    expect(screen.getByTestId("coding-agent-wizard-folder")).toHaveTextContent("/home/clawbox");
+    expect(screen.getByTestId("coding-agent-wizard-folder")).toHaveAttribute("data-value", "/home/clawbox");
+  });
+
+  it("falls back to the root when the proposed folder is not there yet", async () => {
+    stubDevice();
+    render(<CodingAgentSetupWizard status={{ ...STATUS, suggestedDirectory: "/home/clawbox/Nowhere" }} onDone={vi.fn()} />);
+    const enable = screen.getByTestId("coding-agent-wizard-enable");
+    await waitFor(() => expect(enable).not.toBeDisabled());
+    fireEvent.click(enable);
+    fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
+    fireEvent.click(await screen.findByTestId("coding-agent-wizard-browse"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-wizard-picker-path")).toHaveTextContent("/home/clawbox"));
+    expect(screen.getByTestId("coding-agent-wizard-picker-entry")).toHaveTextContent("Projects");
+  });
+
+  it("draws the review pass as a switch, and saves the folder shown with it", async () => {
+    stubDevice();
+    await reachProjectStep();
+    const review = screen.getByTestId("coding-agent-wizard-review");
+    expect(review).toHaveAttribute("role", "switch");
+    expect(review).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(review);
+    expect(review).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+    await waitFor(() => expect(calls.some((c) => c.url === "/setup-api/coding-agent/enable")).toBe(true));
+    expect(calls.find((c) => c.url === "/setup-api/coding-agent/enable")!.body).toEqual({
+      defaultDirectory: "/home/clawbox/Projects",
+      reviewPass: false,
+      enabled: true,
+      setupComplete: false,
+    });
+  });
+});
+
+describe("the last step", () => {
+  // "Try it in the chat" (2026-10-30): the wizard starts no run of its own.
+  // It finishes setup and hands the chat the one message that asks the
+  // assistant for the smoke run, so the first run appears as a card there.
+  it("finishes setup, hands the harness test to the chat and closes", async () => {
+    stubDevice();
+    const onDone = vi.fn();
+    const chat = listenForChat();
+    try {
+      render(<CodingAgentSetupWizard status={STATUS} onDone={onDone} />);
+      const enable = screen.getByTestId("coding-agent-wizard-enable");
+      await waitFor(() => expect(enable).not.toBeDisabled());
+      fireEvent.click(enable);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-next-harness"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
+      const tryIt = await screen.findByTestId("coding-agent-wizard-try-chat");
+      expect(tryIt).toHaveTextContent(translations.en["codingAgent.wizardTryInChat"]);
+      fireEvent.click(tryIt);
+      await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+      // The flag went FIRST, then the hand-off — never a run in the chat
+      // under a wizard that could not close.
+      expect(calls.at(-1)!.body).toEqual({ setupComplete: true });
+      expect(chat.heard).toEqual([buildHarnessTestPrompt()]);
+      expect(chat.heard[0]).toContain("smoke test");
+      expect(chat.heard[0]).toContain("harness-test");
+      // Nothing was posted to the run route from here.
+      expect(calls.some((c) => c.url === "/setup-api/coding-agent/run")).toBe(false);
+      expect(calls.some((c) => c.url === "/setup-api/coding-agent/browse")).toBe(false);
+    } finally {
+      chat.stop();
+    }
+  });
+
+  it("hands nothing to the chat when the flag is refused", async () => {
+    stubDevice({ settingFails: true });
+    // The stub refuses only the browser write; refuse the flag by hand.
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (input.toString() === "/setup-api/coding-agent/enable" && body?.setupComplete === true) {
+        calls.push({ url: input.toString(), body });
+        return json({ error: "Finishing setup needs a signed-in browser session." }, 403);
+      }
+      return real(input, init);
+    }));
+    const onDone = vi.fn();
+    const chat = listenForChat();
+    try {
+      render(<CodingAgentSetupWizard status={STATUS} onDone={onDone} />);
+      const enable = screen.getByTestId("coding-agent-wizard-enable");
+      await waitFor(() => expect(enable).not.toBeDisabled());
+      fireEvent.click(enable);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-next-harness"));
+      // The browser step: Enable's setting write is the one this stub refuses,
+      // so Continue is the way on.
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-enable"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-continue"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-try-chat"));
+      expect(await screen.findByText(/signed-in browser session/)).toBeInTheDocument();
+      expect(onDone).not.toHaveBeenCalled();
+      expect(chat.heard).toEqual([]);
+    } finally {
+      chat.stop();
+    }
+  });
+
+  it("skips by finishing setup alone, with nothing handed to the chat", async () => {
+    stubDevice();
+    const onDone = vi.fn();
+    const chat = listenForChat();
+    try {
+      render(<CodingAgentSetupWizard status={STATUS} onDone={onDone} />);
+      const enable = screen.getByTestId("coding-agent-wizard-enable");
+      await waitFor(() => expect(enable).not.toBeDisabled());
+      fireEvent.click(enable);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-next-harness"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-skip"));
+      await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+      expect(calls.at(-1)!.body).toEqual({ setupComplete: true });
+      expect(chat.heard).toEqual([]);
+    } finally {
+      chat.stop();
+    }
   });
 });

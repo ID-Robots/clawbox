@@ -383,7 +383,9 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       await leaveWizardIntro();
       await passGithubStep();
-      fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
+      // The proposed folder is shown as text (2026-10-30: no typed path); the
+      // picker is the one way to change it, and Next saves what is shown.
+      expect(screen.getByTestId("coding-agent-wizard-folder")).toHaveTextContent("/home/clawbox/Projects");
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
       const post = posts.find((p) => p.url === "/setup-api/coding-agent/enable");
@@ -402,7 +404,7 @@ describe("CodingAgentApp", () => {
       // The browser question stands between this save and the last step, and
       // is a post of its own — the settings above are one post, not four.
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
-      expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+      expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
     });
 
     it("finishes on Skip without starting a run", async () => {
@@ -424,25 +426,38 @@ describe("CodingAgentApp", () => {
       expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
     });
 
-    it("runs the harness test and finishes when the owner asks for it", async () => {
+    it("hands the first run to the chat and finishes when the owner asks for it", async () => {
+      // "Try it in the chat" (2026-10-30): the wizard starts no run itself.
+      // The chat is handed the one message that asks the assistant for the
+      // smoke run, and the run then appears as a card there.
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
-      render(<CodingAgentApp />);
-      await leaveWizardIntro();
-      await passGithubStep();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
-      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
-      const run = posts.find((p) => p.url === "/setup-api/coding-agent/run");
-      // A bare folder name, resolved inside the folder the owner just chose on
-      // the previous step — not a code project under data/.
-      expect((run!.body as { directory: string }).directory).toBe("harness-test");
-      // ...and setup completes, landing the owner on the RUN's page with it
-      // already in flight — not on home, where the run was a dot in the rail
-      // (the wizard sweep, 2026-09-06).
-      await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
-      expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-smoke001");
-      expect(screen.queryByTestId("coding-agent-wizard")).toBeNull();
+      const heard: string[] = [];
+      const onMessage = (e: Event) => heard.push((e as CustomEvent<{ text: string }>).detail.text);
+      window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
+      try {
+        render(<CodingAgentApp />);
+        await leaveWizardIntro();
+        await passGithubStep();
+        fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+        fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
+        fireEvent.click(await screen.findByTestId("coding-agent-wizard-try-chat"));
+        await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
+        await waitFor(() => expect(heard).toHaveLength(1));
+        // The message names the scratch folder by its BARE name — the run
+        // resolver reads that as "inside the default project folder" — and
+        // calls the task a smoke test, so the brief does not inflate it.
+        expect(heard[0]).toContain("\"harness-test\"");
+        expect(heard[0]).toContain("smoke test");
+        expect(heard[0]).toContain("coding_agent_run");
+        // Nothing was posted to the run or browse routes from the app.
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
+        // ...and setup completes, landing the owner on home, the wizard gone.
+        expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
+        expect(screen.queryByTestId("coding-agent-wizard")).toBeNull();
+      } finally {
+        window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage);
+      }
     });
   });
 
@@ -1648,95 +1663,49 @@ describe("CodingAgentApp", () => {
 });
 
 describe("the harness self-test", () => {
-  const TRANSCRIPT = "/home/clawbox/.claude-ds/projects/-home-clawbox-clawbox-data-code-projects-harness-test/61400ab6-0da9-4feb-8ad5-b547239c1367.jsonl";
-
-  it("dispatches the canned smoke run into its scratch project and opens the live view", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [], { transcriptPath: TRANSCRIPT });
-    const opened: string[] = [];
-    const onTerminal = (e: Event) => opened.push((e as CustomEvent<{ command: string }>).detail.command);
-    window.addEventListener("clawbox:open-terminal", onTerminal);
+  // Since 2026-10-30 the owner tool is a hand-off: the app no longer posts
+  // to `browse` and `run` and opens a terminal on the transcript; it hands
+  // the chat the one message that asks the assistant for the smoke run.
+  it("hands the canned smoke run to the chat, and asks the box for nothing", async () => {
+    stubFetch({ enabled: true, readiness: READY }, []);
+    const heard: string[] = [];
+    const onMessage = (e: Event) => heard.push((e as CustomEvent<{ text: string }>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
     try {
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-      fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
-      await waitFor(() => {
-        // The folder is made inside the owner's OWN project folder — it used
-        // to be scaffolded as a code project under data/code-projects, which
-        // is a ClawBox-internal directory they never browse.
-        expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse"
-          && (p.body as { name?: string }).name === "harness-test")).toBe(true);
-        // A BARE NAME, which the run resolver reads as "inside the default
-        // project folder" — so the default stays the one place that decides
-        // where "inside" is.
-        expect(posts.some((p) => p.url === "/setup-api/coding-agent/run"
-          && (p.body as { directory?: string }).directory === "harness-test")).toBe(true);
-      });
-      const runPost = posts.find((p) => p.url === "/setup-api/coding-agent/run");
-      // The task names itself a smoke test, so the brief's "complete, polished
-      // app" bar does not inflate it into a real feature build.
-      expect(String((runPost?.body as { task?: string }).task)).toContain("smoke test");
-      // The live view: the Terminal app is handed the preview script on the
-      // run's transcript, single-quoted, once the listing carries the path.
-      await waitFor(() => expect(opened).toEqual([`/home/clawbox/clawbox/scripts/coding-run-preview '${TRANSCRIPT}'`]));
+      const button = await screen.findByTestId("coding-agent-harness-test");
+      expect(button).toHaveTextContent(translations.en["codingAgent.harnessTest"]);
+      expect(translations.en["codingAgent.harnessTest"]).toBe("Test in the chat");
+      fireEvent.click(button);
+      expect(heard).toHaveLength(1);
+      // The scratch folder by its BARE name — the run resolver reads that as
+      // "inside the default project folder", so the default stays the one
+      // place that decides where "inside" is — and the task names itself a
+      // smoke test, so the brief's "complete, polished app" bar does not
+      // inflate it into a real feature build.
+      expect(heard[0]).toContain("\"harness-test\"");
+      expect(heard[0]).toContain("smoke test");
+      expect(heard[0]).toContain("coding_agent_run");
+      expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
+      expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
     } finally {
-      window.removeEventListener("clawbox:open-terminal", onTerminal);
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage);
     }
   });
 
-  it("is not offered while a run is already in flight — one run at a time is the runner's rule", async () => {
+  it("is offered while a run is already in flight — the chat queues, the app starts nothing", async () => {
     stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null }]);
-    render(<CodingAgentApp />);
-    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-    expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
-  });
-
-  it("is offered while a settled run only waits on GitHub Actions — the CI wait occupies no harness", async () => {
-    const pr = {
-      phase: "waiting", number: 7, url: "https://github.com/o/r/pull/7", branch: "coding/run-k3x9q2ab", base: "main",
-      checks: { total: 2, passed: 0, failed: 0, pending: 2 }, detail: null, startedAt: Date.now() - 30_000, endedAt: null,
-      reviewOk: true,
-    };
-    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, pr }]);
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
     expect(await screen.findByTestId("coding-agent-harness-test")).toBeEnabled();
   });
 
-  it("refuses, in the owner's words, when no project folder is set — and asks the box for nothing", async () => {
-    // The smoke run lives INSIDE the default project folder, so without one
-    // there is nowhere to put it. The refusal is worded through the
-    // component's own `t` (the helper is not a component and cannot reach the
-    // locale itself), and it happens before any route is touched: a scratch
-    // folder made against a folder that does not exist, or a run posted for
-    // the resolver to refuse, would each be a worse answer than the sentence.
-    stubFetch({ enabled: true, readiness: READY }, [], { projectsDir: null });
+  it("is not offered while the agent is switched off — there is nothing to hand the chat", async () => {
+    stubFetch({ enabled: false, readiness: READY }, []);
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-    fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
-    expect(await screen.findByText(translations.en["codingAgent.harnessTestNoFolder"])).toBeInTheDocument();
-    expect(translations.en["codingAgent.harnessTestNoFolder"]).toBe("Choose a project folder first.");
-    expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
-    expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
-    // The button is handed back: the owner fixes the folder and tries again.
-    expect(screen.getByTestId("coding-agent-harness-test")).toBeEnabled();
-  });
-
-  it("tells the desktop a run started, once the route has said so", async () => {
-    // The chat's run card only probes the box when told; a run started from
-    // here while the chat sat open was never adopted.
-    stubFetch({ enabled: true, readiness: READY }, []);
-    let heard = 0;
-    const onStarted = () => { heard += 1; };
-    window.addEventListener(CODING_RUN_STARTED_EVENT, onStarted);
-    try {
-      render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-      fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
-      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
-      await waitFor(() => expect(heard).toBe(1));
-    } finally {
-      window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
-    }
+    expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
   });
 });
 
