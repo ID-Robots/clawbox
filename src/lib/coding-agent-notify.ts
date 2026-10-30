@@ -312,7 +312,7 @@ export async function announceCodingTeam(board: TeamBoard): Promise<void> {
   try {
     await pushPendingAction({
       type: "coding_team",
-      event: "settled",
+      phase: "settled",
       teamId: board.id,
       projectId: board.projectId,
       status: board.status,

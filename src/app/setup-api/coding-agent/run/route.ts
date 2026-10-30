@@ -128,7 +128,7 @@ export async function POST(request: Request) {
     // or the review pass shows up as a chat card within one poll. The
     // desktop only nudges its poll on it; the run record stays the truth.
     void pushPendingAction(
-      { type: "coding_run", event: queued ? "queued" : "started", runId: run.id, projectId: run.projectId, ...(run.team ? { teamId: run.team.id } : {}) },
+      { type: "coding_run", phase: queued ? "queued" : "started", runId: run.id, projectId: run.projectId, ...(run.team ? { teamId: run.team.id } : {}) },
       `coding-run:${run.id}`,
     ).catch((err: unknown) => {
       console.error("[coding-agent/run] desktop notice failed:", err instanceof Error ? err.message : err);

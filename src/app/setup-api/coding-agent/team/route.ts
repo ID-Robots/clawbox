@@ -100,7 +100,7 @@ export async function POST(request: Request) {
     // Every open desktop hears that a team began (the run route does the
     // same): the chat's team card is there within one poll, whoever asked.
     void pushPendingAction(
-      { type: "coding_team", event: queued ? "queued" : "started", teamId: team.id, projectId: team.projectId, goal: team.goal.split(/\r?\n/)[0].slice(0, 160) },
+      { type: "coding_team", phase: queued ? "queued" : "started", teamId: team.id, projectId: team.projectId, goal: team.goal.split(/\r?\n/)[0].slice(0, 160) },
       `coding-team:${team.id}`,
     ).catch((err: unknown) => {
       console.error("[coding-agent/team] desktop notice failed:", err instanceof Error ? err.message : err);

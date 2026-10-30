@@ -2585,7 +2585,7 @@ function ChromeDesktopInner() {
         // on the team; a toast could hand the app nothing. Either way the
         // chat's team card re-asks the box.
         const teamId = action.teamId;
-        if (action.event === "settled") {
+        if (action.phase === "settled") {
           setCodingNotices(prev => (
             prev.some(n => n.id === teamId)
               ? prev

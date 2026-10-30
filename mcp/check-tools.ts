@@ -224,6 +224,10 @@ const PROBE_GATED_COMMON = [
   // coding agent's own gate, because what it answers about is what a RUN will
   // find in its environment.
   "coding_secret_list",
+  // Importing a project (a GitHub repository or a folder on the box) is the
+  // app's Import panel as a tool (2026-10-30), under the coding agent's gate
+  // like the runs it exists for.
+  "coding_project_import",
   // Deploying what a run built is the other half of handing it the task, so it
   // is behind the same switch: a box whose coding agent is off has nothing the
   // Following every run, resuming one, and the project matrix: the same family
