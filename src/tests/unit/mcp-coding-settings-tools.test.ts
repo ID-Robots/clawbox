@@ -105,7 +105,7 @@ describe("registration", () => {
       for (const tool of [get, set]) {
         expect(tool.description.length).toBeLessThanOrEqual(MAX_DESCRIPTION_CHARS);
         expect(tool.description).not.toMatch(BANNED_DESCRIPTION_RE);
-        expect(paramDescriptionViolations({ name: tool.name, description: tool.description, shape: tool.shape, opts: tool.opts })).toEqual([]);
+        expect(paramDescriptionViolations({ name: tool.name, description: tool.description, params: Object.keys(tool.shape), shape: tool.shape, opts: tool.opts })).toEqual([]);
         for (const param of Object.keys(tool.shape)) expect(param).toMatch(PARAM_NAME_RE);
       }
       expect(Object.keys(get.shape)).toEqual([]);
