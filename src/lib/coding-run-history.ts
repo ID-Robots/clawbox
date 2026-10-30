@@ -38,6 +38,7 @@
  */
 import fs from "fs";
 import os from "os";
+import { StringDecoder } from "string_decoder";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import {
@@ -671,17 +672,21 @@ function dropProgressLines(file: string): void {
     src = fs.openSync(file, "r");
     dst = fs.openSync(tmp, "w", 0o600);
     const buf = Buffer.allocUnsafe(SLIM_CHUNK);
+    // One decoder across the chunks: a multi-byte character cut by a chunk
+    // boundary decoded as two U+FFFD when each chunk was decoded on its own.
+    const decoder = new StringDecoder("utf8");
     let carry = "";
     let dropped = 0;
     for (;;) {
       const read = fs.readSync(src, buf, 0, SLIM_CHUNK, null);
       if (read <= 0) break;
-      const lines = (carry + buf.toString("utf-8", 0, read)).split("\n");
+      const lines = (carry + decoder.write(buf.subarray(0, read))).split("\n");
       carry = lines.pop() ?? "";
       const kept = lines.filter((line) => !PROGRESS_LINE_RE.test(line));
       dropped += lines.length - kept.length;
       if (kept.length) fs.writeSync(dst, `${kept.join("\n")}\n`);
     }
+    carry += decoder.end();
     if (carry && !PROGRESS_LINE_RE.test(carry)) fs.writeSync(dst, carry);
     fs.closeSync(src);
     src = null;

@@ -628,7 +628,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.roleModels.bulk": "Bulk work",
   "codingAgent.roleModelsRoleJob.planner": "plans the work and leads the team",
   "codingAgent.roleModelsRoleJob.worker": "write your code",
-  "codingAgent.roleModelsRoleJob.reviewer": "check each task before it is accepted",
+  "codingAgent.roleModelsRoleJob.reviewer": "check tasks before they are accepted, when the plan asks for a review",
   "codingAgent.roleModelsRoleJob.bulk": "token-heavy, non-critical tasks: scraping, mass data, repetitive edits, long test runs",
   "codingAgent.roleAutoAsWorkers": "Default (as the workers)",
   "codingAgent.roleModelNow": "Now: {model} on {provider}",
@@ -684,7 +684,7 @@ export const codingAgentEn: Record<string, string> = {
   // come out of the ClawBox AI daily allowance, the voice out of the one
   // synthesis slot the chat shares.
   "codingAgent.genMediaLabel": "Let runs make pictures and speech",
-  "codingAgent.genMediaHint": "A run may have this box draw pictures and speak lines into sound files for its project, out of your ClawBox AI allowance — at most twenty pictures and forty clips per run.",
+  "codingAgent.genMediaHint": "A run may have this box draw pictures and speak lines into sound files for its project — at most twenty pictures and forty clips per run. Pictures come out of your ClawBox AI allowance; speech uses this box's voice, local or a cloud provider's that bills on its own.",
   "codingAgent.genMediaFailed": "Could not change the media setting.",
   "codingAgent.realBrowserLabel": "Verify in this box's browser",
   "codingAgent.realBrowserHint": "A run checks its work in the Chromium on this box's screen, which you can watch in the Agent Browser app; off, it uses an invisible browser.",

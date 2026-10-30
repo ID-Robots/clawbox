@@ -433,10 +433,13 @@ function launchTeam(board: TeamBoard): void {
  * while `run.team` is set): a team of five used to put five run cards on the
  * desktop and say nothing about the team. On OpenClaw the assistant hears
  * too, one line in the main chat, so it need not poll `coding_team_status`
- * or build itself a watcher. A single-run team's run has no `team` and
- * settled the owner's usual way, with its own card, so the team sends only
- * the chat line. Best-effort, like every notice: one that does not arrive
- * changes nothing on the board.
+ * or build itself a watcher — for a team IT started (`source: "agent"`):
+ * an owner's team is the owner's to read (the team route answers the MCP
+ * bearer 403 `owner_only` on it), and the line would tell the assistant a
+ * board's id, counts and branch and send it to a status it cannot read. A
+ * single-run team's run has no `team` and settled the owner's usual way,
+ * with its own card, so the team sends only the chat line. Best-effort,
+ * like every notice: one that does not arrive changes nothing on the board.
  */
 function announceTeamSettled(board: TeamBoard): void {
   if (!board.singleRun) {
@@ -444,6 +447,7 @@ function announceTeamSettled(board: TeamBoard): void {
       console.error("[coding-team] notice failed:", err instanceof Error ? err.message : err);
     });
   }
+  if (board.source !== "agent") return;
   void postTeamFinishedToOwnerAgent(board).catch((err: unknown) => {
     console.error(`[coding-team] the chat was not told that ${board.id} finished:`, err instanceof Error ? err.message : err);
   });
@@ -2080,7 +2084,15 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
         continue;
       }
       heldSince ??= Date.now();
-      if (Date.now() - heldSince > RUN_BUDGET_MS) {
+      // An allowance pause is the box's to end, at the reset upstream named
+      // (`resumeRunsWaitingForAnthropic`): the budget counts from that reset,
+      // not from the pause. Counted from the pause, a reset past the hour
+      // found the worker stopped, its worktree gone and its task reoffered
+      // into the same spent allowance. A pause with no reset named, or one
+      // that passed without a resume, is held the plain budget.
+      const resetsAt = run.pauseReason?.kind === "allowance" && run.pauseReason.resetsAt ? Date.parse(run.pauseReason.resetsAt) : NaN;
+      const heldFrom = Number.isFinite(resetsAt) ? Math.max(heldSince, resetsAt) : heldSince;
+      if (Date.now() - heldFrom > RUN_BUDGET_MS) {
         // The team's own doing, not its work going wrong: uncounted, and a
         // worker's task is offered once more (`workTask`).
         team.budgetStopped.add(runId);

@@ -198,6 +198,11 @@ describe("what is red and what is not judged", () => {
     expect(suiteRejection(v as Red)).toContain("No failing test was named; it may be too slow for the gate's 5-minute box.");
     expect(suiteRejection(v as Red)).not.toContain("First failure");
     expect(suiteFailure(v as Red)).toBe("The project's own tests fail on the merged result: npm test — did not finish within 5 minutes. No failing test was named; it may be too slow for the gate's 5-minute box.");
+    // A passing test's own console.error(new Error(…)) is an "Error" line: with no failing test named it is not the failure, and the slow-suite hint stays.
+    const noisy = readSuiteOutput("npm test", ran({ code: null, timedOut: true, output: "> test\nError: expected, and handled\nwaiting on port 3000" }), "/p");
+    expect(noisy).toMatchObject({ failing: [], excerpt: "" });
+    expect(suiteRejection(noisy as Red)).toContain("No failing test was named; it may be too slow for the gate's 5-minute box.");
+    expect(suiteRejection(noisy as Red)).not.toContain("First failure");
     // A failure the output did name before the deadline is quoted as one.
     const named = readSuiteOutput("npm test", ran({ code: null, timedOut: true, output: "FAIL src/a.test.ts > adds\nAssertionError: 1 != 2\nwaiting…" }), "/p", 15 * 60_000);
     expect(named).toMatchObject({ kind: "fail", summary: "did not finish within 15 minutes", failing: ["src/a.test.ts > adds"], files: ["src/a.test.ts"], excerpt: "AssertionError: 1 != 2", deadlineMinutes: 15 });

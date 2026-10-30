@@ -4666,12 +4666,18 @@ function normalizeRun(raw: CodingRun): CodingRun {
     media: normalizeMedia(raw.media),
     reviewPass: raw.reviewPass === true,
     // The frozen visual decision (CodingRun.visual). A record from before the
-    // decision existed — no `diet` object, the field that arrived with it —
-    // was started with every tool, so it reads as `true` and its resumes keep
-    // them; a newer record that never spawned is null and decides at its spawn.
-    visual: typeof (raw as { visual?: unknown }).visual === "boolean"
-      ? (raw as { visual: boolean }).visual
-      : typeof (raw as { diet?: unknown }).diet === "object" && (raw as { diet?: unknown }).diet !== null ? null : true,
+    // decision existed — neither the field nor the `diet` object that arrived
+    // with it — was started with every tool, so it reads as `true` and its
+    // resumes keep them; a newer record that never spawned is null and decides
+    // at its spawn. An EXPLICIT null (a draft, `newRunRecord`) stays null: read
+    // as `true` it skipped `decideRunVisual` at the draft's first spawn after
+    // a restart and gave every persisted draft the browser and media tools.
+    visual: (() => {
+      const r = raw as { visual?: unknown; diet?: unknown };
+      if (typeof r.visual === "boolean") return r.visual;
+      if (r.visual === null) return null;
+      return typeof r.diet === "object" && r.diet !== null ? null : true;
+    })(),
     mediaGenerated: {
       images: countOf(raw.mediaGenerated?.images),
       audio: countOf(raw.mediaGenerated?.audio),

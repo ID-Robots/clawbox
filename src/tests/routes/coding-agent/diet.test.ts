@@ -79,12 +79,17 @@ describe("a run record's frozen visual decision", () => {
       // A record with the diet's field that never spawned: decided at its spawn.
       record("run-cccccccc", { diet: { brief: "short", helpers: "lean" }, visual: "yes" }),
       record("run-dddddddd", { visual: true }),
+      // A draft as `newRunRecord` writes it — no `diet`, an explicit null: not
+      // decided yet, and read as `true` after a restart it would skip the
+      // decision at its first spawn and hold every tool.
+      record("run-eeeeeeee", { status: "draft", visual: null }),
     ]));
     const lib = await import("@/lib/coding-agent");
     expect(lib.getRun("run-aaaaaaaa")!.visual).toBe(false);
     expect(lib.getRun("run-bbbbbbbb")!.visual).toBe(true);
     expect(lib.getRun("run-cccccccc")!.visual).toBeNull();
     expect(lib.getRun("run-dddddddd")!.visual).toBe(true);
+    expect(lib.getRun("run-eeeeeeee")!.visual).toBeNull();
     expect(lib.getRun("run-aaaaaaaa")).not.toHaveProperty("diet");
   });
 });

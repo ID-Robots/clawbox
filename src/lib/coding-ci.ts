@@ -171,14 +171,11 @@ export function ciFixNotes(failure: CiFailure, opts: { push: boolean; excerptCha
   return lines.join("\n\n");
 }
 
-/**
- * Does a team's goal ask for a pull request? Its words, not a guess: "open a
- * PR", "a pull request", or a merge — which needs one. A team whose goal says
- * nothing of it leaves its work on the team's branch, as every team did —
- * and so does one whose goal REFUSES it: "do not open a PR", "no pull
- * request", read fail-closed the way `goalWantsMerge` reads its negators
- * (a live goal's "Do not open a PR" used to count as asking for one).
- */
+/** Does the goal name a pull request at all — "pull request", "PR", "PRs"? */
+function mentionsPullRequest(goal: string): boolean {
+  return /\bpull[\s-]?requests?\b/i.test(goal) || /\bPRs?\b/.test(goal);
+}
+
 /**
  * Does a team's goal (or a run's task) REFUSE a pull request — "do not open a
  * PR", "no pull request", "without a PR"? A refusal outranks the owner's
@@ -187,14 +184,22 @@ export function ciFixNotes(failure: CiFailure, opts: { push: boolean; excerptCha
  * was published under auto-PR, 2026-10-30).
  */
 export function goalRefusesPullRequest(goal: string): boolean {
-  if (!/\bpull[\s-]?requests?\b/i.test(goal) && !/\bPRs?\b/.test(goal)) return false;
+  if (!mentionsPullRequest(goal)) return false;
   return /\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(goal);
 }
 
+/**
+ * Does a team's goal ask for a pull request? Its words, not a guess: "open a
+ * PR", "a pull request", or a merge — which needs one. A team whose goal says
+ * nothing of it leaves its work on the team's branch, as every team did —
+ * and so does one whose goal REFUSES it (`goalRefusesPullRequest`, the one
+ * reading of a refusal): "do not open a PR", "no pull request", read
+ * fail-closed the way `goalWantsMerge` reads its negators (a live goal's
+ * "Do not open a PR" used to count as asking for one).
+ */
 export function goalWantsPullRequest(goal: string): boolean {
   if (goalWantsMerge(goal)) return true;
-  if (!/\bpull[\s-]?requests?\b/i.test(goal) && !/\bPRs?\b/.test(goal)) return false;
-  return !/\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(goal);
+  return mentionsPullRequest(goal) && !goalRefusesPullRequest(goal);
 }
 
 /**

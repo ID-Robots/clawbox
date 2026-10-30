@@ -300,23 +300,31 @@ export default function CodingTeamCard({ teams, onChanged, onOpenRun, onPlan, ru
     .filter((x) => isQueuedTeam(x.status) && x.id !== team?.id)
     .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
 
+  // `asked` holds an id for as long as its read is in flight or answered —
+  // a read that fails lets it go, so the next list from the host asks again
+  // (the effect looks once per list; `asked` makes that a no-op for a board
+  // already whole). No cleanup flag: `setWhole` is keyed by id, so a late
+  // answer can only fill in its own board, and a flag that dropped the
+  // answer on cleanup left Strict Mode's first read, and the board, slim.
   const wanted = listed && listed.slim ? listed.id : null;
   useEffect(() => {
     if (!wanted || asked.current.has(wanted)) return;
     asked.current.add(wanted);
-    let gone = false;
     void (async () => {
       try {
         const res = await fetch(`/setup-api/coding-agent/team?id=${encodeURIComponent(wanted)}`, { cache: "no-store" });
         const data = await res.json().catch(() => null) as { team?: TeamView } | null;
-        if (!res.ok || !data?.team || gone) return;
+        if (!res.ok || !data?.team) {
+          asked.current.delete(wanted);
+          return;
+        }
         setWhole((prev) => ({ ...prev, [wanted]: data.team! }));
       } catch {
         /* the card draws the slim board: the status, the chart, no log */
+        asked.current.delete(wanted);
       }
     })();
-    return () => { gone = true; };
-  }, [wanted]);
+  }, [wanted, teams]);
 
   /** Stop the team at work, or — for a queued one — take it out of the queue: the same route, the owner's alone for a queue. */
   const stop = async (target: TeamView | null = team) => {

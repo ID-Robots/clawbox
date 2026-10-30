@@ -190,14 +190,18 @@ export function readSuiteOutput(command: string, ran: SandboxedOutcome, director
   if (ran.error !== null) return { kind: "unjudged", command, reason: `it could not be started: ${ran.error}` };
   if (ran.timedOut) {
     // Only a failure the output really named: the tail of a suite cut short
-    // is whatever test was running, passing or not.
+    // is whatever test was running, passing or not — and a passing test's
+    // own `console.error(new Error(…))` is an "Error" line `firstFailure`
+    // would quote, so the excerpt follows a NAMED failing test or is empty
+    // (an excerpt alone also hid "No failing test was named; it may be too slow").
+    const failing = failingTests(output);
     return {
       kind: "fail",
       command,
       summary: `did not finish within ${timeoutMs >= 60_000 ? plural(Math.round(timeoutMs / 60_000), "minute") : plural(Math.round(timeoutMs / 1000), "second")}`,
-      failing: failingTests(output),
+      failing,
       files: namedFiles(output, directory),
-      excerpt: firstFailure(output),
+      excerpt: failing.length ? firstFailure(output) : "",
       deadlineMinutes: Math.max(1, Math.round(timeoutMs / 60_000)),
     };
   }

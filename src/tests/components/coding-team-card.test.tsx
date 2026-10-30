@@ -242,6 +242,27 @@ describe("with a team working here", () => {
     expect(reads()).toHaveLength(1);
   });
 
+  it("asks again for a slim board whose read failed, on the host's next list — the id is not 'asked' for the life of the card", async () => {
+    const done: TeamView = { ...WORKING, status: "done", slim: true, log: [], tasks: WORKING.tasks.map((x) => ({ ...x, result: null, review: x.review && { ...x.review, notes: "" } })) };
+    teams = [done];
+    whole = { [done.id]: { ...WORKING, status: "done" } };
+    stub();
+    // The first read fails (and a card that marked the id asked before the
+    // read, and never let go, drew that board slim from then on).
+    vi.mocked(fetch).mockImplementationOnce(async () => json({ error: "busy" }, 503));
+    const view = render(<CodingTeamCard teams={[done]} onChanged={vi.fn()} onOpenRun={vi.fn()} />);
+    const reads = () => vi.mocked(fetch).mock.calls.filter(([, i]) => !i?.method).map(([u]) => String(u));
+    await waitFor(() => expect(reads()).toEqual([`/setup-api/coding-agent/team?id=${done.id}`]));
+    expect(screen.queryByText("Built index.html; open it.")).toBeNull();
+    // The host's next list (its poll): the same board, asked for again and whole this time.
+    view.rerender(<CodingTeamCard teams={[done]} onChanged={vi.fn()} onOpenRun={vi.fn()} />);
+    await waitFor(() => expect(reads()).toHaveLength(2));
+    expect(await screen.findByText("Built index.html; open it.")).toBeInTheDocument();
+    // Whole now: a further list asks nothing more.
+    view.rerender(<CodingTeamCard teams={[done]} onChanged={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(reads()).toHaveLength(2);
+  });
+
   it("shows why a team failed", async () => {
     teams = [{ ...WORKING, status: "failed", error: "Stopped after 3 alerts." }];
     stub();

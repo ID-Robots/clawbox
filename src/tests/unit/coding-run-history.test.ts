@@ -190,6 +190,26 @@ describe("the archive", () => {
     expect(fs.existsSync(`${archived}.slim`)).toBe(false);
   });
 
+  it("keeps a multi-byte character that a 1 MiB chunk boundary cuts in two", () => {
+    // Decoded chunk by chunk, the two halves of an "é" on the boundary came
+    // out as two U+FFFD in the archived log.
+    const id = "run-bbbbbbd0";
+    const sources = parts(id);
+    const head = '{"type":"assistant","message":{"content":[{"type":"text","text":"';
+    const chunk = 1 << 20; // SLIM_CHUNK
+    // The boundary falls on an odd byte of the run of two-byte characters: inside one.
+    const pad = (chunk - Buffer.byteLength(head)) % 2 === 0 ? "x" : "";
+    const long = `${head}${pad}${"é".repeat(600_000)}"}]}}`;
+    const progress = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":12,"session_id":"s"}';
+    const tail = '{"type":"result","subtype":"success"}';
+    expect(Buffer.byteLength(long)).toBeGreaterThan(chunk);
+    fs.writeFileSync(sources.streamLog, `${[long, progress, tail].join("\n")}\n`);
+    expect(lib.archiveRun(record(id), sources, "trimmed")).toMatchObject({ id, stream: true });
+    const archived = fs.readFileSync(path.join(data, "coding-agent-archive", id, "stream.jsonl"), "utf-8");
+    expect(archived).not.toContain("\uFFFD");
+    expect(archived).toBe(`${long}\n${tail}\n`);
+  });
+
   it("keeps the team role a run was started under, and reads a bundle from before the field as none", () => {
     const bulk = lib.archiveRun(record("run-bbbbbbc1", { modelRole: "bulk" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
     expect(bulk.modelRole).toBe("bulk");

@@ -1828,9 +1828,9 @@ describe("a team that works", () => {
 });
 
 describe("the settle notice", () => {
-  it("tells the owner ONCE when the team is done, and the assistant's chat on OpenClaw — a fixed line, never the error", async () => {
+  it("tells the owner ONCE when the team is done, and the assistant's chat on OpenClaw for a team IT started — a fixed line, never the error", async () => {
     outcomes = [{ summary: PLAN }];
-    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
     await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
@@ -1842,18 +1842,41 @@ describe("the settle notice", () => {
     expect(opts.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it("keeps an owner's team out of the assistant's chat — the owner hears, the assistant's bearer cannot read that board", async () => {
+    outcomes = [{ summary: PLAN }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done" });
+    // The notice and the chat line leave the same synchronous step, so once
+    // the notice has gone, a chat line that was going to be sent is in flight
+    // already: a macrotask later it would have reached the gateway.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(harness.getActiveHarness).not.toHaveBeenCalled();
+    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+  });
+
   it("says a failed team failed — the counts, not the reason — and a Hermes box gets no chat line", async () => {
     harness.getActiveHarness.mockResolvedValue("hermes" as never);
-    outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
-    const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
-    const done = await finished(board.id);
-    expect(done.status).toBe("failed");
-    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
-    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
-    // The chat line is OpenClaw's: Hermes gives the box no way into its chat.
-    await new Promise((r) => setTimeout(r, 20));
-    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
-    harness.getActiveHarness.mockResolvedValue("openclaw" as never);
+    try {
+      outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("failed");
+      await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+      expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
+      // The chat line is OpenClaw's: Hermes gives the box no way into its chat.
+      // The settle path asks the edition before it would send — so once it has
+      // asked, and its answer has been awaited (a macrotask later), the
+      // absence of a send is its decision, not the clock's.
+      await vi.waitFor(() => expect(harness.getActiveHarness).toHaveBeenCalled());
+      await new Promise((r) => setTimeout(r, 0));
+      expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+    } finally {
+      // Restored whatever the assertions above did: the rest of the file is OpenClaw's.
+      harness.getActiveHarness.mockResolvedValue("openclaw" as never);
+    }
   });
 
   it("waits for the team with waitForTeam — at once when told not to wait, and answered settled once it is", async () => {

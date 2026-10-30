@@ -75,6 +75,10 @@ function stubFetch(
     /** A server from before the browser switch existed: it answers with no
      *  such field at all, which is the state the panel's `?? true` is for. */
     noRealBrowser?: boolean;
+    /** A server from before the media switch: no `generateMedia` field at all,
+     *  the state the panel's `?? true` is for (a fixture that always answered
+     *  the field passed with that fallback gone). */
+    noGenerateMedia?: boolean;
     /** A server from before the review loop: it answers with no merge field,
      *  and the card must then show no switch rather than invent a value. */
     noReviewLoop?: boolean;
@@ -152,7 +156,7 @@ function stubFetch(
     reviewPass,
     // Absent unless the test says: an older server does not answer with it.
     ...(teamDynamic === undefined ? {} : { teamDynamic }),
-    generateMedia,
+    ...(opts.noGenerateMedia ? {} : { generateMedia }),
     ...(opts.noRealBrowser ? {} : { realBrowser }),
     ...(opts.noReviewLoop ? {} : { autoMerge }),
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
@@ -546,7 +550,7 @@ describe("the media switch", () => {
     // One of the few settings here that defaults ON, so a panel that fell back
     // to `false` would show every box as switched off and invite the owner to
     // "turn on" something that was never off.
-    stubFetch({ enabled: true, readiness: READY });
+    stubFetch({ enabled: true, readiness: READY }, { noGenerateMedia: true });
     render(<CodingAgentSettingsPanel />);
     expect(await screen.findByRole("switch", { name: MEDIA })).toHaveAttribute("aria-checked", "true");
     // One switch for pictures and speech together (SCA C3), not two.

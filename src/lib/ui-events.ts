@@ -336,7 +336,12 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
   return [
     `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
     `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
-    "Tell me when it is running, and do not poll it — ClawBox tells me when it finishes; then read coding_team_status and summarise what each task did and what was verified.",
+    // How the assistant hears that the team finished differs per edition (a
+    // chat line on OpenClaw, the desktop on Hermes: TEAM_SETTLE_WORD in
+    // mcp/tools/coding-agent.ts), and this prompt knows no edition — the tool
+    // reply says it, so the prompt points there rather than promising a line
+    // a Hermes box never posts (the assistant would wait on it for ever).
+    "Tell me when it is running, and do not poll it — the coding_team_run reply says how you will hear that it finished; then read coding_team_status and summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
   ].join("\n");
 }
