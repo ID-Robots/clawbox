@@ -1179,6 +1179,7 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     vi.stubGlobal("fetch", fetchMock);
     const onChanged = vi.fn();
     render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} onOpen={() => {}} canControl onChanged={onChanged} />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     const card = screen.getByTestId("coding-agent-activity");
     const pause = screen.getByTestId("coding-agent-activity-pause");
     expect(pause).toHaveAttribute("aria-label", "Pause");
@@ -1195,8 +1196,8 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
     expect(card).toHaveTextContent(en["codingAgent.chatPaused"]);
     expect(screen.queryByTestId("coding-agent-activity-working")).toBeNull();
-    // The press did not expand the card on the way.
-    expect(card).toHaveAttribute("data-expanded", "false");
+    // The press did not collapse the card on the way.
+    expect(card).toHaveAttribute("data-expanded", "true");
   });
 
   it("Resume: posts to coding-agent/resume, flips to running and tells the desktop a run is on its way", async () => {
@@ -1206,6 +1207,7 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     const off = onCodingRunStarted(started);
     try {
       render(<CodingAgentActivityPill run={{ ...base, status: "paused", needsYou: true } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl />);
+      fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
       const card = screen.getByTestId("coding-agent-activity");
       expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
       const resume = screen.getByTestId("coding-agent-activity-resume");
@@ -1226,12 +1228,14 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
 
   it("a run that gave up offers Resume too — its session is intact, as in the app", () => {
     render(<CodingAgentActivityPill run={{ ...base, status: "gave_up", completedAt: NOW + 9_000 } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.getByTestId("coding-agent-activity-resume")).toBeInTheDocument();
   });
 
   it("the record's own status wins once it moves: the optimistic word is dropped, not kept for a later pause", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok({ ...base, status: "running" }, 202)));
     const { rerender } = render(<CodingAgentActivityPill run={{ ...base, status: "paused" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     fireEvent.click(screen.getByTestId("coding-agent-activity-resume"));
     await waitFor(() => expect(screen.getByTestId("coding-agent-activity")).toHaveAttribute("data-status", "running"));
     // The poller confirms, then the run pauses again on its own.
@@ -1244,6 +1248,7 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
   it("a refusal shows the route's line under the card and leaves the status alone", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => refused("The owner started this run; only they can pause it.")));
     render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     fireEvent.click(screen.getByTestId("coding-agent-activity-pause"));
     const line = await screen.findByTestId("coding-agent-activity-error");
     expect(line).toHaveTextContent("The owner started this run; only they can pause it.");
@@ -1255,6 +1260,7 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
   it("a refusal with no readable body falls back to the catalogue's line", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 500 })));
     render(<CodingAgentActivityPill run={{ ...base, status: "paused" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     fireEvent.click(screen.getByTestId("coding-agent-activity-resume"));
     expect(await screen.findByTestId("coding-agent-activity-error")).toHaveTextContent(en["codingAgent.resumeFailed"]);
   });
@@ -1263,6 +1269,7 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const { unmount } = render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} onOpen={() => {}} onDismiss={() => {}} />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
     expect(screen.queryByTestId("coding-agent-activity-resume")).toBeNull();
     // Open and × stay.
@@ -1270,10 +1277,12 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     expect(screen.getByTestId("coding-agent-activity-dismiss")).toBeInTheDocument();
     unmount();
     render(<CodingAgentActivityPill run={{ ...base, status: "paused" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl={false} />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.queryByTestId("coding-agent-activity-resume")).toBeNull();
     cleanup();
     for (const status of ["completed", "failed", "stopped", "queued", "draft"]) {
       render(<CodingAgentActivityPill run={{ ...base, status, completedAt: NOW + 1_000 } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl />);
+      fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
       expect(screen.queryByTestId("coding-agent-activity-pause"), status).toBeNull();
       expect(screen.queryByTestId("coding-agent-activity-resume"), status).toBeNull();
       cleanup();
@@ -1284,19 +1293,23 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
   it("a paused run says WHY when an allowance ran out, and only then", () => {
     const why = "Paused: the daily image allowance is used up. It resets at 09:00 UTC.";
     const { unmount } = render(<CodingAgentActivityPill run={{ ...base, status: "paused" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl pausedWhy={why} />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.getByTestId("coding-agent-activity-pause-reason")).toHaveTextContent(why);
     expect(screen.getByTestId("coding-agent-activity-resume")).toBeInTheDocument();
     unmount();
     // An owner's pause has nothing to explain; a running run neither, whatever the host hands over.
     render(<CodingAgentActivityPill run={{ ...base, status: "paused" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl pausedWhy={null} />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.queryByTestId("coding-agent-activity-pause-reason")).toBeNull();
     cleanup();
     render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} canControl pausedWhy={why} />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.queryByTestId("coding-agent-activity-pause-reason")).toBeNull();
   });
 
-  it("the control is a 32-px button in Open's tokens, beside Open and ×", () => {
+  it("the control is a 32-px button in Open's tokens, beside Open and ×, on the expanded card only", () => {
     render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} onOpen={() => {}} onDismiss={() => {}} canControl />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     const pause = screen.getByTestId("coding-agent-activity-pause");
     const view = screen.getByTestId("coding-agent-activity-view");
     expect(pause.style.minHeight).toBe("32px");
@@ -1308,5 +1321,12 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     const row = pause.parentElement!;
     const ids = Array.from(row.children).map((el) => el.getAttribute("data-testid"));
     expect(ids).toEqual(["coding-agent-activity-toggle", "coding-agent-activity-pause", "coding-agent-activity-view", "coding-agent-activity-dismiss"]);
+  });
+
+  it("the collapsed card shows no Pause: the row keeps Open and × alone until the card is expanded", () => {
+    render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} onOpen={() => {}} onDismiss={() => {}} canControl />);
+    expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
+    expect(screen.getByTestId("coding-agent-activity-pause")).toBeInTheDocument();
   });
 });

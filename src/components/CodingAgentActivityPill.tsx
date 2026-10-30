@@ -584,9 +584,11 @@ export default function CodingAgentActivityPill(
             {expanded ? "expand_less" : "expand_more"}
           </span>
         </div>
-        {control ? (
+        {control && expanded ? (
           // Pause / Resume: the one control the owner's chat gets over the run
-          // (see the note at the top). An icon in Open's tokens, 44 × 44, its
+          // (see the note at the top), shown only on the EXPANDED card (the
+          // owner: the collapsed row keeps Open and × alone). An icon in
+          // Open's tokens, 32 × 32, its
           // name as the tooltip and the accessible name; disabled and named
           // for its in-flight word while the request is out. It stops the
           // click like Open does — pausing a run is not a request to expand

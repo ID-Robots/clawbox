@@ -94,13 +94,15 @@ describe("CodingTeamActivityCard", () => {
     expect(screen.getByTestId("coding-team-activity-tasks-more")).toHaveTextContent("+3 more");
   });
 
-  it("Open and × ask the host, without toggling the card; both are 44-px targets", () => {
+  it("Open and × ask the host, without toggling the card; Open is the run card's 32-px green outline, × a 44-px target", () => {
     const onOpen = vi.fn();
     const onDismiss = vi.fn();
     render(<CodingTeamActivityCard team={TEAM} labels={LABELS} openLabel={OPEN} onOpen={onOpen} onDismiss={onDismiss} />);
     const open = screen.getByTestId("coding-team-activity-open");
     expect(open).toHaveTextContent("Open");
-    expect(open.style.minHeight).toBe("44px");
+    expect(open.style.minHeight).toBe("32px");
+    expect(open.style.background).toBe("transparent");
+    expect(open.style.border).toBe("1px solid rgba(52, 211, 153, 0.35)");
     fireEvent.click(open);
     expect(onOpen).toHaveBeenCalledTimes(1);
     const dismiss = screen.getByTestId("coding-team-activity-dismiss");
