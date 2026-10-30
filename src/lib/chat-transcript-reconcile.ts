@@ -437,10 +437,14 @@ export function carryLocalNotes(
   const stored = new Map<string, number>();
   for (const m of next) if (m.role === "system") stored.set(m.text, (stored.get(m.text) ?? 0) + 1);
   // Nor a second copy of a failure the box recorded itself: the live line and
-  // the stored one name the same run, and their words can differ (the live
-  // frame carried the run's context, the stored row carries only its error).
-  const storedRuns = new Set<string>();
-  for (const m of next) if (m.role === "system" && m.failedRun) storedRuns.add(m.failedRun);
+  // the stored one name the same run. The LIVE line takes the stored one's
+  // place rather than the other way round — its words were chosen with the
+  // run's context (which provider refused, and why), while the stored row
+  // carries the error alone, so a ClawBox AI refusal read back from it can lose
+  // the sentence that names ClawBox AI and the button that signs in again.
+  const storedRuns = new Map<string, number>();
+  next.forEach((m, j) => { if (m.role === "system" && m.failedRun) storedRuns.set(m.failedRun, j); });
+  const replaced = new Map<number, ChatMessage>();
 
   const key = (m: ChatMessage) => `${m.role}\u0000${m.text}`;
   const prevIdx: number[] = [];
@@ -461,7 +465,11 @@ export function carryLocalNotes(
   for (let i = 0; i < previous.length; i++) {
     const note = previous[i];
     if (note.role !== "system" || !carries(note)) continue;
-    if (note.failedRun && storedRuns.has(note.failedRun)) continue;
+    const storedAt = note.failedRun ? storedRuns.get(note.failedRun) : undefined;
+    if (storedAt !== undefined) {
+      replaced.set(storedAt, note);
+      continue;
+    }
     const left = stored.get(note.text) ?? 0;
     if (left > 0) { stored.set(note.text, left - 1); continue; }
     let predecessor = -1;
@@ -486,7 +494,7 @@ export function carryLocalNotes(
   }
   const merged: ChatMessage[] = [...(after.get(-1) ?? [])];
   next.forEach((m, j) => {
-    merged.push(m);
+    merged.push(replaced.get(j) ?? m);
     const notes = after.get(j);
     if (notes) merged.push(...notes);
   });

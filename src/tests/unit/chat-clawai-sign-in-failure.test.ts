@@ -82,6 +82,11 @@ describe("a ClawBox AI turn the box's sign-in cannot serve", () => {
     const anthropic = 'No API key found for provider "anthropic". | missing-provider-auth';
     expect(clawaiSignInFailure(anthropic)).toBeNull();
     expect(chatFailureNote(anthropic)).toEqual({ text: expect.stringMatching(/Anthropic/) });
+    // The standard OAuth bearer error is any signed-in provider's, not ClawBox
+    // AI's: without a provider to go on, only the proxy's whole envelope names it.
+    expect(clawaiSignInFailure('HTTP 401: {"error":"invalid_token","error_description":"The access token expired"}')).toBeNull();
+    expect(clawaiSignInFailure("HTTP 401: missing_token")).toBeNull();
+    expect(clawaiSignInFailure('403 {"error":{"type":"auth_error","code":"invalid_token"}}')).toBe("rejected");
     // Another provider's 403 is not ClawBox AI's.
     expect(clawaiSignInFailure("HTTP 403: Invalid token", { provider: "openai" })).toBeNull();
     expect(clawaiSignInFailure("HTTP 403: Invalid token")).toBeNull();
@@ -137,11 +142,15 @@ describe("a failed turn's line across a history re-read", () => {
     expect(merged.map((m) => m.text)).toEqual(["хей", "live words"]);
   });
 
-  it("is not shown beside the box's stored copy of the same failure", () => {
+  it("is not shown beside the box's stored copy of the same failure — the live line, worded with the run's context, stands in for it", () => {
+    // The stored row carries the error alone: a proxy 403 read back from it
+    // is the generic reconnect sentence, with no ClawBox AI button.
     const stored: ChatMessage = { role: "system", text: "stored words", timestamp: 3, failedRun: RUN_ID };
+    const later: ChatMessage = { role: "user", text: "още", timestamp: 4 };
     for (const opts of [{ keepFailureNotes: true }, { keepLocalNotes: true }]) {
-      const merged = mergeRestoredTranscript([question, liveLine], [{ ...question }, stored], opts);
-      expect(merged.map((m) => m.text)).toEqual(["хей", "stored words"]);
+      const merged = mergeRestoredTranscript([question, liveLine], [{ ...question }, stored, later], opts);
+      expect(merged.map((m) => m.text)).toEqual(["хей", "live words", "още"]);
+      expect(merged[1].actions).toEqual({ signInClawai: true });
     }
   });
 

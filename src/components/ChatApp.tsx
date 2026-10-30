@@ -1194,7 +1194,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
             const isAckOnly = isAckOnlyReply({ text, images, audio, files })
             // A run that ended with nothing at all — see the re-read below.
             const endedEmpty = isEmptyReply({ text, images, audio, files })
-            const endedRun = typeof payload.runId === 'string' ? payload.runId : runIdRef.current
+            // This chat's own turn only: a run something else started in the
+            // conversation (a scheduled turn, a channel) ending empty is not a
+            // question this page asked.
+            const endedRun = runIdRef.current && (payload.runId === undefined || payload.runId === runIdRef.current) ? runIdRef.current : null
             const endedKey = sessionKeyRef.current
             // Same suppression as the history path, so the bubble cannot
             // appear in real time either — only the append is skipped, the

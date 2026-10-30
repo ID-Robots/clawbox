@@ -566,9 +566,18 @@ function isClawaiTurn(context: ChatRunFailureContext | undefined): boolean | nul
 /**
  * The ClawBox AI proxy's own refusal of a credential: `{"error":{"message":
  * "Invalid token","type":"auth_error","code":"invalid_token"}}`. Names the
- * proxy as surely as a provider id does, for a line that arrives without one.
+ * proxy as surely as a provider id does, for a line that arrives without one —
+ * but only as that whole envelope: the type AND the code in one object. A bare
+ * `invalid_token` is the standard OAuth bearer error (RFC 6750) any signed-in
+ * provider can answer with, and reading it as ClawBox AI's would put a
+ * "Sign in to ClawBox AI again" button under a ChatGPT sign-in's 401.
  */
-const CLAWAI_CREDENTIAL_CODE_RE = /\b(?:invalid|missing)_token\b|"type"\s*:\s*"auth_error"/i;
+function isClawaiProxyCredentialRefusal(raw: string): boolean {
+  for (const [object] of raw.matchAll(/\{[^{}]*\}/g)) {
+    if (/"type"\s*:\s*"auth_error"/i.test(object) && /"code"\s*:\s*"(?:invalid|missing)_token"/i.test(object)) return true;
+  }
+  return false;
+}
 
 /**
  * The account behind the sign-in is refused for what it pays for, in the
@@ -612,13 +621,13 @@ export function clawaiSignInFailure(raw: unknown, context?: ChatRunFailureContex
   if (clawai === false) return null;
   // A line that names no provider is ClawBox AI's only when the proxy's own
   // refusal says so; anyone else's 403 keeps the generic reconnect sentence.
-  if (clawai === null && !CLAWAI_CREDENTIAL_CODE_RE.test(evidence)) return null;
+  if (clawai === null && !isClawaiProxyCredentialRefusal(evidence)) return null;
   // Words only, never the gateway's `billing` reason alone: that one also
   // covers spent credits, which signing in again does not fix, and its own
   // sentence quotes the provider's words (`describeProviderFailure`).
   if (isSubscriptionRefusal(evidence)) return "subscription";
   if (isRateLimit(evidence)) return null;
-  if (isCredentialRejected(evidence) || CLAWAI_CREDENTIAL_CODE_RE.test(evidence)
+  if (isCredentialRejected(evidence) || isClawaiProxyCredentialRefusal(evidence)
     || context?.reason === "auth" || context?.reason === "auth_permanent") return "rejected";
   return null;
 }

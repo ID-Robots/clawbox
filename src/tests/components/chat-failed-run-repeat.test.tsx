@@ -508,6 +508,39 @@ describe("the mascot chat, across a history re-read between the two frames", () 
     expect(bubbles(GENERIC)).toHaveLength(0);
   });
 
+  // The pinned core stores the failure in the tab's own transcript
+  // (`run-failed-before-reply`), and the read on the way back now paints it.
+  // The sentence the chat kept for that tab must then not be added a second time.
+  it("shows a background tab's failure once when the box's transcript already holds it", async () => {
+    await mount("popup");
+    const plus = await screen.findByTestId("chat-new-tab");
+    await waitFor(() => expect(plus).not.toBeDisabled());
+    fireEvent.click(plus);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    const key = tabs().find((el) => el.getAttribute("aria-selected") === "true")?.getAttribute("data-session-key") ?? "";
+    expect(key).toMatch(TAB_KEY);
+    const run = await sendPrompt();
+
+    fireEvent.click(tabs()[0]);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    await fallbackStep(run, key);
+    await firstError(run, key);
+    histories[key] = [
+      userMessage(PROMPT, 600, `${run}:user`),
+      {
+        role: "custom", customType: "run-failed-before-reply", display: true, timestamp: 601,
+        content: `Your request couldn't be completed: ${RAW} | missing-provider-auth`, __openclaw: { runId: run },
+      },
+    ];
+
+    fireEvent.click(tabs()[1]);
+    await screen.findByText(SENTENCE);
+    await act(async () => { await new Promise((r) => setTimeout(r, 100)); });
+
+    expect(bubbles(SENTENCE)).toHaveLength(1);
+    expect(bubbles(PROMPT)).toHaveLength(1);
+  });
+
   // The guard on `settleRun`: a repeat ends nothing. In the FOREGROUND tab the
   // case above cannot see it — there is no busy mark there to take — so this
   // is the one where the owner has left a tab whose next turn is running.

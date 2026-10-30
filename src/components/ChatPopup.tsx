@@ -4444,8 +4444,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // keeps its own transcript records the failure there itself, and the
       // history read has just painted it — appending here would report one
       // failed turn twice, in two different wordings.
+      // The gateway's own record of the failure comes back as a system row
+      // tagged with its run (the history projection), Hermes' as an `error` row.
       const replayed = loaded?.[loaded.length - 1]
-      if (replayed?.variant !== 'error') {
+      const replayCarriesIt = replayed?.variant === 'error' || (replayed?.role === 'system' && !!replayed.failedRun)
+      if (!replayCarriesIt) {
         setMessages(prev => [...prev, { role: 'system', text: storedError, timestamp: Date.now() }])
       }
     }

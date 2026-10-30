@@ -740,6 +740,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       monitorsLink.current = false;
       setSection("ai");
       setMobileSection("ai");
+      // The same split as the pitch card's Connect below: a Hermes box draws its
+      // own ClawBox AI sign-in once the provider is SELECTED, and the offer
+      // counter there is read by an AIModelsStep that renders nothing — it would
+      // start a device login with no card on screen to show the code.
+      if (editionRef.current === "hermes") {
+        setRequestedAiProviderId("clawai");
+        setProviderSelectionRequest((current) => current + 1);
+        return;
+      }
       setOpenClawAIOfferRequest((current) => current + 1);
     };
     const requestProviderSelection = (providerId: unknown) => {
@@ -1415,6 +1424,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // not the active harness: a dual box's active harness can be hermes while its
   // AI panel is still the OpenClaw picker, which needs the card.
   const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  // For the deep-link listeners above, which are installed once on mount.
+  const editionRef = useRef(edition);
+  useEffect(() => { editionRef.current = edition; }, [edition]);
   useEffect(() => {
     if (edition !== null) return;
     let alive = true;
