@@ -56,11 +56,16 @@ export default function ClawboxAiDeviceLogin({
   const [token, setToken] = useState("");
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
-  // The code is the one thing the owner came for, and on the Providers page it
-  // lands below the provider list — off screen in a Settings window of
-  // ordinary height (a board, 2026-10-30: the code was there, the owner saw a
-  // page that had not changed). Brought into view once, when it arrives.
+  // On the Providers page this card sits below the provider list — off screen
+  // in a Settings window of ordinary height (a board, 2026-10-30: the code was
+  // there, the owner saw a page that had not changed). So it comes into view
+  // when a sign-in starts — where a refused start then says why, just below —
+  // and the code once more when it arrives.
+  const rootRef = useRef<HTMLDivElement>(null);
   const codeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (busy && !deviceCode) rootRef.current?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [busy, deviceCode]);
   useEffect(() => {
     if (deviceCode) codeRef.current?.scrollIntoView?.({ block: "center", behavior: "smooth" });
   }, [deviceCode]);
@@ -83,7 +88,7 @@ export default function ClawboxAiDeviceLogin({
   };
 
   return (
-    <div className="mt-4">
+    <div className="mt-4" ref={rootRef}>
       <p className="text-xs text-[var(--text-muted)] leading-relaxed mb-3">
         {tr("ai.clawaiDeviceIntro", "Open the ClawBox portal and enter the device code shown below. Your device finishes the handoff once you confirm on the portal.")}
       </p>

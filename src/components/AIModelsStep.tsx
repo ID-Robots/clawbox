@@ -1182,6 +1182,14 @@ export default function AIModelsStep({
   }, [configureScope, extractError, finishConfigure, showConfiguring, showError]);
 
   const selected = allowedProviders.find((p) => p.id === selectedProvider);
+  // A ClawBox AI sign-in that failed says why just under its card, which on
+  // the Providers page is below the fold: the owner who pressed a button
+  // elsewhere (the pitch card, a chat's "Sign in to ClawBox AI again") would
+  // otherwise see nothing happen at all.
+  const statusRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (status?.type === "error" && selected?.id === "clawai") statusRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [status, selected?.id]);
   // Filter out subscription option for providers whose OAuth isn't configured on the backend
   const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
     if (opt.mode === "subscription" && availableOAuth !== null && !SELF_SERVED_SUBSCRIPTIONS.has(selected.id)) {
@@ -2512,7 +2520,9 @@ export default function AIModelsStep({
         )}
 
         {status && (
-          <StatusMessage type={status.type} message={status.message} />
+          <div ref={statusRef}>
+            <StatusMessage type={status.type} message={status.message} />
+          </div>
         )}
 
         <div className="flex items-center gap-3 mt-5">
