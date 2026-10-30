@@ -58,9 +58,9 @@ describe("a run that is nobody's team", () => {
 });
 
 describe("a team's read-only run (planner, reviewer, lead)", () => {
-  it("has no Bash to deny anything in", () => {
+  it("has Bash for read-only git only, and is refused the merge and kill lists like a worker", () => {
     const argv = buildRunArgs({ readOnly: true, run: { ...WORKER, team: { ...WORKER.team, role: "reviewer" as const } } });
-    for (const rule of TEAM_MERGE_DENYLIST) expect(values(argv, "--disallowedTools")).not.toContain(rule);
+    for (const rule of [...TEAM_MERGE_DENYLIST, ...BASH_KILL_DENYLIST]) expect(values(argv, "--disallowedTools")).toContain(rule);
     expect(values(argv, "--allowedTools")).not.toContain("Bash(*)");
   });
 });

@@ -435,6 +435,26 @@ describe("spawning", () => {
     expect(fs.existsSync(streamLog(started.id))).toBe(false);
   });
 
+  it("writes a read-only team run's stream — the planner's — to its log exactly as any run's, and clears it the same way", async () => {
+    installSystemdRun();
+    installSystemctl("active");
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
+    // Where the harness's stdout actually goes: the log file, opened for it
+    // before the spawn with no question of role.
+    const stdout = path.join(base, "planner-stdout");
+    installWrapper(`readlink /proc/$$/fd/1 > ${JSON.stringify(stdout)}\necho '${RESULT}'\nexit 0`);
+    const started = await lib.startRun({ task: "Plan it", directory: path.join(home, "Projects", "site"), source: "owner", readOnly: true, team: { id: "team-abcd1234", role: "planner", taskId: null } });
+    const settled = await lib.waitForRun(started.id, 25_000);
+    expect(settled?.status).toBe("completed");
+    expect(fs.readFileSync(stdout, "utf-8").trim()).toBe(streamLog(started.id));
+    // The planner's answer reached its record through that log.
+    expect(settled?.summary).toContain("All done.");
+    expect(fs.existsSync(streamLog(started.id))).toBe(false);
+    // The settle stops the run's scope behind it; waited for, so the shim's
+    // own log is not written under the teardown.
+    await vi.waitFor(() => expect(shimCalls(systemctlLog()).some((line) => line.includes(" stop "))).toBe(true), { timeout: 10_000 });
+  });
+
   it("records a leftover when the scope still has something in it after the group has gone, and keeps the unit for Kill", async () => {
     // A Chromium a run started puts itself in a process group of its own, so
     // the pgid answered "gone" while clawbox-run-run-eagbnk6g-….scope stayed
