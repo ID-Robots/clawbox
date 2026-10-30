@@ -1476,6 +1476,7 @@ export const fr: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "Pour utiliser {model}, ajoutez du crédit sur {console}.",
   "chat.modelUnavailableAccountNoQuota": "Votre compte {provider} n'a pas de quota d'API pour le moment ({provider} le fixe selon vos dépenses). Ajoutez du crédit sur {console} ou changez de fournisseur.",
   "chat.modelUnavailableOpenProviders": "Paramètres → Fournisseurs",
+  "chat.modelUnavailableClawaiSignIn": "Se reconnecter à ClawBox AI",
   "chat.modelUnavailableSwitchTo": "Passer à {provider}",
   "chat.modelUnavailableSwitchedTo": "Le chat est passé à {provider} — renvoyez votre message.",
   "chat.modelUnavailableSwitchFailed": "Impossible de passer le chat à {provider} — réessayez ou choisissez-le dans Paramètres → Fournisseurs.",

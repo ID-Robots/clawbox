@@ -45,11 +45,12 @@ export interface ChatMessage {
   // yet. A history read carries it until the server has a reply for its turn
   // (lib/chat-transcript-reconcile.ts, `carryUnconfirmedReplies`).
   unconfirmed?: boolean;
-  // Client-only, on a failed turn's system note in the mascot chat: the run
-  // that failed. The gateway reports one failed run twice
-  // (lib/chat-run-failure.ts), and the tag is how the second report finds the
-  // sentence already on screen — or, a history re-read having dropped it,
-  // knows to put it back. The full-page chat keeps its notes and tags none.
+  // On a failed turn's system note: the run that failed. Set by both chats
+  // when the error frame lands, and read back off the box's own record of the
+  // failure (`run-failed-before-reply`) by the history projection. It is how a
+  // repeat report finds the sentence already on screen, how a re-read keeps a
+  // note the transcript does not hold, and how the two copies of one failure —
+  // the live line and the stored one — are never shown side by side.
   failedRun?: string;
   // Which model produced this reply, and the provider behind it — what
   // answered, not what was asked for. Recorded per turn by the Hermes route.
@@ -60,18 +61,21 @@ export interface ChatMessage {
   // "notice" is a fact about the owner's account the box cannot fix — a
   // provider with no API quota right now — drawn calm, not red.
   variant?: "success" | "error" | "stopped" | "notice";
-  // On a "notice" row only: what the owner can do about it in one click.
+  // On a `system` row: what the owner can do about it in one click.
   actions?: ChatNoticeActions;
 }
 
 /**
- * The buttons under a notice: open Settings → Providers, and switch the chat
+ * The buttons under a system row: open Settings → Providers, switch the chat
  * to another provider the box has set up (the picker row's model, name and
- * provider id, as `/setup-api/chat/model` takes them).
+ * provider id, as `/setup-api/chat/model` takes them), and sign in to ClawBox
+ * AI again when the box's ClawBox AI sign-in is missing, refused or its plan
+ * does not cover the turn.
  */
 export interface ChatNoticeActions {
   openProviders?: boolean;
   switchTo?: { model: string; label: string; provider: string | null };
+  signInClawai?: boolean;
 }
 
 /** The gateway suffixes its stored copy by role; the client holds the bare run id. */

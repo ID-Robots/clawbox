@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "设备正在保存设置，因此聊天模型未切换。请稍后再试一次。",
   "chat.modelUnavailableAccountNoQuota": "你的 {provider} 账户目前没有 API 配额（{provider} 按你的消费设定配额）。请在 {console} 充值，或切换服务商。",
   "chat.modelUnavailableAddCredit": "如需使用 {model}，请在 {console} 充值。",
+  "chat.modelUnavailableClawaiSignIn": "重新登录 ClawBox AI",
   "chat.modelUnavailableNoQuota": "这条消息未能发送 — 此 {provider} 账户无法使用 {model}：它的请求上限为 0，也就是还没有可用于它的 API 额度或配额。请在顶部选择其他模型，或在 {console} 充值后再发送一次。",
   "chat.modelUnavailableNone": "此账户没有其他可用的 {provider} 模型 — 请在聊天顶部选择其他服务商。",
   "chat.modelUnavailableNotFound": "{provider} 已不再向此账户提供 {model}。",

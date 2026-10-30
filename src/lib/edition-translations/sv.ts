@@ -1472,6 +1472,7 @@ export const sv: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "Lägg till kredit på {console} för att använda {model}.",
   "chat.modelUnavailableAccountNoQuota": "Ditt {provider}-konto har ingen API-kvot just nu ({provider} sätter den efter hur mycket du har spenderat). Lägg till kredit på {console} eller byt leverantör.",
   "chat.modelUnavailableOpenProviders": "Inställningar → Leverantörer",
+  "chat.modelUnavailableClawaiSignIn": "Logga in på ClawBox AI igen",
   "chat.modelUnavailableSwitchTo": "Byt till {provider}",
   "chat.modelUnavailableSwitchedTo": "Chatten bytte till {provider} — skicka ditt meddelande igen.",
   "chat.modelUnavailableSwitchFailed": "Det gick inte att byta chatten till {provider} — försök igen eller välj den under Inställningar → Leverantörer.",

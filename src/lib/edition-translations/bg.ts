@@ -1462,6 +1462,7 @@ export const bg: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "За да използвате {model}, добавете кредит в {console}.",
   "chat.modelUnavailableAccountNoQuota": "Вашият акаунт в {provider} в момента няма API квота ({provider} я определя според разходите ви). Добавете кредит на {console} или сменете доставчика.",
   "chat.modelUnavailableOpenProviders": "Настройки → Доставчици",
+  "chat.modelUnavailableClawaiSignIn": "Влезте отново в ClawBox AI",
   "chat.modelUnavailableSwitchTo": "Превключване към {provider}",
   "chat.modelUnavailableSwitchedTo": "Чатът е превключен на {provider} — изпратете съобщението си отново.",
   "chat.modelUnavailableSwitchFailed": "Чатът не можа да бъде превключен на {provider} — опитайте отново или го изберете от Настройки → Доставчици.",

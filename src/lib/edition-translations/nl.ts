@@ -1476,6 +1476,7 @@ export const nl: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "Voeg tegoed toe op {console} om {model} te gebruiken.",
   "chat.modelUnavailableAccountNoQuota": "Je {provider}-account heeft op dit moment geen API-quotum ({provider} stelt het in op basis van je uitgaven). Voeg tegoed toe op {console} of kies een andere provider.",
   "chat.modelUnavailableOpenProviders": "Instellingen → Providers",
+  "chat.modelUnavailableClawaiSignIn": "Opnieuw aanmelden bij ClawBox AI",
   "chat.modelUnavailableSwitchTo": "Overschakelen naar {provider}",
   "chat.modelUnavailableSwitchedTo": "De chat is overgezet naar {provider} — verstuur je bericht opnieuw.",
   "chat.modelUnavailableSwitchFailed": "De chat kon niet naar {provider} worden overgezet — probeer het opnieuw of kies hem in Instellingen → Providers.",

@@ -210,6 +210,22 @@ export function handoffSettingsSection(section: string, focus?: string): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: focus ? { section, focus } : { section } }));
 }
 
+/**
+ * "Open Settings → AI and start the ClawBox AI sign-in": the same offer the
+ * ClawBox AI pitch card's Connect makes — ClawBox AI selected and its device
+ * login started, so the owner lands on the code to enter rather than on a
+ * list to search. SettingsApp listens for it; the `window` flag is the cold
+ * open's handoff, taken by whichever of the two paths reads it first.
+ */
+export const OPEN_CLAWAI_OFFER_EVENT = "clawbox:open-clawai-offer";
+
+export function dispatchClawaiSignIn(): void {
+  if (typeof window === "undefined") return;
+  (window as Window & { __clawboxPendingClawAiOffer?: boolean }).__clawboxPendingClawAiOffer = true;
+  window.dispatchEvent(new Event(OPEN_CLAWAI_OFFER_EVENT));
+  dispatchOpenSettingsSection("ai");
+}
+
 /** The query parameter `/app/settings` reads its opening section from. */
 export const STANDALONE_SETTINGS_SECTION_PARAM = "section";
 

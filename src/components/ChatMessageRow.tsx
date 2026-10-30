@@ -209,7 +209,7 @@ function ChatMessageRowImpl({
           </div>
         )}
         {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
-        {isNotice && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
+        {isSystem && msg.actions && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {isLongUser && (
           <button
             type="button"

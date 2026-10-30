@@ -1477,6 +1477,7 @@ export const ja: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "{model} を使うには、{console} でクレジットを追加してください。",
   "chat.modelUnavailableAccountNoQuota": "お使いの {provider} アカウントには現在 API クォータがありません（{provider} は利用額に応じて設定します）。{console} でクレジットを追加するか、プロバイダーを切り替えてください。",
   "chat.modelUnavailableOpenProviders": "設定 → プロバイダー",
+  "chat.modelUnavailableClawaiSignIn": "ClawBox AI にもう一度サインイン",
   "chat.modelUnavailableSwitchTo": "{provider} に切り替える",
   "chat.modelUnavailableSwitchedTo": "チャットを {provider} に切り替えました — メッセージをもう一度送信してください。",
   "chat.modelUnavailableSwitchFailed": "チャットを {provider} に切り替えられませんでした — もう一度試すか、設定 → プロバイダーで選んでください。",

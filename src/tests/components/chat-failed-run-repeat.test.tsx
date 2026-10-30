@@ -415,7 +415,13 @@ describe.each([
   });
 });
 
-describe("the mascot chat, whose history re-read drops its own notes", () => {
+// The mascot chat's re-read used to drop the failed turn's line, and only the
+// gateway's second error frame put it back. The pinned core does not always
+// send that frame (a board, 2026-10-30: one error frame, then the push for the
+// stored failure), and the owner was left with the question and nothing under
+// it. The line is now carried across the read; the repeat must still not add
+// a second copy, and must still leave it under its own turn.
+describe("the mascot chat, across a history re-read between the two frames", () => {
   beforeEach(arrange);
   afterEach(tidy);
 
@@ -423,7 +429,7 @@ describe("the mascot chat, whose history re-read drops its own notes", () => {
   /** Whether tab `i` wears the flag with that test id (busy, unread). */
   const flagged = (i: number, id: string) => tabs()[i].querySelector(`[data-testid="${id}"]`) !== null;
 
-  it("puts the sentence back, once, when a re-read took it between the two frames", async () => {
+  it("keeps the sentence through a re-read between the two frames, and the repeat adds no second copy", async () => {
     await mount("popup");
     const run = await sendPrompt();
     await fallbackStep(run);
@@ -435,7 +441,7 @@ describe("the mascot chat, whose history re-read drops its own notes", () => {
     const before = historyReads;
     await push("session.message", { sessionKey: MAIN, message: histories[MAIN][1] });
     await waitFor(() => expect(historyReads).toBeGreaterThan(before), { timeout: 3_000 });
-    await waitFor(() => expect(bubbles(SENTENCE)).toHaveLength(0));
+    await waitFor(() => expect(bubbles(SENTENCE)).toHaveLength(1));
 
     await secondError(run);
 
@@ -447,7 +453,7 @@ describe("the mascot chat, whose history re-read drops its own notes", () => {
     expect(failureReports()).toBeLessThanOrEqual(1);
   });
 
-  it("puts it back under its own turn, not under the message sent since", async () => {
+  it("keeps it under its own turn, not under the message sent since", async () => {
     await mount("popup");
     const failed = await sendPrompt();
     await fallbackStep(failed);
@@ -463,7 +469,7 @@ describe("the mascot chat, whose history re-read drops its own notes", () => {
     const before = historyReads;
     await push("session.message", { sessionKey: MAIN, message: histories[MAIN][2] });
     await waitFor(() => expect(historyReads).toBeGreaterThan(before), { timeout: 3_000 });
-    await waitFor(() => expect(bubbles(SENTENCE)).toHaveLength(0));
+    await waitFor(() => expect(bubbles(SENTENCE)).toHaveLength(1));
 
     await secondError(failed);
 
@@ -500,6 +506,39 @@ describe("the mascot chat, whose history re-read drops its own notes", () => {
 
     expect(bubbles(SENTENCE)).toHaveLength(1);
     expect(bubbles(GENERIC)).toHaveLength(0);
+  });
+
+  // The pinned core stores the failure in the tab's own transcript
+  // (`run-failed-before-reply`), and the read on the way back now paints it.
+  // The sentence the chat kept for that tab must then not be added a second time.
+  it("shows a background tab's failure once when the box's transcript already holds it", async () => {
+    await mount("popup");
+    const plus = await screen.findByTestId("chat-new-tab");
+    await waitFor(() => expect(plus).not.toBeDisabled());
+    fireEvent.click(plus);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    const key = tabs().find((el) => el.getAttribute("aria-selected") === "true")?.getAttribute("data-session-key") ?? "";
+    expect(key).toMatch(TAB_KEY);
+    const run = await sendPrompt();
+
+    fireEvent.click(tabs()[0]);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    await fallbackStep(run, key);
+    await firstError(run, key);
+    histories[key] = [
+      userMessage(PROMPT, 600, `${run}:user`),
+      {
+        role: "custom", customType: "run-failed-before-reply", display: true, timestamp: 601,
+        content: `Your request couldn't be completed: ${RAW} | missing-provider-auth`, __openclaw: { runId: run },
+      },
+    ];
+
+    fireEvent.click(tabs()[1]);
+    await screen.findByText(SENTENCE);
+    await act(async () => { await new Promise((r) => setTimeout(r, 100)); });
+
+    expect(bubbles(SENTENCE)).toHaveLength(1);
+    expect(bubbles(PROMPT)).toHaveLength(1);
   });
 
   // The guard on `settleRun`: a repeat ends nothing. In the FOREGROUND tab the

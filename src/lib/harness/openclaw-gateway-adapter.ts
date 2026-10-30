@@ -1,4 +1,5 @@
 import { uuid } from "@/lib/chat-history-cache";
+import { chatFailureNote, type ChatFailureWords } from "@/lib/chat-error-text";
 import { userTabKeyFor } from "@/lib/chat-scope";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
 import { commandsFromOpenClawList, type SlashCommand } from "@/lib/chat-slash-commands";
@@ -132,6 +133,35 @@ export function extractText(msg: unknown): string {
 }
 
 
+/** The gateway's `customType` for a run that ended in an error before any reply. */
+const RUN_FAILED_BEFORE_REPLY = "run-failed-before-reply";
+
+/** The gateway's own preface on that row, ahead of the raw error it quotes. */
+const STORED_FAILURE_PREFACE_RE = /^\s*Your request couldn['\u2019]t be completed:\s*/i;
+
+/**
+ * The stored failure row as the chat's own failure note — the same sentence,
+ * tone and button the live error frame paints (`chatFailureNote`), tagged with
+ * the failed run so the live copy and this one are never shown side by side.
+ * Never the row's own text: it quotes the gateway's error for an operator,
+ * device path and CLI instruction included.
+ */
+function storedRunFailure(m: Record<string, unknown>, words: ChatFailureWords | undefined): HistoryMessage | null {
+  if (m.customType !== RUN_FAILED_BEFORE_REPLY || m.display === false) return null;
+  const stored = typeof m.content === "string" ? m.content : extractText(m);
+  const note = chatFailureNote(stored.replace(STORED_FAILURE_PREFACE_RE, ""), undefined, words);
+  const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+  const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+  return {
+    role: "system",
+    text: note.text,
+    timestamp: (m.timestamp as number) || 0,
+    ...(runId ? { failedRun: runId } : {}),
+    ...(note.variant ? { variant: note.variant } : {}),
+    ...(note.actions ? { actions: note.actions } : {}),
+  };
+}
+
 /**
  * Turn a raw `chat.history` page into the transcript the chat renders.
  *
@@ -163,7 +193,7 @@ export function extractText(msg: unknown): string {
 export function projectGatewayHistory(
   rawMessages: unknown[],
   spokenPayload: unknown,
-  options?: { imageWaitFrom?: number | null },
+  options?: { imageWaitFrom?: number | null; failureWords?: ChatFailureWords },
 ): HistoryPage {
   const imageWaitFrom = options?.imageWaitFrom ?? null;
   const watchingImage = imageWaitFrom !== null;
@@ -177,6 +207,17 @@ export function projectGatewayHistory(
     if (!msg || typeof msg !== "object") continue;
     const m = msg as Record<string, unknown>;
     const role = (m.role as string)?.toLowerCase();
+    // The box's own record of a run that failed before it replied. Skipped with
+    // every other non-chat row until 2026-10-30, and that is how a ClawBox AI
+    // turn with no usable sign-in left the owner's question with nothing under
+    // it: the live error line went up, the `session.message` push for this
+    // very row re-read the transcript, and the mascot chat's re-read — which
+    // keeps no notes of its own — painted the transcript without it.
+    if (role === "custom") {
+      const failure = storedRunFailure(m, options?.failureWords);
+      if (failure) chatMsgs.push(failure);
+      continue;
+    }
     if (role !== "user" && role !== "assistant") continue;
     const raw = extractText(m);
     if (isSentinel(raw)) continue;
@@ -582,7 +623,7 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
       this.historyCommittedSeq = readSeq;
       this.historyDelta = cursor ? { sessionKey, rows, cursor } : null;
     }
-    return projectGatewayHistory(rows, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
+    return projectGatewayHistory(rows, spokenPayload, { imageWaitFrom: options?.imageWaitFrom, failureWords: options?.failureWords });
   }
 
   /**

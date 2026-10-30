@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { isPlausibleHermesProviderId } from "@/lib/hermes-providers";
 import { isProviderEnabled } from "@/lib/provider-enablement";
+import { CHATGPT_PROVIDER, CHATGPT_UI_PROVIDER } from "@/lib/chatgpt-subscription";
 import { POST as setHermesPairing } from "@/app/setup-api/hermes/models/route";
 import {
   GET as readChatModelState,
@@ -93,10 +94,25 @@ export async function POST(request: Request) {
   const state = (await stateRes.json().catch(() => ({}))) as {
     options?: { provider?: string; model?: string | null; available?: boolean }[];
   };
-  const matches = (
-    candidate: { provider?: string | null; model?: string | null; available?: boolean },
-  ): boolean => candidate.provider === provider && !!candidate.available && !!candidate.model;
-  let option: { model?: string | null } | undefined = (state.options ?? []).find(matches);
+  type Candidate = { provider?: string | null; model?: string | null; available?: boolean };
+  const matchesId = (id: string) => (candidate: Candidate): boolean =>
+    candidate.provider === id && !!candidate.available && !!candidate.model;
+  // The provider's own row first; for OpenAI, the ChatGPT sign-in's row after
+  // it. Settings folds that sign-in into its OpenAI card (`normalizeProviderId`
+  // maps `codex` to `openai`) and posts `openai`, while the picker lists it
+  // under its own id — so a box whose OpenAI is a ChatGPT sign-in alone found
+  // no `openai` row and answered `provider_unconfigured` to a provider its
+  // Settings page showed as connected. Exact first: a box holding an API key
+  // as well keeps promoting the key's row, as it always has.
+  const ids = provider === CHATGPT_PROVIDER ? [provider, CHATGPT_UI_PROVIDER] : [provider];
+  const pick = (options: readonly Candidate[]): Candidate | undefined => {
+    for (const id of ids) {
+      const found = options.find(matchesId(id));
+      if (found) return found;
+    }
+    return undefined;
+  };
+  let option: { model?: string | null } | undefined = pick(state.options ?? []);
   if (!option?.model) {
     // The picker drops a provider this box can run no model from (TASK-668).
     // That is about what is OFFERED — the owner naming one here is an explicit
@@ -104,7 +120,7 @@ export async function POST(request: Request) {
     // working credential would be a false failure. The write below is judged by
     // the same catalogue guards either way.
     const unfiltered = await readChatModelStateUnfiltered();
-    option = unfiltered.options.find(matches);
+    option = pick(unfiltered.options);
   }
   if (!option?.model) {
     // Not "unknown provider" — the provider is known, it just has no credential

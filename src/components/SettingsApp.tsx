@@ -15,7 +15,7 @@ import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { useTr } from "@/lib/i18n-floor";
-import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
+import { CHAT_MODEL_STATE_EVENT, OPEN_CLAWAI_OFFER_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -740,6 +740,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       monitorsLink.current = false;
       setSection("ai");
       setMobileSection("ai");
+      // The same split as the pitch card's Connect below: a Hermes box draws its
+      // own ClawBox AI sign-in once the provider is SELECTED, and the offer
+      // counter there is read by an AIModelsStep that renders nothing — it would
+      // start a device login with no card on screen to show the code.
+      if (editionRef.current === "hermes") {
+        setRequestedAiProviderId("clawai");
+        setProviderSelectionRequest((current) => current + 1);
+        return;
+      }
       setOpenClawAIOfferRequest((current) => current + 1);
     };
     const requestProviderSelection = (providerId: unknown) => {
@@ -782,14 +791,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
     const providerHandler = (event: Event) =>
       requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
-    const offerHandler = () => requestClawAiOffer();
+    const offerHandler = () => {
+      requestClawAiOffer();
+      // Taken here as well as on mount, like the section's handoff above: the
+      // dispatcher (`dispatchClawaiSignIn`) sets it without knowing whether
+      // Settings is up, and one left on `window` would start a second device
+      // login at the next cold open.
+      delete w.__clawboxPendingClawAiOffer;
+    };
     window.addEventListener("clawbox:open-settings-section", handler);
     window.addEventListener("clawbox:select-ai-provider", providerHandler);
-    window.addEventListener("clawbox:open-clawai-offer", offerHandler);
+    window.addEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     return () => {
       window.removeEventListener("clawbox:open-settings-section", handler);
       window.removeEventListener("clawbox:select-ai-provider", providerHandler);
-      window.removeEventListener("clawbox:open-clawai-offer", offerHandler);
+      window.removeEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     };
   }, []);
   const [isMobile, setIsMobile] = useState(false);
@@ -1408,6 +1424,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // not the active harness: a dual box's active harness can be hermes while its
   // AI panel is still the OpenClaw picker, which needs the card.
   const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  // For the deep-link listeners above, which are installed once on mount.
+  const editionRef = useRef(edition);
+  useEffect(() => { editionRef.current = edition; }, [edition]);
   useEffect(() => {
     if (edition !== null) return;
     let alive = true;

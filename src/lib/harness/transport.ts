@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatToolSummary } from "@/lib/chat-history-cache";
 import type { SlashCommand } from "@/lib/chat-slash-commands";
+import type { ChatFailureWords } from "@/lib/chat-error-text";
 
 /**
  * The one contract the chat surface talks to.
@@ -383,7 +384,7 @@ export interface ConversationModel {
  * eventually drops a field — the attachments, the spoken audio, or the
  * idempotency key that lets a reconcile recognise an in-flight turn.
  */
-export type HistoryMessage = ChatMessage & { variant?: "success" | "error" | "stopped" };
+export type HistoryMessage = ChatMessage & { variant?: "success" | "error" | "stopped" | "notice" };
 
 export interface HistoryOptions {
   /** Newest-last, capped here. Defaults to 50 — today's gateway limit. */
@@ -397,6 +398,12 @@ export interface HistoryOptions {
    * started with the banner never showing.
    */
   readonly imageWaitFrom?: number | null;
+  /**
+   * The chat's translator and clock, for the failure notes a read restores
+   * from the box's own record of a failed run — so a restored line reads as
+   * the live one did. English when absent.
+   */
+  readonly failureWords?: ChatFailureWords;
 }
 
 export interface HistoryPage {

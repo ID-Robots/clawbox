@@ -434,6 +434,7 @@ const table: Record<string, string> = {
   "chat.modelSwitchBusy": "The box was saving its settings, so the chat model did not change. Try again in a moment.",
   "chat.modelUnavailableAccountNoQuota": "Your {provider} account has no API quota right now ({provider} sets it by your spend). Add credit at {console}, or switch provider.",
   "chat.modelUnavailableAddCredit": "To use {model}, add credit at {console}.",
+  "chat.modelUnavailableClawaiSignIn": "Sign in to ClawBox AI again",
   "chat.modelUnavailableNoQuota": "That message did not go through — {model} is not available on this {provider} account: its rate limit is 0, so there is no API credit or quota for it yet. Pick another model in the header, or add credit at {console}, then send it again.",
   "chat.modelUnavailableNone": "No other {provider} model is available on this account — pick another provider in the chat header.",
   "chat.modelUnavailableNotFound": "{provider} no longer offers {model} to this account.",

@@ -26,6 +26,7 @@ export const modelAvailabilityEn: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "To use {model}, add credit at {console}.",
   "chat.modelUnavailableAccountNoQuota": "Your {provider} account has no API quota right now ({provider} sets it by your spend). Add credit at {console}, or switch provider.",
   "chat.modelUnavailableOpenProviders": "Settings → Providers",
+  "chat.modelUnavailableClawaiSignIn": "Sign in to ClawBox AI again",
   "chat.modelUnavailableSwitchTo": "Switch to {provider}",
   "chat.modelUnavailableSwitchedTo": "Switched the chat to {provider} — send your message again.",
   "chat.modelUnavailableSwitchFailed": "Could not switch the chat to {provider} — try again, or pick it in Settings → Providers.",
