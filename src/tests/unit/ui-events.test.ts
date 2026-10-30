@@ -30,7 +30,7 @@ import {
   OPEN_APP_EVENT,
   OPEN_SETTINGS_SECTION_EVENT,
   standaloneSettingsHref,
-  type ChatMessageDetail, buildTeamProjectPrompt } from "@/lib/ui-events";
+  type ChatMessageDetail, buildTeamProjectPrompt, buildResumeProjectPrompt, ultracodeSentence } from "@/lib/ui-events";
 import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "@/lib/coding-agent-harness-test";
 
 describe("dispatchChatMessage", () => {
@@ -259,5 +259,62 @@ describe("dispatchOpenApp", () => {
       { appId: "files", forceNew: true, meta: { path: "Projects/site" } },
       { appId: "coding", maximize: true },
     ]);
+  });
+});
+
+/**
+ * The Create card's two toggles (2026-10-30), as the three builders take them:
+ * `team` sends the build to a coding team, `ultracode` ends the prompt with
+ * the one sentence that names the real `effort` parameter of the tool the
+ * prompt asks for. Off, every prompt reads exactly as before.
+ */
+describe("the prompt builders' toggles", () => {
+  const project = { name: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder" as const, folder: "shop", instructions: "Add invoices." };
+
+  it("say nothing about a team or ultracode when both are off", () => {
+    for (const text of [
+      buildNewAppPrompt({ name: "x", description: "y", template: "app" }),
+      buildNewAppPrompt({ name: "x", description: "y", template: "app" }, {}),
+      buildResumeProjectPrompt({ ...project, latestRun: null }),
+      buildTeamProjectPrompt(project),
+    ]) {
+      expect(text).not.toMatch(/ultracode/i);
+      expect(text).not.toContain("highest effort");
+    }
+    expect(buildNewAppPrompt({ name: "x", description: "y", template: "app" })).not.toContain("coding_team_run");
+    expect(buildNewAppPrompt({ name: "x", description: "y", template: "app" }, { team: false, ultracode: false }))
+      .toBe(buildNewAppPrompt({ name: "x", description: "y", template: "app" }));
+  });
+
+  it("send a NEW app's build to a coding team in the scaffolded folder, with the description as the goal", () => {
+    const text = buildNewAppPrompt({ name: "Shop", description: "An invoice generator", template: "nextjs" }, { team: true });
+    // The scaffold sentence stays whole; the team line follows it.
+    expect(text.split("\n")[1]).toBe(buildNewAppPrompt({ name: "Shop", description: "An invoice generator", template: "nextjs" }).split("\n")[1]);
+    expect(text).toContain("coding TEAM");
+    expect(text).toContain("coding_team_run");
+    expect(text).toContain("the description above as the goal");
+    expect(text).toContain("do not start single runs for the parts yourself");
+    // Still never a code project (the no-team rule, kept with the team on).
+    expect(text).not.toContain("data/code-projects");
+  });
+
+  it("end with the ultracode sentence naming the tool each prompt asks for, and only then", () => {
+    const run = ultracodeSentence("coding_agent_run");
+    const team = ultracodeSentence("coding_team_run");
+    expect(run).toContain('effort "ultracode"');
+    expect(run).toContain("the highest effort on this one");
+    expect(run).toContain("coding_agent_run");
+    expect(team).toContain("coding_team_run");
+    expect(buildNewAppPrompt({ name: "x", description: "y", template: "app" }, { ultracode: true }).endsWith(`\n${run}`)).toBe(true);
+    expect(buildNewAppPrompt({ name: "x", description: "y", template: "app" }, { team: true, ultracode: true }).endsWith(`\n${team}`)).toBe(true);
+    expect(buildResumeProjectPrompt({ ...project, latestRun: null }, { ultracode: true }).endsWith(`\n${run}`)).toBe(true);
+    // A code project's resume keeps its rebuild line BEFORE the effort sentence: the sentence is always last.
+    const code = buildResumeProjectPrompt({ ...project, kind: "codeProject", latestRun: null }, { ultracode: true });
+    expect(code.endsWith(`\n${run}`)).toBe(true);
+    expect(code).toContain("code_project_build");
+    expect(buildTeamProjectPrompt(project, { ultracode: true }).endsWith(`\n${team}`)).toBe(true);
+    expect(buildTeamProjectPrompt({ ...project, kind: "codeProject" }, { ultracode: true }).endsWith(`\n${team}`)).toBe(true);
+    // Once, not per line.
+    expect(buildTeamProjectPrompt(project, { ultracode: true }).split("ultracode").length).toBe(2);
   });
 });
