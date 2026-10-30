@@ -170,7 +170,7 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
 
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     // The owner's own: the plan picks the model, and the effort is the box's default.
-    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "xhigh", maxTurns: 200 });
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "xhigh", maxTurns: 2000 });
     await finished(worker.id);
     expect(handed(worker.id, "model")).toBe("");
 

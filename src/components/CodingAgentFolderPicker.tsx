@@ -97,7 +97,7 @@ export default function CodingAgentFolderPicker({ initialDir, onPick, onClose, t
           aria-modal="true"
           aria-labelledby={titleId}
           onClick={(e) => e.stopPropagation()}
-          className="w-full sm:max-w-md max-h-[85dvh] flex flex-col rounded-t-2xl sm:rounded-2xl border border-white/[0.08] bg-[var(--surface-1,#16171b)] shadow-2xl overflow-hidden"
+          className="w-full sm:max-w-md max-h-[85%] flex flex-col rounded-t-2xl sm:rounded-2xl border border-white/[0.08] bg-[var(--surface-1,#16171b)] shadow-2xl overflow-hidden"
         >
           <div className="flex items-start gap-3 px-4 pt-4 pb-3 border-b border-white/[0.06]">
             <div className="min-w-0 flex-1">
