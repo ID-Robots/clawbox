@@ -41,7 +41,6 @@ export type ProgressLabelKey =
   | "startedWith"
   | "continuing"
   | "thinking"
-  | "tokenLimit"
   | "subagentStarted"
   | "subagentFinished"
   | "subagentRefused"
@@ -52,17 +51,6 @@ export type ProgressLabelKey =
   | "reviewLoopTurn"
   | "reviewLoopRound"
   | "reviewRound"
-  | "pipelineReview"
-  | "pipelineImprovement"
-  | "pipelineDeployPreview"
-  | "pipelineDeployProduction"
-  | "pipelineVerifyPreview"
-  | "pipelineVerifyProduction"
-  | "pipelineVerified"
-  | "pipelineWaitingOwner"
-  | "pipelineResumed"
-  | "pipelineComplete"
-  | "pipelineStopped"
   | "resuming"
   | "reattached"
   | "startingFresh"
@@ -110,7 +98,6 @@ export type ProgressLabelKey =
   // done, and what it did about not finding it (src/lib/coding-deliverable.ts).
   | "deliverableMet"
   | "deliverableMissing"
-  | "anotherAttempt"
   | "droppedSteps"
   // The owner's secret store (src/lib/project-secrets.ts): which of their
   // secrets this run was handed, and which one the box could not open.
@@ -244,7 +231,6 @@ function shorten(s: string, max: number): string {
 export const RUNNER_STEP = {
   thinking: "Thinking…",
   continuing: "Continuing after a background helper finished",
-  tokenLimit: "Token limit reached",
   resuming: "Resuming the previous session",
   // The web server restarted and this run outlived it in its own systemd scope.
   reattached: "The web server restarted; this run kept going and was picked back up",
@@ -273,32 +259,10 @@ export const RUNNER_STEP = {
   /** The deliverable the run was held to was there, so "completed" is honest. */
   deliverableMet: "The deliverable is there",
 
-  // ── the delivery pipeline (src/lib/coding-pipeline.ts) ───────────────────
-  //
-  // A sentence per stage rather than one with the stage's name in it, for the
-  // reason `deployStarted` is two sentences: a stage name travelling through
-  // the feed as an English parameter is a word no locale can translate.
-  pipelineReview: "Delivery pipeline: reviewing the work",
-  pipelineDeployPreview: "Delivery pipeline: deploying a preview",
-  pipelineDeployProduction: "Delivery pipeline: deploying to production",
-  pipelineVerifyPreview: "Delivery pipeline: checking the preview",
-  pipelineVerifyProduction: "Delivery pipeline: checking production",
-  pipelineWaitingOwner: "Delivery pipeline: waiting for you to approve the production deployment",
-  pipelineComplete: "Delivery pipeline: finished, and what was deployed was checked",
-  /**
-   * A stage the web server restarted under, picked back up.
-   *
-   * No stage NAME in it, deliberately: `stageNoun` answers English, and this
-   * block's own rule is that a stage name travelling through the feed as a
-   * parameter is a word no locale can translate. Which stage it was is on the
-   * strip beside this line anyway.
-   */
-  pipelineResumed: "Delivery pipeline: picking up where it left off after a restart",
-
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   /**
    * A team message this run sent. Three sentences rather than one with the
-   * addressee in it, for the pipeline's reason: "the lead" travelling as a
+   * addressee in it, because "the lead" travelling as a
    * parameter is an English word no locale can translate. The text is the
    * run's own words and goes last, where the reader can take the rest of the
    * line for it.
@@ -356,14 +320,6 @@ export const RUNNER_STEP = {
    *  tail of that command's output. */
   deliverableMissing: (reason: string) => `Not finished yet: ${reason}`,
   /** Going back in for another go at the deliverable, same record, same session. */
-  anotherAttempt: (attempt: number, attempts: number) => `Attempt ${attempt} of ${attempts} at the deliverable`,
-  /** The delivery pipeline sent the work back for another lap. */
-  pipelineImprovement: (round: number, rounds: number) => `Delivery pipeline: improvement round ${round} of ${rounds}`,
-  /** The address the box fetched, screenshotted and judged. */
-  pipelineVerified: (url: string) => `Checked ${url} and it shows what was asked for`,
-
-  /** Why the pipeline is not going on. */
-  pipelineStopped: (reason: string) => `Delivery pipeline stopped: ${reason}`,
   /** A helper going out: the type in parentheses, its own description after a colon. */
   helperStarted: (opts: { workflow: boolean; type: string; what: string }) =>
     opts.workflow
@@ -452,7 +408,6 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Started with (\S+)$/, labelKey: "startedWith", icon: "play_arrow", params: (m) => ({ model: m[1] }) },
   { re: /^Continuing after a background helper finished$/, labelKey: "continuing", icon: "sync" },
   { re: /^Thinking…$/, labelKey: "thinking", icon: "psychology" },
-  { re: /^Token limit reached$/, labelKey: "tokenLimit", icon: "hourglass_disabled" },
   {
     re: /^Sub-agent started(?: \(([^)]*)\))?(?::\s*(.*))?$/,
     labelKey: "subagentStarted",
@@ -470,17 +425,6 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Review round (\d+) for (\S+)$/, labelKey: "reviewLoopRound", icon: "rate_review", params: (m) => ({ round: Number(m[1]), id: m[2] }) },
   { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
-  { re: /^Delivery pipeline: reviewing the work$/, labelKey: "pipelineReview", icon: "rate_review" },
-  { re: /^Delivery pipeline: improvement round (\d+) of (\d+)$/, labelKey: "pipelineImprovement", icon: "loop", params: (m) => ({ round: Number(m[1]), rounds: Number(m[2]) }) },
-  { re: /^Delivery pipeline: deploying a preview$/, labelKey: "pipelineDeployPreview", icon: "cloud_upload" },
-  { re: /^Delivery pipeline: deploying to production$/, labelKey: "pipelineDeployProduction", icon: "rocket_launch" },
-  { re: /^Delivery pipeline: checking the preview$/, labelKey: "pipelineVerifyPreview", icon: "fact_check" },
-  { re: /^Delivery pipeline: checking production$/, labelKey: "pipelineVerifyProduction", icon: "fact_check" },
-  { re: /^Delivery pipeline: waiting for you to approve the production deployment$/, labelKey: "pipelineWaitingOwner", icon: "pan_tool" },
-  { re: /^Delivery pipeline: picking up where it left off after a restart$/, labelKey: "pipelineResumed", icon: "restart_alt" },
-  { re: /^Delivery pipeline: finished, and what was deployed was checked$/, labelKey: "pipelineComplete", icon: "verified" },
-  { re: /^Delivery pipeline stopped: (.+)$/, labelKey: "pipelineStopped", icon: "cancel", params: (m) => ({ reason: m[1] }) },
-  { re: /^Checked (\S+) and it shows what was asked for$/, labelKey: "pipelineVerified", icon: "verified", params: (m) => ({ url: m[1] }) },
   { re: /^Resuming the previous session$/, labelKey: "resuming", icon: "history" },
   { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
@@ -526,7 +470,6 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },
   { re: /^The deliverable is there$/, labelKey: "deliverableMet", icon: "task_alt" },
   { re: /^Not finished yet: (.+)$/, labelKey: "deliverableMissing", icon: "pending", params: (m) => ({ reason: m[1] }) },
-  { re: /^Attempt (\d+) of (\d+) at the deliverable$/, labelKey: "anotherAttempt", icon: "replay", params: (m) => ({ attempt: Number(m[1]), attempts: Number(m[2]) }) },
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
   { re: /^Secrets in this run's environment: (.+)$/, labelKey: "secretsInjected", icon: "key", params: (m) => ({ names: m[1] }) },
   { re: /^Could not read these secrets: (.+)$/, labelKey: "secretsUnreadable", icon: "key_off", params: (m) => ({ names: m[1] }) },

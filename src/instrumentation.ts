@@ -213,8 +213,8 @@ export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
   // A second server on the same data/ — a `next dev` live-edit session beside
   // the running clawbox-setup — must not run the boot jobs too: it would
-  // reconcile and reattach the coding runs, resume their pipelines and PR
-  // watches, start a second email-approval poller and both schedulers, and
+  // reconcile and reattach the coding runs, resume their PR watches, start a
+  // second email-approval poller and both schedulers, and
   // repair openclaw.json (restarting the gateway) against the same files the
   // real server owns. It serves pages and routes; the real server keeps the jobs.
   if (process.env.CLAWBOX_SKIP_BOOT_JOBS === '1') {
@@ -472,17 +472,6 @@ export async function register() {
           codingAgent.resumePullRequestWatches()
         } catch (err) {
           console.error('[instrumentation] Could not resume the pull request watches:', err instanceof Error ? err.message : err)
-        }
-        // Delivery pipelines the restart interrupted. AFTER the two above, and
-        // deliberately doing less than either: a stage waiting on a run or on a
-        // deployment is picked back up by the reconciliation and the deployment
-        // watches respectively, so what is left is a verification that was in
-        // flight and a stage nothing at all is behind. Its own try, so one boot
-        // step that throws does not take an unrelated one with it.
-        try {
-          codingAgent.resumePipelines()
-        } catch (err) {
-          console.error('[instrumentation] Could not resume the delivery pipelines:', err instanceof Error ? err.message : err)
         }
         // The Anthropic account pool (TASK-902): its first read migrates a
         // legacy key into the secret store and arms the limit-reset wake, and

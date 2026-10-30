@@ -64,18 +64,11 @@ export const MAX_DELIVERABLE_COMMAND_CHARS = 300;
 export const MAX_MISSING_CHARS = 300;
 
 /**
- * Attempts at the deliverable a run gets by default, the original included.
- * One since TASK-1749: every further attempt resumes the whole session, so
- * its cost is a second run's, and the owner can still raise it to six.
+ * The most attempts a record keeps: the run's own first turn and the owner's
+ * Resumes after it. The box itself never spends a second go (the automatic
+ * completion-attempt loop went in SCA A2); six harness turns at one task is
+ * already a long evening.
  */
-export const DEFAULT_COMPLETION_ATTEMPTS = 1;
-/**
- * One is a real setting: check the deliverable, and if it is not there say so
- * rather than nudging. That is the whole feature for an owner who wants the
- * honest verdict and nothing spent on a second try.
- */
-export const MIN_COMPLETION_ATTEMPTS = 1;
-/** The ceiling. Six harness turns at one task is already a long evening. */
 export const MAX_COMPLETION_ATTEMPTS = 6;
 
 /**
@@ -368,14 +361,6 @@ export function parseAttempts(raw: unknown): RunAttempt[] {
   return attempts;
 }
 
-/** How many attempts this box gives a run, from the raw config value. */
-export function completionAttemptsFrom(raw: unknown): number {
-  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_COMPLETION_ATTEMPTS;
-  const rounded = Math.round(raw);
-  if (rounded < MIN_COMPLETION_ATTEMPTS || rounded > MAX_COMPLETION_ATTEMPTS) return DEFAULT_COMPLETION_ATTEMPTS;
-  return rounded;
-}
-
 /**
  * What the deliverable IS, in one English phrase.
  *
@@ -412,24 +397,13 @@ export function describeDeliverable(deliverable: Deliverable): string {
  * so the transcript of the attempt that just ended is still there, and a
  * harness told only "this is missing" rewrote the work from scratch.
  */
-export function completionNudge(
-  deliverable: Deliverable,
-  missing: string,
-  /**
-   * Which go this is, when the BOX is spending one of its own. Null when the
-   * owner pressed Resume: the attempt cap is what the box spends unasked, so
-   * counting their own deliberate act against it — "attempt 4 of 3" — would be
-   * the box reporting a budget the owner is not subject to.
-   */
-  attempt: { n: number; of: number } | null,
-): string {
+export function completionNudge(deliverable: Deliverable, missing: string): string {
   return [
     `This run is not finished yet: ${missing}`,
     "",
     `What it has to leave behind is ${describeDeliverable(deliverable)}.`,
     "Carry on in the same folder from where the transcript leaves off — do not start over, and do not re-do work that is already done.",
     "Deliver the missing part, verify it yourself, and then finish with one line saying what you delivered.",
-    ...(attempt ? [`This is attempt ${attempt.n} of ${attempt.of}.`] : []),
   ].join("\n");
 }
 

@@ -756,7 +756,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 | `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
 | `coding_agent_resume` | The Resume button, for a `paused` or `gave_up` run the AGENT started — optionally telling it something first (`message`). |
 | `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. A queued run is not stopped: taking it out of the queue is the owner's. |
-| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs and pipeline default. |
+| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
 
 `app_publish` sits behind the same switch: it publishes one of the owner's
@@ -877,7 +877,7 @@ shell tool, not less and not more:
   stays with the main loop, whose edits are what the record, the review
   pass and the commit see. A workflow counts as one helper of type
   `workflow` on the run record, billed live from its task_progress totals
-  so the owner's token ceiling holds during a fan-out; the Agent tool's
+  so the record's spend is current during a fan-out; the Agent tool's
   helpers are background tasks too on the installed CLI (2.1.259), kept
   "active" until their task_notification rather than their launch receipt,
   and a refused launch is taken back out of the counts;
@@ -902,8 +902,8 @@ shell tool, not less and not more:
   stored default project folder is used — the same fallback the run route
   documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
-  200 turns by default (10–2000), an optional token ceiling the device itself
-  enforces, an explicit environment (no session secret, no service tokens),
+  200 turns by default (10–2000), no token ceiling (the device-side one went
+  in SCA A2), an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it;
 - **`completed` means the DELIVERABLE exists** wherever a run HAS one, rather
@@ -916,13 +916,13 @@ shell tool, not less and not more:
   where one was possible, so the implication steps aside when the box recorded
   that its own pull-request flow could not run (no repository to branch, or
   `pr.phase === "failed"`), since nudging the harness for a pull request the
-  DEVICE cannot open would spend every attempt on the one thing the harness
-  cannot fix. When the check fails
-  the device resumes the run IN ITS OWN SESSION with a nudge naming what is
-  missing, up to `coding_agent_completion_attempts` (default 3, the run's own
-  first turn counted as one), and then settles it as `gave_up` — a status of
-  its own, because the session is intact and Resume is what helps, where
-  `failed` means the harness could not finish at all. `coding_agent_status`
+  DEVICE cannot open would hold the run to the one thing the harness cannot
+  fix. When the check fails the device settles the run as `gave_up` — a
+  status of its own, because the session is intact and Resume is what helps,
+  where `failed` means the harness could not finish at all. The box never
+  spends a second go unasked (the automatic completion-attempt loop went in
+  SCA A2): the owner's Resume carries on IN THE RUN'S OWN SESSION with a
+  nudge naming what is missing. `coding_agent_status`
   reports the bar, the verdict and the attempts, and says plainly not to start
   a fresh run for a `gave_up` one. There is deliberately no `command`
   deliverable on this tool surface: that kind has the box RUN something, which
@@ -941,8 +941,8 @@ status. What each row field means:
   reason>`, `merged into <base>`, `files removed; the work is kept on branch …`,
   or `removed with its branch — the run left nothing on it`. Bringing a branch
   home (`POST …/merge`) is the OWNER's button and refuses this bearer.
-- `attempts` — goes at the deliverable, the run's own first turn counted, out of
-  `coding_agent_completion_attempts`; `deliverable.met` is the device's verdict
+- `attempts` — goes at the deliverable, the run's own first turn counted, the
+  owner's Resumes after it; `deliverable.met` is the device's verdict
   and `missing` its reason — never a `command` deliverable's output, for the
   reason `coding_agent_status` withholds it.
 - `paused_because` — `paused on purpose`, or which allowance is used up and when
@@ -1312,7 +1312,6 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Owner's only | Route(s) | Why |
 |---|---|---|
 | Coding agent switch and settings, secrets, permissions, Anthropic/GitHub sign-in, reset | `coding-agent/enable`, `secrets`, `permissions`, `anthropic`, `github-login`, `reset` | consent to a delegated shell and to the owner's credentials |
-| Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
 | The file tree's writes, project import/delete | `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |

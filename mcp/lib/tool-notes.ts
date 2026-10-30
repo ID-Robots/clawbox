@@ -136,7 +136,7 @@ export const TOOL_NOTES: readonly ToolNote[] = [
   },
   {
     tool: "coding_agent_run",
-    note: "A one-line change is your own tools' job. Work only in a `project_id` from `code_project_list` or a `directory` inside the owner's project folder, preferring one the owner already has to scaffolding a new one; the run cannot ask questions. `input_files` are copied where the run can read them — it cannot open your media folder, so a path only mentioned in the task is never read. Name `deliverable_files` for any concrete output: the run is not finished until they exist and are not empty. `delivery_pipeline` adds review and improvement laps; this box cannot deploy, so the deploy and check stages are skipped.",
+    note: "A one-line change is your own tools' job. Work only in a `project_id` from `code_project_list` or a `directory` inside the owner's project folder, preferring one the owner already has to scaffolding a new one; the run cannot ask questions. `input_files` are copied where the run can read them — it cannot open your media folder, so a path only mentioned in the task is never read. Name `deliverable_files` for any concrete output: the run is not finished until they exist and are not empty.",
   },
   {
     tool: "coding_agent_status",

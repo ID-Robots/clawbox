@@ -46,7 +46,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   startedWith: "codingAgent.stepStartedWith",
   continuing: "codingAgent.stepContinuing",
   thinking: "codingAgent.stepThinking",
-  tokenLimit: "codingAgent.stepTokenLimit",
   subagentStarted: "codingAgent.stepSubagentStarted",
   subagentFinished: "codingAgent.stepSubagentFinished",
   subagentRefused: "codingAgent.stepSubagentRefused",
@@ -103,7 +102,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   ownerEndedLeftovers: "codingAgent.stepOwnerEndedLeftovers",
   deliverableMet: "codingAgent.stepDeliverableMet",
   deliverableMissing: "codingAgent.stepDeliverableMissing",
-  anotherAttempt: "codingAgent.stepAnotherAttempt",
   droppedSteps: "codingAgent.stepDropped",
   secretsInjected: "codingAgent.stepSecretsInjected",
   secretsUnreadable: "codingAgent.stepSecretsUnreadable",
@@ -120,17 +118,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   messageMidTurn: "codingAgent.stepMessageMidTurn",
   messageToRun: "codingAgent.stepMessageToRun",
   teamMessageToAssistant: "codingAgent.stepTeamMessageToAssistant",
-  pipelineReview: "codingAgent.stepPipelineReview",
-  pipelineImprovement: "codingAgent.stepPipelineImprovement",
-  pipelineDeployPreview: "codingAgent.stepPipelineDeployPreview",
-  pipelineDeployProduction: "codingAgent.stepPipelineDeployProduction",
-  pipelineVerifyPreview: "codingAgent.stepPipelineVerifyPreview",
-  pipelineVerifyProduction: "codingAgent.stepPipelineVerifyProduction",
-  pipelineVerified: "codingAgent.stepPipelineVerified",
-  pipelineWaitingOwner: "codingAgent.stepPipelineWaitingOwner",
-  pipelineResumed: "codingAgent.stepPipelineResumed",
-  pipelineComplete: "codingAgent.stepPipelineComplete",
-  pipelineStopped: "codingAgent.stepPipelineStopped",
 };
 
 /**

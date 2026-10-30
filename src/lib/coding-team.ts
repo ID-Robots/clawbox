@@ -9,7 +9,7 @@
  *
  * Every agent here IS a coding run (src/lib/coding-agent.ts) — the sandbox
  * the device already has: capability drop, Bash allow/deny lists, file deny
- * rules, folder containment, step and token ceilings. The planner is a run
+ * rules, folder containment, step ceiling. The planner is a run
  * that may only read; a worker is an ordinary run whose task is one board
  * task with the team's context around it. The orchestrator is this module,
  * in the web server: it starts runs one at a time (the runner's own rule on

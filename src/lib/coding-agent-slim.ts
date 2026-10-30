@@ -44,7 +44,6 @@ export interface RunSlimFields {
   progress: string[];
   progressAt?: number[];
   resultText?: string | null;
-  pipeline?: unknown;
   allowRules?: string[];
   deniedActions?: string[];
   denials?: unknown[];
@@ -76,7 +75,6 @@ export function slimRun<T extends SlimmableRun>(run: T): T {
   const out: T = { ...run, progress: [], slim: true };
   if ("progressAt" in run) out.progressAt = [];
   if ("resultText" in run) out.resultText = null;
-  if ("pipeline" in run) out.pipeline = null;
   if ("allowRules" in run) out.allowRules = [];
   if ("deniedActions" in run) out.deniedActions = [];
   if ("denials" in run) out.denials = [];
@@ -130,7 +128,6 @@ export function mergeSlimRuns<T extends SlimmableRun>(held: readonly T[], incomi
     const merged: T = { ...run, progress: prev.progress, slim: false };
     if ("progressAt" in prev) merged.progressAt = prev.progressAt;
     if ("resultText" in prev) merged.resultText = prev.resultText;
-    if ("pipeline" in prev) merged.pipeline = prev.pipeline;
     if ("allowRules" in prev) merged.allowRules = prev.allowRules;
     if ("deniedActions" in prev) merged.deniedActions = prev.deniedActions;
     if ("denials" in prev) merged.denials = prev.denials;

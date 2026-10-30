@@ -61,7 +61,6 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     reviewOf: null,
     reviewLoopOf: null,
     reviewRound: null,
-    pipeline: null,
     team: null,
     readOnly: false,
     extraBrief: null,
@@ -87,7 +86,6 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     tokensUsed: 0,
     tokenBreakdown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
     spawnTokens: [],
-    tokenLimit: null,
     thinkingTokens: 0,
     lastActivityAt: 1_000_000 + 95_000,
     retries: 0,
@@ -111,7 +109,6 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     deliverable: null,
     deliverableCheck: null,
     attempts: [],
-    completionAttempts: 3,
     messages: [],
     ...over,
   };

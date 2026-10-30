@@ -865,28 +865,6 @@ describe("a run", () => {
     });
   });
 
-  describe("the token limit", () => {
-    it("settles as stopped, not completed, when the result event beat the kill", async () => {
-      installFakeClaude();
-      // One turn that alone exceeds the limit, with the result event right
-      // behind it in the same write: the process has said "success" before
-      // the device's kill lands. The device's verdict must stand — a record
-      // that read "completed" beside "Stopped at the token limit" was both.
-      const spent = JSON.stringify({
-        type: "assistant",
-        message: { usage: { input_tokens: 20_000, output_tokens: 10 }, content: [{ type: "text", text: "Done" }] },
-      });
-      installFakeWrapper([`printf '%s\\n' '${INIT}' '${spent}' '${RESULT}'`, "exit 0"].join("\n"));
-      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
-      makeProject("site");
-      const run = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
-      expect(run.status).toBe("stopped");
-      expect(run.error).toMatch(/Stopped at the token limit/);
-      expect(run.resumable).toBe(true);
-      expect(run.progress.join("\n")).toContain("Token limit reached");
-    });
-  });
-
   describe("pause, resume, and drafts", () => {
     it("pauses a live run, keeps its session, and resumes it in place", async () => {
       installFakeClaude();
@@ -1765,11 +1743,11 @@ describe("counting sub-agents", () => {
     expect(progress.match(/Sub-agent finished \(explorer\)/g) ?? []).toHaveLength(1);
   });
 
-  it("bills a workflow as it runs, from its task_progress totals, and stops at the ceiling", async () => {
+  it("bills a workflow as it runs, from its task_progress totals, by the delta each time", async () => {
     // The CLI reports a workflow's cumulative spend on every task_progress
-    // (0 → 2368 → 2368 in the probe); the ceiling must hold while the
-    // fan-out runs, not after it.
-    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
+    // (0 → 2368 → 2368 in the probe); the record's spend must be current
+    // while the fan-out runs, not after it.
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
     const WORKFLOW = JSON.stringify({
       type: "assistant",
       message: { content: [{ type: "tool_use", id: "call_w", name: "Workflow", input: { script: "export const meta = { name: \"sweep\", description: \"check\" }" } }] },
@@ -1784,17 +1762,14 @@ describe("counting sub-agents", () => {
       `echo '${progressAt(4_000)}'`,
       `echo '${progressAt(4_000)}'`,
       `echo '${progressAt(12_000)}'`,
-      "sleep 20",
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
       "exit 0",
     ].join("\n"));
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "sweep", projectId: "site", source: "agent" })).id);
-    expect(run.status).toBe("stopped");
-    expect(run.resumable).toBe(true);
+    expect(run.status).toBe("completed");
     // Deltas, never the running total twice: 0 + 4000 + 0 + 8000.
     expect(run.tokensUsed).toBe(12_000);
-    expect(run.error).toMatch(/Stopped at the token limit \(12,000 of 10,000\)/);
-    expect(run.progress.join("\n")).toContain("Token limit reached");
   });
 
   it("takes a refused launch back out of the counts", async () => {

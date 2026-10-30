@@ -190,12 +190,9 @@ function makeProject(id: string): string {
  * Wait until the record is settled for good.
  *
  * `waitForRun` answers the FIRST settle, which for a run with a deliverable is
- * not the end of it — the gate may put it straight back to work. Nor is "settled
- * status and no open attempt" enough: between the gate closing one attempt and
- * `startCompletionAttempt` flipping the record back to `running`, the record is
- * briefly `completed` with no attempt open, and a poll that caught that window
- * ran its assertions in the MIDDLE of the loop (seen under a parallel sweep:
- * "attempt 3 of 3" in the log beside a zero announce count).
+ * not the end of it — the gate still has to judge the folder, and a poll that
+ * caught the record between the harness's settle and the verdict ran its
+ * assertions in the MIDDLE of the chain.
  *
  * So the signal is the gate's own VERDICT, which is the one thing that happens
  * exactly once per run however it ends: the finish notice. Every terminal path
@@ -228,9 +225,8 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = root;
   process.env.SESSION_SECRET = "the-web-servers-secret";
   process.env.CLAWBOX_MCP_TOKEN = "the-mcp-bearer-token-value";
-  // Three attempts: the cycle these cases exercise. The box's own default is
-  // one since TASK-1749, which the cases that need it set explicitly.
-  writeConfig({ coding_agent_completion_attempts: 3 });
+  // The token and the switch alone: the box has no attempt budget since SCA A2.
+  writeConfig({});
   // Re-armed per test: `mockResolvedValueOnce` chains in one test must not leak
   // into the next, and the default here is the device's ordinary answer.
   commitRunWork.mockReset();
@@ -271,7 +267,9 @@ describe("a run with no deliverable", () => {
 });
 
 describe("a paths deliverable the harness never delivers", () => {
-  it("resumes the SAME run in the SAME session, naming what is missing, and then gives up", async () => {
+  it("checks the folder ONCE, names what is missing, and gives up — no second go unasked", async () => {
+    // Since SCA A2 the box spends no attempt of its own: one harness turn, one
+    // verdict, and the owner's Resume is the only way back in.
     installHarnessThatNeverDelivers();
     const started = await lib.startRun({
       task: "build the app",
@@ -285,87 +283,36 @@ describe("a paths deliverable the harness never delivers", () => {
     // `failed` either — the harness worked, and what it made is not the thing.
     expect(run.status).toBe("gave_up");
     expect(run.error).toContain("app.js was not created.");
+    expect(run.error).toContain("one attempt");
     // The session holds the work, so Resume is the way on and the record says so.
     expect(run.resumable).toBe(true);
     expect(run.sessionId).toBe("sess-durable-1");
 
-    // One attempt per harness turn, the run's own first go counted as one, each
-    // closed with what was still missing when it was judged.
-    expect(run.attempts).toHaveLength(3);
-    expect(run.attempts.every((a) => a.endedAt !== null)).toBe(true);
-    expect(run.attempts.map((a) => a.reason)).toEqual([
-      "app.js was not created.",
-      "app.js was not created.",
-      "app.js was not created.",
-    ]);
+    // The run's own first go, closed with what was missing when it was judged.
+    expect(run.attempts).toHaveLength(1);
+    expect(run.attempts[0].endedAt).not.toBeNull();
+    expect(run.attempts[0].reason).toBe("app.js was not created.");
     expect(run.deliverableCheck).toMatchObject({ ok: false, missing: "app.js was not created." });
 
-    // Three harness turns: the original and two nudges. The nudges name the
-    // missing file and tell it not to start over — it is the same session and
-    // the transcript of the last turn is still in front of it.
+    // ONE harness turn: the task, and no nudge after it.
     const stdin = stdinLog();
-    expect(stdin).toHaveLength(3);
+    expect(stdin).toHaveLength(1);
     expect(stdin[0]).toContain("build the app");
-    for (const nudge of stdin.slice(1)) {
-      expect(nudge).toContain("app.js was not created.");
-      expect(nudge).toMatch(/do not start over/i);
-    }
-    expect(stdin[1]).toContain("attempt 2 of 3");
-    expect(stdin[2]).toContain("attempt 3 of 3");
 
-    // ONE notice, at the end, saying what the run actually is. A "finished"
-    // notice after the first turn — with the run about to go back to work — is
-    // the exact claim this feature removes.
+    // ONE notice, saying what the run actually is.
     expect(announceCodingAgent).toHaveBeenCalledTimes(1);
     expect(announceCodingAgent.mock.calls[0][0]).toMatchObject({ status: "gave_up" });
 
-    // The timeline carries the whole story, in the runner's own vocabulary.
+    // The timeline carries the verdict, in the runner's own vocabulary.
     const progress = run.progress.join("\n");
     expect(progress).toContain("Not finished yet: app.js was not created.");
-    expect(progress).toContain("Attempt 2 of 3 at the deliverable");
+    expect(progress).not.toMatch(/Attempt \d+ of \d+/);
     expect(progress).toContain("Finished: gave_up");
-  });
-
-  it("stops at ONE attempt when that is all the owner allows", async () => {
-    // `min 1` is a real setting: check it, say so, spend nothing more.
-    installHarnessThatNeverDelivers();
-    writeConfig({ coding_agent_completion_attempts: 1 });
-    const started = await lib.startRun({
-      task: "build",
-      projectId: "site",
-      source: "owner",
-      deliverable: { kind: "paths", paths: ["app.js"] },
-    });
-    const run = await settledForGood(started.id);
-
-    expect(run.status).toBe("gave_up");
-    expect(run.attempts).toHaveLength(1);
-    expect(run.completionAttempts).toBe(1);
-    expect(stdinLog()).toHaveLength(1);
-    expect(run.error).toContain("one attempt");
-  });
-
-  it("keeps the cap the run STARTED with when the owner changes it mid-run", async () => {
-    // Frozen like `effort` and `media`: the promise a run was started under must
-    // not move under it.
-    installHarnessThatNeverDelivers();
-    writeConfig({ coding_agent_completion_attempts: 2 });
-    const started = await lib.startRun({
-      task: "build",
-      projectId: "site",
-      source: "owner",
-      deliverable: { kind: "paths", paths: ["app.js"] },
-    });
-    writeConfig({ coding_agent_completion_attempts: 6 });
-    const run = await settledForGood(started.id);
-
-    expect(run.completionAttempts).toBe(2);
-    expect(run.attempts).toHaveLength(2);
   });
 });
 
-describe("a paths deliverable the harness delivers on the second go", () => {
-  it("ends COMPLETED, with the first attempt's failure still on the record", async () => {
+describe("a paths deliverable the harness delivers when the owner resumes", () => {
+  it("ends COMPLETED, with the first go's failure still on the record", async () => {
     installHarnessThatDeliversOnAttempt(2);
     const started = await lib.startRun({
       task: "build",
@@ -373,6 +320,11 @@ describe("a paths deliverable the harness delivers on the second go", () => {
       source: "owner",
       deliverable: { kind: "paths", paths: ["app.js"] },
     });
+    const gaveUp = await settledForGood(started.id);
+    expect(gaveUp.status).toBe("gave_up");
+    announceCodingAgent.mockClear();
+
+    await lib.resumeRun(started.id);
     const run = await settledForGood(started.id);
 
     expect(run.status).toBe("completed");
@@ -381,6 +333,11 @@ describe("a paths deliverable the harness delivers on the second go", () => {
     expect(run.attempts).toHaveLength(2);
     expect(run.attempts[0].reason).toBe("app.js was not created.");
     expect(run.attempts[1].reason).toBeNull();
+    // The resumed go was nudged with what was missing, in the same session.
+    const stdin = stdinLog();
+    expect(stdin).toHaveLength(2);
+    expect(stdin[1]).toContain("app.js was not created.");
+    expect(stdin[1]).toMatch(/do not start over/i);
     expect(run.progress.join("\n")).toContain("The deliverable is there");
     expect(announceCodingAgent).toHaveBeenCalledTimes(1);
     expect(announceCodingAgent.mock.calls[0][0]).toMatchObject({ status: "completed" });
@@ -411,7 +368,6 @@ describe("a command deliverable", () => {
     // One attempt: the subject here is the verdict, not the loop, and a command
     // deliverable spawns a real child per go. Written before the start, because
     // the cap is read there and frozen on the record.
-    writeConfig({ coding_agent_completion_attempts: 1 });
     const started = await lib.startRun({
       task: "build",
       projectId: "site",
@@ -456,7 +412,6 @@ describe("a command deliverable", () => {
 describe("resuming a run that gave up", () => {
   it("is allowed in place, and carries on in the same session", async () => {
     installHarnessThatNeverDelivers();
-    writeConfig({ coding_agent_completion_attempts: 1 });
     const started = await lib.startRun({
       task: "build",
       projectId: "site",
@@ -551,69 +506,6 @@ describe("the deliverable the auto-PR switch implies", () => {
 });
 
 /**
- * Two properties of the attempt itself, each the kind of thing a loop gets
- * quietly wrong.
- */
-describe("what an attempt must not destroy or invent", () => {
-  it("keeps the refusals and the turn count of the attempts before it", async () => {
-    // The per-segment counters (`numTurns`, `permissionDenials`, `deniedActions`,
-    // `denials`) are OVERWRITTEN by a result event unless the spawn says it is
-    // continuing the same record — so without that, a refusal from the first
-    // attempt, and the "Allow next time" button that answers it, vanished the
-    // moment the second ran.
-    const denial = JSON.stringify({
-      type: "result", subtype: "success", is_error: false, result: "Done.", num_turns: 2,
-      permission_denials: [{ tool_name: "Write", tool_input: { file_path: "/etc/hosts" } }],
-    });
-    installWrapper([
-      `printf '%s\\n%s\\n' "$STDIN" '${STDIN_DELIMITER}' >> "${path.join(base, "stdin.log")}"`,
-      `printf '%s\\n' '${INIT}' '${denial.replace(/'/g, "'\\''")}'`,
-      "exit 0",
-    ].join("\n"));
-    writeConfig({ coding_agent_completion_attempts: 2 });
-    const started = await lib.startRun({
-      task: "build", projectId: "site", source: "owner",
-      deliverable: { kind: "paths", paths: ["app.js"] },
-    });
-    const run = await settledForGood(started.id);
-
-    expect(run.status).toBe("gave_up");
-    expect(run.attempts).toHaveLength(2);
-    // Two attempts, each reporting one refusal and two turns: the record is the
-    // run's whole history, not its last segment's.
-    expect(run.permissionDenials).toBe(2);
-    expect(run.deniedActions).toHaveLength(2);
-    expect(run.numTurns).toBe(4);
-  });
-
-  it("does not try again when there is no session to carry on in", async () => {
-    // The loop's whole premise is that the transcript of the attempt that just
-    // ended is still in front of the harness — that is why the nudge says "do
-    // not start over". Without a session it would be a fresh one handed a note
-    // about a missing file: the task redone from nothing, charged to the owner
-    // as "one more attempt".
-    installWrapper([
-      `printf '%s\\n%s\\n' "$STDIN" '${STDIN_DELIMITER}' >> "${path.join(base, "stdin.log")}"`,
-      // No init event, so the record never learns a session id.
-      `printf '%s\\n' '${okResult()}'`,
-      "exit 0",
-    ].join("\n"));
-    const started = await lib.startRun({
-      task: "build", projectId: "site", source: "owner",
-      deliverable: { kind: "paths", paths: ["app.js"] },
-    });
-    const run = await settledForGood(started.id);
-
-    expect(run.sessionId).toBeNull();
-    expect(run.status).toBe("gave_up");
-    expect(run.error).toContain("no session to carry on in");
-    // ONE harness turn, not three: the budget was not spent restarting the task.
-    expect(stdinLog()).toHaveLength(1);
-    expect(run.attempts).toHaveLength(1);
-  });
-});
-
-/**
  * A run that gave up is SETTLED and still resumable, and both halves have to
  * hold at once — which is the whole reason `holdsResumableSession` exists beside
  * `isHeld` rather than inside it.
@@ -634,7 +526,6 @@ describe("a run that gave up is not the box's to throw away", () => {
     // session is not "finished". Clearing it would take the session and the
     // evidence folder the owner is being asked to resume into.
     installHarnessThatNeverDelivers();
-    writeConfig({ coding_agent_completion_attempts: 1 });
     const id = await giveUpOne("build the app");
 
     expect(lib.clearFinishedRuns()).toBe(0);
@@ -695,7 +586,6 @@ describe("a run that gave up is not the box's to throw away", () => {
     // The same exception paused runs and drafts get: `resumeRun` refuses a run
     // whose folder has been deleted, so kept it would be immortal.
     installHarnessThatNeverDelivers();
-    writeConfig({ coding_agent_completion_attempts: 1 });
     const id = await giveUpOne("build the app");
 
     fs.rmSync(projectDir, { recursive: true, force: true });
@@ -704,16 +594,17 @@ describe("a run that gave up is not the box's to throw away", () => {
   });
 });
 
-describe("an attempt that delivers the pull request", () => {
+describe("a resumed go that delivers the pull request", () => {
   it("gets one opened, which the first settle had already ruled out", async () => {
     // `maybeOpenPullRequest` opens a pull request only from `phase: "opening"`.
     // The first settle committed nothing, so it recorded "blocked" — and without
-    // `reopenPullRequestStep` putting the step back, the attempt that DOES commit
-    // would find it blocked, no pull request would ever follow, and the one
-    // deliverable that can then never be met is the one the owner asked for.
+    // `reopenPullRequestStep` putting the step back on the owner's Resume, the
+    // go that DOES commit would find it blocked, no pull request would ever
+    // follow, and the one deliverable that can then never be met is the one
+    // the owner asked for.
     installHarnessThatNeverDelivers();
     initGitRepo(projectDir);
-    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 2 });
+    writeConfig({ coding_agent_auto_pr: true });
     // Nothing on the first turn; the second leaves a commit of its own, which is
     // what lets the pull request step run at all. Through `noteOwnCommit`, the
     // path a run that commits through its own shell takes — and the only commit
@@ -726,10 +617,13 @@ describe("an attempt that delivers the pull request", () => {
     openPullRequest.mockResolvedValue({ ok: true, number: 7, url: "https://github.com/o/r/pull/7" });
 
     const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const gaveUp = await settledForGood(started.id);
+    expect(gaveUp.status).toBe("gave_up");
+    await lib.resumeRun(started.id);
     const run = await settledForGood(started.id);
 
-    // Two harness turns: the first left nothing, the nudge asked for the missing
-    // pull request, and the second delivered.
+    // Two harness turns: the first left nothing, the Resume's nudge asked for
+    // the missing pull request, and the second delivered.
     expect(stdinLog()).toHaveLength(2);
     expect(stdinLog()[1]).toContain("pull request");
     // The step was reopened and the pull request actually opened…
@@ -745,15 +639,16 @@ describe("an attempt that delivers the pull request", () => {
 });
 
 describe("an EXPLICIT pull-request deliverable after the flow failed", () => {
-  it("gets the step reopened, so the attempt is not spent on something unreachable", async () => {
-    // The implied bar steps aside on `phase: "failed"`, so nothing is attempted
-    // for it. An explicit `{ kind: "pr" }` is honoured as the caller stated it,
+  it("gets the step reopened on Resume, so the go is not spent on something unreachable", async () => {
+    // The implied bar steps aside on `phase: "failed"`, so nothing is held to
+    // it. An explicit `{ kind: "pr" }` is honoured as the caller stated it,
     // whatever the phase — so unless the step is reopened, `maybeOpenPullRequest`
-    // (which opens only from "opening") can never run again and every attempt is
-    // spent on a bar that cannot be met, ending `gave_up` over work that was done.
+    // (which opens only from "opening") can never run again and the owner's
+    // Resume is spent on a bar that cannot be met, ending `gave_up` over work
+    // that was done.
     installHarnessThatNeverDelivers();
     initGitRepo(projectDir);
-    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 2 });
+    writeConfig({ coding_agent_auto_pr: true });
     // The first settle's pull-request flow FAILS (not "blocked"): it has a commit
     // to open one from, and the GitHub call refuses.
     newestCommitSince.mockReset();
@@ -767,9 +662,12 @@ describe("an EXPLICIT pull-request deliverable after the flow failed", () => {
       task: "build", projectId: "site", source: "owner",
       deliverable: { kind: "pr" },
     });
+    const gaveUp = await settledForGood(started.id);
+    expect(gaveUp.status).toBe("gave_up");
+    await lib.resumeRun(started.id);
     const run = await settledForGood(started.id);
 
-    // The second attempt got a real go at it, and took it.
+    // The resumed go got a real go at it, and took it.
     expect(openPullRequest).toHaveBeenCalledTimes(2);
     expect(run.pr?.number).toBe(9);
     expect(run.status).toBe("completed");
@@ -824,7 +722,6 @@ describe("the held notice reaches the owner on every path", () => {
     // explicit deliverable is returned by `deliverableFor` before `run.pr` is
     // ever looked at. The test below is the one that reaches that branch.
     installHarnessThatNeverDelivers();
-    writeConfig({ coding_agent_completion_attempts: 1 });
     const started = await lib.startRun({
       task: "build", projectId: "site", source: "owner",
       deliverable: { kind: "paths", paths: ["app.js"] },
@@ -864,7 +761,7 @@ describe("the held notice reaches the owner on every path", () => {
     // been reported nowhere.
     installHarnessThatNeverDelivers();
     initGitRepo(projectDir);
-    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 1 });
+    writeConfig({ coding_agent_auto_pr: true });
     const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
     const first = await settledForGood(started.id);
     // The implied bar was real: a branch was made and an attempt recorded.
@@ -884,7 +781,7 @@ describe("the held notice reaches the owner on every path", () => {
     // Switched off while the run was away: this is what makes
     // `maybeOpenPullRequest` record "failed" rather than "blocked", which is
     // what takes the implied bar away mid-settle.
-    writeConfig({ coding_agent_auto_pr: false, coding_agent_completion_attempts: 1 });
+    writeConfig({ coding_agent_auto_pr: false });
 
     await lib.resumeRun(started.id);
     const run = await settledForGood(started.id);

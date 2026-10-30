@@ -2563,7 +2563,6 @@ describe("CodingAgentApp — the run page's honesty", () => {
       ...RUN,
       id: "run-deliv001",
       deliverable: { kind: "paths", paths: ["app.js", "index.html"] },
-      completionAttempts: 3,
     };
 
     async function openRun(id: string) {
@@ -2610,10 +2609,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
       expect(card).toHaveAttribute("data-state", "missing");
       expect(within(card).getByTestId("coding-agent-deliverable-verdict"))
         .toHaveTextContent("app.js was not created.");
-      // How much of the budget went on it — the fact that tells the owner
-      // whether another go is worth asking for.
-      expect(within(card).getByTestId("coding-agent-deliverable-attempts"))
-        .toHaveTextContent(t("codingAgent.deliverableAttempts", { n: 3, max: 3 }));
+      // No "n of max attempts" line: the box has no attempt budget since SCA A2,
+      // and the gave-up reason already says how many goes it took.
+      expect(within(card).queryByTestId("coding-agent-deliverable-attempts")).toBeNull();
       // Its own word, not "Did not finish" (which reads as a broken box) and not
       // "Stopped" (which is the owner's own gesture).
       expect(within(page).getByTestId("coding-agent-run-status"))
@@ -2673,7 +2671,7 @@ describe("CodingAgentApp — the run page's honesty", () => {
     });
 
     it("names a pull request and a command in the owner's words, not the wire's", async () => {
-      const byPr = { ...RUN, id: "run-deliv005", deliverable: { kind: "pr" }, completionAttempts: 3 };
+      const byPr = { ...RUN, id: "run-deliv005", deliverable: { kind: "pr" } };
       stubFetch({ enabled: true, readiness: READY }, [byPr], { projects: [SITE_PROJECT] });
       const page = await openRun(byPr.id);
       expect(within(page).getByTestId("coding-agent-deliverable-what"))

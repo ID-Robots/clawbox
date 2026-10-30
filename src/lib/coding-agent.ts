@@ -168,6 +168,7 @@ import {
   isCodingProvider,
   isRecordableModel,
   modelsForProvider,
+  offeredProviders,
   resolveRunProvider,
   runsOnCodex,
   DEFAULT_OPENAI_MODEL,
@@ -350,7 +351,6 @@ import {
   type ReviewSnapshot,
 } from "@/lib/coding-review";
 import {
-  completionAttemptsFrom,
   completionNudge,
   gaveUpReason,
   MAX_COMPLETION_ATTEMPTS,
@@ -374,29 +374,6 @@ import {
   normalizeCodingGitEmail,
   normalizeCodingGitName,
 } from "@/lib/coding-git-identity";
-import { readPipelineDefault } from "@/lib/coding-pipeline-store";
-import {
-  addEvidence,
-  clonePipeline,
-  decidePipeline,
-  enterStage,
-  improvementNudge,
-  isPipelineLive,
-  newPipeline,
-  parsePipeline,
-  defaultPipelineInput,
-  readPipelineInput,
-  stageNoun,
-  stepFor,
-  stopPipeline,
-  type PipelineInput,
-  type PipelineInputRefusal,
-  type PipelineStage,
-  type PipelineState,
-  type PipelineTransition,
-  type PipelineVerify,
-  type StageOutcome,
-} from "@/lib/coding-pipeline";
 import {
   EXPERIENCE_BLOCK_MAX_CHARS,
   EXPERIENCE_RULE_ID,
@@ -567,7 +544,7 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
  * So the question is no longer "how long has it been alive" but "is it doing
  * anything". Every stream event stamps lastActivityAt, and only silence
  * counts against a run. Runaway cost is bounded separately and properly, by
- * the owner's step and token ceilings; this is only here so a wedged process cannot
+ * the owner's step ceiling; this is only here so a wedged process cannot
  * hold the one-run-at-a-time slot forever.
  */
 export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -608,19 +585,6 @@ export const MAX_SPAWN_TOKENS_KEPT = 20;
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
-
-/**
- * Optional ceiling on the tokens one run may spend. Null means no ceiling.
- *
- * Claude Code has no flag for this — only --max-budget-usd, which prices an
- * unknown model name and so meant nothing here — so the device enforces it
- * from the usage the stream already reports, and stops the run itself.
- *
- * Counted the way a bill is: every request pays for the input it carries, so
- * input is summed per turn even though the conversation repeats. Cache reads
- * are cheaper than fresh input but are not free, so they count too.
- */
-export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
 
 /**
  * The owner's switch for the automatic review pass: when on, a run that
@@ -782,22 +746,6 @@ export function maxParallelRunsFrom(raw: unknown, ceiling: number = hostMaxParal
   return rounded;
 }
 
-/**
- * How many ATTEMPTS at its deliverable a run gets, the original included.
- *
- * Only ever spent by a run that HAS a deliverable (src/lib/coding-deliverable.ts):
- * one the caller named, or the pull request the auto-PR switch already implies.
- * A run with neither settles exactly as it always did, so this setting costs a
- * box that does not use deliverables nothing at all.
- *
- * One by default (`DEFAULT_COMPLETION_ATTEMPTS`), and the count includes the
- * run's own first turn — so the default buys no resume: check it, tell me,
- * spend nothing more. An owner can raise it to six in all
- * (`MAX_COMPLETION_ATTEMPTS`); each attempt past the first is one resume of
- * the whole session.
- */
-export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY = "coding_agent_completion_attempts";
-
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
 /**
@@ -899,13 +847,11 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_DIR_CONFIG_KEY,
   CODING_AGENT_EFFORT_CONFIG_KEY,
   CODING_AGENT_TURNS_CONFIG_KEY,
-  CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
   CODING_AGENT_PR_BODY_TASK_CONFIG_KEY,
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
-  CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
   CODING_AGENT_MAX_PARALLEL_CONFIG_KEY,
   // The retention setting goes back to standard; resetCodingAgentSetup also
   // hands Claude Code's transcript period back to whoever set it before.
@@ -949,7 +895,6 @@ export const CODING_AGENT_RESET_KEYS = [
  */
 export const MAX_IMAGES_PER_RUN = 20;
 export const MAX_AUDIO_PER_RUN = 40;
-export const MIN_TOKEN_LIMIT = 10_000;
 /** The longest task a person — the owner, or the assistant on their behalf — may type. */
 export const MAX_TASK_CHARS = 4_000;
 /**
@@ -1717,7 +1662,7 @@ export interface CodingRun {
    * How many parallel jobs this run's builds and tests may use
    * (src/lib/coding-run-cpu.ts): worked out at start from the box's CPUs, the
    * runs sharing them and whether it is on battery, then frozen like the
-   * effort, so a retry or a completion attempt keeps to the same number. In
+   * effort, so a retry or a resume keeps to the same number. In
    * its environment as CLAWBOX_RUN_CPU_BUDGET and in its brief.
    *
    * Optional in the type so a record built before it existed still
@@ -1788,22 +1733,6 @@ export interface CodingRun {
    * `review.round` stays the loop's counter; this is one run's place in it.
    */
   reviewRound: number | null;
-  /**
-   * The DELIVERY PIPELINE this run is the build stage of, when it has one.
-   *
-   * The owner's ask of 2026-09-13: "From prompt -> coding agent -> review ->
-   * improvement -> deploy dev -> review -> deploy prod -> review -> task
-   * complete. The full run needs to be auto from start to finish." Every one of
-   * those stages already existed and each ended on its own; this is the record
-   * that joins them up, and it lives on the run that started the whole thing —
-   * the review pass and the improvement laps are turns in ITS session, and the
-   * deployments are of ITS work.
-   *
-   * Null on every run that was not asked to go through one, which is the
-   * unchanged path: such a run settles exactly as it always did. See
-   * src/lib/coding-pipeline.ts for the machine and what each stage means.
-   */
-  pipeline: PipelineState | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -1931,13 +1860,11 @@ export interface CodingRun {
   tokenBreakdown: TokenBreakdown;
   /**
    * The tokens each spawn of this record cost, in order: the first is the run
-   * itself, every later one a completion attempt, a Fix CI lap or a resume.
+   * itself, every later one a Fix CI lap or a resume.
    * A review pass is a record of its own (`reviewOf`). Capped at
    * MAX_SPAWN_TOKENS_KEPT, the newest kept.
    */
   spawnTokens: number[];
-  /** The ceiling that applied, or null when the run was uncapped. */
-  tokenLimit: number | null;
   /**
    * Reasoning tokens Claude Code reports so far.
    *
@@ -1951,7 +1878,7 @@ export interface CodingRun {
   /**
    * An `openai` run's thread usage as Codex last reported it — its CUMULATIVE
    * figure for the whole thread, not this record's share. Kept so a later
-   * spawn that continues the same thread (a resume, a completion attempt) can
+   * spawn that continues the same thread (a resume) can
    * bill only what it added: see codexUsageBaseline. Absent on every other run.
    */
   codexThreadUsage?: CodexThreadUsage;
@@ -2138,12 +2065,6 @@ export interface CodingRun {
    */
   attempts: RunAttempt[];
   /**
-   * The attempt ceiling this run started with, frozen for the reason every
-   * other run setting is: the owner changing the number while a run works must
-   * not change the promise that run was started under.
-   */
-  completionAttempts: number;
-  /**
    * Things the owner (or the assistant) has told this run while it works, and
    * whether the harness has had each of them yet.
    *
@@ -2207,7 +2128,6 @@ export interface QueuedStart {
   provider?: unknown;
   model?: unknown;
   deliverable?: unknown;
-  pipeline?: unknown;
   inputs?: unknown;
   experience?: unknown;
 }
@@ -2567,9 +2487,6 @@ export interface CodingAgentStatus {
   maxTurns: number;
   minMaxTurns: number;
   maxMaxTurns: number;
-  /** Token ceiling the device enforces, or null for none. */
-  tokenLimit: number | null;
-  minTokenLimit: number;
   /** Silence, not total time, is what ends a run. */
   runIdleTimeoutMs: number;
   /** False until the owner finishes the setup wizard — the app shows the
@@ -2661,18 +2578,6 @@ export interface StartRunInput {
    * not otherwise have. See readDeliverableInput.
    */
   deliverable?: unknown;
-  /**
-   * Whether this run goes through the DELIVERY PIPELINE, as the CALLER sent it
-   * — unvalidated, read through `readPipelineInput`, which throws `invalid`
-   * with a stable code rather than repairing. `true` is the shorthand for the
-   * usual one; an object may name the path to check and what the page must
-   * contain, and may switch the production half off.
-   *
-   * Absent, the project's own default decides (`coding_pipeline_projects`), so
-   * a project the owner ships from every day does not need the switch typed
-   * into every prompt.
-   */
-  pipeline?: unknown;
   /**
    * Lessons from earlier verified runs — the training cluster's experience
    * store, as its dispatcher selected it for this task — as the CALLER sent
@@ -2777,10 +2682,6 @@ function effortFrom(raw: unknown): CodingEffort {
 function maxTurnsFrom(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_TURNS;
   return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
-}
-
-function tokenLimitFrom(raw: unknown): number | null {
-  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
 }
 
 export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
@@ -3238,12 +3139,6 @@ export async function setAutoMerge(on: unknown): Promise<boolean> {
   return on;
 }
 
-/** How many attempts at its deliverable a run gets. Absent means the default
- *  (DEFAULT_COMPLETION_ATTEMPTS); no route sets the key since SCA C3. */
-export async function getCompletionAttempts(): Promise<number> {
-  return completionAttemptsFrom(await configGet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY));
-}
-
 /** The two media switches. ON when absent — see their config keys. */
 function generateImagesFrom(raw: unknown): boolean {
   return raw !== false;
@@ -3357,20 +3252,6 @@ export class ProviderChoiceError extends CodingAgentError {
  * has written down as never-allowed must not become allowable through this door
  * just because the current build grants `Bash(*)` and leans on the tool list.
  */
-/**
- * A pipeline request this box will not accept.
- *
- * `ProviderChoiceError`'s sibling and for its reason: both are `invalid`, and a
- * caller that cannot tell "that is not a path" from "that folder is off limits"
- * has no idea which argument to fix. The code travels beside the 400.
- */
-export class PipelineChoiceError extends CodingAgentError {
-  constructor(readonly code: PipelineInputRefusal, message: string) {
-    super("invalid", message);
-    this.name = "PipelineChoiceError";
-  }
-}
-
 /**
  * An `experience` field the box refused, with the reason's stable code beside
  * the shared 400 — so the dispatcher can tell "rule 3's id is malformed" from
@@ -3535,27 +3416,6 @@ export async function setMaxTurns(turns: unknown): Promise<number> {
     throw new CodingAgentError("invalid", `Steps must be between ${MIN_MAX_TURNS} and ${MAX_MAX_TURNS}.`);
   }
   await configSet(CODING_AGENT_TURNS_CONFIG_KEY, n);
-  return n;
-}
-
-/** The owner's token ceiling, or null when they have not set one. */
-export async function getTokenLimit(): Promise<number | null> {
-  return tokenLimitFrom(await configGet(CODING_AGENT_TOKENS_CONFIG_KEY));
-}
-
-export async function setTokenLimit(limit: number | null): Promise<number | null> {
-  if (limit === null) {
-    await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
-    return null;
-  }
-  if (typeof limit !== "number" || !Number.isFinite(limit)) {
-    throw new CodingAgentError("invalid", "The token limit must be a number, or empty for no limit.");
-  }
-  const n = Math.round(limit);
-  if (n < MIN_TOKEN_LIMIT) {
-    throw new CodingAgentError("invalid", `A token limit below ${MIN_TOKEN_LIMIT.toLocaleString("en-US")} would stop almost every run before it started.`);
-  }
-  await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, n);
   return n;
 }
 
@@ -4293,6 +4153,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
     defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
   ]);
+  const connectedProviders = connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider);
   return {
     enabled,
     // Off the SAME config snapshot as everything else here — the app polls
@@ -4347,8 +4208,16 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     provider,
-    providers: CODING_PROVIDERS,
-    connectedProviders: connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider),
+    // What the panel draws — OpenAI only where the Codex CLI is, or where the
+    // owner already has the account (coding-provider.ts, offeredProviders).
+    // Off the readiness probe above: no second look at the disk.
+    providers: offeredProviders({
+      codexInstalled: readiness.codexInstalled,
+      openaiConnected: readiness.openaiConnected,
+      connected: connectedProviders,
+      defaultProvider: provider,
+    }),
+    connectedProviders,
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with
@@ -4365,8 +4234,6 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
     minMaxTurns: MIN_MAX_TURNS,
     maxMaxTurns: MAX_MAX_TURNS,
-    tokenLimit: tokenLimitFrom(config[CODING_AGENT_TOKENS_CONFIG_KEY]),
-    minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
     // An EXPLICIT flag always wins; `enabled` only stands in when there is no
     // flag at all.
@@ -4609,7 +4476,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
     spawnTokens: Array.isArray((raw as { spawnTokens?: unknown }).spawnTokens)
       ? ((raw as { spawnTokens: unknown[] }).spawnTokens).filter((t): t is number => typeof t === "number" && Number.isFinite(t) && t >= 0).slice(-MAX_SPAWN_TOKENS_KEPT)
       : [],
-    tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
     thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
     ...(readCodexThreadUsage((raw as { codexThreadUsage?: unknown }).codexThreadUsage) ?? {}),
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
@@ -4648,9 +4514,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
       const n = (raw as { reviewRound?: unknown }).reviewRound;
       return typeof n === "number" && Number.isInteger(n) && n > 0 ? n : null;
     })(),
-    // Strict, and the safe direction to fall: a record whose pipeline this
-    // build cannot read has none, and settles the way a run without one does.
-    pipeline: parsePipeline((raw as { pipeline?: unknown }).pipeline),
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     // Only a list that matches the lines one for one is a list of their times;
     // a record from before the field has none, and the timeline says nothing.
@@ -4706,7 +4569,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
     deliverable: parseDeliverable((raw as { deliverable?: unknown }).deliverable),
     deliverableCheck: parseDeliverableVerdict((raw as { deliverableCheck?: unknown }).deliverableCheck),
     attempts: parseAttempts((raw as { attempts?: unknown }).attempts),
-    completionAttempts: completionAttemptsFrom((raw as { completionAttempts?: unknown }).completionAttempts),
     // Re-validated rather than trusted, like every other list here: this text
     // is written to the harness's stdin and drawn on the run's page, and the
     // file it comes from is one a restore or a hand edit can have touched.
@@ -4760,7 +4622,6 @@ function parseQueueEntry(raw: unknown): RunQueueEntry {
       provider: start.provider,
       model: start.model,
       deliverable: start.deliverable,
-      pipeline: start.pipeline,
       inputs: start.inputs,
       experience: start.experience,
       ...(start.fixCi === true ? { fixCi: true } : {}),
@@ -5016,7 +4877,7 @@ interface LiveRun {
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
   /**
-   * What the owner (or the token ceiling) asked this run to do: end for good,
+   * What the owner asked this run to do: end for good,
    * or settle as paused with its session intact for resumeRun(). One field,
    * not two flags, because the two gestures are exclusive and the later
    * Stop overrides an earlier Pause — see requestEnd.
@@ -5105,7 +4966,7 @@ interface LiveRun {
   /**
    * `run.tokensUsed` when this spawn began, so the verdict above counts what
    * THIS spawn was billed. The record's bill alone would not do: a resume, an
-   * account switch and a pipeline lap all continue a record that already
+   * account switch and a Resume of a gave-up run all continue a record that already
    * carries earlier spawns' tokens, and a resumed spawn refused on its very
    * first request is the startup case again, not a model error mid-run. The
    * automatic retry inherits its first attempt's value — one run making a
@@ -5115,8 +4976,8 @@ interface LiveRun {
   /** `run.tokenBreakdown` when this process began: the CLI's modelUsage counts from zero per process. */
   breakdownAtSpawn: TokenBreakdown;
   /**
-   * This process continues an earlier session (`--resume`): a review pass, a
-   * completion attempt, the owner's Resume. Its CLI reports modelUsage for the
+   * This process continues an earlier session (`--resume`): a review pass, the
+   * owner's Resume. Its CLI reports modelUsage for the
    * WHOLE session, history included (measured 2026-10-18: a review pass's
    * record read 270,596 = the run's own 125,100 + its 145,496), so the
    * raise-to-modelUsage below would bill the earlier spawns again. Such a
@@ -5265,8 +5126,6 @@ interface RunStore {
   unannounced: Set<string>;
   /** One lifecycle change at a time per run — see transitions. */
   transitions: Map<string, Promise<CodingRun>>;
-  /** One pipeline advance at a time per run — see advancePipeline. */
-  pipelineAdvancing: Map<string, Promise<void>>;
   /** Starts past the gate and not yet visible to loadRuns() — see startingRuns. */
   startingRuns: number;
   /** The same, for automatic review passes — their own pool. */
@@ -5309,7 +5168,6 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   settling: new Set<Promise<void>>(),
   unannounced: new Set<string>(),
   transitions: new Map<string, Promise<CodingRun>>(),
-  pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
   startingReviews: 0,
   signature: null,
@@ -5665,9 +5523,6 @@ function cloneRun(run: CodingRun): CodingRun {
     // Copied entry by entry: a route holding a clone must not be able to mark
     // a message delivered that the harness has never seen.
     messages: run.messages.map((m) => ({ ...m })),
-    // Nested two deep — steps, and the evidence under each — so a route holding
-    // a clone can neither see nor write the driver's later stages.
-    pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
     experience: run.experience ? { ...run.experience, ruleIds: [...run.experience.ruleIds] } : null,
     // Where it stands, never what it asked for: the request (inputs, an
     // experience block) is the runner's to start it with, not a reader's.
@@ -6399,7 +6254,7 @@ export const READ_ONLY_BRIEF = [
 export const ULTRACODE_BRIEF = [
   "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
-  "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
+  "The owner's step ceiling applies to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
   "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
   // Every ultracode run of bench cycle 1 (2026-09-05) re-argued the CLI's
   // "use it on every substantive task" reminder against the brief, and m-04
@@ -8182,12 +8037,6 @@ function parseTodos(raw: unknown): CodingTodo[] | null {
 export const parseTodosForTests = parseTodos;
 
 /**
- * Add to the run's bill and stop it at the owner's ceiling. The CLI has no
- * flag for a token limit, so the device enforces it from the usage the stream
- * reports. Marked resumable: the work is real, it simply ran out of room —
- * the same shape as a step ceiling.
- */
-/**
  * The breakdown raised to the CLI's own per-category bill for this process
  * (modelUsage: every model, sub-agents and workflow agents included, counted
  * from zero per process), never lowered — the live sum from the assistant
@@ -8211,37 +8060,31 @@ function raiseTokenBreakdown(run: CodingRun, base: TokenBreakdown, modelUsage: R
   b.cacheRead = Math.max(b.cacheRead, base.cacheRead + proc.cacheRead);
 }
 
-function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
-  if (!(tokens > 0)) return false;
-  run.tokensUsed += tokens;
-  if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
-    state.endRequested = "stop";
-    run.resumable = true;
-    run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
-    pushProgress(run, RUNNER_STEP.tokenLimit);
-    console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
-    endProcess(state);
-    return true;
-  }
-  return false;
+/**
+ * Add to the run's bill. The device no longer stops a run on its spend (the
+ * token ceiling went in SCA A2): the step ceiling and the idle timeout bound a
+ * run, and the figure here is what the card and the bench read.
+ */
+function noteTokens(run: CodingRun, tokens: number): void {
+  if (tokens > 0) run.tokensUsed += tokens;
 }
 
 /**
  * A workflow's agents never appear on the stream; the CLI reports the
  * workflow's cumulative spend on every task_progress and once more on its
- * task_notification. Bill the delta each time, so the owner's ceiling holds
+ * task_notification. Bill the delta each time, so the record's spend is live
  * WHILE a fan-out runs rather than after it, and a workflow the run was
  * stopped under has still been billed for what it did.
  */
-function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): boolean {
+function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): void {
   const helper = state.openSubagents.get(id);
-  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return false;
+  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return;
   const total = usage && typeof usage === "object" ? (usage as { total_tokens?: unknown }).total_tokens : undefined;
-  if (typeof total !== "number") return false;
+  if (typeof total !== "number") return;
   const billed = state.helperBilled.get(id) ?? 0;
-  if (total <= billed) return false;
+  if (total <= billed) return;
   state.helperBilled.set(id, total);
-  return noteTokens(run, state, total - billed);
+  noteTokens(run, total - billed);
 }
 
 /** The text of a tool_result, whether the CLI sent a string or text blocks. */
@@ -8532,9 +8375,8 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       run.tokenBreakdown.output += n("output_tokens");
       run.tokenBreakdown.cacheCreation += n("cache_creation_input_tokens");
       run.tokenBreakdown.cacheRead += n("cache_read_input_tokens");
-      const stoppedNow = noteTokens(run, state, n("input_tokens") + n("output_tokens")
+      noteTokens(run, n("input_tokens") + n("output_tokens")
         + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
-      if (stoppedNow) return;
     }
     // A helper's own turns (parent_tool_use_id set) are billed above and
     // nothing more: its words are not the run's words, its Bash is not the
@@ -8683,7 +8525,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       const out = (event.usage as { output_tokens?: unknown }).output_tokens;
       if (typeof out === "number" && out > state.outputBilledInSegment) {
         run.tokenBreakdown.output += out - state.outputBilledInSegment;
-        noteTokens(run, state, out - state.outputBilledInSegment);
+        noteTokens(run, out - state.outputBilledInSegment);
       }
     }
     state.outputBilledInSegment = 0;
@@ -8713,7 +8555,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       // history too (see LiveRun.resumedSession).
       if (!state.resumedSession) {
         if (total > run.tokensUsed) {
-          if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
+          if (state.openSubagents.size > 0) noteTokens(run, total - run.tokensUsed);
           else run.tokensUsed = total;
         }
         raiseTokenBreakdown(run, state.breakdownAtSpawn, usage);
@@ -8807,7 +8649,7 @@ function readCodexThreadUsage(raw: unknown): { codexThreadUsage: CodexThreadUsag
 /**
  * What a Codex thread had already billed before this spawn: the largest usage
  * any record of the same thread carries — the run this one resumes, or this
- * very record's earlier spawn on a completion attempt. Codex reports a
+ * very record's earlier spawn, resumed after it gave up. Codex reports a
  * thread's usage cumulatively, so a continuation's own share is its figure
  * less this one. Zero for a fresh thread.
  */
@@ -8828,10 +8670,8 @@ function codexUsageBaseline(sessionId: string | null): CodexThreadUsage {
  * bills — fresh input, cached input read back, output. A figure BELOW the
  * baseline is not cumulative after all (a CLI that counts per process): it is
  * taken whole rather than read as a negative.
- *
- * @returns whether the token ceiling stopped the run (noteTokens)
  */
-function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage): boolean {
+function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage): void {
   const base = state.codexBaseline ?? { input: 0, cachedInput: 0, output: 0 };
   const cumulative = usage.input >= base.input && usage.output >= base.output && usage.cachedInput >= base.cachedInput;
   const input = cumulative ? usage.input - base.input : usage.input;
@@ -8844,7 +8684,7 @@ function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage
   run.tokenBreakdown.input += input - cached;
   run.tokenBreakdown.cacheRead += cached;
   run.tokenBreakdown.output += output;
-  return noteTokens(run, state, input + output);
+  noteTokens(run, input + output);
 }
 
 /**
@@ -8913,7 +8753,7 @@ function handleCodexEvent(run: CodingRun, state: LiveRun, event: unknown): void 
         break;
       }
       case "usage":
-        if (applyCodexUsage(run, state, { input: action.input, cachedInput: action.cachedInput, output: action.output })) return;
+        applyCodexUsage(run, state, { input: action.input, cachedInput: action.cachedInput, output: action.output });
         break;
       case "completed": {
         state.sawResult = true;
@@ -9105,10 +8945,6 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // for the `pr` deliverable the answer is only knowable once the step above
   // has had its go at opening one.
   await enforceDeliverable(run, ended, review);
-  // The delivery pipeline, AFTER the gate — which can put this very record
-  // back to work, and a pipeline that advanced past a run that is running
-  // again would be deploying a folder a live session is still writing in.
-  await pipelineAfterSettle(run, ended, review);
   // After ALL of it: the review pass, another go at the deliverable and the
   // review loop all work in this very tree, and `settleRunWorktree` steps
   // aside while any of them is live. Whichever record settles last is the one
@@ -10473,8 +10309,8 @@ function deliverableGateApplies(run: CodingRun): boolean {
  * the one the gate has to ask to know whether it owes that notice. It cannot
  * simply re-read `deliverableFor`, because the implied pull-request bar can step
  * aside between the two (see the branch that uses this), and it must not assume
- * an attempt is still open, because an owner Resume at the attempt ceiling opens
- * none.
+ * an attempt is still open, because an owner Resume at MAX_COMPLETION_ATTEMPTS
+ * opens none.
  *
  * Exact, not a heuristic: a named deliverable is frozen on the record and never
  * removed, and a run that got the implied one always had `openAttempt` push an
@@ -10489,8 +10325,8 @@ function wasGated(run: CodingRun): boolean {
 function openAttempt(run: CodingRun): void {
   if (deliverableFor(run) === null) return;
   // Never two open at once: a record whose previous attempt was left open by a
-  // restart must not grow a second one, or the count that decides "no more
-  // attempts" would be the count of interruptions.
+  // restart must not grow a second one, or the count the card and the gave-up
+  // reason report would be the count of interruptions.
   if (run.attempts.some((a) => a.endedAt === null)) return;
   if (run.attempts.length >= MAX_COMPLETION_ATTEMPTS) return;
   run.attempts.push({ startedAt: Date.now(), endedAt: null, reason: null });
@@ -10500,9 +10336,9 @@ function openAttempt(run: CodingRun): void {
  * Close the open attempt with what was still missing (null when it was there).
  *
  * A judgement with no open entry to close still gets recorded — a record from
- * before the field, or one whose attempt a restart closed — because the count
- * of attempts is what decides whether to try again, and a judgement that
- * vanished would let a run be nudged for ever.
+ * before the field, or one whose attempt a restart closed — because the
+ * attempt list is the run's whole history at its bar, and a judgement that
+ * vanished would leave the card and the gave-up reason a go short.
  */
 function closeAttempt(run: CodingRun, missing: string | null): void {
   const reason = missing ? missing.slice(0, MAX_MISSING_CHARS) : null;
@@ -10587,14 +10423,8 @@ function reopenPullRequestStep(run: CodingRun): void {
 
 /**
  * The finish notice, once the gate has decided what this run actually is.
- *
- * Unless a DELIVERY PIPELINE is still going, which is the later authority on
- * what this run is: the deliverable being there means the build stage passed,
- * not that the work is deployed and checked. The pipeline sends the notice when
- * it settles, so the two never both send one and never both stay silent.
  */
 function announceGatedRun(run: CodingRun): void {
-  if (pipelineOwnsRun(run)) return;
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -10609,11 +10439,12 @@ function announceGatedRun(run: CodingRun): void {
  * built the thing: both emit a success result event, and nothing on the box had
  * looked at the folder.
  *
- * Three endings, and the ATTEMPT is the middle one: the deliverable is there
- * (`completed` stands), it is not and there are attempts left (the same record
- * goes back in, same session, with a nudge naming what is missing), or it is
- * not and there are none (`gave_up`, with the missing thing as the reason and
- * Resume as the way on).
+ * Two endings: the deliverable is there (`completed` stands), or it is not
+ * (`gave_up`, with the missing thing as the reason and Resume as the way on —
+ * the owner's Resume carries on in the same session with a nudge naming what
+ * is missing, `completionNudge`). The box never spends a second go unasked:
+ * the automatic completion-attempt loop went in SCA A2, having fired once in
+ * 255 runs, at a file the task forbade creating.
  *
  * Never throws: it runs inside the settle chain, and a thrown error here would
  * leave a record whose notice was held back by `finishRun` and never sent.
@@ -10699,12 +10530,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     pushProgress(origin, RUNNER_STEP.deliverableMissing(verdict.missing ?? ""));
-    const made = origin.attempts.length;
-    if (made >= origin.completionAttempts) {
-      giveUp(origin, verdict.missing ?? "", made);
-      return;
-    }
-    await startCompletionAttempt(origin, deliverable, verdict.missing ?? "", made + 1);
+    giveUp(origin, verdict.missing ?? "", origin.attempts.length);
   } catch (err) {
     // The check itself broke. NOT a pass: that is the whole point of the
     // feature. The run is recorded as not having got there, with what went
@@ -10712,11 +10538,10 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     // than a tick over an unanswered question.
     const reason = `The deliverable could not be checked: ${err instanceof Error ? err.message : String(err)}`;
     console.error(`[coding-agent] ${origin.id} deliverable check failed:`, err instanceof Error ? err.message : err);
-    // Unless the run has ALREADY been settled by something inside the try — a
-    // `giveUp` from the attempt's own gates, or the spawn failure that settles
-    // the record as failed. Giving up a second time would push a second ending
-    // onto the timeline, announce the run twice and add a phantom attempt to
-    // the count the card shows.
+    // Unless the run has ALREADY been settled by something inside the try.
+    // Giving up a second time would push a second ending onto the timeline,
+    // announce the run twice and add a phantom attempt to the count the card
+    // shows.
     if (origin.status !== "completed") {
       persist(true);
       return;
@@ -10749,723 +10574,6 @@ function giveUp(run: CodingRun, missing: string, attempts: number): void {
   announceGatedRun(run);
 }
 
-/**
- * One more go at the deliverable: the SAME record, the SAME session, a nudge
- * naming what is missing.
- *
- * In place rather than as a fresh run, which is what the brief's "resume with
- * context" means and what the record needs: `attempts`, the deliverable and the
- * verdict all belong to one run, and the owner asked one question. Mechanically
- * it is `resumeRunOnce`'s spawn — `--resume` on the run's own session id with
- * the continuation on stdin — so the transcript of the attempt that just ended
- * is still in front of the harness, which is why the nudge can say "do not
- * start over" and be obeyed.
- */
-async function startCompletionAttempt(
-  run: CodingRun,
-  deliverable: Deliverable,
-  missing: string,
-  attempt: number,
-): Promise<void> {
-  // No session means there is nothing to CARRY ON from, and this loop's whole
-  // premise is that there is: the nudge says "do not start over" because the
-  // transcript of the attempt that just ended is still in front of the harness.
-  // Spawned without one it would be a fresh session handed a note about a
-  // missing file — the task redone from nothing, charged to the owner under the
-  // name of "one more attempt". So the honest ending is recorded instead.
-  if (!run.sessionId) {
-    giveUp(run, `${missing} There is no session to carry on in, so the box did not try again.`, run.attempts.length);
-    return;
-  }
-
-  let tools: SpawnTools;
-  // Held across the two awaits below and given back the moment the record is
-  // live again (the flip after this block is synchronous) — see `startingRuns`.
-  let releaseSlot: (() => void) | null = null;
-  try {
-    // The same gates a start passes — the owner's switch, readiness, the
-    // slot — because this IS a start, and the owner may have switched the
-    // agent off while the run worked.
-    releaseSlot = await assertCanSpawn(null);
-    tools = await requireSpawnTools();
-    run.directory = await realDirectory(run.directory);
-  } catch (err) {
-    releaseSlot?.();
-    // Another attempt cannot be made now. The ending is still the honest one:
-    // the deliverable is not there. The reason says both halves, so the owner
-    // is not left wondering why the attempts stopped short.
-    const why = err instanceof Error ? err.message : String(err);
-    giveUp(run, `${missing} Another attempt could not be started: ${why}`, run.attempts.length);
-    return;
-  }
-  releaseSlot?.();
-
-  reopenPullRequestStep(run);
-  run.status = "running";
-  run.completedAt = null;
-  run.exitCode = null;
-  run.error = null;
-  run.pauseReason = null;
-  // Judged again when this attempt settles; until then there is no verdict
-  // about a run that is still working.
-  run.leftover = false;
-  run.lastActivityAt = Date.now();
-  openAttempt(run);
-  pushProgress(run, RUNNER_STEP.anotherAttempt(attempt, run.completionAttempts));
-  // RE-RESOLVED for this attempt, like a resume's. The previous attempt's
-  // settle dropped the values out of memory (cleanupRunResources), so they have
-  // to be worked out again either way — and re-reading is the safer of the two
-  // answers: an entry the owner un-ticked while the run was working is not
-  // handed back to it, and the redaction table is armed again before the child
-  // that would echo one exists.
-  await prepareRunSecrets(run);
-  persist(true);
-  console.error(`[coding-agent] ${run.id} attempt ${attempt} of ${run.completionAttempts} at its deliverable`);
-  startProjectIcon(run);
-  try {
-    spawnOrSettle(
-      run,
-      run.sessionId,
-      tools,
-      { effort: run.effort, maxTurns: run.maxTurns },
-      completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
-      // The same record, continuing: its counters and its recorded refusals are
-      // the run's whole history, not the last attempt's.
-      true,
-    );
-  } catch {
-    // `spawnOrSettle` has already settled the record as failed and said why, and
-    // it rethrows for the benefit of a route's caller — of which there is none
-    // here, so the throw itself is not news. What IS left to do is the two
-    // things that path does not do: close the attempt this call opened (left
-    // open it would read as a turn still being made, and would stop any later
-    // Resume from opening one), and send the finish notice `finishRun` held for
-    // a gate that has now ended the run on its own.
-    closeAttempt(run, missing);
-    persist(true);
-    announceGatedRun(run);
-  }
-}
-
-
-// ─── The delivery pipeline ───────────────────────────────────────────────────
-
-/**
- * The DRIVER: what actually happens at each stage of src/lib/coding-pipeline.ts.
- *
- * WHY IT IS HERE AND NOT IN A MODULE OF ITS OWN. Every stage is a thing this
- * file already does — start a run in an existing session, watch a deployment,
- * settle a record, announce a run. The driver is the ORDER, and it is written
- * beside the machinery it orders for the same reason `watchReviewLoop` and
- * `watchDeployment` are: a module that had to be handed `loadRuns`, `persist`,
- * `startRun`, `pushProgress` and the live handles is a module that has the
- * wrong boundary. What it does NOT contain is the decision-making — that is the
- * pure machine, so the transitions can be walked in a unit test without a run,
- * a deployment or a browser.
- *
- * WHAT DRIVES IT. Three seams, and no timer of its own:
- *
- *  - a RUN settling (`pipelineAfterSettle`, from the end of `reviewAndShip`) —
- *    the build stage, the review stage and every improvement lap;
- *  - the OWNER pressing the production button (`approvePipelineProduction`).
- *
- * The verifications are the one thing it does itself, inline, because a fetch
- * and a screenshot are seconds rather than an event to wait for.
- */
-
-/** One advance at a time per run: two seams can fire on the same record. */
-const pipelineAdvancing = store.pipelineAdvancing;
-
-/**
- * True while a live pipeline still owns this run — its own, or the one
- * belonging to the origin a review pass was started for.
- *
- * TWO THINGS ARE HELD ON IT, and they are the same question asked twice:
- *
- *  - THE FINISH NOTICE. The same predicate `deliverableGateApplies` is, and for
- *    the same reason: "Coding agent finished run-x" over a run that is about to
- *    deploy to production is exactly the claim the gate exists to stop making.
- *    `finishRun` holds the notice on it and the pipeline sends it when it
- *    settles, so no run falls between them.
- *  - THE RUN'S WORKTREE. `settleRunWorktree` steps aside while a run is LIVE in
- *    the tree, which a pipeline BETWEEN stages is not: a deployment is building
- *    or a verification is fetching, and nothing holds the folder. So the settle
- *    merged the copy home and deleted it while the pipeline still needed it —
- *    the improvement lap re-spawns into that very folder and the deploy uploads
- *    it. `settlePipelineRun` is what settles the tree once the chain is over.
- */
-function pipelineOwnsRun(run: CodingRun): boolean {
-  if (isPipelineLive(run.pipeline)) return true;
-  // A turn INSIDE a pipeline's chain holds it too. The automatic review pass is
-  // a run record of its own, and nobody asked for it: announcing it would put
-  // "Coding agent finished run-x" on the desktop in the middle of a flow that
-  // is still deploying — the same claim, about a run the owner never started.
-  if (run.reviewOf) {
-    const origin = loadRuns().find((r) => r.id === run.reviewOf);
-    return isPipelineLive(origin?.pipeline);
-  }
-  return false;
-}
-
-/**
- * Queue an advance behind whatever else is advancing this run's pipeline.
- *
- * BOTH seams go through it, and that is the point: a deployment settling on its
- * watcher's timer and a run settling on its child's `close` handler are two
- * different call stacks reaching the same record, and each stage guard reads
- * `pipeline.stage` — which the other one is in the middle of moving.
- */
-function queuePipelineWork(runId: string, work: () => Promise<void>): Promise<void> {
-  const previous = pipelineAdvancing.get(runId) ?? Promise.resolve();
-  const mine = previous.then(work, work).then(
-    () => {},
-    (err: unknown) => {
-      console.error(`[coding-agent] pipeline for ${runId}:`, err instanceof Error ? err.message : err);
-    },
-  );
-  pipelineAdvancing.set(runId, mine);
-  // Dropped once it settles, and only when it is still the one in the map: the
-  // store is process-wide and lives as long as the web server, so without this
-  // every pipeline that ever ran leaves a settled promise behind.
-  const forget = () => {
-    if (pipelineAdvancing.get(runId) === mine) pipelineAdvancing.delete(runId);
-  };
-  void mine.then(forget, forget);
-  return mine;
-}
-
-/** The fire-and-forget form, for a caller with nothing to wait on. */
-function advancePipeline(runId: string, work: () => Promise<void>): void {
-  // Held like every other settle chain, so a suite can wait for it rather than
-  // remove the tree a deployment record is still being written into.
-  trackSettleWork(queuePipelineWork(runId, work));
-}
-
-/**
- * Can this box run the whole pipeline at all?
- *
- * Asked ONCE, when the run starts, and not at the stage that would need it.
- * The owner's rule: a pipeline that cannot finish must say so before the box
- * spends a build, a review pass and three improvement laps getting to the
- * stage that would have proved it.
- */
-export async function pipelinePreflight(
-  scope: string | null,
-  verify: PipelineVerify,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (!scope) {
-    return { ok: false, reason: "That folder is not one of this ClawBox's projects, so the pipeline has nothing to work in." };
-  }
-  // The other half: a verification this box could not make is not a pass, so a
-  // pipeline that could only ever reach that answer is refused here instead.
-  if (verify.expect.length === 0) {
-    const token = await configGet("clawai_token");
-    if (typeof token !== "string" || !token.trim()) {
-      return {
-        ok: false,
-        reason: "This ClawBox has no vision model to check a deployed page with, and the pipeline was not told what to look for. Connect ClawBox AI, or name what the page must contain.",
-      };
-    }
-  }
-  return { ok: true };
-}
-
-/** The review run that has just gone out for this origin, newest first. */
-function reviewRunFor(originId: string): CodingRun | null {
-  return loadRuns().find((r) => r.reviewOf === originId && isLive(r.status))
-    ?? loadRuns().find((r) => r.reviewOf === originId)
-    ?? null;
-}
-
-/**
- * A run has settled. Close whichever stage that was, and go on.
- *
- * Called at the END of `reviewAndShip`, after the deliverable gate — because
- * the gate can put the very same record back to work, and a pipeline that
- * advanced past a run that is running again would be deploying a folder a live
- * session is still writing in.
- */
-function pipelineAfterSettle(
-  finished: CodingRun,
-  ended: "stop" | "pause" | null,
-  review: ReviewPassOutcome,
-): Promise<void> {
-  // AWAITED by the settle chain, unlike the deployment seam: `settleRunWorktree`
-  // runs straight after and steps aside only while a run is LIVE in the tree, so
-  // an improvement lap that had not been spawned yet would have its folder
-  // merged home and removed out from under it.
-  return queuePipelineWork(finished.reviewOf ?? finished.id, () => settlePipelineStage(finished, ended, review));
-}
-
-async function settlePipelineStage(
-  finished: CodingRun,
-  ended: "stop" | "pause" | null,
-  review: ReviewPassOutcome,
-): Promise<void> {
-  const originId = finished.reviewOf ?? finished.id;
-  const origin = loadRuns().find((r) => r.id === originId);
-  const pipeline = origin?.pipeline;
-  if (!origin || !pipeline || !isPipelineLive(pipeline)) return;
-
-  // The owner's own gesture ends it. Judging a stage now would answer a
-  // question they have already closed.
-  if (ended !== null) {
-    stopPipeline(pipeline, ended === "pause"
-      ? "The run was paused, so the pipeline stopped here."
-      : "The run was stopped, so the pipeline stopped here.");
-    pushProgress(origin, RUNNER_STEP.pipelineStopped(pipeline.failure?.reason ?? "stopped"));
-    persist(true);
-    announcePipeline(origin);
-    return;
-  }
-  // A pause is not the end of a stage: the run resumes in place and its settle
-  // comes back here. Nor is a deliverable attempt that has just gone back in.
-  if (finished.status === "paused" || origin.status === "paused" || origin.status === "running") return;
-
-  if (pipeline.stage === "build" || pipeline.stage === "improvement") {
-    // Only the ORIGIN closes these: at stage `improvement` a stray review run
-    // from an earlier lap settling late must not be read as the lap's own end.
-    if (finished.id !== origin.id) return;
-    const outcome: StageOutcome = origin.status === "completed"
-      ? { kind: "passed" }
-      : { kind: "failed", reason: `The run did not finish (${origin.status}).${origin.error ? ` ${origin.error}` : ""}` };
-    await applyPipelineStage(origin.id, pipeline.stage, outcome, review);
-    return;
-  }
-
-  if (pipeline.stage === "review") {
-    if (finished.reviewOf !== origin.id) return;
-    const outcome: StageOutcome = finished.status === "completed"
-      ? { kind: "passed", detail: finished.filesTouched.length ? `The review pass changed ${finished.filesTouched.length} file(s).` : "The review pass found nothing to change." }
-      : { kind: "failed", reason: `The review pass did not finish (${finished.status}).${finished.error ? ` ${finished.error}` : ""}` };
-    await applyPipelineStage(origin.id, "review", outcome, review);
-  }
-  // Every other stage is settled by a deployment or by a verification this
-  // driver made itself; a run settling under one of them is a review-loop or
-  // deployment-fix turn, which belongs to its own watcher.
-}
-
-/** Record what a stage did, then carry on for as long as the machine says to. */
-async function applyPipelineStage(
-  runId: string,
-  stage: PipelineStage,
-  outcome: StageOutcome,
-  review?: ReviewPassOutcome,
-): Promise<void> {
-  const run = loadRuns().find((r) => r.id === runId);
-  if (!run?.pipeline || !isPipelineLive(run.pipeline)) return;
-  const transition = decidePipeline(run.pipeline, stage, outcome);
-  persist(true);
-  await drivePipeline(runId, transition, review);
-}
-
-/**
- * Carry on for as long as the machine says to.
- *
- * Its own function because the owner's production button enters a stage
- * DIRECTLY rather than by re-deciding one that already passed — re-deciding
- * `verify_preview` would overwrite what the check actually found with the
- * sentence "the owner approved it", which is the one thing on that step worth
- * keeping.
- */
-async function drivePipeline(
-  runId: string,
-  first: PipelineTransition,
-  review?: ReviewPassOutcome,
-): Promise<void> {
-  let transition = first;
-  // One consumption of the review outcome: it describes the pass that was
-  // started by the settle we are in, and a later lap gets its own.
-  let pendingReview = review;
-  for (;;) {
-    if (transition.action === "wait") return;
-    if (transition.action === "settled") {
-      await settlePipelineRun(runId);
-      return;
-    }
-    const entered = transition.stage;
-    const current = loadRuns().find((r) => r.id === runId);
-    if (!current?.pipeline) return;
-    const next = await enterPipelineStage(current, entered, pendingReview);
-    pendingReview = undefined;
-    persist(true);
-    // The stage is under way and something else brings the pipeline back.
-    if (!next) return;
-    const live = loadRuns().find((r) => r.id === runId);
-    if (!live?.pipeline || !isPipelineLive(live.pipeline)) return;
-    transition = decidePipeline(live.pipeline, entered, next);
-    persist(true);
-  }
-}
-
-/**
- * Begin a stage.
- *
- * Answers `null` when the stage is now UNDER WAY and something else will bring
- * the pipeline back — a run that has to finish, a deployment that has to build
- * — and an outcome when the stage decided itself, which the two verifications
- * and every refusal do.
- */
-/**
- * What a deploy-or-check stage answers on a box with no deployment
- * integration, which is every ClawBox: the four stages are SKIPPED, with the
- * reason on the step's own `detail`.
- *
- * Skipped and not failed: the pipeline's first half — build, review, improve —
- * is work the owner asked for and got, and throwing it away over a capability
- * the box does not have would be the box punishing them for it.
- */
-export const PIPELINE_DEPLOY_UNAVAILABLE_DETAIL =
-  "deploy_unavailable: this ClawBox has no deployment integration, so there was nothing to deploy to or check.";
-
-async function enterPipelineStage(
-  run: CodingRun,
-  stage: PipelineStage,
-  review?: ReviewPassOutcome,
-): Promise<StageOutcome | null> {
-  const pipeline = run.pipeline;
-  if (!pipeline) return null;
-  enterStage(pipeline, stage);
-
-  switch (stage) {
-    case "build":
-      // Never entered from a transition: the build IS the run, and it is
-      // already going when the pipeline is made.
-      return null;
-
-    case "review": {
-      if (review === "started") {
-        const reviewRun = reviewRunFor(run.id);
-        addEvidence(pipeline, "review", {
-          kind: "run",
-          ref: reviewRun?.id ?? null,
-          detail: "An automatic review pass is reading the work.",
-        });
-        pushProgress(run, RUNNER_STEP.pipelineReview);
-        persist(true);
-        return null;
-      }
-      if (review === "refused") {
-        return { kind: "failed", reason: "The automatic review pass was due and could not be started." };
-      }
-      // "skipped", and the same answer for a lap that somehow reached this
-      // stage with no outcome to read: nothing was reviewed, and saying it
-      // PASSED would be the box claiming work it did not do.
-      return { kind: "skipped", detail: "There was nothing for the review pass to read, so it did not run." };
-    }
-
-    case "improvement":
-      return startPipelineImprovement(run);
-
-    // ALL FOUR, not just the two deploys: `skipped` advances to the next stage
-    // (decidePipeline), so skipping `deploy_preview` alone would walk straight
-    // into `verify_preview`, which has no address to look at.
-    case "deploy_preview":
-    case "deploy_production":
-    case "verify_preview":
-    case "verify_production":
-      return { kind: "skipped", detail: PIPELINE_DEPLOY_UNAVAILABLE_DETAIL };
-
-    case "complete":
-      return null;
-  }
-}
-
-/**
- * Send the work back in for another lap, in the SAME record and the SAME
- * session.
- *
- * `startCompletionAttempt`'s shape, and for its reasons: the owner asked one
- * question, `attempts` and the deliverable belong to one run, and the nudge can
- * say "do not start over" and be obeyed only because the transcript of the lap
- * that just ended is still in front of the harness.
- */
-async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | null> {
-  const pipeline = run.pipeline;
-  if (!pipeline) return null;
-  if (!run.sessionId) {
-    return { kind: "failed", reason: "There is no session to carry on in, so the work could not be sent back for improvement." };
-  }
-
-  // The stage the MACHINE recorded when it routed here, never a search through
-  // `steps` for a failed one: see `PipelineState.sentBackFrom` for the two ways
-  // that guess was wrong.
-  const sentBack = pipeline.sentBackFrom;
-  const stage = sentBack?.stage ?? "verify_preview";
-  const reason = sentBack?.reason ?? "The delivery pipeline sent the work back.";
-  const task = improvementNudge({
-    stage,
-    reason,
-    round: pipeline.round,
-    maxRounds: pipeline.maxRounds,
-    buildLog: null,
-    // Only when THIS lap was sent back by a verification: `lastVerification`
-    // survives a lap, so after a failed deploy the one on the record belongs to
-    // an earlier check, and handing it over as "what this ClawBox checked"
-    // would be a lie about the work in front of the harness now.
-    verification: stage === "verify_preview" || stage === "verify_production"
-      ? lastVerificationFor(pipeline)
-      : null,
-  });
-
-  let tools: SpawnTools;
-  let releaseSlot: (() => void) | null = null;
-  try {
-    releaseSlot = await assertCanSpawn(null);
-    tools = await requireSpawnTools();
-    // The copy of the project this lap works in. A live pipeline holds it now
-    // (`settleRunWorktree` steps aside for one), but a pipeline already in
-    // flight when that hold shipped, or a tree the weekly sweep took, has none
-    // — and the lap would die on a missing folder with the whole task still to
-    // do. Put back from its branch exactly as the owner's own Resume does; a
-    // restore that fails leaves the record alone and `realDirectory` below says
-    // the sentence the owner needs.
-    if (run.worktree) run.worktree = await reopenWorktree(run);
-    run.directory = await realDirectory(run.directory);
-    // Nobody else may be working in this folder. A pipelined run can ALSO have
-    // the pull-request review loop going — GitHub's checks are a different
-    // question from the pipeline's own — and that loop's fix turns resume the
-    // same session in the same tree. Two harnesses there edit each other's
-    // half-written files and each settle's `git add -A` commits the other's,
-    // which is the whole reason a run gets a copy of the project to itself.
-    assertDirectoryFree(run.directory, run.id);
-  } catch (err) {
-    releaseSlot?.();
-    return { kind: "failed", reason: `Another turn could not be started: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  releaseSlot?.();
-
-  run.status = "running";
-  run.completedAt = null;
-  run.exitCode = null;
-  run.error = null;
-  run.pauseReason = null;
-  run.leftover = false;
-  run.lastActivityAt = Date.now();
-  addEvidence(pipeline, "improvement", {
-    kind: "note",
-    ref: null,
-    detail: `Round ${pipeline.round} of ${pipeline.maxRounds}: ${reason}`,
-  });
-  pushProgress(run, RUNNER_STEP.pipelineImprovement(pipeline.round, pipeline.maxRounds));
-  // Re-resolved for this lap, like a resume's: an entry the owner un-ticked
-  // while the run worked is not handed back to it, and the redaction table is
-  // armed again before the child that would echo one exists.
-  await prepareRunSecrets(run);
-  persist(true);
-  startProjectIcon(run);
-  try {
-    spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, task, true);
-  } catch {
-    // `spawnOrSettle` has already settled the record as failed and said why.
-    return { kind: "failed", reason: "The improvement turn could not be spawned." };
-  }
-  return null;
-}
-
-/** What the last verification actually saw, for the nudge. */
-function lastVerificationFor(pipeline: PipelineState): {
-  url: string;
-  status: number | null;
-  missing: string[];
-  description: string | null;
-} | null {
-  const verification = pipeline.lastVerification;
-  if (!verification) return null;
-  return {
-    url: verification.url,
-    status: verification.status,
-    missing: verification.expectations.filter((e) => !e.found).map((e) => e.text),
-    description: verification.vision?.description ?? null,
-  };
-}
-
-/** The pipeline is over. Say what the run actually is, and tell the owner. */
-async function settlePipelineRun(runId: string): Promise<void> {
-  const run = loadRuns().find((r) => r.id === runId);
-  const pipeline = run?.pipeline;
-  if (!run || !pipeline) return;
-  if (pipeline.status === "complete") {
-    pushProgress(run, RUNNER_STEP.pipelineComplete);
-  } else {
-    pushProgress(run, RUNNER_STEP.pipelineStopped(pipeline.failure?.reason ?? pipeline.status));
-    // The brief's own rule: a pipeline that did not finish ends the run
-    // `gave_up`, naming the stage and the reason. Only from `completed` —
-    // a run that FAILED already has the honest ending, and overwriting it
-    // would hide what actually went wrong with a gentler word.
-    if (run.status === "completed") {
-      run.status = "gave_up";
-      run.resumable = true;
-      run.completedAt = run.completedAt ?? Date.now();
-      run.error = pipelineGaveUpReason(pipeline).slice(0, MAX_ERROR_CHARS);
-      pushProgress(run, RUNNER_STEP.finished(run.status));
-    }
-  }
-  persist(true);
-  console.error(`[coding-agent] ${run.id} pipeline ${pipeline.status} at the ${stageNoun(pipeline.stage)} stage`);
-  // The copy of the project the pipeline was holding. `settleRunWorktree`
-  // stepped aside for every stage, and `reviewAndShip`'s own call to it
-  // returned several stages ago — on the asynchronous paths (a deployment
-  // settling on its watcher, a verification this driver made itself) this is
-  // the last act of the chain, so it is where the tree is decided. Idempotent:
-  // on the synchronous paths `reviewAndShip` reaches it straight afterwards and
-  // finds the record already settled.
-  await settleRunWorktree(run);
-  announcePipeline(run);
-}
-
-/** One sentence naming the stage and what stopped there. */
-function pipelineGaveUpReason(pipeline: PipelineState): string {
-  const reason = pipeline.failure?.reason ?? "The delivery pipeline did not finish.";
-  return `The delivery pipeline stopped at the ${stageNoun(pipeline.failure?.stage ?? pipeline.stage)} stage. ${reason} Resume it to carry on in the same session.`;
-}
-
-/** The finish notice `finishRun` held back while the pipeline was still going. */
-function announcePipeline(run: CodingRun): void {
-  void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
-    console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
-  });
-}
-
-/**
- * The owner has pressed "Deploy to production" on a pipeline that was waiting
- * for them.
- *
- * The route holds the gate — their session, this box's own origin, an explicit
- * confirmation — and this is what happens after it. `waiting_owner` is the one
- * state that resumes on an act rather than on an event, which is why it is a
- * verb of its own rather than something a poll notices.
- */
-export async function approvePipelineProduction(runId: string): Promise<CodingRun> {
-  const run = loadRuns().find((r) => r.id === runId);
-  if (!run) throw new CodingAgentError("not_found", "There is no run with that id on this ClawBox.");
-  const pipeline = run.pipeline;
-  if (!pipeline) throw new CodingAgentError("invalid", "That run has no delivery pipeline.");
-  if (pipeline.status !== "waiting_owner") {
-    throw new CodingAgentError("invalid", `That pipeline is not waiting for you: it is ${pipeline.status}.`);
-  }
-  // The wall clock, BEFORE anything is deployed. `decidePipeline` checks it at
-  // the next transition, which for this path is after `runDeployment` has
-  // already put a build on the project's own domain — so a pipeline parked
-  // overnight past its budget would have shipped and then recorded that it had
-  // run out of time. Asked here instead, where the answer is still "no".
-  if (Date.now() > pipeline.deadlineAt) {
-    const transition = decidePipeline(pipeline, "deploy_production", { kind: "passed" });
-    persist(true);
-    if (transition.action === "settled") await settlePipelineRun(runId);
-    throw new CodingAgentError("invalid", pipeline.failure?.reason
-      ?? "That pipeline ran out of its time budget while it was waiting. Start a new run.");
-  }
-  pipeline.status = "running";
-  // Recorded, because `resumePipelines` re-enters this stage after a restart
-  // and would otherwise ask the per-project switch again and park a second
-  // time in front of an owner who has already pressed the button.
-  pipeline.productionApprovedAt = Date.now();
-  const step = stepFor(pipeline, "deploy_production");
-  step.state = "pending";
-  step.detail = null;
-  addEvidence(pipeline, "deploy_production", {
-    kind: "note",
-    ref: null,
-    detail: "The owner approved the production deployment.",
-  });
-  persist(true);
-  await drivePipeline(runId, { action: "enter", stage: "deploy_production" });
-  return getRun(runId) ?? cloneRun(run);
-}
-
-/**
- * The owner has told a pipeline to stop.
- *
- * Its own verb, and not something `stopRun` covers, because the state it is
- * most often used in is a pipeline WAITING for the production button: the run
- * itself settled hours ago, so `stopRun` answers it untouched and the pipeline
- * would wait for ever.
- */
-export function stopRunPipeline(id: string): CodingRun {
-  const run = loadRuns().find((r) => r.id === id);
-  if (!run) throw new CodingAgentError("not_found", "There is no run with that id on this ClawBox.");
-  if (!run.pipeline) throw new CodingAgentError("invalid", "That run has no delivery pipeline.");
-  if (!isPipelineLive(run.pipeline)) return cloneRun(run);
-  stopPipelineFor(run, "The owner stopped the delivery pipeline.");
-  // The run's own ending stands: it built what it built, and the owner calling
-  // the rest of the flow off is not the run failing.
-  announcePipeline(run);
-  return cloneRun(run);
-}
-
-/** Stop a live pipeline because the run it belongs to was ended. */
-function stopPipelineFor(run: CodingRun, reason: string): void {
-  if (!isPipelineLive(run.pipeline) || !run.pipeline) return;
-  stopPipeline(run.pipeline, reason);
-  pushProgress(run, RUNNER_STEP.pipelineStopped(reason));
-  persist(true);
-}
-
-/**
- * Pipelines the restart interrupted.
- *
- * It deliberately does LESS than one
- * might expect, because most of the work is already done by the time it runs:
- *
- *  - a stage waiting on a RUN self-heals — `reconcileAfterRestart` reattaches or
- *    settles the record, and that settle comes back through
- *    `pipelineAfterSettle` exactly as it would have without the restart;
- *  - `waiting_owner` is not waiting on this box at all.
- *
- * What is left is the two cases nothing else covers: a VERIFICATION that was in
- * flight (a fetch and a screenshot, which nothing persisted and which is safe to
- * simply make again), and a stage recorded as running with nothing at all
- * behind it — which is what a restart between "enter the stage" and "start the
- * work" leaves, and which would otherwise be pending for ever.
- */
-export function resumePipelines(): void {
-  for (const run of loadRuns()) {
-    const pipeline = run.pipeline;
-    if (!pipeline || !isPipelineLive(pipeline)) continue;
-    const stage = pipeline.stage;
-    const step = stepFor(pipeline, stage);
-
-    if (stage === "verify_preview" || stage === "verify_production") {
-      if (step.state !== "running") continue;
-      pushProgress(run, RUNNER_STEP.pipelineResumed);
-      persist(true);
-      // Re-entered rather than continued: a verification is a fetch and a
-      // picture, and making it again is cheaper and more honest than guessing
-      // what the last one would have said.
-      advancePipeline(run.id, async () => {
-        const current = loadRuns().find((r) => r.id === run.id);
-        if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
-        // Through the same door a fresh entry uses, so the attempt is COUNTED:
-        // a box crash-looping mid-verification would otherwise re-fetch and
-        // re-photograph for ever, bounded only by the wall clock.
-        const outcome = await enterPipelineStage(current, stage);
-        persist(true);
-        if (outcome) await applyPipelineStage(run.id, stage, outcome);
-      });
-      continue;
-    }
-
-    if (stage === "deploy_preview" || stage === "deploy_production") {
-      // Nothing deploys on this box, so the stage only has to be entered again
-      // to record the skip it never got to write.
-      if (step.state !== "running") continue;
-      advancePipeline(run.id, async () => {
-        const current = loadRuns().find((r) => r.id === run.id);
-        if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
-        const outcome = await enterPipelineStage(current, stage);
-        persist(true);
-        if (outcome) await applyPipelineStage(run.id, stage, outcome);
-      });
-      continue;
-    }
-
-    // build / review / improvement: a live run brings the pipeline back on its
-    // own. Nothing live means the record was settled by the reconciliation,
-    // whose settle chain has already been through `pipelineAfterSettle`, so
-    // there is nothing left for this to do either.
-  }
-}
 
 /**
  * What the CLI prints when `--effort ultracode` cannot be honoured — the two
@@ -12009,12 +11117,6 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   let accountAuthText: string | null = null;
   let accountDecision: "switch" | "wait" | "auth" | "moved" | null = null;
   if (run.status === "running") {
-    // The device's own stop — the token limit — has already written why on
-    // the record. A result event that slipped out before the kill landed
-    // must not turn that into "completed" with a "Stopped at the token
-    // limit" error beside it: both at once, and the resume the error offers
-    // hidden behind a status that says the work is done.
-    const deviceStopped = state.endRequested === "stop" && run.error !== null;
     if (state.forcedAccountPause) {
       // The account switch found no account to move the run to, AFTER the
       // process had gone (continueOnAnotherAccount). It settles as the wait it
@@ -12039,11 +11141,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.status = "failed";
       run.error = state.simulatedLimit;
       state.limitSignal = state.simulatedLimit;
-    } else if (state.outcome && !deviceStopped) {
+    } else if (state.outcome) {
       // The result event's verdict, now that the process is actually gone.
       // Ahead of the stop branch so a stop that raced the final message
-      // keeps "completed", as it always has — the OWNER's stop records no
-      // error, so it is the one this reaches.
+      // keeps "completed", as it always has.
       run.status = state.outcome.status;
       if (state.outcome.resumable) run.resumable = true;
       if (state.outcome.error && !run.error) run.error = redactForRun(run.id, state.outcome.error);
@@ -12490,7 +11591,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     } finally {
       // The copies the owner limited to this one run go once it is over — here,
       // at the END of the chain and not at the settle above it: the deliverable
-      // gate and the delivery pipeline (both inside reviewAndShip) can put this
+      // gate (inside reviewAndShip) can put this
       // very record back to work, and that attempt is still its one run. A
       // pause, or a record back at work, keeps them; that attempt's own settle
       // comes back through here.
@@ -12504,16 +11605,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // making on the harness's word alone, and the run may be back at work
   // seconds later. `enforceDeliverable` sends it once it knows what the run
   // actually is — the two read the same predicate so no run falls between them.
-  // A live DELIVERY PIPELINE holds it for the same reason and by the same
-  // rule: the run is about to be reviewed, improved, deployed and checked, and
-  // "Coding agent finished run-x" now would be exactly the claim the pipeline
-  // exists to stop making. `settlePipelineRun` sends it when the pipeline is
-  // actually over.
   //
   // A TEAM's run sends none either: the owner hears once, when the team
   // settles (coding-team.ts `announceTeamSettled`), not once per planner,
   // worker and reviewer.
-  if (run.status !== "paused" && !run.team && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
+  if (run.status !== "paused" && !run.team && !deliverableGateApplies(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
     });
@@ -12770,10 +11866,11 @@ function spawnRun(
    * `state.sawResult` is what `handleEvent` reads to decide that, and a fresh
    * `LiveRun` has it false — correct for every other spawn, because a resume
    * with `resumeRunId` makes a NEW record whose counters genuinely start at
-   * zero. A completion attempt is the one spawn that re-enters the SAME record:
-   * without this its result event overwrote `numTurns`, `permissionDenials`,
-   * `deniedActions` and `denials`, so a refusal from the first attempt — and the
-   * "Allow next time" button that answers it — vanished when the second ran.
+   * zero. The owner's Resume of a gave-up run is the one spawn that re-enters
+   * the SAME record: without this its result event overwrote `numTurns`,
+   * `permissionDenials`, `deniedActions` and `denials`, so a refusal from the
+   * first attempt — and the "Allow next time" button that answers it — vanished
+   * when the second ran.
    */
   continuingRecord = false,
 ): void {
@@ -12807,7 +11904,7 @@ function spawnRun(
   // lone-run figure rather than none.
   const cpuBudget = run.cpuBudget ?? runCpuBudget({ cpus: hostCpuCount() });
   // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
-  // a completion attempt or a resume sees a lesson the owner added meanwhile.
+  // a resume sees a lesson the owner added meanwhile.
   const runNotes = runNotesBlock(readRunNotes(run.directory));
   // The visual decision, made ONCE — at this record's first spawn — and kept
   // for every respawn, so the run's tools and its prompt prefix never move
@@ -13067,8 +12164,8 @@ function spawnRun(
     } else {
       // No pipe to write to later, so anything already queued rides out with
       // the task itself — the boundary delivery, applied at the one boundary
-      // every spawn is. A start, the owner's Resume and another attempt at the
-      // deliverable all arrive here, so none of them needs its own copy.
+      // every spawn is. A start and the owner's Resume both arrive here, so
+      // neither needs its own copy.
       const waiting = queuedMessages(run.messages);
       const note = runMessagesNote(run.messages);
       if (child.stdin) {
@@ -13387,10 +12484,6 @@ function liveRunsIn(directory: string): CodingRun[] {
  * In order:
  *   - somebody is still working in it (the automatic review pass, another go
  *     at the deliverable, the owner's own Resume) — leave it alone;
- *   - a live DELIVERY PIPELINE owns the run — leave it alone too. Between
- *     stages it holds no live run at all, and the copy is what the improvement
- *     lap re-spawns into and what an upload deploy sends; `settlePipelineRun`
- *     comes back here when the chain is actually over;
  *   - the branch holds nothing — remove the tree AND the branch, which is
  *     the common ending for a run that investigated and changed nothing;
  *   - a pull request owns the branch — remove the tree, keep the branch: the
@@ -13415,7 +12508,6 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
   if (!wt || wt.removed) return;
   try {
     if (liveRunsIn(wt.path).length > 0) return;
-    if (pipelineOwnsRun(run)) return;
     if (!fs.existsSync(wt.path)) {
       wt.removed = true;
       persist(true);
@@ -13944,11 +13036,6 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // without one never grows the list.
     openAttempt(run);
 
-    // THE DELIVERY PIPELINE. Last, because it reads the branch and the project
-    // this run ended up in, and because its preflight reads the project — a call
-    // that must not sit between the spawn gate and the folder checks.
-    await attachPipeline(run, input, settings);
-
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
@@ -14049,66 +13136,6 @@ async function stageInputs(run: CodingRun, named: unknown): Promise<void> {
 }
 
 /**
- * Give this run a delivery pipeline, if it is to have one.
- *
- * WHO GETS ONE. The caller who asked for it, and — when the caller said
- * nothing at all — a run in a project the owner has switched the pipeline on
- * for. Never a review pass, a review-loop turn, a deployment-fix turn, a
- * read-only planner or a team's run: each of those is a TURN INSIDE somebody
- * else's chain, and a pipeline on one of them would be a second chain driving
- * the same folder.
- *
- * THE PREFLIGHT, AND THE TWO WAYS IT LANDS. A pipeline that cannot deploy must
- * say so before the box spends a build, a review pass and three improvement
- * laps getting to the stage that needs it — the owner's own rule. What differs
- * is who asked: a caller who NAMED a pipeline is refused, because they can fix
- * the request and a silent downgrade would have them believe the box was
- * shipping; a project DEFAULT stands aside instead, with the reason in the
- * run's own feed, because refusing there would take ordinary runs away from a
- * project the box cannot verify a page for just now.
- */
-async function attachPipeline(run: CodingRun, input: StartRunInput, settings: RunSettings): Promise<void> {
-  if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
-  const asked = readPipelineInput(input.pipeline);
-  // Refused at the door, with the code beside the sentence, for the reason
-  // `requireDeliverable` refuses: a caller whose request was quietly dropped
-  // would believe the box was shipping.
-  if (asked && !asked.ok) throw new PipelineChoiceError(asked.code, asked.error);
-
-  const explicit = asked !== null;
-  let wanted: PipelineInput | null = asked?.pipeline ?? null;
-  if (input.pipeline === undefined || input.pipeline === null) {
-    const fromProject = await projectScopeFor(run);
-    wanted = (await readPipelineDefault(fromProject)) ? defaultPipelineInput() : null;
-  }
-  if (!wanted) return;
-
-  const scope = await projectScopeFor(run);
-  const ready = await pipelinePreflight(scope, wanted.verify);
-  if (!ready.ok) {
-    if (explicit) throw new CodingAgentError("invalid", ready.reason);
-    pushProgress(run, RUNNER_STEP.pipelineStopped(ready.reason));
-    return;
-  }
-
-  run.pipeline = newPipeline({
-    verify: wanted.verify,
-    production: wanted.production,
-    // The owner's review-rounds setting, frozen here — the cap on how many
-    // times the work goes back round. Read with the run's other settings so a
-    // pipeline and the pull-request loop it runs beside cannot disagree.
-    maxRounds: await getReviewRounds(),
-  });
-  enterStage(run.pipeline, "build");
-  addEvidence(run.pipeline, "build", { kind: "run", ref: run.id, detail: "The run that does the work." });
-  // The review stage IS the automatic review pass, so the switch this run was
-  // frozen with has to be ON — otherwise the pipeline would wait for a pass
-  // that the settle path was never going to start.
-  settings.reviewPass = true;
-  run.reviewPass = true;
-}
-
-/**
  * The caller's deliverable, validated, or a thrown `invalid` saying why not.
  *
  * Thrown rather than dropped: a caller that named a deliverable the box cannot
@@ -14149,14 +13176,11 @@ interface RunSettings {
   model: string | null;
   effort: CodingEffort;
   maxTurns: number;
-  tokenLimit: number | null;
   generateImages: boolean;
   generateAudio: boolean;
   /** The owner's review-pass switch, read with the rest and frozen on the
    *  record (CodingRun.reviewPass): the brief and the pass decide from it. */
   reviewPass: boolean;
-  /** Attempts at the deliverable, frozen on the record for the same reason. */
-  completionAttempts: number;
   /** The owner's permission rules, frozen on the record for the same reason. */
   allowRules: string[];
 }
@@ -14175,9 +13199,8 @@ async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvid
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules] = await Promise.all([
-    getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
-    getCompletionAttempts(),
+  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+    getCodingProvider(), getEffort(), getMaxTurns(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
@@ -14188,11 +13211,9 @@ async function readRunSettings(): Promise<RunSettings> {
     model: defaultModelForProvider(provider),
     effort,
     maxTurns,
-    tokenLimit,
     generateImages,
     generateAudio,
     reviewPass,
-    completionAttempts,
     allowRules,
   };
 }
@@ -14257,7 +13278,6 @@ function newRunRecord(fields: {
   experience?: RunExperience | null;
   experienceBrief?: string | null;
   deliverable?: Deliverable | null;
-  pipeline?: PipelineState | null;
 }): CodingRun {
   const now = Date.now();
   const id = fields.id ?? newRunId();
@@ -14308,7 +13328,6 @@ function newRunRecord(fields: {
     tokensUsed: 0,
     tokenBreakdown: emptyTokenBreakdown(),
     spawnTokens: [],
-    tokenLimit: fields.settings.tokenLimit,
     thinkingTokens: 0,
     lastActivityAt: now,
     retries: 0,
@@ -14320,7 +13339,6 @@ function newRunRecord(fields: {
     reviewOf: fields.reviewOf ?? null,
     reviewLoopOf: fields.reviewLoopOf ?? null,
     reviewRound: fields.reviewRound ?? null,
-    pipeline: fields.pipeline ?? null,
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
@@ -14354,7 +13372,6 @@ function newRunRecord(fields: {
     deliverable: fields.deliverable ?? null,
     deliverableCheck: null,
     attempts: [],
-    completionAttempts: fields.settings.completionAttempts,
     // Nobody has told it anything yet.
     messages: [],
   };
@@ -14539,10 +13556,6 @@ export function stopRun(id: string): CodingRun {
     // the loop that is waiting for it would sit in "working" until the next
     // restart — pending in every sweep, and polled again at boot.
     endReviewLoopFor(run, "The review round was stopped while it was paused, so the pull request is still open.");
-    // And the delivery pipeline, for the same reason: this path never reaches
-    // finishRun, so nothing else would end it and it would hold the finish
-    // notice for good.
-    stopPipelineFor(run, "The run was stopped while it was paused, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
@@ -14557,7 +13570,6 @@ export function stopRun(id: string): CodingRun {
     run.completedAt = Date.now();
     cleanupRunResources(run, null);
     endRunSecrets(run);
-    stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
     // It held a slot on paper: the queue's next run may have it now.
@@ -14790,11 +13802,8 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // on a running record and, worse, survive into the run's next settle.
     run.pauseReason = null;
     run.lastActivityAt = Date.now();
-    // The owner's own go at the deliverable, on the record like every other. It
-    // is NOT counted against the cap before it is made — the cap bounds what the
-    // BOX spends unasked, and a Resume the owner pressed is their decision, not
-    // the box's budget. The gate judges it when it settles, exactly as it judged
-    // the attempts before it.
+    // The owner's own go at the deliverable, on the record like every other.
+    // The gate judges it when it settles, exactly as it judged the first turn.
     // A run that gave up with no pull request ever opened gets the step back, so
     // the owner's Resume can actually reach the deliverable it is resumed for.
     if (gaveUp) reopenPullRequestStep(run);
@@ -14818,7 +13827,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     const continuation = !run.sessionId
       ? undefined
       : missing && deliverable
-        ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
+        ? `${completionNudge(deliverable, missing)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
         : automatic
           ? `You were paused because every Anthropic account on this ClawBox had reached its usage limit. The limit has reset and you are resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
           : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
@@ -14922,9 +13931,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: writersLive + 1, onBattery: await onBatteryPower() });
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
-    run.tokenLimit = settings.tokenLimit;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
-    run.completionAttempts = settings.completionAttempts;
     run.headAtStart = await headCommitShort(run.directory);
     run.status = "running";
     run.queued = null;
@@ -15048,7 +14055,6 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
       provider: input.provider,
       model: input.model,
       deliverable: input.deliverable,
-      pipeline: input.pipeline,
       inputs: input.inputs,
       experience: input.experience,
       ...(input.fixCi === true ? { fixCi: true } : {}),
@@ -15102,7 +14108,6 @@ function startQueuedRun(id: string): Promise<CodingRun> {
       provider: start.provider,
       model: start.model,
       deliverable: start.deliverable,
-      pipeline: start.pipeline,
       inputs: start.inputs,
       experience: start.experience,
       fixCi: start.fixCi === true,
@@ -15585,7 +14590,7 @@ function endEveryLiveRun(): ChildProcess[] {
     if (state.streamTimer) clearInterval(state.streamTimer);
     if (state.unitWatch) clearInterval(state.unitWatch);
     // Said BEFORE the signal, like every other path that ends a run: the
-    // owner's Stop and Pause and the token limit set `endRequested`, and the
+    // owner's Stop and Pause set `endRequested`, and the
     // idle timeout says the same thing with `timedOut`. Without it finishRun
     // reads the kill as the provider blinking — transient stderr, no file
     // touched, `endRequested === null` — and starts a REPLACEMENT child that
@@ -15618,14 +14623,13 @@ function endEveryLiveRun(): ChildProcess[] {
  *
  * One pass is not enough, because the chain this waits for is the chain that
  * STARTS runs: `reviewAndShip` awaits `maybeStartReviewPass`, which spawns the
- * automatic review pass, and `enforceDeliverable` resumes the record for
- * another attempt. Both register a brand-new live run — after `live` was swept,
- * so nothing killed it, and `settling` empties the moment the chain that
+ * automatic review pass. That registers a brand-new live run — after `live`
+ * was swept, so nothing killed it, and `settling` empties the moment the chain that
  * started it returns. `settleWork` then reported success with a harness process
  * still going, holding the previous test's module copy, its temp tree and every
  * shared mock in that file.
  *
- * What it cost: `coding-pipeline-driver.test.ts` and
+ * What it cost: the delivery pipeline's driver test (since deleted) and
  * `coding-agent-durable-completion.test.ts` failed in CI's full run and passed
  * on their own, the leaked run's finish notice landing in the NEXT test's
  * freshly cleared spy. Reproduced on demand under CPU load, and pinned by
