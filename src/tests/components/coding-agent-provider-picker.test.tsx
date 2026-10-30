@@ -59,7 +59,6 @@ function basePayload(provider: string, connected: string[] | null, extra: { prov
     ...(connected ? { connectedProviders: connected } : {}),
     subagents: true,
     maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
-    tokenLimit: null, minTokenLimit: 10_000,
     reviewPass: false, generateMedia: true, realBrowser: true,
   };
 }

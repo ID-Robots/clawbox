@@ -230,31 +230,6 @@ describe("the teardown hook", () => {
     expectNothingStirred();
   });
 
-  it("leaves nothing going when the gate resumed the record for another attempt", async () => {
-    // The other way the settle chain starts a run: the deliverable gate puts
-    // the SAME record back to work. A harness that never writes `app.js` means
-    // every attempt is spent, so there is always one starting behind the sweep.
-    writeConfig({ coding_agent_review_pass: false, coding_agent_completion_attempts: 3 });
-    installHarness();
-    const started = await lib.startRun({
-      task: "build", projectId: "site", source: "owner",
-      deliverable: { kind: "paths", paths: ["nothing-here.txt"] },
-    });
-    // The first turn has settled of its own accord — no Stop anywhere on this
-    // record, so the gate really will put it back to work — and the chain is
-    // held open ahead of that, which is where a teardown lands.
-    await vi.waitFor(() => {
-      expect(lib.getRun(started.id)?.summary).toBeTruthy();
-      expect(lib.getRun(started.id)?.status).not.toBe("running");
-    }, { timeout: 30_000, interval: 25 });
-
-    await lib._resetCodingAgentStateForTests();
-
-    for (const spy of SHARED_SPIES()) spy.mockClear();
-    await wait(3_000);
-    expectNothingStirred();
-  });
-
   it("waits for the review loop's first poll, which the opened pull request started", async () => {
     // The third thing the settle chain starts: the watchers. The review loop
     // looks at a pull request the moment it is opened — `gh pr view` from the

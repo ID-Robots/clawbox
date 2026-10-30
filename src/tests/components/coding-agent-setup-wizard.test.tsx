@@ -56,8 +56,6 @@ const STATUS: AgentStatus = {
   maxTurns: 150,
   minMaxTurns: 10,
   maxMaxTurns: 2000,
-  tokenLimit: null,
-  minTokenLimit: 10_000,
   reviewPass: true,
 };
 

@@ -53,7 +53,6 @@ function stubFetch(
     defaultDirectory?: string | null;
     effort?: string;
     maxTurns?: number;
-    tokenLimit?: number | null;
     reviewPass?: boolean;
     teamDynamic?: boolean;
     generateMedia?: boolean;
@@ -112,7 +111,6 @@ function stubFetch(
   let stored: string | null = status.defaultDirectory ?? null;
   let effort = status.effort ?? "max";
   let maxTurns = status.maxTurns ?? 150;
-  let tokenLimit: number | null = status.tokenLimit ?? null;
   let reviewPass = status.reviewPass ?? false;
   let teamDynamic = status.teamDynamic;
   // The two that are ON when the device has never stored them.
@@ -151,8 +149,6 @@ function stubFetch(
     maxTurns,
     minMaxTurns: 10,
     maxMaxTurns: 2000,
-    tokenLimit,
-    minTokenLimit: 10_000,
     reviewPass,
     // Absent unless the test says: an older server does not answer with it.
     ...(teamDynamic === undefined ? {} : { teamDynamic }),
@@ -216,7 +212,6 @@ function stubFetch(
         }
         maxTurns = body.maxTurns;
       }
-      if ("tokenLimit" in body) tokenLimit = body.tokenLimit;
       if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
       if (typeof body.teamDynamic === "boolean") teamDynamic = body.teamDynamic;
       if (typeof body.generateMedia === "boolean") generateMedia = body.generateMedia;
@@ -524,22 +519,12 @@ describe("effort and the ceilings", () => {
     expect(posts).toHaveLength(1);
   });
 
-  it("sets a token ceiling, and clears it with an empty field", async () => {
-    stubFetch({ enabled: true, readiness: READY, tokenLimit: null });
+  it("offers no token ceiling: the step count is the one field in the Ceilings group", async () => {
+    // SCA A2 took the device-side token limit out; the field went with it.
+    stubFetch({ enabled: true, readiness: READY });
     render(<CodingAgentSettingsPanel />);
-    const tokens = await screen.findByTestId("coding-agent-tokens");
-    expect(tokens).toHaveAttribute("placeholder", translations.en["codingAgent.tokensPlaceholder"]);
-
-    fireEvent.change(tokens, { target: { value: "50000" } });
-    fireEvent.keyDown(tokens, { key: "Enter" });
-    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { tokenLimit: 50000 } }));
-    await waitFor(() => expect(tokens).toHaveValue(50000));
-
-    // null is the route's word for "no ceiling" — an empty field must send
-    // it, not a blank string and not nothing.
-    fireEvent.change(tokens, { target: { value: "" } });
-    fireEvent.blur(tokens);
-    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { tokenLimit: null } }));
+    await screen.findByTestId("coding-agent-turns");
+    expect(screen.queryByTestId("coding-agent-tokens")).toBeNull();
   });
 });
 
@@ -815,7 +800,7 @@ describe("one setting write at a time", () => {
   const STATUS = {
     enabled: true, ready: true, readiness: READY, running: 0, defaultDirectory: "/home/clawbox/projects",
     effort: "max", effortLevels: ["low", "xhigh", "max"], subagents: true,
-    maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000, tokenLimit: null, minTokenLimit: 10_000,
+    maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
   };
 
   it("disables every setting control while a write is in flight, and queues rather than races a second", async () => {
@@ -836,7 +821,6 @@ describe("one setting write at a time", () => {
     expect(xhigh).toBeDisabled();
     expect(screen.getByRole("switch", { name: SWITCH })).toBeDisabled();
     expect(screen.getByTestId("coding-agent-turns")).toBeDisabled();
-    expect(screen.getByTestId("coding-agent-tokens")).toBeDisabled();
     fireEvent.change(screen.getByTestId("coding-agent-folder"), { target: { value: "/home/clawbox/next" } });
     expect(screen.getByRole("button", { name: SAVE })).toBeDisabled();
 
@@ -872,7 +856,7 @@ describe("motion", () => {
     let releaseSwitch: (() => void) | null = null;
     const body = (enabled: boolean) => ({
       enabled, ready: true, readiness: READY, running: 0, defaultDirectory: null,
-      effort: "max", effortLevels: ["max"], maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000, tokenLimit: null, minTokenLimit: 10_000,
+      effort: "max", effortLevels: ["max"], maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
     });
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = input.toString();

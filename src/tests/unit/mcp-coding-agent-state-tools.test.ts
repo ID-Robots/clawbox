@@ -130,7 +130,6 @@ describe("coding_run_list", () => {
           deliverable: { kind: "paths", paths: ["index.html"] },
           deliverableCheck: { ok: false, missing: "index.html was not created", checkedAt: 1 },
           attempts: [{ startedAt: 1, endedAt: 2, reason: "missing" }, { startedAt: 3, endedAt: null, reason: null }],
-          completionAttempts: 3,
           messages: [{ at: 1, text: "use blue", deliveredAt: null }],
         },
         { ...RUN, id: "run-live0001", status: "running", completedAt: null, unit: "clawbox-run-run-live0001.scope" },
@@ -148,7 +147,7 @@ describe("coding_run_list", () => {
       project: "site",
       branch: "clawbox/run-k3x9q2ab",
       copy: "kept, not merged home yet",
-      attempts: "2 of 3",
+      attempts: 2,
       deliverable: { kind: "files", files: ["index.html"], met: false, missing: "index.html was not created" },
       messages_waiting: 1,
     });

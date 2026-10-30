@@ -33,7 +33,6 @@ import {
   setRoleModels,
   setSetupComplete,
   setTeamDynamic,
-  setTokenLimit,
 } from "@/lib/coding-agent";
 import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
 
@@ -71,8 +70,8 @@ function forbidden() {
  * owner's Anthropic access (src/lib/coding-provider.ts). Storing it does not
  * require that provider to be connected — the owner may pick it before pasting
  * the key — but STARTING a run against it does.
- * POST { maxTurns: number } → how many steps a run gets.
- * POST { tokenLimit: number | null } → token ceiling, or null for none.
+ * POST { maxTurns: number } → how many steps a run gets (the token ceiling
+ * went in SCA A2: `{ tokenLimit }` is an unknown body, 400).
  * POST { generateMedia: boolean } → may a run draw pictures with ClawBox AI
  * (and the box draw the project's desktop icon and favicon while it works)
  * and have this box speak clips into its project. ONE switch over the two
@@ -117,10 +116,11 @@ function forbidden() {
  * once. Each run works in a git worktree of its own, so the limit is a
  * question about the box's memory rather than about the filesystem; the range
  * is refused rather than clamped.
- * (The review rounds, the attempts at a deliverable and the extended
- * history's N are no longer settings since SCA C3: a run gets the constants
- * — DEFAULT_REVIEW_ROUNDS, DEFAULT_COMPLETION_ATTEMPTS,
- * DEFAULT_HISTORY_EXTENDED_LIMIT — and a body naming them is answered 400.)
+ * (The review rounds and the extended history's N are no longer settings
+ * since SCA C3: a run gets the constants — DEFAULT_REVIEW_ROUNDS,
+ * DEFAULT_HISTORY_EXTENDED_LIMIT — and a body naming them is answered 400.
+ * The attempts at a deliverable went altogether in SCA A2: the box checks
+ * the bar once and the owner's Resume is the only second go.)
  * POST { historyRetention: "standard"|"extended"|"everything"|"archive" } →
  * what the box keeps of finished runs (see @/lib/coding-run-history); a value
  * this box does not offer is refused before anything is saved. Choosing "everything"
@@ -184,7 +184,6 @@ export async function POST(request: Request) {
     defaultDirectory?: unknown;
     effort?: unknown;
     maxTurns?: unknown;
-    tokenLimit?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
     prBodyIncludesTask?: unknown;
@@ -218,15 +217,12 @@ export async function POST(request: Request) {
   const hasProvider = typeof fields.provider === "string";
   const hasProviders = Array.isArray(fields.providers);
   const hasTurns = typeof fields.maxTurns === "number";
-  // null is meaningful — it CLEARS the ceiling — so presence decides.
-  const hasTokens = "tokenLimit" in fields
-    && (typeof fields.tokenLimit === "number" || fields.tokenLimit === null);
   // `null` is meaningful here — it CLEARS the default — so presence is what
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
   // Both halves of the commit identity are optional and independently
-  // clearable, so — like the folder and the token ceiling — presence decides,
+  // clearable, so — like the folder — presence decides,
   // not truthiness: `null` and `""` are the request that CLEARS one.
   const hasGitAuthorName = "gitAuthorName" in fields
     && (typeof fields.gitAuthorName === "string" || fields.gitAuthorName === null);
@@ -240,13 +236,13 @@ export async function POST(request: Request) {
   // A team's per-role model and effort (src/lib/coding-role-models.ts):
   // presence decides, and a wrong shape is refused below, whole.
   const hasRoleModels = "roleModels" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasAutoMerge && !hasMaxParallelRuns && !hasGenMedia && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasRoleModels && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasProviders && !hasTurns && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasAutoMerge && !hasMaxParallelRuns && !hasGenMedia && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasRoleModels && !clearsFault) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
           + "{ effort: string }, { provider: string }, { maxTurns: number }, "
-          + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
+          + "{ reviewPass: boolean }, "
           + "{ generateMedia: boolean }, "
           + "{ realBrowser: boolean }, { teamDynamic: boolean }, "
           + "{ autoMerge: boolean }, "
@@ -449,10 +445,6 @@ export async function POST(request: Request) {
     if (hasSetupComplete) {
       const saved = await setSetupComplete(fields.setupComplete);
       console.error(`[coding-agent] setup wizard marked ${saved ? "finished" : "unfinished"} by the owner`);
-    }
-    if (hasTokens) {
-      const saved = await setTokenLimit(fields.tokenLimit as number | null);
-      console.error(`[coding-agent] token limit ${saved === null ? "cleared" : `set to ${saved}`} by the owner`);
     }
     if (hasEnabled) {
       await setCodingAgentEnabled(fields.enabled as boolean);

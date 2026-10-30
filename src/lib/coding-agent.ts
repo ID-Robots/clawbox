@@ -350,7 +350,6 @@ import {
   type ReviewSnapshot,
 } from "@/lib/coding-review";
 import {
-  completionAttemptsFrom,
   completionNudge,
   gaveUpReason,
   MAX_COMPLETION_ATTEMPTS,
@@ -544,7 +543,7 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
  * So the question is no longer "how long has it been alive" but "is it doing
  * anything". Every stream event stamps lastActivityAt, and only silence
  * counts against a run. Runaway cost is bounded separately and properly, by
- * the owner's step and token ceilings; this is only here so a wedged process cannot
+ * the owner's step ceiling; this is only here so a wedged process cannot
  * hold the one-run-at-a-time slot forever.
  */
 export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -585,19 +584,6 @@ export const MAX_SPAWN_TOKENS_KEPT = 20;
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
-
-/**
- * Optional ceiling on the tokens one run may spend. Null means no ceiling.
- *
- * Claude Code has no flag for this — only --max-budget-usd, which prices an
- * unknown model name and so meant nothing here — so the device enforces it
- * from the usage the stream already reports, and stops the run itself.
- *
- * Counted the way a bill is: every request pays for the input it carries, so
- * input is summed per turn even though the conversation repeats. Cache reads
- * are cheaper than fresh input but are not free, so they count too.
- */
-export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
 
 /**
  * The owner's switch for the automatic review pass: when on, a run that
@@ -759,22 +745,6 @@ export function maxParallelRunsFrom(raw: unknown, ceiling: number = hostMaxParal
   return rounded;
 }
 
-/**
- * How many ATTEMPTS at its deliverable a run gets, the original included.
- *
- * Only ever spent by a run that HAS a deliverable (src/lib/coding-deliverable.ts):
- * one the caller named, or the pull request the auto-PR switch already implies.
- * A run with neither settles exactly as it always did, so this setting costs a
- * box that does not use deliverables nothing at all.
- *
- * One by default (`DEFAULT_COMPLETION_ATTEMPTS`), and the count includes the
- * run's own first turn — so the default buys no resume: check it, tell me,
- * spend nothing more. An owner can raise it to six in all
- * (`MAX_COMPLETION_ATTEMPTS`); each attempt past the first is one resume of
- * the whole session.
- */
-export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY = "coding_agent_completion_attempts";
-
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
 /**
@@ -876,13 +846,11 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_DIR_CONFIG_KEY,
   CODING_AGENT_EFFORT_CONFIG_KEY,
   CODING_AGENT_TURNS_CONFIG_KEY,
-  CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
   CODING_AGENT_PR_BODY_TASK_CONFIG_KEY,
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
-  CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
   CODING_AGENT_MAX_PARALLEL_CONFIG_KEY,
   // The retention setting goes back to standard; resetCodingAgentSetup also
   // hands Claude Code's transcript period back to whoever set it before.
@@ -926,7 +894,6 @@ export const CODING_AGENT_RESET_KEYS = [
  */
 export const MAX_IMAGES_PER_RUN = 20;
 export const MAX_AUDIO_PER_RUN = 40;
-export const MIN_TOKEN_LIMIT = 10_000;
 /** The longest task a person — the owner, or the assistant on their behalf — may type. */
 export const MAX_TASK_CHARS = 4_000;
 /**
@@ -1694,7 +1661,7 @@ export interface CodingRun {
    * How many parallel jobs this run's builds and tests may use
    * (src/lib/coding-run-cpu.ts): worked out at start from the box's CPUs, the
    * runs sharing them and whether it is on battery, then frozen like the
-   * effort, so a retry or a completion attempt keeps to the same number. In
+   * effort, so a retry or a resume keeps to the same number. In
    * its environment as CLAWBOX_RUN_CPU_BUDGET and in its brief.
    *
    * Optional in the type so a record built before it existed still
@@ -1892,13 +1859,11 @@ export interface CodingRun {
   tokenBreakdown: TokenBreakdown;
   /**
    * The tokens each spawn of this record cost, in order: the first is the run
-   * itself, every later one a completion attempt, a Fix CI lap or a resume.
+   * itself, every later one a Fix CI lap or a resume.
    * A review pass is a record of its own (`reviewOf`). Capped at
    * MAX_SPAWN_TOKENS_KEPT, the newest kept.
    */
   spawnTokens: number[];
-  /** The ceiling that applied, or null when the run was uncapped. */
-  tokenLimit: number | null;
   /**
    * Reasoning tokens Claude Code reports so far.
    *
@@ -1912,7 +1877,7 @@ export interface CodingRun {
   /**
    * An `openai` run's thread usage as Codex last reported it — its CUMULATIVE
    * figure for the whole thread, not this record's share. Kept so a later
-   * spawn that continues the same thread (a resume, a completion attempt) can
+   * spawn that continues the same thread (a resume) can
    * bill only what it added: see codexUsageBaseline. Absent on every other run.
    */
   codexThreadUsage?: CodexThreadUsage;
@@ -2098,12 +2063,6 @@ export interface CodingRun {
    * Empty on a run with no deliverable.
    */
   attempts: RunAttempt[];
-  /**
-   * The attempt ceiling this run started with, frozen for the reason every
-   * other run setting is: the owner changing the number while a run works must
-   * not change the promise that run was started under.
-   */
-  completionAttempts: number;
   /**
    * Things the owner (or the assistant) has told this run while it works, and
    * whether the harness has had each of them yet.
@@ -2527,9 +2486,6 @@ export interface CodingAgentStatus {
   maxTurns: number;
   minMaxTurns: number;
   maxMaxTurns: number;
-  /** Token ceiling the device enforces, or null for none. */
-  tokenLimit: number | null;
-  minTokenLimit: number;
   /** Silence, not total time, is what ends a run. */
   runIdleTimeoutMs: number;
   /** False until the owner finishes the setup wizard — the app shows the
@@ -2725,10 +2681,6 @@ function effortFrom(raw: unknown): CodingEffort {
 function maxTurnsFrom(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_TURNS;
   return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
-}
-
-function tokenLimitFrom(raw: unknown): number | null {
-  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
 }
 
 export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
@@ -3186,12 +3138,6 @@ export async function setAutoMerge(on: unknown): Promise<boolean> {
   return on;
 }
 
-/** How many attempts at its deliverable a run gets. Absent means the default
- *  (DEFAULT_COMPLETION_ATTEMPTS); no route sets the key since SCA C3. */
-export async function getCompletionAttempts(): Promise<number> {
-  return completionAttemptsFrom(await configGet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY));
-}
-
 /** The two media switches. ON when absent — see their config keys. */
 function generateImagesFrom(raw: unknown): boolean {
   return raw !== false;
@@ -3469,27 +3415,6 @@ export async function setMaxTurns(turns: unknown): Promise<number> {
     throw new CodingAgentError("invalid", `Steps must be between ${MIN_MAX_TURNS} and ${MAX_MAX_TURNS}.`);
   }
   await configSet(CODING_AGENT_TURNS_CONFIG_KEY, n);
-  return n;
-}
-
-/** The owner's token ceiling, or null when they have not set one. */
-export async function getTokenLimit(): Promise<number | null> {
-  return tokenLimitFrom(await configGet(CODING_AGENT_TOKENS_CONFIG_KEY));
-}
-
-export async function setTokenLimit(limit: number | null): Promise<number | null> {
-  if (limit === null) {
-    await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
-    return null;
-  }
-  if (typeof limit !== "number" || !Number.isFinite(limit)) {
-    throw new CodingAgentError("invalid", "The token limit must be a number, or empty for no limit.");
-  }
-  const n = Math.round(limit);
-  if (n < MIN_TOKEN_LIMIT) {
-    throw new CodingAgentError("invalid", `A token limit below ${MIN_TOKEN_LIMIT.toLocaleString("en-US")} would stop almost every run before it started.`);
-  }
-  await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, n);
   return n;
 }
 
@@ -4299,8 +4224,6 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
     minMaxTurns: MIN_MAX_TURNS,
     maxMaxTurns: MAX_MAX_TURNS,
-    tokenLimit: tokenLimitFrom(config[CODING_AGENT_TOKENS_CONFIG_KEY]),
-    minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
     // An EXPLICIT flag always wins; `enabled` only stands in when there is no
     // flag at all.
@@ -4543,7 +4466,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
     spawnTokens: Array.isArray((raw as { spawnTokens?: unknown }).spawnTokens)
       ? ((raw as { spawnTokens: unknown[] }).spawnTokens).filter((t): t is number => typeof t === "number" && Number.isFinite(t) && t >= 0).slice(-MAX_SPAWN_TOKENS_KEPT)
       : [],
-    tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
     thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
     ...(readCodexThreadUsage((raw as { codexThreadUsage?: unknown }).codexThreadUsage) ?? {}),
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
@@ -4637,7 +4559,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
     deliverable: parseDeliverable((raw as { deliverable?: unknown }).deliverable),
     deliverableCheck: parseDeliverableVerdict((raw as { deliverableCheck?: unknown }).deliverableCheck),
     attempts: parseAttempts((raw as { attempts?: unknown }).attempts),
-    completionAttempts: completionAttemptsFrom((raw as { completionAttempts?: unknown }).completionAttempts),
     // Re-validated rather than trusted, like every other list here: this text
     // is written to the harness's stdin and drawn on the run's page, and the
     // file it comes from is one a restore or a hand edit can have touched.
@@ -4946,7 +4867,7 @@ interface LiveRun {
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
   /**
-   * What the owner (or the token ceiling) asked this run to do: end for good,
+   * What the owner asked this run to do: end for good,
    * or settle as paused with its session intact for resumeRun(). One field,
    * not two flags, because the two gestures are exclusive and the later
    * Stop overrides an earlier Pause — see requestEnd.
@@ -5035,7 +4956,7 @@ interface LiveRun {
   /**
    * `run.tokensUsed` when this spawn began, so the verdict above counts what
    * THIS spawn was billed. The record's bill alone would not do: a resume, an
-   * account switch and another attempt all continue a record that already
+   * account switch and a Resume of a gave-up run all continue a record that already
    * carries earlier spawns' tokens, and a resumed spawn refused on its very
    * first request is the startup case again, not a model error mid-run. The
    * automatic retry inherits its first attempt's value — one run making a
@@ -5045,8 +4966,8 @@ interface LiveRun {
   /** `run.tokenBreakdown` when this process began: the CLI's modelUsage counts from zero per process. */
   breakdownAtSpawn: TokenBreakdown;
   /**
-   * This process continues an earlier session (`--resume`): a review pass, a
-   * completion attempt, the owner's Resume. Its CLI reports modelUsage for the
+   * This process continues an earlier session (`--resume`): a review pass, the
+   * owner's Resume. Its CLI reports modelUsage for the
    * WHOLE session, history included (measured 2026-10-18: a review pass's
    * record read 270,596 = the run's own 125,100 + its 145,496), so the
    * raise-to-modelUsage below would bill the earlier spawns again. Such a
@@ -6323,7 +6244,7 @@ export const READ_ONLY_BRIEF = [
 export const ULTRACODE_BRIEF = [
   "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
-  "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
+  "The owner's step ceiling applies to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
   "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
   // Every ultracode run of bench cycle 1 (2026-09-05) re-argued the CLI's
   // "use it on every substantive task" reminder against the brief, and m-04
@@ -8106,12 +8027,6 @@ function parseTodos(raw: unknown): CodingTodo[] | null {
 export const parseTodosForTests = parseTodos;
 
 /**
- * Add to the run's bill and stop it at the owner's ceiling. The CLI has no
- * flag for a token limit, so the device enforces it from the usage the stream
- * reports. Marked resumable: the work is real, it simply ran out of room —
- * the same shape as a step ceiling.
- */
-/**
  * The breakdown raised to the CLI's own per-category bill for this process
  * (modelUsage: every model, sub-agents and workflow agents included, counted
  * from zero per process), never lowered — the live sum from the assistant
@@ -8135,37 +8050,31 @@ function raiseTokenBreakdown(run: CodingRun, base: TokenBreakdown, modelUsage: R
   b.cacheRead = Math.max(b.cacheRead, base.cacheRead + proc.cacheRead);
 }
 
-function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
-  if (!(tokens > 0)) return false;
-  run.tokensUsed += tokens;
-  if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
-    state.endRequested = "stop";
-    run.resumable = true;
-    run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
-    pushProgress(run, RUNNER_STEP.tokenLimit);
-    console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
-    endProcess(state);
-    return true;
-  }
-  return false;
+/**
+ * Add to the run's bill. The device no longer stops a run on its spend (the
+ * token ceiling went in SCA A2): the step ceiling and the idle timeout bound a
+ * run, and the figure here is what the card and the bench read.
+ */
+function noteTokens(run: CodingRun, tokens: number): void {
+  if (tokens > 0) run.tokensUsed += tokens;
 }
 
 /**
  * A workflow's agents never appear on the stream; the CLI reports the
  * workflow's cumulative spend on every task_progress and once more on its
- * task_notification. Bill the delta each time, so the owner's ceiling holds
+ * task_notification. Bill the delta each time, so the record's spend is live
  * WHILE a fan-out runs rather than after it, and a workflow the run was
  * stopped under has still been billed for what it did.
  */
-function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): boolean {
+function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): void {
   const helper = state.openSubagents.get(id);
-  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return false;
+  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return;
   const total = usage && typeof usage === "object" ? (usage as { total_tokens?: unknown }).total_tokens : undefined;
-  if (typeof total !== "number") return false;
+  if (typeof total !== "number") return;
   const billed = state.helperBilled.get(id) ?? 0;
-  if (total <= billed) return false;
+  if (total <= billed) return;
   state.helperBilled.set(id, total);
-  return noteTokens(run, state, total - billed);
+  noteTokens(run, total - billed);
 }
 
 /** The text of a tool_result, whether the CLI sent a string or text blocks. */
@@ -8456,9 +8365,8 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       run.tokenBreakdown.output += n("output_tokens");
       run.tokenBreakdown.cacheCreation += n("cache_creation_input_tokens");
       run.tokenBreakdown.cacheRead += n("cache_read_input_tokens");
-      const stoppedNow = noteTokens(run, state, n("input_tokens") + n("output_tokens")
+      noteTokens(run, n("input_tokens") + n("output_tokens")
         + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
-      if (stoppedNow) return;
     }
     // A helper's own turns (parent_tool_use_id set) are billed above and
     // nothing more: its words are not the run's words, its Bash is not the
@@ -8607,7 +8515,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       const out = (event.usage as { output_tokens?: unknown }).output_tokens;
       if (typeof out === "number" && out > state.outputBilledInSegment) {
         run.tokenBreakdown.output += out - state.outputBilledInSegment;
-        noteTokens(run, state, out - state.outputBilledInSegment);
+        noteTokens(run, out - state.outputBilledInSegment);
       }
     }
     state.outputBilledInSegment = 0;
@@ -8637,7 +8545,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       // history too (see LiveRun.resumedSession).
       if (!state.resumedSession) {
         if (total > run.tokensUsed) {
-          if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
+          if (state.openSubagents.size > 0) noteTokens(run, total - run.tokensUsed);
           else run.tokensUsed = total;
         }
         raiseTokenBreakdown(run, state.breakdownAtSpawn, usage);
@@ -8731,7 +8639,7 @@ function readCodexThreadUsage(raw: unknown): { codexThreadUsage: CodexThreadUsag
 /**
  * What a Codex thread had already billed before this spawn: the largest usage
  * any record of the same thread carries — the run this one resumes, or this
- * very record's earlier spawn on a completion attempt. Codex reports a
+ * very record's earlier spawn, resumed after it gave up. Codex reports a
  * thread's usage cumulatively, so a continuation's own share is its figure
  * less this one. Zero for a fresh thread.
  */
@@ -8752,10 +8660,8 @@ function codexUsageBaseline(sessionId: string | null): CodexThreadUsage {
  * bills — fresh input, cached input read back, output. A figure BELOW the
  * baseline is not cumulative after all (a CLI that counts per process): it is
  * taken whole rather than read as a negative.
- *
- * @returns whether the token ceiling stopped the run (noteTokens)
  */
-function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage): boolean {
+function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage): void {
   const base = state.codexBaseline ?? { input: 0, cachedInput: 0, output: 0 };
   const cumulative = usage.input >= base.input && usage.output >= base.output && usage.cachedInput >= base.cachedInput;
   const input = cumulative ? usage.input - base.input : usage.input;
@@ -8768,7 +8674,7 @@ function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage
   run.tokenBreakdown.input += input - cached;
   run.tokenBreakdown.cacheRead += cached;
   run.tokenBreakdown.output += output;
-  return noteTokens(run, state, input + output);
+  noteTokens(run, input + output);
 }
 
 /**
@@ -8837,7 +8743,7 @@ function handleCodexEvent(run: CodingRun, state: LiveRun, event: unknown): void 
         break;
       }
       case "usage":
-        if (applyCodexUsage(run, state, { input: action.input, cachedInput: action.cachedInput, output: action.output })) return;
+        applyCodexUsage(run, state, { input: action.input, cachedInput: action.cachedInput, output: action.output });
         break;
       case "completed": {
         state.sawResult = true;
@@ -10393,8 +10299,8 @@ function deliverableGateApplies(run: CodingRun): boolean {
  * the one the gate has to ask to know whether it owes that notice. It cannot
  * simply re-read `deliverableFor`, because the implied pull-request bar can step
  * aside between the two (see the branch that uses this), and it must not assume
- * an attempt is still open, because an owner Resume at the attempt ceiling opens
- * none.
+ * an attempt is still open, because an owner Resume at MAX_COMPLETION_ATTEMPTS
+ * opens none.
  *
  * Exact, not a heuristic: a named deliverable is frozen on the record and never
  * removed, and a run that got the implied one always had `openAttempt` push an
@@ -10409,8 +10315,8 @@ function wasGated(run: CodingRun): boolean {
 function openAttempt(run: CodingRun): void {
   if (deliverableFor(run) === null) return;
   // Never two open at once: a record whose previous attempt was left open by a
-  // restart must not grow a second one, or the count that decides "no more
-  // attempts" would be the count of interruptions.
+  // restart must not grow a second one, or the count the card and the gave-up
+  // reason report would be the count of interruptions.
   if (run.attempts.some((a) => a.endedAt === null)) return;
   if (run.attempts.length >= MAX_COMPLETION_ATTEMPTS) return;
   run.attempts.push({ startedAt: Date.now(), endedAt: null, reason: null });
@@ -10420,9 +10326,9 @@ function openAttempt(run: CodingRun): void {
  * Close the open attempt with what was still missing (null when it was there).
  *
  * A judgement with no open entry to close still gets recorded — a record from
- * before the field, or one whose attempt a restart closed — because the count
- * of attempts is what decides whether to try again, and a judgement that
- * vanished would let a run be nudged for ever.
+ * before the field, or one whose attempt a restart closed — because the
+ * attempt list is the run's whole history at its bar, and a judgement that
+ * vanished would leave the card and the gave-up reason a go short.
  */
 function closeAttempt(run: CodingRun, missing: string | null): void {
   const reason = missing ? missing.slice(0, MAX_MISSING_CHARS) : null;
@@ -10523,11 +10429,12 @@ function announceGatedRun(run: CodingRun): void {
  * built the thing: both emit a success result event, and nothing on the box had
  * looked at the folder.
  *
- * Three endings, and the ATTEMPT is the middle one: the deliverable is there
- * (`completed` stands), it is not and there are attempts left (the same record
- * goes back in, same session, with a nudge naming what is missing), or it is
- * not and there are none (`gave_up`, with the missing thing as the reason and
- * Resume as the way on).
+ * Two endings: the deliverable is there (`completed` stands), or it is not
+ * (`gave_up`, with the missing thing as the reason and Resume as the way on —
+ * the owner's Resume carries on in the same session with a nudge naming what
+ * is missing, `completionNudge`). The box never spends a second go unasked:
+ * the automatic completion-attempt loop went in SCA A2, having fired once in
+ * 255 runs, at a file the task forbade creating.
  *
  * Never throws: it runs inside the settle chain, and a thrown error here would
  * leave a record whose notice was held back by `finishRun` and never sent.
@@ -10613,12 +10520,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     pushProgress(origin, RUNNER_STEP.deliverableMissing(verdict.missing ?? ""));
-    const made = origin.attempts.length;
-    if (made >= origin.completionAttempts) {
-      giveUp(origin, verdict.missing ?? "", made);
-      return;
-    }
-    await startCompletionAttempt(origin, deliverable, verdict.missing ?? "", made + 1);
+    giveUp(origin, verdict.missing ?? "", origin.attempts.length);
   } catch (err) {
     // The check itself broke. NOT a pass: that is the whole point of the
     // feature. The run is recorded as not having got there, with what went
@@ -10626,11 +10528,10 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     // than a tick over an unanswered question.
     const reason = `The deliverable could not be checked: ${err instanceof Error ? err.message : String(err)}`;
     console.error(`[coding-agent] ${origin.id} deliverable check failed:`, err instanceof Error ? err.message : err);
-    // Unless the run has ALREADY been settled by something inside the try — a
-    // `giveUp` from the attempt's own gates, or the spawn failure that settles
-    // the record as failed. Giving up a second time would push a second ending
-    // onto the timeline, announce the run twice and add a phantom attempt to
-    // the count the card shows.
+    // Unless the run has ALREADY been settled by something inside the try.
+    // Giving up a second time would push a second ending onto the timeline,
+    // announce the run twice and add a phantom attempt to the count the card
+    // shows.
     if (origin.status !== "completed") {
       persist(true);
       return;
@@ -10661,104 +10562,6 @@ function giveUp(run: CodingRun, missing: string, attempts: number): void {
   persist(true);
   console.error(`[coding-agent] ${run.id} gave up after ${attempts} attempt(s) at its deliverable`);
   announceGatedRun(run);
-}
-
-/**
- * One more go at the deliverable: the SAME record, the SAME session, a nudge
- * naming what is missing.
- *
- * In place rather than as a fresh run, which is what the brief's "resume with
- * context" means and what the record needs: `attempts`, the deliverable and the
- * verdict all belong to one run, and the owner asked one question. Mechanically
- * it is `resumeRunOnce`'s spawn — `--resume` on the run's own session id with
- * the continuation on stdin — so the transcript of the attempt that just ended
- * is still in front of the harness, which is why the nudge can say "do not
- * start over" and be obeyed.
- */
-async function startCompletionAttempt(
-  run: CodingRun,
-  deliverable: Deliverable,
-  missing: string,
-  attempt: number,
-): Promise<void> {
-  // No session means there is nothing to CARRY ON from, and this loop's whole
-  // premise is that there is: the nudge says "do not start over" because the
-  // transcript of the attempt that just ended is still in front of the harness.
-  // Spawned without one it would be a fresh session handed a note about a
-  // missing file — the task redone from nothing, charged to the owner under the
-  // name of "one more attempt". So the honest ending is recorded instead.
-  if (!run.sessionId) {
-    giveUp(run, `${missing} There is no session to carry on in, so the box did not try again.`, run.attempts.length);
-    return;
-  }
-
-  let tools: SpawnTools;
-  // Held across the two awaits below and given back the moment the record is
-  // live again (the flip after this block is synchronous) — see `startingRuns`.
-  let releaseSlot: (() => void) | null = null;
-  try {
-    // The same gates a start passes — the owner's switch, readiness, the
-    // slot — because this IS a start, and the owner may have switched the
-    // agent off while the run worked.
-    releaseSlot = await assertCanSpawn(null);
-    tools = await requireSpawnTools();
-    run.directory = await realDirectory(run.directory);
-  } catch (err) {
-    releaseSlot?.();
-    // Another attempt cannot be made now. The ending is still the honest one:
-    // the deliverable is not there. The reason says both halves, so the owner
-    // is not left wondering why the attempts stopped short.
-    const why = err instanceof Error ? err.message : String(err);
-    giveUp(run, `${missing} Another attempt could not be started: ${why}`, run.attempts.length);
-    return;
-  }
-  releaseSlot?.();
-
-  reopenPullRequestStep(run);
-  run.status = "running";
-  run.completedAt = null;
-  run.exitCode = null;
-  run.error = null;
-  run.pauseReason = null;
-  // Judged again when this attempt settles; until then there is no verdict
-  // about a run that is still working.
-  run.leftover = false;
-  run.lastActivityAt = Date.now();
-  openAttempt(run);
-  pushProgress(run, RUNNER_STEP.anotherAttempt(attempt, run.completionAttempts));
-  // RE-RESOLVED for this attempt, like a resume's. The previous attempt's
-  // settle dropped the values out of memory (cleanupRunResources), so they have
-  // to be worked out again either way — and re-reading is the safer of the two
-  // answers: an entry the owner un-ticked while the run was working is not
-  // handed back to it, and the redaction table is armed again before the child
-  // that would echo one exists.
-  await prepareRunSecrets(run);
-  persist(true);
-  console.error(`[coding-agent] ${run.id} attempt ${attempt} of ${run.completionAttempts} at its deliverable`);
-  startProjectIcon(run);
-  try {
-    spawnOrSettle(
-      run,
-      run.sessionId,
-      tools,
-      { effort: run.effort, maxTurns: run.maxTurns },
-      completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
-      // The same record, continuing: its counters and its recorded refusals are
-      // the run's whole history, not the last attempt's.
-      true,
-    );
-  } catch {
-    // `spawnOrSettle` has already settled the record as failed and said why, and
-    // it rethrows for the benefit of a route's caller — of which there is none
-    // here, so the throw itself is not news. What IS left to do is the two
-    // things that path does not do: close the attempt this call opened (left
-    // open it would read as a turn still being made, and would stop any later
-    // Resume from opening one), and send the finish notice `finishRun` held for
-    // a gate that has now ended the run on its own.
-    closeAttempt(run, missing);
-    persist(true);
-    announceGatedRun(run);
-  }
 }
 
 
@@ -11304,12 +11107,6 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   let accountAuthText: string | null = null;
   let accountDecision: "switch" | "wait" | "auth" | "moved" | null = null;
   if (run.status === "running") {
-    // The device's own stop — the token limit — has already written why on
-    // the record. A result event that slipped out before the kill landed
-    // must not turn that into "completed" with a "Stopped at the token
-    // limit" error beside it: both at once, and the resume the error offers
-    // hidden behind a status that says the work is done.
-    const deviceStopped = state.endRequested === "stop" && run.error !== null;
     if (state.forcedAccountPause) {
       // The account switch found no account to move the run to, AFTER the
       // process had gone (continueOnAnotherAccount). It settles as the wait it
@@ -11334,11 +11131,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.status = "failed";
       run.error = state.simulatedLimit;
       state.limitSignal = state.simulatedLimit;
-    } else if (state.outcome && !deviceStopped) {
+    } else if (state.outcome) {
       // The result event's verdict, now that the process is actually gone.
       // Ahead of the stop branch so a stop that raced the final message
-      // keeps "completed", as it always has — the OWNER's stop records no
-      // error, so it is the one this reaches.
+      // keeps "completed", as it always has.
       run.status = state.outcome.status;
       if (state.outcome.resumable) run.resumable = true;
       if (state.outcome.error && !run.error) run.error = redactForRun(run.id, state.outcome.error);
@@ -12060,10 +11856,11 @@ function spawnRun(
    * `state.sawResult` is what `handleEvent` reads to decide that, and a fresh
    * `LiveRun` has it false — correct for every other spawn, because a resume
    * with `resumeRunId` makes a NEW record whose counters genuinely start at
-   * zero. A completion attempt is the one spawn that re-enters the SAME record:
-   * without this its result event overwrote `numTurns`, `permissionDenials`,
-   * `deniedActions` and `denials`, so a refusal from the first attempt — and the
-   * "Allow next time" button that answers it — vanished when the second ran.
+   * zero. The owner's Resume of a gave-up run is the one spawn that re-enters
+   * the SAME record: without this its result event overwrote `numTurns`,
+   * `permissionDenials`, `deniedActions` and `denials`, so a refusal from the
+   * first attempt — and the "Allow next time" button that answers it — vanished
+   * when the second ran.
    */
   continuingRecord = false,
 ): void {
@@ -12097,7 +11894,7 @@ function spawnRun(
   // lone-run figure rather than none.
   const cpuBudget = run.cpuBudget ?? runCpuBudget({ cpus: hostCpuCount() });
   // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
-  // a completion attempt or a resume sees a lesson the owner added meanwhile.
+  // a resume sees a lesson the owner added meanwhile.
   const runNotes = runNotesBlock(readRunNotes(run.directory));
   // The visual decision, made ONCE — at this record's first spawn — and kept
   // for every respawn, so the run's tools and its prompt prefix never move
@@ -12357,8 +12154,8 @@ function spawnRun(
     } else {
       // No pipe to write to later, so anything already queued rides out with
       // the task itself — the boundary delivery, applied at the one boundary
-      // every spawn is. A start, the owner's Resume and another attempt at the
-      // deliverable all arrive here, so none of them needs its own copy.
+      // every spawn is. A start and the owner's Resume both arrive here, so
+      // neither needs its own copy.
       const waiting = queuedMessages(run.messages);
       const note = runMessagesNote(run.messages);
       if (child.stdin) {
@@ -13369,14 +13166,11 @@ interface RunSettings {
   model: string | null;
   effort: CodingEffort;
   maxTurns: number;
-  tokenLimit: number | null;
   generateImages: boolean;
   generateAudio: boolean;
   /** The owner's review-pass switch, read with the rest and frozen on the
    *  record (CodingRun.reviewPass): the brief and the pass decide from it. */
   reviewPass: boolean;
-  /** Attempts at the deliverable, frozen on the record for the same reason. */
-  completionAttempts: number;
   /** The owner's permission rules, frozen on the record for the same reason. */
   allowRules: string[];
 }
@@ -13395,9 +13189,8 @@ async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvid
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules] = await Promise.all([
-    getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
-    getCompletionAttempts(),
+  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+    getCodingProvider(), getEffort(), getMaxTurns(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
@@ -13408,11 +13201,9 @@ async function readRunSettings(): Promise<RunSettings> {
     model: defaultModelForProvider(provider),
     effort,
     maxTurns,
-    tokenLimit,
     generateImages,
     generateAudio,
     reviewPass,
-    completionAttempts,
     allowRules,
   };
 }
@@ -13527,7 +13318,6 @@ function newRunRecord(fields: {
     tokensUsed: 0,
     tokenBreakdown: emptyTokenBreakdown(),
     spawnTokens: [],
-    tokenLimit: fields.settings.tokenLimit,
     thinkingTokens: 0,
     lastActivityAt: now,
     retries: 0,
@@ -13572,7 +13362,6 @@ function newRunRecord(fields: {
     deliverable: fields.deliverable ?? null,
     deliverableCheck: null,
     attempts: [],
-    completionAttempts: fields.settings.completionAttempts,
     // Nobody has told it anything yet.
     messages: [],
   };
@@ -14003,11 +13792,8 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // on a running record and, worse, survive into the run's next settle.
     run.pauseReason = null;
     run.lastActivityAt = Date.now();
-    // The owner's own go at the deliverable, on the record like every other. It
-    // is NOT counted against the cap before it is made — the cap bounds what the
-    // BOX spends unasked, and a Resume the owner pressed is their decision, not
-    // the box's budget. The gate judges it when it settles, exactly as it judged
-    // the attempts before it.
+    // The owner's own go at the deliverable, on the record like every other.
+    // The gate judges it when it settles, exactly as it judged the first turn.
     // A run that gave up with no pull request ever opened gets the step back, so
     // the owner's Resume can actually reach the deliverable it is resumed for.
     if (gaveUp) reopenPullRequestStep(run);
@@ -14031,7 +13817,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     const continuation = !run.sessionId
       ? undefined
       : missing && deliverable
-        ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
+        ? `${completionNudge(deliverable, missing)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
         : automatic
           ? `You were paused because every Anthropic account on this ClawBox had reached its usage limit. The limit has reset and you are resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
           : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
@@ -14135,9 +13921,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: writersLive + 1, onBattery: await onBatteryPower() });
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
-    run.tokenLimit = settings.tokenLimit;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
-    run.completionAttempts = settings.completionAttempts;
     run.headAtStart = await headCommitShort(run.directory);
     run.status = "running";
     run.queued = null;
@@ -14796,7 +14580,7 @@ function endEveryLiveRun(): ChildProcess[] {
     if (state.streamTimer) clearInterval(state.streamTimer);
     if (state.unitWatch) clearInterval(state.unitWatch);
     // Said BEFORE the signal, like every other path that ends a run: the
-    // owner's Stop and Pause and the token limit set `endRequested`, and the
+    // owner's Stop and Pause set `endRequested`, and the
     // idle timeout says the same thing with `timedOut`. Without it finishRun
     // reads the kill as the provider blinking — transient stderr, no file
     // touched, `endRequested === null` — and starts a REPLACEMENT child that
@@ -14829,9 +14613,8 @@ function endEveryLiveRun(): ChildProcess[] {
  *
  * One pass is not enough, because the chain this waits for is the chain that
  * STARTS runs: `reviewAndShip` awaits `maybeStartReviewPass`, which spawns the
- * automatic review pass, and `enforceDeliverable` resumes the record for
- * another attempt. Both register a brand-new live run — after `live` was swept,
- * so nothing killed it, and `settling` empties the moment the chain that
+ * automatic review pass. That registers a brand-new live run — after `live`
+ * was swept, so nothing killed it, and `settling` empties the moment the chain that
  * started it returns. `settleWork` then reported success with a harness process
  * still going, holding the previous test's module copy, its temp tree and every
  * shared mock in that file.

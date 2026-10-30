@@ -140,19 +140,6 @@ describe("steps and tokens", () => {
     expect(await lib.getMaxTurns()).toBe(lib.MIN_MAX_TURNS);
   });
 
-  it("has no token ceiling unless the owner sets one", async () => {
-    const lib = await import("@/lib/coding-agent");
-    expect(await lib.getTokenLimit()).toBeNull();
-    expect(await lib.setTokenLimit(250_000)).toBe(250_000);
-    expect(await lib.setTokenLimit(null)).toBeNull();
-    expect(configSet).toHaveBeenLastCalledWith(lib.CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
-  });
-
-  it("refuses a ceiling so low every run would die on its first turn", async () => {
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.setTokenLimit(100)).rejects.toBeInstanceOf(lib.CodingAgentError);
-  });
-
   it("puts the owner's step count on the command line, and no price flag", async () => {
     const lib = await import("@/lib/coding-agent");
     const args = lib.buildRunArgs({ resumeSessionId: null, maxTurns: 400 });
@@ -704,12 +691,14 @@ describe("the knobs SCA C3 took off the settings page", () => {
   // The review rounds, the attempts at a deliverable, the extended history's
   // N and the second media switch are gone from the status (and the route):
   // a run gets the constants the code always fell back to. The config keys
-  // are still READ — an older box's stored value still applies — so they
-  // stay on the reset list, where Start over puts them back to the default.
+  // still READ — an older box's stored value still applies — stay on the
+  // reset list, where Start over puts them back to the default. The attempt
+  // budget and the token ceiling (SCA A2) are read by nothing, so their keys
+  // are off the list too.
   it("are no longer on the status, which carries one media switch instead", async () => {
     const lib = await import("@/lib/coding-agent");
     const status = await lib.getCodingAgentStatus() as unknown as Record<string, unknown>;
-    for (const gone of ["reviewRounds", "minReviewRounds", "maxReviewRounds", "completionAttempts", "minCompletionAttempts", "maxCompletionAttempts", "historyLimits", "generateImages", "generateAudio"]) {
+    for (const gone of ["reviewRounds", "minReviewRounds", "maxReviewRounds", "completionAttempts", "minCompletionAttempts", "maxCompletionAttempts", "historyLimits", "generateImages", "generateAudio", "tokenLimit", "minTokenLimit"]) {
       expect(status[gone], gone).toBeUndefined();
     }
     expect(status.generateMedia).toBe(true);
@@ -726,8 +715,11 @@ describe("the knobs SCA C3 took off the settings page", () => {
 
   it("keep their keys on the reset list, since the code still reads them", async () => {
     const lib = await import("@/lib/coding-agent");
-    for (const key of [lib.CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, lib.CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY, lib.CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY, lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]) {
+    for (const key of [lib.CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, lib.CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY, lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]) {
       expect(lib.CODING_AGENT_RESET_KEYS).toContain(key);
+    }
+    for (const dead of ["coding_agent_completion_attempts", "coding_agent_token_limit"]) {
+      expect(lib.CODING_AGENT_RESET_KEYS).not.toContain(dead);
     }
   });
 });

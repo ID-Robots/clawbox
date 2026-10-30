@@ -359,8 +359,6 @@ interface RunPayload {
   deliverableCheck?: DeliverableVerdict | null;
   /** Every go at it, the run's own first turn included. */
   attempts?: RunAttempt[];
-  /** The ceiling that applied. */
-  completionAttempts?: number;
 }
 
 function elapsed(run: RunPayload): string {
@@ -441,7 +439,7 @@ function describeDeliverableState(run: RunPayload): string | null {
   const deliverable = run.deliverable;
   if (!deliverable) return null;
   const attempts = Array.isArray(run.attempts) ? run.attempts.length : 0;
-  const made = attempts && run.completionAttempts ? ` after ${attempts} of ${run.completionAttempts} attempts` : "";
+  const made = attempts > 1 ? ` after ${attempts} attempts` : "";
   const check = run.deliverableCheck;
   if (!check) return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)}. The device has not checked yet.`;
   if (check.ok) return `[deliverable] It left behind ${describeDeliverable(deliverable)}${made}, which is why this counts as finished.`;
@@ -808,7 +806,7 @@ function runRow(run: RunPayload): Record<string, unknown> {
     ...(run.ci && !run.ci.fixRunId && run.ci.attempt + 1 <= MAX_CI_FIX_ATTEMPTS ? { can_fix_ci: true } : {}),
     ...(run.reviewOf ? { review_of: run.reviewOf } : {}),
     ...(run.worktree ? { branch: run.worktree.branch, copy } : {}),
-    ...(attempts ? { attempts: run.completionAttempts ? `${attempts} of ${run.completionAttempts}` : attempts } : {}),
+    ...(attempts ? { attempts } : {}),
     ...(deliverable ? { deliverable } : {}),
     ...(pause ? { paused_because: pause } : {}),
     // Only while it is live: a settled run's scope is gone or is the leftover below.
@@ -1209,7 +1207,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       }
       return res.delivery === "after_tool_call"
         ? text(`Queued: the message is in run ${run_id}'s inbox and is handed to it mid-turn, the moment the tool call it is running now ends (a long build or test can take a few minutes). Tell the user it is on its way, and do not send it again.`)
-        : text(`Queued: run ${run_id} is not in a turn that can take it now, so it receives the message at its next start — when it goes back in for another attempt, or when the owner resumes it. Tell the user that, and do not send it again.`);
+        : text(`Queued: run ${run_id} is not in a turn that can take it now, so it receives the message at its next start — when the owner resumes it. Tell the user that, and do not send it again.`);
     },
   );
 

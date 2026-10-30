@@ -204,8 +204,6 @@ interface Run {
   deliverableCheck?: DeliverableVerdict | null;
   /** Every go at it, the run's own first turn included. */
   attempts?: RunAttempt[];
-  /** The ceiling that applied to this run. */
-  completionAttempts?: number;
   /** What the owner (or the assistant) has told this run while it works, and
    *  whether the harness has had each of them yet. Absent on a server that
    *  predates the queue, which is why the card reads it defensively. */
@@ -1540,7 +1538,6 @@ export default function CodingAgentApp() {
     const deliverable = run.deliverable;
     if (!deliverable) return null;
     const check = run.deliverableCheck;
-    const attempts = run.attempts?.length ?? 0;
     const what = deliverable.kind === "pr"
       ? t("codingAgent.deliverablePr")
       : deliverable.kind === "paths"
@@ -1557,9 +1554,6 @@ export default function CodingAgentApp() {
             <span data-testid="coding-agent-deliverable-verdict">{t("codingAgent.deliverableMet")}</span>
             {" "}
             <span data-testid="coding-agent-deliverable-what">{what}</span>
-            {attempts > 1 && run.completionAttempts != null && (
-              <span data-testid="coding-agent-deliverable-attempts"> · {t("codingAgent.deliverableAttempts", { n: attempts, max: run.completionAttempts })}</span>
-            )}
           </span>
         </p>
       );
@@ -1578,11 +1572,6 @@ export default function CodingAgentApp() {
               ? t("codingAgent.deliverableMet")
               : t("codingAgent.deliverableMissing", { reason: check.missing ?? "" })}
         </p>
-        {attempts > 0 && run.completionAttempts != null && (
-          <p className="mt-1 text-[10px] text-[var(--text-muted)]" data-testid="coding-agent-deliverable-attempts">
-            {t("codingAgent.deliverableAttempts", { n: attempts, max: run.completionAttempts })}
-          </p>
-        )}
       </div>
     );
   };

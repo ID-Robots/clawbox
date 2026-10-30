@@ -13,9 +13,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  completionAttemptsFrom,
   completionNudge,
-  DEFAULT_COMPLETION_ATTEMPTS,
   describeDeliverable,
   gaveUpReason,
   isDeniedDeliverableCommand,
@@ -24,7 +22,6 @@ import {
   MAX_DELIVERABLE_COMMAND_CHARS,
   MAX_DELIVERABLE_PATHS,
   MAX_MISSING_CHARS,
-  MIN_COMPLETION_ATTEMPTS,
   parseAttempts,
   parseDeliverable,
   parseDeliverableVerdict,
@@ -207,20 +204,6 @@ describe("the verdict and the attempt list on a record", () => {
   });
 });
 
-describe("how many attempts a box gives a run", () => {
-  it("falls back to the default for anything outside what this box offers", () => {
-    expect(completionAttemptsFrom(1)).toBe(1);
-    expect(completionAttemptsFrom(MAX_COMPLETION_ATTEMPTS)).toBe(MAX_COMPLETION_ATTEMPTS);
-    for (const bad of [0, -1, MAX_COMPLETION_ATTEMPTS + 1, NaN, Infinity, "3", null, undefined, {}]) {
-      expect(completionAttemptsFrom(bad), String(bad)).toBe(DEFAULT_COMPLETION_ATTEMPTS);
-    }
-  });
-
-  it("offers one as a real setting: check it, say so, spend nothing more", () => {
-    expect(MIN_COMPLETION_ATTEMPTS).toBe(1);
-  });
-});
-
 describe("the words the harness and the owner are given", () => {
   it("names each kind of deliverable in one phrase", () => {
     expect(describeDeliverable({ kind: "pr" })).toContain("pull request");
@@ -230,22 +213,15 @@ describe("the words the harness and the owner are given", () => {
   });
 
   it("tells the harness what is missing and NOT to start over", () => {
-    const nudge = completionNudge({ kind: "paths", paths: ["app.js"] }, "app.js was not created.", { n: 2, of: 3 });
+    const nudge = completionNudge({ kind: "paths", paths: ["app.js"] }, "app.js was not created.");
     expect(nudge).toContain("app.js was not created.");
     expect(nudge).toContain("the file app.js");
-    // Load-bearing: this is a resume into the SAME session, so the transcript
-    // of the attempt that just ended is still in front of the harness.
+    // Load-bearing: the owner's Resume goes back into the SAME session, so the
+    // transcript of the turn that just ended is still in front of the harness.
     expect(nudge).toMatch(/do not start over/i);
-    expect(nudge).toContain("attempt 2 of 3");
-  });
-
-  it("counts no attempt when the OWNER pressed Resume", () => {
-    // The cap bounds what the box spends unasked. Reporting the owner's own
-    // deliberate act as "attempt 4 of 3" would be the box naming a budget they
-    // are not subject to.
-    const nudge = completionNudge({ kind: "pr" }, "No pull request was opened.", null);
+    // The box spends no go of its own (SCA A2), so there is no budget to name:
+    // "attempt 4 of 3" would be the box reporting one the owner is not subject to.
     expect(nudge).not.toMatch(/attempt \d+ of \d+/);
-    expect(nudge).toContain("No pull request was opened.");
   });
 
   it("says what is absent rather than what went wrong, and offers the way on", () => {

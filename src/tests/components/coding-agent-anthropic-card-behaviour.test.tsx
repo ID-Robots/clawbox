@@ -54,7 +54,6 @@ function basePayload(provider: string, extra: Record<string, unknown> = {}) {
     providers: ["clawbox-ai", "anthropic"],
     subagents: true,
     maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
-    tokenLimit: null, minTokenLimit: 10_000,
     reviewPass: false, generateMedia: true, realBrowser: true,
   };
 }
@@ -94,7 +93,6 @@ function stubDevice(opts: {
     ...(opts.providers ? { provider, providers: opts.providers } : {}),
     subagents: true,
     maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
-    tokenLimit: null, minTokenLimit: 10_000,
     reviewPass: false, generateMedia: true, realBrowser: true,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {

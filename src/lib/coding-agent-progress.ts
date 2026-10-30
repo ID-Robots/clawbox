@@ -41,7 +41,6 @@ export type ProgressLabelKey =
   | "startedWith"
   | "continuing"
   | "thinking"
-  | "tokenLimit"
   | "subagentStarted"
   | "subagentFinished"
   | "subagentRefused"
@@ -99,7 +98,6 @@ export type ProgressLabelKey =
   // done, and what it did about not finding it (src/lib/coding-deliverable.ts).
   | "deliverableMet"
   | "deliverableMissing"
-  | "anotherAttempt"
   | "droppedSteps"
   // The owner's secret store (src/lib/project-secrets.ts): which of their
   // secrets this run was handed, and which one the box could not open.
@@ -233,7 +231,6 @@ function shorten(s: string, max: number): string {
 export const RUNNER_STEP = {
   thinking: "Thinking…",
   continuing: "Continuing after a background helper finished",
-  tokenLimit: "Token limit reached",
   resuming: "Resuming the previous session",
   // The web server restarted and this run outlived it in its own systemd scope.
   reattached: "The web server restarted; this run kept going and was picked back up",
@@ -323,7 +320,6 @@ export const RUNNER_STEP = {
    *  tail of that command's output. */
   deliverableMissing: (reason: string) => `Not finished yet: ${reason}`,
   /** Going back in for another go at the deliverable, same record, same session. */
-  anotherAttempt: (attempt: number, attempts: number) => `Attempt ${attempt} of ${attempts} at the deliverable`,
   /** A helper going out: the type in parentheses, its own description after a colon. */
   helperStarted: (opts: { workflow: boolean; type: string; what: string }) =>
     opts.workflow
@@ -412,7 +408,6 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Started with (\S+)$/, labelKey: "startedWith", icon: "play_arrow", params: (m) => ({ model: m[1] }) },
   { re: /^Continuing after a background helper finished$/, labelKey: "continuing", icon: "sync" },
   { re: /^Thinking…$/, labelKey: "thinking", icon: "psychology" },
-  { re: /^Token limit reached$/, labelKey: "tokenLimit", icon: "hourglass_disabled" },
   {
     re: /^Sub-agent started(?: \(([^)]*)\))?(?::\s*(.*))?$/,
     labelKey: "subagentStarted",
@@ -475,7 +470,6 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },
   { re: /^The deliverable is there$/, labelKey: "deliverableMet", icon: "task_alt" },
   { re: /^Not finished yet: (.+)$/, labelKey: "deliverableMissing", icon: "pending", params: (m) => ({ reason: m[1] }) },
-  { re: /^Attempt (\d+) of (\d+) at the deliverable$/, labelKey: "anotherAttempt", icon: "replay", params: (m) => ({ attempt: Number(m[1]), attempts: Number(m[2]) }) },
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
   { re: /^Secrets in this run's environment: (.+)$/, labelKey: "secretsInjected", icon: "key", params: (m) => ({ names: m[1] }) },
   { re: /^Could not read these secrets: (.+)$/, labelKey: "secretsUnreadable", icon: "key_off", params: (m) => ({ names: m[1] }) },

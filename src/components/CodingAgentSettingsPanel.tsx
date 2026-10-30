@@ -166,8 +166,6 @@ export interface AgentStatus {
   maxTurns: number;
   minMaxTurns: number;
   maxMaxTurns: number;
-  tokenLimit: number | null;
-  minTokenLimit: number;
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
   reviewPass: boolean;
@@ -254,12 +252,12 @@ const CONFIRM_MS = 5_000;
  * message sat below the GitHub card, a screen away from a Steps field that
  * still held the refused number.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
+type ErrorSlot = "dir" | "turns" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it. The run history's is inside its own card.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "maxParallelRuns", "gitAuthor", "history"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "maxParallelRuns", "gitAuthor", "history"]);
 
 /**
  * The label of each choice for how much of the task a pull request carries,
@@ -343,7 +341,6 @@ export default function CodingAgentSettingsPanel() {
   // status the route keeps returning.
   const [dirDraft, setDirDraft] = useState<string | null>(null);
   const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
-  const [tokensDraft, setTokensDraft] = useState<string | null>(null);
   const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
   const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
@@ -366,7 +363,6 @@ export default function CodingAgentSettingsPanel() {
       setStatus(next);
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
       setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
-      setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
       setAuthorNameDraft(prev => (prev === null ? (next.gitAuthorName ?? "") : prev));
       setAuthorEmailDraft(prev => (prev === null ? (next.gitAuthorEmail ?? "") : prev));
     } catch {
@@ -601,16 +597,6 @@ export default function CodingAgentSettingsPanel() {
     if (!Number.isFinite(n) || n === status?.maxTurns) return;
     const next = await saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
     setTurnsDraft(next ? String(next.maxTurns) : stored);
-  };
-
-  const saveTokens = async () => {
-    const raw = (tokensDraft ?? "").trim();
-    const limit = raw === "" ? null : Number(raw);
-    if (limit !== null && !Number.isFinite(limit)) return;
-    if (limit === (status?.tokenLimit ?? null)) return;
-    const stored = status?.tokenLimit == null ? "" : String(status.tokenLimit);
-    const next = await saveSetting({ tokenLimit: limit }, "tokens", t("codingAgent.tokensFailed"));
-    setTokensDraft(next ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : stored);
   };
 
   /** The GitHub device flow, driven by this card so it works from a phone:
@@ -1005,9 +991,9 @@ export default function CodingAgentSettingsPanel() {
           </summary>
           <div className="mt-5">
             <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupCeilings")}</p>
-            {/* The ceilings a run stops at — both the owner's to set. There is no
-                time limit and no price limit: a run ends when it finishes, runs
-                out of steps, hits a token ceiling if one is set, or goes quiet.
+            {/* The one ceiling a run stops at, the owner's to set. There is no
+                time limit, no price limit and (since SCA A2) no token limit: a
+                run ends when it finishes, runs out of steps, or goes quiet.
                 Saved on blur and on Enter, so a half-typed number is never sent. */}
             <div className="grid grid-cols-2 gap-3 mt-4">
               <div>
@@ -1029,26 +1015,6 @@ export default function CodingAgentSettingsPanel() {
                   className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
                 />
                 {errorIn("turns")}
-              </div>
-              <div>
-                <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.tokensLabel")}
-                </label>
-                <input
-                  id="coding-agent-tokens"
-                  type="number"
-                  inputMode="numeric"
-                  min={status?.minTokenLimit ?? 10000}
-                  placeholder={t("codingAgent.tokensPlaceholder")}
-                  value={tokensDraft ?? ""}
-                  onChange={(e) => setTokensDraft(e.target.value)}
-                  onBlur={() => void saveTokens()}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveTokens(); }}
-                  disabled={saving}
-                  data-testid="coding-agent-tokens"
-                  className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-                />
-                {errorIn("tokens")}
               </div>
             </div>
 

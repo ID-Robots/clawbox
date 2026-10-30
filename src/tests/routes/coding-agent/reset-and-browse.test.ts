@@ -228,7 +228,6 @@ describe("POST /setup-api/coding-agent/reset", () => {
       "coding_agent_default_directory",
       "coding_agent_effort",
       "coding_agent_max_turns",
-      "coding_agent_token_limit",
       "coding_agent_review_pass",
       // The auto-PR switch is standing consent for the box to push and merge
       // the agent's work, so "start over" must take it back too.
@@ -242,9 +241,6 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // merge on the strength of a decision the owner has just wiped.
       "coding_agent_review_rounds",
       "coding_agent_auto_merge",
-      // The attempt budget for a run's deliverable: spent only by a run that
-      // has one, so a reset clears it with the rest of what the owner chose.
-      "coding_agent_completion_attempts",
       // How many runs at once. The one setting here with a MEMORY cost: a box
       // left on four would carry four `claude -p` processes past a "start
       // over" that has just presented a freshly configured agent.

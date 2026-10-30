@@ -369,7 +369,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     effort: "max",
     subagents: false,
     maxTurns: 200,
-    tokenLimit: null as number | null,
   };
 
   const browserStatus = {
@@ -675,8 +674,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       maxTurns: codingAgent.maxTurns,
       minMaxTurns: 10,
       maxMaxTurns: 1000,
-      tokenLimit: codingAgent.tokenLimit,
-      minTokenLimit: 100_000,
     };
   };
 
@@ -1696,7 +1693,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       if (typeof payload.effort === "string") codingAgent.effort = payload.effort;
       if (typeof payload.subagents === "boolean") codingAgent.subagents = payload.subagents;
       if (typeof payload.maxTurns === "number") codingAgent.maxTurns = payload.maxTurns;
-      if (payload.tokenLimit !== undefined) codingAgent.tokenLimit = payload.tokenLimit;
       await fulfillJson(route, buildCodingAgentStatus());
       return;
     }
