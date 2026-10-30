@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
-import { onCodingRunStarted } from "@/lib/ui-events";
+import { onCodingRunStarted, onCodingTeamChanged } from "@/lib/ui-events";
 import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding-pr-state";
 import { samePlainData } from "@/lib/same-plain-data";
+import { isSettledTeamStatus, TEAM_STATUSES, type TeamStatus } from "@/lib/coding-team-status";
+import type { TeamCard, TeamCardAgent, TeamCardTask } from "@/lib/coding-agent-slim";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -128,9 +130,75 @@ export interface CodingAgentActivity {
    * carry it.
    */
   prPhase?: PrPhase | null;
+  /** The pull request's number, for the settled card's chip; null without one. */
+  prNumber?: number | null;
+  /**
+   * The team this run works for, or null for a run of its own. A member run
+   * is never drawn as a card: the team's card shows it (CodingChatCards.tsx),
+   * and the hook holds it back — see `useCodingAgentActivity`.
+   */
+  teamId?: string | null;
+  /** The result's first sentence (the runs route's `summaryLine`), for the settled card; null before there is one. */
+  summaryLine?: string | null;
+  /** A failed run's error, first line, for the settled card in the danger tone. */
+  errorLine?: string | null;
+  /**
+   * The run is PAUSED and waits on the owner — a refused action it cannot go
+   * on without, or an allowance that ran out. The card says "Needs you" and
+   * its Open lands on the run page's refusal card.
+   */
+  needsYou?: boolean;
+  /** The newest refused action, in the owner's words, when the run needs them for one. */
+  refusedLine?: string | null;
+}
+
+/**
+ * A coding TEAM, as the chat's team card draws it: the slim board's `card`
+ * (src/lib/coding-agent-slim.ts `teamCard`) with the few board fields the
+ * card names beside it. Polled with the runs, on the same beat.
+ */
+export interface TeamActivity {
+  id: string;
+  projectId: string | null;
+  directory: string | null;
+  /** The goal as written; the card draws its first line. */
+  goal: string;
+  status: TeamStatus;
+  source: "agent" | "owner";
+  startedAt: number;
+  finishedAt: number | null;
+  tasksDone: number;
+  tasksTotal: number;
+  tasks: TeamCardTask[];
+  prNumber: number | null;
+  resultLine: string | null;
+  agents: TeamCardAgent[];
+  tokensUsed: number;
+  /** Why the team stopped short, first line, or null. */
+  errorLine: string | null;
+}
+
+interface TeamPayload {
+  id: string;
+  goal?: unknown;
+  projectId?: unknown;
+  directory?: unknown;
+  status?: unknown;
+  source?: unknown;
+  createdAt?: unknown;
+  finishedAt?: unknown;
+  error?: unknown;
+  metrics?: { tokensUsed?: unknown } | null;
+  card?: Partial<TeamCard> | null;
 }
 
 interface RunPayload {
+  /** The team the run works for; absent or null on a run of its own. */
+  team?: { id?: unknown } | null;
+  summaryLine?: unknown;
+  error?: unknown;
+  denials?: { text?: unknown }[];
+  deniedActions?: unknown;
   /** The pull request this run's work went into, when the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
@@ -190,8 +258,8 @@ const SCREENSHOTS_SHOWN = 3;
 export function artifactUrl(runId: string, name: string): string {
   return `/setup-api/coding-agent/artifacts?runId=${encodeURIComponent(runId)}&file=${encodeURIComponent(name)}`;
 }
-/** Badges kept in one conversation, oldest dropped first. */
-const MAX_BADGES = 6;
+/** Cards kept in one conversation — runs and teams each, oldest dropped first. */
+export const MAX_BADGES = 6;
 /**
  * How far back a finished run still counts as "this conversation".
  *
@@ -234,6 +302,53 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     sessionId: typeof r.sessionId === "string" && r.sessionId ? r.sessionId : null,
     directory: typeof r.directory === "string" && r.directory ? r.directory : null,
     prPhase: toPrPhase(r.pr),
+    prNumber: r.pr && typeof r.pr.number === "number" ? r.pr.number : null,
+    teamId: r.team && typeof r.team.id === "string" && r.team.id ? r.team.id : null,
+    summaryLine: typeof r.summaryLine === "string" && r.summaryLine ? r.summaryLine : null,
+    errorLine: firstLineOf(r.error),
+    needsYou: r.status === "paused",
+    refusedLine: refusedLineOf(r),
+  };
+}
+
+/** The first non-empty line of a text, cut to the card's width. */
+function firstLineOf(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const line = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
+  if (!line) return null;
+  return line.length > 160 ? line.slice(0, 159).trimEnd() + "…" : line;
+}
+
+/** The newest refused action on the record, from either list the record keeps (CodingRunDenials.tsx says why there are two). */
+function refusedLineOf(r: RunPayload): string | null {
+  const structured = Array.isArray(r.denials) ? r.denials.map((d) => d?.text).filter((t): t is string => typeof t === "string" && t.length > 0) : [];
+  const plain = Array.isArray(r.deniedActions) ? r.deniedActions.filter((t): t is string => typeof t === "string" && t.length > 0) : [];
+  const list = structured.length > 0 ? structured : plain;
+  return list.length > 0 ? firstLineOf(list[list.length - 1]) : null;
+}
+
+/** A slim board's row as the team card draws it; null for a shape it cannot draw. */
+function toTeam(t: TeamPayload): TeamActivity | null {
+  if (typeof t.id !== "string" || !t.id) return null;
+  const status = (TEAM_STATUSES as readonly unknown[]).includes(t.status) ? t.status as TeamStatus : "working";
+  const card = t.card ?? {};
+  return {
+    id: t.id,
+    projectId: typeof t.projectId === "string" ? t.projectId : null,
+    directory: typeof t.directory === "string" && t.directory ? t.directory : null,
+    goal: typeof t.goal === "string" ? t.goal : "",
+    status,
+    source: t.source === "owner" ? "owner" : "agent",
+    startedAt: typeof t.createdAt === "number" ? t.createdAt : 0,
+    finishedAt: typeof t.finishedAt === "number" ? t.finishedAt : null,
+    tasksDone: typeof card.tasksDone === "number" ? card.tasksDone : 0,
+    tasksTotal: typeof card.tasksTotal === "number" ? card.tasksTotal : 0,
+    tasks: Array.isArray(card.tasks) ? card.tasks : [],
+    prNumber: typeof card.prNumber === "number" ? card.prNumber : null,
+    resultLine: typeof card.resultLine === "string" && card.resultLine ? card.resultLine : null,
+    agents: Array.isArray(card.agents) ? card.agents : [],
+    tokensUsed: typeof t.metrics?.tokensUsed === "number" ? t.metrics.tokensUsed : 0,
+    errorLine: firstLineOf(t.error),
   };
 }
 
@@ -256,16 +371,41 @@ function sameRuns(a: readonly CodingAgentActivity[], b: readonly CodingAgentActi
   return a.length === b.length && a.every((run, i) => run === b[i]);
 }
 
-/** True when the tool the chat just saw is one of the coding-agent family. */
+/**
+ * True when the tool the chat just saw is one of the coding family — a run,
+ * a team, a run message, a project tool, or the scaffold that precedes a run
+ * (`code_project_init`): each of them may have started, or be about to
+ * start, something a card should show.
+ */
 export function isCodingAgentTool(name: string): boolean {
-  return /coding_agent/i.test(name);
+  return /coding_(agent|team|run|project)|code_project_init/i.test(name);
 }
 
+/** The same teams, in the same order, each the very object already held. */
+function sameTeams(a: readonly TeamActivity[], b: readonly TeamActivity[]): boolean {
+  return a.length === b.length && a.every((team, i) => team === b[i]);
+}
+
+/**
+ * How many polls a member run whose team the list does not hold yet is held
+ * back before it is shown on its own: the run record can land a poll before
+ * its board is listed, and a card that appears for one poll and vanishes
+ * into the team card is a flicker.
+ */
+const MEMBER_HOLD_POLLS = 1;
+
 export function useCodingAgentActivity(active: boolean): {
+  /** Runs of their own — a team's member runs are left to the team's card. */
   runs: CodingAgentActivity[];
+  /** The teams this conversation has seen, oldest first. */
+  teams: TeamActivity[];
   nudge: () => void;
 } {
   const [runs, setRuns] = useState<CodingAgentActivity[]>([]);
+  const [teams, setTeams] = useState<TeamActivity[]>([]);
+  // Member runs seen without their team, and for how many polls: shown on
+  // their own only once the hold has passed (MEMBER_HOLD_POLLS).
+  const orphanPolls = useRef(new Map<string, number>());
   // Bumped by nudge(); the effect below re-runs and probes immediately.
   const [probe, setProbe] = useState(0);
   // When this conversation started caring. A run older than this belongs to a
@@ -283,9 +423,11 @@ export function useCodingAgentActivity(active: boolean): {
     if (!active) return;
     const onVisible = () => { if (document.visibilityState === "visible") nudge(); };
     const off = onCodingRunStarted(nudge);
+    const offTeam = onCodingTeamChanged(nudge);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       off();
+      offTeam();
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [active, nudge]);
@@ -294,7 +436,10 @@ export function useCodingAgentActivity(active: boolean): {
     if (!active) {
       // `prev` when there is nothing to drop: a new empty array is still a
       // new state, and a render of the chat for it.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the chat closed: the cards it held go with it
       setRuns((prev) => (prev.length === 0 ? prev : []));
+      setTeams((prev) => (prev.length === 0 ? prev : []));
+      orphanPolls.current.clear();
       openedAtRef.current = 0;
       return;
     }
@@ -326,16 +471,67 @@ export function useCodingAgentActivity(active: boolean): {
         // per-poll cost is a handful of syscalls every five seconds while a
         // run is in flight, and nothing at all once it is not; the plumbing
         // would be the larger cost, paid in code.
-        const res = await fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}&artifacts=1`, { cache: "no-store" });
+        // The runs and the teams on ONE beat: two requests in flight
+        // together, one timer. The team list may be refused (403 to a
+        // signed-in person who is not the owner — the team route is
+        // owner-only); then the teams this chat holds are left as they are
+        // and the runs still come through.
+        const [res, teamRes] = await Promise.all([
+          fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}&artifacts=1`, { cache: "no-store" }),
+          fetch("/setup-api/coding-agent/team?slim=1", { cache: "no-store" }).catch(() => null),
+        ]);
         if (!res.ok) throw new Error("runs");
         const data = await res.json() as { runs?: RunPayload[] };
+        let fetchedTeams: TeamPayload[] | null = null;
+        if (teamRes && teamRes.ok) {
+          try {
+            const teamData = await teamRes.json() as { teams?: TeamPayload[] };
+            fetchedTeams = Array.isArray(teamData.teams) ? teamData.teams : [];
+          } catch {
+            fetchedTeams = null;
+          }
+        }
         if (!alive) return;
         const fetched = data.runs ?? [];
+        const listedTeams = new Set((fetchedTeams ?? []).map((t) => t.id));
+
+        setTeams((prev) => {
+          if (fetchedTeams === null) return prev;
+          const byId = new Map(prev.map((t) => [t.id, t]));
+          for (const raw of fetchedTeams) {
+            const team = toTeam(raw);
+            if (!team) continue;
+            const known = byId.get(team.id);
+            // Adopted on the run's rule: at work now, or begun around the
+            // time the chat opened; yesterday's teams are the app's history.
+            const mine = known !== undefined
+              || !isSettledTeamStatus(team.status)
+              || team.startedAt >= openedAtRef.current - RECENT_MS;
+            if (mine) byId.set(team.id, known && samePlainData(known, team) ? known : team);
+          }
+          const next = [...byId.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-MAX_BADGES);
+          return sameTeams(prev, next) ? prev : next;
+        });
 
         setRuns((prev) => {
           const byId = new Map(prev.map((r) => [r.id, r]));
+          const orphans = orphanPolls.current;
           for (const raw of fetched) {
             const run = toActivity(raw);
+            // A team's member run is the team card's to show, never a card of
+            // its own. Its team may land in the list a poll after the run
+            // does, so a member whose team is not listed yet is HELD for a
+            // poll rather than drawn and then withdrawn.
+            if (run.teamId) {
+              if (fetchedTeams === null || listedTeams.has(run.teamId)) {
+                orphans.delete(run.id);
+                byId.delete(run.id);
+                continue;
+              }
+              const seen = (orphans.get(run.id) ?? 0) + 1;
+              orphans.set(run.id, seen);
+              if (seen <= MEMBER_HOLD_POLLS) continue;
+            }
             // Adopt what belongs to this conversation: in flight now, or
             // started around the time the chat opened (a 9-second run can
             // begin and end between two polls, and it still happened here).
@@ -362,7 +558,9 @@ export function useCodingAgentActivity(active: boolean): {
         // so the poll that saw the finish could not have seen either.
         // A run waiting on GitHub Actions has settled but is still changing,
         // so the chat card keeps polling for it too — see CodingAgentApp.
-        if (fetched.some((r) => r.status === "running" || isPrPending(r.pr))) {
+        // A team at work keeps the beat too.
+        const teamLive = (fetchedTeams ?? []).some((t) => typeof t.status === "string" && !isSettledTeamStatus(t.status as TeamStatus));
+        if (teamLive || fetched.some((r) => r.status === "running" || isPrPending(r.pr))) {
           sawLive = true;
           timer = setTimeout(() => { void read(); }, POLL_MS);
         } else if (sawLive) {
@@ -387,5 +585,5 @@ export function useCodingAgentActivity(active: boolean): {
     };
   }, [active, probe]);
 
-  return { runs, nudge };
+  return { runs, teams, nudge };
 }

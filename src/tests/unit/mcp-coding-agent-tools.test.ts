@@ -120,6 +120,23 @@ describe("registration", () => {
 });
 
 describe("coding_agent_run", () => {
+  it("tells the assistant the chat shows the run as a card, and carries the same facts as structuredContent", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/The chat shows this as a card .* do not describe progress yourself and do not poll/);
+    expect(out.result.structuredContent).toEqual({
+      kind: "coding_run", id: "run-k3x9q2ab", projectId: "site", directory: RUN.directory,
+      title: "Add a dark mode toggle", status: "running",
+    });
+    apiPost.mockResolvedValue({ started: false, queued: true, run: { ...RUN, status: "queued", queued: { at: 1, position: 3 } } });
+    const queued = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(queued.isError).toBe(false);
+    if (queued.isError) return;
+    expect(queued.result.structuredContent).toMatchObject({ kind: "coding_run", status: "queued", queuePosition: 3 });
+  });
+
   it("starts a run and hands back the id with the follow-up step", async () => {
     apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
     const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });

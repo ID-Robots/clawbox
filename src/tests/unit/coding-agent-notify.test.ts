@@ -208,14 +208,24 @@ describe("a team's text", () => {
     expect(buildTeamAnnouncement(board({ branch: null, projectId: null }))).toContain("in its folder (2 of 3 tasks done, 1 failed).");
   });
 
-  it("goes to the desktop as the plain notice named after the team, and to Telegram, with the same template", async () => {
+  it("goes to the desktop as the team's finish card named after the team, and to Telegram, with the same template", async () => {
     readTelegramAllowFrom.mockResolvedValue(["12345"]);
     readConfigStrict.mockResolvedValue({ channels: { telegram: { botToken: "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" } } });
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     await announceCodingTeam(board());
     const payload = ringEntry();
-    expect(payload.type).toBe("notify");
+    // A `coding_team settled` ring action, not a toast: the desktop draws the
+    // same top-right finish card a run gets, whose Open hands the app the team.
+    expect(payload.type).toBe("coding_team");
+    expect(payload.event).toBe("settled");
+    expect(payload.teamId).toBe("team-k3x9q2ab");
+    expect(payload.projectId).toBe("site");
+    expect(payload.status).toBe("done");
+    // t4 is retired: not a task the team owed.
+    expect(payload.tasksDone).toBe(2);
+    expect(payload.tasksTotal).toBe(3);
+    expect(payload.prNumber).toBeUndefined();
     expect(payload.id).toBe("coding-team:team-k3x9q2ab");
     expect(payload.message).toBe(buildTeamAnnouncement(board()));
     expect(String(payload.message).length).toBeLessThanOrEqual(280);

@@ -38,6 +38,9 @@ import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { CodingChatCards, NewAppCardSlot, NewAppToggleButton, useCodingChatCards, useNewAppCard } from '@/components/CodingChatCards'
+import { CHAT_MESSAGE_EVENT, type ChatMessageDetail } from '@/lib/ui-events'
 import { useChatFullscreen, useChatTextScale, usePhoneViewport } from '@/lib/use-chat-phone-layout'
 import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
@@ -444,6 +447,19 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   }, [])
   const [sending, setSending] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
+  // The coding cards — one per run of its own, one per team, live then
+  // settled — and the Create card over the composer, the SAME host the mascot
+  // chat renders (src/components/CodingChatCards.tsx). This page is the
+  // owner's chat on a phone and behind "Open in new tab"; it used to show
+  // none of them. Only for the owner's own transcript: another user's chat
+  // (`chatUser`) has no coding agent to watch, and the team route is the
+  // owner's.
+  const codingCards = useCodingChatCards(chatUser === null)
+  const nudgeCodingCards = codingCards.nudge
+  // This page draws one app and no desktop, so "open this and get out of the
+  // way" is just "open this": the desktop around /app/<id> is a plain link.
+  const openFromChat = useCallback((open: () => void) => { open() }, [])
+  const newApp = useNewAppCard(openFromChat)
   const [errorMsg, setErrorMsg] = useState('')
   /**
    * The conversation being brought back, or one that could not be (TASK-1158).
@@ -1093,7 +1109,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
           if (payload.stream === 'tool') {
-            applyToolEvent(payload.data as Record<string, unknown> | undefined)
+            const toolData = payload.data as Record<string, unknown> | undefined
+            applyToolEvent(toolData)
+            // A coding tool went past: the cards re-ask the box at once.
+            if (typeof toolData?.name === 'string' && isCodingAgentTool(toolData.name)) nudgeCodingCards()
           }
           const stuck = fallbackWatchRef.current.fromAgentFrame(payload, runFailureRef.current.peek(payload.runId))
           if (stuck) reportModelFallbackFor(stuck)
@@ -1578,6 +1597,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           // is handed over under that name, and `detail` (a shell step's
           // command) is what names the app the step reached.
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
+          if (isCodingAgentTool(event.name)) nudgeCodingCards()
         }
       })
     } catch (err) {
@@ -1636,7 +1656,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     clearToolCalls()
     setSending(false)
     runIdRef.current = null
-  }, [applyStreaming, applyToolEvent, clearToolCalls, appendAssistantReply])
+  }, [applyStreaming, applyToolEvent, clearToolCalls, appendAssistantReply, nudgeCodingCards])
 
   const sendMessage = useCallback(async () => {
     const text = input.trim()
@@ -1695,6 +1715,28 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
 
     await dispatchSend(text, staged, idempotencyKey)
   }, [input, sending, pendingAttachments, caps.hasLiveConnection, status, dispatchSend, applyStreaming])
+
+  // The Create card — and the Coding Agent app's hand-off buttons — send
+  // their one message through CHAT_MESSAGE_EVENT, the way the mascot chat
+  // takes it: into the composer, then sent on the render that sees it there
+  // (sendMessage reads the composer). This page had no listener, so a card
+  // here composed a message nobody sent.
+  const handoffPendingRef = useRef(false)
+  useEffect(() => {
+    const onMessage = (e: Event) => {
+      const text = (e as CustomEvent<ChatMessageDetail>).detail?.text
+      if (typeof text !== 'string' || !text.trim()) return
+      handoffPendingRef.current = true
+      setInput(text)
+    }
+    window.addEventListener(CHAT_MESSAGE_EVENT, onMessage)
+    return () => window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage)
+  }, [])
+  useEffect(() => {
+    if (!handoffPendingRef.current || !input.trim()) return
+    handoffPendingRef.current = false
+    void sendMessage()
+  }, [input, sendMessage])
 
   // Drain queued sends on connect; flush them as system errors on error.
   // Sequential dispatch preserves user-typed order — chat.send acks fast
@@ -2152,6 +2194,34 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
 
+        {/* The coding cards, after the pills and before the reply in flight:
+            a team's card, then each run's — they stay once the work ends and
+            report the outcome (CodingChatCards.tsx). */}
+        {chatUser === null && <CodingChatCards cards={codingCards} openFromChat={openFromChat} />}
+        {chatUser === null && codingCards.autoHiddenCount > 0 && (
+          <div data-testid="coding-agent-restore-row" style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}>
+            <button
+              type="button"
+              data-testid="coding-agent-restore"
+              onClick={codingCards.restore}
+              title={t("codingAgent.chatRestore")}
+              aria-label={t("codingAgent.chatRestore")}
+              style={{
+                pointerEvents: 'auto',
+                width: 42, height: 42, borderRadius: '50%',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                padding: 0, fontSize: 20, lineHeight: 1, cursor: 'pointer',
+                background: 'rgba(13,17,23,0.92)',
+                border: '1px solid rgba(252,211,77,0.45)',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.45)',
+                color: '#fcd34d',
+              }}
+            >
+              <span aria-hidden="true">🤖</span>
+            </button>
+          </div>
+        )}
+
         {streaming && <ChatAppStreamingBubble text={streaming} t={t} />}
 
         {sending && !streaming && (
@@ -2319,16 +2389,22 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
         </div>
       )}
 
+      {/* The Create card, over the composer (the mascot chat's place for it). */}
+      {chatUser === null && <NewAppCardSlot card={newApp} />}
+
       {/* Input area */}
       <div style={{
         padding: '10px 14px 12px',
-        borderTop: pendingAttachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
+        borderTop: (pendingAttachments.length > 0 || newApp.show) ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
         // A phone's unfolded attachment buttons take a line of their own.
         flexWrap: tuckable ? 'wrap' : undefined,
       }}>
         {!tuckable && attachControls}
+        {/* Create: the Coding Agent's New app card, right here — the chat is
+            where the request lands, so it is where it starts. */}
+        {!tuckable && chatUser === null && <NewAppToggleButton card={newApp} />}
         {/* A phone: the fold control leads the row, so the button just
             pressed never moves; the attachment buttons it folds away sit
             on a line of their own after Send when unfolded (below). */}
@@ -2446,6 +2522,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
             style={{ flexBasis: '100%', display: 'flex', gap: 8, alignItems: 'center' }}
           >
             {attachControls}
+            {chatUser === null && <NewAppToggleButton card={newApp} />}
           </div>
         )}
       </div>

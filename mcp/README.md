@@ -372,6 +372,17 @@ with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
 
+`ui_open_app` takes, for the `coding` app only, one of `run_id`, `team_id` or
+`project_id`: the desktop opens the Coding Agent ON that run's page, that
+team, or that project's page (the ring's `open_app` carries a `target`;
+page.tsx hands the id to the app the way the chat's cards do). "Show me the
+run" is one call. `ui_open_card({ card: "new_app", project_id?, team? })`
+opens the chat's "A new app for your desktop" card for the user to fill in —
+`project_id` is the project's absolute folder, `team: true` switches the card
+to a coding team — and the request arrives as their next message; use it when
+the user wants a new app or a change and has not said the details, instead of
+asking several questions.
+
 An app `webapp_create` or `code_project_build` puts on the desktop without an
 icon gets one drawn by ClawBox AI's image model when the box is linked — after
 the tool has answered, never overwriting an icon that exists, one picture per
@@ -978,6 +989,17 @@ gesture, and stopping already covers ending a run.
 ### Coding team (both editions, the same switch)
 
 `coding_team_run` · `coding_team_status` · `coding_team_stop`
+
+A team the assistant starts shows up in the user's chat as a CARD — live, then
+settled — and so does every `coding_agent_run`; the two start tools say so in
+their prose ("the chat shows this as a card … do not describe progress yourself
+and do not poll") and are the only two tools whose result carries MCP
+`structuredContent` (`{ kind: "coding_run" | "coding_team", id, projectId,
+directory, title, status: "running" | "queued", queuePosition? }`), so a chat
+client can draw its own card without parsing the sentence. `coding_team_status`
+without a `team_id` lists `phase`, `tasks_done`, `tasks_total` and `pr_number`
+beside the older fields; with one, its closing line says the chat shows the
+team's card and not to paste the task list unless asked.
 
 The multi-agent shape of the coding agent (`src/lib/coding-team.ts`): one
 GOAL, a **planner** (a read-only run on the tier model whose final message

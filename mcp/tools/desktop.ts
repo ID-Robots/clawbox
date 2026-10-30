@@ -17,6 +17,12 @@ import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
 
+/** The ids the box mints (src/lib/coding-agent.ts, coding-team-board.ts) — what `ui_open_app coding` may hand a window. */
+const CODING_RUN_ID_RE = /^run-[a-z0-9]{8}$/;
+const CODING_TEAM_ID_RE = /^team-[a-z0-9]{8}$/;
+/** A code project id or a folder project's name: one path segment, no slashes, no dots at the start. */
+const PROJECT_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/;
+
 /**
  * Hand the desktop an action. This process cannot append to the owner-notice
  * ring itself (src/lib/pending-actions.ts — the web server's file, and one
@@ -142,9 +148,34 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     `Open a window on the ClawBox desktop for the user to see or use. Built-in apps here: ${appLine}. For an app the user installed or you built, pass "installed-<id>" (ids from ui_list_apps). To browse the web, use browser_open, not the "browser" app.`,
     {
       app_id: zText(80, "A built-in app id, or \"installed-<id>\" for an installed app."),
+      run_id: zOptText(40, "With app_id \"coding\": open this coding run's page (an id like \"run-k3x9q2ab\")."),
+      team_id: zOptText(40, "With app_id \"coding\": open this coding team (an id like \"team-k3x9q2ab\")."),
+      project_id: zOptText(200, "With app_id \"coding\": open this project's page — a code project id, or a folder project's name."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, profile: "core" },
-    async ({ app_id }: { app_id: string }) => {
+    async ({ app_id, run_id, team_id, project_id }: { app_id: string; run_id?: string; team_id?: string; project_id?: string }) => {
+      // A place INSIDE the Coding Agent: one of the three, and only for that
+      // app — "show me the run" is one tool call, and the desktop hands the
+      // id to the app the way the chat's cards do (page.tsx, the ring
+      // handler). Shape-checked here, because the id lands in a window's
+      // record; the app looks the run or team up and opens nothing it does
+      // not hold.
+      const target: Record<string, string> = {};
+      if (run_id || team_id || project_id) {
+        if (app_id !== "coding") {
+          throw new ToolError("BAD_ARGUMENT", "run_id, team_id and project_id only apply to the \"coding\" app.", "Pass app_id \"coding\" with one of them, or leave them out.");
+        }
+        if (run_id) {
+          if (!CODING_RUN_ID_RE.test(run_id)) throw new ToolError("BAD_ARGUMENT", "That is not a coding run id.", "Pass the id coding_agent_run or coding_run_list answered, like \"run-k3x9q2ab\".");
+          target.runId = run_id;
+        } else if (team_id) {
+          if (!CODING_TEAM_ID_RE.test(team_id)) throw new ToolError("BAD_ARGUMENT", "That is not a coding team id.", "Pass the id coding_team_run or coding_team_status answered, like \"team-k3x9q2ab\".");
+          target.teamId = team_id;
+        } else if (project_id) {
+          if (!PROJECT_TARGET_RE.test(project_id)) throw new ToolError("BAD_ARGUMENT", "That is not a project id or folder name.", "Pass a code project id from code_project_list, or a folder project's name from coding_project_status.");
+          target.projectId = project_id;
+        }
+      }
       // Order matters: check the app EXISTS on this edition before writing the
       // pending action. The previous version wrote first and then answered
       // "Opening X" for apps that are not installed on this harness at all.
@@ -200,13 +231,38 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
           "Tell the user; to show a page anywhere else, use browser_open.",
         );
       }
-      await pushUiAction({ type: "open_app", appId: app_id });
+      await pushUiAction({ type: "open_app", appId: app_id, ...(Object.keys(target).length ? { target } : {}) });
       if (app_id === "browser") {
         return text("Opened the Browser Setup panel. That is the settings panel — to actually browse the web, use browser_open.");
       }
+      if (target.runId) return text(`Opened the Coding Agent on run ${target.runId}. Tell the user it is on their desktop and stop.`);
+      if (target.teamId) return text(`Opened the Coding Agent on team ${target.teamId}. Tell the user it is on their desktop and stop.`);
+      if (target.projectId) return text(`Opened the Coding Agent on project "${target.projectId}". Tell the user it is on their desktop and stop.`);
       // The same sentence `clawbox app open` prints, from one place — an
       // `external` app is hedged about on both surfaces or on neither.
       return text(openedAppNotice(apps.find((a) => a.id === app_id), app_id));
+    },
+  );
+
+  reg.tool(
+    "ui_open_card",
+    "Open a card in the user's chat for them to fill in. The one card, \"new_app\", is \"A new app for your desktop\": name, what it should do, which starter — or an existing project and what its next run should do, as a run or a coding team. Use it when the user wants a new app or a change without saying the details, instead of asking questions; what they submit arrives as their next message.",
+    {
+      card: zEnumOf(["new_app"], "Which card: \"new_app\"."),
+      project_id: zOptText(512, "Open the card on this existing project — its absolute folder path, as coding_project_status lists it."),
+      team: zBool(false, "With project_id: open the card with \"Run it as a coding team\" switched on."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false, profile: "core" },
+    async ({ card, project_id, team }: { card: string; project_id?: string; team: boolean }) => {
+      if (card !== "new_app") throw new ToolError("BAD_ARGUMENT", "There is no such card.", "The one card is \"new_app\".");
+      if (project_id !== undefined && !project_id.startsWith("/")) {
+        throw new ToolError("BAD_ARGUMENT", "project_id must be the project's absolute folder path.", "Read it from coding_project_status (the `directory` of the project), or leave it out for a new app.");
+      }
+      await pushUiAction({ type: "open_card", card: "new_app", ...(project_id ? { project: project_id } : {}), ...(team ? { team: true } : {}) });
+      return text(
+        `Opened the "A new app for your desktop" card in the user's chat${project_id ? ` on project ${project_id}${team ? " with the coding team switch on" : ""}` : ""}. `
+        + "Tell them to fill it in and stop; what they submit arrives as their next message, and you take it from there.",
+      );
     },
   );
 

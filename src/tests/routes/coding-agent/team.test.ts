@@ -5,6 +5,7 @@
  * their status, the board answered as-is.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { teamCard } from "@/lib/coding-agent-slim";
 
 const team = vi.hoisted(() => ({
   startTeam: vi.fn(),
@@ -78,13 +79,15 @@ describe("GET", () => {
   });
 
   it("answers a settled board slim on ?slim=1 — no log, its tasks' text gone — and a working one whole", async () => {
-    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted", notes: "fine", at: 1 } };
+    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted" as const, notes: "fine", at: 1 } };
     const done = { ...BOARD, id: "team-done00001", status: "done", log: [{ type: "note", message: "planned" }], tasks: [task] };
     const working = { ...BOARD, id: "team-work00001", status: "working", log: [{ type: "note", message: "planned" }], tasks: [task] };
     team.listTeams.mockReturnValue([done, working]);
     const slim = await (await GET(req("team?slim=1"))).json();
-    expect(slim.teams[0]).toEqual({ ...done, slim: true, log: [], tasks: [{ ...task, result: null, review: { verdict: "accepted", notes: "", at: 1 } }] });
-    expect(slim.teams[1]).toEqual(working);
+    // Every slim board carries `card` — the chat's team card reads it.
+    expect(slim.teams[0]).toEqual({ ...done, slim: true, log: [], tasks: [{ ...task, result: null, review: { verdict: "accepted", notes: "", at: 1 } }], card: teamCard(done) });
+    expect(slim.teams[1]).toEqual({ ...working, card: teamCard(working) });
+    expect(slim.teams[1].card).toMatchObject({ phase: "working", tasksDone: 1, tasksTotal: 1, prNumber: null });
     expect(await (await GET(req("team"))).json()).toEqual({ teams: [done, working] });
     // One board by id is never slim.
     team.getTeam.mockReturnValue(done);

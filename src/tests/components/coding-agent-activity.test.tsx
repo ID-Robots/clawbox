@@ -19,7 +19,7 @@ import { cleanup, renderHook } from "@testing-library/react";
 import { translations } from "@/lib/translations";
 import CodingAgentActivityPill from "@/components/CodingAgentActivityPill";
 import { artifactUrl, IDLE_POLL_MS, isCodingAgentTool, useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
-import { notifyCodingRunStarted } from "@/lib/ui-events";
+import { notifyCodingRunStarted, notifyCodingTeamChanged } from "@/lib/ui-events";
 
 const NOW = Date.now();
 const RUNNING = {
@@ -87,6 +87,13 @@ const TODOS = [
  * of those queries per test blew the 5 s budget. Its role is asserted once.
  */
 const header = () => screen.getByTestId("coding-agent-activity-toggle");
+/**
+ * How many times the RUNS route was asked. Every poll is two requests since
+ * the team list rides on the same beat (`/team?slim=1`), so a test about the
+ * poll's cadence counts the run reads, not the fetches.
+ */
+const runPolls = (fetchMock: { mock: { calls: unknown[][] } }) =>
+  fetchMock.mock.calls.filter(([url]) => String(url).includes("/coding-agent/runs")).length;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -95,10 +102,13 @@ afterEach(() => {
 
 describe("which tools mean a run may have started", () => {
   it("recognises the coding-agent family and nothing else", () => {
-    for (const name of ["coding_agent_run", "coding_agent_status", "clawbox__coding_agent_run"]) {
+    // The whole coding family since 2026-10-30: a team, a run message, a
+    // project tool and the scaffold a run follows all start or change
+    // something a card shows.
+    for (const name of ["coding_agent_run", "coding_agent_status", "clawbox__coding_agent_run", "coding_team_run", "coding_run_message", "coding_project_status", "code_project_init"]) {
       expect(isCodingAgentTool(name), name).toBe(true);
     }
-    for (const name of ["bash", "code_project_init", "web_search", "email_send"]) {
+    for (const name of ["bash", "code_project_build", "web_search", "email_send"]) {
       expect(isCodingAgentTool(name), name).toBe(false);
     }
   });
@@ -272,16 +282,16 @@ describe("useCodingAgentActivity", () => {
       initialProps: { open: true },
     });
     await act(async () => { await Promise.resolve(); });
-    const calls = fetchMock.mock.calls.length;
+    const calls = runPolls(fetchMock);
 
     // Messages keep arriving and the chat re-renders: the badge stays, and
     // only the slow idle check asks — not the five-second poll.
     rerender({ open: true });
     await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 100); });
     expect(result.current.runs).toHaveLength(1);
-    expect(fetchMock.mock.calls.length).toBe(calls);
+    expect(runPolls(fetchMock)).toBe(calls);
     await act(async () => { await vi.advanceTimersByTimeAsync(200); });
-    expect(fetchMock.mock.calls.length).toBe(calls + 1);
+    expect(runPolls(fetchMock)).toBe(calls + 1);
   });
 
   it("asks once more after a run it watched settles — the review pass starts after the record is written", async () => {
@@ -296,15 +306,15 @@ describe("useCodingAgentActivity", () => {
 
     renderHook(() => useCodingAgentActivity(true));
     await act(async () => { await Promise.resolve(); });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(runPolls(fetchMock)).toBe(1);
 
     status = "completed";
     await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
-    expect(fetchMock).toHaveBeenCalledTimes(2); // saw it settle
+    expect(runPolls(fetchMock)).toBe(2); // saw it settle
     await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
-    expect(fetchMock).toHaveBeenCalledTimes(3); // the one round owed
+    expect(runPolls(fetchMock)).toBe(3); // the one round owed
     await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 1_000); });
-    expect(fetchMock).toHaveBeenCalledTimes(3); // then only the slow idle check
+    expect(runPolls(fetchMock)).toBe(3); // then only the slow idle check
   });
 
   it("finds a run started where the chat cannot see it — API, MCP, another session — with the idle check, no refresh", async () => {
@@ -334,11 +344,11 @@ describe("useCodingAgentActivity", () => {
 
     const { result } = renderHook(() => useCodingAgentActivity(true));
     await act(async () => { await Promise.resolve(); });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(runPolls(fetchMock)).toBe(1);
 
     fail = false;
     await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS + 100); });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(runPolls(fetchMock)).toBe(2);
     expect(result.current.runs).toHaveLength(1);
   });
 
@@ -352,7 +362,7 @@ describe("useCodingAgentActivity", () => {
       renderHook(() => useCodingAgentActivity(true));
       await act(async () => { await Promise.resolve(); });
       await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 3); });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(runPolls(fetchMock)).toBe(1);
     } finally {
       if (visibility) Object.defineProperty(document, "visibilityState", visibility);
       else delete (document as { visibilityState?: unknown }).visibilityState;
@@ -367,13 +377,13 @@ describe("useCodingAgentActivity", () => {
 
     const { result } = renderHook(() => useCodingAgentActivity(true));
     await act(async () => { await Promise.resolve(); });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(runPolls(fetchMock)).toBe(1);
     expect(result.current.runs).toHaveLength(0);
 
     fetchMock.mockImplementation(async () => runsResponse([RUNNING]));
     act(() => { notifyCodingRunStarted(); });
     await waitFor(() => expect(result.current.runs).toHaveLength(1));
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(runPolls(fetchMock)).toBe(2);
   });
 
   it("does not hear the desktop while the chat is closed", async () => {
@@ -394,11 +404,11 @@ describe("useCodingAgentActivity", () => {
     try {
       renderHook(() => useCodingAgentActivity(true));
       await act(async () => { await Promise.resolve(); });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(runPolls(fetchMock)).toBe(1);
 
       act(() => { document.dispatchEvent(new Event("visibilitychange")); });
       await act(async () => { await Promise.resolve(); });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(runPolls(fetchMock)).toBe(2);
     } finally {
       if (visibility) Object.defineProperty(document, "visibilityState", visibility);
       else delete (document as { visibilityState?: unknown }).visibilityState;
@@ -963,3 +973,180 @@ describe("the plan and the signs of life", () => {
 function cleanupRender() {
   cleanup();
 }
+
+// ── The 2026-10-30 redesign: teams on the same beat, members hidden, the settled card ──
+
+function pollResponse(runs: unknown[], teams: unknown[] | null) {
+  return vi.fn(async (url: string) => {
+    if (String(url).includes("/coding-agent/team")) {
+      if (teams === null) return new Response(JSON.stringify({ error: "owner_only" }), { status: 403 });
+      return new Response(JSON.stringify({ teams }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return runsResponse(runs);
+  });
+}
+
+const TEAM_PAYLOAD = {
+  id: "team-k3x9q2ab",
+  goal: "Settings drawer and export",
+  projectId: "sca",
+  directory: "/srv/projects/sca",
+  status: "working",
+  source: "agent",
+  createdAt: NOW - 60_000,
+  finishedAt: null,
+  error: null,
+  metrics: { tokensUsed: 46_000 },
+  card: { phase: "working", tasksDone: 1, tasksTotal: 2, tasks: [{ id: "T1", title: "Drawer", status: "complete", verdict: "accepted", workerRunId: "run-00000002", reviewerRunId: null }], prNumber: null, resultLine: null, agents: [{ role: "worker", runId: "run-00000002", state: "done" }] },
+};
+
+describe("useCodingAgentActivity — teams and member runs", () => {
+  it("reads the slim team list on the same beat as the runs and hands the teams back with their card", async () => {
+    const fetchMock = pollResponse([RUNNING], [TEAM_PAYLOAD]);
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.teams).toHaveLength(1));
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringMatching(/\/setup-api\/coding-agent\/runs\?limit=/),
+      "/setup-api/coding-agent/team?slim=1",
+    ]);
+    expect(result.current.teams[0]).toMatchObject({
+      id: "team-k3x9q2ab", projectId: "sca", goal: "Settings drawer and export", status: "working",
+      tasksDone: 1, tasksTotal: 2, prNumber: null, tokensUsed: 46_000,
+    });
+    expect(result.current.teams[0].tasks).toHaveLength(1);
+    expect(result.current.teams[0].agents).toHaveLength(1);
+    expect(result.current.runs).toHaveLength(1);
+  });
+
+  it("keeps the runs when the team list is refused — a signed-in person who is not the owner", async () => {
+    vi.stubGlobal("fetch", pollResponse([RUNNING], null));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+    expect(result.current.teams).toEqual([]);
+  });
+
+  it("never draws a team's member run as a card of its own once the team is listed", async () => {
+    const member = { ...RUNNING, id: "run-member001", team: { id: "team-k3x9q2ab", role: "worker", taskId: "T1" } };
+    vi.stubGlobal("fetch", pollResponse([member, RUNNING], [TEAM_PAYLOAD]));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+    expect(result.current.runs[0].id).toBe("run-k3x9q2ab");
+    expect(result.current.runs[0].teamId).toBeNull();
+    expect(result.current.teams).toHaveLength(1);
+  });
+
+  it("holds a member whose team is not listed yet for one poll, then shows it on its own", async () => {
+    vi.useFakeTimers();
+    const member = { ...RUNNING, id: "run-member001", team: { id: "team-missing1", role: "worker", taskId: "T1" } };
+    vi.stubGlobal("fetch", pollResponse([member], []));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    // First sight: held, no flicker.
+    expect(result.current.runs).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    // Still no team after a poll: the run is its own card after all.
+    expect(result.current.runs).toHaveLength(1);
+    expect(result.current.runs[0].teamId).toBe("team-missing1");
+  });
+
+  it("keeps polling fast while a team works even when no run does", async () => {
+    vi.useFakeTimers();
+    const fetchMock = pollResponse([], [TEAM_PAYLOAD]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(runPolls(fetchMock)).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    expect(runPolls(fetchMock)).toBe(2);
+  });
+
+  it("asks again when the desktop says a team changed", async () => {
+    const fetchMock = pollResponse([], []);
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(runPolls(fetchMock)).toBe(1);
+    fetchMock.mockImplementation(pollResponse([], [TEAM_PAYLOAD]));
+    act(() => { notifyCodingTeamChanged(); });
+    await waitFor(() => expect(result.current.teams).toHaveLength(1));
+  });
+
+  it("carries the settled card's fields: the result's first sentence, the error's first line, the PR number, the refused line", async () => {
+    vi.stubGlobal("fetch", pollResponse([
+      { ...RUNNING, id: "run-done00001", status: "completed", completedAt: NOW + 9_000, summaryLine: "Added the drawer.", pr: { number: 12, phase: "merged" } },
+      { ...RUNNING, id: "run-fail00001", status: "failed", completedAt: NOW + 9_000, error: "Build failed: exit 1\nmore" },
+      { ...RUNNING, id: "run-pause0001", status: "paused", denials: [{ text: "Read: /srv/notes.md", rule: null, refusal: null }] },
+    ], []));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(3));
+    const byId = Object.fromEntries(result.current.runs.map((r) => [r.id, r]));
+    expect(byId["run-done00001"]).toMatchObject({ summaryLine: "Added the drawer.", prNumber: 12, needsYou: false, errorLine: null });
+    expect(byId["run-fail00001"]).toMatchObject({ errorLine: "Build failed: exit 1", summaryLine: null });
+    expect(byId["run-pause0001"]).toMatchObject({ needsYou: true, refusedLine: "Read: /srv/notes.md" });
+  });
+});
+
+describe("CodingAgentActivityPill — the settled card and Needs you", () => {
+  const SETTLED_LABELS = { ...LABELS, needsYou: en["codingAgent.chatNeedsYou"], files: en["codingAgent.chatFiles"], pr: en["codingAgent.chatPr"] };
+  const base = {
+    ...RUNNING, subagentsTotal: 2, subagentsActive: 0, subagentsByType: {}, tokensUsed: 46_000, thinkingTokens: 0, filesTouched: 2, numTurns: 9,
+    progress: ["$ bun test"], screenshots: [], todos: [], transcriptPath: null, sessionId: null, directory: null, teamId: null,
+  };
+
+  it("done: the result's first sentence, files and time, a PR chip, Open — no progress, no dots", () => {
+    render(
+      <CodingAgentActivityPill
+        run={{ ...base, status: "completed", completedAt: NOW + 9 * 60_000, summaryLine: "Added a settings drawer with three toggles.", prNumber: 12, errorLine: null, needsYou: false, refusedLine: null } as never}
+        labels={SETTLED_LABELS}
+        openLabel={OPEN}
+        onOpen={() => {}}
+      />,
+    );
+    const result = screen.getByTestId("coding-agent-activity-result");
+    expect(result).toHaveTextContent("Added a settings drawer with three toggles.");
+    expect(result).toHaveAttribute("data-tone", "result");
+    expect(screen.getByTestId("coding-agent-activity")).toHaveTextContent("2 files");
+    expect(screen.getByTestId("coding-agent-activity-pr")).toHaveTextContent("PR #12");
+    expect(screen.getByTestId("coding-agent-activity-view")).toHaveTextContent("Open");
+    expect(screen.queryByTestId("coding-agent-progressbar")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-activity-progress")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-activity-subagents")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-activity-needs-you")).toBeNull();
+  });
+
+  it("failed: the error's first line in the danger tone", () => {
+    render(
+      <CodingAgentActivityPill
+        run={{ ...base, status: "failed", completedAt: NOW + 9_000, summaryLine: null, errorLine: "Build failed: exit 1", prNumber: null, needsYou: false, refusedLine: null } as never}
+        labels={SETTLED_LABELS}
+        openLabel={OPEN}
+      />,
+    );
+    const result = screen.getByTestId("coding-agent-activity-result");
+    expect(result).toHaveTextContent("Build failed: exit 1");
+    expect(result).toHaveAttribute("data-tone", "danger");
+    expect(screen.queryByTestId("coding-agent-activity-pr")).toBeNull();
+  });
+
+  it("paused on a refusal: the Needs you chip and the refused line", () => {
+    render(
+      <CodingAgentActivityPill
+        run={{ ...base, status: "paused", summaryLine: null, errorLine: null, prNumber: null, needsYou: true, refusedLine: "Read: /srv/notes.md" } as never}
+        labels={SETTLED_LABELS}
+        openLabel={OPEN}
+      />,
+    );
+    expect(screen.getByTestId("coding-agent-activity-needs-you")).toHaveTextContent("Needs you");
+    const result = screen.getByTestId("coding-agent-activity-result");
+    expect(result).toHaveTextContent("Read: /srv/notes.md");
+    expect(result).toHaveAttribute("data-tone", "attention");
+  });
+
+  it("Open and × are 44-px targets", () => {
+    render(<CodingAgentActivityPill run={{ ...base, teamId: null } as never} labels={SETTLED_LABELS} openLabel={OPEN} onOpen={() => {}} onDismiss={() => {}} />);
+    expect(screen.getByTestId("coding-agent-activity-view").style.minHeight).toBe("44px");
+    expect(screen.getByTestId("coding-agent-activity-dismiss").style.width).toBe("44px");
+    expect(screen.getByTestId("coding-agent-activity-dismiss").style.height).toBe("44px");
+  });
+});

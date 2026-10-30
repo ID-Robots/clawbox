@@ -1033,11 +1033,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // QUEUED, not refused: the box was already running every run the owner
       // allows. The run starts by itself, in order, when one ends.
       if (res.queued && run?.id) {
-        return text(
+        const queuedReply = text(
           `Queued coding run "${run.id}" for ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}: this ClawBox is already running as many coding runs as the owner allows`
           + `${run.queued?.position ? `, so it is number ${run.queued.position} in line` : ""}. It starts by itself when a running run ends — after a restart too — and only the owner can cancel it. `
-          + `Do NOT start it again. Tell the user it is queued and stop; coding_run_list shows its place in line.`,
+          + `Do NOT start it again. The chat shows it as a card and tells you when it finishes; tell the user it is queued and stop — do not poll. coding_run_list shows its place in line.`,
         );
+        return { ...queuedReply, structuredContent: startedContent("coding_run", run.id, run.projectId, run.directory, run.task, "queued", run.queued?.position) };
       }
       if (!res.started || !run?.id) {
         throw new ToolError(
@@ -1046,7 +1047,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           "Call coding_agent_status to see whether a run appeared; if not, tell the user and do not retry more than once.",
         );
       }
-      return text(
+      const reply = text(
         `Started coding run "${run.id}" in ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}. `
         // Where the work will actually be. A run gets a copy of the project
         // on a branch of its own, which is what lets another run work in the
@@ -1061,8 +1062,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         // something the run will otherwise be blamed for not using.
         + inputsSentence(run, inputs.length)
         + "It works in the background on the ClawBox and may take several minutes. "
-        + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
+        + "The chat shows this as a card with its progress and tells you when it finishes; say it is running and stop — do not describe progress yourself and do not poll. "
+        + `Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
       );
+      // The same facts as data, for the chat client: the one tool besides
+      // coding_team_run that carries structuredContent (mcp/lib/register.ts).
+      return { ...reply, structuredContent: startedContent("coding_run", run.id, run.projectId, run.directory, run.task, "running") };
     },
   );
 
@@ -1681,6 +1686,33 @@ function slotWaitName(wait: { role: string; taskId: string | null }): string {
  * later" taught the assistant to poll — and once to build itself a cron
  * watcher per team.
  */
+/**
+ * The `structuredContent` of the two START tools — `coding_agent_run` and
+ * `coding_team_run`, and only those two (mcp/lib/register.ts `ToolResult`):
+ * what was started, where, and whether it runs or waits, as data a chat
+ * client can draw a card from without parsing the prose. `title` is the
+ * task's or goal's first line, redacted like every other line here.
+ */
+export function startedContent(
+  kind: "coding_run" | "coding_team",
+  id: string,
+  projectId: string | null | undefined,
+  directory: string,
+  title: string,
+  status: "running" | "queued",
+  queuePosition?: number,
+): Record<string, unknown> {
+  return {
+    kind,
+    id,
+    projectId: projectId ?? null,
+    directory,
+    title: redact(firstLine(title, 120)),
+    status,
+    ...(status === "queued" && typeof queuePosition === "number" ? { queuePosition } : {}),
+  };
+}
+
 const TEAM_SETTLE_WORD: Record<Ed, string> = {
   openclaw: "ClawBox posts in this chat when the team finishes; do not poll it or schedule a watcher.",
   hermes: "ClawBox tells the user on the desktop when the team finishes; do not poll it or schedule a watcher — look again only when they ask.",
@@ -1768,7 +1800,7 @@ function describeTeam(team: TeamPayload, withLog: boolean, edition: Ed): string 
   } else if ((team.status === "planning" || team.status === "working" || team.status === "reviewing") && waits.length) {
     parts.push(`Waiting for a free slot: the box is busy with other runs, and the team goes on by itself as they finish. Tell the user and stop; do not start it again. ${TEAM_SETTLE_WORD[edition]}`);
   } else if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
-    parts.push(`Still working. Tell the user and stop. ${TEAM_SETTLE_WORD[edition]}`);
+    parts.push(`Still working. Tell the user and stop. ${TEAM_SETTLE_WORD[edition]} The chat shows the team's card; do not paste the task list unless asked.`);
   } else if (team.status === "done") {
     parts.push("Every task is complete and accepted. Summarise the task results for the user, naming the files.");
   } else if (team.status === "failed") {
@@ -1804,24 +1836,27 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       }
       const team = res.team;
       if (res.queued && team?.id) {
-        return text(
+        const queuedReply = text(
           `Queued coding team "${team.id}" for ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}: another team is working on this ClawBox`
           + `${team.queuePosition ? `, so it is number ${team.queuePosition} in line` : ""}. It starts by itself when the team ahead of it finishes — after a restart too — and only the owner can cancel it. `
-          + "Do NOT start it again. Tell the user it is queued and stop; coding_team_status shows its place.",
+          + "Do NOT start it again. The chat shows it as a card and tells you when it finishes; tell the user it is queued and stop — do not poll. coding_team_status shows its place.",
         );
+        return { ...queuedReply, structuredContent: startedContent("coding_team", team.id, team.projectId, team.directory, team.goal, "queued", team.queuePosition) };
       }
       if (!res.started || !team?.id) {
         throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not start the team.", "Call coding_team_status to see whether a team appeared; if not, tell the user and do not retry more than once.");
       }
       const advice = teamAdviceSentence(team);
-      return text(
+      const reply = text(
         `Started coding team "${team.id}" in ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}. `
         + "The planner is reading the folder; workers follow — side by side in a folder project, one at a time in a code project. This takes a while. "
         + (advice
           ? `${advice} `
           : "If the plan comes back with one task it runs as one ordinary run, and coding_team_status says so — and says when a single run would have been cheaper. ")
-        + `Tell the user it is running and stop. ${TEAM_SETTLE_WORD[ctx.edition]} Its result is in coding_team_status.`,
+        + "The chat shows this as a card with its progress and tells you when it finishes; say it is running and stop — do not describe progress yourself and do not poll. "
+        + `${TEAM_SETTLE_WORD[ctx.edition]} Its result is in coding_team_status.`,
       );
+      return { ...reply, structuredContent: startedContent("coding_team", team.id, team.projectId, team.directory, team.goal, "running") };
     },
   );
 
@@ -1844,12 +1879,16 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           status: t.status,
           ...(t.status === "queued" && t.queuePosition ? { queue_position: t.queuePosition } : {}),
           ...(t.status !== "queued" && t.slotWaits?.length ? { waiting_for: `a free slot: ${t.slotWaits.map(slotWaitName).join(", ")}` } : {}),
-          ...(t.pr ? { pull_request: `#${t.pr.number} ${t.pr.phase}` } : {}),
+          ...(t.pr ? { pull_request: `#${t.pr.number} ${t.pr.phase}`, pr_number: t.pr.number } : {}),
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
+          // The chat's team card reads the same three (the slim board's `card`).
+          phase: t.status,
           // A retired task will never be done: counted, a finished team read as unfinished.
           tasks: t.tasks.filter((x) => x.status !== "retired").length,
+          tasks_total: t.tasks.filter((x) => x.status !== "retired").length,
           complete: t.tasks.filter((x) => x.status === "complete").length,
+          tasks_done: t.tasks.filter((x) => x.status === "complete").length,
           alerts: t.alerts,
           ...(t.singleRun ? { single_run: true } : t.advice ? { advice: t.advice.reason === "one_task" ? "a single run would have been cheaper: one task" : `a single run would have been cheaper: ${t.advice.overlap}% of the files overlap` } : {}),
         })));
