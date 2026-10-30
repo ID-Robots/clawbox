@@ -2,13 +2,22 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
+import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { pushPendingAction } from "@/lib/pending-actions";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, inputs?, experience?, fixCi? } → start a coding run.
+ * effort?, deliverable?, inputs?, experience?, fixCi? } → start a coding run.
+ *
+ * `effort` is the per-request override of the owner's effort setting
+ * (Settings → Coding Agent): one of OFFERED_EFFORT_LEVELS (`low`, `xhigh`,
+ * `max`, `ultracode`), validated HERE — 400 `invalid` with `code: "effort"`
+ * naming the levels — and again in `startRun`, where it stands in for the
+ * owner's setting and nothing more: a reading role's cap and the read-only
+ * clamp still apply after it. The Create card's Ultracode toggle asks the
+ * assistant to pass it (`coding_agent_run`'s `effort`).
  *
  * `fixCi: true` with `resumeRunId` is a "Fix CI" continuation: the run named
  * had its pull request fail its checks (the record's `ci`), and the box
@@ -64,7 +73,7 @@ export async function POST(request: Request) {
 
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
-    provider?: unknown; model?: unknown; deliverable?: unknown;
+    provider?: unknown; model?: unknown; effort?: unknown; deliverable?: unknown;
     inputs?: unknown; experience?: unknown; fixCi?: unknown;
   };
   try {
@@ -85,6 +94,11 @@ export async function POST(request: Request) {
       { status: 413 },
     );
   }
+  // A level this box does not offer is refused before anything is read or
+  // held, with a `code` so the MCP tool advises on the right argument.
+  if (body.effort !== undefined && body.effort !== null && !isOfferedEffort(body.effort)) {
+    return NextResponse.json({ error: effortRefusal(body.effort), kind: "invalid", code: "effort" }, { status: 400 });
+  }
 
   // Who is asking decides how the run is labelled, nothing more: an owner
   // clicking in Settings holds a cookie, the agent holds the bearer.
@@ -100,6 +114,9 @@ export async function POST(request: Request) {
       // cannot accept a combination the MCP tool would refuse, or the reverse.
       provider: body.provider,
       model: body.model,
+      // Validated above; `startRun` checks it once more and applies it where
+      // the owner's effort is read, before the role caps and the read-only clamp.
+      ...(body.effort !== undefined && body.effort !== null ? { effort: body.effort } : {}),
       source,
       // Passed through unvalidated ON PURPOSE: `startRun` reads it through the
       // one reader (`readDeliverableInput`), which is also what the draft route

@@ -102,6 +102,7 @@ import {
   type TeamRoleModelMap,
 } from "@/lib/coding-agent";
 import { announceCodingTeam } from "@/lib/coding-agent-notify";
+import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
@@ -224,6 +225,13 @@ export interface StartTeamInput {
   projectId?: string | null;
   directory?: string | null;
   source: CodingRunSource;
+  /**
+   * How hard every run of the team thinks, as the CALLER sent it — one of
+   * OFFERED_EFFORT_LEVELS, else `invalid`. Kept on the board and handed to
+   * every member run as its input effort (StartRunInput.effort), where the
+   * role caps and the read-only clamp still apply. Absent: the owner's setting.
+   */
+  effort?: unknown;
 }
 
 interface LiveTeam {
@@ -326,6 +334,12 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const goal = typeof input.goal === "string" ? input.goal.trim() : "";
   if (!goal) throw new CodingAgentError("invalid", "A team needs a goal.");
   if (goal.length > MAX_TASK_CHARS) throw new CodingAgentError("invalid", `The goal is too long (${goal.length} > ${MAX_TASK_CHARS} characters).`);
+  // Before anything is resolved or made: a level this box does not offer is a
+  // plain 400, the same sentence the run route gives.
+  if (input.effort !== undefined && input.effort !== null && !isOfferedEffort(input.effort)) {
+    throw new CodingAgentError("invalid", effortRefusal(input.effort));
+  }
+  const effort = isOfferedEffort(input.effort) ? input.effort : null;
   const { directory, projectId } = await resolveWorkingDirectory({ projectId: input.projectId ?? null, directory: input.directory ?? null });
   // Before anything is made or spawned: a team whose planner, workers or
   // reviewers sit on an account that cannot run would fail at its first run
@@ -345,7 +359,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
 
   // The owner's team is created in the owner's name; the assistant's by the
   // system on its behalf — the audit says which, and the routes gate on it.
-  const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
+  const board = createBoard({ goal, projectId, directory, source: input.source, dynamic, effort }, input.source === "owner" ? OWNER : SYSTEM);
   if (busy || waiting.length) {
     setTeamStatus(board, SYSTEM, "queued", busy ? `Waiting for team ${busy} to finish` : `Waiting behind ${waiting.length} queued team(s)`);
     saveBoard(board);
@@ -1050,6 +1064,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     team: plannerRole,
     readOnly: true,
     extraBrief: brief(),
+    effort: board.effort,
   }));
   if (!planner) return;
   board.plannerRunId = planner.id;
@@ -1084,8 +1099,8 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     // the ask is for the plan alone. A session the runner cannot continue (it
     // never opened one, the record is gone) is a fresh read-only run instead,
     // the way the first was — never a lost attempt.
-    const fresh = { task: reask, projectId: board.projectId, directory: board.directory, source, team: plannerRole, readOnly: true as const, extraBrief: brief() };
-    const resumed = { task: reask, resumeRunId: lastPlanner, source, team: plannerRole, readOnly: true as const, extraBrief: brief() };
+    const fresh = { task: reask, projectId: board.projectId, directory: board.directory, source, team: plannerRole, readOnly: true as const, extraBrief: brief(), effort: board.effort };
+    const resumed = { task: reask, resumeRunId: lastPlanner, source, team: plannerRole, readOnly: true as const, extraBrief: brief(), effort: board.effort };
     const again = await startWhenRoom(team, plannerRole, () => 0, async () => {
       try {
         return await startRun(resumed);
@@ -1417,6 +1432,7 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
         directory: board.directory,
         source,
         extraBrief: repoMapBrief(board, null),
+        effort: board.effort,
       });
     } catch (err) {
       if (err instanceof SlotsFullError && Date.now() - waitingSince < RUN_BUDGET_MS) {
@@ -1498,6 +1514,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       team: { id: board.id, role: "worker", taskId: task.task_id },
       extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
       cpuShare: team.workerSlots,
+      effort: board.effort,
     });
   } catch (err) {
     // Refused for ROOM at the spawn: a start of someone else's took the slot
@@ -1817,7 +1834,7 @@ async function reviewIn(
     const readOnly = shell ? {} : { readOnly: true };
     try {
       return await startRun(resumeOf
-        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, ...readOnly, extraBrief: brief }
+        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, ...readOnly, extraBrief: brief, effort: board.effort }
         : {
           task: review(),
           projectId: shell ? null : board.projectId,
@@ -1826,6 +1843,7 @@ async function reviewIn(
           team: role,
           ...readOnly,
           extraBrief: brief,
+          effort: board.effort,
         });
     } catch (err) {
       return { reason: err instanceof Error ? err.message : String(err), wait: err instanceof CodingAgentError && err.wait };
@@ -1961,6 +1979,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
       team: { id: board.id, role: "reviewer", taskId: null },
       readOnly: true,
       extraBrief: withRepoMap(FINAL_REVIEWER_BRIEF, board, null),
+      effort: board.effort,
     });
   } catch (err) {
     return byRule("the final reviewer could not start.", `No final reviewer: ${err instanceof Error ? err.message : String(err)}`);
@@ -1974,7 +1993,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
   }
   const reask = async (runId: string): Promise<CodingRun | { reason: string }> => {
     try {
-      return await startRun({ task: REVIEWER_NUDGE, resumeRunId: runId, source, team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: withRepoMap(FINAL_REVIEWER_BRIEF, board, null) });
+      return await startRun({ task: REVIEWER_NUDGE, resumeRunId: runId, source, team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: withRepoMap(FINAL_REVIEWER_BRIEF, board, null), effort: board.effort });
     } catch (err) {
       return { reason: err instanceof Error ? err.message : String(err) };
     }
@@ -2086,6 +2105,7 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
         team: lead,
         readOnly: true,
         extraBrief: REPLAN_BRIEF,
+        effort: board.effort,
       });
     });
   } catch (err) {

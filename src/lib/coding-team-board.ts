@@ -27,6 +27,7 @@ import fs from "fs";
 import os from "os";
 import type { CiFailure } from "@/lib/coding-ci";
 import { emptyTokenBreakdown, readTokenBreakdown, type TokenBreakdown } from "@/lib/coding-agent";
+import { isOfferedEffort, type CodingEffort } from "@/lib/coding-effort";
 import { CODING_PROVIDERS, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
 import { isSettledTeamStatus, type TeamStatus } from "@/lib/coding-team-status";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
@@ -469,6 +470,15 @@ export interface TeamBoard {
   /** The `coding_team_dynamic` switch as it stood when the team started: may a lead add or retire tasks while it runs? */
   dynamic: boolean;
   /**
+   * The effort the team was ASKED for (the route's `effort`, the assistant's
+   * `coding_team_run`), one of OFFERED_EFFORT_LEVELS — absent when the owner's
+   * setting decides, as on every board from before 2026-10-30. The
+   * orchestrator hands it to every member run as its input effort; a reading
+   * role's cap and the read-only clamp still apply there (a planner asked for
+   * ultracode runs at xhigh).
+   */
+  effort?: CodingEffort;
+  /**
    * When the lead's last turn was written (ms): its inbox, and the message
    * that calls it back, are what was said to the lead after this. Set only
    * once that turn gave a usable answer — a lead that failed or answered
@@ -661,6 +671,9 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     repoMap: normalizeRepoMap(b.repoMap),
     singleRun: b.singleRun === true,
     dynamic: b.dynamic === true,
+    // Re-read, never trusted: a level this box does not offer is dropped, and
+    // the team runs on the owner's setting as a board without one does.
+    ...(isOfferedEffort(b.effort) ? { effort: b.effort } : {}),
     lastLeadAt: typeof b.lastLeadAt === "number" && Number.isFinite(b.lastLeadAt) && b.lastLeadAt > 0 ? b.lastLeadAt : 0,
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
       ? { verdict: finalReview.verdict, notes: finalReview.notes, at: typeof finalReview.at === "number" ? finalReview.at : 0 }
@@ -845,7 +858,7 @@ export const MAX_HOLD_REASON_CHARS = 600;
 
 // ─── Mutations (every one role-checked and logged) ───────────────────────────
 
-export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean }, actor: Actor): TeamBoard {
+export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean; effort?: CodingEffort | null }, actor: Actor): TeamBoard {
   if (actor.kind !== "owner" && actor.kind !== "system") {
     throw new BoardAccessError(actor, "create", `Only the owner starts a team; ${describeActor(actor)} may not.`);
   }
@@ -872,6 +885,7 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     repoMap: null,
     singleRun: false,
     dynamic: input.dynamic === true,
+    ...(input.effort ? { effort: input.effort } : {}),
     lastLeadAt: 0,
     finalReview: null,
     pr: null,

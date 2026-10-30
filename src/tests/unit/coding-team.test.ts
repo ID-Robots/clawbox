@@ -3473,3 +3473,45 @@ describe("per-role models: each run's own account, the cost by provider", () => 
     expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0, openai: 0 });
   });
 });
+
+/**
+ * The team's asked-for effort (2026-10-30, the Create card's Ultracode
+ * toggle): validated at the start, kept on the board, and handed to EVERY
+ * member run as its input effort — the runner's role caps and read-only clamp
+ * are what keep a planner at xhigh, not the orchestrator.
+ */
+describe("the team's effort", () => {
+  it("is kept on the board and handed to every run the team starts", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "ultracode" });
+    expect(board.effort).toBe("ultracode");
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.effort).toBe("ultracode");
+    expect(starts.length).toBeGreaterThanOrEqual(3);
+    const roles = new Set(starts.map((s) => ((s.team as { role?: string } | null)?.role ?? "single")));
+    expect(roles.has("planner")).toBe(true);
+    expect(roles.has("worker")).toBe(true);
+    for (const start of starts) expect(start.effort, String(start.team)).toBe("ultracode");
+  });
+
+  it("leaves every run's effort to the owner's setting when none was asked for", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done).not.toHaveProperty("effort");
+    for (const start of starts) expect(start.effort).toBeUndefined();
+  });
+
+  it("refuses a level the app does not offer before anything is made", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toBeInstanceOf(CodingAgentError);
+    expect(runner.startRun).not.toHaveBeenCalled();
+    expect(team.listTeams()).toEqual([]);
+  });
+});

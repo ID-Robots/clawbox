@@ -36,6 +36,8 @@ import { PAUSE_METER_NOUN, RUN_STATUSES, isRollingPauseMeter, pauseResetClock, p
 // tool cannot describe a state the server never writes.
 import { foldReviewChecks, type ReviewLoop } from "../../src/lib/coding-review-state";
 import { taskTitle } from "../../src/lib/task-title";
+// The effort levels a request may name — the same list the routes validate against.
+import { OFFERED_EFFORT_LEVELS } from "../../src/lib/coding-effort";
 // Pure TypeScript, like the status union above: the providers and the models
 // each one offers, so a combination the device would refuse is refused HERE
 // rather than after a round trip — and cannot drift from what the route
@@ -153,6 +155,18 @@ function routeCode(err: ApiError): string | null {
 
 const PROVIDER_CHOICE_NEXT =
   "The working folder was not the problem: do not change it. Call again with no provider and no model to use the owner's default account, or name a provider with a model it offers.";
+
+/**
+ * `effort` on coding_agent_run and coding_team_run: the per-request override
+ * of the owner's effort setting, in the levels the app offers
+ * (OFFERED_EFFORT_LEVELS, src/lib/coding-effort.ts). Named here so the two
+ * tools say the same thing; the route validates the value and answers
+ * `code: "effort"` when it refuses one.
+ */
+const EFFORT_PARAM_DESCRIPTION = "This run's effort: low, xhigh, max or ultracode (the highest, far more tokens: only when asked). Omit: owner's setting.";
+/** The team's: every member run gets the level, and a planner or reviewer is still capped at xhigh. */
+const TEAM_EFFORT_PARAM_DESCRIPTION = "Every run's effort: low, xhigh, max or ultracode (highest, far more tokens; readers stay at xhigh). Omit: owner's.";
+const EFFORT_CHOICE_NEXT = `Pass one of ${OFFERED_EFFORT_LEVELS.join(", ")} as effort, or omit it to use the owner's setting.`;
 
 const SWITCH_NEXT =
   "Do not retry. Tell the user the coding agent is switched off and that they can turn it on in the Coding Agent app on the ClawBox desktop.";
@@ -939,6 +953,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         RUN_MODELS,
         `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Naming a model with "clawbox-ai" is refused.`,
       ).optional(),
+      effort: zEnumOf(
+        OFFERED_EFFORT_LEVELS,
+        EFFORT_PARAM_DESCRIPTION,
+      ).optional(),
       input_files: zOptText(
         1024,
         "Comma-separated ABSOLUTE paths of files to GIVE the run (assets, a user's file); a path only in the task is never read.",
@@ -950,9 +968,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, input_files, fix_ci }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, effort, deliverable_files, input_files, fix_ci }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
-      provider?: string; model?: string; deliverable_files?: string;
+      provider?: string; model?: string; effort?: string; deliverable_files?: string;
       input_files?: string; fix_ci?: boolean;
     }) => {
       if (fix_ci === true && !resume_run_id) {
@@ -996,6 +1014,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // idea of it, and silently move a run to another account.
       if (provider) body.provider = provider;
       if (model) body.model = model;
+      // The same rule: only an effort the caller NAMED travels, so an omitted
+      // one leaves the owner's setting in force. The route validates it.
+      if (effort) body.effort = effort;
       // A list in a string, the `allowed_domains` shape: the schema rules here
       // forbid array and JSON-in-a-string parameters, because both harnesses
       // rewrite them differently on the way in. Split and trimmed here; the
@@ -1033,11 +1054,11 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           // default, which this process cannot read, so the pair can only be
           // refused at the route — and answering that with "pass a different
           // project_id" sent the caller to change a folder that was fine.
-          const wrongPair = routeCode(err) === "provider";
+          const code = routeCode(err);
           throw new ToolError(
             "BAD_ARGUMENT",
             routeReason(err) ?? "The ClawBox refused that working folder.",
-            wrongPair ? PROVIDER_CHOICE_NEXT : WORKING_FOLDER_NEXT,
+            code === "provider" ? PROVIDER_CHOICE_NEXT : code === "effort" ? EFFORT_CHOICE_NEXT : WORKING_FOLDER_NEXT,
           );
         }
         throw err;
@@ -1874,18 +1895,21 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole: the outcome and its constraints (a PR or not), not a task list."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
+      effort: zEnumOf(OFFERED_EFFORT_LEVELS, TEAM_EFFORT_PARAM_DESCRIPTION).optional(),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ goal, project_id, directory }: { goal: string; project_id?: string; directory?: string }) => {
+    async ({ goal, project_id, directory, effort }: { goal: string; project_id?: string; directory?: string; effort?: string }) => {
       const body: Record<string, unknown> = { goal };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
+      // Only a named effort travels (coding_agent_run's rule): omitted, the owner's setting stands.
+      if (effort) body.effort = effort;
       let res: { started?: boolean; queued?: boolean; team?: TeamPayload };
       try {
         res = await apiPost<{ started?: boolean; queued?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
       } catch (err) {
         if (err instanceof ApiError && err.status === 400) {
-          throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", WORKING_FOLDER_NEXT);
+          throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", routeCode(err) === "effort" ? EFFORT_CHOICE_NEXT : WORKING_FOLDER_NEXT);
         }
         throw err;
       }
