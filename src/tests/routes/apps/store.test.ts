@@ -142,4 +142,83 @@ describe("/setup-api/apps/store", () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
   });
+
+  // The portal matches words: "audiobook player" found the app and its own id,
+  // "audiobook-player", found nothing. Yet "one-mail" finds One-mail and
+  // "one mail" does not, so a slug-shaped query is asked every way and merged.
+  describe("searching by an app's slug", () => {
+    const STORE = "https://clawbox.com/api/store/apps";
+    const AUDIOBOOK = { slug: "audiobook-player", name: "Audiobook Player", category: "clawbox-apps" };
+
+    /** The portal: the list by `q`, and the per-app record by slug. */
+    function portal(byQuery: Record<string, unknown[]>, records: Record<string, unknown> = {}) {
+      mockFetch.mockImplementation(async (url: string) => {
+        const u = new URL(url);
+        if (u.pathname === "/api/store/apps") {
+          const apps = byQuery[u.searchParams.get("q") ?? ""] ?? [];
+          return jsonResponse(200, { total: apps.length, categories: [], apps });
+        }
+        const slug = u.pathname.slice("/api/store/apps/".length);
+        return slug in records ? jsonResponse(200, records[slug]) : jsonResponse(404, { error: "not found" });
+      });
+    }
+
+    const search = async (query: string) => {
+      const res = await GET(new Request(`http://localhost/setup-api/apps/store?limit=200&${query}`));
+      return { status: res.status, body: await res.json() };
+    };
+
+    it("finds an app by its exact slug, hyphens and all", async () => {
+      portal({ "audiobook player": [AUDIOBOOK] }, { "audiobook-player": AUDIOBOOK });
+      const { status, body } = await search("q=audiobook-player");
+      expect(status).toBe(200);
+      expect(body.apps.map((a: { slug: string }) => a.slug)).toEqual(["audiobook-player"]);
+      expect(body.total).toBe(1);
+      expect(mockFetch).toHaveBeenCalledWith(`${STORE}?limit=200&q=audiobook-player`, expect.anything());
+      expect(mockFetch).toHaveBeenCalledWith(`${STORE}?limit=200&q=audiobook+player`, expect.anything());
+      expect(mockFetch).toHaveBeenCalledWith(`${STORE}/audiobook-player`, expect.anything());
+    });
+
+    it("finds it by the slug alone when the words find nothing", async () => {
+      portal({}, { "audiobook-player": AUDIOBOOK });
+      expect((await search("q=Audiobook-Player")).body.apps).toEqual([AUDIOBOOK]);
+    });
+
+    it("never loses what the query as typed found", async () => {
+      portal({ "one-mail": [{ slug: "one-mail" }, { slug: "mail-tools" }], "one mail": [{ slug: "mail-tools" }, { slug: "one-time" }] });
+      const { body } = await search("q=one-mail");
+      expect(body.apps.map((a: { slug: string }) => a.slug)).toEqual(["one-mail", "mail-tools", "one-time"]);
+    });
+
+    it("never surfaces a hidden listing, or one outside the category being browsed", async () => {
+      portal({}, { "secret-app": { slug: "secret-app", hidden: true }, "audiobook-player": AUDIOBOOK });
+      expect((await search("q=secret-app")).body.apps).toEqual([]);
+      expect((await search("q=audiobook-player&category=tools")).body.apps).toEqual([]);
+      expect((await search("q=audiobook-player&category=clawbox-apps")).body.apps).toEqual([AUDIOBOOK]);
+    });
+
+    it("keeps the limit", async () => {
+      portal({ "a-b": [{ slug: "x1" }, { slug: "x2" }], "a b": [{ slug: "x3" }] });
+      const res = await GET(new Request("http://localhost/setup-api/apps/store?limit=2&q=a-b"));
+      expect((await res.json()).apps.map((a: { slug: string }) => a.slug)).toEqual(["x1", "x2"]);
+    });
+
+    it("answers the portal's own failure, and never fails over the extra lookups", async () => {
+      mockFetch.mockImplementation(async (url: string) => (url.includes("q=audiobook-player") ? jsonResponse(503, {}) : jsonResponse(200, { apps: [AUDIOBOOK] })));
+      expect((await search("q=audiobook-player")).status).toBe(503);
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.includes("q=audiobook-player")) return jsonResponse(200, { total: 0, apps: [] });
+        throw new Error("fetch failed");
+      });
+      expect(await search("q=audiobook-player")).toMatchObject({ status: 200, body: { total: 0, apps: [] } });
+    });
+
+    it("sends any other query to the portal once, as it always did", async () => {
+      portal({ "audiobook player": [AUDIOBOOK] });
+      await search("q=audiobook%20player");
+      await search("q=audiobook");
+      await search("q=--");
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+  });
 });

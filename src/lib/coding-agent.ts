@@ -191,6 +191,7 @@ import {
   type OpenAISource,
 } from "@/lib/coding-openai";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { chosenProjectFolderFrom, defaultProjectFolder, ensureDefaultProjectFolder, PROJECT_FOLDER_CONFIG_KEY, projectFolderFrom } from "@/lib/project-folder";
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
@@ -451,16 +452,17 @@ import {
  */
 export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
 /**
- * config.json key of the folder a run works in when the caller names neither a
- * project nor a directory. Absent means "no default": a run must then say
- * where it works, as it always had to.
+ * config.json key of the owner's project folder: the shelf a run's folder name
+ * is looked up on, the Store installs into and the app lists. Absent means the
+ * owner has not chosen one, and ~/Projects is in force (src/lib/project-folder.ts)
+ * — never written here, so a folder they chose is never overwritten by it.
  *
  * It is stored as the owner typed it and re-validated on EVERY use, never
  * trusted because it was validated once when it was set. The containment rules
  * are the same ones an explicit directory faces — a default is a convenience,
  * not a way around them.
  */
-export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
+export const CODING_AGENT_DIR_CONFIG_KEY = PROJECT_FOLDER_CONFIG_KEY;
 
 // The effort levels live in src/lib/coding-effort.ts (pure, so the MCP server
 // can offer the same list); re-exported here under the names every caller
@@ -2378,9 +2380,9 @@ export interface CodingAgentStatus {
    * discover it at the button.
    */
   planGate: PlanGate;
-  /** The owner's default working folder, or null when they have not set one. */
-  defaultDirectory: string | null;
-  /** What the device proposes when they have not chosen one: ~/Projects. */
+  /** The owner's project folder: the one they chose, else the ~/Projects default. */
+  defaultDirectory: string;
+  /** The default in force when they have not chosen one: ~/Projects. */
   suggestedDirectory: string;
   /** enabled AND the harness is installed and connected — i.e. a run can start. */
   ready: boolean;
@@ -2637,8 +2639,9 @@ export function codingAgentEnabledFrom(raw: unknown): boolean {
   return raw !== false;
 }
 
-function defaultDirectoryFrom(raw: unknown): string | null {
-  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+/** The project folder in force: the owner's choice, else ~/Projects. */
+function defaultDirectoryFrom(raw: unknown): string {
+  return projectFolderFrom(raw);
 }
 
 function effortFrom(raw: unknown): CodingEffort {
@@ -2654,16 +2657,17 @@ export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
   await configSet(CODING_AGENT_CONFIG_KEY, enabled === true);
 }
 
-/** The owner's default working folder, or null when they have not set one. */
 /**
- * The folder this device proposes for a run's work: ~/Projects.
+ * The project folder in force when the owner has not chosen one: ~/Projects.
  *
- * It is a SUGGESTION, not a default that silently takes effect — the wizard
- * pre-fills its field with this so the common case is one tap, and the owner
- * can browse to anything else before saving.
+ * It used to be only a SUGGESTION the wizard pre-filled, and a box whose owner
+ * never saved it had no project folder at all — so a Store install of a server
+ * app was refused until they found the setting. It is now the default every
+ * reader resolves (src/lib/project-folder.ts); the wizard still pre-fills it,
+ * and the owner can still choose anything else.
  */
 export function suggestedDefaultDirectory(): string {
-  return path.join(homeDir(), "Projects");
+  return defaultProjectFolder();
 }
 
 /**
@@ -2719,12 +2723,29 @@ async function existingAncestorInside(target: string, home: string): Promise<boo
   }
 }
 
-export async function getDefaultDirectory(): Promise<string | null> {
+/** The owner's project folder: the one they chose, else ~/Projects. Never null. */
+export async function getDefaultDirectory(): Promise<string> {
   return defaultDirectoryFrom(await configGet(CODING_AGENT_DIR_CONFIG_KEY));
 }
 
+/** The folder the owner CHOSE, or null while the ~/Projects default is in force. */
+export async function getChosenDirectory(): Promise<string | null> {
+  return chosenProjectFolderFrom(await configGet(CODING_AGENT_DIR_CONFIG_KEY));
+}
+
 /**
- * Set (or clear, with null/"") the default working folder.
+ * `getDefaultDirectory`, for a caller about to put something INTO the folder
+ * (a Store install, an import): the ~/Projects default is created first, so a
+ * fresh box never answers "that folder does not exist" for a folder it chose
+ * itself. A folder the owner chose is returned as it is.
+ */
+export async function ensureProjectFolder(): Promise<string> {
+  return (await getChosenDirectory()) ?? ensureDefaultProjectFolder();
+}
+
+/**
+ * Set (or clear, with null/"") the owner's project folder. Clearing puts the
+ * ~/Projects default back in force.
  *
  * Validated here rather than only at the route so there is one answer to "is
  * this folder allowed", and it is the same answer a run gets. Returns the
@@ -3341,8 +3362,8 @@ export async function setSetupComplete(done: unknown): Promise<boolean> {
 
 /**
  * Put every coding-agent setting back to factory and send the owner to the
- * wizard: the switch off, no default folder, effort/ceilings/review back to
- * their defaults.
+ * wizard: the switch off, the project folder back to the ~/Projects default,
+ * effort/ceilings/review back to their defaults.
  *
  * The run history goes too. It was left alone at first — an audit trail is not
  * a setting — but "start over" that leaves last week's runs listed under a
@@ -3394,17 +3415,16 @@ export async function getMaxTurns(): Promise<number> {
  * Names only: this is a picker, not a file listing.
  */
 export async function listProjectFolders(): Promise<string[]> {
-  return (await readProjectFolders())?.names ?? [];
+  return (await readProjectFolders()).names;
 }
 
 /**
- * The owner's folder and the names in it. Null when no folder is set; a
- * folder that is set but cannot be read answers with no names, so the caller
- * can still say WHICH folder it looked in.
+ * The owner's folder (chosen, or the ~/Projects default) and the names in it.
+ * A folder that cannot be read — the default before anything created it —
+ * answers with no names, so the caller can still say WHICH folder it looked in.
  */
-async function readProjectFolders(): Promise<{ base: string; names: string[] } | null> {
+async function readProjectFolders(): Promise<{ base: string; names: string[] }> {
   const base = await getDefaultDirectory();
-  if (!base) return null;
   return { base, names: await readFolderNames(base) };
 }
 
@@ -3534,32 +3554,30 @@ interface ProjectCandidate {
 export async function listProjects(): Promise<{ directory: string | null; projects: CodingProject[] }> {
   const [folders, codeProjects] = await Promise.all([readProjectFolders(), readFolderNames(CODE_PROJECTS_DIR)]);
   const candidates: ProjectCandidate[] = [];
-  if (folders) {
-    // The folders runs have worked in, directly under the project folder: a
-    // project by that run alone, `.git` or not. A run records the folder it
-    // worked in symlink-resolved, so both spellings of the base are matched.
-    // Never a dot-folder: that is state, not a project.
-    const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
-    // Bounded like the readdir (readFolderNames keeps 100): the run store is
-    // not a hard bound — held runs are never trimmed — and every folder here
-    // costs a stat and a git log on every poll.
-    const workedIn = new Set<string>();
-    for (const run of loadRuns()) {
-      if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
-      if (typeof run.directory !== "string") continue;
-      const worked = projectDirectoryOf(run);
-      for (const base of new Set([folders.base, realBase])) {
-        if (!worked.startsWith(base + path.sep)) continue;
-        const first = path.relative(base, worked).split(path.sep)[0];
-        if (first && !first.startsWith(".")) workedIn.add(first);
-      }
+  // The folders runs have worked in, directly under the project folder: a
+  // project by that run alone, `.git` or not. A run records the folder it
+  // worked in symlink-resolved, so both spellings of the base are matched.
+  // Never a dot-folder: that is state, not a project.
+  const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
+  // Bounded like the readdir (readFolderNames keeps 100): the run store is
+  // not a hard bound — held runs are never trimmed — and every folder here
+  // costs a stat and a git log on every poll.
+  const workedIn = new Set<string>();
+  for (const run of loadRuns()) {
+    if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
+    if (typeof run.directory !== "string") continue;
+    const worked = projectDirectoryOf(run);
+    for (const base of new Set([folders.base, realBase])) {
+      if (!worked.startsWith(base + path.sep)) continue;
+      const first = path.relative(base, worked).split(path.sep)[0];
+      if (first && !first.startsWith(".")) workedIn.add(first);
     }
-    for (const folder of folders.names) {
-      candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
-    }
-    for (const folder of workedIn) {
-      if (!folders.names.includes(folder)) candidates.push({ base: folders.base, folder, kind: "folder", fromRun: true });
-    }
+  }
+  for (const folder of folders.names) {
+    candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
+  }
+  for (const folder of workedIn) {
+    if (!folders.names.includes(folder)) candidates.push({ base: folders.base, folder, kind: "folder", fromRun: true });
   }
   for (const folder of codeProjects) {
     if (folder === HARNESS_TEST_PROJECT_ID) continue;
@@ -3579,7 +3597,7 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     projects.push(d.project);
   }
   projects.sort((a, b) => (b.lastCommit?.date ?? 0) - (a.lastCommit?.date ?? 0) || a.name.localeCompare(b.name));
-  return { directory: folders?.base ?? null, projects };
+  return { directory: folders.base, projects };
 }
 
 async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
@@ -4116,7 +4134,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
   const [readiness, projectFolders] = await Promise.all([
     readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
-    defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
+    readFolderNames(defaultDirectory),
   ]);
   const connectedProviders = connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider);
   return {
@@ -5861,31 +5879,21 @@ export async function resolveWorkingDirectory(input: {
   }
 
   if (!directory) {
-    // The owner's default, if they set one. Re-validated by falling through
-    // into the same checks below — a folder that stopped being allowed since
-    // it was set (deleted, moved, replaced by a symlink out of the home) is
-    // refused now, not trusted because it passed once.
-    const fallback = await getDefaultDirectory();
-    if (!fallback) {
-      throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
-    }
     // Every run happens in a folder INSIDE the project folder, never in the
     // project folder itself — a run's folder is a project the owner can find
     // again, and the project folder is the shelf they all sit on.
+    const fallback = await getDefaultDirectory();
     throw new CodingAgentError("invalid", `Give a folder inside your project folder (${fallback}) — its name is enough — or a code project id.`);
   }
   if (directory.length > MAX_DIRECTORY_CHARS) {
     throw new CodingAgentError("invalid", "The folder path is too long.");
   }
   if (!path.isAbsolute(directory)) {
-    // A bare name means a folder in the owner's default directory. Without
-    // this, working on a folder they already have — ~/Projects/my-app —
-    // required the assistant to know and type the whole absolute path, and
-    // nothing told it the folder existed.
+    // A bare name means a folder in the owner's project folder — the one they
+    // chose, else ~/Projects. Without this, working on a folder they already
+    // have — ~/Projects/my-app — required the assistant to know and type the
+    // whole absolute path, and nothing told it the folder existed.
     const base = await getDefaultDirectory();
-    if (!base) {
-      throw new CodingAgentError("invalid", "The folder must be an absolute path, or a folder name inside your default project folder.");
-    }
     if (directory.includes("/") || directory.includes("\\") || directory === "." || directory === "..") {
       throw new CodingAgentError("invalid", "Give a single folder name, or an absolute path.");
     }
@@ -5924,11 +5932,12 @@ export async function resolveWorkingDirectory(input: {
     }
   }
   // The owner's rule: every run happens in a folder inside the project
-  // folder, so every run's folder is listed under Projects. Only once a
-  // project folder is set (a box without one keeps the home rule above), and
-  // never for the setting that says where "inside" is (`asDefault`).
+  // folder, so every run's folder is listed under Projects. Only once the
+  // owner has CHOSEN a project folder: the ~/Projects default is where things
+  // go, not a new fence — a box that never chose keeps the home rule above, as
+  // it always had. Never for the setting that says where "inside" is (`asDefault`).
   if (!input.asDefault) {
-    const base = await getDefaultDirectory();
+    const base = await getChosenDirectory();
     if (base) {
       const realBase = await fs.promises.realpath(base).catch(() => path.resolve(base));
       if (real === realBase) {
@@ -6856,15 +6865,14 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
  * scope keyed on it would have left every folder project — the kind the owner's
  * own project folder holds — unable to have a secret of its own.
  *
- * Null when the run is in no project of the owner's (a bare absolute folder, or
- * a box with no project folder set). Such a run gets the box-scoped entries
+ * Null when the run is in no project of the owner's (a bare absolute folder
+ * outside the project folder). Such a run gets the box-scoped entries
  * alone; it is not a project, so no project's secrets are its own.
  */
 async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">): Promise<string | null> {
   if (typeof run.projectId === "string" && run.projectId) return run.projectId;
   if (typeof run.directory !== "string" || !run.directory) return null;
   const folders = await readProjectFolders();
-  if (!folders) return null;
   // Both spellings of the base, the way listProjects matches them: a run
   // records its folder symlink-resolved, and the owner's setting may not be.
   const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);

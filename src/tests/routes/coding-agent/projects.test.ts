@@ -311,11 +311,12 @@ describe("GET projects", () => {
 
     it("lists them even when the owner has set no project folder", async () => {
       writeConfig({});
+      fs.rmSync(projectsDir, { recursive: true, force: true });
       scaffoldCodeProject("notes", "Notes");
       vi.resetModules();
       GET = (await import("@/app/setup-api/coding-agent/projects/route")).GET;
       const { directory, projects } = await body();
-      expect(directory).toBeNull();
+      expect(directory).toBe(projectsDir);
       expect(projects.map((p) => p.folder)).toEqual(["notes"]);
     });
 
@@ -339,11 +340,15 @@ describe("GET projects", () => {
     expect(await body()).toEqual({ directory: missing, projects: [] });
   });
 
-  it("answers a null folder when none is set, so the app can say so in words", async () => {
+  // A fresh or factory-reset box: no folder chosen, and ~/Projects in force —
+  // its projects listed, the same folder the Store installs into.
+  it("answers ~/Projects and what is in it when the owner never chose a folder", async () => {
     writeConfig({});
     vi.resetModules();
     GET = (await import("@/app/setup-api/coding-agent/projects/route")).GET;
-    expect(await body()).toEqual({ directory: null, projects: [] });
+    expect(await body()).toEqual({ directory: projectsDir, projects: [] });
+    makeRepo("shop", { commit: "first" });
+    expect((await body()).projects.map((p) => p.folder)).toEqual(["shop"]);
   });
 
   describe("path safety", () => {
