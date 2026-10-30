@@ -211,13 +211,13 @@ describe("the archive", () => {
   });
 
   it("keeps the team role a run was started under, and reads a bundle from before the field as none", () => {
-    const bulk = lib.archiveRun(record("run-bbbbbbc1", { modelRole: "bulk" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
-    expect(bulk.modelRole).toBe("bulk");
+    const reviewer = lib.archiveRun(record("run-bbbbbbc1", { modelRole: "reviewer" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
+    expect(reviewer.modelRole).toBe("reviewer");
     const solo = lib.archiveRun(record("run-bbbbbbc2", { modelRole: null }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
     expect(solo.modelRole).toBeNull();
     // A role this code never writes is none, not a new kind of role.
     expect(lib.archiveRun(record("run-bbbbbbc3", { modelRole: "lead" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!.modelRole).toBeNull();
-    expect(lib.listArchive(0, 10).entries.find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBe("bulk");
+    expect(lib.listArchive(0, 10).entries.find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBe("reviewer");
 
     // A bundle archived before the field: its archive.json and the index carry
     // no role at all, and the entry reads back with null rather than undefined.
@@ -227,11 +227,13 @@ describe("the archive", () => {
     fs.writeFileSync(meta, JSON.stringify(older));
     fs.rmSync(path.join(data, "coding-agent-archive", "index.json"), { force: true });
     expect(lib.archiveIndex().find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBeNull();
-    expect(lib.readArchivedRun("run-bbbbbbc1")!.record.modelRole).toBe("bulk");
+    expect(lib.readArchivedRun("run-bbbbbbc1")!.record.modelRole).toBe("reviewer");
   });
 
   it("reads a stored role as one of the roles a choice is made for, or none", () => {
-    for (const role of ["planner", "worker", "reviewer", "bulk"]) expect(lib.readModelRole(role)).toBe(role);
+    for (const role of ["planner", "worker", "reviewer"]) expect(lib.readModelRole(role)).toBe(role);
+    // A role until 2026-10-30 — a worker on a task marked token-heavy — reads as the worker it was.
+    expect(lib.readModelRole("bulk")).toBe("worker");
     for (const junk of ["lead", "Planner", "", 1, null, undefined, {}]) expect(lib.readModelRole(junk)).toBeNull();
   });
 

@@ -119,7 +119,6 @@ function roleMap(over: { [R in keyof RoleModelMap]?: Partial<RoleModelMap[R]> } 
     planner: { ...base, ...flash, ...over.planner },
     worker: { ...base, ...over.worker },
     reviewer: { ...base, ...flash, ...over.reviewer },
-    bulk: { ...base, ...over.bulk },
   };
 }
 
@@ -3241,114 +3240,69 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
   });
 });
 
-describe("per-role models: bulk tasks, each run's own account, the cost by provider", () => {
+describe("per-role models: each run's own account, the cost by provider", () => {
   const roleOfStart = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
   const NOT_CONNECTED = "Anthropic is not connected on this ClawBox.";
-  /** A team on two accounts: its bulk work on ClawBox AI's flash tier, everything else on Anthropic. */
+  /** A team on two accounts: its workers on ClawBox AI's flash tier, everything else on Anthropic. */
   const MIXED = roleMap({
     planner: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
-    worker: { provider: "anthropic", model: "claude-opus-5-5", relativeCost: 20, auto: false },
+    worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false },
     reviewer: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
-    bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false },
   });
   /** The runner as it starts a team's fresh run: on its role's provider and model, the record saying so. */
   function startsOnRole(map: RoleModelMap) {
     runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
-      const t = input.team as { role: string; bulk?: boolean };
-      const modelRole = t.role === "lead" ? "planner" : t.role === "worker" && t.bulk === true ? "bulk" : (t.role as "planner" | "worker" | "reviewer");
+      const t = input.team as { role: string };
+      const modelRole = t.role === "lead" ? "planner" : (t.role as "planner" | "worker" | "reviewer");
       const r = map[modelRole];
       return Object.assign(fakeRun(input), { provider: r.provider, requestedModel: r.model, modelRole, model: null, modelsUsed: [] });
     });
   }
-  const BULK_PLAN = JSON.stringify([
+  /** A plan still writing the task `role` of before 2026-10-30: the words are not read. */
+  const PLAN = JSON.stringify([
     { task_description: "Scrape the catalogue into data/items.json", files_hint: ["data/items.json"], role: "bulk" },
     { task_description: "Build the page from data/items.json", depends_on: ["t1"], files_hint: ["index.html"], role: "worker" },
   ]);
   const ACCEPTED = JSON.stringify({ verdict: "accepted", notes: "" });
 
-  it("starts a bulk task's worker on the bulk role, keeps every run's own provider and model, and splits the cost by provider", async () => {
+  it("keeps every run's own provider and model, splits the cost by provider, and reads no task role off a plan", async () => {
     runner.teamRoleModelMap.mockImplementation(async () => MIXED);
     startsOnRole(MIXED);
     outcomes = [
-      { summary: BULK_PLAN, tokensUsed: 5_000 },
+      { summary: PLAN, tokensUsed: 5_000 },
       { summary: "Scraped 400 items.\nCould not finish: two pages timed out.", filesTouched: ["data/items.json"], tokensUsed: 80_000, model: "deepseek-v4-flash" },
-      { summary: "Built the page.", filesTouched: ["index.html"], tokensUsed: 30_000, model: "claude-opus-5-5", modelsUsed: ["claude-haiku-4-5", "claude-opus-5-5"] },
+      { summary: "Built the page.", filesTouched: ["index.html"], tokensUsed: 30_000, model: "deepseek-v4-flash" },
     ];
     reviews = [{ summary: ACCEPTED, tokensUsed: 2_000 }, { summary: ACCEPTED, tokensUsed: 3_000 }];
     const board = await team.startTeam({ goal: "Scrape the catalogue and build a page from it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
     expect(starts.map(roleOfStart)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
-    // The plan's mark is on the board, and only the bulk task's worker asked for the bulk role.
-    expect(done.tasks.map((t) => [t.task_id, t.role])).toEqual([["t1", "bulk"], ["t2", undefined]]);
+    // The plan's `role` words reach neither the board nor a worker's start.
+    expect(done.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
     expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => w.team)).toEqual([
-      { id: board.id, role: "worker", taskId: "t1", bulk: true },
+      { id: board.id, role: "worker", taskId: "t1" },
       { id: board.id, role: "worker", taskId: "t2" },
     ]);
-    // The planner was told what each role runs on and costs: bulk is a real choice on this box.
-    const brief = String(starts[0].extraBrief);
-    expect(brief).toContain("- bulk: deepseek-v4-flash on ClawBox AI, ~1x");
-    expect(brief).toContain("- worker: claude-opus-5-5 on Anthropic, ~20x");
-    expect(brief).toContain("- planner (and the lead): claude-sonnet-5 on Anthropic, ~10x");
-    expect(brief).toContain('"role": "worker" | "bulk"');
+    // The planner's brief carries no cost table and no word of bulk.
+    expect(String(starts[0].extraBrief)).not.toMatch(/Team models|bulk|~\d+x/);
     // Every run keeps its own account and model — what answered, once it settled.
     const cast = done.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole]);
     expect(cast).toEqual([
       ["planner", null, "anthropic", "claude-sonnet-5", "planner"],
-      ["worker", "t1", "clawbox-ai", "deepseek-v4-flash", "bulk"],
+      ["worker", "t1", "clawbox-ai", "deepseek-v4-flash", "worker"],
       ["reviewer", "t1", "anthropic", "claude-sonnet-5", "reviewer"],
-      ["worker", "t2", "anthropic", "claude-opus-5-5", "worker"],
+      ["worker", "t2", "clawbox-ai", "deepseek-v4-flash", "worker"],
       ["reviewer", "t2", "anthropic", "claude-sonnet-5", "reviewer"],
     ]);
-    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 80_000, anthropic: 40_000, openai: 0 });
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 110_000, anthropic: 10_000, openai: 0 });
     expect(done.metrics.tokensUsed).toBe(120_000);
     // And the same off disk.
     const { loadBoard } = await import("@/lib/coding-team-board");
     const disk = loadBoard(board.id)!;
     expect(disk.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole])).toEqual(cast);
     expect(disk.metrics.tokensByProvider).toEqual(done.metrics.tokensByProvider);
-    expect(disk.tasks[0].role).toBe("bulk");
-    expect(disk.tasks[1]).not.toHaveProperty("role");
-  });
-
-  it("works a bulk task with an ordinary worker when the bulk role's account cannot run — with a note, never a refused team", async () => {
-    const map = roleMap({ bulk: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false, ready: false, problems: [NOT_CONNECTED] } });
-    runner.teamRoleModelMap.mockImplementation(async () => map);
-    startsOnRole(map);
-    outcomes = [{ summary: BULK_PLAN }, { summary: "Scraped.", filesTouched: ["data/items.json"] }, { summary: "Built.", filesTouched: ["index.html"] }];
-    const board = await team.startTeam({ goal: "Scrape and build", directory: "site", source: "owner" });
-    const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    expect(done.alerts).toBe(0);
-    // The planner was told before it planned.
-    expect(String(starts[0].extraBrief)).toContain(`- bulk: claude-sonnet-5 on Anthropic, ~10x — UNAVAILABLE: ${NOT_CONNECTED} A task marked bulk runs as an ordinary worker until it is.`);
-    expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => (w.team as { bulk?: boolean }).bulk)).toEqual([undefined, undefined]);
-    expect(done.runs.find((r) => r.role === "worker" && r.taskId === "t1")).toMatchObject({ provider: "clawbox-ai", modelRole: "worker" });
-    expect(done.log.filter((e) => e.type === "note" && /marked bulk/.test(e.message)).map((e) => [e.task_id, e.message])).toEqual([
-      ["t1", `Task t1 is marked bulk, but the bulk role's provider is unavailable — Anthropic cannot run right now: ${NOT_CONNECTED} It runs as an ordinary worker, on the workers' model.`],
-    ]);
-    // Still the plan's bulk task: the mark stays, only the worker changed.
-    expect(done.tasks[0].role).toBe("bulk");
-  });
-
-  it("falls back the same way when the bulk spawn itself is refused for its account", async () => {
-    const { CodingAgentError } = await import("@/lib/coding-agent");
-    runner.teamRoleModelMap.mockImplementation(async () => MIXED);
-    startsOnRole(MIXED);
-    const onRole = runner.startRun.getMockImplementation()!;
-    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
-      if ((input.team as { bulk?: boolean }).bulk) throw new CodingAgentError("not_ready", "ClawBox AI is not connected.");
-      return onRole(input);
-    });
-    outcomes = [{ summary: BULK_PLAN }, { summary: "Scraped.", filesTouched: ["data/items.json"] }, { summary: "Built.", filesTouched: ["index.html"] }];
-    const board = await team.startTeam({ goal: "Scrape and build", directory: "site", source: "owner" });
-    const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    const t1 = runner.startRun.mock.calls.map(([input]) => input.team as { role: string; taskId: string | null }).filter((t) => t.role === "worker" && t.taskId === "t1");
-    expect(t1).toEqual([{ id: board.id, role: "worker", taskId: "t1", bulk: true }, { id: board.id, role: "worker", taskId: "t1" }]);
-    expect(done.runs.find((r) => r.role === "worker" && r.taskId === "t1")).toMatchObject({ provider: "anthropic", model: "claude-opus-5-5", modelRole: "worker" });
-    expect(done.log.map((e) => e.message)).toContain("Task t1 is marked bulk, but the bulk role's provider is unavailable — ClawBox AI is not connected. It runs as an ordinary worker, on the workers' model.");
-    expect(done.alerts).toBe(0);
+    expect(disk.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
   });
 
   it("refuses the team before any spawn when its planner, workers or reviewers cannot run — not_ready, naming the role, the provider and why", async () => {

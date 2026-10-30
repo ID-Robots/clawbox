@@ -550,20 +550,16 @@ export function turnsKnown(run: Pick<DiagramRun, "numTurns" | "status">): boolea
 
 /**
  * "Opus 5.5 on Anthropic" — what a teammate runs on, from the board's cast
- * list, on its panel. Its role is already the panel's title, so the role is
- * only added where the model was chosen for a different one: a worker on a
- * task the plan marked bulk. Nothing on a board from before the fields were
- * kept, or where the provider is not one the box knows.
+ * list, on its panel. Its role is already the panel's title. Nothing on a
+ * board from before the fields were kept, or where the provider is not one
+ * the box knows.
  */
-export function memberModelLine(t: Translate, m: { provider?: string | null; model?: string | null; modelRole?: string | null }): string | undefined {
+export function memberModelLine(t: Translate, m: { provider?: string | null; model?: string | null }): string | undefined {
   if (!m.provider || !isCodingProvider(m.provider)) return undefined;
-  const params = {
+  return t("codingAgent.memberModel", {
     model: m.model ? codingModelName(m.model) : t("codingAgent.roleModelPlanDecides"),
     provider: t(CODING_PROVIDER_NAME_KEY[m.provider]),
-  };
-  return m.modelRole === "bulk"
-    ? t("codingAgent.memberModelRole", { ...params, role: t("codingAgent.modelRole.bulk") })
-    : t("codingAgent.memberModel", params);
+  });
 }
 
 /** The chart's figures as chips and bars: how far the tasks are, what each role spent, how long it has been. Exported for the home's plain row of a lone run. */

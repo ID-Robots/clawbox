@@ -558,15 +558,15 @@ describe("a team's model and effort per role", () => {
     vi.mocked(configGet).mockImplementation(async (key: string) =>
       key === "clawai_plan_tier" ? "flash"
         : key === "coding_agent_provider" ? "anthropic"
-          : key === "coding_agent_role_models" ? { planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "high" }, bulk: { provider: "anthropic", model: "economy" }, worker: { provider: "clawbox-ai" } }
+          : key === "coding_agent_role_models" ? { planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "high" }, reviewer: { provider: "anthropic", model: "economy" }, worker: { provider: "clawbox-ai" } }
             : undefined);
     const res = await POST(request({ cookie: ownerCookie(), body: { providers: ["clawbox-ai"] } }));
     expect(res.status).toBe(200);
     expect(configSet).toHaveBeenCalledWith("coding_agent_providers", ["clawbox-ai"]);
     // The default provider was anthropic, which just left the list.
     expect(configSet).toHaveBeenCalledWith("coding_agent_provider", "clawbox-ai");
-    // The planner loses its account AND the model only that account offered; bulk keeps its tier; the worker is untouched.
-    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { effort: "high" }, bulk: { model: "economy" }, worker: { provider: "clawbox-ai" } });
+    // The planner loses its account AND the model only that account offered; the reviewer keeps its tier; the worker is untouched.
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { effort: "high" }, reviewer: { model: "economy" }, worker: { provider: "clawbox-ai" } });
   });
 
   it("applies the list before the default, and refuses a default outside the resulting list before any write", async () => {
@@ -598,15 +598,15 @@ describe("a team's model and effort per role", () => {
     expect(configSet).not.toHaveBeenCalled();
   });
 
-  it("saves a provider and a model per role, bulk work included", async () => {
+  it("saves a provider and a model per role", async () => {
     const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: {
       planner: { provider: "anthropic", model: "claude-fable-5-1" },
-      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
+      reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
     } } }));
     expect(res.status).toBe(200);
     expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", {
       planner: { provider: "anthropic", model: "claude-fable-5-1" },
-      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
+      reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
     });
   });
 
@@ -621,7 +621,9 @@ describe("a team's model and effort per role", () => {
   it("refuses a provider and model that do not go together, WHOLE and before anything is written", async () => {
     for (const roleModels of [
       { planner: { provider: "clawbox-ai", model: "claude-fable-5-1" } },
-      { bulk: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      { reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      // A role until 2026-10-30, unknown since.
+      { bulk: { provider: "clawbox-ai" } },
       { worker: { model: "claude-fable-5-1" } },
       { planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "mistral" } },
       { reviewer: { provider: "openai", model: "claude-sonnet-5" } },
@@ -637,7 +639,7 @@ describe("a team's model and effort per role", () => {
   it("names the new shape in its usage answer", async () => {
     const res = await POST(request({ cookie: ownerCookie(), body: { nothing: true } }));
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }");
+    expect((await res.json()).error).toContain("{ roleModels: { planner?|worker?|reviewer?: { provider?, model?, effort? } } }");
   });
 
   it("is the owner's alone: the MCP bearer cannot change what a team's runs cost", async () => {

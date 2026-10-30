@@ -142,7 +142,7 @@ interface Run {
    *  an absent field simply draws no line. */
   provider?: CodingProviderId;
   /** On a team run, the role its provider and model were chosen for
-   *  (coding-role-models.ts: planner, worker, reviewer, bulk). Null on a solo
+   *  (coding-role-models.ts: planner, worker, reviewer). Null on a solo
    *  run; absent on a record written before the field. */
   modelRole?: ModelRole | null;
   /** The model it was STARTED with — not `model`, which is what answered. */

@@ -7,7 +7,6 @@ import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, type CodingProvider } from 
 import {
   MODEL_ROLES,
   ROLE_AUTO,
-  ROLE_AUTO_FOLLOWS,
   ROLE_DEFAULTS,
   ROLE_MODEL_TIERS,
   roleModelOptions,
@@ -180,7 +179,7 @@ export interface AgentStatus {
    * default (src/lib/coding-role-models.ts roleModelsView). Optional: a server
    * that predates the setting answers without it, and the section is not
    * drawn there; one that predates per-role providers answers without
-   * `provider`, or without the bulk role, and draws what it has.
+   * `provider`, and draws what it has.
    */
   roleModels?: Partial<Record<ModelRole, RoleModelsViewEntry>>;
   /** What each role starts on right now, whether that provider can run, and
@@ -238,7 +237,6 @@ const ROLE_JOB_KEY: Record<ModelRole, string> = {
   planner: "codingAgent.roleModelsRoleJob.planner",
   worker: "codingAgent.roleModelsRoleJob.worker",
   reviewer: "codingAgent.roleModelsRoleJob.reviewer",
-  bulk: "codingAgent.roleModelsRoleJob.bulk",
 };
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
@@ -1260,8 +1258,7 @@ export default function CodingAgentSettingsPanel() {
                 comes back as the lead), a reviewer reads and judges; only
                 workers write the code — so the first two default to the
                 provider's cheaper model and at most Extra high effort, workers
-                keep the owner's own, and bulk work runs as the workers do until
-                the owner says otherwise. "Default" stores nothing: a box that
+                keep the owner's own. "Default" stores nothing: a box that
                 never opens this runs on the defaults, and the older
                 standard/economy choices read back as the same two options. */}
             {status?.roleModels && (
@@ -1283,8 +1280,6 @@ export default function CodingAgentSettingsPanel() {
                   {MODEL_ROLES.filter((role) => status.roleModels![role]).map((role) => {
                     const current = status.roleModels![role]!;
                     const defaults = ROLE_DEFAULTS[role];
-                    // Bulk work with nothing stored is a worker's run, auto included.
-                    const followsWorkers = ROLE_AUTO_FOLLOWS[role] === "worker";
                     const roleName = t(`codingAgent.roleModels.${role}`);
                     const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
                       ? status.effortLevels
@@ -1321,7 +1316,7 @@ export default function CodingAgentSettingsPanel() {
                           onChange={(e) => void saveSetting({ roleModels: { [role]: { provider: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
                         >
-                          <option value={ROLE_AUTO}>{followsWorkers ? t("codingAgent.roleAutoAsWorkers") : t("codingAgent.roleProvider.auto")}</option>
+                          <option value={ROLE_AUTO}>{t("codingAgent.roleProvider.auto")}</option>
                           {connectedProviders.map((p) => (
                             <option key={p} value={p}>{providerName(p)}</option>
                           ))}
@@ -1338,11 +1333,9 @@ export default function CodingAgentSettingsPanel() {
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
                         >
                           <option value={ROLE_AUTO}>
-                            {followsWorkers
-                              ? t("codingAgent.roleAutoAsWorkers")
-                              : pinned
-                                ? t("codingAgent.roleModel.autoForProvider")
-                                : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
+                            {pinned
+                              ? t("codingAgent.roleModel.autoForProvider")
+                              : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
                           </option>
                           {/* On the team's own account the older two choices
                               stand; pinned to an account, that account's
@@ -1367,11 +1360,9 @@ export default function CodingAgentSettingsPanel() {
                           className={`text-base sm:text-xs ${FIELD} w-[9.5rem]`}
                         >
                           <option value={ROLE_AUTO}>
-                            {followsWorkers
-                              ? t("codingAgent.roleAutoAsWorkers")
-                              : defaults.effortCap
-                                ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
-                                : t("codingAgent.roleEffort.autoOwner")}
+                            {defaults.effortCap
+                              ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
+                              : t("codingAgent.roleEffort.autoOwner")}
                           </option>
                           {levels.map((level) => (
                             <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>

@@ -61,9 +61,7 @@
  * (src/lib/coding-role-models.ts), and each run's line in the cast list keeps
  * its own, so the team's tokens split by provider. A team whose planner,
  * workers or reviewers sit on an account that cannot run is refused before
- * anything is made (`not_ready`). A task the plan marks `bulk` — token-heavy,
- * not critical — gets a worker on the bulk role's model; when that account
- * cannot run, an ordinary worker takes it, and a note says so.
+ * anything is made (`not_ready`).
  *
  * A team lives in this process; its board is on disk after every message.
  * A team the web server was restarted under is settled as failed on the
@@ -176,7 +174,7 @@ import {
  */
 export type TeamView = TeamBoard & { agents: TeamAgents; advice: TeamAdvice | null; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
-import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, providerWords, REPLAN_BRIEF, replanContext, replanTask, withBoxWidth, withTeamModels } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, providerWords, REPLAN_BRIEF, replanContext, replanTask, withBoxWidth } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -348,12 +346,6 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   return snapshot(board);
 }
 
-/**
- * The roles a team cannot do without. Not `bulk`: a bulk task whose account
- * cannot run is worked by an ordinary worker instead (`bulkMayRun`).
- */
-const REQUIRED_ROLES: readonly ModelRole[] = MODEL_ROLES.filter((r) => r !== "bulk");
-
 /** "planner", "planner and reviewer", "planner, worker and reviewer". */
 function andList(words: readonly string[]): string {
   return words.length <= 1 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
@@ -381,7 +373,7 @@ async function assertTeamRolesReady(): Promise<void> {
   const map = await readTeamModels();
   if (!map) return;
   const blocked = new Map<CodingProvider, { roles: ModelRole[]; problems: string[] }>();
-  for (const role of REQUIRED_ROLES) {
+  for (const role of MODEL_ROLES) {
     const r = map[role];
     if (!r || r.ready) continue;
     const entry = blocked.get(r.provider) ?? { roles: [], problems: [] };
@@ -840,14 +832,11 @@ function recordedTeamBase(branch: string): string | null {
 
 async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const { board, bus } = team;
-  // What every role runs on and costs, after the brief: the planner weighs
-  // which tasks to mark bulk by it. Read once, as the team begins.
-  const models = await readTeamModels();
   // The box's real width — how many of the team's runs may go at once — is
   // told to the planner and written on the shape line: a plan for three on a
   // box that runs two only waited for a seat, in silence.
   const width = Math.max(1, Math.min(MAX_TEAM_WORKERS, await getMaxParallelRuns()));
-  const brief = () => withTeamModels(withBoxWidth(PLANNER_BRIEF, width), models);
+  const brief = () => withBoxWidth(PLANNER_BRIEF, width);
 
   // 1. The planner: a read-only run whose final message is the plan — once
   //    the box has a slot for it. A box busy with other runs makes the team
@@ -1299,30 +1288,17 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     return false;
   }
 
-  // A bulk task's worker starts on the bulk role's provider and model — while
-  // that provider can run. When it cannot, the task is still worked, by an
-  // ordinary worker, and the board says why.
-  let bulk = current.role === "bulk" && await bulkMayRun(team, task.task_id);
-  const startWorker = (asBulk: boolean) => startRun({
-    task: workerTask(board, task, worktree?.path ?? null),
-    projectId: worktree ? null : board.projectId,
-    directory,
-    source,
-    team: { id: board.id, role: "worker", taskId: task.task_id, ...(asBulk ? { bulk: true } : {}) },
-    extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
-    cpuShare: team.workerSlots,
-  });
   let run: CodingRun;
   try {
-    try {
-      run = await startWorker(bulk);
-    } catch (err) {
-      // Its account went away between the look and the spawn: the same fallback.
-      if (!bulk || !(err instanceof CodingAgentError) || err.kind !== "not_ready") throw err;
-      bulk = false;
-      bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: bulkFallbackText(task.task_id, err.message) });
-      run = await startWorker(false);
-    }
+    run = await startRun({
+      task: workerTask(board, task, worktree?.path ?? null),
+      projectId: worktree ? null : board.projectId,
+      directory,
+      source,
+      team: { id: board.id, role: "worker", taskId: task.task_id },
+      extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
+      cpuShare: team.workerSlots,
+    });
   } catch (err) {
     // Refused for ROOM at the spawn: a start of someone else's took the slot
     // the look had seen. Not a failure of the task — nothing ran — so no
@@ -1888,9 +1864,6 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
   // The run is filed under the batch's latest task; the alerts name them all.
   const taskId = taskIds[taskIds.length - 1];
   const after = taskIds.join(", ");
-  // What every role runs on now — read for each turn, before the seat is
-  // taken: an account connected, or gone, since the plan is what it adds by.
-  const models = await readTeamModels();
   // A seat beside the workers still going, and beside whatever else the box
   // runs: the room is waited out the way a worker's is; a refusal that
   // cannot clear by waiting is an alert.
@@ -1912,7 +1885,7 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
         source,
         team: lead,
         readOnly: true,
-        extraBrief: withTeamModels(REPLAN_BRIEF, models),
+        extraBrief: REPLAN_BRIEF,
       });
     });
   } catch (err) {
@@ -2172,27 +2145,6 @@ function runModelFields(run: CodingRun, model: string | null): Pick<TeamRunRef, 
 function answeredModel(run: CodingRun): string | null {
   const used = Array.isArray(run.modelsUsed) && run.modelsUsed.length === 1 ? refModel(run.modelsUsed[0]) : undefined;
   return refModel(run.model) ?? refModel(run.requestedModel) ?? used ?? null;
-}
-
-/**
- * May this bulk task's worker start on the bulk role's provider? Yes while
- * that provider can run; when it cannot — or the map cannot be read — no, and
- * a note on the board says the task runs as an ordinary worker, and why.
- */
-async function bulkMayRun(team: LiveTeam, taskId: string): Promise<boolean> {
-  const map = await readTeamModels();
-  const bulk = map?.bulk;
-  if (bulk?.ready) return true;
-  const why = bulk
-    ? `${providerWords(bulk.provider)} cannot run right now: ${bulk.problems.join(" ") || "it is not ready."}`
-    : "the team's role models could not be read.";
-  team.bus.send(SYSTEM, { type: "note", task_id: taskId, text: bulkFallbackText(taskId, why) });
-  return false;
-}
-
-/** The board's line for a bulk task worked by an ordinary worker. */
-function bulkFallbackText(taskId: string, why: string): string {
-  return `Task ${taskId} is marked bulk, but the bulk role's provider is unavailable — ${why.trim()} It runs as an ordinary worker, on the workers' model.`;
 }
 
 // ─── Words ───────────────────────────────────────────────────────────────────

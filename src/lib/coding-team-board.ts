@@ -147,15 +147,6 @@ export interface RoleTokens {
 /** Tokens the team's runs spent by kind, by the role they ran in. */
 export type RoleTokenBreakdown = Record<keyof RoleTokens, TokenBreakdown>;
 
-/**
- * Which kind of worker a task wants. `bulk`: token-heavy and not critical —
- * scraping, mass data, repetitive edits, long test runs — so its worker may
- * start on the `bulk` role's provider and model (src/lib/coding-role-models.ts)
- * rather than the workers'. `worker` is every other task.
- */
-export type TaskRole = "worker" | "bulk";
-export const TASK_ROLES: readonly TaskRole[] = ["worker", "bulk"];
-
 /** Tokens the team's runs spent, by the account that paid for them (each run's own provider). */
 export type ProviderTokens = Record<CodingProvider, number>;
 
@@ -288,12 +279,6 @@ export interface TeamTask {
   budgetReoffers: number;
   created_at: number;
   updated_at: number;
-  /**
-   * `bulk` on a task the planner (or the lead) marked token-heavy and not
-   * critical: its worker starts on the bulk role's model. ABSENT on every
-   * other task — a worker's — and on every task of a board from before.
-   */
-  role?: TaskRole;
 }
 
 /** A task set back because a task it depends on was rejected or reopened (`holdTask`). */
@@ -381,8 +366,8 @@ export interface TeamRunRef {
    * The account the run was paid from, and its model there — from its record
    * when it started, the model brought up to what answered once it settled;
    * null where the provider's plan chose and nothing said which. `modelRole`
-   * is the role its model choice was made for: `planner` for the lead too,
-   * `bulk` for a worker on a bulk task. Each ABSENT on a board from before.
+   * is the role its model choice was made for: `planner` for the lead too.
+   * Each ABSENT on a board from before.
    */
   provider?: CodingProvider;
   model?: string | null;
@@ -661,7 +646,9 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
           if (isCodingProvider(ref.provider)) run.provider = ref.provider;
           const model = refModel(ref.model);
           if (model !== undefined) run.model = model;
-          if ((MODEL_ROLES as readonly unknown[]).includes(ref.modelRole)) run.modelRole = ref.modelRole as ModelRole;
+          // A ref from before 2026-10-30 may say `bulk`: that was a worker's run.
+          const modelRole = ref.modelRole === "bulk" ? "worker" : ref.modelRole;
+          if ((MODEL_ROLES as readonly unknown[]).includes(modelRole)) run.modelRole = modelRole as ModelRole;
           return [run];
         })
       : [],
@@ -808,8 +795,7 @@ function normalizeTask(raw: unknown): TeamTask | null {
     budgetReoffers: typeof t.budgetReoffers === "number" && Number.isInteger(t.budgetReoffers) && t.budgetReoffers >= 0 ? t.budgetReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
-    // Only a bulk task carries it; absent is a worker's, as on a board from before.
-    ...(t.role === "bulk" ? { role: "bulk" as const } : {}),
+    // A task's `role` (`bulk`, until 2026-10-30) is not read back: every task is a worker's.
   };
 }
 
@@ -949,7 +935,7 @@ export function setRepoMap(board: TeamBoard, actor: Actor, raw: unknown): RepoMa
 export function postTask(
   board: TeamBoard,
   actor: Actor,
-  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; role?: TaskRole },
+  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string },
 ): TeamTask {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "post_task", `Only the planner posts tasks; ${describeActor(actor)} may not.`);
   if (board.tasks.length >= MAX_TEAM_TASKS) throw new Error(`A team holds at most ${MAX_TEAM_TASKS} tasks.`);
@@ -964,8 +950,6 @@ export function postTask(
   const depends_on = [...new Set((input.depends_on ?? []).filter((d) => typeof d === "string" && TASK_ID_RE.test(d)))];
   const unknown = depends_on.filter((d) => !known.has(d));
   if (unknown.length) throw new Error(`A task depends on tasks that are not on the board: ${unknown.join(", ")}.`);
-  if (input.role !== undefined && !TASK_ROLES.includes(input.role)) throw new Error(`A task's role is ${TASK_ROLES.join(" or ")}.`);
-  const role = input.role === "bulk" ? { role: "bulk" as const } : {};
   const now = Date.now();
   const task: TeamTask = {
     task_id: `t${board.tasks.length + 1}`,
@@ -988,20 +972,18 @@ export function postTask(
     budgetReoffers: 0,
     created_at: now,
     updated_at: now,
-    ...role,
   };
   board.tasks.push(task);
   const note = (input.note ?? "").trim();
-  const bulk = task.role === "bulk" ? " (bulk)" : "";
   append(board, {
     ts: now,
     actor,
     type: "task",
     task_id: task.task_id,
     message: origin === "lead"
-      ? `Task ${task.task_id}${bulk} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
-      : `Task ${task.task_id}${bulk} posted: ${firstLine(description)}`,
-    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}), ...role },
+      ? `Task ${task.task_id} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
+      : `Task ${task.task_id} posted: ${firstLine(description)}`,
+    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}) },
   });
   return task;
 }
