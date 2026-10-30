@@ -923,7 +923,7 @@ export const it: Record<string, string> = {
   "codingAgent.liveView": "Apri",
   "codingAgent.chatNeedsYou": "Serve il tuo intervento",
   "codingAgent.chatFiles": "{n} file",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "PR n. {n}",
   "codingAgent.chatTeam.queued": "In coda",
   "codingAgent.chatTeam.planning": "Pianificazione",
   "codingAgent.chatTeam.working": "Al lavoro",

@@ -913,7 +913,7 @@ export const ja: Record<string, string> = {
   "codingAgent.liveView": "開く",
   "codingAgent.chatNeedsYou": "確認が必要",
   "codingAgent.chatFiles": "{n} ファイル",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "プルリク #{n}",
   "codingAgent.chatTeam.queued": "待機中",
   "codingAgent.chatTeam.planning": "計画中",
   "codingAgent.chatTeam.working": "作業中",

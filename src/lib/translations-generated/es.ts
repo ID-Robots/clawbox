@@ -1070,7 +1070,7 @@ const table: Record<string, string> = {
   "codingAgent.chatOpeningPage": "Abriendo una página",
   "codingAgent.chatPaused": "Agente de código en pausa",
   "codingAgent.chatPlan": "Tareas",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "PR n.º {n}",
   "codingAgent.chatQueued": "Ejecución de código en cola",
   "codingAgent.chatRead": "Leyendo",
   "codingAgent.chatRestore": "Volver a mostrar las ejecuciones de código terminadas",

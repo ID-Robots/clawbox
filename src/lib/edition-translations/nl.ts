@@ -912,7 +912,7 @@ export const nl: Record<string, string> = {
   "codingAgent.liveView": "Openen",
   "codingAgent.chatNeedsYou": "Heeft u nodig",
   "codingAgent.chatFiles": "{n} bestanden",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "PR nr. {n}",
   "codingAgent.chatTeam.queued": "In de wachtrij",
   "codingAgent.chatTeam.planning": "Plannen",
   "codingAgent.chatTeam.working": "Bezig",

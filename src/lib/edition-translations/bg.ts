@@ -898,7 +898,7 @@ export const bg: Record<string, string> = {
   "codingAgent.liveView": "Отвори",
   "codingAgent.chatNeedsYou": "Нужни сте",
   "codingAgent.chatFiles": "{n} файла",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "PR №{n}",
   "codingAgent.chatTeam.queued": "В опашка",
   "codingAgent.chatTeam.planning": "Планира",
   "codingAgent.chatTeam.working": "Работи",

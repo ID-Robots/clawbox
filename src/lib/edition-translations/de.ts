@@ -911,7 +911,7 @@ export const de: Record<string, string> = {
   "codingAgent.liveView": "Öffnen",
   "codingAgent.chatNeedsYou": "Braucht Sie",
   "codingAgent.chatFiles": "{n} Dateien",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "PR Nr. {n}",
   "codingAgent.chatTeam.queued": "In der Warteschlange",
   "codingAgent.chatTeam.planning": "Plant",
   "codingAgent.chatTeam.working": "Arbeitet",

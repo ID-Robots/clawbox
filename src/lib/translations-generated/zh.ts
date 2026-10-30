@@ -1070,7 +1070,7 @@ const table: Record<string, string> = {
   "codingAgent.chatOpeningPage": "正在打开页面",
   "codingAgent.chatPaused": "编码代理已暂停",
   "codingAgent.chatPlan": "计划",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "拉取请求 #{n}",
   "codingAgent.chatQueued": "编码运行排队中",
   "codingAgent.chatRead": "读取",
   "codingAgent.chatRestore": "重新显示已完成的编程运行",

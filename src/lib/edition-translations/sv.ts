@@ -908,7 +908,7 @@ export const sv: Record<string, string> = {
   "codingAgent.liveView": "Öppna",
   "codingAgent.chatNeedsYou": "Behöver dig",
   "codingAgent.chatFiles": "{n} filer",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "PR nr {n}",
   "codingAgent.chatTeam.queued": "I kö",
   "codingAgent.chatTeam.planning": "Planerar",
   "codingAgent.chatTeam.working": "Arbetar",

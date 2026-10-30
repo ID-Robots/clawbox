@@ -79,7 +79,7 @@ describe("GET", () => {
   });
 
   it("answers a settled board slim on ?slim=1 — no log, its tasks' text gone — and a working one whole", async () => {
-    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted", notes: "fine", at: 1 } };
+    const task = { task_id: "t1", task_description: "Write the toggle", status: "complete", result: "wrote it", review: { verdict: "accepted" as const, notes: "fine", at: 1 } };
     const done = { ...BOARD, id: "team-done00001", status: "done", log: [{ type: "note", message: "planned" }], tasks: [task] };
     const working = { ...BOARD, id: "team-work00001", status: "working", log: [{ type: "note", message: "planned" }], tasks: [task] };
     team.listTeams.mockReturnValue([done, working]);

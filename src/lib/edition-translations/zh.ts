@@ -922,7 +922,7 @@ export const zh: Record<string, string> = {
   "codingAgent.liveView": "打开",
   "codingAgent.chatNeedsYou": "需要你处理",
   "codingAgent.chatFiles": "{n} 个文件",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "拉取请求 #{n}",
   "codingAgent.chatTeam.queued": "排队中",
   "codingAgent.chatTeam.planning": "规划中",
   "codingAgent.chatTeam.working": "进行中",

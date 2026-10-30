@@ -1070,7 +1070,7 @@ const table: Record<string, string> = {
   "codingAgent.chatOpeningPage": "ページを開いています",
   "codingAgent.chatPaused": "コーディングエージェントは一時停止中",
   "codingAgent.chatPlan": "計画",
-  "codingAgent.chatPr": "PR #{n}",
+  "codingAgent.chatPr": "プルリク #{n}",
   "codingAgent.chatQueued": "コーディング実行を待機中",
   "codingAgent.chatRead": "読み取り",
   "codingAgent.chatRestore": "完了したコーディング実行を再表示",
