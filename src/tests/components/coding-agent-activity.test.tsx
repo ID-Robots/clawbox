@@ -1153,9 +1153,9 @@ describe("CodingAgentActivityPill — the settled card and Needs you", () => {
     expect(result).toHaveAttribute("data-tone", "attention");
   });
 
-  it("Open and × are 44-px targets", () => {
+  it("Open is a 32-px button and × a 44-px target", () => {
     render(<CodingAgentActivityPill run={{ ...base, teamId: null } as never} labels={SETTLED_LABELS} openLabel={OPEN} onOpen={() => {}} onDismiss={() => {}} />);
-    expect(screen.getByTestId("coding-agent-activity-view").style.minHeight).toBe("44px");
+    expect(screen.getByTestId("coding-agent-activity-view").style.minHeight).toBe("32px");
     expect(screen.getByTestId("coding-agent-activity-dismiss").style.width).toBe("44px");
     expect(screen.getByTestId("coding-agent-activity-dismiss").style.height).toBe("44px");
   });
@@ -1295,12 +1295,12 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     expect(screen.queryByTestId("coding-agent-activity-pause-reason")).toBeNull();
   });
 
-  it("the control is a 44-px target in Open's tokens, beside Open and ×", () => {
+  it("the control is a 32-px button in Open's tokens, beside Open and ×", () => {
     render(<CodingAgentActivityPill run={{ ...base, status: "running" } as never} labels={CONTROL_LABELS} openLabel={OPEN} onOpen={() => {}} onDismiss={() => {}} canControl />);
     const pause = screen.getByTestId("coding-agent-activity-pause");
     const view = screen.getByTestId("coding-agent-activity-view");
-    expect(pause.style.minHeight).toBe("44px");
-    expect(pause.style.minWidth).toBe("44px");
+    expect(pause.style.minHeight).toBe("32px");
+    expect(pause.style.minWidth).toBe("32px");
     expect(pause.style.background).toBe(view.style.background);
     expect(pause.style.border).toBe(view.style.border);
     expect(pause.title).toBe("Pause");

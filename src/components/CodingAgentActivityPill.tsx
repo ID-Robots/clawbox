@@ -603,9 +603,9 @@ export default function CodingAgentActivityPill(
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              minHeight: 44,
-              minWidth: 44,
-              margin: "-12px 0",
+              minHeight: 32,
+              minWidth: 32,
+              margin: "-6px 0",
               padding: 0,
               background: "rgba(52,211,153,0.12)",
               border: "1px solid rgba(52,211,153,0.35)",
@@ -617,7 +617,7 @@ export default function CodingAgentActivityPill(
               flexShrink: 0,
             }}
           >
-            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
               {busy ? "hourglass_top" : control === "pause" ? "pause" : "play_arrow"}
             </span>
           </button>
@@ -633,14 +633,15 @@ export default function CodingAgentActivityPill(
             title={openLabel}
             aria-label={openLabel}
             data-testid="coding-agent-activity-view"
-            // A 44 px target, the row's own height kept by the margin.
+            // A 32 px button (the owner found 44 too big in the chat row,
+            // 2026-10-30); the row's own height kept by the margin.
             style={{
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              minHeight: 44,
-              minWidth: 44,
-              margin: "-12px 0",
+              minHeight: 32,
+              minWidth: 32,
+              margin: "-6px 0",
               background: "rgba(52,211,153,0.12)",
               border: "1px solid rgba(52,211,153,0.35)",
               borderRadius: 8,
