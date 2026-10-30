@@ -310,8 +310,10 @@ describe("useCodingAgentActivity", () => {
     // seen the run that follows it. One round more; not a timer.
     vi.useFakeTimers();
     let status = "running";
+    // At work: its harness has spoken (a session id), so it is past its start
+    // and on the five-second beat, not the start beat.
     const fetchMock = vi.fn(async () =>
-      runsResponse([{ ...RUNNING, status, completedAt: status === "running" ? null : NOW + 12_000 }]));
+      runsResponse([{ ...RUNNING, sessionId: "sess-k3x9q2ab", status, completedAt: status === "running" ? null : NOW + 12_000 }]));
     vi.stubGlobal("fetch", fetchMock);
 
     renderHook(() => useCodingAgentActivity(true));

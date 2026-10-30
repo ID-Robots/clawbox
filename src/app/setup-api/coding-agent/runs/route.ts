@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { clearFinishedRuns, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
 import { runSummaryLine, slimRun } from "@/lib/coding-agent-slim";
+import { listCodingStarts } from "@/lib/coding-run-starts";
 import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,10 @@ export const dynamic = "force-dynamic";
  *
  * Every run carries `summaryLine` — the first sentence of its result, at
  * most 160 characters — beside the record, for the chat's settled card.
+ *
+ * Beside `runs`, `starting`: the starts on their way (a run from its
+ * request until its record is written) and the runs and teams the box
+ * refused to start, for a while — src/lib/coding-start-phase.ts.
  *
  * GET ?slim=1              → the list with every SETTLED run's free text
  *                            emptied (progress, result text, allow
@@ -112,7 +117,13 @@ export async function GET(request: Request) {
     }
     const limitRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT)) : DEFAULT_LIMIT;
-    return NextResponse.json({ runs: listRuns(limit).map((run) => withDerived(slim ? slimRun(run) : run, withArtifacts)) });
+    return NextResponse.json({
+      runs: listRuns(limit).map((run) => withDerived(slim ? slimRun(run) : run, withArtifacts)),
+      // The starts on their way and the ones refused, beside the records and
+      // never among them (src/lib/coding-run-starts.ts): what the cards draw
+      // as "Starting…" — or the reason — before a record exists.
+      starting: listCodingStarts(),
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not read the coding runs" },

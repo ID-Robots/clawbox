@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
-import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
+import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, newRunId, startOrQueueRun } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { pushPendingAction } from "@/lib/pending-actions";
 
@@ -104,8 +104,17 @@ export async function POST(request: Request) {
   // clicking in Settings holds a cookie, the agent holds the bearer.
   const source = (await hasPersonSession(request)) ? "owner" : "agent";
 
+  // The id the run will carry, named now: the runs list shows this start
+  // under it from this moment (startOrQueueRun announces it before its first
+  // await), and every open desktop is told at once — before the worktree, the
+  // account and the spawn, which used to be all the owner waited through with
+  // nothing on screen. The desktop only nudges its poll on it.
+  const runId = newRunId();
+  notifyDesktop({ type: "coding_run", phase: "starting", runId }, `coding-run-start:${runId}`);
+
   try {
     const { run, queued } = await startOrQueueRun({
+      runId,
       task,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
@@ -144,14 +153,15 @@ export async function POST(request: Request) {
     // MCP tool, so a run started from another device, the owner's own click
     // or the review pass shows up as a chat card within one poll. The
     // desktop only nudges its poll on it; the run record stays the truth.
-    void pushPendingAction(
+    notifyDesktop(
       { type: "coding_run", phase: queued ? "queued" : "started", runId: run.id, projectId: run.projectId, ...(run.team ? { teamId: run.team.id } : {}) },
       `coding-run:${run.id}`,
-    ).catch((err: unknown) => {
-      console.error("[coding-agent/run] desktop notice failed:", err instanceof Error ? err.message : err);
-    });
+    );
     return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
   } catch (err) {
+    // The start the desktops were told of will not happen: they re-read, and
+    // the runs list's `starting` says why (startOrQueueRun listed it failed).
+    notifyDesktop({ type: "coding_run", phase: "failed", runId }, `coding-run-failed:${runId}`);
     if (err instanceof CodingAgentError) {
       // The provider/model refusal carries a `code` beside the shared 400, so a
       // caller can tell "that pair is not on this box" from "that folder is not
@@ -168,4 +178,11 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+}
+
+/** One notice on the desktop ring, fire-and-forget: a notice that fails is logged, never the start's failure. */
+function notifyDesktop(action: Record<string, unknown>, id: string): void {
+  void pushPendingAction(action, id).catch((err: unknown) => {
+    console.error("[coding-agent/run] desktop notice failed:", err instanceof Error ? err.message : err);
+  });
 }

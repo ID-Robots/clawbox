@@ -1,7 +1,9 @@
+import { randomBytes } from "crypto";
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { slimTeam, teamCard } from "@/lib/coding-agent-slim";
+import { failCodingStart } from "@/lib/coding-run-starts";
 import { pushPendingAction } from "@/lib/pending-actions";
 import { getTeam, listTeams, startTeam, waitForTeam } from "@/lib/coding-team";
 import { hasPersonSession } from "@/lib/owner-session";
@@ -98,12 +100,16 @@ export async function POST(request: Request) {
   if (body.effort !== undefined && body.effort !== null && !isOfferedEffort(body.effort)) {
     return NextResponse.json({ error: effortRefusal(body.effort), kind: "invalid", code: "effort" }, { status: 400 });
   }
+  const goal = typeof body.goal === "string" ? body.goal : "";
+  const projectId = typeof body.projectId === "string" ? body.projectId : null;
+  const directory = typeof body.directory === "string" ? body.directory : null;
+  const source = (await hasPersonSession(request)) ? "owner" : "agent";
   try {
     const team = await startTeam({
-      goal: typeof body.goal === "string" ? body.goal : "",
-      projectId: typeof body.projectId === "string" ? body.projectId : null,
-      directory: typeof body.directory === "string" ? body.directory : null,
-      source: (await hasPersonSession(request)) ? "owner" : "agent",
+      goal,
+      projectId,
+      directory,
+      source,
       ...(body.effort !== undefined && body.effort !== null ? { effort: body.effort } : {}),
     });
     const queued = team.status === "queued";
@@ -117,6 +123,14 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ started: !queued, queued, team }, { status: 202 });
   } catch (err) {
+    // No board was written, so no card would ever appear: the runs list's
+    // `starting` carries the refusal for a while (src/lib/coding-run-starts.ts),
+    // and the desktops re-read at once, so the chat shows WHY no team began.
+    const startId = `start-${randomBytes(4).toString("hex")}`;
+    failCodingStart(startId, err instanceof Error ? err.message : "Could not start the team", { kind: "team", task: goal, projectId, directory, source });
+    void pushPendingAction({ type: "coding_team", phase: "failed", teamId: startId }, `coding-team-failed:${startId}`).catch((noticeErr: unknown) => {
+      console.error("[coding-agent/team] desktop notice failed:", noticeErr instanceof Error ? noticeErr.message : noticeErr);
+    });
     if (err instanceof CodingAgentError) {
       return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
     }

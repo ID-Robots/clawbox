@@ -7,6 +7,7 @@ import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding
 import { samePlainData } from "@/lib/same-plain-data";
 import { isSettledTeamStatus, TEAM_STATUSES, type TeamStatus } from "@/lib/coding-team-status";
 import type { TeamCard, TeamCardAgent, TeamCardTask } from "@/lib/coding-agent-slim";
+import { isTeamStartStep, readCodingStarts, runRecordStartStep, START_POLL_MS, type CodingStartView, type RunCardStartStep, type TeamStartStep } from "@/lib/coding-start-phase";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -157,6 +158,18 @@ export interface CodingAgentActivity {
    * owner's pause, a run never paused, or a record from before the field.
    */
   pauseReason?: CodingPauseReason | null;
+  /**
+   * Where the run is on its way to its first step of work
+   * (src/lib/coding-start-phase.ts): the box's checks, its own copy of the
+   * project, the launch, then the harness's first word. Null once it works.
+   */
+  startStep?: RunCardStartStep | null;
+  /**
+   * ANNOUNCED, not yet a record: the runs list's `starting`. Nothing on the
+   * box answers to its id until the record lands (Pause, the run's page), so
+   * the card offers neither. Set on a start that failed, too.
+   */
+  announced?: boolean;
 }
 
 /**
@@ -183,6 +196,10 @@ export interface TeamActivity {
   tokensUsed: number;
   /** Why the team stopped short, first line, or null. */
   errorLine: string | null;
+  /** Where it is on its way to its first worker (src/lib/coding-start-phase.ts); null once one is at work. */
+  startStep?: TeamStartStep | null;
+  /** A team the box refused to start: no board exists, so nothing opens. */
+  announced?: boolean;
 }
 
 interface TeamPayload {
@@ -253,6 +270,10 @@ function toTodos(raw: unknown): CodingTodo[] {
 
 /** How often to re-ask while a run is actually in flight. */
 const POLL_MS = 5_000;
+/** The quick beat while something is starting (src/lib/coding-start-phase.ts). */
+export { START_POLL_MS };
+/** How long after a nudge the chat keeps the start beat when nothing is listed yet: the tool's request may reach the box a moment after its event. */
+export const START_WATCH_MS = 10_000;
 /** How often to re-ask while nothing is in flight and the chat is visible. */
 export const IDLE_POLL_MS = 30_000;
 /** Enough to catch a run even if a couple of others finished meanwhile. */
@@ -317,6 +338,62 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     needsYou: r.status === "paused",
     refusedLine: refusedLineOf(r),
     pauseReason: parsePauseReason(r.pauseReason),
+    startStep: runRecordStartStep({ status: r.status, sessionId: typeof r.sessionId === "string" ? r.sessionId : null, numTurns: r.numTurns }),
+    announced: false,
+  };
+}
+
+/** A run start as a run card draws it: "Starting…" at its step, or failed with the reason. */
+function startActivity(start: CodingStartView): CodingAgentActivity {
+  const failed = start.failedAt !== null;
+  return {
+    id: start.id,
+    projectId: start.projectId,
+    task: start.task,
+    startedAt: start.requestedAt,
+    completedAt: failed ? start.failedAt : null,
+    status: failed ? "failed" : "running",
+    source: start.source,
+    subagentsTotal: 0,
+    subagentsActive: 0,
+    subagentsByType: {},
+    tokensUsed: 0,
+    thinkingTokens: 0,
+    filesTouched: 0,
+    numTurns: 0,
+    progress: [],
+    screenshots: [],
+    todos: [],
+    transcriptPath: null,
+    sessionId: null,
+    directory: start.directory,
+    errorLine: failed ? start.error : null,
+    startStep: failed ? null : start.step,
+    announced: true,
+  };
+}
+
+/** A team the box refused to start, as the team card draws a team that failed. */
+function startTeamActivity(start: CodingStartView): TeamActivity {
+  return {
+    id: start.id,
+    projectId: start.projectId,
+    directory: start.directory,
+    goal: start.task,
+    status: "failed",
+    source: start.source,
+    startedAt: start.requestedAt,
+    finishedAt: start.failedAt ?? start.requestedAt,
+    tasksDone: 0,
+    tasksTotal: 0,
+    tasks: [],
+    prNumber: null,
+    resultLine: null,
+    agents: [],
+    tokensUsed: 0,
+    errorLine: start.error,
+    startStep: null,
+    announced: true,
   };
 }
 
@@ -358,6 +435,8 @@ function toTeam(t: TeamPayload): TeamActivity | null {
     agents: Array.isArray(card.agents) ? card.agents : [],
     tokensUsed: typeof t.metrics?.tokensUsed === "number" ? t.metrics.tokensUsed : 0,
     errorLine: firstLineOf(t.error),
+    startStep: isTeamStartStep(card.startStep) ? card.startStep : null,
+    announced: false,
   };
 }
 
@@ -415,13 +494,24 @@ export function useCodingAgentActivity(active: boolean): {
   // Member runs seen without their team, and for how many polls: shown on
   // their own only once the hold has passed (MEMBER_HOLD_POLLS).
   const orphanPolls = useRef(new Map<string, number>());
+  // When each announced start's request arrived, by run id: the record that
+  // takes its card over is stamped when it is WRITTEN — after the checks,
+  // the worktree, a wait on the folder's lock — and its clock must not jump
+  // back by that much in front of the owner.
+  const requestedAt = useRef(new Map<string, number>());
   // Bumped by nudge(); the effect below re-runs and probes immediately.
   const [probe, setProbe] = useState(0);
   // When this conversation started caring. A run older than this belongs to a
   // previous conversation and is not adopted.
   const openedAtRef = useRef(0);
+  // Until when a nudge keeps the start beat (START_WATCH_MS): a coding tool's
+  // event can reach the chat a moment before its request reaches the box.
+  const watchUntilRef = useRef(0);
 
-  const nudge = useCallback(() => setProbe((n) => n + 1), []);
+  const nudge = useCallback(() => {
+    watchUntilRef.current = Date.now() + START_WATCH_MS;
+    setProbe((n) => n + 1);
+  }, []);
 
   // The two probe sources the chat itself cannot see: a run started from the
   // Coding Agent app (or finished, as the desktop's notice reports) while the
@@ -449,6 +539,7 @@ export function useCodingAgentActivity(active: boolean): {
       setRuns((prev) => (prev.length === 0 ? prev : []));
       setTeams((prev) => (prev.length === 0 ? prev : []));
       orphanPolls.current.clear();
+      requestedAt.current.clear();
       openedAtRef.current = 0;
       return;
     }
@@ -490,7 +581,7 @@ export function useCodingAgentActivity(active: boolean): {
           fetch("/setup-api/coding-agent/team?slim=1", { cache: "no-store" }).catch(() => null),
         ]);
         if (!res.ok) throw new Error("runs");
-        const data = await res.json() as { runs?: RunPayload[] };
+        const data = await res.json() as { runs?: RunPayload[]; starting?: unknown };
         let fetchedTeams: TeamPayload[] | null = null;
         if (teamRes && teamRes.ok) {
           try {
@@ -503,6 +594,12 @@ export function useCodingAgentActivity(active: boolean): {
         if (!alive) return;
         const fetched = data.runs ?? [];
         const listedTeams = new Set((fetchedTeams ?? []).map((t) => t.id));
+        // The starts the box announced and the ones it refused (the runs
+        // list's `starting`, src/lib/coding-run-starts.ts). A start whose
+        // record is listed is the record's to show.
+        const recorded = new Set(fetched.map((r) => r.id));
+        const starts = readCodingStarts(data.starting).filter((x) => !recorded.has(x.id));
+        const inFlight = new Set(starts.filter((x) => x.failedAt === null).map((x) => x.id));
 
         setTeams((prev) => {
           if (fetchedTeams === null) return prev;
@@ -518,6 +615,14 @@ export function useCodingAgentActivity(active: boolean): {
               || team.startedAt >= openedAtRef.current - RECENT_MS;
             if (mine) byId.set(team.id, known && samePlainData(known, team) ? known : team);
           }
+          // A team the box refused to start has no board: its card says why.
+          for (const start of starts) {
+            if (start.kind !== "team") continue;
+            const known = byId.get(start.id);
+            if (known === undefined && start.requestedAt < openedAtRef.current - RECENT_MS) continue;
+            const team = startTeamActivity(start);
+            byId.set(start.id, known && samePlainData(known, team) ? known : team);
+          }
           const next = [...byId.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-MAX_BADGES);
           return sameTeams(prev, next) ? prev : next;
         });
@@ -526,7 +631,9 @@ export function useCodingAgentActivity(active: boolean): {
           const byId = new Map(prev.map((r) => [r.id, r]));
           const orphans = orphanPolls.current;
           for (const raw of fetched) {
-            const run = toActivity(raw);
+            const record = toActivity(raw);
+            const asked = requestedAt.current.get(record.id);
+            const run = asked !== undefined && asked < record.startedAt ? { ...record, startedAt: asked } : record;
             // A team's member run is the team card's to show, never a card of
             // its own. Its team may land in the list a poll after the run
             // does, so a member whose team is not listed yet is HELD for a
@@ -552,6 +659,27 @@ export function useCodingAgentActivity(active: boolean): {
             // screen, so its card is handed the same props it drew last time.
             if (mine) byId.set(run.id, known && samePlainData(known, run) ? known : run);
           }
+          // Announced starts: "Starting…" from the moment the request
+          // arrived, under the id the record will take — so the record, when
+          // it lands, replaces this card in place rather than beside it.
+          for (const start of starts) {
+            if (start.kind !== "run") continue;
+            const known = byId.get(start.id);
+            const mine = known !== undefined
+              || start.failedAt === null
+              || start.requestedAt >= openedAtRef.current - RECENT_MS;
+            if (!mine) continue;
+            const run = startActivity(start);
+            requestedAt.current.set(start.id, start.requestedAt);
+            byId.set(start.id, known && samePlainData(known, run) ? known : run);
+          }
+          // A start that is neither on its way nor recorded any more went
+          // somewhere this list cannot follow (dropped as stale): its
+          // "Starting…" must not tick on for ever. One that FAILED stays,
+          // with its reason, until the owner puts it away.
+          for (const [id, run] of byId) {
+            if (run.announced && run.status === "running" && !inFlight.has(id) && !recorded.has(id)) byId.delete(id);
+          }
           const next = [...byId.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-MAX_BADGES);
           // Nothing moved: the SAME array, so React skips the render. Every
           // poll parses a fresh answer, and handing that back unconditionally
@@ -569,7 +697,18 @@ export function useCodingAgentActivity(active: boolean): {
         // so the chat card keeps polling for it too — see CodingAgentApp.
         // A team at work keeps the beat too.
         const teamLive = (fetchedTeams ?? []).some((t) => typeof t.status === "string" && !isSettledTeamStatus(t.status as TeamStatus));
-        if (teamLive || fetched.some((r) => r.status === "running" || isPrPending(r.pr))) {
+        // Something STARTING moves on in seconds: the quick beat, for as long
+        // as it is starting (and a moment after a coding tool went by).
+        const starting = inFlight.size > 0
+          || Date.now() < watchUntilRef.current
+          || fetched.some((r) => runRecordStartStep({ status: r.status, sessionId: typeof r.sessionId === "string" ? r.sessionId : null, numTurns: r.numTurns }) !== null)
+          || (fetchedTeams ?? []).some((t) => t.card?.startStep === "planner_starting" || t.card?.startStep === "worker_starting");
+        if (starting) {
+          sawLive = true;
+          timer = setTimeout(() => { void read(); }, START_POLL_MS);
+        } else if (teamLive || fetched.some((r) => r.status === "running" || r.status === "queued" || isPrPending(r.pr))) {
+          // A QUEUED run is on the five-second beat too: its slot can open
+          // at any moment, and nothing tells the chat when it does.
           sawLive = true;
           timer = setTimeout(() => { void read(); }, POLL_MS);
         } else if (sawLive) {

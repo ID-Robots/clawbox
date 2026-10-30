@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { artifactUrl, type CodingAgentActivity, type CodingTodo } from "@/lib/use-coding-agent-activity";
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
+import type { RunCardStartStep } from "@/lib/coding-start-phase";
 import { describeProgressLine, estimateRunProgress, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { taskTitle } from "@/lib/task-title";
 import { notifyCodingRunStarted } from "@/lib/ui-events";
@@ -134,7 +135,20 @@ export interface CodingAgentCardLabels extends Record<Exclude<CodingRunStatus, "
   resuming?: string;
   pauseFailed?: string;
   resumeFailed?: string;
+  /** The word for a run on its way to its first step, and for one the box refused to start. */
+  starting?: string;
+  startFailed?: string;
+  /** One line per start step (src/lib/coding-start-phase.ts); a missing one falls back to English. */
+  startSteps?: Partial<Record<RunCardStartStep, string>>;
 }
+
+/** The start steps in English, for a host from before the catalogue had them. */
+const START_STEP_FALLBACK: Record<RunCardStartStep, string> = {
+  checking: "Checking the box and the folder",
+  worktree: "Preparing its own copy of the project",
+  launching: "Launching the coding agent",
+  agent: "Waiting for the coding agent's first step",
+};
 
 /**
  * THE SETTLED STATE (the 2026-10-30 redesign)
@@ -344,7 +358,9 @@ export default function CodingAgentActivityPill(
     return () => clearTimeout(id);
   }, [pending]);
   // What the one control does in this state, if anything.
-  const control: "pause" | "resume" | null = canControl
+  // A start that is only announced has no record yet: nothing on the box
+  // answers to its id, so there is nothing to pause.
+  const control: "pause" | "resume" | null = canControl && !run.announced
     ? status === "running" ? "pause" : status === "paused" || status === "gave_up" ? "resume" : null
     : null;
   // The control's name: what it does, or what it is doing while the request is out.
@@ -381,22 +397,33 @@ export default function CodingAgentActivityPill(
   // Over, one way or another: the card reports a result rather than progress.
   const settled = status === "completed" || status === "failed" || status === "stopped" || status === "gave_up";
   const needsYou = run.needsYou === true && status === "paused";
+  // On its way to its first step (src/lib/coding-start-phase.ts): the card
+  // says which step, and the run's id, instead of a progress it has none of.
+  const startStep = live ? (run.startStep ?? null) : null;
+  const startFailed = status === "failed" && run.announced === true;
+  // A queued run's clock runs too: it is time the owner is waiting.
+  const ticking = live || status === "queued";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!live) return;
+    if (!ticking) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [live]);
+  }, [ticking]);
   const [expanded, setExpanded] = useState(false);
   const toggle = () => setExpanded((v) => !v);
 
   const tone = RUN_TONE[status];
   // A run the OWNER started says so, so the assistant is not credited with
   // work the person at the desk kicked off.
-  const label = live && run.source === "owner"
-    ? labels.runningOwner
-    : status === "queued" ? (labels.queued ?? labels.draft) : labels[status];
-  const took = elapsed(run.startedAt, live ? now : (run.completedAt ?? now));
+  const label = startStep
+    ? (labels.starting ?? "Starting…")
+    : startFailed
+      ? (labels.startFailed ?? "Could not start")
+      : live && run.source === "owner"
+        ? labels.runningOwner
+        : status === "queued" ? (labels.queued ?? labels.draft) : labels[status];
+  const startLine = startStep ? (labels.startSteps?.[startStep] ?? START_STEP_FALLBACK[startStep]) : null;
+  const took = elapsed(run.startedAt, ticking ? now : (run.completedAt ?? now));
   const title = firstLine(run.task) || run.projectId || label;
 
   // Tolerate a record from before these fields existed (or a test's stub).
@@ -691,7 +718,29 @@ export default function CodingAgentActivityPill(
           </button>
         ) : null}
       </div>
-      {live && <RunProgressBar estimate={est} color={tone.color} timeLeft={labels.timeLeft} testId="coding-agent-progressbar" />}
+      {live && !startStep && <RunProgressBar estimate={est} color={tone.color} timeLeft={labels.timeLeft} testId="coding-agent-progressbar" />}
+      {startLine ? (
+        // Which step of the start it is on, and the id the run goes by —
+        // the line the owner reads in the seconds before there is work to show.
+        <div
+          data-testid="coding-agent-activity-start"
+          data-step={startStep ?? undefined}
+          aria-live="off"
+          title={startLine}
+          style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0, fontSize: 11.5, color: "rgba(255,255,255,0.75)" }}
+        >
+          <span aria-hidden="true" className="coding-agent-pulse" style={{ color: TODO_MARK.in_progress.color, flexShrink: 0 }}>
+            {TODO_MARK.in_progress.glyph}
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{startLine}</span>
+          <span
+            data-testid="coding-agent-activity-run-id"
+            style={{ marginLeft: "auto", flexShrink: 0, color: "rgba(255,255,255,0.4)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 10.5 }}
+          >
+            {run.id}
+          </span>
+        </div>
+      ) : null}
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 6, rowGap: 2, color: "rgba(255,255,255,0.5)", fontSize: 11.5 }}>
         {meta.map((part, i) => (
           <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>

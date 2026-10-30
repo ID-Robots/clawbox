@@ -67,24 +67,33 @@ afterEach(() => {
 });
 
 describe("POST coding-agent/run", () => {
-  it("pushes a coding_run action named after the run — started, or queued with the run's team when it has one", async () => {
+  it("pushes a coding_run action named after the run — starting at once, then started, or queued with the run's team when it has one", async () => {
     const { POST } = runRoute;
     startOrQueueRun.mockResolvedValueOnce({ run: RUN, queued: false });
     expect((await POST(post("run", { task: "Add a toggle", projectId: "site" }))).status).toBe(202);
-    await vi.waitFor(() => expect(desktop).toHaveLength(1));
-    expect(desktop[0]).toEqual({ action: { type: "coding_run", phase: "started", runId: "run-k3x9q2ab", projectId: "site" }, id: "coding-run:run-k3x9q2ab" });
+    await vi.waitFor(() => expect(desktop).toHaveLength(2));
+    // The id is named before the start's own work, handed to the start, and
+    // announced on the ring under a notice id of its own — never the started
+    // notice's, which a desktop that saw the first would skip.
+    const announced = startOrQueueRun.mock.calls[0][0].runId as string;
+    expect(announced).toMatch(/^run-[0-9a-z]{8}$/);
+    expect(desktop[0]).toEqual({ action: { type: "coding_run", phase: "starting", runId: announced }, id: `coding-run-start:${announced}` });
+    expect(desktop[1]).toEqual({ action: { type: "coding_run", phase: "started", runId: "run-k3x9q2ab", projectId: "site" }, id: "coding-run:run-k3x9q2ab" });
 
     startOrQueueRun.mockResolvedValueOnce({ run: { ...RUN, id: "run-queued001", status: "queued", team: { id: "team-k3x9q2ab", role: "worker", taskId: "T1" } }, queued: true });
     await POST(post("run", { task: "Add a toggle", projectId: "site" }));
-    await vi.waitFor(() => expect(desktop).toHaveLength(2));
-    expect(desktop[1].action).toEqual({ type: "coding_run", phase: "queued", runId: "run-queued001", projectId: "site", teamId: "team-k3x9q2ab" });
+    await vi.waitFor(() => expect(desktop).toHaveLength(4));
+    expect(desktop[3].action).toEqual({ type: "coding_run", phase: "queued", runId: "run-queued001", projectId: "site", teamId: "team-k3x9q2ab" });
   });
 
-  it("pushes nothing when the run was refused", async () => {
+  it("follows a refused start with a failed notice, so the desktops re-read and the card says why", async () => {
     const { POST } = runRoute;
     startOrQueueRun.mockRejectedValueOnce(new CodingAgentError("disabled", "off"));
     expect((await POST(post("run", { task: "Add a toggle" }))).status).toBe(409);
-    expect(desktop).toEqual([]);
+    await vi.waitFor(() => expect(desktop).toHaveLength(2));
+    const announced = startOrQueueRun.mock.calls[0][0].runId as string;
+    expect(desktop.map((d) => d.action.phase)).toEqual(["starting", "failed"]);
+    expect(desktop[1]).toEqual({ action: { type: "coding_run", phase: "failed", runId: announced }, id: `coding-run-failed:${announced}` });
   });
 });
 
@@ -102,6 +111,26 @@ describe("POST coding-agent/team", () => {
     await POST(post("team", { goal: BOARD.goal, directory: "invoice" }));
     await vi.waitFor(() => expect(desktop).toHaveLength(2));
     expect(desktop[1].action).toMatchObject({ type: "coding_team", phase: "queued", teamId: "team-queued01" });
+  });
+
+  it("lists a team the box refused to start, with the reason, and tells the desktops", async () => {
+    const { POST } = teamRoute;
+    const { listCodingStarts, resetCodingStartsForTests } = await import("@/lib/coding-run-starts");
+    resetCodingStartsForTests();
+    team.startTeam.mockRejectedValueOnce(new CodingAgentError("not_ready", "Claude Code is not signed in on this ClawBox.\nSign in from the Coding Agent app."));
+    expect((await POST(post("team", { goal: BOARD.goal, directory: "invoice" }))).status).toBe(409);
+    await vi.waitFor(() => expect(desktop).toHaveLength(1));
+    const [refused] = listCodingStarts();
+    expect(refused).toMatchObject({
+      kind: "team",
+      task: BOARD.goal,
+      directory: "invoice",
+      source: "owner",
+      error: "Claude Code is not signed in on this ClawBox.",
+    });
+    expect(refused.failedAt).toEqual(expect.any(Number));
+    expect(desktop[0]).toEqual({ action: { type: "coding_team", phase: "failed", teamId: refused.id }, id: `coding-team-failed:${refused.id}` });
+    resetCodingStartsForTests();
   });
 });
 

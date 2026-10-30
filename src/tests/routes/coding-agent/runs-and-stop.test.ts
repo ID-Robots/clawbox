@@ -66,7 +66,8 @@ describe("GET runs", () => {
     // The route decorates each run with where its transcript lives, so the
     // app can offer a live preview without knowing Claude Code's layout.
     // `summaryLine` rides on every run for the chat's settled card.
-    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null, summaryLine: runSummaryLine(RUN) }] });
+    // `starting` beside the records: no start is on its way in this test.
+    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null, summaryLine: runSummaryLine(RUN) }], starting: [] });
     expect(listRuns).toHaveBeenCalledWith(30);
   });
 

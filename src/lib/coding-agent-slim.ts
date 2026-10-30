@@ -38,6 +38,7 @@
  */
 import { isSettled, type CodingRunStatus } from "./coding-agent-status";
 import { isSettledTeamStatus, type TeamStatus } from "./coding-team-status";
+import { teamStartStep, type TeamStartStep } from "./coding-start-phase";
 
 /** The run fields a slim read empties on a settled run. */
 export interface RunSlimFields {
@@ -212,6 +213,8 @@ export interface TeamCardAgent {
 export interface TeamCard {
   /** The team's status word; the card's chip. */
   phase: string;
+  /** Where it is on its way to its first worker (src/lib/coding-start-phase.ts); null once one is at work. */
+  startStep: TeamStartStep | null;
   tasksDone: number;
   tasksTotal: number;
   /** In outline order (the board's), at most TEAM_CARD_TASKS. */
@@ -269,6 +272,7 @@ export function teamCard(team: CardableTeam): TeamCard {
   });
   return {
     phase: team.status,
+    startStep: teamStartStep(team),
     tasksDone: done,
     tasksTotal: tasks.length,
     tasks: tasks.slice(0, TEAM_CARD_TASKS).map((t) => ({
