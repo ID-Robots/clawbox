@@ -584,9 +584,11 @@ export default function CodingAgentActivityPill(
             {expanded ? "expand_less" : "expand_more"}
           </span>
         </div>
-        {control ? (
+        {control && expanded ? (
           // Pause / Resume: the one control the owner's chat gets over the run
-          // (see the note at the top). An icon in Open's tokens, 44 × 44, its
+          // (see the note at the top), shown only on the EXPANDED card (the
+          // owner: the collapsed row keeps Open and × alone). An icon in
+          // Open's tokens, 32 × 32, its
           // name as the tooltip and the accessible name; disabled and named
           // for its in-flight word while the request is out. It stops the
           // click like Open does — pausing a run is not a request to expand
@@ -603,11 +605,11 @@ export default function CodingAgentActivityPill(
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              minHeight: 44,
-              minWidth: 44,
-              margin: "-12px 0",
+              minHeight: 32,
+              minWidth: 32,
+              margin: "-6px 0",
               padding: 0,
-              background: "rgba(52,211,153,0.12)",
+              background: "transparent",
               border: "1px solid rgba(52,211,153,0.35)",
               borderRadius: 8,
               color: "#a7f3d0",
@@ -617,7 +619,7 @@ export default function CodingAgentActivityPill(
               flexShrink: 0,
             }}
           >
-            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
               {busy ? "hourglass_top" : control === "pause" ? "pause" : "play_arrow"}
             </span>
           </button>
@@ -633,15 +635,16 @@ export default function CodingAgentActivityPill(
             title={openLabel}
             aria-label={openLabel}
             data-testid="coding-agent-activity-view"
-            // A 44 px target, the row's own height kept by the margin.
+            // A 32 px button (the owner found 44 too big in the chat row,
+            // 2026-10-30); the row's own height kept by the margin.
             style={{
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              minHeight: 44,
-              minWidth: 44,
-              margin: "-12px 0",
-              background: "rgba(52,211,153,0.12)",
+              minHeight: 32,
+              minWidth: 32,
+              margin: "-6px 0",
+              background: "transparent",
               border: "1px solid rgba(52,211,153,0.35)",
               borderRadius: 8,
               color: "#a7f3d0",

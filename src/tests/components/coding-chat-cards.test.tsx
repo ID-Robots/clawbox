@@ -154,11 +154,15 @@ describe("CodingChatCards", () => {
     expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
     cleanup();
     render(<Host canControl />);
+    // The control lives on the EXPANDED card: the collapsed row keeps Open and × alone.
+    expect(screen.queryByTestId("coding-agent-activity-pause")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.getByTestId("coding-agent-activity-pause")).toHaveAttribute("aria-label", translations.en["codingAgent.pause"]);
     cleanup();
     // A paused run whose allowance ran out: Resume, and the run page's own sentence beside it.
     feed.runs = [{ ...RUN, status: "paused", needsYou: true, pauseReason: { kind: "allowance", meter: "images", resetsAt: "2026-10-31T09:00:00.000Z", message: "quota" } }];
     render(<Host canControl />);
+    fireEvent.click(screen.getByTestId("coding-agent-activity-toggle"));
     expect(screen.getByTestId("coding-agent-activity-resume")).toHaveAttribute("aria-label", translations.en["codingAgent.resume"]);
     // The mocked `t` leaves `{time}` in place; the whole sentence is pinned
     // by src/tests/unit/coding-pause-reason-copy.test.ts.

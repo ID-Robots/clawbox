@@ -323,6 +323,35 @@ export interface NewAppRequest {
 }
 
 /**
+ * The Create card's two toggles (2026-10-30), as every prompt builder takes
+ * them: run the work as a coding TEAM, and ask for the highest effort.
+ */
+export interface PromptOptions {
+  /** The work goes to a coding team (coding_team_run) rather than one run. */
+  team?: boolean;
+  /**
+   * The owner asked for the highest effort on this one: the prompt ends with
+   * the sentence that tells the assistant to pass `effort: "ultracode"` to the
+   * tool it starts the work with — a real parameter of coding_agent_run and
+   * coding_team_run (the per-request override, src/lib/coding-effort.ts).
+   */
+  ultracode?: boolean;
+}
+
+/**
+ * The closing sentence of a prompt whose Ultracode toggle was on. Named for
+ * the tool the prompt asks for, so the assistant is told where the argument
+ * goes rather than left to guess; exported so the card's test can pin it.
+ */
+export function ultracodeSentence(tool: "coding_agent_run" | "coding_team_run"): string {
+  return `The owner asked for the highest effort on this one: pass effort "ultracode" to ${tool} when you start it.`;
+}
+
+/** The new-app prompt's extra line when the team toggle is on: the scaffold stays, the build goes to a team. */
+const NEW_APP_TEAM_SENTENCE =
+  "Once the folder is scaffolded, start the work as a coding TEAM with coding_team_run in that folder (its directory), with the description above as the goal — the planner splits it into tasks, workers do them and a reviewer checks each; do not start single runs for the parts yourself.";
+
+/**
  * The one message the New wizard hands to the chat.
  *
  * English on purpose, like buildFixErrorPrompt: it is addressed to the
@@ -331,7 +360,7 @@ export interface NewAppRequest {
  * — so the request lands as a plan rather than a wish. The template is named
  * the way code_project_init's argument is spelled.
  */
-export function buildNewAppPrompt(req: NewAppRequest): string {
+export function buildNewAppPrompt(req: NewAppRequest, opts: PromptOptions = {}): string {
   const name = req.name.trim();
   // One sentence, whatever punctuation the owner typed: strip a trailing full
   // stop so the description does not end "...timer.." after ours.
@@ -339,6 +368,10 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
   return [
     `Create a new ClawBox app called "${name}": ${what}.`,
     SCAFFOLD_SENTENCE[req.template],
+    // With the team toggle on the scaffold is still the assistant's; the
+    // build itself goes to a team in the folder it made.
+    ...(opts.team ? [NEW_APP_TEAM_SENTENCE] : []),
+    ...(opts.ultracode ? [ultracodeSentence(opts.team ? "coding_team_run" : "coding_agent_run")] : []),
   ].join("\n");
 }
 
@@ -387,7 +420,7 @@ export interface ResumeProjectRequest {
  * before any change, the verification and commit after, and — for a code
  * project — the rebuild that puts the result back on the desktop.
  */
-export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
+export function buildResumeProjectPrompt(req: ResumeProjectRequest, opts: PromptOptions = {}): string {
   const what = req.instructions.trim().replace(/[.\s]+$/u, "");
   const last = req.latestRun;
   const lastTask = last ? last.task.trim().split(/\r?\n/)[0].slice(0, 160) : "";
@@ -402,6 +435,7 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
       : "When the run is done, tell me what changed, what was verified, and what is left for the next run.",
   ];
   if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
+  if (opts.ultracode) lines.push(ultracodeSentence("coding_agent_run"));
   return lines.join("\n");
 }
 
@@ -412,7 +446,7 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
  * project page's "Plan with the assistant" button opens the Create App card
  * with the team switch on, and this is what the card then hands the chat.
  */
-export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">): string {
+export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">, opts: PromptOptions = {}): string {
   // Trailing periods come off so the sentence reads as one; a goal that is
   // nothing but periods keeps what the owner typed rather than becoming an
   // empty request.
@@ -429,6 +463,7 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
     // a Hermes box never posts (the assistant would wait on it for ever).
     "Tell me when it is running, and do not poll it — the coding_team_run reply says how you will hear that it finished; then read coding_team_status and summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
+    ...(opts.ultracode ? [ultracodeSentence("coding_team_run")] : []),
   ].join("\n");
 }
 

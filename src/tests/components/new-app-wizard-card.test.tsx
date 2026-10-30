@@ -12,7 +12,10 @@ import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import NewAppWizardCard, { lastRunLabel, lastRunSummary } from "@/components/NewAppWizardCard";
 import { translations } from "@/lib/translations";
-import { buildResumeProjectPrompt, buildTeamProjectPrompt, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
+import { buildNewAppPrompt, buildResumeProjectPrompt, buildTeamProjectPrompt, CHAT_MESSAGE_EVENT, ultracodeSentence } from "@/lib/ui-events";
+
+// The two toggles remember the owner's last choice per browser; no case may inherit another's.
+afterEach(() => { try { window.localStorage.clear(); } catch { /* unavailable */ } });
 
 describe("NewAppWizardCard", () => {
   it("ignores an outside click by default — the page host must not lose typed text", () => {
@@ -255,3 +258,128 @@ describe("NewAppWizardCard — an existing project", () => {
     expect((await screen.findByTestId("coding-agent-new-project")).className).toContain("text-ellipsis");
   });
 });
+
+/**
+ * The two toggles (2026-10-30): "Run as a coding team" and "Ultracode", as
+ * switch rows above the buttons in BOTH modes, off by default, each
+ * remembered in localStorage, and what each does to the message.
+ */
+describe("NewAppWizardCard — the two toggles", () => {
+  const PROJECTS = [
+    { folder: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder", name: "shop", lastCommit: null, onDesktop: false, latestRun: null },
+  ];
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function listen(): { heard: string[]; stop: () => void } {
+    const heard: string[] = [];
+    const onChatMessage = (e: Event) => heard.push(String((e as CustomEvent<{ text?: string }>).detail?.text ?? ""));
+    window.addEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
+    return { heard, stop: () => window.removeEventListener(CHAT_MESSAGE_EVENT, onChatMessage) };
+  }
+
+  it("shows both switches in the NEW mode, off, as role=switch buttons, above the buttons", () => {
+    render(<NewAppWizardCard onClose={() => {}} />);
+    const team = screen.getByTestId("coding-agent-new-team");
+    const ultra = screen.getByTestId("coding-agent-new-ultracode");
+    for (const sw of [team, ultra]) {
+      expect(sw.tagName).toBe("BUTTON");
+      expect(sw).toHaveAttribute("role", "switch");
+      expect(sw).not.toBeChecked();
+    }
+    // Directly above the Cancel/Create row: the toggles come before the buttons in the form.
+    const toggles = screen.getByTestId("coding-agent-new-toggles");
+    expect(toggles.compareDocumentPosition(screen.getByTestId("coding-agent-new-create")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(toggles.compareDocumentPosition(screen.getByTestId("coding-agent-new-what")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    // The old checkbox is gone.
+    expect(document.querySelector('input[type="checkbox"]')).toBeNull();
+  });
+
+  it("shows both switches in the EXISTING mode too", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+    render(<NewAppWizardCard onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("coding-agent-new-mode-existing"));
+    await screen.findByTestId("coding-agent-new-project");
+    expect(screen.getByTestId("coding-agent-new-team")).not.toBeChecked();
+    expect(screen.getByTestId("coding-agent-new-ultracode")).not.toBeChecked();
+  });
+
+  it("sends a NEW app to a coding team when the team switch is on, and says Start a team", () => {
+    const { heard, stop } = listen();
+    try {
+      render(<NewAppWizardCard onClose={() => {}} />);
+      fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Shop" } });
+      fireEvent.change(screen.getByTestId("coding-agent-new-what"), { target: { value: "An invoice generator" } });
+      const submit = screen.getByTestId("coding-agent-new-create");
+      // No i18n provider here: the button reads its key, which is enough to tell the three apart.
+      expect(submit.textContent).toContain("newCreate");
+      fireEvent.click(screen.getByTestId("coding-agent-new-team"));
+      expect(screen.getByTestId("coding-agent-new-team")).toBeChecked();
+      expect(submit.textContent).toContain("newStartTeam");
+      fireEvent.click(submit);
+      expect(heard).toEqual([buildNewAppPrompt({ name: "Shop", description: "An invoice generator", template: "nextjs" }, { team: true })]);
+      expect(heard[0]).toContain("coding_team_run");
+      expect(heard[0]).not.toContain("ultracode");
+    } finally {
+      stop();
+    }
+  });
+
+  it("ends the message with the ultracode sentence when that switch is on — a new app and an existing project alike", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+    const { heard, stop } = listen();
+    try {
+      const first = render(<NewAppWizardCard onClose={() => {}} />);
+      fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Shop" } });
+      fireEvent.change(screen.getByTestId("coding-agent-new-what"), { target: { value: "An invoice generator" } });
+      fireEvent.click(screen.getByTestId("coding-agent-new-ultracode"));
+      expect(screen.getByTestId("coding-agent-new-ultracode")).toBeChecked();
+      fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+      expect(heard[0]).toBe(buildNewAppPrompt({ name: "Shop", description: "An invoice generator", template: "nextjs" }, { ultracode: true }));
+      expect(heard[0].endsWith(ultracodeSentence("coding_agent_run"))).toBe(true);
+      first.unmount();
+
+      // The choice is remembered: the next card opens with Ultracode on, and
+      // with the team switch on too the sentence names coding_team_run.
+      render(<NewAppWizardCard onClose={() => {}} initialProject="/home/clawbox/Projects/shop" initialTeam />);
+      const select = await screen.findByTestId("coding-agent-new-project");
+      await waitFor(() => expect(select).not.toBeDisabled());
+      expect(screen.getByTestId("coding-agent-new-ultracode")).toBeChecked();
+      expect(screen.getByTestId("coding-agent-new-team")).toBeChecked();
+      fireEvent.change(screen.getByTestId("coding-agent-new-next"), { target: { value: "Add invoices." } });
+      fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+      expect(heard[1]).toBe(buildTeamProjectPrompt({ name: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder", folder: "shop", instructions: "Add invoices." }, { ultracode: true }));
+      expect(heard[1].endsWith(ultracodeSentence("coding_team_run"))).toBe(true);
+    } finally {
+      stop();
+    }
+  });
+
+  it("remembers each switch as the owner last left it, and reads a blocked storage as off", () => {
+    const first = render(<NewAppWizardCard onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("coding-agent-new-team"));
+    first.unmount();
+    const second = render(<NewAppWizardCard onClose={() => {}} />);
+    expect(screen.getByTestId("coding-agent-new-team")).toBeChecked();
+    expect(screen.getByTestId("coding-agent-new-ultracode")).not.toBeChecked();
+    fireEvent.click(screen.getByTestId("coding-agent-new-team"));
+    second.unmount();
+    const third = render(<NewAppWizardCard onClose={() => {}} />);
+    expect(screen.getByTestId("coding-agent-new-team")).not.toBeChecked();
+    expect(window.localStorage.getItem("clawbox:create-card:team")).toBe("0");
+    third.unmount();
+    cleanupStorage();
+    // A storage that throws (a private window, blocked site data): the card still renders, both off.
+    const broken = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+    try {
+      render(<NewAppWizardCard onClose={() => {}} />);
+      expect(screen.getByTestId("coding-agent-new-team")).not.toBeChecked();
+      expect(screen.getByTestId("coding-agent-new-ultracode")).not.toBeChecked();
+    } finally {
+      broken.mockRestore();
+    }
+  });
+});
+
+function cleanupStorage() {
+  try { window.localStorage.clear(); } catch { /* unavailable */ }
+}

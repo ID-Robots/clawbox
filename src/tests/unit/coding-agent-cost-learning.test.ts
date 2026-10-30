@@ -469,3 +469,49 @@ describe("the project's run notes", () => {
     expect(argv).not.toContain("run-notes.json");
   });
 });
+
+/**
+ * A run's own effort (2026-10-30): the caller's level stands in for the
+ * owner's setting and for nothing else — the role caps and the read-only clamp
+ * still land on it — and a level the app does not offer is refused before the
+ * run exists.
+ */
+describe("a run asked for its own effort", () => {
+  it("runs on the level it was asked for, recorded and handed to the harness, over the owner's setting", async () => {
+    makePlainProject("plain");
+    const writer = await lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "ultracode" });
+    expect(writer).toMatchObject({ effort: "ultracode" });
+    await finished(writer.id);
+    expect(handed(writer.id, "argv")).toMatch(/ultracode/);
+    expect(lib.getRun(writer.id)).toMatchObject({ effort: "ultracode" });
+    const low = await lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "low" });
+    expect(low).toMatchObject({ effort: "low" });
+    await finished(low.id);
+    expect(handed(low.id, "effort")).toBe("low");
+  });
+
+  it("still caps a planner and a reviewer at xhigh, and never runs a read-only run on ultracode", async () => {
+    makePlainProject("plain");
+    const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, effort: "ultracode", team: { id: TEAM, role: "planner", taskId: null } });
+    expect(planner).toMatchObject({ effort: "xhigh", maxTurns: 100 });
+    await finished(planner.id);
+    expect(handed(planner.id, "argv")).not.toMatch(/ultracode|Workflow/);
+    const reviewer = await lib.startRun({ task: "review", directory: "plain", source: "owner", readOnly: true, effort: "max", team: { id: TEAM, role: "reviewer", taskId: "t1" } });
+    expect(reviewer).toMatchObject({ effort: "xhigh" });
+    await finished(reviewer.id);
+    const reader = await lib.startRun({ task: "look", directory: "plain", source: "owner", readOnly: true, effort: "ultracode" });
+    expect(reader).toMatchObject({ effort: "xhigh" });
+    await finished(reader.id);
+    // A worker — the writing role — takes the asked-for level whole.
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", effort: "ultracode", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    expect(worker).toMatchObject({ effort: "ultracode" });
+    await finished(worker.id);
+  });
+
+  it("refuses a level the app does not offer before the run exists", async () => {
+    makePlainProject("plain");
+    await expect(lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
+    const saved = fs.existsSync(runsFile()) ? fs.readFileSync(runsFile(), "utf8") : "";
+    expect(saved).not.toContain("build it");
+  });
+});

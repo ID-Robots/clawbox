@@ -53,6 +53,8 @@ const NAMES = [
   "coding_run_list", "coding_agent_resume", "coding_project_status",
   // 2026-10-30: the app's Import panel as a tool (src/tests/unit/mcp-coding-project-import.test.ts).
   "coding_project_import",
+  // 2026-10-30: the coding team's settings (src/tests/unit/mcp-coding-settings-tools.test.ts).
+  "coding_settings_get", "coding_settings_set",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
@@ -976,5 +978,48 @@ describe("a run whose pull request's CI failed", () => {
     const refused = await harness().call("coding_agent_run", { task: "Fix the CI.", fix_ci: true });
     expect(refused.isError).toBe(true);
     expect(apiPost).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `effort` (2026-10-30): the per-request level, offered as the app's own list,
+ * sent only when named, and the route's refusal of one turned into advice on
+ * that argument rather than on the folder.
+ */
+describe("coding_agent_run effort", () => {
+  it("offers exactly the levels the app offers, and sends only a named one", async () => {
+    const { OFFERED_EFFORT_LEVELS } = await import("../../../src/lib/coding-effort");
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    for (const effort of OFFERED_EFFORT_LEVELS) {
+      const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", effort });
+      expect(out.isError, effort).toBe(false);
+      expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "x", projectId: "site", effort }, expect.anything());
+    }
+    await harness().call("coding_agent_run", { task: "x", project_id: "site", effort: "ultracode" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "x", projectId: "site", effort: "ultracode" }, expect.anything());
+    await harness().call("coding_agent_run", { task: "x", project_id: "site" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "x", projectId: "site" }, expect.anything());
+  });
+
+  it("declares the parameter as an enum of the offered levels — the dispatcher's schema refuses the rest", async () => {
+    // The test registrar calls the handler directly (see its header); the
+    // schema itself is what a device validates with, so it is pinned here.
+    const { z } = await import("zod");
+    const shape = harness().get("coding_agent_run").shape;
+    const schema = z.object(shape);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "medium" }).success).toBe(false);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "ultracode" }).success).toBe(true);
+    expect(schema.safeParse({ task: "x", project_id: "site" }).success).toBe(true);
+  });
+
+  it("turns the route's effort refusal into advice on the effort, not the folder", async () => {
+    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "medium". Use one of: low, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
+    const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", effort: "max" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/Unknown effort/);
+    expect(out.error.next).toMatch(/low, xhigh, max, ultracode/);
+    expect(out.error.next).not.toMatch(/folder/);
   });
 });

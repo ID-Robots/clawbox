@@ -228,3 +228,27 @@ describe("POST stop", () => {
     expect(team.stopTeam).toHaveBeenCalledWith(OWNERS.id);
   });
 });
+
+/**
+ * `effort` on POST — the team's per-request level (2026-10-30): passed to the
+ * orchestrator when named, left out when not, refused here when it is not one
+ * the app offers.
+ */
+describe("POST effort", () => {
+  it("hands an offered level to startTeam and leaves it out when none was named", async () => {
+    await POST(req("team", { goal: "Build it", directory: "site", effort: "ultracode" }));
+    expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: null, directory: "site", source: "agent", effort: "ultracode" });
+    await POST(req("team", { goal: "Build it", directory: "site" }));
+    expect(team.startTeam.mock.calls[1][0]).not.toHaveProperty("effort");
+  });
+
+  it("refuses a level the app does not offer with 400 and a code, before startTeam", async () => {
+    for (const effort of ["medium", "Max", "", 7]) {
+      team.startTeam.mockClear();
+      const res = await POST(req("team", { goal: "Build it", directory: "site", effort }));
+      expect(res.status, String(effort)).toBe(400);
+      expect(await res.json()).toMatchObject({ kind: "invalid", code: "effort" });
+      expect(team.startTeam).not.toHaveBeenCalled();
+    }
+  });
+});

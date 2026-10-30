@@ -462,46 +462,11 @@ export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
  */
 export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
 
-/**
- * How hard Claude Code thinks per turn. The first five are the levels the
- * installed CLI accepts for `--effort` and the wrapper pins through
- * CLAUDE_DS_EFFORT — it warns and falls back to its default on anything
- * else, so the set is validated here rather than passed through.
- *
- * Higher is slower and costs more; on a Jetson the difference is felt.
- *
- * "ultracode" is not a thinking level but Claude Code's own mode on top of
- * one: xhigh effort plus a standing opt-in to orchestrate the work with its
- * Workflow tool (fan-out, adversarial verification). It was the default until
- * TASK-1749: its fan-outs multiply every run's tokens (an owner measured a job
- * at 20-30 million tokens that a single-agent tool did in ~500k), so the
- * default is now xhigh — the same thinking level without the standing
- * fan-out — and ultracode stays one tap away in the picker.
- * The wrapper requests it with `--effort ultracode` instead of the env pin
- * the fixed levels use, because a pinned CLAUDE_CODE_EFFORT_LEVEL blocks the
- * mode ("clear it and ultracode takes over"). Checked on this box: a -p run
- * under the flag reports "Ultracode is on" and carries the Workflow tool.
- */
-export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
-/**
- * The levels the app offers, as opposed to the ones the CLI accepts.
- *
- * Measured on this box, same prompt, deepseek-v4-pro[1m], reasoning tokens:
- *
- *     low 82   medium 94   high 102   xhigh 139   max 414
- *
- * The effort does reach the model — the request carries
- * output_config {"effort": "..."} and it changes with the flag — but low,
- * medium and high land within noise of each other. Offering six buttons
- * where three do the same thing teaches a false model of the machine, so the
- * picker shows the three that measurably differ, plus ultracode. All six stay
- * valid for anyone setting the config key directly.
- */
-export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max", "ultracode"];
-export type CodingEffort = (typeof EFFORT_LEVELS)[number];
-export const DEFAULT_EFFORT: CodingEffort = "xhigh";
-/** The one level the wrapper cannot pin through the environment — see EFFORT_LEVELS. */
-export const ULTRACODE_EFFORT: CodingEffort = "ultracode";
+// The effort levels live in src/lib/coding-effort.ts (pure, so the MCP server
+// can offer the same list); re-exported here under the names every caller
+// already imports.
+import { DEFAULT_EFFORT, EFFORT_LEVELS, effortRefusal, isEffort, isOfferedEffort, OFFERED_EFFORT_LEVELS, ULTRACODE_EFFORT, type CodingEffort } from "@/lib/coding-effort";
+export { DEFAULT_EFFORT, EFFORT_LEVELS, isOfferedEffort, OFFERED_EFFORT_LEVELS, ULTRACODE_EFFORT, type CodingEffort };
 export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
 
 
@@ -2562,6 +2527,18 @@ export interface StartRunInput {
   /** Which model, for a provider that lets one be named. Validated together with `provider`. */
   model?: unknown;
   /**
+   * How hard to think on THIS run, as the CALLER sent it — unvalidated. One of
+   * OFFERED_EFFORT_LEVELS stands in for the owner's stored effort when the
+   * run's settings are read (the assistant's `coding_agent_run` `effort`, a
+   * team's board — the Create card's Ultracode toggle asks for it); anything
+   * else is `invalid`, before the slot or the folder is held. It replaces the
+   * owner's SETTING and nothing downstream of it: a reading role's cap
+   * (`ROLE_DEFAULTS.effortCap`), the owner's per-role choice and the read-only
+   * clamp (ultracode → xhigh) all still apply to it, so "ultracode" on a
+   * planner is still a planner at xhigh. Absent or null, the owner's setting.
+   */
+  effort?: unknown;
+  /**
    * What this run has to leave behind before the box calls it finished, as the
    * CALLER sent it — unvalidated. `startRun` reads it through
    * `readDeliverableInput` and throws `invalid` with the reason when it cannot,
@@ -2842,10 +2819,6 @@ export async function setCodingGitAuthor(input: { name?: string | null; email?: 
 
   if (Object.keys(entries).length > 0) await configSetMany(entries);
   return saved;
-}
-
-function isEffort(value: unknown): value is CodingEffort {
-  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
 /**
@@ -12697,6 +12670,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // Read before anything is held — the slot, the folder — so a malformed
   // request is a plain 400 that cost the box nothing.
   const givenExperience = requireExperience(input.experience);
+  const givenEffort = requireEffort(input.effort);
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -12802,6 +12776,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Read once, here: a run keeps the settings it started with even if the
     // owner changes them while it works.
     const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+    // The caller's effort for THIS run stands in for the owner's setting — and
+    // only for the setting: the role step and the read-only clamp below still
+    // have the last word (StartRunInput.effort).
+    if (givenEffort) settings.effort = givenEffort;
     // A REVIEW ROUND inherits the effort of the run it is fixing, the way it
     // already inherits that run's provider and model. A round is a
     // continuation, not a new piece of work: thinking harder or softer about
@@ -13135,6 +13113,17 @@ function requireDeliverable(input: StartRunInput): Deliverable | null {
  * the record still says the run was given an empty one, which is a different
  * fact from being given none.
  */
+/**
+ * The per-request effort as the caller sent it: one of OFFERED_EFFORT_LEVELS,
+ * null for none, or `invalid` — read before anything is held, like the
+ * experience block, so a malformed request costs the box nothing.
+ */
+function requireEffort(raw: unknown): CodingEffort | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isOfferedEffort(raw)) throw new CodingAgentError("invalid", effortRefusal(raw));
+  return raw;
+}
+
 function requireExperience(raw: unknown): { brief: string | null; record: RunExperience } | null {
   const read = readExperienceInput(raw);
   if (read === null) return null;
