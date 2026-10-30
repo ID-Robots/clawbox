@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
@@ -56,6 +56,14 @@ export default function ClawboxAiDeviceLogin({
   const [token, setToken] = useState("");
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  // The code is the one thing the owner came for, and on the Providers page it
+  // lands below the provider list — off screen in a Settings window of
+  // ordinary height (a board, 2026-10-30: the code was there, the owner saw a
+  // page that had not changed). Brought into view once, when it arrives.
+  const codeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (deviceCode) codeRef.current?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [deviceCode]);
 
   const submitToken = async () => {
     if (!onSubmitToken) return;
@@ -90,12 +98,14 @@ export default function ClawboxAiDeviceLogin({
           {busy ? t("connecting") : tr("ai.clawaiGetCode", "Get device code")}
         </button>
       ) : (
-        <DeviceCodeCard
-          code={deviceCode}
-          verificationUrl={verificationUrl ?? PORTAL_LOGIN_URL}
-          polling={polling}
-          onNewCode={onStart}
-        />
+        <div ref={codeRef}>
+          <DeviceCodeCard
+            code={deviceCode}
+            verificationUrl={verificationUrl ?? PORTAL_LOGIN_URL}
+            polling={polling}
+            onNewCode={onStart}
+          />
+        </div>
       )}
 
       {onSubmitToken && (

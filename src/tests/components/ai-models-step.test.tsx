@@ -372,14 +372,23 @@ describe("AIModelsStep variants", () => {
       description: "Primary provider",
     };
 
-    const { findByText, rerender } = render(<AIModelsStep {...props} currentProviderId={null} />);
-    await waitFor(() => expect(startSignal).toBeDefined());
-    // The status read answers while the start is still out.
-    rerender(<AIModelsStep {...props} currentProviderId="clawai" />);
-    await act(async () => { releaseStart(); await Promise.resolve(); });
+    const originalScroll = Element.prototype.scrollIntoView;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      const { findByText, rerender } = render(<AIModelsStep {...props} currentProviderId={null} />);
+      await waitFor(() => expect(startSignal).toBeDefined());
+      // The status read answers while the start is still out.
+      rerender(<AIModelsStep {...props} currentProviderId="clawai" />);
+      await act(async () => { releaseStart(); await Promise.resolve(); });
 
-    expect(startSignal?.aborted).toBe(false);
-    expect(await findByText("WXYZ-9876")).toBeInTheDocument();
+      expect(startSignal?.aborted).toBe(false);
+      expect(await findByText("WXYZ-9876")).toBeInTheDocument();
+      // And brought into view: on the Providers page it lands below the fold.
+      expect(scrolled).toHaveBeenCalledWith({ block: "center", behavior: "smooth" });
+    } finally {
+      Element.prototype.scrollIntoView = originalScroll;
+    }
   });
 
   it("forwards the selected ClawBox AI tier to the start endpoint", async () => {
