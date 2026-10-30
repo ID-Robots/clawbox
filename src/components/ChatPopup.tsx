@@ -73,7 +73,7 @@ import {
   type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
-import { describeChatFailure, describeFallbackReply, describeImageFailure, isAccountQuotaFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
+import { chatFailureNote, describeChatFailure, describeFallbackReply, describeImageFailure, EMPTY_RUN_TEXT, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import {
   SESSION_EXPIRED_CHAT_MESSAGE,
   SESSION_EXPIRED_EVENT,
@@ -118,12 +118,14 @@ import {
   finalAlreadyShownWithMedia,
   finiteMessageTimestamp,
   isAckOnlyReply,
+  isEmptyReply,
   mergeRestoredTranscript,
   pushedSpokenReply,
   readLiveReply,
   scheduleTranscriptReconcile,
   sessionMessagePush,
   withAssistantReply,
+  withEmptyRunNote,
   withPushedSpokenReply,
   type ReconcileTimer,
 } from '@/lib/chat-transcript-reconcile'
@@ -3468,13 +3470,18 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           // first was, from the context and the sentence that one carried.
           const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
           const failureContext = settledError?.context
-          const failureText = settledError
-            ? describeChatFailure(settledError.errorMessage, settledError.context, failureWordsRef.current)
+          // The sentence, its tone — no API quota on the owner's account is a
+          // fact, not a fault: calm, not red — and the button that fixes it (a
+          // ClawBox AI sign-in the box can no longer use), worded by the same
+          // helper the history read restores the box's own record with.
+          const failureNote = settledError
+            ? chatFailureNote(settledError.errorMessage, settledError.context, failureWordsRef.current)
             : undefined
-          // No API quota on the owner's account is a fact, not a fault: calm, not red.
-          const failureTone = settledError && isAccountQuotaFailure(settledError.errorMessage, settledError.context)
-            ? { variant: 'notice' as const }
-            : {}
+          const failureText = failureNote?.text
+          const failureTone = {
+            ...(failureNote?.variant ? { variant: failureNote.variant } : {}),
+            ...(failureNote?.actions ? { actions: failureNote.actions } : {}),
+          }
           // A repeat ends nothing: its run's busy mark went with the first
           // frame, and one on this key now belongs to a turn sent since.
           if (state === 'final' || state === 'aborted' || (state === 'error' && !settledError?.repeat)) {
@@ -3526,6 +3533,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // a repeat of the one already on screen, and treating that as an
             // empty ack threw the recording away and refetched history instead.
             const isAckOnly = isAckOnlyReply({ text, images, audio, files })
+            // A run that ended with nothing at all, rather than an ack that
+            // promises a reply: the re-read below is its last chance, and when
+            // it finds nothing either the turn gets a line of its own.
+            const endedEmpty = isEmptyReply({ text, images, audio, files })
             // The reconcile often wins the race now: `session.message` lands
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
@@ -3630,6 +3641,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 // the transcript from before the read.
                 void loadHistory().then((loaded) => {
                   if (sessionKeyRef.current !== sk) return
+                  if (endedEmpty && finishedRun && loaded) {
+                    setMessages(prev => withEmptyRunNote(prev, { role: 'system' as const, text: EMPTY_RUN_TEXT, timestamp: Date.now(), failedRun: finishedRun, variant: 'notice' as const }))
+                  }
                   const restored = [...(loaded ?? [])].reverse().find(m => m.role === 'assistant')
                   // Both owings, exactly as the live final settles them: aloud
                   // for a spoken question, a clip to press for a typed one on
@@ -4085,6 +4099,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       const read = () => adapter.loadHistory({
         limit: 50,
         imageWaitFrom: generatingImageRef.current ? imageWaitFromRef.current : null,
+        failureWords: failureWordsRef.current,
       })
       // A restore retries only while the gateway says "not yet" (the history
       // is rebuilding, the gateway is restarting) or does not answer, and never
@@ -4122,7 +4137,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The merge is shared with the full-page chat
       // (lib/chat-transcript-reconcile.ts); it returns `prev` itself when
       // nothing changed, which makes React skip the render.
-      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs))
+      // A failed turn's line is kept across the read: the box's own record of
+      // the failure restores it when the box stored one, and nothing else
+      // would put it back when it did not.
+      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs, { keepFailureNotes: true }))
 
       // Open the FIRST conversation, but only on a box that actually has an
       // introduction waiting.

@@ -1486,6 +1486,7 @@ export const zh: Record<string, string> = {
   "chat.modelUnavailableAddCredit": "如需使用 {model}，请在 {console} 充值。",
   "chat.modelUnavailableAccountNoQuota": "你的 {provider} 账户目前没有 API 配额（{provider} 按你的消费设定配额）。请在 {console} 充值，或切换服务商。",
   "chat.modelUnavailableOpenProviders": "设置 → 服务商",
+  "chat.modelUnavailableClawaiSignIn": "重新登录 ClawBox AI",
   "chat.modelUnavailableSwitchTo": "切换到 {provider}",
   "chat.modelUnavailableSwitchedTo": "已将聊天切换到 {provider} — 请重新发送你的消息。",
   "chat.modelUnavailableSwitchFailed": "无法将聊天切换到 {provider} — 请重试，或在 设置 → 服务商 中选择它。",

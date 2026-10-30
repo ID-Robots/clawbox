@@ -281,3 +281,62 @@ describe("what it refuses before either harness is asked", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("POST /setup-api/providers/default — OpenAI through a ChatGPT sign-in", () => {
+  beforeEach(() => getActiveHarness.mockResolvedValue("openclaw"));
+
+  // Settings folds the ChatGPT sign-in (profile `openai:chatgpt`, mode oauth)
+  // into its OpenAI card and posts `openai`; the picker lists that sign-in as
+  // `codex`. A box with the sign-in alone found no `openai` row and the card's
+  // "Make default" came back red with `provider_unconfigured`.
+  it("promotes the ChatGPT sign-in's row when OpenAI has no API-key row", async () => {
+    chatModelGET.mockResolvedValue(json({
+      options: [
+        { id: "a", provider: "clawai", model: "deepseek/deepseek-v4-flash", available: true },
+        { id: "b", provider: "codex", model: "openai/gpt-5.5", available: true },
+      ],
+    }));
+    chatModelPOST.mockResolvedValue(json({ ok: true }));
+
+    const res = await call({ provider: "openai" });
+
+    expect(res.status).toBe(200);
+    expect(await delegateBody(chatModelPOST)).toEqual({ model: "openai/gpt-5.5", automatic: true });
+  });
+
+  it("finds it in the unfiltered state too", async () => {
+    chatModelGET.mockResolvedValue(json({ options: [] }));
+    chatModelStateUnfiltered.mockResolvedValue({ options: [{ id: "b", provider: "codex", model: "openai/gpt-5.5", available: true }] });
+    chatModelPOST.mockResolvedValue(json({ ok: true }));
+
+    const res = await call({ provider: "openai" });
+
+    expect(res.status).toBe(200);
+    expect(await delegateBody(chatModelPOST)).toEqual({ model: "openai/gpt-5.5", automatic: true });
+  });
+
+  it("keeps promoting the API key's own row on a box that holds both", async () => {
+    chatModelGET.mockResolvedValue(json({
+      options: [
+        { id: "b", provider: "codex", model: "openai/gpt-5.5", available: true },
+        { id: "c", provider: "openai", model: "openai/gpt-5.4-mini", available: true },
+      ],
+    }));
+    chatModelPOST.mockResolvedValue(json({ ok: true }));
+
+    await call({ provider: "openai" });
+
+    expect(await delegateBody(chatModelPOST)).toEqual({ model: "openai/gpt-5.4-mini", automatic: true });
+  });
+
+  it("never lends the ChatGPT row to another provider", async () => {
+    chatModelGET.mockResolvedValue(json({ options: [{ id: "b", provider: "codex", model: "openai/gpt-5.5", available: true }] }));
+    chatModelStateUnfiltered.mockResolvedValue({ options: [{ id: "b", provider: "codex", model: "openai/gpt-5.5", available: true }] });
+
+    const res = await call({ provider: "google" });
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({ error: "provider_unconfigured" });
+    expect(chatModelPOST).not.toHaveBeenCalled();
+  });
+});

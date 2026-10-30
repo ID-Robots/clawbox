@@ -6,7 +6,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from '
 import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
-import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure } from '@/lib/chat-error-text'
+import { chatFailureNote, describeChatFailure, describeFallbackReply, EMPTY_RUN_TEXT } from '@/lib/chat-error-text'
 import {
   SESSION_EXPIRED_CHAT_MESSAGE,
   SESSION_EXPIRED_EVENT,
@@ -73,12 +73,14 @@ import {
   cancelTranscriptReconcile,
   claimHistoryRead,
   isAckOnlyReply,
+  isEmptyReply,
   mergeRestoredTranscript,
   pushedSpokenReply,
   readLiveReply,
   scheduleTranscriptReconcile,
   sessionMessagePush,
   withAssistantReply,
+  withEmptyRunNote,
   withPushedSpokenReply,
   type HistoryReadOrder,
   type ReconcileTimer,
@@ -276,7 +278,7 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail,
           </div>
         )}
         {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
-        {isNotice && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
+        {msg.role === 'system' && msg.actions && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {files.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
             {files.map(src => <ChatFileCard key={src} src={src} />)}
@@ -784,7 +786,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       // It used to be this single read with its failure sent to the console: a
       // conversation the gateway was still rebuilding came back empty, looking
       // exactly like a new one, with nothing to press.
-      const read = () => transport.loadHistory()
+      const read = () => transport.loadHistory({ failureWords: failureWordsRef.current })
       const { messages: chatMsgs } = restoreCtl
         ? await restoreWithRetry(read, {
           signal: restoreCtl.signal,
@@ -1190,6 +1192,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
             // below. The same shared check ChatPopup uses, so the two
             // components can't drift on which finals count as ack-only.
             const isAckOnly = isAckOnlyReply({ text, images, audio, files })
+            // A run that ended with nothing at all — see the re-read below.
+            const endedEmpty = isEmptyReply({ text, images, audio, files })
+            const endedRun = typeof payload.runId === 'string' ? payload.runId : runIdRef.current
+            const endedKey = sessionKeyRef.current
             // Same suppression as the history path, so the bubble cannot
             // appear in real time either — only the append is skipped, the
             // ack-only refetch below still runs. Asked of the ORIGINAL text: a
@@ -1238,7 +1244,13 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
                   historyCatchUpOwedRef.current = true
                   return
                 }
-                void loadHistory()
+                // A run that ended empty gets its line once this read is in
+                // and still holds nothing under the question: a question with
+                // nothing under it reads as a box still thinking.
+                void loadHistory().then(() => {
+                  if (!endedEmpty || !endedRun || sessionKeyRef.current !== endedKey) return
+                  setMessages(prev => withEmptyRunNote(prev, { role: 'system', text: EMPTY_RUN_TEXT, timestamp: Date.now(), failedRun: endedRun, variant: 'notice' }))
+                })
               }, 3_000)
             }
           } else if (settledError?.repeat) {
@@ -1304,9 +1316,21 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
               const failureContext = settledError?.context
-              // No API quota on the owner's account is a fact, not a fault: calm, not red.
-              const failureTone = isAccountQuotaFailure(payload.errorMessage, failureContext) ? { variant: 'notice' as const } : {}
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current), timestamp: Date.now(), ...failureTone }])
+              // The sentence, its tone — no API quota on the owner's account is
+              // a fact, not a fault: calm, not red — and the button that fixes
+              // it (a ClawBox AI sign-in the box can no longer use). Tagged with
+              // its run: the box records the failure too, and the history read
+              // restores that record as this same line, never beside it.
+              const note = chatFailureNote(payload.errorMessage, failureContext, failureWordsRef.current)
+              const failedRun = settledError?.runId ?? (typeof payload.runId === 'string' ? payload.runId : undefined)
+              setMessages(prev => [...prev, {
+                role: 'system',
+                text: note.text,
+                timestamp: Date.now(),
+                ...(failedRun ? { failedRun } : {}),
+                ...(note.variant ? { variant: note.variant } : {}),
+                ...(note.actions ? { actions: note.actions } : {}),
+              }])
               // A Claude account at its limit, or refused (TASK-1260): the box
               // moves every Claude consumer to the next account and sends the
               // turn again; the chat says which of those happened.

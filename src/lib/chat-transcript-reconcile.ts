@@ -83,6 +83,34 @@ export function isAckOnlyReply(reply: Pick<LiveReply, "text" | "images" | "audio
 }
 
 /**
+ * A `final` that carries nothing at all — no words, no media. One of the
+ * ack-only shapes above, but not a reply on its way: "Sent." promises one and
+ * a sentinel is the agent choosing silence, while this is a run that ended
+ * empty. The chat re-reads the box once for it (the reply may have been
+ * stored rather than streamed) and says so when nothing turns up
+ * (`withEmptyRunNote`).
+ */
+export function isEmptyReply(reply: Pick<LiveReply, "text" | "images" | "audio" | "files">): boolean {
+  return !reply.text.trim() && !hasMedia(reply);
+}
+
+/**
+ * The transcript with a note under the newest turn when that turn ended with
+ * nothing under it — no reply, no note — or the transcript itself when it
+ * did not. Only the run that ended empty: a newer question the owner has sent
+ * since is not this run's, and nor is one the box tagged with another run.
+ */
+export function withEmptyRunNote<T extends ChatMessage>(transcript: T[], note: T & { failedRun: string }): T[] {
+  let lastUser = -1;
+  for (let i = transcript.length - 1; i >= 0; i--) if (transcript[i].role === "user") { lastUser = i; break; }
+  if (lastUser === -1) return transcript;
+  const turnRun = runIdOf(transcript[lastUser].idempotencyKey);
+  if (turnRun && turnRun !== note.failedRun) return transcript;
+  if (transcript.slice(lastUser + 1).some((m) => m.role === "assistant" || m.role === "system")) return transcript;
+  return [...transcript, note];
+}
+
+/**
  * Has the transcript re-read already put this reply on screen, WITH the media
  * the live frame is missing?
  *
@@ -399,11 +427,20 @@ function alignKeys(a: string[], b: string[]): number[] {
  * the message that followed it; failing both — it followed only what the box
  * has not stored yet — at the end, where it already was.
  */
-export function carryLocalNotes(previous: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
-  if (!previous.some((m) => m.role === "system")) return next;
+export function carryLocalNotes(
+  previous: ChatMessage[],
+  next: ChatMessage[],
+  carries: (note: ChatMessage) => boolean = () => true,
+): ChatMessage[] {
+  if (!previous.some((m) => m.role === "system" && carries(m))) return next;
   // A harness that stores notes of its own is not handed a second copy.
   const stored = new Map<string, number>();
   for (const m of next) if (m.role === "system") stored.set(m.text, (stored.get(m.text) ?? 0) + 1);
+  // Nor a second copy of a failure the box recorded itself: the live line and
+  // the stored one name the same run, and their words can differ (the live
+  // frame carried the run's context, the stored row carries only its error).
+  const storedRuns = new Set<string>();
+  for (const m of next) if (m.role === "system" && m.failedRun) storedRuns.add(m.failedRun);
 
   const key = (m: ChatMessage) => `${m.role}\u0000${m.text}`;
   const prevIdx: number[] = [];
@@ -423,7 +460,8 @@ export function carryLocalNotes(previous: ChatMessage[], next: ChatMessage[]): C
   const atEnd: ChatMessage[] = [];
   for (let i = 0; i < previous.length; i++) {
     const note = previous[i];
-    if (note.role !== "system") continue;
+    if (note.role !== "system" || !carries(note)) continue;
+    if (note.failedRun && storedRuns.has(note.failedRun)) continue;
     const left = stored.get(note.text) ?? 0;
     if (left > 0) { stored.set(note.text, left - 1); continue; }
     let predecessor = -1;
@@ -535,7 +573,10 @@ export function carryUnconfirmedReplies(previous: ChatMessage[], next: ChatMessa
  * The full-page chat also asks for two carries: `keepUnconfirmedReplies`, the
  * live replies the box has not stored yet (see `carryUnconfirmedReplies`), and
  * `keepLocalNotes`, its own notes (see `carryLocalNotes`). The mascot chat
- * clears and repaints those on its own schedule and asks for neither.
+ * clears and repaints those on its own schedule — except a failed turn's line
+ * (`keepFailureNotes`, the notes tagged with their run): nothing repaints that
+ * one, and a re-read that dropped it left the owner's question with nothing
+ * under it at all.
  *
  * Returns `previous` itself when the read changed nothing, so React skips the
  * render.
@@ -543,7 +584,7 @@ export function carryUnconfirmedReplies(previous: ChatMessage[], next: ChatMessa
 export function mergeRestoredTranscript(
   previous: ChatMessage[],
   fromServer: ChatMessage[],
-  opts?: { keepLocalNotes?: boolean; keepUnconfirmedReplies?: boolean },
+  opts?: { keepLocalNotes?: boolean; keepUnconfirmedReplies?: boolean; keepFailureNotes?: boolean },
 ): ChatMessage[] {
   if (previous.length === 0) return fromServer;
   // Carry an event that beat the disk/history read across this one
@@ -555,7 +596,11 @@ export function mergeRestoredTranscript(
   const withTurns = inFlight.length === 0 ? restored : [...restored, ...inFlight];
   // Replies before notes: a note that followed a carried reply anchors on it.
   const withReplies = opts?.keepUnconfirmedReplies ? carryUnconfirmedReplies(previous, withTurns) : withTurns;
-  const next = opts?.keepLocalNotes ? carryLocalNotes(previous, withReplies) : withReplies;
+  const next = opts?.keepLocalNotes
+    ? carryLocalNotes(previous, withReplies)
+    : opts?.keepFailureNotes
+      ? carryLocalNotes(previous, withReplies, (note) => !!note.failedRun)
+      : withReplies;
   return sameTranscript(previous, next) ? previous : next;
 }
 

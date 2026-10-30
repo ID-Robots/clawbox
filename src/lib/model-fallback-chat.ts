@@ -30,6 +30,7 @@ import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availab
 import { followsNewestModel } from "@/lib/provider-newest-model";
 import {
   CHAT_MODEL_STATE_EVENT,
+  dispatchClawaiSignIn,
   dispatchOpenSettingsSection,
   onStandaloneAppPage,
   standaloneSettingsHref,
@@ -275,6 +276,18 @@ export function openProvidersSettings(): void {
   if (typeof window === "undefined") return;
   if (onStandaloneAppPage()) window.location.assign(standaloneSettingsHref("ai"));
   else dispatchOpenSettingsSection("ai");
+}
+
+/**
+ * A failed turn's "Sign in to ClawBox AI again": Settings → AI with the
+ * ClawBox AI device login already started (`dispatchClawaiSignIn`). The
+ * standalone page has no desktop to start it in, so it lands on that page's
+ * own Settings → AI, where the same sign-in is one press away.
+ */
+export function signInToClawaiAgain(): void {
+  if (typeof window === "undefined") return;
+  if (onStandaloneAppPage()) window.location.assign(standaloneSettingsHref("ai"));
+  else dispatchClawaiSignIn();
 }
 
 /**
