@@ -53,6 +53,7 @@ const UPDATE_KEYS = [
   // The run view of the System Update window: step count, log, failure copy.
   "update.stepsComplete", "update.stepStopped", "update.reconnectNote",
   "update.highlights", "update.updateLog", "update.noFailureReason",
+  "update.stepCompleted", "update.stepPending",
   // A branch or an update refused for installing an older harness than the
   // one that wrote the box's data, and its override.
   "update.harnessDowngrade.titleBranch", "update.harnessDowngrade.titleUpdate",

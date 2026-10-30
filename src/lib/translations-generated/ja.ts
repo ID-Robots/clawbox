@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "更新を開始できませんでした",
   "update.startFailedHttp": "更新を開始できませんでした（HTTP {status}）",
   "update.startUpdate": "アップデート開始",
+  "update.stepCompleted": "完了",
+  "update.stepPending": "待機中",
   "update.stepStopped": "停止",
   "update.stepsComplete": "{done} / {total} ステップ完了",
   "update.stuckHint": "通常の更新より時間がかかっています。データは失われていません。端末が自分で戻ってこない場合は再起動してください。次回の起動時にデスクトップのロックは自動で解除されます。",

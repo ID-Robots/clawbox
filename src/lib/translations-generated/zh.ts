@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "无法启动更新",
   "update.startFailedHttp": "无法启动更新（HTTP {status}）",
   "update.startUpdate": "开始更新",
+  "update.stepCompleted": "已完成",
+  "update.stepPending": "等待中",
   "update.stepStopped": "已停止",
   "update.stepsComplete": "已完成 {done} / {total} 步",
   "update.stuckHint": "这比一次更新通常需要的时间更久。没有任何内容丢失。如果设备没有自行恢复，请重启它——桌面会在下次启动时自动解锁。",

@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "Impossible de lancer la mise à jour",
   "update.startFailedHttp": "Impossible de lancer la mise à jour (HTTP {status})",
   "update.startUpdate": "Lancer la mise à jour",
+  "update.stepCompleted": "Terminée",
+  "update.stepPending": "En attente",
   "update.stepStopped": "Arrêtée",
   "update.stepsComplete": "{done} / {total} étapes terminées",
   "update.stuckHint": "Cela prend plus de temps qu'une mise à jour habituelle. Rien n'a été perdu. Si l'appareil ne revient pas de lui-même, redémarrez-le — le bureau se déverrouille tout seul au démarrage suivant.",

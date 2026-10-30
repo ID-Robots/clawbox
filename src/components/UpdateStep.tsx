@@ -188,6 +188,15 @@ export function UpdateStepList({ steps, phase }: { steps: StepState[]; phase: Up
                 </span>
               )}
             </span>
+            {/* Done and waiting are said by the disc and the colour alone,
+                both hidden from a screen reader; this says them in words. */}
+            {(status === "completed" || status === "pending") && (
+              <span className="sr-only">
+                {status === "completed"
+                  ? tr("update.stepCompleted", "Completed")
+                  : tr("update.stepPending", "Waiting")}
+              </span>
+            )}
             {status === "running" && (
               <span className="shrink-0 text-[10px] font-medium text-orange-400">{tr("update.progressRunning", "In progress")}</span>
             )}
@@ -651,7 +660,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  const showLedger = !(isFailed && state.error) && state.steps.length > 0;
+  // The run's own error, unless it is the updater's placeholder: a failFast
+  // step that threw a non-Error leaves "Unknown error" here as well as on the
+  // step, and drawn in the box below it hid the ledger that names the step.
+  const runError = realMessage(state.error);
+  const showLedger = !(isFailed && runError) && state.steps.length > 0;
 
   return (
     <Card>
@@ -671,12 +684,13 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       </p>
 
       {/* Internet error (no steps shown) */}
-      {isFailed && state.error && (
+      {isFailed && runError && (
         <div
           className="mb-[var(--s-4)] p-[var(--s-3)] bg-red-500/10 border border-red-500/20 rounded-[var(--r-1)] text-red-400"
           style={{ fontSize: "var(--t-4)", lineHeight: 1.55 }}
+          data-testid="update-run-error"
         >
-          {state.error}
+          {runError}
         </div>
       )}
 
@@ -720,7 +734,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
 
       {/* Failed step errors — the step's own reason, or a sentence saying the
           device gave none; never the updater's bare "Unknown error". */}
-      {(isDone || isFailed) && !state.error &&
+      {(isDone || isFailed) && !runError &&
         state.steps
           .filter((s) => shownStepStatus(s, state.phase) === "failed")
           .map((s) => (

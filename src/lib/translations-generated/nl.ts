@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "Update kon niet worden gestart",
   "update.startFailedHttp": "Update kon niet worden gestart (HTTP {status})",
   "update.startUpdate": "Update starten",
+  "update.stepCompleted": "Voltooid",
+  "update.stepPending": "Wachtend",
   "update.stepStopped": "Gestopt",
   "update.stepsComplete": "{done} / {total} stappen voltooid",
   "update.stuckHint": "Dit duurt langer dan een update normaal doet. Er is niets verloren gegaan. Komt het apparaat niet vanzelf terug, start het dan opnieuw op — het bureaublad ontgrendelt zichzelf bij de volgende start.",

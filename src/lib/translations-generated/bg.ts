@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "Актуализацията не можа да стартира",
   "update.startFailedHttp": "Актуализацията не можа да стартира (HTTP {status})",
   "update.startUpdate": "Започни актуализация",
+  "update.stepCompleted": "Завършена",
+  "update.stepPending": "Изчаква",
   "update.stepStopped": "Спряна",
   "update.stepsComplete": "{done} / {total} стъпки завършени",
   "update.stuckHint": "Това отнема повече време от обичайното за актуализация. Нищо не е загубено. Ако устройството не се върне само, рестартирайте го — работният плот се отключва сам при следващото стартиране.",

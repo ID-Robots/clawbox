@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "Impossibile avviare l'aggiornamento",
   "update.startFailedHttp": "Impossibile avviare l'aggiornamento (HTTP {status})",
   "update.startUpdate": "Avvia aggiornamento",
+  "update.stepCompleted": "Completato",
+  "update.stepPending": "In attesa",
   "update.stepStopped": "Interrotto",
   "update.stepsComplete": "{done} / {total} passaggi completati",
   "update.stuckHint": "Sta impiegando più tempo di quanto ne serva di solito a un aggiornamento. Non è andato perso nulla. Se il dispositivo non torna da solo, riavvialo: il desktop si sblocca da sé al prossimo avvio.",

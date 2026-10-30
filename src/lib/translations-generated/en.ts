@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "Failed to start update",
   "update.startFailedHttp": "Failed to start update (HTTP {status})",
   "update.startUpdate": "Start Update",
+  "update.stepCompleted": "Completed",
+  "update.stepPending": "Waiting",
   "update.stepStopped": "Stopped",
   "update.stepsComplete": "{done} / {total} steps complete",
   "update.stuckHint": "This is taking longer than an update usually does. Nothing has been lost. If the device does not come back on its own, restart it — the desktop unlocks by itself on the next start.",

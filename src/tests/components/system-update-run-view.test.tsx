@@ -286,3 +286,45 @@ describe("UpdateStep — the wizard's failed step", () => {
     expect(screen.getByTestId("update-step-count")).toHaveTextContent("2 / 10 steps complete");
   });
 });
+
+// A run-level error takes a different branch of the wizard: a real one is the
+// whole story (no ledger, no per-step box), but the updater's placeholder,
+// which a failFast step that threw a non-Error leaves on the run as well as on
+// the step, must not stand in for that story.
+describe("UpdateStep — the wizard's run-level error", () => {
+  function mountWizard(status: Partial<UpdateState>) {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ currentStepIndex: -1, ...status })));
+    render(<UpdateStep onNext={() => {}} />);
+  }
+
+  it("treats a run-level 'Unknown error' as no reason and keeps the ledger that names the step", async () => {
+    mountWizard({ phase: "failed", error: "Unknown error", steps: steps(2, { status: "failed", error: "Unknown error" }) });
+
+    const error = await screen.findByTestId("update-step-error");
+    expect(error.textContent).toContain("Installing Chromium:");
+    expect(error.textContent).toContain(NO_REASON);
+    expect(screen.queryByTestId("update-run-error")).toBeNull();
+    expect(screen.getByTestId("update-step-list")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Unknown error");
+  });
+
+  it("says a real run-level error alone, without the per-step box", async () => {
+    const offline = "No internet connection. Check your WiFi and try again.";
+    mountWizard({ phase: "failed", error: offline, steps: steps(0, { status: "pending" }) });
+
+    expect(await screen.findByTestId("update-run-error")).toHaveTextContent(offline);
+    expect(screen.queryByTestId("update-step-error")).toBeNull();
+    expect(screen.queryByTestId("update-step-list")).toBeNull();
+  });
+});
+
+describe("UpdateStepList — every row's state in words", () => {
+  it("says done and waiting to a screen reader, not by colour alone", async () => {
+    mount({ phase: "running", currentStepIndex: 4, steps: steps(4) });
+
+    const rows = within(await screen.findByTestId("update-step-list")).getAllByRole("listitem");
+    expect(within(rows[0]).getByText("Completed")).toHaveClass("sr-only");
+    expect(within(rows[4]).getByText("In progress")).not.toHaveClass("sr-only");
+    expect(within(rows[5]).getByText("Waiting")).toHaveClass("sr-only");
+  });
+});

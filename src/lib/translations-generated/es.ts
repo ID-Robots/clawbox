@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "No se pudo iniciar la actualización",
   "update.startFailedHttp": "No se pudo iniciar la actualización (HTTP {status})",
   "update.startUpdate": "Iniciar actualización",
+  "update.stepCompleted": "Completado",
+  "update.stepPending": "En espera",
   "update.stepStopped": "Detenido",
   "update.stepsComplete": "{done} / {total} pasos completados",
   "update.stuckHint": "Esto está tardando más de lo que suele tardar una actualización. No se ha perdido nada. Si el dispositivo no vuelve por sí solo, reinícialo: el escritorio se desbloquea solo en el siguiente arranque.",

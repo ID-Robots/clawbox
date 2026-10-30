@@ -4381,6 +4381,8 @@ const table: Record<string, string> = {
   "update.startFailed": "Kunde inte starta uppdateringen",
   "update.startFailedHttp": "Kunde inte starta uppdateringen (HTTP {status})",
   "update.startUpdate": "Starta uppdatering",
+  "update.stepCompleted": "Klar",
+  "update.stepPending": "Väntar",
   "update.stepStopped": "Stoppad",
   "update.stepsComplete": "{done} / {total} steg klara",
   "update.stuckHint": "Det här tar längre tid än en uppdatering brukar göra. Inget har gått förlorat. Om enheten inte kommer tillbaka av sig själv, starta om den — skrivbordet låses upp automatiskt vid nästa start.",
