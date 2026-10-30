@@ -101,7 +101,10 @@ describe("globals.css — the shelf shield's glow copies", () => {
     // "shield" is the shelf's own glyph — ChromeShelf names none.
     expect(read("components/ChromeShelf.tsx")).toMatch(/clawkeep-shelf-glow[\s\S]*>\s*shield\s*</);
     // The System Update hero names its own.
-    expect(read("components/SystemUpdateApp.tsx")).toMatch(/\["--glow-glyph" as string\]: JSON\.stringify\(hero\.icon\)/);
+    // System Update's run view has no hero glyph to glow; should one come
+    // back, it has to name its glyph like any other host.
+    const update = read("components/SystemUpdateApp.tsx");
+    if (update.includes("clawkeep-shelf-glow")) expect(update).toMatch(/\["--glow-glyph" as string\]: JSON\.stringify\(/);
   });
 
   // A declaration holding var() that the browser cannot parse is invalid at

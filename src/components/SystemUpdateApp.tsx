@@ -5,8 +5,19 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
-import type { RemoteReachability, StepStatus, UpdateState } from "@/lib/updater";
+import {
+  describeUpdateFailure,
+  shownStepStatus,
+  stepFailureReason,
+  UpdateStepCount,
+  UpdateStepList,
+  UpdateStepMeter,
+} from "@/components/UpdateStep";
+import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
+import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
 import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
+import { isNamedChannel, updateWhatsNewPanel } from "@/lib/update-whats-new";
+import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
 import {
@@ -171,33 +182,6 @@ export function componentNeedsUpdate(component: { current: string | null; target
 }
 
 type Status = "loading" | "up-to-date" | "available" | "drift" | "updating" | "completed" | "failed" | "fetch-error";
-
-function StepIcon({ status }: { status: StepStatus }) {
-  if (status === "completed") {
-    return (
-      <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-300 shrink-0">
-        <span className="material-symbols-rounded" style={{ fontSize: 14, fontVariationSettings: "'wght' 700" }}>check</span>
-      </span>
-    );
-  }
-  if (status === "running") {
-    return (
-      <span className="flex items-center justify-center w-6 h-6 shrink-0">
-        <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
-      </span>
-    );
-  }
-  if (status === "failed") {
-    return (
-      <span className="flex items-center justify-center w-6 h-6 rounded-full bg-red-500/20 text-red-300 shrink-0">
-        <span className="material-symbols-rounded" style={{ fontSize: 14, fontVariationSettings: "'wght' 700" }}>close</span>
-      </span>
-    );
-  }
-  return <span className="flex items-center justify-center w-6 h-6 rounded-full bg-white/[0.04] shrink-0">
-    <span className="w-1.5 h-1.5 rounded-full bg-white/30" />
-  </span>;
-}
 
 /**
  * `embedded`: drawn inside another pane — Settings → System Update — which
@@ -576,11 +560,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           tone: "available" as const,
         };
       }
+      // The three run states are drawn by UpdateRunView, which takes the
+      // headline and subhead from here. "Don't power off" is its footer bar.
       case "updating":
         return {
           icon: "downloading", iconClass: "text-orange-300",
           headline: tr("update.heroUpdating", "Updating your device"),
-          subhead: tr("update.heroUpdatingSub", "Don't power off until this finishes."),
+          subhead: tr("update.updatingDescription", "Updating your ClawBox with the latest software…"),
           tone: "busy" as const,
         };
       case "completed":
@@ -596,14 +582,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         return {
           icon: "error", iconClass: "text-red-300",
           headline: tr("update.heroFailed", "Update failed"),
-          // A refused downgrade is said in the owner's language below, from
-          // its detail; its English sentence is for the log and the MCP tools.
-          subhead: updateError
-            || (updateState?.errorCode === HARNESS_DOWNGRADE_CODE
-              || updateState?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE
-              ? tr("update.harnessDowngrade.titleUpdate", "This update would install an older assistant")
-              : updateState?.error)
-            || tr("update.heroFailedSub", "One step couldn't complete. See the steps below."),
+          // What stopped and why is the error panel's, said once, beside the
+          // steps; a refused downgrade is said there in the owner's language,
+          // from its detail — its English sentence is for the log and the MCP
+          // tools.
+          subhead: tr("update.heroFailedSub", "One step couldn't complete. See the steps below."),
           tone: "error" as const,
         };
     }
@@ -631,14 +614,42 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // offer, because that fact was established without the remote.
   const clawboxUnknown = !clawboxAvail && versions?.remote?.reachable === false;
 
+  // A run on screen — live, finished or failed — gets the run view instead of
+  // the hero and the component cards.
+  const inRun = status === "updating" || status === "completed" || status === "failed";
+
   return (
     <div className={embedded ? "relative w-full text-gray-200" : "relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200"} data-testid="system-update-app">
-      <div className={embedded ? "w-full" : "min-h-full w-full flex items-start justify-center p-6 pt-10 bg-[var(--bg-deep)]"}>
-        <div className="w-full max-w-2xl space-y-4">
+      <div className={embedded ? "w-full" : `min-h-full w-full flex items-start justify-center p-6 ${inRun ? "pt-8" : "pt-10"} bg-[var(--bg-deep)]`}>
+        <div className={`w-full ${inRun ? "max-w-[1200px]" : "max-w-2xl"} space-y-4`}>
+          {inRun ? (
+            <UpdateRunView
+              status={status}
+              state={updateState}
+              error={updateError}
+              versions={versions}
+              channel={effectiveBranch?.branch ?? branch}
+              heading={HeroHeading}
+              headline={hero.headline}
+              lede={hero.subhead}
+              onDismiss={dismissResult}
+              // A run the box lost (a restart, a power cut, a replaced web
+              // server) is RESUMED from the step it died on by a fresh run —
+              // the verdict's own sentence says so — and this is the control
+              // that starts one. Dismiss forgets the position; the hero's
+              // update button is hidden while a run is settled, so without
+              // this the resume was reachable by no gesture at all. Any other
+              // failure starts over from step 1 on a fresh run, so it is not
+              // offered as a "resume": Dismiss, then Update everything.
+              onResume={updateState?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX) ? () => void triggerUpdate() : undefined}
+              onOverrideDowngrade={() => void triggerUpdate(true)}
+            />
+          ) : (
+          <>
           {/* HERO */}
           <div className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-10 pb-8 bg-gradient-to-br ${heroBgClass} to-transparent`}>
             <div className="relative w-32 h-32 flex items-center justify-center mb-3">
-              {(status === "available" || status === "up-to-date" || status === "updating") && (
+              {(status === "available" || status === "up-to-date") && (
                 <>
                   <div
                     aria-hidden="true"
@@ -652,9 +663,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 </>
               )}
               <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-[var(--border-subtle)]">
-                {/* The glow's breathing half is a copy of the glyph (globals.css,
-                    .clawkeep-shelf-glow), which has to be told which glyph. */}
-                <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600", ["--glow-glyph" as string]: JSON.stringify(hero.icon) }}>
+                <span className={`material-symbols-rounded ${hero.iconClass}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600" }}>
                   {hero.icon}
                 </span>
               </div>
@@ -709,7 +718,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               whatever was last published to npm, which is what we just
               moved away from. The installed harness version is reported
               below the card instead: read-only, no second update button. */}
-          {versions && status !== "updating" && status !== "completed" && status !== "failed" && (
+          {versions && (
             <div className="grid grid-cols-1 gap-3">
               <ComponentCard
                 name="ClawBox"
@@ -723,27 +732,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
             </div>
           )}
 
-          {/* Outside the gate above: "Update complete" is exactly when an owner
-              wants to read the version their agent came back on, and the
-              components block is hidden in that state. */}
+          {/* The run view draws these itself once a run has settled: "Update
+              complete" is exactly when an owner wants to read the version
+              their agent came back on. */}
           {versions && <AgentVersions versions={versions} />}
-
-          {/* PROGRESS */}
-          {(status === "updating" || status === "completed" || status === "failed") && (
-            <UpdateProgressCard
-              state={updateState}
-              error={updateError}
-              status={status}
-              onDismiss={dismissResult}
-              // A run the box lost (a restart, a power cut, a replaced web
-              // server) is RESUMED from the step it died on by a fresh run —
-              // the verdict's own sentence says so — and this is the control
-              // that starts one. Dismiss forgets the position; the hero's
-              // update button is hidden while a run is settled, so without
-              // this the resume was reachable by no gesture at all.
-              onResume={updateState?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX) ? () => void triggerUpdate() : undefined}
-              onOverrideDowngrade={() => void triggerUpdate(true)}
-            />
+          </>
           )}
 
           {/* ADVANCED */}
@@ -1241,17 +1234,51 @@ function HarnessDowngradeNotice({
   );
 }
 
-function UpdateProgressCard({
+/** A step's place in the list, as the log writes it: `05`. */
+function stepNumber(index: number): string {
+  return String(index + 1).padStart(2, "0");
+}
+
+/**
+ * The System Update window while a run is on screen — running, finished or
+ * failed.
+ *
+ * Running and finished: the run on the left (where it is, how far, every step
+ * by number) and what the version being installed brings on the right, with
+ * "don't power off" across the bottom while it runs. Failed: what stopped and
+ * why first — the failed step's name, the most specific reason the updater
+ * recorded, the way on (Resume where the server can resume, Dismiss always) —
+ * then the log of the steps that ran, beside the stopped step list.
+ *
+ * The columns follow the window, not the screen (container queries), so a
+ * narrow window, the Settings pane or a phone stacks them. In a stack the
+ * failure comes before the steps, and it stays first in the document either
+ * way: a refused downgrade's explanation and override were once out of sight
+ * below ten pending steps on a laptop-sized window.
+ */
+function UpdateRunView({
+  status,
   state,
   error,
-  status,
+  versions,
+  channel,
+  heading: Heading,
+  headline,
+  lede,
   onDismiss,
   onResume,
   onOverrideDowngrade,
 }: {
-  state: UpdateState | null;
-  error: string | null;
   status: Status;
+  state: UpdateState | null;
+  /** This screen's own failure to start or clear a run. */
+  error: string | null;
+  versions: VersionInfo | null;
+  /** The branch this box updates from, as far as this screen knows it. */
+  channel: string | null;
+  heading: "h1" | "h2";
+  headline: string;
+  lede: string;
   onDismiss: () => void;
   /** Present only for an interrupted run: starts the fresh run that resumes it. */
   onResume?: () => void;
@@ -1259,156 +1286,313 @@ function UpdateProgressCard({
   onOverrideDowngrade?: () => void;
 }) {
   const tr = useTr();
-  const failedSteps = state?.steps.filter((s) => s.status === "failed") ?? [];
+  const SubHeading = Heading === "h1" ? "h2" : "h3";
+  // Asked only while a run is on screen: the route reads the target's notes,
+  // and an idle System Update window has no target to ask about.
+  const whatsNew = useUpdateWhatsNew();
+  const panel = updateWhatsNewPanel(whatsNew.answer);
+
+  const failed = status === "failed";
+  // The screen's verdict wins over a stale poll: a run this screen calls
+  // failed has no step still "in progress".
+  const phase: UpdatePhase | undefined = failed ? "failed" : state?.phase;
+  const steps = state?.steps ?? [];
+  const running = steps.find((s) => shownStepStatus(s, phase) === "running");
+  const failure = failed ? describeUpdateFailure(state, error) : null;
   // A refused downgrade (or the backup its override could not take) is said
   // from its detail in the owner's language, never as the server's English.
-  const downgrade = status === "failed"
+  const downgrade = failed
     && (state?.errorCode === HARNESS_DOWNGRADE_CODE || state?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE)
     ? readHarnessDowngradeDetail(state.downgrade)
     : null;
   // Non-fatal problems the update found and worked around — build drift, a
-  // missing update pin it wrote for the owner. Krasi's ruling is that these
+  // missing update pin it wrote for the owner. The ruling is that these
   // warn rather than block, which only means anything if they are visible;
   // the text comes from the server alongside the step labels.
   const warnings = state?.warnings ?? [];
-  return (
-    <div className={CARD}>
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold text-gray-100">
-          {status === "completed"
-            ? tr("update.progressFinished", "Update finished")
-            : status === "failed" ? tr("update.progressStopped", "Update stopped") : tr("update.progressRunning", "In progress")}
-        </h2>
-        {(status === "completed" || status === "failed") && (
-          <div className="flex items-center gap-2">
-            {status === "failed" && onResume && (
-              <button
-                type="button"
-                onClick={onResume}
-                className="px-3 py-1 rounded-md text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black cursor-pointer"
-              >
-                {/* The step is known when one is marked failed: the run picks
-                    up there. With none known a fresh run is what "again" means. */}
-                {failedSteps.length > 0
-                  ? tr("update.resume", "Resume update")
-                  : tr("update.startAgain", "Start the update again")}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={onDismiss}
-              className="px-3 py-1 rounded-md text-xs font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
-            >
-              {tr("update.dismiss", "Dismiss")}
-            </button>
-          </div>
-        )}
+  const restarts = steps.some((s) => s.id === RESTART_STEP_ID);
+
+  const current = versions ? cleanVersion(versions.clawbox.current) ?? versions.clawbox.current : null;
+  const target = panel.version
+    ?? (versions?.clawbox.target ? cleanVersion(versions.clawbox.target) ?? versions.clawbox.target : null);
+  const shownChannel = panel.channel ?? channel;
+
+  const header = (
+    <div className="min-w-0">
+      <p className="m-0 mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-orange-400">
+        {tr("update.title", "System Update")}
+      </p>
+      <Heading className="m-0 font-display text-[32px] font-bold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
+        {headline}
+      </Heading>
+      <p className="m-0 mt-2 text-[15px] leading-relaxed text-[var(--text-secondary)]">{lede}</p>
+    </div>
+  );
+
+  const versionRow = (current || target) && (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[13px] text-[var(--text-secondary)]"
+      data-testid="update-run-versions"
+    >
+      <span>ClawBox</span>
+      {current && <span className="font-mono">{current}</span>}
+      {target && target !== current && (
+        <>
+          {current && <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>arrow_forward</span>}
+          <span className="font-mono text-[var(--text-primary)]">{target}</span>
+        </>
+      )}
+      {isNamedChannel(shownChannel) && (
+        // A QA pin can be a long branch name: it is cut, never allowed to
+        // push the row past a narrow window.
+        <span
+          className="min-w-0 max-w-[14rem] truncate rounded-[var(--r-full)] border border-[var(--coral-edge)] bg-[var(--coral-wash)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-orange-400"
+          title={shownChannel}
+          data-testid="update-run-channel"
+        >
+          {tr("update.whatsNewChannel", "{channel} channel", { channel: shownChannel })}
+        </span>
+      )}
+    </div>
+  );
+
+  const countHeadline = status === "completed"
+    ? tr("update.progressFinished", "Update finished")
+    : failed
+      ? tr("update.progressStopped", "Update stopped")
+      : running?.label ?? (state ? tr("update.progressRunning", "In progress") : tr("update.connecting", "Connecting…"));
+
+  const stepsPanel = (
+    <section
+      className="rounded-[var(--r-2)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6"
+      data-testid="update-steps-panel"
+    >
+      <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
+        <span className="inline-flex min-w-0 items-center gap-2 font-medium text-[var(--text-primary)]">
+          {!state && !failed && (
+            <span className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent motion-safe:animate-spin" aria-hidden="true" />
+          )}
+          <span className="truncate">{countHeadline}</span>
+        </span>
+        {steps.length > 0 && <UpdateStepCount steps={steps} />}
       </div>
-
-      {/* First, above the step list: a run refused before step 1 leaves every
-          step pending, and below ten of them the explanation and the override
-          were out of sight on a laptop-sized window. */}
-      {downgrade && state && (
-        <HarnessDowngradeNotice
-          detail={downgrade}
-          kind="update"
-          backupFailure={state.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE ? downgrade.backupFailure ?? "" : undefined}
-          onOverride={onOverrideDowngrade}
-        />
+      {steps.length > 0 && (
+        <>
+          <div className="mt-4">
+            <UpdateStepMeter steps={steps} phase={phase} label={tr("update.title", "System Update")} />
+          </div>
+          <div className="mt-[18px]">
+            <UpdateStepList steps={steps} phase={phase} />
+          </div>
+        </>
       )}
+    </section>
+  );
 
-      {!state && (
-        <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-muted)]">
-          <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
-          {tr("update.connecting", "Connecting…")}
+  const warningList = warnings.length > 0 && (
+    <ul className="m-0 list-none space-y-2 p-0">
+      {warnings.map((w) => {
+        // The line a finished run leaves behind about drift it RESOLVED is
+        // history, not a problem. Drawn amber with a warning triangle it
+        // alarmed the owner exactly as the stale imperative did, which is
+        // the thing the completion view is meant to stop doing.
+        const resolved = w.code === DRIFT_RESOLVED_CODE;
+        return (
+          <li
+            key={w.code}
+            data-testid={`update-warning-${w.code}`}
+            data-tone={resolved ? "info" : "warning"}
+            className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
+              resolved
+                ? "border-[var(--border-subtle)] bg-white/5 text-[var(--text-muted)]"
+                : "border-amber-500/20 bg-amber-500/10 text-amber-100"
+            }`}
+          >
+            <span
+              className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
+              style={{ fontSize: 16 }}
+            >
+              {resolved ? "history" : "warning"}
+            </span>
+            <span>{w.message}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  const dismissButton = (
+    <button
+      type="button"
+      onClick={onDismiss}
+      className="rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-4 py-2.5 text-sm font-semibold text-gray-300 hover:bg-[var(--fill-3)] cursor-pointer"
+    >
+      {tr("update.dismiss", "Dismiss")}
+    </button>
+  );
+
+  const agentVersions = versions && status !== "updating" && <AgentVersions versions={versions} />;
+
+  if (failure) {
+    const ran = steps
+      .map((step, index) => ({ step, index, shown: shownStepStatus(step, phase) }))
+      .filter(({ shown }) => shown === "completed" || shown === "failed");
+    const completedCount = steps.filter((s) => s.status === "completed").length;
+    const noReason = tr(
+      "update.noFailureReason",
+      "The device did not say why the update stopped. Run the update again; if it stops at the same step, contact ClawBox support.",
+    );
+
+    return (
+      <div className="@container w-full" data-testid="update-run" data-status={status}>
+        <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
+          {header}
+          {versionRow}
         </div>
-      )}
-
-      {state && state.steps.length > 0 && (
-        <ul className="mt-4 space-y-2">
-          {state.steps.map((step) => (
-            <li key={step.id} className="flex items-start gap-3 text-sm">
-              <StepIcon status={step.status} />
-              <span className="min-w-0">
-                <span className={
-                  step.status === "running" ? "text-gray-100 font-medium" :
-                  step.status === "completed" ? "text-emerald-300/80" :
-                  step.status === "failed" ? "text-red-300" : "text-[var(--text-muted)]"
-                }>
-                  {step.label}
-                </span>
-                {/* What the step is doing under a label that cannot say it —
-                    "Applying system fixups" is fifteen minutes of CUDA compile
-                    and multi-hundred-MB downloads. Only ever on the running
-                    step, and absent unless the installer has said something, so
-                    a step with nothing to add looks exactly as it did. */}
-                {step.status === "running" && step.detail && (
-                  <span
-                    className="block truncate text-xs text-[var(--text-muted)]"
-                    title={step.detail}
-                    data-testid="update-step-detail"
+        {/* Placed, not reordered, on a wide window: the steps fill the left
+            column, the failure and its log sit right with the feature below.
+            Stacked, the document order reads failure, log, steps, feature. */}
+        <div className="mt-6 grid grid-cols-1 gap-5 @3xl:grid-cols-[minmax(0,420px)_minmax(0,1fr)] @3xl:grid-rows-[auto_1fr] @3xl:gap-x-7">
+          <div className="min-w-0 space-y-5 @3xl:col-start-2 @3xl:row-start-1">
+            <section className="rounded-[var(--r-2)] border border-red-500/25 bg-red-500/[0.06] p-5" data-testid="update-error-panel">
+              {failure.step && (
+                <SubHeading className="m-0 mb-2 flex items-center gap-2 font-display text-[19px] font-semibold text-red-300">
+                  <span className="material-symbols-rounded shrink-0" aria-hidden="true" style={{ fontSize: 21 }}>error</span>
+                  <span className="min-w-0 break-words">{failure.step.label}</span>
+                </SubHeading>
+              )}
+              {downgrade && state ? (
+                <HarnessDowngradeNotice
+                  detail={downgrade}
+                  kind="update"
+                  backupFailure={state.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE ? downgrade.backupFailure ?? "" : undefined}
+                  onOverride={onOverrideDowngrade}
+                />
+              ) : (
+                <>
+                  <p className="m-0 flex items-start gap-2 text-[13px] leading-relaxed text-[var(--text-secondary)]" data-testid="update-error-reason">
+                    {!failure.step && (
+                      <span className="material-symbols-rounded shrink-0 text-red-300" aria-hidden="true" style={{ fontSize: 20 }}>error</span>
+                    )}
+                    <span className="min-w-0 break-words">{failure.reason ?? noReason}</span>
+                  </p>
+                  {failure.context && (
+                    <p className="m-0 mt-2 break-words text-xs leading-relaxed text-[var(--text-muted)]" data-testid="update-error-context">
+                      {failure.context}
+                    </p>
+                  )}
+                </>
+              )}
+              <div className="mt-[18px] flex flex-wrap items-center gap-2.5">
+                {onResume && (
+                  <button
+                    type="button"
+                    onClick={onResume}
+                    className="inline-flex items-center gap-2 rounded-[var(--r-1)] bg-[var(--coral-bright)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--coral-mid)] cursor-pointer"
                   >
-                    {step.detail}
-                  </span>
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>refresh</span>
+                    {/* The step is known when one is marked failed: the run picks
+                        up there. With none known a fresh run is what "again" means. */}
+                    {failure.step
+                      ? tr("update.resume", "Resume update")
+                      : tr("update.startAgain", "Start the update again")}
+                  </button>
                 )}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
+                {dismissButton}
+              </div>
+            </section>
 
-      {warnings.length > 0 && (
-        <ul className="mt-4 space-y-2">
-          {warnings.map((w) => {
-            // The line a finished run leaves behind about drift it RESOLVED is
-            // history, not a problem. Drawn amber with a warning triangle it
-            // alarmed the owner exactly as the stale imperative did, which is
-            // the thing the completion card is meant to stop doing.
-            const resolved = w.code === DRIFT_RESOLVED_CODE;
-            return (
-              <li
-                key={w.code}
-                data-testid={`update-warning-${w.code}`}
-                data-tone={resolved ? "info" : "warning"}
-                className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
-                  resolved
-                    ? "border-[var(--border-subtle)] bg-white/5 text-[var(--text-muted)]"
-                    : "border-amber-500/20 bg-amber-500/10 text-amber-100"
-                }`}
+            {ran.length > 0 && (
+              <section
+                aria-label={tr("update.updateLog", "Update log")}
+                className="rounded-[var(--r-2)] border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-5 font-mono text-xs text-[var(--text-secondary)]"
+                data-testid="update-log"
               >
-                <span
-                  className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
-                  style={{ fontSize: 16 }}
-                >
-                  {resolved ? "history" : "warning"}
-                </span>
-                <span>{w.message}</span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                <div className="mb-2 flex justify-between gap-3 border-b border-[var(--border-subtle)] pb-2 text-gray-300" aria-hidden="true">
+                  <span>{tr("update.updateLog", "Update log")}</span>
+                  <span className="tabular-nums">{completedCount} / {steps.length}</span>
+                </div>
+                <ol className="m-0 list-none p-0">
+                  {ran.map(({ step, index, shown }) => {
+                    // The step the run stopped at carries the reason the panel
+                    // gives; any other failed step only its own. A refused
+                    // downgrade's English is never written here.
+                    const reason = shown !== "failed" || downgrade
+                      ? null
+                      : step === failure.step ? failure.reason : stepFailureReason(step);
+                    return (
+                      <li key={step.id} className="flex min-w-0 gap-3 py-[3px] leading-relaxed">
+                        <span className="shrink-0 text-[var(--text-muted)]">{stepNumber(index)}</span>
+                        {shown === "completed" ? (
+                          <span className="min-w-0">
+                            <span className="text-[var(--cyan-bright)]" aria-hidden="true">✓</span> {step.label}
+                          </span>
+                        ) : (
+                          <span className="min-w-0 break-words text-red-300">
+                            <span aria-hidden="true">×</span> {reason ? `${step.label}: ${reason}` : step.label}
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </section>
+            )}
 
-      {error && (
-        <p className="mt-4 text-sm text-red-300">{error}</p>
-      )}
-      {failedSteps.length > 0 && (
-        <ul className="mt-3 space-y-2">
-          {failedSteps.map((step) => (
-            <li key={`${step.id}-err`} className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-              <span className="font-semibold text-red-100">{step.label}:</span>{" "}
-              {downgrade && step.error === state?.error
-                ? tr("update.harnessDowngrade.titleUpdate", "This update would install an older assistant")
-                : step.error || tr("update.unknownError", "Unknown error")}
-            </li>
-          ))}
-        </ul>
-      )}
+          </div>
 
-      {status === "completed" && state?.steps.some((s) => s.id === RESTART_STEP_ID) && (
-        <p className="mt-4 text-xs text-[var(--text-muted)]">
-          {tr("update.reloadOnRestart", "The page will reload once the device is back up.")}
-        </p>
+          <div className="min-w-0 space-y-4 @3xl:col-start-1 @3xl:row-span-2 @3xl:row-start-1">
+            {stepsPanel}
+            {warningList}
+            {agentVersions}
+          </div>
+
+          {whatsNew.settled && (
+            <div className="min-w-0 self-start @3xl:col-start-2 @3xl:row-start-2">
+              <UpdateWhatsNewPanel panel={panel} variant="compact" headingLevel={SubHeading} />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const bar = status === "updating"
+    ? { icon: "power_settings_new", title: tr("update.heroUpdatingSub", "Don't power off until this finishes."), note: tr("update.reconnectNote", "Your ClawBox will briefly go offline while restarting. This page reconnects automatically.") }
+    : restarts
+      ? { icon: "restart_alt", title: tr("update.reloadOnRestart", "The page will reload once the device is back up."), note: null }
+      : null;
+
+  return (
+    <div className="@container w-full" data-testid="update-run" data-status={status}>
+      <div className="grid grid-cols-1 gap-8 @3xl:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-[18px]">
+          {header}
+          {versionRow}
+          {stepsPanel}
+          {warningList}
+          {status === "completed" && <div>{dismissButton}</div>}
+          {agentVersions}
+        </div>
+        <div className="min-w-0">
+          {whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />}
+        </div>
+      </div>
+      {/* While the run is live it is held to the bottom of the window as the
+          steps scroll under it: "don't power off" is the one line that must
+          stay in sight. A finished run's restart note sits in the flow, over
+          nothing. */}
+      {bar && (
+        <div
+          className={`${status === "updating" ? "sticky bottom-4 z-10 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]" : ""} mt-7 flex items-center gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-5 py-4 text-xs text-[var(--text-secondary)]`}
+          data-testid="update-run-notice"
+        >
+          <span className="material-symbols-rounded shrink-0 text-orange-400" aria-hidden="true" style={{ fontSize: 21 }}>{bar.icon}</span>
+          <div className="min-w-0">
+            <p className="m-0 font-medium text-gray-300">{bar.title}</p>
+            {bar.note && <p className="m-0 mt-1 text-[11px]">{bar.note}</p>}
+          </div>
+        </div>
       )}
     </div>
   );

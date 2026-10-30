@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
-import type { RemoteReachability, StepStatus, StepState, UpdateState } from "@/lib/updater";
+import type { RemoteReachability, StepStatus, StepState, UpdatePhase, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { cleanVersion } from "@/lib/version-utils";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 
@@ -44,56 +45,168 @@ function Card({ children }: { children: ReactNode }) {
   );
 }
 
-function stepTextClass(status: StepStatus): string {
-  switch (status) {
-    // Cyan means DONE on every box; the step in flight is simply the one
-    // written in full ink.
-    case "running": return "text-[var(--text-primary)]";
-    case "completed": return "text-[var(--cyan-bright)]";
-    case "failed": return "text-red-400";
-    default: return "text-[var(--text-muted)]";
-  }
+/* ─────────────────────────────────────────────────────────────────────────
+   The run's step list, meter and failure reason — shared with the System
+   Update window (SystemUpdateApp), so the wizard and the desktop say the same
+   thing about the same run in the same marks.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/** What the updater writes for a step that threw something other than an Error. */
+const PLACEHOLDER_ERROR = "Unknown error";
+
+/** A message worth showing: present, and not the updater's placeholder. */
+function realMessage(text: string | null | undefined): string | null {
+  const trimmed = text?.trim();
+  return trimmed && trimmed !== PLACEHOLDER_ERROR ? trimmed : null;
 }
 
 /**
- * One 18px disc per step, four states, none of them moving.
+ * How a step is drawn. A run that settled as failed can leave the step it
+ * died in still marked `running` — the updater's unexpected-error path sets
+ * the phase and the run's error without touching the step — and "In progress"
+ * under "Update failed" is a claim about a run that has ended. That step is
+ * where it stopped.
+ */
+export function shownStepStatus(step: StepState, phase: UpdatePhase | undefined): StepStatus {
+  return phase === "failed" && step.status === "running" ? "failed" : step.status;
+}
+
+export interface UpdateFailure {
+  /** The step the run stopped at, when one is known. */
+  step: StepState | null;
+  /** The most specific reason the device gave, or null when it gave none worth showing. */
+  reason: string | null;
+  /** A second thing the device said — the run's own verdict — when it differs from `reason`. */
+  context: string | null;
+}
+
+/**
+ * Why a settled run stopped, from everything recorded about it, most specific
+ * first: the failed step's own error, then the run's verdict, then this
+ * screen's own failure to reach the run route. "Unknown error" — the updater's
+ * placeholder for a step that threw a non-Error — counts as nothing, so a real
+ * reason anywhere else wins over it; a run with none at all is said as such by
+ * the caller (`update.noFailureReason`), never as two words that explain
+ * nothing. Asked only about a run the screen calls failed, so a step still
+ * marked running is the one it stopped at, whatever a stale poll's phase says.
+ */
+export function describeUpdateFailure(state: UpdateState | null, clientError?: string | null): UpdateFailure {
+  const step = state?.steps.find((s) => shownStepStatus(s, "failed") === "failed") ?? null;
+  const said = [step?.error, state?.error, clientError]
+    .map(realMessage)
+    .filter((message): message is string => message !== null);
+  const reason = said[0] ?? null;
+  return { step, reason, context: said.find((message) => message !== reason) ?? null };
+}
+
+/** The reason one failed step gives, or null — for a step that is not the run's headline failure. */
+export function stepFailureReason(step: StepState): string | null {
+  return realMessage(step.error);
+}
+
+/**
+ * One 23px disc per step, none of them moving: a cyan check when done, the
+ * step's number in coral while it runs, a red cross where it failed, the
+ * number in grey while it waits.
  *
  * The running step used to carry a spinner, which is a claim about the
  * machine that a 4-minute JetPack install cannot back: it turns at the same
  * rate whether the device is working or dead. The cadence of this screen is
- * carried by the meter — twelve real completion events — and its liveness by
- * a dot that steps once per answered poll.
+ * carried by the meter — one segment per real completion event.
  */
-function StepIcon({ status }: { status: StepStatus }) {
+function StepDisc({ status, number }: { status: StepStatus; number: number }) {
+  const base = "grid place-items-center shrink-0 w-[23px] h-[23px] rounded-[var(--r-full)] font-mono text-[10px] leading-none";
   if (status === "completed") {
     return (
-      <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-[var(--cyan-bright)]">
-        <span className="material-symbols-rounded text-[#06202a]" aria-hidden="true" style={{ fontSize: 12 }}>
-          check
-        </span>
+      <span className={`${base} bg-[var(--cyan-wash)] text-[var(--cyan-bright)]`} aria-hidden="true">
+        <span className="material-symbols-rounded" style={{ fontSize: 15 }}>check</span>
       </span>
     );
   }
   if (status === "failed") {
     return (
-      <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-red-500">
-        <span className="material-symbols-rounded text-white" aria-hidden="true" style={{ fontSize: 12 }}>
-          close
-        </span>
+      <span className={`${base} bg-red-500/20 text-red-300`} aria-hidden="true">
+        <span className="material-symbols-rounded" style={{ fontSize: 15 }}>close</span>
       </span>
     );
   }
+  const label = String(number).padStart(2, "0");
   if (status === "running") {
     return (
-      <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-[var(--coral-tint)] border border-[var(--coral-bright)]">
-        <span className="block w-1.5 h-1.5 rounded-[var(--r-full)] bg-[var(--coral-bright)]" />
+      <span className={`${base} border border-[var(--coral-bright)] bg-[var(--coral-tint)] text-orange-400`} aria-hidden="true">
+        {label}
       </span>
     );
   }
+  return <span className={`${base} bg-[var(--bg-elevated)] text-[var(--text-muted)]`} aria-hidden="true">{label}</span>;
+}
+
+/**
+ * The run's steps, one numbered row each. Cyan means DONE on every box; the
+ * step in flight is written in full ink and marked "In progress"; a step a
+ * settled run stopped at is red and marked "Stopped".
+ */
+export function UpdateStepList({ steps, phase }: { steps: StepState[]; phase: UpdatePhase | undefined }) {
+  const tr = useTr();
+  const settled = phase === "failed" || phase === "completed";
   return (
-    <span className="grid place-items-center shrink-0 w-[18px] h-[18px] rounded-[var(--r-full)] bg-[var(--fill-2)]">
-      <span className="block w-[5px] h-[5px] rounded-[var(--r-full)] bg-[var(--text-muted)]" />
-    </span>
+    <ol className="m-0 list-none p-0" data-testid="update-step-list">
+      {steps.map((step, index) => {
+        const status = shownStepStatus(step, phase);
+        return (
+          <li
+            key={step.id}
+            className="flex min-h-[35px] items-center gap-3 py-1"
+            data-status={status}
+            aria-current={status === "running" ? "step" : undefined}
+          >
+            <StepDisc status={status} number={index + 1} />
+            <span
+              className={`min-w-0 flex-1 ${
+                status === "running"
+                  ? "font-medium text-[var(--text-primary)]"
+                  : status === "completed"
+                    ? "text-[var(--cyan-bright)]"
+                    : status === "failed"
+                      ? "text-red-300"
+                      : "text-[var(--text-muted)]"
+              }`}
+              style={{ fontSize: "var(--t-2)", lineHeight: 1.4, transition: "color var(--d-2) var(--ease-standard)" }}
+            >
+              {step.label}
+              {/* What the step is doing under a label that cannot say it —
+                  "Applying system fixups" is fifteen minutes of CUDA compile
+                  and multi-hundred-MB downloads. Only ever on the running
+                  step, and absent unless the installer has said something. */}
+              {status === "running" && step.detail && (
+                <span
+                  className="block truncate text-[11px] font-normal text-[var(--text-muted)]"
+                  title={step.detail}
+                  data-testid="update-step-detail"
+                >
+                  {step.detail}
+                </span>
+              )}
+            </span>
+            {/* Done and waiting are said by the disc and the colour alone,
+                both hidden from a screen reader; this says them in words. */}
+            {(status === "completed" || status === "pending") && (
+              <span className="sr-only">
+                {status === "completed"
+                  ? tr("update.stepCompleted", "Completed")
+                  : tr("update.stepPending", "Waiting")}
+              </span>
+            )}
+            {status === "running" && (
+              <span className="shrink-0 text-[10px] font-medium text-orange-400">{tr("update.progressRunning", "In progress")}</span>
+            )}
+            {status === "failed" && settled && (
+              <span className="shrink-0 text-[10px] font-medium text-red-300">{tr("update.stepStopped", "Stopped")}</span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -107,7 +220,7 @@ function StepIcon({ status }: { status: StepStatus }) {
  * fabricate a velocity profile the box never reported. Between segments
  * nothing moves, which is the truth: nothing has been reported.
  */
-function Meter({ steps, done, label }: { steps: StepState[]; done: boolean; label: string }) {
+export function UpdateStepMeter({ steps, phase, label }: { steps: StepState[]; phase: UpdatePhase | undefined; label: string }) {
   const completed = steps.filter((s) => s.status === "completed").length;
   return (
     <div
@@ -116,34 +229,43 @@ function Meter({ steps, done, label }: { steps: StepState[]; done: boolean; labe
       aria-valuemin={0}
       aria-valuemax={steps.length}
       aria-valuenow={completed}
+      className="flex gap-[5px]"
     >
-      <div className="flex gap-[var(--s-0)]" aria-hidden="true">
-        {steps.map((s) => (
+      {steps.map((s) => {
+        const status = shownStepStatus(s, phase);
+        return (
           <span
             key={s.id}
-            className={`flex-1 h-1 rounded-[var(--r-full)] ${
-              done
+            aria-hidden="true"
+            className={`h-[5px] flex-1 rounded-[var(--r-full)] ${
+              phase === "completed"
                 ? "bg-[var(--cyan-bright)]"
-                : s.status === "completed"
+                : status === "completed"
                   ? "bg-[var(--coral-bright)]"
-                  : s.status === "failed"
+                  : status === "failed"
                     ? "bg-red-500"
-                    : "bg-[var(--fill-2)]"
+                    : "bg-[var(--border-subtle)]"
             }`}
             style={{ transition: "background-color var(--d-2) var(--ease-truth)" }}
           />
-        ))}
-      </div>
-      {/* A count, not an estimate: the box reports which steps finished and
-          nothing about how long the rest will take, so nothing here pretends
-          to know. Tabular figures so the number does not jitter. */}
-      <p
-        className="mt-[var(--s-2)] font-mono tabular-nums text-[var(--text-muted)]"
-        style={{ fontSize: "var(--t-2)" }}
-      >
-        {completed} / {steps.length}
-      </p>
+        );
+      })}
     </div>
+  );
+}
+
+/**
+ * "N / M steps complete" — a count, not an estimate: the box reports which
+ * steps finished and nothing about how long the rest will take. Tabular
+ * figures so the number does not jitter.
+ */
+export function UpdateStepCount({ steps }: { steps: StepState[] }) {
+  const tr = useTr();
+  const completed = steps.filter((s) => s.status === "completed").length;
+  return (
+    <span className="shrink-0 tabular-nums" data-testid="update-step-count">
+      {tr("update.stepsComplete", "{done} / {total} steps complete", { done: completed, total: steps.length })}
+    </span>
   );
 }
 
@@ -198,6 +320,7 @@ function compareVersions(a: string, b: string): number {
 
 export default function UpdateStep({ onNext }: UpdateStepProps) {
   const { t } = useT();
+  const tr = useTr();
   const [state, setState] = useState<UpdateState | null>(null);
 
   const [versions, setVersions] = useState<{
@@ -537,7 +660,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  const showLedger = !(isFailed && state.error) && state.steps.length > 0;
+  // The run's own error, unless it is the updater's placeholder: a failFast
+  // step that threw a non-Error leaves "Unknown error" here as well as on the
+  // step, and drawn in the box below it hid the ledger that names the step.
+  const runError = realMessage(state.error);
+  const showLedger = !(isFailed && runError) && state.steps.length > 0;
 
   return (
     <Card>
@@ -557,18 +684,25 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       </p>
 
       {/* Internet error (no steps shown) */}
-      {isFailed && state.error && (
+      {isFailed && runError && (
         <div
           className="mb-[var(--s-4)] p-[var(--s-3)] bg-red-500/10 border border-red-500/20 rounded-[var(--r-1)] text-red-400"
           style={{ fontSize: "var(--t-4)", lineHeight: 1.55 }}
+          data-testid="update-run-error"
         >
-          {state.error}
+          {runError}
         </div>
       )}
 
       {showLedger && (
         <>
-          <Meter steps={state.steps} done={!!isDone} label={t("update.title")} />
+          <div
+            className="mb-[var(--s-2)] flex items-center justify-end text-[var(--text-secondary)]"
+            style={{ fontSize: "var(--t-2)" }}
+          >
+            <UpdateStepCount steps={state.steps} />
+          </div>
+          <UpdateStepMeter steps={state.steps} phase={state.phase} label={t("update.title")} />
 
           {/* What is happening right now, said once. The list below marks the
               same step, but a customer watching a twelve-minute install should
@@ -592,54 +726,29 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             </div>
           )}
 
-          <ul className="list-none mt-[var(--s-5)] mb-[var(--s-5)]">
-            {state.steps.map((step) => (
-              <li
-                key={step.id}
-                className="flex items-center gap-[var(--s-2)] py-[var(--s-2)]"
-              >
-                <StepIcon status={step.status} />
-                <span
-                  className={`flex-1 min-w-0 ${stepTextClass(step.status)}`}
-                  style={{
-                    fontSize: "var(--t-4)",
-                    fontWeight: step.status === "running" ? "var(--w-label)" : undefined,
-                    transition: "color var(--d-2) var(--ease-standard)",
-                  }}
-                >
-                  {step.label}
-                  {/* The installer's own account of the sub-phase, on the
-                      running step only. See SystemUpdateApp for why a coarse
-                      label alone leaves the wizard silent for minutes. */}
-                  {step.status === "running" && step.detail && (
-                    <span
-                      className="block truncate"
-                      style={{ fontSize: "var(--t-5)", color: "var(--text-muted)" }}
-                      title={step.detail}
-                      data-testid="update-step-detail"
-                    >
-                      {step.detail}
-                    </span>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className="mt-[var(--s-4)] mb-[var(--s-5)]">
+            <UpdateStepList steps={state.steps} phase={state.phase} />
+          </div>
         </>
       )}
 
-      {/* Failed step errors */}
-      {(isDone || isFailed) && !state.error &&
+      {/* Failed step errors — the step's own reason, or a sentence saying the
+          device gave none; never the updater's bare "Unknown error". */}
+      {(isDone || isFailed) && !runError &&
         state.steps
-          .filter((s) => s.status === "failed")
+          .filter((s) => shownStepStatus(s, state.phase) === "failed")
           .map((s) => (
             <div
               key={s.id}
               className="mt-[var(--s-2)] p-[var(--s-3)] bg-red-500/10 border border-red-500/20 rounded-[var(--r-1)] text-red-400"
               style={{ fontSize: "var(--t-2)", lineHeight: 1.55 }}
+              data-testid="update-step-error"
             >
               <span style={{ fontWeight: "var(--w-label)" }}>{s.label}:</span>{" "}
-              {s.error || "Unknown error"}
+              {stepFailureReason(s) ?? tr(
+                "update.noFailureReason",
+                "The device did not say why the update stopped. Run the update again; if it stops at the same step, contact ClawBox support.",
+              )}
             </div>
           ))}
 
