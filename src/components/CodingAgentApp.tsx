@@ -15,18 +15,16 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_PRIMARY_WIDE, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
 import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
-import CodingRunTimeline from "./CodingRunTimeline";
+import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
 import CodingRunCiCard, { type RunCiView } from "./CodingRunCiCard";
-import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
-import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { worktreeCardApplies, type RunWorktreeView } from "./CodingRunWorktreeCard";
-import CodingTaskDialog from "./CodingTaskDialog";
+import CodingTaskDialog, { hasRunInputs, type RunInputs } from "./CodingTaskDialog";
 import StorePublishDialog from "./StorePublishDialog";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
@@ -40,6 +38,7 @@ import CodingRunSummary from "./CodingRunSummary";
 import {
   OPEN_CODING_RUN_EVENT,
   dispatchOpenApp,
+  dispatchOpenChat,
   notifyCodingAgentChanged,
   notifyCodingRunStarted,
   onCodingAgentChanged,
@@ -271,6 +270,8 @@ export function installedAppId(folder: string): string {
  *  the top of the window. */
 /** How many pictures a run's evidence card shows before it asks to be unfolded. */
 const ARTIFACT_PREVIEW = 4;
+/** How many changed files a settled run's What changed lists before "All N". */
+const CHANGED_FILES_PREVIEW = 6;
 const RUNS_PAGE = 10;
 const POLL_MS = 5_000;
 /**
@@ -469,12 +470,15 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
  * move while a run works, and in a grid where every value was the same 14 px
  * they had to be hunted for among a commit hash and a model identifier.
  *
- * Nothing here truncates. The tiles are ~118 px wide in the rail, and a
- * Bulgarian label ("Променени файлове", 128 px) and a Japanese hint ("思考中 ·
- * 166821 トークン") both overflowed it — ellipsised in every locale, with the
- * hint carrying no `title` and a phone offering no hover at all, so the figure
- * was simply unreadable. A tile that grows a line is the cheaper answer than a
- * figure nobody can read; the grid stretches its row to match.
+ * Nothing here truncates. The tiles were ~118 px wide in the rail they used to
+ * sit in, and a Bulgarian label ("Променени файлове", 128 px) and a Japanese
+ * hint ("思考中 · 166821 トークン") both overflowed it — ellipsised in every
+ * locale, with the hint carrying no `title` and a phone offering no hover at
+ * all, so the figure was simply unreadable. A tile that grows a line is the
+ * cheaper answer than a figure nobody can read; the grid stretches its row to
+ * match. Since 2026-10-30 the four tiles are a row of the run page's one
+ * column (2×2 on a phone, four across from `@md`) — still the ONE home of
+ * these numbers.
  */
 function StatTile({ label, value, hint, testId }: { label: string; value: ReactNode; hint?: string; testId?: string }) {
   return (
@@ -488,12 +492,13 @@ function StatTile({ label, value, hint, testId }: { label: string; value: ReactN
 
 /**
  * A figure that is looked UP rather than watched — the models that answered,
- * the commit, what was refused.
+ * the commit, what was refused: a `<dl>` row of the run page's closed Details
+ * fold (2026-10-30; the rail these rows sat in is gone).
  *
- * A row across the full width of the rail rather than a tile: the longest
- * value on the whole page is a model identifier, and in a ~118 px tile it had
- * nowhere to go. Here it has the rail's width and wraps at its own hyphens,
- * which is where a name like `deepseek-v4-pro[1m]` wants to break.
+ * A row across the full width rather than a tile: the longest value on the
+ * whole page is a model identifier, and in a ~118 px tile it had nowhere to
+ * go. Here it has the column's width and wraps at its own hyphens, which is
+ * where a name like `deepseek-v4-pro[1m]` wants to break.
  */
 function StatLine({ label, value, hint, note, mono = false, testId }: { label: string; value: string; hint?: string; note?: string; mono?: boolean; testId?: string }) {
   return (
@@ -594,6 +599,8 @@ export default function CodingAgentApp() {
   // summary and the files off the page; the card shows a few and the rest
   // on request. Keyed by run so the next run's page starts folded.
   const [artifactsOpenFor, setArtifactsOpenFor] = useState<string | null>(null);
+  // The run whose whole list of changed files is unfolded in What changed.
+  const [filesOpenFor, setFilesOpenFor] = useState<string | null>(null);
   // The run whose whole task is open in its dialog (null: none).
   const [taskOpenFor, setTaskOpenFor] = useState<string | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
@@ -667,8 +674,8 @@ export default function CodingAgentApp() {
   const [olderPage, setOlderPage] = useState<{ project: string; total: number; loaded: number } | null>(null);
   const [olderBusy, setOlderBusy] = useState(false);
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
-  /** The tab a project page opens on when it was asked for by a team chart — read once, as the workspace mounts. */
-  const [workspaceTab, setWorkspaceTab] = useState<{ directory: string; tab: WorkspaceTab } | null>(null);
+  /** The tab a project page opens on when it was asked for by a team chart or a run's **See the diff** (`ref`: that commit) — read once, as the workspace mounts. */
+  const [workspaceTab, setWorkspaceTab] = useState<{ directory: string; tab: WorkspaceTab; ref?: string } | null>(null);
   useEffect(() => {
     // One-shot: the workspace has read it by now, and the next visit to the
     // project opens on its own default again.
@@ -1609,6 +1616,14 @@ export default function CodingAgentApp() {
   const removeRunCopy = (id: string) => runAction(id, "worktree", t("codingAgent.worktreeRemoveFailed"));
   /** Resume after "Allow next time" — the denials card's button. */
   const resumeRunNow = (id: string) => runAction(id, "resume", t("codingAgent.resumeFailed"));
+  /** The same, for the run whose page is open — the page's blocks are built as values before they are returned, and the compiler reads a closure over `run` there as render-time. */
+  const resumeOpenRun = () => { if (openRunId) void resumeRunNow(openRunId); };
+  /** A continuation started from a card on the run's page (Fix CI): the chat's card probes, the list re-reads, the new run's page opens. */
+  const onContinuationStarted = (id: string) => {
+    notifyCodingRunStarted();
+    void load();
+    showRun(id);
+  };
   /**
    * Carry a ceiling-hit run on: a NEW run continuing its session (the same
    * POST the Fix CI card makes, without `fixCi`), then its page.
@@ -1942,7 +1957,7 @@ export default function CodingAgentApp() {
   // the phone and the wide window the same page); a project's page is wider
   // for its file tree beside the viewer, and a run's page keeps its rail's
   // width until the rail goes with the run page's own redesign.
-  const column = view.face === "run" ? "max-w-6xl" : view.face === "project" ? "max-w-5xl" : view.face === "settings" ? "max-w-2xl" : "max-w-3xl";
+  const column = view.face === "project" ? "max-w-5xl" : view.face === "settings" ? "max-w-2xl" : "max-w-3xl";
 
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
@@ -2421,25 +2436,252 @@ export default function CodingAgentApp() {
               />
             </div>
           );
-          return (
-            <div className="mt-1 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
-
-              {/* The agents first: this run's team with the run marked on it,
-                  or — solo — the run and the helpers it sent out. A node opens
-                  what that agent is doing now — the one list of agents on the page. */}
-              {started && (
-                <RunAgentsDiagram
-                  run={run}
-                  teams={teams}
-                  runOf={runById}
-                  onOpenRun={showRun}
-                  onChanged={() => { void load(); }}
-                  refreshKey={runs}
-                />
+          // The LIVE layout — a run at work or waiting its turn — against the
+          // SETTLED one, which a paused run and a draft share: nothing moves
+          // on them, and what they want is the same as a finished run's (why
+          // it stopped, then the way on).
+          const working = isLive(run.status) || run.status === "queued";
+          // A run that did not finish on its own: the reason goes under the
+          // status, loud. A finished run's refusals fold into Details.
+          const stoppedBadly = !working && run.status !== "completed" && run.status !== "draft";
+          const nowStep = activity.length > 0 ? describeStep(t, activity[activity.length - 1]) : null;
+          const command = isLive(run.status) && run.transcriptPath
+            ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
+            : null;
+          // The dialog: the rest of a long task, and the files the run was
+          // given. A one-line task that was handed nothing draws neither.
+          const taskDialog = fullTask ?? (hasRunInputs(run.inputs) && !run.reviewOf ? run.task : null);
+          const pullRequestOpen = Boolean(run.pr && run.pr.phase !== "failed");
+          const worktreeLine = Boolean(run.worktree && isSettled(run.status) && worktreeCardApplies(run.worktree, pullRequestOpen));
+          const webApp = Boolean(project && (project.onDesktop || project.app?.port));
+          const changedAnything = run.filesTouched.length > 0 || Boolean(run.commit) || Boolean(run.pr?.url) || worktreeLine || webApp;
+          /** What was refused, spelled out — and, where this box can answer it, an "Allow next time" beside it. Nothing when nothing was. */
+          const denials = (
+            <CodingRunDenials
+              runId={run.id}
+              inputs={run.inputs}
+              denials={run.denials}
+              deniedActions={run.deniedActions}
+              resumable={run.status === "paused"}
+              onAllowed={notifyCodingAgentChanged}
+              onResume={resumeOpenRun}
+            />
+          );
+          /** Why it stopped / Needs you: the error, why a pause is a pause, the refusals. */
+          const attention = (
+            <>
+              {run.error && (
+                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
+                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
+                  {/* The device's verdict FIRST, in the owner's own language,
+                      and only where the record says so — never guessed at from
+                      the English below. What the harness actually printed is
+                      an error code wrapped in JSON; it stays, because it names
+                      the model that was refused and that is what anyone
+                      looking into this needs, but it is no longer the first
+                      and only thing the owner is handed. */}
+                  {run.failureKind === "harness_not_ready" && (
+                    <p className="mt-1 text-xs text-amber-300 leading-relaxed" data-testid="coding-agent-run-harness-not-ready">
+                      {t("codingAgent.harnessNotReadyDetail")}
+                    </p>
+                  )}
+                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
+                </div>
               )}
-              {/* The header: what this run is, how it stands, and everything
-                  you can do to it. */}
-              <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
+              {/* WHY it is paused, when the answer is not "somebody asked". A
+                  run refused because one of this box's allowances is spent
+                  settles exactly like an owner's pause, and read the generic
+                  "Paused — resume to continue" the owner's only move was to
+                  press Resume and buy the same refusal. The Resume control is
+                  in the controls below: the allowance does come back, and this
+                  says when. */}
+              {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
+                <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
+                  <p className="text-[11px] text-[var(--text-secondary)] break-words">
+                    {t(PAUSE_METER_KEY[run.pauseReason.meter])}
+                    {" "}
+                    {(() => {
+                      // ClawBox AI's rolling allowances free up as old usage
+                      // ages out, possibly days from now: said in the owner's
+                      // clock with the day in front. The per-day meters keep
+                      // the UTC hour they are counted in. Every Anthropic
+                      // account at its limit: nobody has to press Resume — the
+                      // box carries on by itself at the first reset, and says
+                      // so rather than inviting a click that would only buy
+                      // the same refusal.
+                      if (run.pauseReason.meter === "anthropic") {
+                        const at = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
+                        return at ? t("codingAgent.pausedAnthropicResumesAt", { time: at }) : t("codingAgent.pausedAnthropicResumes");
+                      }
+                      if (isRollingPauseMeter(run.pauseReason.meter)) {
+                        const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
+                        return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");
+                      }
+                      const clock = pauseResetClock(run.pauseReason.resetsAt);
+                      // No reset time means the far side never said when — so
+                      // the card says "when it is back" rather than inventing
+                      // an hour the owner would plan around.
+                      return clock ? t("codingAgent.pausedAllowanceResets", { time: clock }) : t("codingAgent.pausedAllowanceResetsUnknown");
+                    })()}
+                  </p>
+                </div>
+              )}
+              {denials}
+            </>
+          );
+          /** The four figures a run is watched BY, as 2×2 tiles (four across from `@md`) — the ONE home of these numbers. */
+          const figures = (
+            <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 gap-2" data-testid="coding-agent-run-figures">
+              {/* The CLI reports its turns with its final result: a live
+                  run's 0 is no count yet, not a count (turnsKnown). */}
+              <StatTile label={t("codingAgent.statSteps")} value={started && turnsKnown(run) ? (run.maxTurns ? `${run.numTurns} / ${run.maxTurns}` : String(run.numTurns)) : nothingYet} testId="coding-agent-stat-steps" />
+              <StatTile label={t("codingAgent.statFiles")} value={run.filesTouched.length > 0 ? String(run.filesTouched.length) : nothingYet} testId="coding-agent-stat-files" />
+              <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : nothingYet} />
+              <StatTile
+                label={t("codingAgent.statTokens")}
+                value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : nothingYet}
+                hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
+              />
+            </div>
+          );
+          /** Everything you can do to the run, 44-px buttons wrapping in a row. */
+          const controls = (
+            <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="coding-agent-run-actions">
+              {/* Continue in the chat: the face's one primary on a settled
+                  run — the Create card opens on this project with its last run
+                  in view, and the assistant starts the next one. Not on the
+                  standalone page, which mounts no chat. */}
+              {!working && !standalone && project && (
+                <button
+                  type="button"
+                  onClick={() => openNewAppCard({ project: project.directory })}
+                  data-testid="coding-agent-run-continue-chat"
+                  className={BTN_PRIMARY_WIDE}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
+                  {t("codingAgent.continueInChat")}
+                </button>
+              )}
+              {runControls(run, "page")}
+              {command && (
+                <button
+                  type="button"
+                  onClick={() => openInTerminal(run)}
+                  data-testid="coding-agent-run-terminal-open"
+                  className={BTN_SECONDARY}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
+                  {t("codingAgent.livePreviewOpenApp")}
+                </button>
+              )}
+              {/* Steering, while there is still something to steer — through
+                  the chat (2026-10-30): the composer opens with "Tell coding
+                  run <id>: " for the owner to finish, and the assistant
+                  delivers it with coding_run_message. The text box that sat
+                  here (CodingRunMessageBox) is gone with every other input in
+                  the app. A paused run, a draft and one that GAVE UP all still
+                  hold a session, and their queue goes in when they go back. */}
+              {!standalone && holdsResumableSession(run.status) && (
+                <button
+                  type="button"
+                  onClick={() => dispatchOpenChat({ draft: t("codingAgent.messageDraft", { id: run.id }) })}
+                  data-testid="coding-agent-run-message"
+                  className={BTN_SECONDARY}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">forum</span>
+                  {t("codingAgent.messageInChat")}
+                </button>
+              )}
+            </div>
+          );
+          /** The run's evidence: screenshots it took while verifying its work, its report.md, and whatever test output it saved — a grid, folded after a few. */
+          const evidence = artifacts.length > 0 && (
+            <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
+              <div className="flex items-center justify-between gap-2">
+                <p className={SECTION_LABEL}>
+                  {t("codingAgent.artifactsTitle")}
+                  <span className="ml-1.5 normal-case tracking-normal font-normal text-[var(--text-muted)]">({artifacts.length})</span>
+                </p>
+                {artifacts.length > ARTIFACT_PREVIEW && (
+                  <button
+                    type="button"
+                    onClick={() => setArtifactsOpenFor(artifactsFolded ? run.id : null)}
+                    aria-expanded={!artifactsFolded}
+                    data-testid="coding-agent-artifacts-toggle"
+                    className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                  >
+                    {artifactsFolded ? t("codingAgent.artifactsShowAll", { n: artifacts.length }) : t("codingAgent.artifactsShowFewer")}
+                  </button>
+                )}
+              </div>
+              {images.length > 0 && (
+                <div className="mt-2 grid grid-cols-2 @3xl:grid-cols-4 gap-2" data-testid="coding-agent-artifact-images">
+                  {images.map((a) => (
+                    <a
+                      key={a.name}
+                      href={artifactUrl(run.id, a.name)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
+                      className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25 bg-black/30"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
+                      <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="w-full h-36 object-cover object-top" />
+                      {/* The picture's alt is the link's name; the caption repeats it for the eye only. */}
+                      <span aria-hidden="true" className="block truncate px-2 py-1 text-[10px] text-[var(--text-muted)]">{a.name}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+              {clips.length > 0 && (
+                <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
+                  {clips.map((a) => (
+                    <div key={a.name} className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] text-[var(--text-secondary)] break-all">{a.name}</span>
+                      {formatBytes(a.bytes) && <span className="text-[11px] text-[var(--text-muted)]">· {formatBytes(a.bytes)}</span>}
+                      {/* No track: the clip is speech the run generated, and
+                          the text it was made from is in the run's report. The
+                          file name IS the label — several players can sit in
+                          this list, and "audio" three times over tells a
+                          screen-reader user nothing about which is which. */}
+                      <audio controls preload="none" aria-label={a.name} src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {files.length > 0 && (
+                <ul className="mt-2 space-y-0.5">
+                  {files.map((a) => (
+                    <li key={a.name} className="text-[11px]">
+                      <a
+                        href={artifactUrl(run.id, a.name)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                      >
+                        {a.name}
+                      </a>
+                      {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+          return (
+            <div className="mt-1 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id} data-live={working ? "true" : "false"}>
+              {/* ONE COLUMN (2026-10-30): status → task → Now → figures →
+                  controls → Needs you → live card → plan → helpers (only
+                  with helpers) → evidence → Details; settled: status → why
+                  it stopped → Result → What changed → Continue in the chat →
+                  figures → evidence → timeline → plan → helpers → Details.
+                  No rail, no grid, no chart card for a run without helpers:
+                  the owner's "the space in the run diagram is almost all
+                  empty". */}
+
+              {/* 1. STATUS: what this run is and how it stands. */}
+              <div className={`${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-head">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid="coding-agent-run-status">
                     {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
@@ -2461,18 +2703,9 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                   {relationChips(run)}
-                  {project && (
-                    <button
-                      type="button"
-                      onClick={() => { setOpenRunId(null); setOpenProjectDir(project.directory); }}
-                      data-testid="coding-agent-run-project"
-                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40 hover:bg-sky-400/10 inline-flex items-center gap-1"
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">folder</span>
-                      {project.name}
-                    </button>
-                  )}
-                  {/* Its project folder was removed. The run itself is history
+                  {/* The project is the header row's title (coding-agent-crumb-
+                      project); the clickable pill that repeated it here is
+                      gone. Its folder was removed: the run itself is history
                       and stays — this is the chip that says why there is
                       nothing to click through to. */}
                   {!project && missingProject && (
@@ -2489,7 +2722,7 @@ export default function CodingAgentApp() {
                 {/* The title: the task's first line, three lines at most, and
                     itself a tap target for the whole task when there is more. */}
                 <h2 className="mt-2 text-[15px] leading-snug font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">
-                  {fullTask ? (
+                  {taskDialog ? (
                     <button
                       type="button"
                       onClick={() => setTaskOpenFor(run.id)}
@@ -2508,8 +2741,10 @@ export default function CodingAgentApp() {
                     button, 44 px on a phone and the card's whole width there,
                     directly under the title: the 11-px line it used to be was
                     the owner's complaint of 2026-10-30 ("needs better
-                    visibility"). */}
-                {fullTask && (
+                    visibility"). The dialog also lists the files the run was
+                    GIVEN, so a run handed a file opens it even when its task
+                    is one line. */}
+                {taskDialog && (
                   <button
                     type="button"
                     onClick={() => setTaskOpenFor(run.id)}
@@ -2520,12 +2755,13 @@ export default function CodingAgentApp() {
                     {t("codingAgent.fullTask")}
                   </button>
                 )}
-                {fullTask && taskOpenFor === run.id && (
-                  <CodingTaskDialog title={title} task={fullTask} runId={run.id} onClose={() => setTaskOpenFor(null)} />
+                {taskDialog && taskOpenFor === run.id && (
+                  <CodingTaskDialog title={title} task={taskDialog} runId={run.id} inputs={run.inputs} onClose={() => setTaskOpenFor(null)} />
                 )}
                 <p className="text-[11px] text-[var(--text-muted)] mt-1.5 flex items-center gap-1 flex-wrap">
                   <span>{run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}</span>
                   <span>· {t("codingAgent.startedAgo", { when: timeAgo(run.startedAt, t) })}</span>
+                  {started && !working && <span>· {duration(run)}</span>}
                   {started && run.effort && <span>· {t(`codingAgent.effort.${run.effort}`)}</span>}
                   {/* Whose account. Said on every run that has the field, not
                       only the Anthropic ones: on a box where the owner moved
@@ -2537,147 +2773,206 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                 </p>
-                {isLive(run.status) && (
-                  <RunProgressBar
-                    estimate={estimateRunProgress(run, now)}
-                    color={tone.color}
-                    timeLeft={t("codingAgent.timeLeft")}
-                    testId={`coding-agent-progress-${run.id}`}
-                    className="mt-2"
-                  />
-                )}
-                {/* A run that finished on its own keeps whatever it started:
-                    an app that serves itself on a port is meant to stay up,
-                    so the device says what survived instead of killing it
-                    unasked, and the owner ends it when they are done.
-
-                    Only once the run is OVER, though. A paused run also
-                    records what it left behind, and killRunLeftovers refuses
-                    one on purpose — the run is still the owner's to resume and
-                    those leftovers are the very thing a resume carries on
-                    against — so the button here could never do anything but
-                    show that refusal. The same guard hides the flag a resume
-                    carries into a running run, where it is stale as well. */}
-                {run.leftover && isSettled(run.status) && (
-                  <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-leftover">
-                    <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
-                    <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
-                    <button
-                      type="button"
-                      onClick={() => killLeftovers(run.id)}
-                      disabled={busy === run.id}
-                      data-testid={`coding-agent-kill-${run.id}`}
-                      className={`${BTN_SECONDARY} ml-auto`}
-                    >
-                      {t("codingAgent.killLeftover")}
-                    </button>
-                  </div>
-                )}
-                {/* WHERE THE RUN'S WORK IS, in one line: merged home, open as
-                    a pull request, or on its branch and why it is not in the
-                    project (the settle removes the copy either way and keeps
-                    the branch). Remove copy only while a copy is still on
-                    disk, which is now the exception. */}
-                {run.worktree && isSettled(run.status) && worktreeCardApplies(run.worktree, Boolean(run.pr && run.pr.phase !== "failed")) && (
-                  <CodingRunWorktreeCard
-                    runId={run.id}
-                    worktree={run.worktree}
-                    pullRequestOpen={Boolean(run.pr && run.pr.phase !== "failed")}
-                    busy={busy === run.id}
-                    onRemove={() => removeRunCopy(run.id)}
-                  />
-                )}
-                {/* WHY it is paused, when the answer is not "somebody asked".
-                    A run refused because one of this box's allowances is spent
-                    settles exactly like an owner's pause, and read the generic
-                    "Paused — resume to continue" the owner's only move was to
-                    press Resume and buy the same refusal. The Resume control
-                    stays exactly where it was, directly below: the allowance
-                    does come back, and this says when. */}
-                {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
-                  <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
-                    <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
-                    <p className="text-[11px] text-[var(--text-secondary)] break-words">
-                      {t(PAUSE_METER_KEY[run.pauseReason.meter])}
-                      {" "}
-                      {(() => {
-                        // ClawBox AI's rolling allowances free up as old usage
-                        // ages out, possibly days from now: said in the owner's
-                        // clock with the day in front. The per-day meters keep
-                        // the UTC hour they are counted in.
-                        // Every Anthropic account at its limit: nobody has to
-                        // press Resume — the box carries on by itself at the
-                        // first reset, and says so rather than inviting a click
-                        // that would only buy the same refusal.
-                        if (run.pauseReason.meter === "anthropic") {
-                          const at = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                          return at ? t("codingAgent.pausedAnthropicResumesAt", { time: at }) : t("codingAgent.pausedAnthropicResumes");
-                        }
-                        if (isRollingPauseMeter(run.pauseReason.meter)) {
-                          const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                          return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                        }
-                        const clock = pauseResetClock(run.pauseReason.resetsAt);
-                        // No reset time means the far side never said when —
-                        // so the card says "when it is back" rather than
-                        // inventing an hour the owner would plan around.
-                        return clock ? t("codingAgent.pausedAllowanceResets", { time: clock }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                      })()}
-                    </p>
-                  </div>
-                )}
-                {/* Steering, while there is still something to steer. Above
-                    the controls on purpose: Stop and Pause are what an owner
-                    reached for when a run went the wrong way, and the point of
-                    this box is that they no longer have to. The bar is the
-                    same one the library holds: a paused run, a draft and one
-                    that GAVE UP all still hold a session, and their queue goes
-                    in when they go back — which is exactly what "tell it what
-                    it missed, then Resume" needs. */}
-                {holdsResumableSession(run.status) && (
-                  <CodingRunMessageBox runId={run.id} messages={run.messages} onSent={() => { void load(); }} />
-                )}
-                <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
-                  {runControls(run, "page")}
-                  {project && (project.onDesktop || project.app?.port) && (
-                    <button
-                      type="button"
-                      onClick={() => void openOrAddProject(project)}
-                      className={BTN_SECONDARY}
-                      data-testid="coding-agent-project-open-app"
-                    >
-                      {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
-                    </button>
-                  )}
-                  {project?.app && (
-                    <button
-                      type="button"
-                      onClick={() => setPublishTarget({ folder: project.folder, directory: project.directory })}
-                      className={BTN_SECONDARY}
-                      data-testid="coding-agent-project-publish"
-                    >
-                      {t("codingAgent.publish")}
-                    </button>
-                  )}
-                </div>
               </div>
 
-              {/* Wide: the run's story in the middle — its terminal while it
-                  works, the summary, the plan, the log — and its data in a
-                  rail beside it: figures, files, evidence, refusals. The
-                  Claude Code web layout, in short. Narrow: one column. */}
-              <div className="@3xl:grid @3xl:grid-cols-[minmax(0,1fr)_296px] @3xl:gap-4 @3xl:items-start">
-                <div className="min-w-0">
-              {/* While the run works: ONE card with three tabs — the timeline
-                  (first, and the default), the terminal tailing the transcript,
-                  and the browser the run drives (a picture only, with a way to
-                  the VNC app for the real thing). One at a time: the three
-                  stacked were three screens tall. Once the run has settled,
-                  the timeline alone is the record. */}
+              {/* 2 (settled). WHY IT STOPPED — directly under the status and
+                  loud, only for a run that did not finish on its own: the
+                  error in the owner's language, why a pause is a pause, and
+                  the refusals with Allow next time + Resume. */}
+              {stoppedBadly && attention}
+
+              {/* 2 (live). NOW: the one line the owner opened this for, with
+                  the chat card's working dots and the progress bar — the
+                  first thing above the fold on a phone. */}
+              {working && (
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-now">
+                  <div className="flex items-start gap-2 flex-wrap text-[13px] leading-snug">
+                    <span className="shrink-0 font-semibold text-[var(--text-primary)]">{t("codingAgent.diagram.now")}:</span>
+                    <span className="min-w-0 flex-1 basis-40 text-[var(--text-secondary)] break-words" data-testid="coding-agent-run-now-step">
+                      {nowStep ? (
+                        <>
+                          {nowStep.label}
+                          {nowStep.detail && <span className="text-[var(--text-muted)]"> · {nowStep.detail}</span>}
+                        </>
+                      ) : (
+                        run.status === "queued" ? t("codingAgent.statusQueued") : t("codingAgent.diagram.nothingYet")
+                      )}
+                    </span>
+                    {isLive(run.status) && (
+                      <span className="ml-auto shrink-0 text-[11px] text-amber-300 inline-flex items-center gap-2" data-testid="coding-agent-run-working">
+                        {t("codingAgent.chatWorking")}
+                        <span className="coding-agent-working" role="img" aria-label={t("codingAgent.chatBusy")} title={t("codingAgent.chatBusy")}>
+                          <span className="coding-agent-working-dot" />
+                          <span className="coding-agent-working-dot" style={{ animationDelay: "0.15s" }} />
+                          <span className="coding-agent-working-dot" style={{ animationDelay: "0.3s" }} />
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                  {isLive(run.status) && (
+                    <RunProgressBar
+                      estimate={estimateRunProgress(run, now)}
+                      color={tone.color}
+                      timeLeft={t("codingAgent.timeLeft")}
+                      testId={`coding-agent-progress-${run.id}`}
+                      className="mt-2"
+                    />
+                  )}
+                </div>
+              )}
+
+              {/* 3 (live). FIGURES, then CONTROLS, then NEEDS YOU. */}
+              {working && figures}
+              {working && controls}
+              {working && attention}
+
+              {/* 3 (settled). RESULT first among the outcome cards (the
+                  2026-10-12 ruling): the run's closing message filed as
+                  Markdown, then the deliverable's verdict, the review loop
+                  and the pull request's CI with Fix CI. */}
+              {!working && summaryCard}
+              {!working && deliverableCard(run)}
+              {!working && reviewCard(run)}
+              {!working && run.ci && (
+                <CodingRunCiCard
+                  runId={run.id}
+                  ci={run.ci}
+                  settled={isSettled(run.status)}
+                  onStarted={onContinuationStarted}
+                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
+                />
+              )}
+
+              {/* 4 (settled). WHAT CHANGED: the files, the commit and the way
+                  to its diff, the pull request, where the work is, and the
+                  app on the desktop. Nothing of it: no card. */}
+              {!working && changedAnything && (
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-changed">
+                  <p className={SECTION_LABEL}>
+                    {t("codingAgent.whatChanged")}
+                    {run.filesTouched.length > 0 && (
+                      <span className="normal-case tracking-normal font-normal text-[var(--text-muted)]">({run.filesTouched.length})</span>
+                    )}
+                  </p>
+                  {run.filesTouched.length > 0 && (
+                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px] text-[var(--text-secondary)]" data-testid="coding-agent-run-changed-files">
+                      {(filesOpenFor === run.id ? run.filesTouched : run.filesTouched.slice(0, CHANGED_FILES_PREVIEW)).map((f) => (
+                        <li key={f} className="break-all">{f}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {run.filesTouched.length > CHANGED_FILES_PREVIEW && (
+                    <button
+                      type="button"
+                      onClick={() => setFilesOpenFor(filesOpenFor === run.id ? null : run.id)}
+                      aria-expanded={filesOpenFor === run.id}
+                      data-testid="coding-agent-run-changed-more"
+                      className="mt-1 text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                    >
+                      {filesOpenFor === run.id ? t("codingAgent.artifactsShowFewer") : t("codingAgent.allFiles", { n: run.filesTouched.length })}
+                    </button>
+                  )}
+                  {/* WHERE THE RUN'S WORK IS, in one line: merged home, open
+                      as a pull request, or on its branch and why it is not in
+                      the project (the settle removes the copy either way and
+                      keeps the branch). Remove copy only while a copy is still
+                      on disk, which is now the exception. */}
+                  {worktreeLine && (
+                    <div className="mt-1.5">
+                      <CodingRunWorktreeCard
+                        runId={run.id}
+                        worktree={run.worktree!}
+                        pullRequestOpen={pullRequestOpen}
+                        busy={busy === run.id}
+                        onRemove={() => removeRunCopy(run.id)}
+                      />
+                    </div>
+                  )}
+                  {(run.commit || run.pr?.url || webApp) && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {run.commit && (
+                        <span className={`${BTN_SECONDARY} font-mono cursor-default hover:bg-white/[0.06] hover:text-[var(--text-secondary)]`} data-testid="coding-agent-run-commit" title={run.commit}>
+                          {t("codingAgent.statCommit").toLowerCase()} {run.commit.slice(0, 7)}
+                        </span>
+                      )}
+                      {run.commit && project && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setWorkspaceTab({ directory: project.directory, tab: "changes", ref: run.commit ?? undefined });
+                            setOpenRunId(null);
+                            setOpenProjectDir(project.directory);
+                          }}
+                          data-testid="coding-agent-run-see-diff"
+                          className={BTN_SECONDARY}
+                        >
+                          <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">difference</span>
+                          {t("codingAgent.seeDiff")}
+                        </button>
+                      )}
+                      {run.pr?.url && (
+                        <a
+                          href={run.pr.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-testid="coding-agent-run-pr-open"
+                          className={BTN_SECONDARY}
+                        >
+                          {run.pr.number ? `PR #${run.pr.number}` : t("codingAgent.prOpening")}
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
+                        </a>
+                      )}
+                      {webApp && (
+                        <button
+                          type="button"
+                          onClick={() => void openOrAddProject(project!)}
+                          className={BTN_SECONDARY}
+                          data-testid="coding-agent-project-open-app"
+                        >
+                          {project!.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 5 (settled). CONTROLS: Continue in the chat, and whatever the
+                  held run still takes (Resume, Continue after a ceiling, Start
+                  or Discard a draft, the terminal, the backup); then figures. */}
+              {!working && controls}
+              {!working && figures}
+
+              {/* A run that finished on its own keeps whatever it started: an
+                  app that serves itself on a port is meant to stay up, so the
+                  device says what survived instead of killing it unasked, and
+                  the owner ends it when they are done. Only once the run is
+                  OVER: a paused run also records what it left behind, and
+                  killRunLeftovers refuses one on purpose — the run is still
+                  the owner's to resume and those leftovers are the very thing
+                  a resume carries on against. */}
+              {run.leftover && isSettled(run.status) && (
+                <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-leftover">
+                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
+                  <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
+                  <button
+                    type="button"
+                    onClick={() => killLeftovers(run.id)}
+                    disabled={busy === run.id}
+                    data-testid={`coding-agent-kill-${run.id}`}
+                    className={`${BTN_SECONDARY} ml-auto`}
+                  >
+                    {t("codingAgent.killLeftover")}
+                  </button>
+                </div>
+              )}
+
+              {/* 6 (live). THE LIVE CARD: three tabs — the timeline (first,
+                  and the default), the terminal tailing the transcript, and
+                  the browser the run drives (a picture only, with a way to the
+                  VNC app for the real thing). One at a time: the three stacked
+                  were three screens tall. */}
               {isLive(run.status) && (() => {
-                const command = run.transcriptPath
-                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
-                  : null;
                 const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
                 const terminalSeen = liveTabFor?.id === run.id && liveTabFor.terminalSeen;
                 const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next, terminalSeen: terminalSeen || next === "terminal" });
@@ -2699,34 +2994,27 @@ export default function CodingAgentApp() {
                 return (
                   <div className={`mt-3 ${CARD_SURFACE} overflow-hidden flex flex-col`} data-testid="coding-agent-live-card" data-tab={tab}>
                     <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
-                      <div className={`${SEGMENTED_TRACK} max-w-md`} role="tablist" aria-label={t("codingAgent.timelineTitle")}>
+                      {/* Three segments fit 390 px; the Open in Terminal that
+                          sat beside them is a control of the page now. */}
+                      <div className={SEGMENTED_TRACK} role="tablist" aria-label={t("codingAgent.timelineTitle")}>
                         {tabButton("timeline", "timeline", t("codingAgent.timelineTitle"))}
                         {tabButton("terminal", "terminal", t("codingAgent.livePreviewTitle"), !command)}
                         {tabButton("browser", "web", t("codingAgent.browserPreviewTitle"))}
                       </div>
-                      <span className="ml-auto" />
-                      {tab === "terminal" && command && (
-                        <button
-                          type="button"
-                          onClick={() => openInTerminal(run)}
-                          data-testid="coding-agent-run-terminal-open"
-                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
-                        >
-                          {t("codingAgent.livePreviewOpenApp")}
-                        </button>
-                      )}
                       {tab === "browser" && (
                         <button
                           type="button"
                           onClick={() => dispatchOpenApp("vnc")}
                           data-testid="coding-agent-open-vnc"
-                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                          className={`${BTN_QUIET} shrink-0`}
                         >
                           {t("codingAgent.openVnc")}
                         </button>
                       )}
                     </div>
-                    <div id="coding-agent-live-pane-timeline" role="tabpanel" hidden={tab !== "timeline"} className="px-4 py-3">
+                    {/* The timeline scrolls inside its own height on a phone,
+                        so the plan and the evidence stay a swipe away. */}
+                    <div id="coding-agent-live-pane-timeline" role="tabpanel" hidden={tab !== "timeline"} className="px-4 py-3 max-h-[60dvh] overflow-y-auto">
                       <CodingRunTimeline
                         lines={activity}
                         times={activityAt}
@@ -2735,7 +3023,6 @@ export default function CodingAgentApp() {
                         embedded
                         provider={run.provider}
                         modelRole={run.modelRole}
-                        working={{ label: t("codingAgent.chatWorking"), busy: t("codingAgent.chatBusy") }}
                       />
                     </div>
                     {command && terminalSeen && (
@@ -2743,7 +3030,8 @@ export default function CodingAgentApp() {
                       // from then on: the terminal types its command once, and a
                       // remount would tail from the top (the preview replays the
                       // last lines anyway, so a first pick mid-run misses nothing).
-                      <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+                      // 360 px tall on a phone, 460 from `@md`.
+                      <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} className="h-[360px] @md:h-[460px]" style={{ background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
                         <TerminalApp key={run.id} initialCommand={command} />
                       </div>
                     )}
@@ -2755,36 +3043,26 @@ export default function CodingAgentApp() {
                   </div>
                 );
               })()}
-              {/* Settled: the summary is what the page is for, so it comes
-                  first; the timeline — the tallest thing on a finished run,
-                  sixty rows the owner scrolled past to reach one paragraph —
-                  is under it, folded. */}
-              {!isLive(run.status) && summaryCard}
-              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded provider={run.provider} modelRole={run.modelRole} />}
+              {/* A live run that already carries a closing message — one
+                  resumed over a settled session — shows it under the live
+                  card; most live runs have none yet and draw nothing here. */}
+              {working && (run.summary || reportFile) && summaryCard}
 
-              {deliverableCard(run)}
-              {reviewCard(run)}
-              {/* The pull request's failed CI, read, and the Fix CI it offers. */}
-              {run.ci && (
-                <CodingRunCiCard
-                  runId={run.id}
-                  ci={run.ci}
-                  settled={isSettled(run.status)}
-                  onStarted={(id) => {
-                    notifyCodingRunStarted();
-                    void load();
-                    showRun(id);
-                  }}
-                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
-                />
+              {/* 7 (settled). THE TIMELINE — the tallest thing on a finished
+                  run, sixty rows the owner scrolled past to reach one
+                  paragraph — folded, after the figures and before the plan. */}
+              {!working && (
+                <>
+                  {evidence}
+                  <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded provider={run.provider} modelRole={run.modelRole} />
+                </>
               )}
-              {isLive(run.status) && summaryCard}
 
-              {/* The plan, as the run last wrote it: open while the run works
-                  (what is left), folded once it has settled (every row ticked
-                  and struck through, which the summary already says). */}
+              {/* 8. THE PLAN, as the run last wrote it: open while the run
+                  works (what is left), folded once it has settled (every row
+                  ticked and struck through, which the summary already says). */}
               {todos.length > 0 && (
-                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan" open={isLive(run.status) || undefined}>
+                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan" open={working || undefined}>
                   <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
                     {t("codingAgent.planTitle")}
                     <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{todosDone}/{todos.length}</span>
@@ -2810,142 +3088,53 @@ export default function CodingAgentApp() {
                 </details>
               )}
 
-              {/* The run's evidence: screenshots it took while verifying its
-                  work, its report.md, and whatever test output it saved. Under
-                  the Agents card, across the whole column — the pictures were
-                  a stack of thumbnails in the rail, and the owner asked for
-                  room to see them. */}
-              {artifacts.length > 0 && (
-                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
-                  <div className="flex items-center justify-between gap-2">
-                    <p className={SECTION_LABEL}>
-                      {t("codingAgent.artifactsTitle")}
-                      <span className="ml-1.5 normal-case tracking-normal font-normal text-[var(--text-muted)]">({artifacts.length})</span>
-                    </p>
-                    {artifacts.length > ARTIFACT_PREVIEW && (
-                      <button
-                        type="button"
-                        onClick={() => setArtifactsOpenFor(artifactsFolded ? run.id : null)}
-                        aria-expanded={!artifactsFolded}
-                        data-testid="coding-agent-artifacts-toggle"
-                        className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
-                      >
-                        {artifactsFolded ? t("codingAgent.artifactsShowAll", { n: artifacts.length }) : t("codingAgent.artifactsShowFewer")}
-                      </button>
-                    )}
-                  </div>
-                  {images.length > 0 && (
-                    <div className="mt-2 grid grid-cols-2 @lg:grid-cols-3 @3xl:grid-cols-4 gap-2" data-testid="coding-agent-artifact-images">
-                      {images.map((a) => (
-                        <a
-                          key={a.name}
-                          href={artifactUrl(run.id, a.name)}
-                          target="_blank"
-                          rel="noreferrer"
-                          title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
-                          className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25 bg-black/30"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
-                          <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="w-full h-36 object-cover object-top" />
-                          {/* The picture's alt is the link's name; the caption repeats it for the eye only. */}
-                          <span aria-hidden="true" className="block truncate px-2 py-1 text-[10px] text-[var(--text-muted)]">{a.name}</span>
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                  {clips.length > 0 && (
-                    <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
-                      {clips.map((a) => (
-                        <div key={a.name} className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[11px] text-[var(--text-secondary)] break-all">{a.name}</span>
-                          {formatBytes(a.bytes) && <span className="text-[11px] text-[var(--text-muted)]">· {formatBytes(a.bytes)}</span>}
-                          {/* No track: the clip is speech the run generated, and
-                              the text it was made from is in the run's report.
-                              The file name IS the label — several players can
-                              sit in this list, and "audio" three times over
-                              tells a screen-reader user nothing about which
-                              is which (the same fix ChatPopup's audioLabel is). */}
-                          <audio controls preload="none" aria-label={a.name} src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {files.length > 0 && (
-                    <ul className="mt-2 space-y-0.5">
-                      {files.map((a) => (
-                        <li key={a.name} className="text-[11px]">
-                          <a
-                            href={artifactUrl(run.id, a.name)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
-                          >
-                            {a.name}
-                          </a>
-                          {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+              {/* 9. HELPERS — only when the run sent any out, or belongs to a
+                  team: the chart, content-sized, a node opening what that
+                  agent is doing now (the one list of agents on the page). For
+                  the common solo run this block does not exist. */}
+              {started && (
+                <RunAgentsDiagram
+                  run={run}
+                  teams={teams}
+                  runOf={runById}
+                  onOpenRun={showRun}
+                  onChanged={() => { void load(); }}
+                  refreshKey={runs}
+                />
               )}
 
-
-              {run.error && (
-                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
-                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
-                  {/* The device's verdict FIRST, in the owner's own language,
-                      and only where the record says so — never guessed at from
-                      the English below. What the harness actually printed is
-                      an error code wrapped in JSON; it stays, because it names
-                      the model that was refused and that is what anyone
-                      looking into this needs, but it is no longer the first
-                      and only thing the owner is handed. */}
-                  {run.failureKind === "harness_not_ready" && (
-                    <p className="mt-1 text-xs text-amber-300 leading-relaxed" data-testid="coding-agent-run-harness-not-ready">
-                      {t("codingAgent.harnessNotReadyDetail")}
-                    </p>
-                  )}
-                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
-                </div>
+              {/* 10 (live). The review loop, the deliverable and the pull
+                  request's CI, where a run that is still going has them; then
+                  the evidence it has filed so far. */}
+              {working && deliverableCard(run)}
+              {working && reviewCard(run)}
+              {working && run.ci && (
+                <CodingRunCiCard
+                  runId={run.id}
+                  ci={run.ci}
+                  settled={false}
+                  onStarted={onContinuationStarted}
+                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
+                />
               )}
+              {working && evidence}
 
-                </div>
-                <aside className="min-w-0" data-testid="coding-agent-run-rail">
-              {/* The figures, in two weights.
-
-                  Eight tiles of identical weight is a wall: the steps someone
-                  watches tick sat at exactly the same size as a commit hash
-                  nobody reads twice, and the longest value on the page — a
-                  model identifier — was in the narrowest box of all. So the
-                  four figures a run is watched BY are tiles, and the
-                  three that are looked up once are quiet rows across the full
-                  width of the rail, where a model name has room to wrap at its
-                  own hyphens instead of breaking mid-word. */}
-              <div className="mt-3" data-testid="coding-agent-run-figures">
-                <div className="grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2">
-                  {/* The CLI reports its turns with its final result: a live
-                      run's 0 is no count yet, not a count (turnsKnown). */}
-                  <StatTile label={t("codingAgent.statSteps")} value={started && turnsKnown(run) ? (run.maxTurns ? `${run.numTurns} / ${run.maxTurns}` : String(run.numTurns)) : nothingYet} testId="coding-agent-stat-steps" />
-                  <StatTile label={t("codingAgent.statFiles")} value={run.filesTouched.length > 0 ? String(run.filesTouched.length) : nothingYet} testId="coding-agent-stat-files" />
-                  <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : nothingYet} />
-                  <StatTile
-                    label={t("codingAgent.statTokens")}
-                    value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : nothingYet}
-                    hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
-                  />
-                </div>
-                <dl className={`mt-2 ${CARD_SURFACE} px-3 divide-y divide-white/[0.05]`}>
+              {/* 11. DETAILS, closed: the figures that are looked up once
+                  rather than watched — the models that answered, the commit,
+                  what was refused, the run id — and, for a run that finished
+                  on its own, the refusals it carried on past. */}
+              <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-more">
+                <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
+                  {t("codingAgent.diagram.details")}
+                  <span className="normal-case tracking-normal font-normal text-[var(--text-muted)]">· {t("codingAgent.detailsHint")}</span>
+                </summary>
+                <dl className="mt-1 divide-y divide-white/[0.05]">
                   {/* What the run ASKED for, beside what actually answered: on
                       ClawBox AI the plan picks the model and these differ by
                       design, so the hint is the only place the owner's own
-                      choice is visible after the fact. Only when they DO
-                      differ — a run that got what it asked for drew the same
-                      identifier twice, one under the other. */}
-                  {/* And whose account they ran on — on a team run, beside the
-                      role the model was chosen for: a team's roles may sit on
-                      different accounts, and this is the one place a run's
-                      own record says which. */}
+                      choice is visible after the fact — only when they DO
+                      differ. And whose account they ran on: on a team run,
+                      beside the role the model was chosen for. */}
                   <StatLine
                     label={t("codingAgent.statModels")}
                     value={runModels(run) ?? nothingYet}
@@ -2960,51 +3149,35 @@ export default function CodingAgentApp() {
                   />
                   <StatLine label={t("codingAgent.statCommit")} value={run.commit ?? nothingYet} mono testId="coding-agent-stat-commit" />
                   {/* Only when something WAS refused: "Not allowed — 0" is a
-                      figure nobody has ever acted on, and the card below spells
-                      out every refusal there was. */}
+                      figure nobody has ever acted on. */}
                   {run.permissionDenials > 0 && (
                     <StatLine label={t("codingAgent.deniedTitle")} value={String(run.permissionDenials)} testId="coding-agent-stat-denied" />
                   )}
+                  <div className="flex items-baseline justify-between gap-3 py-1.5 min-w-0">
+                    <dt className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{t("codingAgent.runIdLabel")}</dt>
+                    <dd className="min-w-0 text-right">
+                      <button
+                        type="button"
+                        onClick={() => void copyFolder(run.id)}
+                        title={t("codingAgent.copyId")}
+                        aria-label={t("codingAgent.copyId")}
+                        data-testid="coding-agent-run-id-copy"
+                        className="inline-flex items-center gap-1 text-[11px] font-mono text-[var(--text-secondary)] hover:text-white break-all"
+                      >
+                        {run.id}
+                        <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
+                          {copiedFolder === run.id ? "check" : "content_copy"}
+                        </span>
+                        {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
+                      </button>
+                    </dd>
+                  </div>
                 </dl>
-                <button
-                  type="button"
-                  onClick={() => void copyFolder(run.id)}
-                  title={t("codingAgent.copyId")}
-                  aria-label={t("codingAgent.copyId")}
-                  data-testid="coding-agent-run-copy-id"
-                  className="mt-2 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
-                >
-                  {run.id}
-                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                    {copiedFolder === run.id ? "check" : "content_copy"}
-                  </span>
-                  {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
-                </button>
-              </div>
-
-              {/* The files this run was GIVEN, and the folder they are in —
-                  which is also where the owner puts one the run turns out to
-                  need. Above the refusals on purpose: the commonest refusal
-                  this feature answers is a read of a file that should have
-                  been handed over, and the answer is right here. */}
-              {((run.inputs?.files?.length ?? 0) > 0 || (run.inputs?.refused?.length ?? 0) > 0) && (
-                <CodingRunInputs inputs={run.inputs} />
-              )}
-
-              {/* What was refused, spelled out — and, where this box can
-                  answer it, an "Allow next time" beside it. */}
-              <CodingRunDenials
-                runId={run.id}
-                inputs={run.inputs}
-                denials={run.denials}
-                deniedActions={run.deniedActions}
-                resumable={run.status === "paused"}
-                onAllowed={() => notifyCodingAgentChanged()}
-                onResume={() => void resumeRunNow(run.id)}
-              />
-
-                </aside>
-              </div>
+                {/* A run that finished on its own past a refusal: what was
+                    refused, and Allow next time — here, not under the status,
+                    because nothing is waiting on it. */}
+                {!stoppedBadly && !working && denials}
+              </details>
             </div>
           );
         })()}
@@ -3177,6 +3350,7 @@ export default function CodingAgentApp() {
                 key={`workspace-${projectQuery}`}
                 query={projectQuery}
                 initialTab={workspaceTab?.directory === p.directory ? workspaceTab.tab : undefined}
+                initialRef={workspaceTab?.directory === p.directory ? workspaceTab.ref ?? null : null}
                 live={projectLive}
                 fill
                 filesDirectory={!standalone && p.kind === "folder" ? p.directory : undefined}

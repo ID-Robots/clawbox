@@ -83,9 +83,19 @@ function firstLine(text: string, max = 120): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line.trim();
 }
 
+/** Whether a run sent any helper out — the one case a solo run's page draws a chart for. */
+export function runHasHelpers(run: Pick<LiveRun, "subagents" | "activeSubagents">): boolean {
+  return (run.subagents?.length ?? 0) > 0 || (run.activeSubagents?.length ?? 0) > 0;
+}
+
 /**
- * The chart atop a run's page: its team, with this run marked, or — solo, or
- * while the board cannot be read — the run and the helpers it sent out.
+ * The run page's **Helpers** chart: its team with this run marked (until the
+ * team has a page of its own), or — solo — the run and the helpers it sent
+ * out. NOTHING for a solo run without helpers (2026-10-30): a one-node chart
+ * in a full-width card was the owner's "the space in the run diagram is
+ * almost all empty", and the page's status, Now line and figures already say
+ * everything that node did. Bare and without the legend: the host's block
+ * is the card, and three nodes with their icons need no key.
  */
 export function RunAgentsDiagram({ run, teams, runOf, onOpenRun, onChanged, refreshKey }: {
   run: LiveRun;
@@ -95,36 +105,51 @@ export function RunAgentsDiagram({ run, teams, runOf, onOpenRun, onChanged, refr
   onChanged?: () => void;
   refreshKey?: unknown;
 }) {
+  const { t } = useT();
   const known = run.team ? teams.find((x) => x.id === run.team!.id) ?? null : null;
   const board = useTeamBoard(run.team?.id ?? null, known, refreshKey);
-  if (run.team && board) {
+  // A team member's page: its TEAM, the run marked — once the board is read;
+  // nothing stands in meanwhile (the run's one node said nothing the status
+  // block above does not). The team's own page takes this over when it exists.
+  if (run.team) {
+    if (!board) return null;
     return (
+      <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-helpers" data-kind="team">
+        <p className={SECTION_LABEL}>{t("codingAgent.teamTab")}</p>
+        <CodingAgentDiagram
+          source={{ kind: "team", team: board }}
+          runOf={runOf}
+          current={run.id}
+          onOpenRun={onOpenRun}
+          onChanged={onChanged}
+          refreshKey={refreshKey}
+          bare
+          testId="coding-agent-run-diagram"
+          className="mt-2"
+        />
+      </div>
+    );
+  }
+  if (!runHasHelpers(run)) return null;
+  // No figure chips over a solo run's chart: the page's figure tiles hold
+  // those numbers, and the same four sat twice on one screen. A team chart
+  // keeps its task and role bars, which the tiles do not draw.
+  return (
+    <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-helpers" data-kind="run">
+      <p className={SECTION_LABEL}>{t("codingAgent.statHelpers")}</p>
       <CodingAgentDiagram
-        source={{ kind: "team", team: board }}
-        runOf={runOf}
+        source={{ kind: "run", run }}
         current={run.id}
         onOpenRun={onOpenRun}
         onChanged={onChanged}
         refreshKey={refreshKey}
+        figures={false}
+        legend={false}
+        bare
         testId="coding-agent-run-diagram"
-        className="mt-3"
+        className="mt-2"
       />
-    );
-  }
-  // No figure chips over a solo run's chart: the page's rail holds its
-  // tiles, and the same four numbers sat twice on one screen. A team chart
-  // keeps its task and role bars, which the rail does not draw.
-  return (
-    <CodingAgentDiagram
-      source={{ kind: "run", run }}
-      current={run.id}
-      onOpenRun={onOpenRun}
-      onChanged={onChanged}
-      refreshKey={refreshKey}
-      figures={false}
-      testId="coding-agent-run-diagram"
-      className="mt-3"
-    />
+    </div>
   );
 }
 

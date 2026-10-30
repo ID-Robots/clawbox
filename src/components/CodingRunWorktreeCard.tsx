@@ -13,10 +13,12 @@ import type { MergeHomeBlocker } from "@/lib/coding-run-worktree";
  * owner's own, never onto a project that has been moved to another branch,
  * never through a conflict. The files then go either way (the branch keeps
  * the work, and a resume puts the tree back from it); what the owner needs
- * from this card is one fact — merged, open as a pull request, or on a branch
+ * from this line is one fact — merged, open as a pull request, or on a branch
  * and why — not a paragraph and a button per blocker. The "Bring the work
  * home" button and the copied git commands that used to sit here were
- * removed at the owner's word (2026-10-12).
+ * removed at the owner's word (2026-10-12); the tinted card around the line
+ * went with the run page's one column (2026-10-30) — it is a row of the
+ * run's **What changed** block now.
  */
 
 /** The record, as the run listing carries it. */
@@ -45,13 +47,13 @@ const REASON_KEY: Record<MergeHomeBlocker, string> = {
   failed: "codingAgent.worktreeUnmergedFailed",
 };
 
-/** Enough of a sha to recognise the commit by, which is all the card claims. */
+/** Enough of a sha to recognise the commit by, which is all the line claims. */
 function shortSha(sha: string): string {
   return /^[0-9a-f]{7,40}$/i.test(sha) ? sha.slice(0, 7) : sha;
 }
 
 /**
- * Whether the card has anything to say for this record: a copy still on disk
+ * Whether the line has anything to say for this record: a copy still on disk
  * (Remove copy), or work that is on a branch and not in the project. A merged
  * run whose copy is gone, or a pull request's branch whose copy is gone, has
  * nothing left to tell — the timeline and the PR chip already said it.
@@ -96,9 +98,7 @@ export default function CodingRunWorktreeCard({
 
   return (
     <div
-      className={`mt-3 rounded-xl px-4 py-2.5 border flex items-center gap-2 flex-wrap ${unmerged
-        ? "bg-amber-500/[0.05] border-amber-500/30"
-        : "bg-white/[0.03] border-[var(--border-subtle)]"}`}
+      className="flex items-center gap-2 flex-wrap py-1"
       data-testid="coding-agent-run-worktree"
       data-state={merged ? "merged" : pullRequestOpen ? "pull_request" : result?.reason ?? "unknown"}
       data-on-disk={onDisk || undefined}

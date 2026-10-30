@@ -220,6 +220,29 @@ export function dispatchChatMessage(text: string): void {
   window.dispatchEvent(new CustomEvent<ChatMessageDetail>(CHAT_MESSAGE_EVENT, { detail: { text } }));
 }
 
+/**
+ * "Open the chat — and put these words in the composer, UNSENT."
+ *
+ * The run page's **Message in chat** (and the agent chart's panel) end here
+ * rather than at a text box of their own: the chat composes, the app shows
+ * (the 2026-10-30 redesign). `page.tsx` opens the popup; `ChatPopup` seeds
+ * its composer with `draft` and focuses it, and NOTHING is sent until the
+ * owner presses Send — a draft is a draft. `dispatchChatMessage` stays for a
+ * prompt that needs no editing.
+ */
+export const OPEN_CHAT_EVENT = "clawbox:open-chat";
+
+export interface OpenChatDetail {
+  /** Words for the composer, left for the owner to finish and send. */
+  draft?: string;
+}
+
+export function dispatchOpenChat(opts: OpenChatDetail = {}): void {
+  if (typeof window === "undefined") return;
+  const detail: OpenChatDetail = opts.draft ? { draft: opts.draft } : {};
+  window.dispatchEvent(new CustomEvent<OpenChatDetail>(OPEN_CHAT_EVENT, { detail }));
+}
+
 /** The starter a new app is scaffolded from — initProject's two templates. */
 /** The wizard's starters, in the order the select shows them; "nextjs" is the default. */
 export type NewAppTemplate = "nextjs" | "react" | "app" | "blank";

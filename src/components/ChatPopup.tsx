@@ -86,7 +86,7 @@ import {
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { modelFallbackNotice, ModelFallbackWatch, openProvidersSettings, reportModelFallback, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, dispatchOpenSettingsSection, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, OPEN_CHAT_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, dispatchOpenSettingsSection, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, type OpenChatDetail, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { sameSpokenWords, shortSpeechTextFor, shortSpeechTextFromStream } from '@/lib/short-speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
@@ -6931,6 +6931,28 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     }
     window.addEventListener(CHAT_MESSAGE_EVENT, handler)
     return () => window.removeEventListener(CHAT_MESSAGE_EVENT, handler)
+  }, [])
+
+  // A DRAFT handed over by another app — the Coding Agent run page's "Message
+  // in chat" — lands in the composer and nowhere else: nothing is queued, nothing
+  // is sent, the owner finishes the sentence and presses Send themselves. The
+  // caret goes to the end so they can type straight on; a draft over words
+  // already in the box replaces them, since the hand-off is what they just asked
+  // for. page.tsx opens the popup on the same event.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const draft = (e as CustomEvent<OpenChatDetail>).detail?.draft
+      if (typeof draft !== 'string' || !draft) return
+      setInput(draft)
+      setTimeout(() => {
+        const el = inputRef.current
+        if (!el) return
+        el.focus()
+        try { el.setSelectionRange(draft.length, draft.length) } catch { /* a textarea mid-remount */ }
+      }, 50)
+    }
+    window.addEventListener(OPEN_CHAT_EVENT, handler)
+    return () => window.removeEventListener(OPEN_CHAT_EVENT, handler)
   }, [])
 
   // Drain queued sends on connect; flush them as system errors on error

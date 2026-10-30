@@ -9,7 +9,7 @@ import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import WhatsNewCard from "@/components/WhatsNewCard";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, OPEN_CHAT_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { useWhatsNew } from "@/lib/use-whats-new";
@@ -1395,11 +1395,15 @@ function ChromeDesktopInner() {
     // The Coding Agent's "Create app" button: the chat has to be open before
     // the card inside it can be seen.
     window.addEventListener(NEW_APP_EVENT, handler);
+    // "Message in chat" on a run's page: the popup opens and ChatPopup puts
+    // the draft in the composer, unsent.
+    window.addEventListener(OPEN_CHAT_EVENT, handler);
     return () => {
       window.removeEventListener(SKILL_CHANGE_EVENT, handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
       window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
       window.removeEventListener(NEW_APP_EVENT, handler);
+      window.removeEventListener(OPEN_CHAT_EVENT, handler);
     };
   }, []);
 

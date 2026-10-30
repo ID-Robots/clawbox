@@ -13,6 +13,7 @@ import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 import CodingAgentDiagram, { DiagramDetails, SHEET_BELOW, type DiagramRun } from "@/components/CodingAgentDiagram";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "@/components/CodingAgentLiveAgents";
 import type { TeamView } from "@/components/CodingTeamCard";
+import { OPEN_CHAT_EVENT } from "@/lib/ui-events";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -222,10 +223,19 @@ describe("the panel: what an agent is doing now", () => {
     expect(within(panel).getByTestId("coding-agent-node-panel-task")).toHaveTextContent("Wire app.js to the form");
     fireEvent.click(within(panel).getByTestId("coding-agent-node-panel-open"));
     expect(onOpenRun).toHaveBeenCalledWith("run-work0002");
-    // The owner may stop it; a message box opens on request.
+    // The owner may stop it; Message in chat drafts into the chat composer —
+    // no text box of the panel's own (2026-10-30), and nothing is sent.
     expect(await within(panel).findByTestId("coding-agent-node-panel-stop")).toBeInTheDocument();
-    fireEvent.click(within(panel).getByTestId("coding-agent-node-panel-message"));
-    expect(within(panel).getByRole("textbox")).toBeInTheDocument();
+    const opens: unknown[] = [];
+    const onOpen = (e: Event) => opens.push((e as CustomEvent).detail);
+    window.addEventListener(OPEN_CHAT_EVENT, onOpen);
+    try {
+      fireEvent.click(within(panel).getByTestId("coding-agent-node-panel-message"));
+      expect(opens).toEqual([{ draft: t("codingAgent.messageDraft", { id: "run-work0002" }) }]);
+      expect(within(panel).queryByRole("textbox")).toBeNull();
+    } finally {
+      window.removeEventListener(OPEN_CHAT_EVENT, onOpen);
+    }
   });
 
   it("opens a reviewer on Enter with its verdict and notes, and a worker's result on Space", () => {
@@ -434,20 +444,33 @@ describe("the chart of one run", () => {
   it("draws a team run's TEAM on its page, the run marked, reading the board by id when the list lacks it", async () => {
     const member = { ...RUNS["run-work0002"], team: { id: TEAM.id, role: "worker" as const, taskId: "t2" } };
     render(<RunAgentsDiagram run={member} teams={[]} runOf={(id) => RUNS[id]} onOpenRun={vi.fn()} />);
-    // The run's own chart stands in until the board is read.
-    expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "run");
+    // Nothing stands in while the board is read: the run's one node said
+    // nothing the page's status block does not.
+    expect(screen.queryByTestId("coding-agent-run-diagram")).toBeNull();
     await waitFor(() => expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "team"));
+    expect(screen.getByTestId("coding-agent-run-helpers")).toHaveAttribute("data-kind", "team");
     expect(node("run-work0002")).toHaveAttribute("data-current", "true");
     // A team chart keeps its task and role bars on the run's page.
     expect(screen.getByTestId("coding-agent-diagram-figures")).toBeInTheDocument();
   });
 
-  it("draws a solo run on its page without figure chips — the rail's tiles are their one home — and says nothing of a model the board never kept", () => {
-    render(<RunAgentsDiagram run={RUNS["run-work0001"]} teams={[]} runOf={(id) => RUNS[id]} onOpenRun={vi.fn()} />);
+  it("draws no chart at all for a solo run without helpers", () => {
+    const { container } = render(<RunAgentsDiagram run={RUNS["run-work0001"]} teams={[]} runOf={(id) => RUNS[id]} onOpenRun={vi.fn()} />);
+    // The owner's "the space in the run diagram is almost all empty": a
+    // one-node chart is nothing the status block does not say.
+    expect(screen.queryByTestId("coding-agent-run-diagram")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-run-helpers")).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("draws a solo run that sent helpers out as a Helpers block — no figure chips, no legend — and says nothing of a model the board never kept", () => {
+    const withHelpers = { ...RUNS["run-work0001"], subagents: [{ type: "Explore", description: "Map the folder", startedAt: NOW - 90_000, endedAt: NOW - 60_000, refused: false }] };
+    render(<RunAgentsDiagram run={withHelpers} teams={[]} runOf={(id) => RUNS[id]} onOpenRun={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-run-helpers")).toHaveAttribute("data-kind", "run");
     expect(screen.getByTestId("coding-agent-run-diagram")).toHaveAttribute("data-shape", "run");
     expect(screen.queryByTestId("coding-agent-diagram-figures")).toBeNull();
-    // The legend and the nodes stay.
-    expect(screen.getByTestId("coding-agent-run-diagram-legend")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-run-diagram-legend")).toBeNull();
+    expect(screen.getAllByTestId("coding-agent-node")).toHaveLength(2);
     fireEvent.click(screen.getAllByTestId("coding-agent-node")[0]);
     expect(within(screen.getByTestId("coding-agent-node-panel")).queryByTestId("coding-agent-node-panel-model")).toBeNull();
   });
