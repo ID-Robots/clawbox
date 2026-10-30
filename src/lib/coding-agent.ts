@@ -168,6 +168,7 @@ import {
   isCodingProvider,
   isRecordableModel,
   modelsForProvider,
+  offeredProviders,
   resolveRunProvider,
   runsOnCodex,
   DEFAULT_OPENAI_MODEL,
@@ -4152,6 +4153,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
     defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
   ]);
+  const connectedProviders = connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider);
   return {
     enabled,
     // Off the SAME config snapshot as everything else here — the app polls
@@ -4206,8 +4208,16 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     provider,
-    providers: CODING_PROVIDERS,
-    connectedProviders: connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider),
+    // What the panel draws — OpenAI only where the Codex CLI is, or where the
+    // owner already has the account (coding-provider.ts, offeredProviders).
+    // Off the readiness probe above: no second look at the disk.
+    providers: offeredProviders({
+      codexInstalled: readiness.codexInstalled,
+      openaiConnected: readiness.openaiConnected,
+      connected: connectedProviders,
+      defaultProvider: provider,
+    }),
+    connectedProviders,
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with

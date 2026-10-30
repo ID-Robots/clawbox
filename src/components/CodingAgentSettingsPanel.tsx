@@ -1449,7 +1449,10 @@ export default function CodingAgentSettingsPanel() {
 
       {/* The owner's own OpenAI account — an API key or a ChatGPT sign-in —
           for runs on OpenAI, which run on the Codex CLI. Drawn on a server
-          that offers the provider at all, for the Anthropic card's reason. */}
+          that offers the provider at all, for the Anthropic card's reason.
+          The server offers it (status.providers, `offeredProviders`) only
+          where the Codex CLI is installed or the account is already set up,
+          so a box without the CLI has neither this card nor the row above. */}
       {(status?.providers ?? []).includes("openai") && (
         <CodingAgentOpenAICard onChanged={() => void refreshStatus()} />
       )}

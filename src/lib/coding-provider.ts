@@ -218,6 +218,38 @@ export function runsOnCodex(provider: CodingProvider): boolean {
 }
 
 /**
+ * The providers the settings panel OFFERS — its account rows, its per-role
+ * selects and the OpenAI card, which all read `status.providers` — as against
+ * CODING_PROVIDERS, what the box can run at all.
+ *
+ * Every provider but `openai` is always offered. `openai` runs on the Codex
+ * CLI (install.sh's `codex_cli` step, `isCodexInstalled` in coding-openai.ts),
+ * and on a box without it the row and the card could only ever say "install
+ * the CLI": noise on every box whose owner never asked for OpenAI (2026-10-30).
+ * So it is offered when the CLI is there, OR when the owner already has it —
+ * a saved credential, a place on the connected list, or the default — so an
+ * account that was set up and then lost its CLI stays visible, with the
+ * readiness check's reason beside it, rather than vanishing.
+ *
+ * Only what the panel shows. The run route and the MCP tool still accept the
+ * id (CODING_PROVIDERS) and refuse an `openai` run for the missing CLI in words.
+ */
+export function offeredProviders(state: {
+  codexInstalled: boolean;
+  openaiConnected: boolean;
+  connected: readonly CodingProvider[];
+  defaultProvider: CodingProvider;
+}): CodingProvider[] {
+  return CODING_PROVIDERS.filter((id) =>
+    !runsOnCodex(id)
+    || state.codexInstalled
+    || state.openaiConnected
+    || state.connected.includes(id)
+    || state.defaultProvider === id,
+  );
+}
+
+/**
  * A caller's `{ provider, model }`, checked together.
  *
  * Answers either the pair a run may be started with or the one sentence the
