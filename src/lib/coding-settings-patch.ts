@@ -65,48 +65,25 @@ import { CODING_GIT_EMAIL_REFUSAL, CODING_GIT_NAME_REFUSAL, normalizeCodingGitEm
 import { PR_BODY_TASK_MODES } from "./coding-pr-body";
 import { isCodingProvider, type CodingProvider } from "./coding-provider";
 import { MODEL_ROLES, ROLE_AUTO, ROLE_EFFORT_LEVELS, ROLE_MODEL_TIERS, roleModelOptions } from "./coding-role-models";
+import {
+  AGENT_SETTABLE_FIELDS,
+  OWNER_ONLY_FIELDS,
+  OWNER_SETTING_KIND,
+  SETTINGS_PAGE_SENTENCE,
+  type AgentSettableField,
+} from "./coding-settings-shape";
 import { logSafe } from "./log-safe";
 
-/** The fields the assistant may change, in the order the enable route applies them. */
-export const AGENT_SETTABLE_FIELDS = [
-  "gitAuthorName",
-  "gitAuthorEmail",
-  "effort",
-  "roleModels",
-  "reviewPass",
-  "autoPr",
-  "prBodyIncludesTask",
-  "autoMerge",
-  "maxParallelRuns",
-  "historyRetention",
-  "generateMedia",
-  "teamDynamic",
-] as const;
-export type AgentSettableField = (typeof AGENT_SETTABLE_FIELDS)[number];
-
-/**
- * The enable route's fields this door refuses BY NAME — see the module
- * comment for why each one. Named, rather than left to "unknown field", so
- * the refusal can say where the owner changes it instead of implying a typo.
- */
-export const OWNER_ONLY_FIELDS = [
-  "enabled",
-  "defaultDirectory",
-  "provider",
-  "providers",
-  "realBrowser",
-  "allowRules",
-  "injectSecrets",
-  "secrets",
-  "setupComplete",
-  "clearHarnessFault",
-] as const;
-
-/** Where the owner changes what this door refuses — the sentence every such refusal ends with. */
-export const SETTINGS_PAGE_SENTENCE = "The owner changes it on the Coding Agent app's Settings page.";
-
-/** The refusal `kind` for a field the assistant may never change (400, beside `invalid` for a bad value). */
-export const OWNER_SETTING_KIND = "owner_setting";
+// The set itself is in coding-settings-shape.ts (pure), so the MCP server can
+// name the fields and the choices without importing the runner; re-exported
+// here so a caller of the seam has one import.
+export {
+  AGENT_SETTABLE_FIELDS,
+  OWNER_ONLY_FIELDS,
+  OWNER_SETTING_KIND,
+  SETTINGS_PAGE_SENTENCE,
+  type AgentSettableField,
+};
 
 /**
  * The current values of exactly the settable set, plus the choices a caller
