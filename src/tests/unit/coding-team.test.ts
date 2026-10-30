@@ -17,6 +17,12 @@ import path from "path";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 let root: string;
+/**
+ * A project folder that exists (under `root`), for the cases whose files are
+ * looked at: a plan run as a single run has each task's named files checked.
+ * Every other case keeps the fixture path, which nothing reads from disk.
+ */
+let site: string;
 vi.mock("@/lib/config-store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/config-store")>();
   return { ...actual, get DATA_DIR() { return path.join(root, "data"); } };
@@ -161,10 +167,12 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; tokenBreakdown: TokenBreakdown; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; tokenBreakdown: TokenBreakdown; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown>; writes: Record<string, string> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
+  site = path.join(root, "Projects", "site");
+  fs.mkdirSync(site, { recursive: true });
   runs = new Map();
   starts = [];
   seq = 0;
@@ -219,6 +227,12 @@ beforeEach(async () => {
           ? (leadAnswers.shift() ?? { summary: "{}" })
           : (outcomes[at] ?? { status: "completed", summary: "done" });
       Object.assign(run, { status: outcome.status ?? "completed", completedAt: Date.now() }, outcome);
+      // What the run wrote, in its folder, as the settle finds it.
+      for (const [file, content] of Object.entries((outcome as { writes?: Record<string, string> }).writes ?? {})) {
+        const at = path.join(String(run.directory), file);
+        fs.mkdirSync(path.dirname(at), { recursive: true });
+        fs.writeFileSync(at, content);
+      }
     } else if (run.status === "paused" && run.resumesAs) {
       // The owner came back. Only reached if the orchestrator LOOKED again —
       // a settle that took the pause as an outcome never would — so this is
@@ -258,6 +272,11 @@ function committedOn(branch: string): string[] {
   const touched = (run?.filesTouched as string[] | undefined) ?? [];
   if (touched.length) return touched;
   return team.getTeam(teamId)?.tasks.find((t) => t.task_id === taskId)?.files_hint ?? [];
+}
+
+/** The team's project is `site`, a folder on disk: what a single run's tasks name is looked for there. */
+function inSite(): void {
+  runner.resolveWorkingDirectory.mockResolvedValue({ directory: site, projectId: null });
 }
 
 const PLAN = JSON.stringify([
@@ -2515,7 +2534,8 @@ describe("the lead (coding_team_dynamic)", () => {
 
   it("spends no run when nothing is left to decide: every task left is complete", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
-    outcomes = [{ summary: JSON.stringify([{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }]) }, { summary: "fixed", filesTouched: ["README.md"] }];
+    inSite();
+    outcomes = [{ summary: JSON.stringify([{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }]) }, { summary: "fixed", filesTouched: ["README.md"], writes: { "README.md": "fixed\n" } }];
     const board = await team.startTeam({ goal: "Fix the typo", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
@@ -3031,11 +3051,12 @@ describe("a second team: queued, not refused", () => {
   const ONE_TASK = JSON.stringify([{ task_description: "Scaffold index.html", files_hint: ["index.html"] }]);
 
   it("waits on disk with its place while one works, and starts by itself when that one settles", async () => {
+    inSite();
     outcomes = [
       { summary: ONE_TASK },
-      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "index done", filesTouched: ["index.html"], writes: { "index.html": "<h1>1</h1>\n" } },
       { summary: ONE_TASK },
-      { summary: "index done again", filesTouched: ["index.html"] },
+      { summary: "index done again", filesTouched: ["index.html"], writes: { "index.html": "<h1>2</h1>\n" } },
     ];
     // The first team's planner holds until the second has been asked for.
     const hold: { release?: () => void } = {};
@@ -3081,10 +3102,10 @@ describe("a second team: queued, not refused", () => {
   it("is started at boot when it was waiting at a restart", async () => {
     // What a restart leaves: a queued board on disk and no team in this process.
     const board = await import("@/lib/coding-team-board");
-    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: site, source: "owner" }, { kind: "owner" });
     board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting for team team-00000000 to finish");
     board.saveBoard(queued);
-    outcomes = [{ summary: ONE_TASK }, { summary: "index done", filesTouched: ["index.html"] }];
+    outcomes = [{ summary: ONE_TASK }, { summary: "index done", filesTouched: ["index.html"], writes: { "index.html": "<h1>1</h1>\n" } }];
     expect(team.getTeam(queued.id)?.status).toBe("queued");
     const started = await team.startNextQueuedTeam();
     expect(started?.id).toBe(queued.id);
@@ -3236,9 +3257,10 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
   const MAP = { files: ["index.html — the page", "app.js — its script"], entry_points: ["index.html"], test_commands: ["npm test -- --maxWorkers=1"], gotchas: ["app.js is loaded as a module"] };
 
   it("runs a ONE-task plan as one ordinary run — no team branch, worktree or reviewer — and the board follows it", async () => {
+    inSite();
     outcomes = [
       { summary: JSON.stringify({ repo_map: MAP, tasks: [{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }] }), tokensUsed: 9_000 },
-      { summary: "Fixed the typo in README.md.", filesTouched: ["/home/clawbox/Projects/site/README.md"], tokensUsed: 41_000 },
+      { summary: "Fixed the typo in README.md.", filesTouched: [`${site}/README.md`], tokensUsed: 41_000, writes: { "README.md": "# Site\n" } },
     ];
     const board = await team.startTeam({ goal: "Fix the typo in the readme", directory: "site", source: "agent" });
     const done = await finished(board.id);
@@ -3246,7 +3268,7 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
     expect(starts.map(roleOf)).toEqual(["planner", "run"]);
     const single = starts[1];
     // An ordinary run: in the project, the owner's goal first, the planner's map in its brief.
-    expect(single).toMatchObject({ directory: "/home/clawbox/Projects/site", source: "agent" });
+    expect(single).toMatchObject({ directory: site, source: "agent" });
     expect(single.team).toBeUndefined();
     expect(single.readOnly).toBeUndefined();
     expect(String(single.task).split("\n")[0]).toBe("Fix the typo in the readme");
@@ -3260,7 +3282,7 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
     await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
     expect(notify.announceCodingTeam).not.toHaveBeenCalled();
     expect(done.advice).toEqual({ reason: "one_task", overlap: 100 });
-    expect(done.tasks[0]).toMatchObject({ status: "complete", assigned_to: "run-00000002", result: "Fixed the typo in README.md.", review: { verdict: "accepted" } });
+    expect(done.tasks[0]).toMatchObject({ status: "complete", assigned_to: "run-00000002", result: "Fixed the typo in README.md.", review: { verdict: "accepted", notes: expect.stringMatching(/^Ran as a single run, and the files it names are present \(README\.md\)/) } });
     expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/one task, so it runs as one ordinary run/)]));
     expect(done.metrics.tokensByRole).toEqual({ planner: 9_000, worker: 41_000, reviewer: 0, lead: 0 });
   });
@@ -3353,12 +3375,13 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
   });
 
   it("runs a plan whose tasks mostly touch the same files as ONE ordinary run, says so up front, and keeps the advice", async () => {
+    inSite();
     outcomes = [
       { summary: JSON.stringify([
         { task_description: "Add the header to index.html", files_hint: ["index.html", "styles.css"] },
         { task_description: "Add the footer to index.html", depends_on: ["t1"], files_hint: ["index.html", "styles.css"] },
       ]) },
-      { summary: "Header and footer done.", filesTouched: ["index.html"] },
+      { summary: "Header and footer done.", filesTouched: ["index.html"], writes: { "index.html": "<header></header><footer></footer>\n", "styles.css": "header{}\n" } },
     ];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
@@ -3513,5 +3536,196 @@ describe("the team's effort", () => {
     await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toBeInstanceOf(CodingAgentError);
     expect(runner.startRun).not.toHaveBeenCalled();
     expect(team.listTeams()).toEqual([]);
+  });
+});
+
+/** A planner that could not read the project hedged, and its plan was taken in silence (D2). */
+describe("a planner that planned without reading the project", () => {
+  const plannerStarts = () => starts.filter((s) => (s.team as { role?: string } | null)?.role === "planner");
+  const MAP = (files: string[]) => ({ files, entry_points: [], test_commands: [], gotchas: [] });
+  const BLIND = JSON.stringify({ repo_map: MAP(["index.html — source not inspected", "app.js — source not inspected"]), tasks: JSON.parse(PLAN) });
+  const READ = JSON.stringify({ repo_map: MAP(["index.html — the page", "app.js — its script"]), tasks: JSON.parse(PLAN) });
+  const WORK = [{ summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+  const notes = (done: { log: Array<{ type: string; message: string }> }) => done.log.filter((e) => e.type === "note").map((e) => e.message);
+  const alerts = (done: { log: Array<{ type: string; message: string }> }) => done.log.filter((e) => e.type === "alert").map((e) => e.message);
+
+  it("is asked once more in a FRESH read-only run, and the team goes on from the plan that read the project", async () => {
+    outcomes = [{ summary: BLIND }, { summary: READ }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(2);
+    // Not the first planner's session: that one believes it cannot read.
+    expect(plannerStarts()[1]).toMatchObject({ readOnly: true, directory: "/home/clawbox/Projects/site", team: { id: board.id, role: "planner", taskId: null } });
+    expect(plannerStarts()[1].resumeRunId).toBeUndefined();
+    expect(String(plannerStarts()[1].task)).toMatch(/^Build it\n/);
+    expect(String(plannerStarts()[1].task)).toContain("said you read no source");
+    expect(String(plannerStarts()[1].task)).toContain("Read, Grep, Glob and read-only git");
+    expect(plannerStarts()[1].extraBrief).toBe(plannerStarts()[0].extraBrief);
+    expect(notes(done)).toContain("The planner's plan was written without reading the project (its repo map says \"source not inspected\" (2 of 2 entries)); asking once more in a fresh read-only run.");
+    expect(done.alerts).toBe(0);
+    expect(done.agents.planner).toBe(2);
+    expect(done.plannerRunId).toBe("run-00000001");
+    expect(done.repoMap?.files).toEqual(["index.html — the page", "app.js — its script"]);
+  });
+
+  it("stands with ONE alert when the second plan is blind too, and the team goes on with it", async () => {
+    outcomes = [{ summary: BLIND }, { summary: `Source not inspected: the tools were unavailable.\n${BLIND}` }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(2);
+    expect(done.alerts).toBe(1);
+    expect(alerts(done)).toEqual(["ALERT: The planner planned without reading the project twice (its repo map says \"source not inspected\" (2 of 2 entries); its answer says \"Source not inspected\"); the plan stands with that caveat."]);
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete"]);
+  });
+
+  it("keeps the first plan, with an alert, when the fresh run gives none", async () => {
+    outcomes = [{ summary: BLIND }, { status: "failed", error: "The harness exited." }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.alerts).toBe(1);
+    expect(alerts(done)[0]).toMatch(/^ALERT: The planner was asked again and gave no plan \(The planner did not finish its answer: The harness exited\.\); the first plan, written without reading the project \(its repo map says "source not inspected"/);
+    expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
+  });
+
+  it("asks nothing more of a plan that read the project", async () => {
+    outcomes = [{ summary: READ }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(1);
+    expect(done.alerts).toBe(0);
+    expect(done.log.map((e) => e.message).filter((m) => /without reading the project/.test(m))).toEqual([]);
+  });
+});
+
+/** A task naming every file the others own made every task overlap, and the team one run, in silence (D2). */
+describe("a plan with a catch-all task", () => {
+  const roleOf = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  const plan = (thirdDependsOn: string[]) => JSON.stringify([
+    { task_description: "Write index.html", files_hint: ["index.html"] },
+    { task_description: "Write app.js", files_hint: ["app.js"] },
+    { task_description: "Wire the page to its script", depends_on: thirdDependsOn, files_hint: ["index.html", "app.js"] },
+  ]);
+
+  it("runs as planned when the catch-all is the integration step that waits for every other task, and says why", async () => {
+    outcomes = [
+      { summary: plan(["t1", "t2"]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "wired", filesTouched: ["index.html", "app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(false);
+    expect(starts.filter((s) => roleOf(s) === "worker")).toHaveLength(3);
+    expect(done.log.map((e) => e.message)).toContain("Task t3 names every file the other tasks own; it is the integration step and runs after them, so it is left out of the overlap measure and the team runs as planned.");
+    // The card says nothing it just decided against.
+    expect(done.advice).toBeNull();
+  });
+
+  it("still runs as one run when the catch-all does not wait for the others — and the note names it as the reason", async () => {
+    inSite();
+    outcomes = [
+      { summary: plan(["t1"]) },
+      { summary: "All three done.", writes: { "index.html": "<script src=app.js></script>\n", "app.js": "go();\n" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(true);
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    expect(done.advice).toEqual({ reason: "overlap", overlap: 100, catchAll: ["t3"] });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too \(Task t3 names every file the other tasks own, and it does not wait for all of them, so it is no integration step\): side by side they would only conflict, so its 3 tasks run as one ordinary run/)]));
+  });
+
+  it("still runs as one run when the others overlap without it, and says so", async () => {
+    inSite();
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "The header", files_hint: ["index.html", "styles.css"] },
+        { task_description: "The logo", files_hint: ["index.html", "styles.css", "logo.svg"] },
+        { task_description: "Wire it all", depends_on: ["t1", "t2"], files_hint: ["index.html", "styles.css", "logo.svg", "app.js"] },
+      ]) },
+      { summary: "Done.", writes: { "index.html": "<h1></h1>\n", "styles.css": "h1{}\n", "logo.svg": "<svg/>\n", "app.js": "go();\n" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(true);
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/\(Task t3 names every file the other tasks own, and the others still overlap 80% without it\)/)]));
+  });
+});
+
+/** One run doing several planned tasks: each task is judged on the files it named (D3). */
+describe("a plan run as a single run: each task's named files", () => {
+  it("rejects — for good — a task whose named files are missing or empty, accepts the one whose files are there, and fails the team naming them", async () => {
+    inSite();
+    // A folder that is there but holds nothing.
+    fs.mkdirSync(path.join(site, "docs"));
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "The page", files_hint: ["./index.html", "styles.css", "app.js"] },
+        { task_description: "The page's docs", depends_on: ["t1"], files_hint: ["index.html", "styles.css", "app.js", "docs/", "notes.md", "CHANGELOG.md"] },
+      ]) },
+      { summary: "Page and docs done.", writes: { "index.html": "<h1></h1>\n", "styles.css": "h1{}\n", "app.js": "go();\n", "notes.md": "" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.singleRun).toBe(true);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The run for the plan's tasks finished, but named deliverables are missing — t2: docs (empty), notes.md (empty), CHANGELOG.md (missing).");
+    const [t1, t2] = done.tasks;
+    expect(t1).toMatchObject({ status: "complete", review: { verdict: "accepted", notes: expect.stringMatching(/^Ran as a single run, and the files it names are present \(index\.html, styles\.css, app\.js\)/) } });
+    // Not left pending on a settled board: this run was every attempt it gets.
+    expect(t2).toMatchObject({ status: "rejected", review: { verdict: "rejected", notes: "Deliverable missing: docs (empty), notes.md (empty), CHANGELOG.md (missing)" } });
+    expect(done.log.map((e) => e.message)).toContain("Task t2 rejected: Deliverable missing: docs (empty), notes.md (empty), CHANGELOG.md (missing)");
+  });
+
+  it("accepts as before a task that names no file it could look for", async () => {
+    // The fixture folder is not on disk: nothing is looked at.
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Tidy whatever needs it", files_hint: ["**", "src/*.ts", "./"] }]) },
+      { summary: "Tidied." },
+    ];
+    const board = await team.startTeam({ goal: "Tidy up", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0]).toMatchObject({ status: "complete", review: { verdict: "accepted", notes: expect.stringMatching(/^Ran as a single run: the run's own settle judged it/) } });
+  });
+
+  it("reads a hint the way the stray check does: no ./, no trailing / or /** or /*, and no pattern", () => {
+    expect(team.namedDeliverables(["./src/app.ts", "docs/", "assets/**", "lib/*", "src/**/*.ts", "**", "a?.md", " ./README.md ", "README.md", "./", ""])).toEqual(["src/app.ts", "docs", "assets", "lib", "README.md"]);
+  });
+
+  it("looks on the run's branch when its work did not come home, and in the project when the branch is gone", async () => {
+    const { execFileSync } = await import("child_process");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: site, encoding: "utf8", env });
+    git("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    git("add", "-A");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "clawbox/run-aaaaaaaa");
+    fs.mkdirSync(path.join(site, "docs"));
+    fs.writeFileSync(path.join(site, "docs", "new.md"), "new\n");
+    fs.writeFileSync(path.join(site, "empty.md"), "");
+    git("add", "-A");
+    git("commit", "-qm", "work");
+    git("checkout", "-q", "main");
+    expect(fs.existsSync(path.join(site, "docs", "new.md"))).toBe(false);
+    const tree = path.join(site, ".clawbox", "worktrees", "run-aaaaaaaa");
+    const worktree = { path: tree, branch: "clawbox/run-aaaaaaaa", base: "main", project: site, removed: true, branchRemoved: false };
+    const place = team.deliverablePlace({ directory: tree, worktree }, "/unused");
+    expect(place).toEqual({ dir: site, branch: { repo: site, name: "clawbox/run-aaaaaaaa", roots: [tree, site] } });
+    expect(await team.missingDeliverables(place, ["README.md", "docs/new.md", "docs", `${tree}/docs/new.md`, "empty.md", "gone.md", "../outside.md"])).toEqual(["empty.md (empty)", "gone.md (missing)", "../outside.md (missing)"]);
+    // The branch went with the tree (it held nothing): only the project is looked at.
+    const bare = team.deliverablePlace({ directory: tree, worktree: { ...worktree, branchRemoved: true } }, "/unused");
+    expect(await team.missingDeliverables(bare, ["README.md", "docs/new.md"])).toEqual(["docs/new.md (missing)"]);
+    // No worktree: the run's own folder.
+    expect(team.deliverablePlace({ directory: site, worktree: null }, "/unused")).toEqual({ dir: site, branch: null });
   });
 });
