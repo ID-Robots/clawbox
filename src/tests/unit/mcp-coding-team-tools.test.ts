@@ -403,3 +403,25 @@ describe("run or team, and what each role cost", () => {
     expect(text).not.toMatch(/Advice|Single run|Repo map/);
   });
 });
+
+/** `effort` (2026-10-30): the team's level, sent only when named. */
+describe("coding_team_run effort", () => {
+  it("sends a named level and nothing when none was named", async () => {
+    apiPost.mockResolvedValue({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    await ok("coding_team_run", { goal: "Build it", directory: "invoice", effort: "ultracode" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/team", { goal: "Build it", directory: "invoice", effort: "ultracode" }, expect.anything());
+    await ok("coding_team_run", { goal: "Build it", directory: "invoice" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/team", { goal: "Build it", directory: "invoice" }, expect.anything());
+  });
+
+  it("refuses a level outside the app's list at the schema, and turns the route's refusal into advice on the effort", async () => {
+    // The test registrar calls the handler directly; the schema is what the dispatcher refuses with.
+    const { z } = await import("zod");
+    const schema = z.object(harness().get("coding_team_run").shape);
+    expect(schema.safeParse({ goal: "g", directory: "invoice", effort: "high" }).success).toBe(false);
+    expect(schema.safeParse({ goal: "g", directory: "invoice", effort: "max" }).success).toBe(true);
+    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "high". Use one of: low, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
+    const route = await refused("coding_team_run", { goal: "g", directory: "invoice", effort: "max" });
+    expect(route).toMatchObject({ code: "BAD_ARGUMENT", message: expect.stringMatching(/Unknown effort/), next: expect.stringMatching(/low, xhigh, max, ultracode/) });
+  });
+});

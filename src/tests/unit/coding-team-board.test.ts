@@ -1030,3 +1030,29 @@ describe("the team's pull request on the board", () => {
     expect(lib.loadBoard(b.id)!.tasks[0].budgetReoffers).toBe(1);
   });
 });
+
+/** The team's asked-for effort (2026-10-30): kept on the board, re-read on load, dropped when it is not a level the app offers. */
+describe("the board's effort", () => {
+  it("is absent unless the team was asked for one, and survives a save and a load", () => {
+    expect(board()).not.toHaveProperty("effort");
+    const b = lib.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/inv", source: "owner", effort: "ultracode" }, OWNER);
+    expect(b.effort).toBe("ultracode");
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)?.effort).toBe("ultracode");
+    // A null is "none", not a level.
+    expect(lib.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/inv", source: "owner", effort: null }, OWNER)).not.toHaveProperty("effort");
+  });
+
+  it("drops a level the app does not offer when a file carries one", () => {
+    const b = board();
+    lib.saveBoard(b);
+    const file = path.join(root, "data", "coding-team", `${b.id}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    raw.effort = "turbo";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)).not.toHaveProperty("effort");
+    raw.effort = "max";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)?.effort).toBe("max");
+  });
+});

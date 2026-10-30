@@ -38,7 +38,10 @@ of them kept failing.
     are the ONLY tools whose result carries MCP `structuredContent` —
     `{ kind, id, projectId, directory, title, status, queuePosition? }`, `ToolResult.structuredContent`
     in `mcp/lib/register.ts`; their prose tells the assistant the chat shows
-    the card and not to poll), `coding_run_message`, `coding_run_list`,
+    the card and not to poll; both take an optional `effort` — the levels the
+    app offers, `OFFERED_EFFORT_LEVELS` from the pure `src/lib/coding-effort.ts`,
+    sent only when named, the route's `code: "effort"` refusal turned into
+    advice on that argument, see [coding-agent.md](coding-agent.md)), `coding_run_message`, `coding_run_list`,
     `coding_agent_resume`, `coding_project_status`, `coding_project_import`
     (the app's Import panel as a tool since 2026-10-30: a GitHub repository
     or a folder on the box into the project folder; `POST

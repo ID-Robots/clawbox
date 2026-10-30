@@ -763,7 +763,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 
 | Tool | What it does |
 |---|---|
-| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. |
+| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. `effort`: this run's level (`low`, `xhigh`, `max`, `ultracode`) in place of the owner's setting. |
 | `coding_agent_status` | One run in full — its summary, deliverable, pull request, deployment, plan — or, with no `run_id`, the recent ids. `wait_seconds` blocks up to two minutes. |
 | `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says "Delivered" (the run has it, mid-turn after a tool call or as its next turn) or "Queued" and when — the end of the tool call under way, or its next start. |
 | `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
@@ -819,6 +819,21 @@ exists to prevent. `anthropic` and `openai` work only where the owner has
 connected their own access; `coding_agent_status` and the Coding Agent app say
 whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
+
+`coding_agent_run` and `coding_team_run` take an optional `effort` (2026-10-30):
+one of the levels the app offers — `low`, `xhigh`, `max`, `ultracode`
+(`OFFERED_EFFORT_LEVELS` in `src/lib/coding-effort.ts`, mirrored in the
+parameter's enum) — the per-request override of the owner's effort setting
+(Settings → Coding Agent). Omitted, it is NOT sent and the owner's setting
+stands; named, the route validates it (400 `invalid`, `code: "effort"`, which
+the tool turns into advice on that argument) and `startRun` applies it where
+the owner's effort is read — BEFORE the role caps and the read-only clamp, which
+still win: a planner or reviewer asked for `ultracode` runs at `xhigh`. On a
+team the level is kept on the board and handed to every member run. `ultracode`
+is xhigh plus Claude Code's own fan-out and costs far more tokens, so the
+description tells the assistant to pass it only when the user asked for the
+highest effort on this one — the Create card's Ultracode toggle writes exactly
+that sentence into its message.
 `coding_secret_list` answers the NAMES of the owner's stored secrets
 (`src/lib/project-secrets.ts`), their scope (`box` or a project id), whether
 each is handed to runs and whether this box can still decrypt it. There is no

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS } from "@/lib/coding-agent";
+import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { slimTeam, teamCard } from "@/lib/coding-agent-slim";
 import { pushPendingAction } from "@/lib/pending-actions";
 import { getTeam, listTeams, startTeam, waitForTeam } from "@/lib/coding-team";
@@ -36,10 +37,15 @@ export const dynamic = "force-dynamic";
  *                                 tasks done/total, the task titles, the pull
  *                                 request number, the result's first sentence
  *                                 and the agents — the chat's team card
- * POST { goal, projectId | directory } → 202 { started: true, team }, or —
+ * POST { goal, projectId | directory, effort? } → 202 { started: true, team }, or —
  *                                 while another team works — 202 { started:
  *                                 false, queued: true, team } with the board in
- *                                 status `queued` and its `queuePosition`
+ *                                 status `queued` and its `queuePosition`.
+ *                                 `effort` (one of OFFERED_EFFORT_LEVELS, else
+ *                                 400 `invalid` with `code: "effort"`) is kept
+ *                                 on the board and handed to every member run
+ *                                 in place of the owner's setting — the role
+ *                                 caps and the read-only clamp still apply
  *
  * Session-gated like the runs. POST is admitted to the owner's cookie AND
  * the MCP bearer — the assistant is the party that usually delegates a goal —
@@ -89,12 +95,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
   if (!body || typeof body !== "object") return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  if (body.effort !== undefined && body.effort !== null && !isOfferedEffort(body.effort)) {
+    return NextResponse.json({ error: effortRefusal(body.effort), kind: "invalid", code: "effort" }, { status: 400 });
+  }
   try {
     const team = await startTeam({
       goal: typeof body.goal === "string" ? body.goal : "",
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
       source: (await hasPersonSession(request)) ? "owner" : "agent",
+      ...(body.effort !== undefined && body.effort !== null ? { effort: body.effort } : {}),
     });
     const queued = team.status === "queued";
     // Every open desktop hears that a team began (the run route does the

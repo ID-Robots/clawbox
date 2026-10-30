@@ -293,3 +293,36 @@ describe("a Fix CI continuation", () => {
     expect(startOrQueueRun.mock.calls[startOrQueueRun.mock.calls.length - 1][0]).not.toHaveProperty("fixCi");
   });
 });
+
+/**
+ * `effort` — the per-request override of the owner's effort setting
+ * (2026-10-30, the Create card's Ultracode toggle): one of the levels the app
+ * offers, refused HERE with a `code` when it is not, and never invented.
+ */
+describe("effort", () => {
+  it("passes an offered level through to the runner", async () => {
+    await POST(req({ body: { task: "Do the thing", projectId: "site", effort: "ultracode" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ effort: "ultracode" }));
+    await POST(req({ body: { task: "Do the thing", projectId: "site", effort: "low" } }));
+    expect(startRun).toHaveBeenLastCalledWith(expect.objectContaining({ effort: "low" }));
+  });
+
+  it("sends none when the caller named none, so the owner's setting decides", async () => {
+    await POST(req({ body: { task: "t", projectId: "site" } }));
+    expect(startRun.mock.calls[0][0]).not.toHaveProperty("effort");
+    await POST(req({ body: { task: "t", projectId: "site", effort: null } }));
+    expect(startRun.mock.calls[1][0]).not.toHaveProperty("effort");
+  });
+
+  it("refuses a level this box does not offer with 400, a code and the list, before the runner is asked", async () => {
+    for (const effort of ["medium", "ULTRACODE", "turbo", 3, true]) {
+      startRun.mockClear();
+      const res = await POST(req({ body: { task: "t", projectId: "site", effort } }));
+      expect(res.status, String(effort)).toBe(400);
+      const body = await res.json();
+      expect(body).toMatchObject({ kind: "invalid", code: "effort" });
+      expect(body.error).toMatch(/low, xhigh, max, ultracode/);
+      expect(startRun).not.toHaveBeenCalled();
+    }
+  });
+});
