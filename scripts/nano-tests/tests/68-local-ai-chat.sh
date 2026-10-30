@@ -101,6 +101,7 @@ box_snapshot() {
 
 # ---- what the board has --------------------------------------------------------
 
+# shellcheck disable=SC2016  # expanded on the board
 if [ "$(board '[ -x "$1" ] && echo yes' "$OPENCLAW_BIN" | tail -n 1)" != yes ]; then
   skip "no OpenClaw on this board ($OPENCLAW_BIN)"
   finish
@@ -148,7 +149,7 @@ SWITCHED=0 CONFIGURED_HERE=0 RESTORED=0 NEW_APPS=""
 restore() {
   [ "$RESTORED" = 1 ] && return 0
   RESTORED=1
-  local id body after
+  local id body after back
   for id in $NEW_APPS; do
     board_api POST /setup-api/apps/uninstall "{\"appId\":\"$id\"}"
     if [ "$API_STATUS" = 200 ]; then
@@ -161,8 +162,13 @@ restore() {
     if [ -n "$BEFORE_MODEL" ] && [[ $BEFORE_MODEL != llamacpp/* ]]; then
       body=$(jq -cn --arg m "$BEFORE_MODEL" --arg p "$BEFORE_PROVIDER" '{model: $m} + (if $p == "" then {} else {provider: $p} end)')
       board_api POST /setup-api/chat/model "$body"
-      if [ "$API_STATUS" = 200 ] && [ "$(api_json '.activeModel // empty')" = "$BEFORE_MODEL" ]; then
+      back=$(api_json '.activeModel // empty')
+      if [ "$API_STATUS" = 200 ] && [ "$back" = "$BEFORE_MODEL" ]; then
         ok "the chat model is back on $BEFORE_MODEL"
+      elif [ "$API_STATUS" = 200 ] && [[ $BEFORE_MODEL == deepseek/* && $back == deepseek/* ]]; then
+        # chat/model writes every ClawBox AI pick as its one chat id
+        # (canonicalChatModel: the proxy serves Flash under the Pro id too).
+        ok "the chat model is back on ClawBox AI ($back; it was $BEFORE_MODEL, which a pick writes as $back)"
       else
         not_ok "could not put the chat model back on $BEFORE_MODEL: $(api_error)"
       fi

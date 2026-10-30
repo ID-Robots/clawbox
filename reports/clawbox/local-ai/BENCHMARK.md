@@ -164,3 +164,27 @@ header offers Off / High for Gemma, and `/think high` turns it on for one messag
   `LLAMACPP_MAX_TOKENS` 8192; the OpenClaw row is told the same window. Fielded boxes are
   migrated off exactly the old shipped values.
 - **Reasoning:** off by default, per request as above.
+
+## On the shipped path (2026-10-30)
+
+The step this report left for a person — the shipped path end to end, through ClawBox's own
+launcher, proxy and routes after an update — now runs on a lab board in the on-device suite
+as `scripts/nano-tests/tests/68-local-ai-chat.sh` (see `docs/nano-hardware-tests.md`). Its
+first run, on a freshly reflashed Jetson Orin Nano 8 GB rebuilt to commit `ddc80e44e`,
+OpenClaw 2026.10.7, the board on ClawBox AI:
+
+- Settings → Local AI's Install configured the GGUF already on the board, and the chat
+  header's pick made `llamacpp/gemma4-e2b-it-q4_0` the primary with `tools.toolSearch`
+  `{"enabled": false}`.
+- "направи ми проста todo страница", asked on a fresh session, was answered by `llamacpp`
+  itself on the first attempt in **51 s**. The reply was in Bulgarian ("Сега имаш страница за
+  задачи (Todo List) на твоят настолен компютър. Можеш да използваш бутона в долната част на
+  екрана за добавяне на нови задачи."), and the turn called `clawbox__webapp_create`, which
+  wrote a 2,685-byte `todo-list` page with an input field and a script. The turn used
+  **1,671 prompt tokens over 2 model calls** (lean prompt) and produced 886 output tokens.
+- MemAvailable was **3,784 MB** with the model in standby, **1,355 MB** at its lowest during
+  the turn, and llama-server's RSS was **3,023 MB**. Neither the gateway nor the web server
+  restarted. On a fixed 977-token prompt, llama-server decoded at **29 tok/s** and prefilled
+  at **977 tok/s**: the same as the raw-server measurements above.
+- The other 17 tests of the suite passed on the same board, `75-full-reboot`'s chat turn
+  among them (back on ClawBox AI after the test put the primary back).
