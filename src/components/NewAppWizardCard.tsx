@@ -32,7 +32,64 @@ import {
  * folder and code projects) with "what should the next run do?", composed
  * as a message that tells the assistant how to resume that project rather
  * than scaffold a new one (buildResumeProjectPrompt).
+ *
+ * Two TOGGLES sit above the buttons in both modes (2026-10-30, the owner's
+ * ask): "Run as a coding team" (the message asks for coding_team_run — on a
+ * new app, after the scaffold) and "Ultracode" (the message ends with the
+ * sentence that has the assistant pass `effort: "ultracode"`, the per-request
+ * override the run and team routes take). Both default off; the owner's last
+ * choice of each is remembered in localStorage, a per-viewer convenience and
+ * nothing more — it can be absent, and the card renders the same without it.
  */
+
+/** Where the card remembers the owner's last choice of each toggle (per browser). */
+const TOGGLE_STORAGE = { team: "clawbox:create-card:team", ultracode: "clawbox:create-card:ultracode" } as const;
+type ToggleName = keyof typeof TOGGLE_STORAGE;
+
+/** The remembered choice, or off: a private window, blocked storage or a throwing accessor all read as off. */
+function rememberedToggle(which: ToggleName): boolean {
+  try {
+    return typeof window !== "undefined" && window.localStorage?.getItem(TOGGLE_STORAGE[which]) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberToggle(which: ToggleName, on: boolean): void {
+  try {
+    window.localStorage?.setItem(TOGGLE_STORAGE[which], on ? "1" : "0");
+  } catch {
+    // localStorage unavailable: the choice holds for this card and no longer.
+  }
+}
+
+/**
+ * One toggle row, drawn as the app's switches (SettingsApp's `Toggle`): a
+ * 44-px row, the label and a one-line hint on the left, a `role="switch"`
+ * button on the right, coral when on. A button rather than a checkbox so it
+ * reads and taps like every other switch on the box.
+ */
+function ToggleRow({ label, hint, on, onToggle, testId }: { label: string; hint: string; on: boolean; onToggle: (on: boolean) => void; testId: string }) {
+  return (
+    <div className="flex min-h-11 items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-1.5">
+      <div className="min-w-0">
+        <p className="text-sm font-medium leading-tight text-[var(--text-primary)]">{label}</p>
+        <p className="truncate text-[11px] text-[var(--text-muted)]" title={hint}>{hint}</p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={label}
+        onClick={() => onToggle(!on)}
+        data-testid={testId}
+        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-none transition-colors ${on ? "bg-[var(--coral-bright)]" : "bg-white/15"}`}
+      >
+        <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-md transition-transform ${on ? "translate-x-6" : "translate-x-1"}`} />
+      </button>
+    </div>
+  );
+}
 
 /**
  * The longest name the wizard accepts — the same bound as
@@ -175,9 +232,14 @@ export default function NewAppWizardCard({
   const [template, setTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<WizardMode>(initialProject ? "existing" : "new");
-  // A team: the same card, the same project, one more switch — the message
-  // asks for coding_team_run instead of one run.
-  const [team, setTeam] = useState(initialTeam === true);
+  // The two toggles: a team (the message asks for coding_team_run instead of
+  // one run) and ultracode (the message asks for effort "ultracode"). A host
+  // that opens the card FOR a team wins over the remembered choice; otherwise
+  // each starts as the owner last left it, and a tap is what is remembered.
+  const [team, setTeam] = useState(() => initialTeam === true || rememberedToggle("team"));
+  const [ultracode, setUltracode] = useState(() => rememberedToggle("ultracode"));
+  const toggleTeam = (on: boolean) => { setTeam(on); rememberToggle("team", on); };
+  const toggleUltracode = (on: boolean) => { setUltracode(on); rememberToggle("ultracode", on); };
   // The owner's projects, read the first time the existing-project mode is
   // opened: null until then, [] when the box has none (or could not say).
   const [projects, setProjects] = useState<ProjectRow[] | null>(null);
@@ -275,7 +337,7 @@ export default function NewAppWizardCard({
         instructions: trimmedNext,
         latestRun: project.latestRun,
       };
-      dispatchChatMessage(team ? buildTeamProjectPrompt(req) : buildResumeProjectPrompt(req));
+      dispatchChatMessage(team ? buildTeamProjectPrompt(req, { ultracode }) : buildResumeProjectPrompt(req, { ultracode }));
       setError(null);
       onClose();
       onHanded?.();
@@ -287,7 +349,7 @@ export default function NewAppWizardCard({
     if (trimmedName.length > NEW_APP_NAME_MAX) return setError(t("codingAgent.newNameTooLong", { max: NEW_APP_NAME_MAX }));
     if (!trimmedWhat) return setError(t("codingAgent.newWhatRequired"));
     if (trimmedWhat.length > maxTaskChars) return setError(t("codingAgent.newWhatTooLong", { max: maxTaskChars }));
-    dispatchChatMessage(buildNewAppPrompt({ name: trimmedName, description: trimmedWhat, template }));
+    dispatchChatMessage(buildNewAppPrompt({ name: trimmedName, description: trimmedWhat, template }, { team, ultracode }));
     setError(null);
     onClose();
     onHanded?.();
@@ -356,17 +418,6 @@ export default function NewAppWizardCard({
             className={`${FIELD} mt-1.5 resize-y min-h-[5.5rem]`}
           />
         </label>
-        <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={team}
-            onChange={(e) => setTeam(e.target.checked)}
-            data-testid="coding-agent-new-team"
-            className="accent-[var(--coral-bright)]"
-          />
-          {t("codingAgent.newTeamSwitch")}
-        </label>
-        <p className="text-[11px] text-[var(--text-muted)]">{t(team ? "codingAgent.newTeamHint" : "codingAgent.newExistingHint")}</p>
       </>) : (<>
       <label className={LABEL}>
         {t("codingAgent.newNameLabel")}
@@ -410,6 +461,23 @@ export default function NewAppWizardCard({
         </select>
       </label>
       </>)}
+      {/* The two toggles, in both modes, directly above the buttons. */}
+      <div className="space-y-2" data-testid="coding-agent-new-toggles">
+        <ToggleRow
+          label={t("codingAgent.newTeamSwitch")}
+          hint={t("codingAgent.newTeamHint")}
+          on={team}
+          onToggle={toggleTeam}
+          testId="coding-agent-new-team"
+        />
+        <ToggleRow
+          label={t("codingAgent.newUltracodeSwitch")}
+          hint={t("codingAgent.newUltracodeHint")}
+          on={ultracode}
+          onToggle={toggleUltracode}
+          testId="coding-agent-new-ultracode"
+        />
+      </div>
       {error && (
         <p className="text-[11px] text-amber-400" role="alert" data-testid="coding-agent-new-error">{error}</p>
       )}
@@ -427,7 +495,7 @@ export default function NewAppWizardCard({
           data-testid="coding-agent-new-create"
           className="text-[11px] px-3 py-1 rounded-lg bg-[var(--coral-bright)] text-black font-medium hover:opacity-90"
         >
-          {t(mode === "existing" ? (team ? "codingAgent.newStartTeam" : "codingAgent.newContinue") : "codingAgent.newCreate")}
+          {t(team ? "codingAgent.newStartTeam" : mode === "existing" ? "codingAgent.newContinue" : "codingAgent.newCreate")}
         </button>
       </div>
     </form>
