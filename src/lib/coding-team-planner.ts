@@ -43,6 +43,7 @@ import {
   type TaskStatus,
   type TeamBoard,
   type TeamShape,
+  type TeamTask,
 } from "@/lib/coding-team-board";
 
 export interface PlannedTask {
@@ -399,8 +400,23 @@ export function leadRoom(ctx: ReplanContext): { adds: number; retires: number; r
 export function leadShouldRun(board: TeamBoard, batch: readonly string[], sinceTs: number): { run: boolean; why: string } {
   const stopped = board.log.find((e) => e.type === "budget" && e.task_id !== undefined && batch.includes(e.task_id) && e.ts > sinceTs);
   if (stopped) return { run: true, why: `${stopped.task_id}'s worker was stopped by the budget and the task is offered again` };
+  // A task whose worker settled but whose reviewer has not spoken is IN
+  // FLIGHT, not settled: `isExhausted` (which the orchestrator also uses to
+  // settle the team, so it is not changed here) counts only a running task,
+  // and in team-ppwwpnzl the lead ran the moment t1 was accepted while t2 was
+  // complete-but-unreviewed and t3 waited on both — 4 s and 11K tokens to
+  // say "the plan stands". The verdict decides what runs next (t2 accepted
+  // frees t3; rejected with a try left re-offers t2), and `workTask` queues
+  // the lead again once it lands, so nothing is lost by waiting for it.
+  const reviewing = board.tasks.find(underReview);
+  if (reviewing) return { run: false, why: `${reviewing.task_id} is under review: its verdict decides what runs next` };
   if (isExhausted(board) && !allComplete(board)) return { run: true, why: "nothing left can start, and the goal is not complete" };
   return { run: false, why: "nothing a lead could change: the work goes on" };
+}
+
+/** Complete and not yet ruled on — `reviewTask` has not recorded a verdict (nor the rule a shape without a reviewer runs on). */
+function underReview(task: Pick<TeamTask, "status" | "review">): boolean {
+  return task.status === "complete" && task.review === null;
 }
 
 /** How much of a settled task's own result the lead is shown — alone; several share the room, never under the floor — and of the goal. */

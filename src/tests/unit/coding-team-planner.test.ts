@@ -549,6 +549,26 @@ describe("leadShouldRun — a lead run only when its answer can change the outco
     expect(leadShouldRun(board, ["t1"], at - 1)).toMatchObject({ run: false });
   });
 
+  it("waits while a task is under review: complete with no verdict is in flight, not settled", () => {
+    // team-ppwwpnzl: the lead ran the moment t1 was accepted, while t2 was
+    // complete-but-unreviewed and t3 waited on both, and answered "the plan
+    // stands" (4 s, 11K tokens). t2's verdict decides what runs next, and the
+    // lead is queued again when it lands (`workTask` settles after the review).
+    const reviewing = boardOf([{ status: "complete", verdict: "accepted" }, { status: "complete" }, { status: "pending", depends_on: ["t1", "t2"] }]);
+    expect(reviewing.tasks[1].review).toBeNull();
+    expect(leadShouldRun(reviewing, ["t1"], 0)).toEqual({ run: false, why: "t2 is under review: its verdict decides what runs next" });
+    // The same board once the verdict is in: accepted, t3 can start — no turn;
+    // rejected for good, t3 can never start — the chain broke, a turn.
+    expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "complete", verdict: "accepted" }, { status: "pending", depends_on: ["t1", "t2"] }]), ["t1"], 0)).toMatchObject({ run: false, why: "nothing a lead could change: the work goes on" });
+    expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "rejected", verdict: "rejected" }, { status: "pending", depends_on: ["t1", "t2"] }]), ["t1"], 0)).toEqual({ run: true, why: "nothing left can start, and the goal is not complete" });
+    // Rejected with a try left is re-offered: its next worker is the answer.
+    expect(leadShouldRun(boardOf([{ status: "complete", verdict: "accepted" }, { status: "pending", verdict: "rejected" }, { status: "pending", depends_on: ["t1", "t2"] }]), ["t1"], 0)).toMatchObject({ run: false });
+    // A budget stop in the batch still calls the lead: that task is offered again whatever the review says.
+    const stoppedBoard = boardOf([{ status: "complete", verdict: "accepted" }, { status: "complete" }, { status: "in_progress" }]);
+    reopenAfterStop(stoppedBoard, { kind: "system" }, "t3", "The previous worker was paused for over 60 minutes and nobody resumed it.");
+    expect(leadShouldRun(stoppedBoard, ["t3"], stoppedBoard.log[stoppedBoard.log.length - 1].ts - 1)).toMatchObject({ run: true });
+  });
+
   it("runs when nothing left can start and the goal is not complete — a dependency chain broke", () => {
     const broke = { run: true, why: "nothing left can start, and the goal is not complete" };
     // t2 failed on an earlier turn; t1, the last to settle, was clean.
