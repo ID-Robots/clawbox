@@ -8,6 +8,8 @@ import ReconnectStage from "@/components/ReconnectStage";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
+import UpdateBusyNotice from "@/components/UpdateBusyNotice";
+import { UPDATE_IGNORE_BUSY_FLAG } from "@/lib/update-busy";
 
 /**
  * The screen the owner sees while an update owns the box.
@@ -61,6 +63,8 @@ interface UpdateStatus {
   error?: string;
   /** The last line the running step logged, already redacted by the server. */
   log?: string;
+  /** Set while the update holds a gateway stop back for active agent runs (issue #1269). */
+  busyWait?: { active?: number; until?: number };
 }
 
 function clock(ms: number): string {
@@ -94,13 +98,23 @@ function UpdatingScreen() {
   // new" panel is re-asked of the server that came back (see the hook).
   const [reconnects, setReconnects] = useState(0);
   const wasOffline = useRef(false);
+  // The owner's answer to "N agent runs are active": "wait" keeps the update
+  // waiting for them and folds the question into a status line; "anyway" has
+  // been sent and the update is about to stop the assistant.
+  const [busyAnswer, setBusyAnswer] = useState<"wait" | "anyway" | null>(null);
+  // The wall clock, read by the tick and the poll below rather than during
+  // render, for the minutes a busy wait has left. 0 until either has run.
+  const [now, setNow] = useState(0);
   const whatsNew = useUpdateWhatsNew(reconnects);
   // Not Date.now() arithmetic across a reboot — this clock only ever measures
   // how long THIS page has been open, in one process, on the viewer's device.
   const openedAt = useRef(Date.now());
 
   useEffect(() => {
-    const tick = window.setInterval(() => setElapsed(Date.now() - openedAt.current), 1000);
+    const tick = window.setInterval(() => {
+      setNow(Date.now());
+      setElapsed(Date.now() - openedAt.current);
+    }, 1000);
     return () => window.clearInterval(tick);
   }, []);
 
@@ -112,6 +126,7 @@ function UpdatingScreen() {
         if (!res.ok) throw new Error(String(res.status));
         const data = (await res.json()) as UpdateStatus;
         if (stop) return;
+        setNow(Date.now());
         if (wasOffline.current) setReconnects((n) => n + 1);
         wasOffline.current = false;
         setOffline(false);
@@ -164,6 +179,35 @@ function UpdatingScreen() {
   // read as live.
   const detail = !offline && status?.log ? status.log : undefined;
 
+  // The update is holding a gateway stop back for agent runs that would be cut
+  // short (issue #1269): say so, and offer both answers. Its own budget ends
+  // the wait anyway, so the minutes left are part of what is true here.
+  const busyWait = !offline && busyAnswer !== "anyway" ? status?.busyWait : undefined;
+  const busyActive = typeof busyWait?.active === "number" && busyWait.active > 0 ? busyWait.active : 0;
+  const minutesLeft = typeof busyWait?.until === "number" && now > 0
+    ? Math.max(1, Math.ceil((busyWait.until - now) / 60_000))
+    : null;
+  const updateAnyway = () => {
+    setBusyAnswer("anyway");
+    void fetch("/setup-api/update/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [UPDATE_IGNORE_BUSY_FLAG]: true }),
+    }).then((res) => { if (!res.ok) setBusyAnswer(null); }, () => setBusyAnswer(null));
+  };
+  const busyNotice = busyActive > 0 ? (
+    <UpdateBusyNotice
+      active={busyActive}
+      mode={busyAnswer === "wait" ? "waiting" : "ask"}
+      hint={minutesLeft !== null
+        ? tr("update.busy.runnerHint", "The update stops the assistant once they finish, or after {minutes} min at the latest.")
+          .replaceAll("{minutes}", String(minutesLeft))
+        : tr("update.busy.body", "The update stops the assistant, which would cut them short. Wait for them to finish, or update anyway.")}
+      onWait={() => setBusyAnswer("wait")}
+      onUpdateAnyway={updateAnyway}
+    />
+  ) : undefined;
+
   return (
     <>
       {/*
@@ -210,6 +254,7 @@ function UpdatingScreen() {
       // Not until the first ask has finished, so the panel does not flash
       // its fallback on the way to the highlights.
       aside={whatsNew.settled ? <UpdateWhatsNewPanel panel={updateWhatsNewPanel(whatsNew.answer)} /> : undefined}
+      notice={busyNotice}
       />
     </>
   );

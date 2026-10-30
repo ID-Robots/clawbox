@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, type ReactNode } from "react"
 import type { RemoteReachability, StepStatus, StepState, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
+import { UPDATE_IGNORE_BUSY_FLAG } from "@/lib/update-busy";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 
 interface UpdateStepProps {
@@ -335,6 +336,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         signal: controller.signal,
+        // The first-boot wizard runs before any assistant is set up, so there
+        // is no agent run for the busy gate to protect, and a refusal here
+        // would only strand the wizard.
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [UPDATE_IGNORE_BUSY_FLAG]: true }),
       });
       if (!res.ok) throw new Error(`Start update failed (${res.status})`);
       startPolling();

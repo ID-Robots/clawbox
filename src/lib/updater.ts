@@ -60,6 +60,18 @@ import {
   withOpenclawMaintenanceRetry,
 } from "./openclaw-maintenance";
 import {
+  GATEWAY_DRAIN_MAX_MS,
+  describeAgentRuns,
+  describeAgentWork,
+  drainGatewayForStop,
+  updateBusyWaitMs,
+  waitForAgentWork,
+  type AgentWorkCounts,
+  type DrainOutcome,
+  type UpdateBusyWait,
+} from "./update-busy";
+import { activeAgentWork, gatewayCall, resumeGatewayAdmission } from "./update-busy-server";
+import {
   X64_ROOT_STEPS_SKIPPED,
   classifyX64RootStepExit,
   classifyX64RootStepGap,
@@ -781,7 +793,16 @@ export interface UpdateState {
   errorCode?: HarnessDowngradeErrorCode;
   /** The harnesses and versions behind a `harness_downgrade` refusal. */
   downgrade?: HarnessDowngradeDetail;
+  /**
+   * Set while the runner holds a gateway stop back for active agent work
+   * (`withGatewayStopHeldForAgentWork`), so /updating can say so and offer
+   * "Update anyway". Absent the rest of the time.
+   */
+  busyWait?: UpdateBusyWait;
 }
+
+/** The card a run gets when it stopped the gateway with agent work still active. */
+export const UPDATE_BUSY_WAIT_EXPIRED = "update_busy_wait_expired";
 
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
@@ -3845,7 +3866,8 @@ async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
   try {
     await retryPluginRepairsAfterCoreUpdate({
       release: currentCoreRelease,
-      quiesce: withGatewayQuiesced,
+      // It stops a gateway that is serving again, so it waits for its runs too.
+      quiesce: (operation) => withGatewayStopHeldForAgentWork("plugin_repair", { drain: true }, () => withGatewayQuiesced(operation)),
       restartAndVerify: () => ensureGatewayHealthy({ restartFirst: true }),
     });
   } catch (err) {
@@ -4140,8 +4162,124 @@ async function waitForRootStepToSettle(stepId: string): Promise<void> {
   throw new Error(`${stepId} did not settle before its root service timeout`);
 }
 
+/** Said once a gateway stop went ahead over agent work it had waited for: a card, and the journal. */
+async function warnStoppedOverAgentWork(stepId: string, active: number, waitedMs: number): Promise<void> {
+  const message = `The update waited ${formatWaited(waitedMs)} for ${describeAgentRuns(active)} to finish, `
+    + `then stopped the assistant anyway, which may have cut ${active === 1 ? "it" : "them"} short.`;
+  console.warn(`[Updater] ${stepId}: ${message}`);
+  if (!runtime.state.warnings) runtime.state.warnings = [];
+  const card = runtime.state.warnings.find((w) => w.code === UPDATE_BUSY_WAIT_EXPIRED);
+  if (card) card.message = message;
+  else runtime.state.warnings.push({ code: UPDATE_BUSY_WAIT_EXPIRED, message });
+  await persistWarnings();
+}
+
+/**
+ * The gateway's own drain for a stop (`drainGatewayForStop`): admission
+ * closes, admitted work settles, bounded like `gateway restart --safe`.
+ * Returns the lease to resume once the stop is done, or null when none is held.
+ */
+async function drainGatewayBeforeStop(stepId: string): Promise<string | null> {
+  const startedAt = Date.now();
+  let lastActive = -1;
+  const outcome: DrainOutcome = await drainGatewayForStop({
+    call: gatewayCall,
+    requestId: `clawbox-update-${stepId}-${startedAt}`,
+    maxMs: GATEWAY_DRAIN_MAX_MS,
+    released: () => runtime.ignoreBusy === true,
+    onDraining: (active) => {
+      runtime.state.busyWait = { phase: "draining", active, startedAt, until: startedAt + GATEWAY_DRAIN_MAX_MS };
+      showRunningStepDetail(`Waiting for ${describeAgentRuns(active)}…`);
+      if (active !== lastActive) {
+        lastActive = active;
+        console.log(`[Updater] ${stepId}: gateway admission closed, draining ${describeAgentRuns(active)} before the stop`);
+      }
+    },
+  });
+  switch (outcome.kind) {
+    case "unavailable":
+      console.log(`[Updater] ${stepId}: no gateway drain (${outcome.reason}) — stopping it the plain way`);
+      return null;
+    case "ready":
+      console.log(`[Updater] ${stepId}: gateway drained${outcome.waitedMs >= 1_000 ? ` after ${formatWaited(outcome.waitedMs)}` : ""} — stopping it`);
+      return outcome.suspensionId;
+    case "expired":
+      await warnStoppedOverAgentWork(stepId, outcome.active, outcome.waitedMs);
+      return outcome.suspensionId;
+    case "released":
+      return outcome.suspensionId;
+  }
+}
+
+/**
+ * Hold a gateway stop back for the agent work it would cut short (issue
+ * #1269), then run `stop`.
+ *
+ * First the busy wait: up to `CLAWBOX_UPDATE_BUSY_WAIT_MS` (15 min) for the
+ * runs ClawBox can count — gateway sessions with a run in flight, sub-agent and
+ * ACP runs, coding-agent runs — with admission open and the step saying
+ * "Waiting for N agent runs…". Then, with `drain`, the gateway's own drain
+ * (`drainGatewayBeforeStop`). A wait that runs out goes ahead and says so on a
+ * card; "Update anyway" (`runtime.ignoreBusy`, at start or mid-wait) skips
+ * whatever is left of both, and the stop is the plain one it always was.
+ *
+ * `drain: false` for a stop that comes long after this returns (the reboot at
+ * the end of the rebuild): a lease is two minutes, and closing admission for a
+ * whole build would take the owner's chat away for nothing.
+ *
+ * The drain lease is released when `stop` returns or throws. Its gateway has
+ * usually exited by then and taken the lease with it; one that was never
+ * stopped (the step failed first) gets its admission back at once instead of
+ * when the lease runs out.
+ */
+async function withGatewayStopHeldForAgentWork<T>(
+  stepId: string,
+  options: { drain: boolean },
+  stop: () => Promise<T>,
+): Promise<T> {
+  let lease: string | null = null;
+  if (runtime.ignoreBusy) {
+    console.log(`[Updater] ${stepId}: "Update anyway" — stopping the gateway without waiting for agent work`);
+  } else {
+    const maxMs = updateBusyWaitMs();
+    const startedAt = Date.now();
+    let lastLogged = "";
+    try {
+      const waited = await waitForAgentWork({
+        maxMs,
+        read: () => activeAgentWork(),
+        released: () => runtime.ignoreBusy === true,
+        onWaiting: (counts: AgentWorkCounts) => {
+          runtime.state.busyWait = { phase: "waiting", active: counts.total, counts, startedAt, until: startedAt + maxMs };
+          showRunningStepDetail(`Waiting for ${describeAgentRuns(counts.total)}…`);
+          const described = describeAgentWork(counts);
+          if (described !== lastLogged) {
+            lastLogged = described;
+            console.log(`[Updater] ${stepId}: waiting for ${described} to finish before the gateway stops (at most ${formatWaited(maxMs)})`);
+          }
+        },
+      });
+      if (waited.kind === "expired") await warnStoppedOverAgentWork(stepId, waited.counts.total, waited.waitedMs);
+      if (waited.kind === "idle" && lastLogged) console.log(`[Updater] ${stepId}: agent work finished after ${formatWaited(waited.waitedMs)}`);
+      if (options.drain && waited.kind === "idle" && !runtime.ignoreBusy) lease = await drainGatewayBeforeStop(stepId);
+    } finally {
+      runtime.state.busyWait = undefined;
+      showRunningStepDetail(undefined);
+    }
+  }
+  try {
+    return await stop();
+  } finally {
+    if (lease) await resumeGatewayAdmission(lease);
+  }
+}
+
 /** Run root steps that mutate OpenClaw without a live gateway/SQLite writer. */
 async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number): Promise<void> {
+  await withGatewayStopHeldForAgentWork(stepId, { drain: true }, () => execAsRootQuiesced(stepId, timeoutMs));
+}
+
+async function execAsRootQuiesced(stepId: string, timeoutMs: number): Promise<void> {
   const startedAt = Date.now();
   await withGatewayQuiesced(async () => {
     gatewayNeedsRecovery = true;
@@ -4737,6 +4875,12 @@ interface UpdaterRuntime {
   state: UpdateState;
   running: boolean;
   continuationInFlight: Promise<boolean> | null;
+  /**
+   * The owner's "Update anyway" for THIS run: set when it starts with
+   * `ignoreBusy`, or by `releaseBusyWait` while it is waiting. Cleared by every
+   * launch. Optional: a runtime made by an older copy of this module has none.
+   */
+  ignoreBusy?: boolean;
 }
 const runtimeKey: unique symbol = Symbol.for("clawbox.updater.runtime.v1");
 const processRuntime = globalThis as typeof globalThis & { [runtimeKey]?: UpdaterRuntime };
@@ -5073,6 +5217,12 @@ interface RunOptions {
    * and goes ahead instead of being refused (see harnessDowngradePreflight).
    */
   allowHarnessDowngrade?: boolean;
+  /**
+   * The owner's "Update anyway" over active agent work: no busy wait and no
+   * drain before a gateway stop — the plain stop (see
+   * withGatewayStopHeldForAgentWork).
+   */
+  ignoreBusy?: boolean;
 }
 
 /**
@@ -5081,6 +5231,7 @@ interface RunOptions {
  * startOpenclawUpdate (scoped run with a different step list).
  */
 function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): void {
+  runtime.ignoreBusy = options.ignoreBusy === true;
   runUpdate(steps, startFrom, options)
     .catch((err) => {
       console.error("[Updater] Unexpected error:", err);
@@ -5368,7 +5519,7 @@ const DB_MAINTENANCE_BUSY =
   "OpenClaw database maintenance is running (the gateway is stopped for it) — update when it has finished";
 
 export function startUpdate(
-  opts: { allowHarnessDowngrade?: boolean } = {},
+  opts: { allowHarnessDowngrade?: boolean; ignoreBusy?: boolean } = {},
 ): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
@@ -5392,8 +5543,23 @@ export function startUpdate(
     markCompleted: true,
     resumeFromInterruption: true,
     allowHarnessDowngrade: opts.allowHarnessDowngrade === true,
+    ignoreBusy: opts.ignoreBusy === true,
   });
   return { started: true };
+}
+
+/**
+ * The owner's "Update anyway" for the run that is going on: a busy wait or a
+ * drain in progress ends at once, and the run's later gateway stops are the
+ * plain ones. False when no update is running.
+ */
+export function releaseBusyWait(): boolean {
+  if (!updateOwned()) return false;
+  if (!runtime.ignoreBusy) {
+    console.warn(`[Updater] the owner chose "Update anyway"${runtime.state.busyWait ? ` with ${describeAgentRuns(runtime.state.busyWait.active)} still active` : ""}`);
+  }
+  runtime.ignoreBusy = true;
+  return true;
 }
 
 // Scoped update path: re-installs OpenClaw + re-applies the gateway patch
@@ -6127,8 +6293,16 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         await syncCheckoutAsOwner();
       } else if (x64Install && step.id === RESTART_STEP_ID) {
         await updateClawBoxAsOwner();
+      } else if (step.customRun && step.id === RESTART_STEP_ID && !desktopIntegration) {
+        // The appliance's rebuild ends in a reboot, which stops the gateway
+        // and every coding-agent run with it. No drain: the reboot is a build
+        // away, far past a two-minute lease.
+        await withGatewayStopHeldForAgentWork(step.id, { drain: false }, step.customRun);
       } else if (step.customRun) {
         await step.customRun();
+      } else if (step.requiresRoot && x64Install && step.id === "openclaw_install") {
+        // install-x64.sh's core step stops and restarts the gateway itself.
+        await withGatewayStopHeldForAgentWork(step.id, { drain: true }, () => execX64InstallRootStep(step, stepStartedAt, x64Skipped));
       } else if (step.requiresRoot && x64Install) {
         await execX64InstallRootStep(step, stepStartedAt, x64Skipped);
       } else if (step.requiresRoot) {
@@ -6149,6 +6323,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           // Done, with the gateway never stopped: nothing to recover.
         } else if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
+        } else if (desktopIntegration && step.id === "openclaw_install") {
+          // The desktop adapter's with_gateway_stopped stops the owner's user
+          // gateway itself, first thing: the wait and the drain come here.
+          await withGatewayStopHeldForAgentWork(step.id, { drain: true }, () => execAsRoot(step.id, timeoutMs));
         } else {
           await execAsRoot(step.id, timeoutMs);
         }
