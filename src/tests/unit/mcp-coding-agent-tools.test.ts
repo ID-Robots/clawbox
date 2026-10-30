@@ -51,6 +51,8 @@ const NAMES = [
   // TASK-899: every run at a glance, resuming one, the project matrix, and the
   // project matrix (src/tests/unit/mcp-coding-agent-state-tools.test.ts).
   "coding_run_list", "coding_agent_resume", "coding_project_status",
+  // 2026-10-30: the app's Import panel as a tool (src/tests/unit/mcp-coding-project-import.test.ts).
+  "coding_project_import",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {

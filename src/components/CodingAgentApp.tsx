@@ -15,19 +15,20 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_PRIMARY_WIDE, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, PAGE_PAD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
 import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
-import { openNewAppCard } from "@/lib/ui-events";
+import { dispatchChatMessage, openNewAppCard } from "@/lib/ui-events";
+import { buildRunNotesPrompt } from "@/lib/coding-project-prompts";
+import { renderText } from "@/lib/chat-markdown";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
-import CodingRunTimeline from "./CodingRunTimeline";
+import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
 import CodingRunCiCard, { type RunCiView } from "./CodingRunCiCard";
 import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
 import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { worktreeCardApplies, type RunWorktreeView } from "./CodingRunWorktreeCard";
 import CodingTaskDialog from "./CodingTaskDialog";
-import StorePublishDialog from "./StorePublishDialog";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
@@ -48,13 +49,11 @@ import {
   takePendingCodingRun,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
-import ImportProjectPanel, { type ImportResult } from "./ImportProjectPanel";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
-import CodingTeamCard, { isTeamActive, type TeamView } from "./CodingTeamCard";
+import CodingTeamCard, { isTeamActive, TEAM_STATUS_TONE, type TeamView } from "./CodingTeamCard";
 import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
-import CodingRunNotesCard from "./CodingRunNotesCard";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
 import { turnsKnown } from "./CodingAgentDiagram";
@@ -361,6 +360,11 @@ function runBelongsTo(r: Run, pr: Project): boolean {
   return (r.worktree?.project ?? r.directory) === pr.directory;
 }
 
+/** The project a team works in: a code project by its id, a folder by its path. */
+function teamBelongsTo(team: TeamView, pr: Project): boolean {
+  return pr.kind === "codeProject" ? team.projectId === pr.folder : team.directory === pr.directory;
+}
+
 /**
  * The project this run worked in, when it is no longer on the box — the name
  * alone, or null when nothing is missing.
@@ -453,7 +457,7 @@ function useProjectGit(project: Project | null, version: number): GitInfo | null
  * around it, the icon took the whole width of the project row and pushed the
  * name and the chips onto the next line.
  */
-function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w-7 h-7" }) {
+function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w-7 h-7" | "w-10 h-10" }) {
   if (!project.iconUrl) return null;
   return (
     <span className={`${size} shrink-0 rounded-md overflow-hidden flex items-center justify-center`}>
@@ -587,7 +591,6 @@ export default function CodingAgentApp() {
   // most owners never open it and it cost a PTY and a tail each.
   const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser"; terminalSeen: boolean } | null>(null);
   /** How many MCP servers each project's runs start with, as its Setup tab's card last read them — the count on the tab. */
-  const [mcpTicked, setMcpTicked] = useState<Record<string, number>>({});
   /** The markdown artifact open in the preview dialog, if any. */
   // The run whose whole evidence list is unfolded. A run that screenshots
   // every step files dozens of pictures, and drawn in full they pushed the
@@ -622,8 +625,6 @@ export default function CodingAgentApp() {
    * folder) while every request it makes is keyed by the folder and the kind.
    */
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
-  /** The project the "Publish to ClawBox Store" dialog is open for — its folder AND directory, since one name can be two projects. */
-  const [publishTarget, setPublishTarget] = useState<{ folder: string; directory: string } | null>(null);
   /** Where the last removed project went — the line the list keeps afterwards. */
   const [removedProject, setRemovedProject] = useState<{ folder: string; trashPath: string } | null>(null);
   // Pull requests opened from a project's page this session, by folder.
@@ -675,8 +676,8 @@ export default function CodingAgentApp() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (workspaceTab && openProjectDir === workspaceTab.directory) setWorkspaceTab(null);
   }, [workspaceTab, openProjectDir]);
-  /** The Import panel on the home face: GitHub or a folder on the box. */
-  const [importOpen, setImportOpen] = useState(false);
+  /** The project whose Tools checklist (MCP servers) is unfolded — read only then. */
+  const [toolsOpenFor, setToolsOpenFor] = useState<string | null>(null);
   /** Bumped when this window changed the open project's git state itself
    *  (a backup), so the git block re-reads without a new commit. */
   const [gitVersion, setGitVersion] = useState(0);
@@ -1209,6 +1210,30 @@ export default function CodingAgentApp() {
     [projects, openProjectDir],
   );
   const git = useProjectGit(openProject, gitVersion);
+  /**
+   * The open project's run notes (`<project>/.clawbox/run-notes.md`), read
+   * once per visit to the page and drawn read-only; "" when there are none,
+   * so no fold is drawn. Keyed on the project's scope, not the object: the
+   * poll replaces the projects list every tick.
+   */
+  const [notesFor, setNotesFor] = useState<{ directory: string; notes: string } | null>(null);
+  const openProjectDirectory = openProject?.directory ?? null;
+  const openProjectNotesQuery = openProject ? (openProject.kind === "codeProject" ? `projectId=${encodeURIComponent(openProject.folder)}` : `directory=${encodeURIComponent(openProject.directory)}`) : null;
+  useEffect(() => {
+    if (!openProjectDirectory || !openProjectNotesQuery) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch(`/setup-api/coding-agent/run-notes?${openProjectNotesQuery}`, { cache: "no-store" });
+        const data = await res.json().catch(() => null) as { notes?: string } | null;
+        if (!alive || !res.ok) return;
+        setNotesFor({ directory: openProjectDirectory, notes: typeof data?.notes === "string" ? data.notes : "" });
+      } catch {
+        /* no fold: the notes are a convenience, and the page stands without them */
+      }
+    })();
+    return () => { alive = false; };
+  }, [openProjectDirectory, openProjectNotesQuery]);
   /** The run whose page is open, once the list has it. A run that was cleared
    *  meanwhile simply has no page — the window falls back to where it was. */
   const openRun = useMemo(
@@ -1324,7 +1349,6 @@ export default function CodingAgentApp() {
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
   useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
   useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
-  useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
   // Registered last so it sits on top: with the delete dialog open, Back
   // closes the dialog rather than leaving the project underneath it.
   useMobileBack(phoneLayout && deleteTarget !== null, () => setDeleteTarget(null));
@@ -1752,139 +1776,260 @@ export default function CodingAgentApp() {
 
 
   /**
-   * The runs a face lists, as one section: the toggle, the paged rows, the
-   * More button. On a project's page they are its own; on home, the ones
-   * filed under no project — those used to be computed and never drawn, so a
-   * run in a folder the projects list does not know was invisible.
+   * What happened in the open project — its teams and its runs as ONE list,
+   * the Activity tab the project page opens on: the ones at work first, then
+   * newest first, RUNS_PAGE rows at a time behind Show more, and the older
+   * runs "keep everything" kept after them, on request. A team's row opens
+   * the Team tab (its page comes with redesign step 5); a run's row opens
+   * the run's page from anywhere on it and carries ONE control — Stop while
+   * it is live (pause, resume, the terminal, backup and the relation chips
+   * are the run page's since 2026-10-30; the row said each of them twice).
    */
-  /**
-   * The rows and the More button — the list itself. Home draws it under a
-   * toggle (the runs filed under no project); a project's page draws it
-   * inside its Runs tab, where it has the whole width.
-   */
-  const runsList = (
-    <>
-      {
-        visibleRuns.length === 0 ? (
-          <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
-        ) : (
-          <ul className="mt-2 flex flex-col gap-2" data-testid="coding-agent-runs">
-            {visibleRuns.slice(0, runsShown).map((run) => {
-              const tone = RUN_TONE[run.status];
-              // A draft has not run: its startedAt is when it was drafted
-              // (the runner overwrites it at start), so a duration would be
-              // time-since-drafting, which the "updated" line already says —
-              // and the effort it will run with is read at start.
-              const started = run.status !== "draft" && run.status !== "queued";
-              return (
-                <li
-                  key={run.id}
-                  data-run-id={run.id}
-                  data-testid={`coding-agent-run-row-${run.id}`}
-                  className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
-                  onClick={(e) => {
-                    // The row is the way to the run; a control on it (Stop,
-                    // the terminal glyph, a chip to another run) is its own.
-                    if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
-                    showRun(run.id);
-                  }}
+  const projectTeams = openProject ? teams.filter((x) => teamBelongsTo(x, openProject)) : [];
+  type ActivityRow = { key: string; live: boolean; at: number; node: ReactNode };
+  const stopTeam = async (id: string) => {
+    setBusy(`team-${id}`);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/team/stop", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
+      if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
+      void load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+  /** The row's one control: Stop for a run that is working or paused, Cancel for one waiting its turn. Nothing on a settled run. */
+  const rowStop = (run: Run) => {
+    if (run.status === "queued") {
+      return (
+        <button
+          type="button"
+          onClick={() => runAction(run.id, "stop", t("codingAgent.cancelQueuedFailed"))}
+          disabled={busy === run.id}
+          data-testid={`coding-agent-cancel-queued-${run.id}`}
+          aria-label={`${t("codingAgent.cancelQueued")} · ${run.id}`}
+          className={`${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5`}
+        >
+          {t("codingAgent.cancelQueued")}
+        </button>
+      );
+    }
+    if (run.status !== "running" && run.status !== "paused") return null;
+    return (
+      <button
+        type="button"
+        onClick={() => runAction(run.id, "stop", t("codingAgent.stopFailed"))}
+        disabled={busy === run.id}
+        data-testid={`coding-agent-stop-${run.id}`}
+        className={`${RUN_BUTTON} border-red-400/40 text-red-300 hover:bg-red-500/10`}
+      >
+        {t("codingAgent.stop")}
+      </button>
+    );
+  };
+  const teamRows: ActivityRow[] = projectTeams.map((team) => {
+    const active = isTeamActive(team.status);
+    const live = active || team.status === "queued";
+    const tasks = team.tasks.filter((x) => x.status !== "retired");
+    const done = tasks.filter((x) => x.status === "complete" && (!x.review || x.review.verdict === "accepted")).length;
+    return {
+      key: `team-${team.id}`,
+      live,
+      at: team.updatedAt ?? team.createdAt,
+      node: (
+        <li
+          key={`team-${team.id}`}
+          data-team-id={team.id}
+          data-testid={`coding-team-row-${team.id}`}
+          className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
+          onClick={(e) => {
+            if ((e.target as HTMLElement).closest("button, a")) return;
+            setWorkspaceTab({ directory: openProject!.directory, tab: "team" });
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <span className="material-symbols-rounded text-violet-300 shrink-0 mt-0.5" style={{ fontSize: 18 }} aria-hidden="true">groups</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span
+                  className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${TEAM_STATUS_TONE[team.status]} ${active ? "coding-agent-pulse" : ""}`}
+                  data-testid={`coding-team-row-status-${team.id}`}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid={`coding-agent-status-${run.id}`}>
-                          {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
-                          {statusLabel(run.status)}
-                        </span>
-                        {run.status === "queued" && run.queued?.position && (
-                          <span className="text-[11px] text-indigo-200/90" data-testid={`coding-agent-queue-position-${run.id}`}>
-                            {t("codingAgent.queuePosition", { n: run.queued.position })}
-                          </span>
-                        )}
-                        {/* A run at high effort can be silent for minutes on
-                            its first turn. Show that it is thinking, so quiet
-                            never reads as stuck. */}
-                        {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
-                          <span
-                            data-testid="coding-agent-thinking"
-                            className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
-                          >
-                            {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
-                          </span>
-                        )}
-                        {prChip(run)}
-                        {relationChips(run)}
-                      </div>
-                      <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
-                        {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
-                      </p>
-                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                        {started && t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
-                        {started && " · "}
-                        {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
-                        {started && run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
-                        {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
-                        {run.permissionDenials > 0 && (
-                          <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
-                        )}
-                      </p>
-                      {isLive(run.status) && (
-                        <RunProgressBar
-                          estimate={estimateRunProgress(run, now)}
-                          color={tone.color}
-                          timeLeft={t("codingAgent.timeLeft")}
-                          testId={`coding-agent-progress-${run.id}`}
-                          className="mt-1"
-                        />
-                      )}
-                      {/* How fresh this is. The models are on the run's page
-                          (the longest strings a row used to carry). */}
-                      {run.lastActivityAt && (
-                        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
-                          {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}
-                        </p>
-                      )}
-                    </div>
-                    {/* One row of controls: a live run's Pause/Stop as words,
-                        then the glyphs — terminal, back up, details — the
-                        same size, side by side. */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      {runControls(run, "row")}
-                      {/* The run's own page: its figures, its summary, its
-                          evidence. The row itself opens it too. */}
-                      <button
-                        type="button"
-                        onClick={() => showRun(run.id)}
-                        data-testid={`coding-agent-details-${run.id}`}
-                        title={t("codingAgent.showDetails")}
-                        aria-label={t("codingAgent.showDetails")}
-                        className={ROW_ICON_BUTTON}
-                      >
-                        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )
-      }
-      {visibleRuns.length > runsShown && (
+                  {active && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+                  {t(`codingAgent.team.status.${team.status}`)}
+                </span>
+                {tasks.length > 0 && (
+                  <span className="text-[11px] text-[var(--text-muted)]" data-testid={`coding-team-row-tasks-${team.id}`}>
+                    {t("codingAgent.teamTasksDone", { done, total: tasks.length })}
+                  </span>
+                )}
+                {team.pr && (
+                  <a
+                    href={team.pr.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    data-testid={`coding-team-row-pr-${team.id}`}
+                    className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40 hover:bg-violet-400/10"
+                  >
+                    {t("codingAgent.viewPr", { n: team.pr.number })}
+                  </a>
+                )}
+              </div>
+              <p className="text-xs text-[var(--text-primary)] mt-1 line-clamp-2 break-words">{firstLine(team.goal, 160)}</p>
+              {active && tasks.length > 0 && (
+                <div className="mt-1.5 h-1 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
+                  <div className="h-full rounded-full bg-violet-400/70 transition-[width]" style={{ width: `${Math.round((done / tasks.length) * 100)}%` }} />
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {live ? (
+                <button
+                  type="button"
+                  onClick={() => void stopTeam(team.id)}
+                  disabled={busy === `team-${team.id}`}
+                  data-testid={`coding-team-row-stop-${team.id}`}
+                  className={`${RUN_BUTTON} border-red-400/40 text-red-300 hover:bg-red-500/10`}
+                >
+                  {t("codingAgent.stop")}
+                </button>
+              ) : (
+                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
+              )}
+            </div>
+          </div>
+        </li>
+      ),
+    };
+  });
+  const runRows: ActivityRow[] = visibleRuns.map((run) => {
+    const tone = RUN_TONE[run.status];
+    // A draft has not run: its startedAt is when it was drafted (the runner
+    // overwrites it at start), so a duration would be time-since-drafting.
+    const started = run.status !== "draft" && run.status !== "queued";
+    const lastStep = run.status === "running" && run.progress.length > 0 ? run.progress[run.progress.length - 1] : null;
+    return {
+      key: run.id,
+      live: isLive(run.status) || run.status === "queued",
+      at: run.startedAt,
+      node: (
+        <li
+          key={run.id}
+          data-run-id={run.id}
+          data-testid={`coding-agent-run-row-${run.id}`}
+          className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
+          onClick={(e) => {
+            // The row is the way to the run; a control on it (Stop, a chip
+            // to a pull request) is its own.
+            if ((e.target as HTMLElement).closest("button, a")) return;
+            showRun(run.id);
+          }}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid={`coding-agent-status-${run.id}`}>
+                  {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+                  {statusLabel(run.status)}
+                </span>
+                {run.status === "queued" && run.queued?.position && (
+                  <span className="text-[11px] text-indigo-200/90" data-testid={`coding-agent-queue-position-${run.id}`}>
+                    {t("codingAgent.queuePosition", { n: run.queued.position })}
+                  </span>
+                )}
+                {/* A run at high effort can be silent for minutes on its
+                    first turn. Show that it is thinking, so quiet never
+                    reads as stuck. */}
+                {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
+                  <span
+                    data-testid="coding-agent-thinking"
+                    className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
+                  >
+                    {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
+                  </span>
+                )}
+                {prChip(run)}
+              </div>
+              <p className="text-xs text-[var(--text-primary)] mt-1 line-clamp-2 break-words">
+                {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 120)}
+              </p>
+              {/* One line under the task: what the run is doing NOW while it
+                  works, its figures once it has stopped. */}
+              <p className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate" data-testid={`coding-agent-run-meta-${run.id}`}>
+                {lastStep
+                  ? t("codingAgent.rowNow", { step: describeStep(t, lastStep).label })
+                  : started
+                    ? t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })
+                    : run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
+                {run.permissionDenials > 0 && (
+                  <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
+                )}
+              </p>
+              {isLive(run.status) && (
+                <RunProgressBar
+                  estimate={estimateRunProgress(run, now)}
+                  color={tone.color}
+                  timeLeft={t("codingAgent.timeLeft")}
+                  testId={`coding-agent-progress-${run.id}`}
+                  className="mt-1"
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {rowStop(run)}
+              {/* The run's own page. The row itself opens it too; this is the
+                  row's chevron, named in full for a screen reader. */}
+              <button
+                type="button"
+                onClick={() => showRun(run.id)}
+                data-testid={`coding-agent-details-${run.id}`}
+                title={t("codingAgent.showDetails")}
+                aria-label={t("codingAgent.showDetails")}
+                className={ROW_ICON_BUTTON}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
+              </button>
+            </div>
+          </div>
+        </li>
+      ),
+    };
+  });
+  // A stable sort: the ones at work first, then newest first, and two rows
+  // the comparison cannot tell apart keep the order the lists gave them.
+  const activityRows = [...teamRows, ...runRows].sort((a, b) => Number(b.live) - Number(a.live) || b.at - a.at);
+  const activityList = (
+    <>
+      {activityRows.length === 0 ? (
+        <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
+      ) : (
+        <ul className="mt-2 flex flex-col gap-2" data-testid="coding-agent-runs">
+          {activityRows.slice(0, runsShown).map((row) => row.node)}
+        </ul>
+      )}
+      {activityRows.length > runsShown && (
         <button
           type="button"
           onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
           data-testid="coding-agent-runs-more"
           className={`${BTN_SECONDARY} w-full mt-2`}
         >
-          {t("codingAgent.more")} ({visibleRuns.length - runsShown})
+          {t("codingAgent.more")} ({activityRows.length - runsShown})
         </button>
       )}
       {/* The runs past the newest thirty that "keep everything" kept for this
-          folder (`runs?history=1&project=`), a page at a time, once every run
+          folder (`runs?history=1&project=`), a page at a time, once every row
           the poll holds is on the page. Asked for, not read on open: the
           history is a file per run, and most visits never want it. */}
-      {openProject && visibleRuns.length <= runsShown && (
+      {openProject && activityRows.length <= runsShown && (
         olderPage?.project === openProject.directory && olderPage.loaded >= olderPage.total ? (
           olderPage.total === 0 && (
             <p className="text-[11px] text-[var(--text-muted)] mt-2 px-1 leading-relaxed" data-testid="coding-agent-older-empty">
@@ -2189,40 +2334,8 @@ export default function CodingAgentApp() {
                   {t("codingAgent.createNewProject")}
                 </button>
               )}
-              {/* Bringing in what already exists: one of the owner's GitHub
-                  repositories, or a folder on the box. Offered on the standalone
-                  page too — nothing here needs the chat. */}
-              <button
-                type="button"
-                onClick={() => setImportOpen((v) => !v)}
-                aria-expanded={importOpen}
-                className={BTN_SECONDARY}
-                data-testid="coding-agent-import-toggle"
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
-                {t("codingAgent.importButton")}
-              </button>
             </div>
           </div>
-
-          {importOpen && (
-            <ImportProjectPanel
-              onClose={() => setImportOpen(false)}
-              onOpenSettings={() => { disarmClear(); setImportOpen(false); setPage("settings"); }}
-              onImported={(result: ImportResult) => {
-                setImportOpen(false);
-                const name = result.project?.name ?? result.folder;
-                const lines = [t("codingAgent.importDone", { name })];
-                if (result.skipped.length > 0) lines.push(t("codingAgent.importSkipped", { folders: result.skipped.join(", ") }));
-                window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: lines.join(" "), type: "success" } }));
-                // The row is on the next read; the page opens on the folder
-                // now, and the project page reads its own git line.
-                void load();
-                setOpenRunId(null);
-                setOpenProjectDir(result.directory);
-              }}
-            />
-          )}
 
           {standalone && (
             <p className="mt-2 px-1 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-new-needs-desktop">
@@ -2649,16 +2762,6 @@ export default function CodingAgentApp() {
                       {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                     </button>
                   )}
-                  {project?.app && (
-                    <button
-                      type="button"
-                      onClick={() => setPublishTarget({ folder: project.folder, directory: project.directory })}
-                      className={BTN_SECONDARY}
-                      data-testid="coding-agent-project-publish"
-                    >
-                      {t("codingAgent.publish")}
-                    </button>
-                  )}
                 </div>
               </div>
 
@@ -3009,116 +3112,98 @@ export default function CodingAgentApp() {
           );
         })()}
 
-        {/* One project, expanded: its data, its git state, its runs. */}
+        {/* One project, expanded: who it is, where its work is, what happened
+            in it. No inputs (2026-10-30): a run or a team is asked for in the
+            chat, notes and tools are read here and changed there, and the
+            Store is a sentence to the assistant (`app_publish`). */}
         {view.face === "project" && (() => {
           const p = view.project;
           const projectQuery = p.kind === "codeProject"
             ? `projectId=${encodeURIComponent(p.folder)}`
             : `directory=${encodeURIComponent(p.directory)}`;
           const projectLive = runs.some((r) => runBelongsTo(r, p) && isLive(r.status));
+          const teamLive = projectTeams.find((x) => isTeamActive(x.status)) ?? null;
           // The pull request for the branch the project is on: one opened from
           // this page, or one a run opened for that same branch.
           const runPr = git?.branch ? runs.find((r) => runBelongsTo(r, p) && r.pr?.url && r.pr.number && r.pr.branch === git.branch)?.pr : undefined;
           const projectPr = projectPrs[p.directory] ?? (runPr?.url && runPr.number ? { number: runPr.number, url: runPr.url } : null);
-          const lastSubject = git?.lastCommit?.subject ?? p.lastCommit?.subject ?? null;
           const lastDate = git?.lastCommit?.date ?? p.lastCommit?.date ?? null;
+          const notes = notesFor?.directory === p.directory ? notesFor.notes : "";
+          const pill = "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5";
           return (<>
             <div className="mt-1 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
-              {/* One row: who this is and what it is. The folder under it is
-                  one tap to copy — the home row no longer carries that. */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <ProjectIcon project={p} size="w-7 h-7" />
-                <h2 className="text-sm font-semibold text-[var(--text-primary)] break-words">{p.name}</h2>
-                {p.kind === "codeProject" && (
-                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
-                    {t("codingAgent.codeProject")}
-                  </span>
-                )}
-                {/* A clawbox.json makes the folder a ClawBox APP, not just a
-                    folder with history; said here, not on the home row. */}
-                {p.app && (
-                  <span
-                    className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
-                    title={p.app.description ?? undefined}
-                    data-testid={`coding-agent-app-chip-${p.folder}`}
-                  >
-                    {t("codingAgent.clawboxApp")}
-                  </span>
-                )}
-                <div className="ml-auto flex items-center gap-1.5">
-                  {(p.onDesktop || p.app?.port) && (
-                    <button
-                      type="button"
-                      // Through the one helper, so this button knows about the
-                      // standalone page too — it dispatched the desktop-only
-                      // event directly and did nothing on `/app/coding`. A
-                      // project whose manifest declares a port but is not on
-                      // the desktop yet is put there first.
-                      onClick={() => void openOrAddProject(p)}
-                      data-testid="coding-agent-project-open"
-                      className={BTN_SECONDARY}
-                    >
-                      {p.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
-                    </button>
-                  )}
-                  {/* Only a ClawBox app (a clawbox.json at its root) can go to
-                      the Store. */}
-                  {p.app && (
-                    <button
-                      type="button"
-                      onClick={() => setPublishTarget({ folder: p.folder, directory: p.directory })}
-                      data-testid={`coding-agent-publish-${p.folder}`}
-                      title={t("codingAgent.publish")}
-                      aria-label={t("codingAgent.publishFor", { name: p.name })}
-                      className={BTN_QUIET}
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">storefront</span>
-                    </button>
-                  )}
-                  {/* Removing the folder. Quiet and an icon: everything that
-                      makes it safe is in the dialog behind it. */}
+              {/* The title block: the picture, the name, ONE pill (a team at
+                  work, else a run at work, else that the desktop has it, else
+                  that it is a code project) and the ClawBox-app chip; then
+                  Open, the page's one primary — the whole width on a phone. */}
+              <div className="flex flex-col @md:flex-row @md:items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <ProjectIcon project={p} size="w-10 h-10" />
+                  <div className="min-w-0">
+                    <h2 className="text-base font-semibold text-[var(--text-primary)] break-words leading-tight">{p.name}</h2>
+                    <div className="mt-1 flex items-center gap-1.5 flex-wrap" data-testid="coding-agent-project-pills">
+                      {teamLive ? (
+                        <span className={`${pill} ${TEAM_STATUS_TONE[teamLive.status]} coding-agent-pulse`} data-testid="coding-agent-project-pill">
+                          <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />
+                          {t(`codingAgent.team.status.${teamLive.status}`)}
+                        </span>
+                      ) : projectLive ? (
+                        <span className={`${pill} text-amber-400 border-amber-400/40 coding-agent-pulse`} data-testid="coding-agent-project-pill">
+                          <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />
+                          {t("codingAgent.runInProgress")}
+                        </span>
+                      ) : p.onDesktop ? (
+                        <span className={`${pill} text-sky-300 border-sky-400/40`} data-testid="coding-agent-project-pill">{t("codingAgent.onDesktop")}</span>
+                      ) : p.kind === "codeProject" ? (
+                        <span className={`${pill} text-[var(--text-muted)] border-white/20`} data-testid="coding-agent-project-pill">{t("codingAgent.codeProject")}</span>
+                      ) : null}
+                      {/* A clawbox.json makes the folder a ClawBox APP, not just
+                          a folder with history; said here, not on the home row. */}
+                      {p.app && (
+                        <span
+                          className={`${pill} text-[var(--coral-bright)] border-[var(--coral-bright)]/40`}
+                          title={p.app.description ?? undefined}
+                          data-testid={`coding-agent-app-chip-${p.folder}`}
+                        >
+                          {t("codingAgent.clawboxApp")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {(p.onDesktop || p.app?.port) && (
                   <button
                     type="button"
-                    onClick={() => setDeleteTarget(p)}
-                    data-testid={`coding-agent-delete-${p.folder}`}
-                    title={t("codingAgent.delete.action")}
-                    aria-label={t("codingAgent.delete.actionFor", { name: p.name })}
-                    className={`${BTN_QUIET} hover:text-red-300`}
+                    // Through the one helper, so this button knows about the
+                    // standalone page too — it dispatched the desktop-only
+                    // event directly and did nothing on `/app/coding`. A
+                    // project whose manifest declares a port but is not on
+                    // the desktop yet is put there first.
+                    onClick={() => void openOrAddProject(p)}
+                    data-testid="coding-agent-project-open"
+                    className={BTN_PRIMARY_WIDE}
                   >
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">open_in_new</span>
+                    {p.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                   </button>
-                </div>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={() => void copyFolder(p.directory)}
-                title={t("codingAgent.copyFolder")}
-                aria-label={t("codingAgent.copyFolder")}
-                data-testid="coding-agent-project-copy"
-                className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
-              >
-                {p.directory}
-                <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                  {copiedFolder === p.directory ? "check" : "content_copy"}
-                </span>
-                {copiedFolder === p.directory && <span className="font-sans">{t("codingAgent.copied")}</span>}
-              </button>
-              {/* The git state on ONE line: branch, commits, the newest
-                  commit, and whether the folder has reached GitHub — the
-                  store road starts there. */}
+              {/* Where the work is, in THREE facts: the branch, the commits,
+                  when the newest was — and on the right whether the folder
+                  has reached GitHub. The newest commit's subject went: the
+                  Changes tab and the Activity rows say what changed. */}
               <div className={`mt-3 ${INSET_SURFACE} px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]`} data-testid="coding-agent-git-info">
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
                 {git?.branch && <span className="font-mono text-[var(--text-primary)]">{git.branch}</span>}
+                {git?.branch && <span aria-hidden="true">·</span>}
                 {git && <span>{t("codingAgent.gitCommits", { n: git.commits })}</span>}
-                <span className="break-all">
-                  {lastSubject && lastDate ? <>{firstLine(lastSubject, 70)} · {timeAgo(lastDate, t)}</> : t("codingAgent.noCommits")}
-                </span>
+                {git && <span aria-hidden="true">·</span>}
+                <span>{lastDate ? timeAgo(lastDate, t) : t("codingAgent.noCommits")}</span>
                 <span className="ml-auto flex items-center gap-2 flex-wrap justify-end">
                   {/* On GitHub: the repository's page, and the way to a pull
                       request for the branch the project is on (or the one
                       already open for it). Not yet: a quiet Back up, the one
-                      road there — the green button it used to be shouted over
-                      the whole page. */}
+                      road there. */}
                   {githubWebUrl(git?.remote) ? (
                     <>
                       <a
@@ -3170,74 +3255,132 @@ export default function CodingAgentApp() {
                   )}
                 </span>
               </div>
-              {/* Five tabs, each with the whole width: the team, the runs, the
-                  folder, what changed, and Setup. The runs sat in a 22rem rail
-                  before and their rows wrapped three deep. */}
+              {/* The hand-offs: the next run, or a team, is asked for in the
+                  chat's Create card with this project preselected — the card
+                  composes, the assistant carries it. Nothing here composes.
+                  Not on /app/coding, where no chat listens. */}
+              {!standalone && (
+                <div className="mt-3 flex flex-col @md:flex-row gap-2" data-testid="coding-agent-project-start">
+                  <button
+                    type="button"
+                    onClick={() => openNewAppCard({ project: p.directory })}
+                    data-testid="coding-agent-project-start-run"
+                    className={`${BTN_SECONDARY} @md:flex-1`}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
+                    {t("codingAgent.projectStartRun")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openNewAppCard({ project: p.directory, team: true })}
+                    data-testid="coding-agent-project-start-team"
+                    className={`${BTN_SECONDARY} @md:flex-1`}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">groups</span>
+                    {t("codingAgent.projectStartTeam")}
+                  </button>
+                </div>
+              )}
+              {/* Activity · Files · Changes (and, until the team has a page
+                  of its own, a plain Team tab last). */}
               <CodingProjectWorkspace
                 key={`workspace-${projectQuery}`}
                 query={projectQuery}
                 initialTab={workspaceTab?.directory === p.directory ? workspaceTab.tab : undefined}
                 live={projectLive}
                 fill
+                directory={p.directory}
                 filesDirectory={!standalone && p.kind === "folder" ? p.directory : undefined}
-                runsCount={visibleRuns.length}
-                runsLive={projectLive}
-                runs={<div className="pt-1" data-testid="coding-agent-project-runs">{runsList}</div>}
-                setupCount={mcpTicked[p.folder] ?? null}
-                setup={(
-                  /* Rendered only while the tab is open (not hidden): the two
-                     cards each read the box on mount, and on every project
-                     page that was two GETs for cards most visits never
-                     unfolded. */
-                  <div className="pt-1" data-testid="coding-agent-project-setup">
-                    {/* What earlier runs here learned (src/lib/coding-run-notes.ts):
-                        every run and team role reads it; the owner reads, edits
-                        and clears it here. Keyed like the team card, by the
-                        whole scope. */}
-                    <CodingRunNotesCard
-                      key={`notes-${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                      directory={p.directory}
-                      projectId={p.kind === "codeProject" ? p.folder : null}
-                    />
-                    {/* Which MCP servers this project's runs start with
-                        (src/lib/project-mcp-servers.ts): the harness's
-                        configured servers and the ClawBox read-only tools, all
-                        unticked until the owner ticks one. Keyed by the
-                        project's scope — the same `folder` a run's secrets are
-                        scoped by. The count it read is carried on the tab. */}
-                    <CodingProjectMcpServersCard
-                      key={`mcp-${p.folder}`}
-                      project={p.folder}
-                      onTicked={(n) => setMcpTicked((prev) => (prev[p.folder] === n ? prev : { ...prev, [p.folder]: n }))}
-                    />
-                  </div>
-                )}
+                activityLive={projectLive || teamLive !== null}
+                activity={<div className="pt-1" data-testid="coding-agent-project-runs">{activityList}</div>}
                 team={(
                   /* Keyed by the WHOLE scope the card reads by — the folder
                      and the code-project id — so a project that changes kind
                      under the same folder is a fresh card, never one holding
-                     the previous team. */
+                     the previous team. A plain list: no shape drawing. */
                   <div className="pt-1">
                     <CodingTeamCard
                       key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                      teams={teams.filter((x) => (p.kind === "codeProject" ? x.projectId === p.folder : x.directory === p.directory))}
+                      teams={projectTeams}
                       onChanged={() => { void load(); }}
                       onOpenRun={(id) => showRun(id)}
-                      onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
                       runs={runs}
+                      plain
                     />
                   </div>
                 )}
               />
+              {/* What earlier runs here learned (src/lib/coding-run-notes.ts),
+                  read-only — every run and team role reads it, runs add to it,
+                  and a change is asked for in the chat, where the assistant
+                  edits the file with its own tools. Not drawn while empty. */}
+              {notes.trim() !== "" && (
+                <details className={`mt-4 ${CARD_SURFACE} px-3 py-2`} data-testid="coding-run-notes">
+                  <summary className="cursor-pointer select-none flex items-center gap-2 min-h-[32px] text-xs font-semibold text-[var(--text-primary)]">
+                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">sticky_note_2</span>
+                    {t("codingAgent.runNotes.title")}
+                    <span className="font-normal text-[var(--text-muted)]">· {t("codingAgent.runNotes.byRuns")}</span>
+                  </summary>
+                  <div className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)] break-words" data-testid="coding-run-notes-body">
+                    {renderText(notes, t("chat.table"))}
+                  </div>
+                  {!standalone && (
+                    <button
+                      type="button"
+                      onClick={() => dispatchChatMessage(buildRunNotesPrompt({ name: p.name, directory: p.directory }))}
+                      data-testid="coding-run-notes-ask"
+                      className={`${BTN_SECONDARY} mt-2`}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
+                      {t("codingAgent.runNotes.askToChange")}
+                    </button>
+                  )}
+                </details>
+              )}
+              {/* Which tools (MCP servers) this project's runs may use — the
+                  owner's consent, kept as the owner's own checklist
+                  (src/lib/project-mcp-servers.ts: the route refuses the
+                  agent, so no chat sentence can grant a run a tool the owner
+                  never ticked). Folded, and read only when unfolded. */}
+              <div className={`mt-2 ${CARD_SURFACE} px-3 py-2`} data-testid="coding-project-tools">
+                <div className="flex items-center gap-2 min-h-[32px]">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">hub</span>
+                  <span className="text-xs font-semibold text-[var(--text-primary)]">{t("codingAgent.mcp.toolsLine")}</span>
+                  <button
+                    type="button"
+                    onClick={() => setToolsOpenFor((cur) => (cur === p.directory ? null : p.directory))}
+                    aria-expanded={toolsOpenFor === p.directory}
+                    data-testid="coding-project-tools-change"
+                    className={`${BTN_QUIET} ml-auto`}
+                  >
+                    {toolsOpenFor === p.directory ? t("codingAgent.mcp.hide") : t("codingAgent.mcp.change")}
+                  </button>
+                </div>
+                {toolsOpenFor === p.directory && (
+                  <CodingProjectMcpServersCard key={`mcp-${p.folder}`} project={p.folder} />
+                )}
+              </div>
+              {/* The last row of the page: removing the folder. Quiet and
+                  last, like an iOS trailing destructive row; everything that
+                  makes it safe is in the dialog behind it. */}
+              <div className="mt-7 mb-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(p)}
+                  data-testid={`coding-agent-delete-${p.folder}`}
+                  title={t("codingAgent.delete.action")}
+                  aria-label={t("codingAgent.delete.actionFor", { name: p.name })}
+                  className={`${BTN_QUIET} text-red-300/80 hover:text-red-300 hover:bg-red-500/10`}
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
+                  {t("codingAgent.delete.row")}
+                </button>
+              </div>
             </div>
           </>);
         })()}
 
       </div>
-
-      {publishTarget && (
-        <StorePublishDialog key={publishTarget.directory} projectId={publishTarget.folder} directory={publishTarget.directory} onClose={() => setPublishTarget(null)} />
-      )}
 
       {/* Mounted at the top level rather than inside the row, so the backdrop
           covers the window and the focus trap has the whole app behind it. */}

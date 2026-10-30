@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { formatBytes } from "@/lib/format-bytes";
@@ -12,15 +12,25 @@ import { BTN_DANGER, BTN_SECONDARY, INSET_SURFACE } from "./coding-agent-ui";
  *
  * WHAT IT IS FOR. Not to ask "are you sure": a yes/no over a folder full of
  * work is a question nobody can answer. It STATES what is there — how big the
- * folder is, what git would say is unsaved, which secrets and which deploy link
- * are filed against it, how many runs worked in it — and only then asks for the
- * folder's name to be typed. The box's own preview is where every one of those
- * facts comes from (`GET …/projects/delete`), so the dialog can never promise
- * something the route would then refuse.
+ * folder is, what git would say is unsaved, which secrets are filed against
+ * it, how many runs worked in it — and only then offers the button. The box's
+ * own preview is where every one of those facts comes from
+ * (`GET …/projects/delete`), so the dialog can never promise something the
+ * route would then refuse.
  *
- * THE FORCE BUTTON APPEARS LAST, and only after the box has listed exactly what
- * would be lost. That ordering is the whole design of it: a checkbox that said
- * "remove anyway" before the list would be a checkbox for skipping the reading.
+ * TWO TAPS, NOT A TYPED NAME (2026-10-30: the app carries no inputs). The
+ * first tap ARMS the button for five seconds and re-words it — "Really delete
+ * My Shop?" — and the second tap removes. The route still wants the folder's
+ * name back as `confirm`, byte for byte; the dialog sends the name it was
+ * opened with, which is the same name the title shows.
+ *
+ * THE BUTTON SAYS WHAT IT WILL DO. A project with work that exists nowhere
+ * else is listed first, exactly, and the button under the list reads "Delete
+ * anyway, losing that work" and carries the route's `force`. A full shelf
+ * (removing this would delete an older removal for good) is named the same
+ * way, in the button's armed sentence, and carries `purgeOldest`. The owner
+ * reads what the second tap costs before the second tap — a checkbox before
+ * the list was a checkbox for skipping the reading.
  *
  * THE OTHER REFUSALS OFFER NOTHING. A live run, a folder that is not a project,
  * a path that leads out of the project roots, ClawBox's own checkout — each is
@@ -87,27 +97,40 @@ export interface CodingProjectDeleteDialogProps {
   onDeleted: (outcome: ProjectDeleteOutcome) => void;
 }
 
+/** How long the first tap arms the button. A timer, not blur: iOS Safari focuses no button on tap. */
+export const DELETE_CONFIRM_MS = 5_000;
+
 export default function CodingProjectDeleteDialog({
   folder, kind, name, onClose, onDeleted,
 }: CodingProjectDeleteDialogProps) {
   const { t, locale } = useT();
   const titleId = useId();
   const describedId = useId();
-  const nameFieldId = useId();
 
   const [preview, setPreview] = useState<ProjectDeletePreview | null>(null);
   /** A refusal the PREVIEW itself met — the folder is not one this box may remove. */
   const [blocked, setBlocked] = useState<{ code: string; message: string } | null>(null);
-  const [typed, setTyped] = useState("");
-  const [force, setForce] = useState(false);
-  /** The owner's explicit yes to deleting somebody else's recoverable project. */
-  const [purgeOldest, setPurgeOldest] = useState(false);
+  /** The first tap has been made; the second removes. */
+  const [armed, setArmed] = useState(false);
+  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [busy, setBusy] = useState(false);
   /** A refusal the removal met, which is not always the one the preview showed. */
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
   const [done, setDone] = useState<ProjectDeleteOutcome | null>(null);
 
   const panelRef = useModalDialog<HTMLDivElement>({ onClose });
+
+  const disarm = useCallback(() => {
+    if (armTimer.current) clearTimeout(armTimer.current);
+    armTimer.current = null;
+    setArmed(false);
+  }, []);
+  const arm = () => {
+    if (armTimer.current) clearTimeout(armTimer.current);
+    armTimer.current = setTimeout(() => { armTimer.current = null; setArmed(false); }, DELETE_CONFIRM_MS);
+    setArmed(true);
+  };
+  useEffect(() => () => { if (armTimer.current) clearTimeout(armTimer.current); }, []);
 
   /**
    * A refusal in the owner's language, falling back to the box's own sentence.
@@ -158,35 +181,42 @@ export default function CodingProjectDeleteDialog({
     return () => { live = false; };
   }, [loadPreview]);
 
+  const unsaved = preview?.unsaved;
+  // The ONE refusal a flag can clear. Everything else the preview reports keeps
+  // the button off entirely.
+  const unsavedOnly = preview?.refusal?.code === "unsaved_work";
+  const hardRefusal = blocked ?? (preview?.refusal && !unsavedOnly ? preview.refusal : null);
+  // Both flags are conditions, not preferences: each travels only when the box
+  // has something to lose by it, and each is named on the button that sends it.
+  const needsPurge = (preview?.wouldPurge.length ?? 0) > 0;
+  const purgeNames = preview?.wouldPurge.join(", ") ?? "";
+  const canRemove = !!preview && !hardRefusal && !busy;
+
   const remove = useCallback(async () => {
+    if (!preview) return;
+    disarm();
     setBusy(true);
     setFailure(null);
     try {
       const res = await fetch("/setup-api/coding-agent/projects/delete", {
         method: "DELETE",
         headers: { "content-type": "application/json" },
-        // `typed`, NOT `typed.trim()`: the route compares the confirmation to
-        // the folder's own name byte for byte, and a folder name may legally
-        // end in a space. Trimming here would make such a folder impossible to
-        // confirm, and — before the route stopped trimming its own side — was
-        // half of how "shop " could have removed "shop".
-        body: JSON.stringify({ folder, kind, confirm: typed, force, purgeOldest }),
+        // `confirm` is the folder's own name, byte for byte — the route
+        // compares it so, and a folder name may legally end in a space. The
+        // dialog sends the name it was opened with; the owner's yes is the
+        // second tap on a button that names the folder.
+        body: JSON.stringify({ folder, kind, confirm: folder, force: unsavedOnly, purgeOldest: needsPurge }),
       });
       const body = await res.json().catch(() => null) as (ProjectDeleteOutcome & { error?: string; code?: string }) | null;
       if (!res.ok || !body) {
         setFailure({ code: body?.code ?? "failed", message: body?.error ?? t("codingAgent.delete.failed") });
         // `trash_full` is the ONE refusal the owner can clear from inside this
-        // dialog, and only if the dialog can show them what they would be
+        // dialog, and only once the dialog can show them what they would be
         // agreeing to. It fires when the shelf filled up since the preview was
         // read — so that preview is stale by definition, and with an empty
-        // `wouldPurge` the consent checkbox is not even rendered: the owner
-        // would be left pressing an enabled button that posts the same refused
-        // state for ever. Re-read it, and drop any consent they had given,
-        // because it was consent to a DIFFERENT list of folders.
-        if (body?.code === "trash_full") {
-          setPurgeOldest(false);
-          await loadPreview();
-        }
+        // `wouldPurge` the button would post the same refused state for ever.
+        // Re-read it: the next tap's sentence names the folders that go.
+        if (body?.code === "trash_full") await loadPreview();
         return;
       }
       setDone(body);
@@ -196,22 +226,19 @@ export default function CodingProjectDeleteDialog({
     } finally {
       setBusy(false);
     }
-  }, [folder, kind, typed, force, purgeOldest, onDeleted, t, loadPreview]);
+  }, [preview, folder, kind, unsavedOnly, needsPurge, onDeleted, t, loadPreview, disarm]);
 
-  const unsaved = preview?.unsaved;
-  // The ONE refusal a flag can clear. Everything else the preview reports keeps
-  // the button off entirely.
-  const unsavedOnly = preview?.refusal?.code === "unsaved_work";
-  const hardRefusal = blocked ?? (preview?.refusal && !unsavedOnly ? preview.refusal : null);
-  // Exact, for the reason the body below is not trimmed either: this gate and
-  // the route's own comparison have to be the same question.
-  const nameMatches = typed === folder;
-  // Both flags are conditions, not preferences: each is demanded only when the
-  // box has something to lose by it, and each is offered only beside the list of
-  // what that is.
-  const needsPurgeConsent = (preview?.wouldPurge.length ?? 0) > 0;
-  const canRemove = !!preview && !hardRefusal && nameMatches
-    && (!unsavedOnly || force) && (!needsPurgeConsent || purgeOldest) && !busy;
+  // The button's words: what it does, then — armed — what it costs.
+  const restingLabel = busy
+    ? t("codingAgent.delete.removing")
+    : unsavedOnly
+      ? t("codingAgent.delete.deleteAnyway")
+      : t("codingAgent.delete.deleteProject");
+  const armedLabel = needsPurge
+    ? t("codingAgent.delete.reallyPurging", { name, names: purgeNames })
+    : unsavedOnly
+      ? t("codingAgent.delete.reallyLosing", { name })
+      : t("codingAgent.delete.really", { name });
 
   return (
     <div
@@ -332,34 +359,23 @@ export default function CodingProjectDeleteDialog({
                   </ul>
                 </div>
 
-                {preview.wouldPurge.length > 0 && (
+                {needsPurge && (
                   // The shelf is full, so THIS removal deletes an older one for
                   // good — a folder still inside the thirty days it was promised.
-                  // A TICK, not a warning: the thing at risk is somebody else's
-                  // recoverable project, and being told is not the same as
-                  // agreeing. The route refuses `trash_full` without it.
-                  <div
-                    className="mt-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2"
+                  // Named here and again on the armed button: the thing at risk
+                  // is somebody else's recoverable project, and the second tap
+                  // is on a sentence that says so. The route refuses
+                  // `trash_full` without the flag that tap sends.
+                  <p
+                    className="mt-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100"
                     data-testid="coding-agent-delete-would-purge"
                   >
-                    <p className="text-[11px] leading-relaxed text-amber-100">
-                      {t("codingAgent.delete.willPurge", { names: preview.wouldPurge.join(", "), max: preview.retentionMax })}
-                    </p>
-                    <label className="mt-2.5 flex cursor-pointer items-start gap-2">
-                      <input
-                        type="checkbox"
-                        checked={purgeOldest}
-                        onChange={(e) => setPurgeOldest(e.target.checked)}
-                        data-testid="coding-agent-delete-purge-oldest"
-                        className="mt-0.5"
-                      />
-                      <span className="text-[11px] text-amber-100">{t("codingAgent.delete.purgeOldestLabel")}</span>
-                    </label>
-                  </div>
+                    {t("codingAgent.delete.willPurge", { names: purgeNames, max: preview.retentionMax })}
+                  </p>
                 )}
 
                 {unsavedOnly && unsaved && (
-                  // EXACTLY what would be lost, before the flag that would lose
+                  // EXACTLY what would be lost, before the button that would lose
                   // it is offered at all.
                   <div
                     className="mt-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2"
@@ -395,32 +411,8 @@ export default function CodingProjectDeleteDialog({
                         <li>{t("codingAgent.delete.unsavedWorktrees", { names: unsaved.worktrees.join(", ") })}</li>
                       )}
                     </ul>
-                    <label className="mt-2.5 flex cursor-pointer items-start gap-2">
-                      <input
-                        type="checkbox"
-                        checked={force}
-                        onChange={(e) => setForce(e.target.checked)}
-                        data-testid="coding-agent-delete-force"
-                        className="mt-0.5"
-                      />
-                      <span className="text-[11px] text-amber-100">{t("codingAgent.delete.forceLabel")}</span>
-                    </label>
                   </div>
                 )}
-
-                <label htmlFor={nameFieldId} className="mt-3 block text-xs text-[var(--text-secondary)]">
-                  {t("codingAgent.delete.typeName", { folder })}
-                </label>
-                <input
-                  id={nameFieldId}
-                  type="text"
-                  value={typed}
-                  onChange={(e) => setTyped(e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  data-testid="coding-agent-delete-name"
-                  className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-1.5 text-xs text-[var(--text-primary)] outline-none focus:border-white/20"
-                />
               </>
             )}
 
@@ -434,19 +426,28 @@ export default function CodingProjectDeleteDialog({
               </p>
             )}
 
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={onClose} className={BTN_SECONDARY} data-testid="coding-agent-delete-cancel">
+            <div className="mt-4 flex flex-col-reverse @md:flex-row justify-end gap-2">
+              <button type="button" onClick={() => { disarm(); onClose(); }} className={BTN_SECONDARY} data-testid="coding-agent-delete-cancel">
                 {t("cancel")}
               </button>
-              <button
-                type="button"
-                onClick={() => void remove()}
-                disabled={!canRemove}
-                className={BTN_DANGER}
-                data-testid="coding-agent-delete-confirm"
-              >
-                {busy ? t("codingAgent.delete.removing") : t("codingAgent.delete.remove")}
-              </button>
+              {/* Two taps. The first arms for DELETE_CONFIRM_MS and re-words the
+                  button with the folder's name and what the removal costs; the
+                  second removes. Drawn only once the box has said what is there. */}
+              {preview && !hardRefusal && (
+                <button
+                  type="button"
+                  onClick={() => (armed ? void remove() : arm())}
+                  disabled={!canRemove}
+                  aria-pressed={armed}
+                  data-armed={armed || undefined}
+                  data-force={unsavedOnly || undefined}
+                  data-purge={needsPurge || undefined}
+                  className={`${BTN_DANGER} ${armed ? "bg-red-500/30 ring-1 ring-red-400/60" : ""}`}
+                  data-testid="coding-agent-delete-confirm"
+                >
+                  {armed ? armedLabel : restingLabel}
+                </button>
+              )}
             </div>
           </>
         )}
