@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
+import { readCodingStarts, runRecordStartStep, START_POLL_MS, teamStartStep, type CodingStartView } from "@/lib/coding-start-phase";
+import { samePlainData } from "@/lib/same-plain-data";
 import { holdsResumableSession, isHeld, isLive, isSettled, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { pauseReasonText } from "@/lib/coding-pause-reason-copy";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
@@ -44,6 +46,8 @@ import {
   notifyCodingAgentChanged,
   notifyCodingRunStarted,
   onCodingAgentChanged,
+  onCodingRunStarted,
+  onCodingTeamChanged,
   onStandaloneAppPage,
   standaloneAppHref,
   takePendingCodingRun,
@@ -556,6 +560,8 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   const { t, locale } = useT();
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  // The starts on their way and the ones refused: the runs list's `starting`.
+  const [starts, setStarts] = useState<CodingStartView[]>([]);
   /** The recent coding teams, newest first — what home's Now cards and the Team page draw. */
   const [teams, setTeams] = useState<TeamView[]>([]);
   const [loading, setLoading] = useState(true);
@@ -742,10 +748,15 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
     // which is also what fills a run that settled between two ticks.
     const runs = read("runs", () => fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1${tick ? "&slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
       if (!r.ok) return;
-      const data = await r.json() as { runs?: Run[] };
+      const data = await r.json() as { runs?: Run[]; starting?: unknown };
       const next = Array.isArray(data.runs) ? data.runs : [];
       if (tick && runsSettledSinceHeld(runsRef.current, next).length > 0) settleReadDue.current = true;
       setRuns((prev) => (tick ? mergeSlimRuns(prev, next) : next));
+      // The starts on their way and the ones refused (src/lib/coding-start-phase.ts):
+      // Now's "Starting…" rows, until each start's record is in `runs`.
+      const listed = new Set(next.map((run) => run.id));
+      const nextStarts = readCodingStarts(data.starting).filter((start) => !listed.has(start.id));
+      setStarts((prev) => (samePlainData(prev, nextStarts) ? prev : nextStarts));
     }));
     const githubDue = !tick || monotonicNow() - githubAskedAt.current >= GITHUB_LIVE_POLL_MS;
     const github = !githubDue ? Promise.resolve() : read("github", () => {
@@ -829,12 +840,21 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // says it saved something — the chip, the checklist and a run's Backup
   // button all follow the switch and the GitHub account — and when this tab
   // comes back into view, which is how a phone returns from /app/settings.
+  // And when a run or a team begins anywhere — the chat, the MCP, another
+  // device: the desktop hears it off the notice ring the run and team routes
+  // write the moment a start arrives. An open window with nothing live has
+  // no poll of its own, and used to show a run the chat had started only
+  // when it was next shown or reopened.
   useEffect(() => {
     const onVisible = () => { if (document.visibilityState === "visible") void load(); };
     const off = onCodingAgentChanged(() => { void load(); });
+    const offRun = onCodingRunStarted(() => { void load({ tick: true }); });
+    const offTeam = onCodingTeamChanged(() => { void load({ tick: true }); });
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       off();
+      offRun();
+      offTeam();
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [load]);
@@ -863,7 +883,11 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // last poll happened to see, clock included.
   // A team at work counts too: between one of its runs settling and the next
   // starting it has no live run, and its chart must not freeze in the gap.
-  const anyRunning = runs.some((r) => isLive(r.status) || isPrPending(r.pr)) || teams.some((x) => isTeamActive(x.status));
+  // A start on its way counts as well: its record lands within seconds.
+  const anyStarting = starts.some((x) => x.failedAt === null)
+    || runs.some((r) => runRecordStartStep(r) !== null)
+    || teams.some((x) => { const step = teamStartStep(x); return step === "planner_starting" || step === "worker_starting"; });
+  const anyRunning = anyStarting || runs.some((r) => isLive(r.status) || isPrPending(r.pr)) || teams.some((x) => isTeamActive(x.status));
   // Only a LIVE run moves a progress bar or occupies the harness; a PR waiting
   // on Actions does neither, so the clock and the harness gate read this one —
   // a CI wait can last many minutes, and a re-render a second for nothing is
@@ -878,14 +902,14 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         // view is a full read of its own (the visibility effect above).
         if (document.visibilityState === "hidden") return;
         void load({ tick: true });
-      }, POLL_MS);
+      }, anyStarting ? START_POLL_MS : POLL_MS);
       return () => clearInterval(id);
     }
     if (!sawRunning.current) return;
     sawRunning.current = false;
     const id = setTimeout(() => { void load(); }, POLL_MS);
     return () => clearTimeout(id);
-  }, [anyRunning, load]);
+  }, [anyRunning, anyStarting, load]);
   // The clock the progress estimate reads. Held in state, ticking once a
   // second while a run is live (as the activity pill does), so the bar
   // moves between polls and render stays pure — a Date.now() in render
@@ -910,7 +934,8 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // four, and nothing they bring acts on the screen while it is away.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const every = anyLive ? NOW_LIVE_TICK_MS : NOW_IDLE_TICK_MS;
+    // A start on its way ticks by the second too: Now's "Starting…" row shows its clock.
+    const every = anyLive || anyStarting ? NOW_LIVE_TICK_MS : NOW_IDLE_TICK_MS;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
       if (id === null) id = setInterval(() => setNow(Date.now()), every);
@@ -933,7 +958,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [anyLive]);
+  }, [anyLive, anyStarting]);
 
   const readError = async (res: Response, fallback: string) => {
     try {
@@ -2304,6 +2329,8 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         <CodingAgentLiveAgents
           runs={runs}
           teams={teams}
+          starts={starts}
+          now={now}
           onOpenRun={showRun}
           onOpenTeam={openTeam}
           onAsk={standalone ? undefined : openNew}

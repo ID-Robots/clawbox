@@ -19,11 +19,18 @@
  * Every card and row taps through to its page (the Team page, the run's
  * page); the chart's own nodes keep their click (the agent's panel). It reads
  * nothing on a clock of its own: the boards and the runs are the app's.
+ *
+ * A start on its way is a row before it is a run (src/lib/coding-start-phase.ts):
+ * "Starting…", the step it is on, its id and its clock — from the moment the
+ * request reached the box, not from when its record was written; a start the
+ * box refused stays a row with the reason for a while. A team on its way to
+ * its first worker names its step under its heading the same way.
  */
 
 import type { MouseEvent, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { isLive, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { runRecordStartStep, teamStartStep, type CodingStartView, type RunCardStartStep, type TeamStartStep } from "@/lib/coding-start-phase";
 import { taskProgress } from "@/lib/coding-agent-graph";
 import CodingAgentDiagram, { DiagramFigures, type DiagramRun } from "./CodingAgentDiagram";
 import { describeStep } from "./CodingRunTimeline";
@@ -115,9 +122,20 @@ function Heading({ icon, chip, title, extra, onOpen, testId }: { icon: string; c
   );
 }
 
-export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTeam, onAsk, onChanged, refreshKey }: {
+function elapsed(from: number, to: number): string {
+  const s = Math.max(0, Math.round((to - from) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s - m * 60}s`;
+}
+
+export default function CodingAgentLiveAgents({ runs, teams, starts = [], now, onOpenRun, onOpenTeam, onAsk, onChanged, refreshKey }: {
   runs: LiveRun[];
   teams: TeamView[];
+  /** The runs list's `starting`: starts on their way, and the ones the box refused. */
+  starts?: CodingStartView[];
+  /** The app's clock, for a start's elapsed time; without it the rows show none. */
+  now?: number;
   onOpenRun: (id: string) => void;
   /** Open a team's own page. */
   onOpenTeam: (team: TeamView) => void;
@@ -136,7 +154,12 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
   const liveRuns = runs.filter((r) => isLive(r.status) && solo(r));
   const queuedTeams = teams.filter((x) => x.status === "queued").sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
   const queuedRuns = runs.filter((r) => r.status === "queued" && solo(r)).sort((a, b) => (a.queued?.position ?? 0) - (b.queued?.position ?? 0));
-  const atWork = liveTeams.length + liveRuns.length;
+  // A start whose record is listed is the record's row.
+  const listed = new Set(runs.map((r) => r.id));
+  const shownStarts = starts.filter((x) => !listed.has(x.id));
+  const startsOnWay = shownStarts.filter((x) => x.failedAt === null);
+  const startsFailed = shownStarts.filter((x) => x.failedAt !== null);
+  const atWork = liveTeams.length + liveRuns.length + startsOnWay.length;
   const waiting = queuedTeams.length + queuedRuns.length;
 
   // Nothing at work: the newest thing that was, as one row.
@@ -164,6 +187,33 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
     const p = taskProgress(team);
     return p.total > 0 ? <span className="shrink-0 text-[11px] text-[var(--text-muted)]">{t("codingAgent.teamTasksDone", { done: p.accepted, total: p.total })}</span> : null;
   };
+  // Literal keys, one per step: the catalogue sweep reads them where they are used.
+  const runStepWord: Record<RunCardStartStep, string> = {
+    checking: t("codingAgent.start.step.checking"),
+    worktree: t("codingAgent.start.step.worktree"),
+    launching: t("codingAgent.start.step.launching"),
+    agent: t("codingAgent.start.step.agent"),
+  };
+  const teamStepWord: Record<TeamStartStep, string> = {
+    planner_starting: t("codingAgent.start.team.plannerStarting"),
+    planning: t("codingAgent.start.team.planning"),
+    plan_ready: t("codingAgent.start.team.planReady"),
+    worker_starting: t("codingAgent.start.team.workerStarting"),
+  };
+  /** The step line: what it is waiting on, the id it goes by, and how long it has been. */
+  const stepLine = (testId: string, step: string, id: string, since: number | null) => (
+    <p className="mt-0.5 flex min-w-0 items-baseline gap-1.5 text-[11px] text-[var(--text-muted)]" data-testid={testId}>
+      <span className="truncate">{step}</span>
+      <span aria-hidden="true">·</span>
+      <span className="shrink-0 font-mono text-[10.5px]" data-testid={`${testId}-id`}>{id}</span>
+      {since !== null && now !== undefined && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className="shrink-0" aria-hidden="true">{elapsed(since, now)}</span>
+        </>
+      )}
+    </p>
+  );
   /** The card's whole surface opens the page; a control on it keeps its own meaning. */
   const cardOpen = (open: () => void) => (e: MouseEvent<HTMLElement>) => {
     if ((e.target as HTMLElement).closest("button, a")) return;
@@ -174,6 +224,10 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
   const teamCard = (team: TeamView) => (
     <div key={team.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-team-${team.id}`} data-kind="team" data-shape="team" onClick={cardOpen(() => onOpenTeam(team))}>
       <Heading icon="groups" chip={teamChip(team)} title={firstLine(team.goal)} extra={tasksCount(team)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
+      {(() => {
+        const step = teamStartStep(team);
+        return step ? stepLine(`coding-agent-live-team-step-${team.id}`, teamStepWord[step], team.id, team.createdAt) : null;
+      })()}
       <CodingAgentDiagram
         source={{ kind: "team", team }}
         runOf={runOf}
@@ -211,6 +265,7 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
   const runRow = (run: LiveRun) => {
     const steps = run.progress ?? [];
     const last = run.status === "running" && steps.length > 0 ? steps[steps.length - 1] : null;
+    const startStep = runRecordStartStep(run);
     return (
       <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-run-${run.id}`} data-plain="true" onClick={cardOpen(() => onOpenRun(run.id))}>
         <Heading icon="smart_toy" chip={runChip(run)} title={firstLine(run.task)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
@@ -219,6 +274,7 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
             {t("codingAgent.rowNow", { step: describeStep(t, last).label })}
           </p>
         )}
+        {startStep && stepLine(`coding-agent-live-run-step-${run.id}`, runStepWord[startStep], run.id, run.startedAt)}
         <DiagramFigures source={{ kind: "run", run }} lookup={runOf} />
       </div>
     );
@@ -247,6 +303,33 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
     </div>
   );
 
+  /** A start before its record: "Starting…" and its step — or, refused, the reason. */
+  const startRow = (start: CodingStartView) => {
+    const failed = start.failedAt !== null;
+    const tone = failed ? RUN_TONE.failed : RUN_TONE.running;
+    return (
+      <div
+        key={`start-${start.id}`}
+        className={`mt-2 ${CARD_SURFACE} px-3 py-2`}
+        data-testid={`coding-agent-live-start-${start.id}`}
+        data-kind={start.kind}
+        data-step={failed ? "failed" : start.step}
+      >
+        <div className="flex min-h-[36px] min-w-0 items-center gap-2">
+          <span className="material-symbols-rounded shrink-0 text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">{start.kind === "team" ? "groups" : "smart_toy"}</span>
+          <span className={`${chipClass} ${tone?.chip ?? ""} ${failed ? "" : "coding-agent-pulse"}`}>
+            {!failed && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+            {t(failed ? "codingAgent.start.failed" : "codingAgent.start.starting")}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]" title={start.task}>{firstLine(start.task) || start.projectId || start.id}</span>
+        </div>
+        {failed
+          ? <p className="mt-0.5 text-[11px] text-[var(--danger,#fca5a5)]" data-testid={`coding-agent-live-start-error-${start.id}`}>{start.error}</p>
+          : stepLine(`coding-agent-live-start-step-${start.id}`, runStepWord[start.step], start.id, start.requestedAt)}
+      </div>
+    );
+  };
+
   const label = atWork > 0 ? t("codingAgent.diagram.liveTitle") : latest ? t("codingAgent.diagram.latestTitle") : t("codingAgent.agentsTitle");
   return (
     <section className="mt-3" data-testid="coding-agent-live-agents" data-live={atWork} data-queued={waiting || undefined} aria-label={label}>
@@ -255,13 +338,15 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTe
         {label}
         {atWork > 0 && <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{atWork}</span>}
       </p>
+      {startsOnWay.map(startRow)}
+      {startsFailed.map(startRow)}
       {liveTeams.map(teamCard)}
       {liveRuns.map((run) => (runHasHelpers(run) ? runCard(run) : runRow(run)))}
       {queuedTeams.map(queuedTeamRow)}
       {queuedRuns.map(queuedRunRow)}
       {latest?.kind === "team" && teamRow(latest.team)}
       {latest?.kind === "run" && runRow(latest.run)}
-      {atWork === 0 && waiting === 0 && !latest && (
+      {atWork === 0 && waiting === 0 && !latest && startsFailed.length === 0 && (
         <div className={`mt-2 ${CARD_SURFACE} flex flex-col items-center gap-3 px-4 py-5`} data-testid="coding-agent-live-empty">
           <p className="max-w-[36rem] text-center text-[13px] leading-relaxed text-[var(--text-secondary)]">{t("codingAgent.nothingRunYet")}</p>
           {onAsk && (

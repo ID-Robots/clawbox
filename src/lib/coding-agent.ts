@@ -149,6 +149,7 @@ import { memAvailableMb } from "@/lib/mem-available";
 // Why the runs and the handles on them do not live in module-level `let`: this
 // file is compiled twice into the one web-server process. See the store below.
 import { processStore } from "@/lib/process-store";
+import { beginCodingStart, endCodingStart, failCodingStart, stepCodingStart } from "@/lib/coding-run-starts";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import {
   CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY,
@@ -2467,6 +2468,12 @@ export interface StartRunInput {
    * queued" goes on following run-x.
    */
   queuedRunId?: string | null;
+  /**
+   * Internal: the id this start was ANNOUNCED under (`startOrQueueRun`, the
+   * runs list's `starting`), so the record that lands — or the queued one —
+   * carries the id the card already shows. Ignored when a record has it.
+   */
+  runId?: string | null;
   /**
    * A "Fix CI" continuation of `resumeRunId`: that run's pull request failed
    * its checks (CodingRun.ci), and the box appends what failed to this task.
@@ -5739,7 +5746,7 @@ function wakeWaiters(id: string): void {
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
-function newRunId(): string {
+export function newRunId(): string {
   // 8 base36 characters: readable, short, and never a 32-hex run the MCP
   // redaction would blank.
   const bytes = randomBytes(6);
@@ -12826,8 +12833,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== queuedRunId).length;
     const cpuShare = typeof input.cpuShare === "number" && Number.isFinite(input.cpuShare) && input.cpuShare >= 1 ? Math.floor(input.cpuShare) : 1;
     const cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: Math.max(cpuShare, writersLive + 1), onBattery: await onBatteryPower() });
+    const announcedId = queuedRunId ? null : announcedRunId(input);
     const run = newRunRecord({
-      ...(queuedRunId ? { id: queuedRunId } : {}),
+      ...(queuedRunId ? { id: queuedRunId } : announcedId ? { id: announcedId } : {}),
       task,
       directory,
       projectId,
@@ -12875,6 +12883,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (resumeRunId) {
       run.worktree = inheritedWorktree;
     } else if (!run.team && !run.readOnly) {
+      stepCodingStart(run.id, "worktree");
       await attachRunWorktree(run, directory);
     }
 
@@ -12991,6 +13000,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
 
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
+    stepCodingStart(run.id, "launching");
     await prepareRunSecrets(run);
     // Where the folder stood as the run began — see CodingRun.headAtStart.
     run.headAtStart = await headCommitShort(run.directory);
@@ -13027,6 +13037,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       insertRun(list, run, history);
     }
     persist(true);
+    // The record is what the lists show from here: the announcement steps aside.
+    endCodingStart(run.id);
     console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}${waited >= 0 ? " from the queue" : ""}`);
     startProjectIcon(run);
     try {
@@ -13933,17 +13945,55 @@ export function queuePosition(id: string): number | null {
  * Every other refusal (the switch, readiness, a bad folder) is still a refusal.
  */
 export async function startOrQueueRun(input: StartRunInput): Promise<{ run: CodingRun; queued: boolean }> {
-  if (!hasQueuedRuns()) {
-    try {
-      return { run: await startRun(input), queued: false };
-    } catch (err) {
-      if (!(err instanceof SlotsFullError)) throw err;
-    }
+  // ANNOUNCED before the first await: the runs list shows this start from
+  // the moment the request arrived (src/lib/coding-start-phase.ts), under the
+  // id its record will carry, and walks its steps — the checks, the worktree,
+  // the launch — until that record is written. A team's run is its team's
+  // card's to show, and a queued run's start already has a record.
+  const announced = input.team || input.queuedRunId ? null : (announcedRunId(input) ?? newRunId());
+  if (announced) {
+    beginCodingStart({
+      id: announced,
+      task: typeof input.task === "string" ? input.task : "",
+      projectId: input.projectId ?? null,
+      directory: input.directory ?? null,
+      source: input.source === "owner" ? "owner" : "agent",
+    });
   }
-  const run = await queueRun(input);
-  // Room may have come free between the refusal and the queue.
-  void pumpRunQueue();
-  return { run, queued: true };
+  const asked: StartRunInput = announced ? { ...input, runId: announced } : input;
+  let failed = false;
+  try {
+    if (!hasQueuedRuns()) {
+      try {
+        return { run: await startRun(asked), queued: false };
+      } catch (err) {
+        if (!(err instanceof SlotsFullError)) throw err;
+      }
+    }
+    const run = await queueRun(asked);
+    // Room may have come free between the refusal and the queue.
+    void pumpRunQueue();
+    return { run, queued: true };
+  } catch (err) {
+    // Nothing will come of it: the card says why, in place of "Starting…".
+    if (announced) {
+      failCodingStart(announced, err instanceof Error ? err.message : String(err));
+      failed = true;
+    }
+    throw err;
+  } finally {
+    if (announced && !failed) endCodingStart(announced);
+  }
+}
+
+/**
+ * The announced id a start may take: well formed, and no record's already —
+ * a caller can never name an existing run into a new one.
+ */
+function announcedRunId(input: StartRunInput): string | null {
+  const id = typeof input.runId === "string" ? input.runId : "";
+  if (!/^run-[0-9a-z]{8}$/.test(id)) return null;
+  return loadRuns().some((r) => r.id === id) ? null : id;
 }
 
 /**
@@ -13985,7 +14035,8 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
   const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
-  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  const announcedId = announcedRunId(input);
+  const run = newRunRecord({ ...(announcedId ? { id: announcedId } : {}), task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
   // Claimed now, so the failure is not offered a second Fix CI while this one waits.
   if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
   run.queued = {

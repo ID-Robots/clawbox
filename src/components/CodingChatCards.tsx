@@ -150,6 +150,15 @@ export function runCardLabels(t: T): CodingAgentCardLabels {
     resuming: t("codingAgent.chatResuming"),
     pauseFailed: t("codingAgent.pauseFailed"),
     resumeFailed: t("codingAgent.resumeFailed"),
+    // On its way to its first step, and refused (src/lib/coding-start-phase.ts).
+    starting: t("codingAgent.start.starting"),
+    startFailed: t("codingAgent.start.failed"),
+    startSteps: {
+      checking: t("codingAgent.start.step.checking"),
+      worktree: t("codingAgent.start.step.worktree"),
+      launching: t("codingAgent.start.step.launching"),
+      agent: t("codingAgent.start.step.agent"),
+    },
     // One word per kind of step the card can draw as a chip — the owner's
     // language for what the harness names by tool.
     steps: {
@@ -194,6 +203,13 @@ export function teamCardLabels(t: T): CodingTeamCardLabels {
       rejected: t("codingAgent.chatTeam.taskRejected"),
       failed: t("codingAgent.chatTeam.taskFailed"),
     },
+    startFailed: t("codingAgent.start.failed"),
+    startSteps: {
+      planner_starting: t("codingAgent.start.team.plannerStarting"),
+      planning: t("codingAgent.start.team.planning"),
+      plan_ready: t("codingAgent.start.team.planReady"),
+      worker_starting: t("codingAgent.start.team.workerStarting"),
+    },
   };
 }
 
@@ -233,7 +249,8 @@ export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun, 
           // Open: the Coding Agent app on the team's own page (CodingTeamPage;
           // the app takes the id from the hand-off slot or the event). A
           // normal window, like the run's.
-          onOpen={() => openFromChat(() => dispatchOpenCodingTeam(team.id))}
+          // A team the box refused to start has no page to open.
+          onOpen={team.announced ? undefined : () => openFromChat(() => dispatchOpenCodingTeam(team.id))}
           onDismiss={() => cards.dismiss(teamCardKey(team.id))}
           autoHiding={cards.finishing.has(teamCardKey(team.id))}
         />
@@ -248,7 +265,9 @@ export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun, 
           // button asked for a maximize once, which threw a window the owner
           // had sized and placed to full screen on every press.
           openLabel={openLabel}
-          onOpen={() => openFromChat(() => dispatchOpenCodingRun(run.id))}
+          // A start with no record yet has no page either: the app's Now
+          // section shows it, and the run's page is there once it lands.
+          onOpen={run.announced ? () => openFromChat(() => dispatchOpenApp("coding")) : () => openFromChat(() => dispatchOpenCodingRun(run.id))}
           onPreview={onPreview}
           onDismiss={() => (onDismissRun ?? cards.dismiss)(run.id)}
           autoHiding={cards.finishing.has(run.id)}

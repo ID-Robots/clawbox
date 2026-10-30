@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { TeamActivity } from "@/lib/use-coding-agent-activity";
 import type { TeamStatus } from "@/lib/coding-team-status";
+import type { TeamStartStep } from "@/lib/coding-start-phase";
 import { isSettledTeamStatus } from "@/lib/coding-team-status";
 import { taskTitle } from "@/lib/task-title";
 
@@ -85,7 +86,19 @@ export interface CodingTeamCardLabels extends Record<TeamStatus, string> {
   busy?: string;
   /** The states a task row can carry, in the owner's words. */
   taskState?: Partial<Record<string, string>>;
+  /** One line per step on the way to the first worker (src/lib/coding-start-phase.ts); a missing one falls back to English. */
+  startSteps?: Partial<Record<TeamStartStep, string>>;
+  /** The chip of a team the box refused to start. */
+  startFailed?: string;
 }
+
+/** The start steps in English, for a host from before the catalogue had them. */
+const START_STEP_FALLBACK: Record<TeamStartStep, string> = {
+  planner_starting: "Starting the planner",
+  planning: "The planner is reading the project and splitting the goal",
+  plan_ready: "Plan ready — setting up the workers",
+  worker_starting: "Starting the first worker",
+};
 
 function elapsed(from: number, to: number): string {
   const s = Math.max(0, Math.round((to - from) / 1000));
@@ -114,16 +127,21 @@ export default function CodingTeamActivityCard(
 ) {
   const settled = isSettledTeamStatus(team.status);
   const live = !settled && team.status !== "queued";
+  // A queued team's clock runs too: it is time the owner is waiting.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!live) return;
+    if (settled) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [live]);
+  }, [settled]);
   const [expanded, setExpanded] = useState(false);
   const toggle = () => setExpanded((v) => !v);
 
-  const statusWord = labels[team.status];
+  // Refused before it had a board: its own word, not "Failed" — no work was lost.
+  const startFailed = team.announced === true && team.status === "failed";
+  const statusWord = startFailed ? (labels.startFailed ?? "Could not start") : labels[team.status];
+  const startStep = live ? (team.startStep ?? null) : null;
+  const startLine = startStep ? (labels.startSteps?.[startStep] ?? START_STEP_FALLBACK[startStep]) : null;
   const statusColor = STATUS_TONE[team.status];
   const title = taskTitle(team.goal, TITLE_CHARS) || team.projectId || statusWord;
   const took = elapsed(team.startedAt, settled ? (team.finishedAt ?? now) : now);
@@ -144,7 +162,9 @@ export default function CodingTeamActivityCard(
   counters.push(took);
 
   // The settled body: the final review's first sentence, or why it stopped.
-  const resultLine = team.status === "failed" || team.status === "stopped"
+  const resultLine = startFailed
+    ? team.errorLine
+    : team.status === "failed" || team.status === "stopped"
     ? (team.errorLine ? (labels.reason ?? "Stopped: {reason}").replaceAll("{reason}", team.errorLine) : team.resultLine)
     : settled ? team.resultLine : null;
 
@@ -289,6 +309,28 @@ export default function CodingTeamActivityCard(
         {!settled ? <span aria-hidden="true">·</span> : null}
         {!settled ? <span aria-hidden="true">{took}</span> : null}
       </div>
+
+      {startLine ? (
+        // Which step on the way to its first worker, and the id the team goes
+        // by: the planner's first turn takes minutes, and an empty chart with
+        // a ticking clock said nothing about what it was waiting for.
+        <div
+          data-testid="coding-team-activity-start"
+          data-step={startStep ?? undefined}
+          aria-live="off"
+          title={startLine}
+          style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0, fontSize: 11.5, color: "rgba(255,255,255,0.75)" }}
+        >
+          <span aria-hidden="true" className="coding-agent-pulse" style={{ color: statusColor, flexShrink: 0 }}>●</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{startLine}</span>
+          <span
+            data-testid="coding-team-activity-id"
+            style={{ marginLeft: "auto", flexShrink: 0, color: "rgba(255,255,255,0.4)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 10.5 }}
+          >
+            {team.id}
+          </span>
+        </div>
+      ) : null}
 
       {live && total > 0 ? (
         <div

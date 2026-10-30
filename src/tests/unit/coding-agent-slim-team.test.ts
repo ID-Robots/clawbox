@@ -102,6 +102,6 @@ describe("teamCard", () => {
   });
 
   it("copes with a board that has no cast list or pull request", () => {
-    expect(teamCard({ status: "queued", tasks: [] })).toEqual({ phase: "queued", tasksDone: 0, tasksTotal: 0, tasks: [], prNumber: null, resultLine: null, agents: [] });
+    expect(teamCard({ status: "queued", tasks: [] })).toEqual({ phase: "queued", startStep: null, tasksDone: 0, tasksTotal: 0, tasks: [], prNumber: null, resultLine: null, agents: [] });
   });
 });

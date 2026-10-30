@@ -33,7 +33,9 @@ describe("the chat's View button on a coding run card", () => {
     // (`openFromChat`, the host's prop) is pinned in
     // src/tests/components/chat-run-card-view-phone.test.tsx.
     // Whitespace-tolerant: a formatter re-wrapping the JSX is not a change.
-    expect(CHAT_POPUP).toMatch(/onOpen\s*=\s*\{\s*\(\s*\)\s*=>\s*openFromChat\(\s*\(\s*\)\s*=>\s*dispatchOpenCodingRun\(\s*run\.id\s*\)\s*\)\s*\}/);
+    // A start only announced (no record yet) opens the app instead — the
+    // branch before the run's own, which is still exactly this call.
+    expect(CHAT_POPUP).toMatch(/onOpen\s*=\s*\{(?:\s*run\.announced\s*\?\s*\(\s*\)\s*=>\s*openFromChat\(\s*\(\s*\)\s*=>\s*dispatchOpenApp\(\s*"coding"\s*\)\s*\)\s*:)?\s*\(\s*\)\s*=>\s*openFromChat\(\s*\(\s*\)\s*=>\s*dispatchOpenCodingRun\(\s*run\.id\s*\)\s*\)\s*\}/);
     // And no other chat-side caller sneaks the option back in.
     const calls = CHAT_POPUP.match(/dispatchOpenCodingRun\([^)]*\)/g) ?? [];
     expect(calls.length).toBeGreaterThan(0);
