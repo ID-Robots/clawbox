@@ -2,6 +2,8 @@
 // Defining them in one place avoids typo drift between the dispatch and
 // listen sites.
 
+import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "./coding-agent-harness-test";
+
 export const OPEN_APP_EVENT = "clawbox:open-app";
 export const FIX_ERROR_EVENT = "clawbox:fix-error";
 /**
@@ -337,6 +339,29 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
   return [
     `Create a new ClawBox app called "${name}": ${what}.`,
     SCAFFOLD_SENTENCE[req.template],
+  ].join("\n");
+}
+
+/**
+ * The one message "Test in the chat" (Settings' owner tools) and "Try it in
+ * the chat" (the wizard's last step) hand to the chat.
+ *
+ * English and addressed to the assistant, like buildNewAppPrompt. Until the
+ * 2026-10-30 redesign both buttons posted to `coding-agent/browse` and
+ * `coding-agent/run` from the app itself; now the assistant does what the
+ * app did — makes the scratch folder inside the owner's default project
+ * folder and starts ONE run there with the canned task — so the run shows up
+ * where every other run does: as a card in the chat. The folder is named
+ * BARE on purpose: the run resolver reads a bare name as "inside the default
+ * project folder", which keeps the default the one place that decides where
+ * "inside" is.
+ */
+export function buildHarnessTestPrompt(): string {
+  return [
+    "Run the coding agent's harness self-test for me.",
+    `Inside my default project folder, create a folder named "${HARNESS_TEST_PROJECT}" if it is not there yet, then start exactly one coding run in it with coding_agent_run, directory "${HARNESS_TEST_PROJECT}", and this task, word for word:`,
+    HARNESS_TEST_TASK,
+    "Tell me when the run has started; when it finishes, tell me what it built and what the browser description confirmed.",
   ].join("\n");
 }
 

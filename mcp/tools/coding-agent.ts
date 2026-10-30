@@ -216,6 +216,19 @@ const STATUS_RULES: ErrorRule[] = [
   },
 ];
 
+/** The import route's typed refusals (`kind`), as the next step the agent takes. */
+const IMPORT_RULES: ErrorRule[] = [
+  { status: 409, match: /"kind":\s*"exists"/, code: "CONFLICT", message: "A project of that name is already in the owner's project folder.", next: "Nothing was changed. Tell the user; coding_project_status lists it. Do not retry." },
+  { status: 409, match: /"kind":\s*"no_project_folder"/, code: "CONFLICT", message: "No project folder is set on this ClawBox.", next: "Tell the user to choose a project folder in the Coding Agent app's Settings first." },
+  { status: 409, match: /"kind":\s*"(no_gh|not_connected)"/, code: "CONFLICT", message: "No GitHub account is connected on this ClawBox, so nothing can be cloned.", next: "Tell the user to connect GitHub in the Coding Agent app's Settings, then ask again. A folder on the box can still be imported with directory." },
+  { status: 403, match: /"kind":\s*"refused"/, code: "BLOCKED_PATH", message: "That folder cannot become a project: it is outside the owner's home, holds the box's own configuration or credentials, or is already inside the project folder.", next: "Tell the user which folder was refused and ask for another. Do not retry with the same path." },
+  { status: 404, match: /"kind":\s*"not_found"/, code: "NOT_FOUND", message: "No such folder or repository.", next: "Check the name with the user and call again." },
+  { status: 413, code: "TOO_LARGE", message: "That project is too large to copy onto this ClawBox.", next: "Tell the user; do not retry." },
+  { status: 507, code: "TOO_LARGE", message: "There is not enough free disk on this ClawBox for that project.", next: "Tell the user to free space first; do not retry." },
+  { status: 503, code: "ENDPOINT_DOWN", message: "GitHub could not be reached from this ClawBox.", next: "Tell the user; try once more later if they ask." },
+  { status: 400, code: "BAD_ARGUMENT", message: "The import request was refused as malformed.", next: "Check the repository is owner/name, or the directory an absolute path, and call again." },
+];
+
 const STOP_RULES: ErrorRule[] = [
   ...STATUS_RULES,
   // Without this a 403 reads as "the device token was rejected, restart".
@@ -1502,6 +1515,48 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         detail.runs as Record<string, unknown>[],
         LIST_MAX_CHARS,
       ));
+    },
+  );
+
+  // Bringing an EXISTING project in (src/lib/project-import.ts): the Import
+  // panel the Coding Agent app used to carry, as a sentence to the assistant
+  // (2026-10-30: the app carries no inputs). The route admits this process's
+  // bearer for the same reason the run route does — the import lands in the
+  // owner's project folder, where every run of the agent's already works —
+  // and refuses everything the library refuses: a source outside the owner's
+  // home, a credential store, the checkout, a name already taken.
+  reg.tool(
+    "coding_project_import",
+    "Bring an existing project into the owner's project folder, so it is listed in coding_project_status and runs can work in it: clone one of their GitHub repositories (github_repo) or copy a folder already on this ClawBox (directory). Only when the USER asks; nothing is merged or overwritten. Answers the new project's id.",
+    {
+      github_repo: zOptText(200, "The repository to clone as owner/name, from the GitHub account connected in Settings. Give this OR directory."),
+      directory: zOptText(512, "An absolute folder on this ClawBox (under the owner's home) to copy into the project folder; node_modules stays behind."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ github_repo, directory }: { github_repo?: string; directory?: string }) => {
+      const repo = github_repo?.trim();
+      const folder = directory?.trim();
+      if (!!repo === !!folder) {
+        throw new ToolError("BAD_ARGUMENT", "Name exactly one source: github_repo (owner/name) or directory (an absolute folder on this ClawBox).", "Ask the user which project to bring in, then call again with one of the two.");
+      }
+      const body = repo ? { source: "github", repo } : { source: "folder", path: folder };
+      const data = await apiPost<{ project?: ProjectPayload | null; directory?: string; folder?: string; initialized?: boolean; skipped?: string[] }>(
+        "/setup-api/coding-agent/projects/import",
+        body,
+        // A clone or a copy of a whole project, on a Jetson's disk.
+        { timeoutMs: 300_000, rules: IMPORT_RULES },
+      );
+      const id = typeof data.folder === "string" && data.folder ? data.folder : basename(data.directory ?? "");
+      const where = typeof data.directory === "string" ? data.directory : "the owner's project folder";
+      const parts = [
+        repo
+          ? `Cloned ${repo} into ${where}.`
+          : `Copied ${folder} into ${where}.`,
+        data.initialized ? "The folder had no git history, so it was given one." : "",
+        Array.isArray(data.skipped) && data.skipped.length ? `Left behind: ${data.skipped.join(", ")}.` : "",
+        `It is a coding project now — name it to coding_agent_run as project_id "${id}" (or by its directory). project_id: ${id}`,
+      ].filter(Boolean);
+      return text(redact(parts.join(" ")));
     },
   );
 }

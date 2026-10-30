@@ -1,15 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { notifyCodingAgentChanged, notifyCodingRunStarted } from "@/lib/ui-events";
+import { buildHarnessTestPrompt, dispatchChatMessage, notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
+import CodingAgentFolderPicker from "./CodingAgentFolderPicker";
+import Switch from "./CodingAgentSwitch";
 import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
-import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
+import { BTN_PRIMARY, BTN_SECONDARY, CARD } from "./coding-agent-ui";
 import { browserErrorText, runBrowserAction } from "@/lib/browser-actions";
-import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import {
   devicePollSeconds,
@@ -37,22 +38,18 @@ const PRIMARY = BTN_PRIMARY;
 
 type Step = "intro" | "github" | "project" | "browser" | "harness";
 
-type BrowseAnswer = {
-  root: string;
-  path: string;
-  parent: string | null;
-  entries: { name: string; path: string }[];
-  truncated?: boolean;
-};
-
 export default function CodingAgentSetupWizard({
   status,
   onDone,
 }: {
   status: AgentStatus;
-  /** The app re-reads its own status; the wizard does not own that state. */
-  /** Setup is finished; `runId` names the harness run when one was started. */
-  onDone: (runId?: string | null) => void;
+  /**
+   * Setup is finished; the app re-reads its own status (the wizard does not
+   * own that state) and the face flips to home. Since 2026-10-30 the last
+   * step starts no run of its own — "Try it in the chat" hands the smoke test
+   * to the chat and then calls this — so there is no run id to carry.
+   */
+  onDone: () => void;
 }) {
   const { t } = useT();
   // The paid-plan gate (owner's decision, 2026-09-14). Polled rather than read
@@ -174,75 +171,17 @@ export default function CodingAgentSetupWizard({
   // ─── Project folder + how a run thinks (step 2) ───
   // Pre-filled with what the device proposes (~/Projects) so the common case
   // is one tap. The folder need not exist yet — saving creates it, as long as
-  // it is inside the owner's home.
+  // it is inside the owner's home. It is shown as TEXT and changed through the
+  // picker (CodingAgentFolderPicker, existing folders only): the typed path
+  // and the "Create folder" name field went on 2026-10-30 — typing a path is
+  // not a thing an owner does on a phone, and a folder that is not there yet
+  // is made at the proposed name when this step saves.
   const [folder, setFolder] = useState(status.defaultDirectory ?? status.suggestedDirectory ?? "");
+  const [picking, setPicking] = useState(false);
   // No effort choice here (SCA C3): a run starts at the box's own default
   // (DEFAULT_EFFORT), the note below says what the heavier levels cost, and
   // the Settings page is where an owner who wants one changes it.
   const [reviewPass, setReviewPass] = useState(status.reviewPass);
-
-  const [browse, setBrowse] = useState<BrowseAnswer | null>(null);
-  /** The "Create folder" field, open only while the owner is naming one. */
-  const [newFolder, setNewFolder] = useState<string | null>(null);
-  const [browsing, setBrowsing] = useState(false);
-  const browseAbort = useRef<AbortController | null>(null);
-
-  const openBrowse = useCallback(async (dir?: string) => {
-    browseAbort.current?.abort();
-    const ctl = new AbortController();
-    browseAbort.current = ctl;
-    setBrowsing(true);
-    setError(null);
-    try {
-      const qs = dir ? `?dir=${encodeURIComponent(dir)}` : "";
-      let res = await fetch(`/setup-api/coding-agent/browse${qs}`, { signal: ctl.signal });
-      // The pre-filled ~/Projects need not exist yet — saving is what creates
-      // it. Opening the picker there would 404, so fall back to the root
-      // rather than showing the owner an error for a folder we proposed.
-      if (res.status === 404 && dir) {
-        res = await fetch("/setup-api/coding-agent/browse", { signal: ctl.signal });
-      }
-      if (!res.ok) throw new Error(t("codingAgent.wizardBrowseFailed"));
-      setBrowse((await res.json()) as BrowseAnswer);
-    } catch (err) {
-      if ((err as Error)?.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : t("codingAgent.wizardBrowseFailed"));
-    } finally {
-      setBrowsing(false);
-    }
-  }, [t]);
-  useEffect(() => () => browseAbort.current?.abort(), []);
-
-  /**
-   * Create a folder in the directory on screen and step into it.
-   *
-   * Stepping in is the point: the owner opened this to choose a working
-   * folder, and one they just made is almost always the one they meant — the
-   * alternative is making it, then hunting for it in the list they were
-   * already looking at.
-   */
-  const createFolder = async () => {
-    const name = (newFolder ?? "").trim();
-    if (!name || !browse) return;
-    setBusy("mkdir");
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/browse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir: browse.path, name }),
-      });
-      const out = await res.json().catch(() => null) as (BrowseAnswer & { created?: string; error?: string }) | null;
-      if (!res.ok) throw new Error(out?.error || t("codingAgent.wizardCreateFolderFailed"));
-      setNewFolder(null);
-      if (out?.created) await openBrowse(out.created);
-      else if (out) setBrowse(out);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.wizardCreateFolderFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
 
   /**
    * Save what the wizard collected and switch the agent ON — but do NOT mark
@@ -356,17 +295,19 @@ export default function CodingAgentSetupWizard({
   };
 
   /**
-   * Mark setup finished. Called by both ways out of the last step — running
-   * the test and skipping it — because the test is an offer, not a gate: a
-   * box whose harness is not ready yet is still a configured box.
+   * Mark setup finished. Called by both ways out of the last step — trying it
+   * in the chat and skipping — because the test is an offer, not a gate: a
+   * box whose harness is not ready yet is still a configured box. Answers
+   * whether the flag was written, so the hand-off below happens only for a
+   * wizard that really closed.
    */
-  const finish = async (runId: string | null = null) => {
+  const finish = async (): Promise<boolean> => {
     // The plan is re-read at the moment of the act, not only at the render
     // that drew the button: `setupComplete: true` is one of the two bodies the
     // route refuses, and sending it after a subscription lapsed mid-wizard
     // would spend a 402 on a question the box can answer itself. The derived
     // step has already put the intro on screen, so there is nothing to set.
-    if (gated) return;
+    if (gated) return false;
     setBusy("finish");
     setError(null);
     try {
@@ -380,35 +321,28 @@ export default function CodingAgentSetupWizard({
         throw new Error(out?.error || t("codingAgent.wizardFinishFailed"));
       }
       notifyCodingAgentChanged();
-      onDone(runId);
+      onDone();
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.wizardFinishFailed"));
+      return false;
     } finally {
       setBusy(null);
     }
   };
 
   /**
-   * The offered smoke test: scaffold the scratch project, start the canned run,
-   * then finish setup with the run's id, so the owner lands on the RUN's page
-   * with it already in flight. Home used to be the landing — from before the
-   * runs moved off it: the owner who had just pressed "Try it once" was shown
-   * the project list, with the run they were promised a dot in the rail.
+   * The offered smoke test, as a hand-off: finish setup, then give the chat
+   * the one message that asks the assistant to make the scratch folder and
+   * start the canned run (`buildHarnessTestPrompt`). The run then appears
+   * where every run does — as a card in the chat — rather than the wizard
+   * posting to the run route itself (it did until 2026-10-30, and landed the
+   * owner on the run's page). Finish FIRST: a hand-off from a wizard that
+   * could not close would leave the owner with a run in the chat and the
+   * wizard still up.
    */
-  const runHarnessTest = async () => {
-    setBusy("harness");
-    setError(null);
-    try {
-      // The folder the owner just chose, not a ClawBox-internal one. It is
-      // saved by now: this step runs after saveAndTest().
-      const started = await startHarnessTest(folder.trim() || null, t);
-      if (!started.ok) throw new Error(started.error);
-      notifyCodingRunStarted();
-      await finish(started.runId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
-      setBusy(null);
-    }
+  const tryInChat = async () => {
+    if (await finish()) dispatchChatMessage(buildHarnessTestPrompt());
   };
 
   const stepNumber = step === "github" ? 1
@@ -554,113 +488,37 @@ export default function CodingAgentSetupWizard({
             {t("codingAgent.wizardProjectHint")}
           </p>
 
-          <div className="mt-3 flex items-center gap-2">
-            <input
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              placeholder={t("codingAgent.folderPlaceholder")}
-              aria-label={t("codingAgent.folderLabel")}
+          {/* The folder as text, and Browse: the picker is the only way to
+              change it (no typed path, no new-folder field — the wizard's
+              two inputs went on 2026-10-30). A proposed folder that is not
+              there yet is created when Next saves. */}
+          <div className="mt-3 flex items-center gap-3">
+            <p
+              className="min-w-0 flex-1 font-mono text-[12px] text-[var(--text-primary)] break-all"
               data-testid="coding-agent-wizard-folder"
-              className={`${FIELD} flex-1 text-xs`}
-            />
+              data-value={folder}
+            >
+              {folder || t("codingAgent.folderUnset")}
+            </p>
             <button
               type="button"
-              // The pre-filled folder may not exist yet; the picker opens at
-              // the browse root in that case rather than answering 404.
-              onClick={() => void openBrowse(folder.trim() || undefined)}
-              disabled={browsing}
+              onClick={() => setPicking(true)}
               data-testid="coding-agent-wizard-browse"
               className={SMALL_BUTTON}
             >
-              {t("codingAgent.wizardBrowse")}
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">folder_open</span>
+              {t("codingAgent.browse")}
             </button>
           </div>
-
-          {browse && (
-            <div className="mt-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] p-2" data-testid="coding-agent-wizard-picker">
-              <div className="flex items-center justify-between gap-2 px-1 pb-1">
-                <span className="font-mono text-[11px] text-[var(--text-muted)] truncate" title={browse.path}>{browse.path}</span>
-                <button type="button" onClick={() => setBrowse(null)} className={SMALL_BUTTON}>
-                  {t("codingAgent.wizardPickerClose")}
-                </button>
-              </div>
-              <ul className="max-h-48 overflow-y-auto">
-                {browse.parent && (
-                  <li>
-                    <button
-                      type="button"
-                      onClick={() => void openBrowse(browse.parent as string)}
-                      className="w-full text-left px-2 py-1 rounded-lg text-xs text-[var(--text-secondary)] hover:bg-white/5"
-                    >
-                      <span className="material-symbols-rounded align-middle mr-1" style={{ fontSize: 14 }} aria-hidden="true">arrow_upward</span>
-                      {t("codingAgent.wizardPickerUp")}
-                    </button>
-                  </li>
-                )}
-                {browse.entries.map((entry) => (
-                  <li key={entry.path}>
-                    <button
-                      type="button"
-                      onClick={() => void openBrowse(entry.path)}
-                      className="w-full text-left px-2 py-1 rounded-lg text-xs text-[var(--text-primary)] hover:bg-white/5"
-                    >
-                      <span className="material-symbols-rounded align-middle mr-1 text-[var(--text-muted)]" style={{ fontSize: 14 }} aria-hidden="true">folder</span>
-                      {entry.name}
-                    </button>
-                  </li>
-                ))}
-                {browse.entries.length === 0 && (
-                  <li className="px-2 py-1 text-[11px] text-[var(--text-muted)]">{t("codingAgent.wizardPickerEmpty")}</li>
-                )}
-              </ul>
-              {newFolder === null ? (
-                <button
-                  type="button"
-                  onClick={() => setNewFolder("")}
-                  data-testid="coding-agent-wizard-newfolder"
-                  className={`${SMALL_BUTTON} mt-1 w-full`}
-                >
-                  <span className="material-symbols-rounded align-middle mr-1" style={{ fontSize: 14 }} aria-hidden="true">create_new_folder</span>
-                  {t("codingAgent.wizardCreateFolder")}
-                </button>
-              ) : (
-                <div className="mt-1 flex items-center gap-2">
-                  <input
-                    autoFocus
-                    value={newFolder}
-                    onChange={(e) => setNewFolder(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void createFolder();
-                      if (e.key === "Escape") setNewFolder(null);
-                    }}
-                    placeholder={t("codingAgent.wizardCreateFolderPlaceholder")}
-                    aria-label={t("codingAgent.wizardCreateFolder")}
-                    data-testid="coding-agent-wizard-newfolder-name"
-                    className={`${FIELD} flex-1 text-xs`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void createFolder()}
-                    disabled={busy === "mkdir" || newFolder.trim() === ""}
-                    data-testid="coding-agent-wizard-newfolder-create"
-                    className={SMALL_BUTTON}
-                  >
-                    {t("codingAgent.wizardCreateFolderSave")}
-                  </button>
-                  <button type="button" onClick={() => setNewFolder(null)} className={SMALL_BUTTON}>
-                    {t("codingAgent.wizardPickerClose")}
-                  </button>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => { setFolder(browse.path); setBrowse(null); }}
-                data-testid="coding-agent-wizard-pick"
-                className={`${SMALL_BUTTON} mt-1 w-full`}
-              >
-                {t("codingAgent.wizardPickerUse")}
-              </button>
-            </div>
+          {picking && (
+            <CodingAgentFolderPicker
+              // The pre-filled folder may not exist yet; the picker opens at
+              // the browse root in that case rather than answering 404.
+              initialDir={folder.trim() || null}
+              onPick={(path) => { setFolder(path); setPicking(false); }}
+              onClose={() => setPicking(false)}
+              testId="coding-agent-wizard-picker"
+            />
           )}
 
           {/* What a run costs to think: the default is what it starts at, the
@@ -670,19 +528,22 @@ export default function CodingAgentSetupWizard({
             {t("codingAgent.wizardEffortCost")}
           </p>
 
-          <label className="mt-4 flex items-start gap-2 cursor-pointer">
-            <input
-              type="checkbox"
+          {/* The review pass as a Switch row — the same control Settings
+              draws for it, not a checkbox the rest of the app has nowhere. */}
+          <div className="mt-4 flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs text-[var(--text-primary)]">{t("codingAgent.reviewPassLabel")}</p>
+              <p className="text-[11px] leading-relaxed text-[var(--text-muted)]">{t("codingAgent.reviewPassHint")}</p>
+            </div>
+            <Switch
               checked={reviewPass}
-              onChange={(e) => setReviewPass(e.target.checked)}
-              data-testid="coding-agent-wizard-review"
-              className="mt-0.5 accent-[var(--coral-bright)]"
+              busy={false}
+              disabled={busy === "save"}
+              label={t("codingAgent.reviewPassLabel")}
+              onChange={setReviewPass}
+              testId="coding-agent-wizard-review"
             />
-            <span>
-              <span className="block text-xs text-[var(--text-primary)]">{t("codingAgent.reviewPassLabel")}</span>
-              <span className="block text-[11px] leading-relaxed text-[var(--text-muted)]">{t("codingAgent.reviewPassHint")}</span>
-            </span>
-          </label>
+          </div>
 
           <div className="mt-5 flex items-center gap-2">
             <button type="button" onClick={() => setStep("github")} className={SMALL_BUTTON}>
@@ -701,7 +562,7 @@ export default function CodingAgentSetupWizard({
         </>
       )}
 
-      {/* ── Step 4: which browser a run checks its work in. ── */}
+      {/* ── Step 3: which browser a run checks its work in. ── */}
       {step === "browser" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardBrowserTitle")}</h2>
@@ -739,7 +600,7 @@ export default function CodingAgentSetupWizard({
         </>
       )}
 
-      {/* ── Step 5: prove the whole thing actually works, or don't. ── */}
+      {/* ── Step 4: prove the whole thing actually works — in the chat — or don't. ── */}
       {step === "harness" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardHarnessTitle")}</h2>
@@ -747,28 +608,28 @@ export default function CodingAgentSetupWizard({
             {t("codingAgent.wizardHarnessHint")}
           </p>
 
-          <div className="mt-5 flex items-center gap-2">
+          <div className="mt-5 flex flex-col @md:flex-row items-stretch @md:items-center gap-2">
             <button
               type="button"
-              onClick={() => void runHarnessTest()}
-              disabled={busy === "harness" || busy === "finish"}
-              data-testid="coding-agent-wizard-harness-run"
+              onClick={() => void tryInChat()}
+              disabled={busy === "finish"}
+              data-testid="coding-agent-wizard-try-chat"
               className={PRIMARY}
             >
-              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">play_arrow</span>
-              {busy === "harness" ? t("codingAgent.wizardHarnessStarting") : t("codingAgent.wizardHarnessRun")}
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
+              {busy === "finish" ? t("codingAgent.wizardFinishing") : t("codingAgent.wizardTryInChat")}
             </button>
             {/* An offer, not a gate: a box whose harness is not ready yet is
-                still a configured box, and the card in Settings runs the same
-                test whenever they want it. */}
+                still a configured box, and Settings' "Test in the chat" hands
+                the same test to the chat whenever they want it. */}
             <button
               type="button"
               onClick={() => void finish()}
-              disabled={busy === "harness" || busy === "finish"}
+              disabled={busy === "finish"}
               data-testid="coding-agent-wizard-harness-skip"
               className={SMALL_BUTTON}
             >
-              {busy === "finish" ? t("codingAgent.wizardFinishing") : t("codingAgent.wizardHarnessSkip")}
+              {t("codingAgent.wizardHarnessSkip")}
             </button>
           </div>
         </>

@@ -22,6 +22,7 @@ import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import CodingAgentOpenAICard from "./CodingAgentOpenAICard";
 import CodingRunHistoryCard from "./CodingRunHistoryCard";
+import CodingAgentFolderPicker from "./CodingAgentFolderPicker";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
 import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import HelpTip from "./HelpTip";
@@ -332,7 +333,9 @@ export default function CodingAgentSettingsPanel() {
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
   // The typed fields are DRAFTS until saved, so typing does not fight the
   // status the route keeps returning.
-  const [dirDraft, setDirDraft] = useState<string | null>(null);
+  /** The folder picker is up (the 2026-10-30 redesign: the folder is chosen,
+   *  never typed — see CodingAgentFolderPicker). */
+  const [picking, setPicking] = useState(false);
   const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
   const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
@@ -353,7 +356,6 @@ export default function CodingAgentSettingsPanel() {
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
       setStatus(next);
-      setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
       setAuthorNameDraft(prev => (prev === null ? (next.gitAuthorName ?? "") : prev));
       setAuthorEmailDraft(prev => (prev === null ? (next.gitAuthorEmail ?? "") : prev));
     } catch {
@@ -538,12 +540,14 @@ export default function CodingAgentSettingsPanel() {
 
   const toggle = (next: boolean) => saveSetting({ enabled: next }, "switch", t("codingAgent.toggleFailed"));
 
-  const saveDirectory = async () => {
-    const value = (dirDraft ?? "").trim();
-    // "" clears it. The route answers the re-read status, so a symlink
-    // comes back as the folder it actually leads to.
-    const next = await saveSetting({ defaultDirectory: value === "" ? null : value }, "dir", t("codingAgent.folderFailed"));
-    if (next) setDirDraft(next.defaultDirectory ?? "");
+  /**
+   * The folder the picker chose, saved at once: there is no draft to keep,
+   * and the row redraws from the route's answer — a symlink comes back as the
+   * folder it actually leads to, which is what the row then shows.
+   */
+  const pickDirectory = (path: string) => {
+    setPicking(false);
+    void saveSetting({ defaultDirectory: path }, "dir", t("codingAgent.folderFailed"));
   };
 
   /**
@@ -708,37 +712,44 @@ export default function CodingAgentSettingsPanel() {
           </p>
         )}
 
-        {/* Where work goes when the assistant does not name a project. */}
-        <div className="mt-4">
-          <label htmlFor="coding-agent-dir" className="text-xs font-medium text-[var(--text-secondary)]">
-            {t("codingAgent.folderLabel")}
-          </label>
-          <div className="flex items-center gap-2 mt-1.5">
-            <input
-              id="coding-agent-dir"
-              type="text"
-              value={dirDraft ?? ""}
-              onChange={(e) => setDirDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveDirectory(); }}
-              placeholder={t("codingAgent.folderPlaceholder")}
-              spellCheck={false}
+        {/* Where work goes when the assistant does not name a project. The
+            path is TEXT and the choice is made in the picker (2026-10-30:
+            typing a path is not a thing an owner does on a phone); the id
+            stays on the element that carries the value, so the e2e reads it
+            with toHaveText. Browse stays live during a write — opening a
+            listing writes nothing — and a pick made meanwhile queues behind
+            the write like every other setting. */}
+        <div className="mt-4 flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.folderLabel")}</p>
+            <p
+              className={`mt-1 font-mono text-[12px] break-all ${status?.defaultDirectory ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
               data-testid="coding-agent-folder"
-              // text-base on a phone: an input under 16px makes iOS Safari
-              // zoom the page on focus, which scrolls the rest of the
-              // settings out of view.
-              className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
-            />
-            <button
-              type="button"
-              onClick={() => void saveDirectory()}
-              disabled={saving || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
-              className={BTN_SECONDARY}
+              data-value={status?.defaultDirectory ?? ""}
             >
-              {t("codingAgent.folderSave")}
-            </button>
+              {status?.defaultDirectory ?? t("codingAgent.folderUnset")}
+            </p>
           </div>
-          {errorIn("dir")}
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            disabled={!status}
+            data-testid="coding-agent-folder-browse"
+            className={BTN_SECONDARY}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">folder_open</span>
+            {t("codingAgent.browse")}
+          </button>
         </div>
+        {errorIn("dir")}
+        {picking && (
+          <CodingAgentFolderPicker
+            initialDir={status?.defaultDirectory ?? null}
+            onPick={pickDirectory}
+            onClose={() => setPicking(false)}
+            testId="coding-agent-folder-picker"
+          />
+        )}
 
         {/* WHICH ACCOUNT PAYS. Drawn only by a server that answers with the
             list, so an older box shows nothing rather than a picker with one

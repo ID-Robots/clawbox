@@ -214,6 +214,12 @@ interface Props {
    * then reads the board alone, and a panel asks the box for its run.
    */
   runs?: DiagramRun[];
+  /**
+   * A plain list: no drawing of the shape a team takes while none has worked
+   * here. The project page's Team tab since 2026-10-30 (the owner: "the old
+   * team chart is a fake image"); the tab itself goes with redesign step 5.
+   */
+  plain?: boolean;
 }
 
 const LOG_SHOWN = 30;
@@ -279,7 +285,7 @@ function isQueuedTeam(status: TeamView["status"]): boolean {
   return status === "queued";
 }
 
-export default function CodingTeamCard({ teams, onChanged, onOpenRun, onPlan, runs }: Props) {
+export default function CodingTeamCard({ teams, onChanged, onOpenRun, onPlan, runs, plain = false }: Props) {
   const { t } = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -445,7 +451,7 @@ export default function CodingTeamCard({ teams, onChanged, onOpenRun, onPlan, ru
         />
       ) : (
         <div className="mt-2 flex flex-col items-center gap-2">
-          <CodingTeamTree className="shrink-0" />
+          {!plain && <CodingTeamTree className="shrink-0" />}
           <p className="text-[11px] text-[var(--text-muted)] leading-relaxed text-center max-w-[40rem]">{t("codingAgent.team.help")}</p>
         </div>
       )}

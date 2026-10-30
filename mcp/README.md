@@ -124,7 +124,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Publishing to the ClawBox Store (`app_publish`) | when the owner switched the coding agent on | same |
-| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
+| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
 | Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
@@ -757,7 +757,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
 `coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
-`coding_project_status` · `coding_secret_list`
+`coding_project_status` · `coding_project_import` · `coding_secret_list`
 
 | Tool | What it does |
 |---|---|
@@ -769,6 +769,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 | `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. A queued run is not stopped: taking it out of the queue is the owner's. |
 | `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
+| `coding_project_import` | Bring an EXISTING project into the owner's project folder, only when the user asks: clone one of their GitHub repositories (`github_repo`, owner/name) or copy a folder on the box (`directory`, under the owner's home; `node_modules` left behind). Nothing is merged or overwritten; the reply ends `project_id: <id>`. The route's refusals come back typed — `exists`, `no_gh`/`not_connected` (connect GitHub in Settings), `refused` (outside the home, a credential store, the checkout), `too_big`/`no_space`. This replaced the app's Import panel on 2026-10-30; the app carries no inputs. |
 
 `app_publish` sits behind the same switch: it publishes one of the owner's
 projects that carries a `clawbox.json` to the ClawBox Store, through

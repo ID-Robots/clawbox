@@ -383,7 +383,9 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       await leaveWizardIntro();
       await passGithubStep();
-      fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
+      // The proposed folder is shown as text (2026-10-30: no typed path); the
+      // picker is the one way to change it, and Next saves what is shown.
+      expect(screen.getByTestId("coding-agent-wizard-folder")).toHaveTextContent("/home/clawbox/Projects");
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
       const post = posts.find((p) => p.url === "/setup-api/coding-agent/enable");
@@ -402,7 +404,7 @@ describe("CodingAgentApp", () => {
       // The browser question stands between this save and the last step, and
       // is a post of its own — the settings above are one post, not four.
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
-      expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+      expect(await screen.findByTestId("coding-agent-wizard-try-chat")).toBeInTheDocument();
     });
 
     it("finishes on Skip without starting a run", async () => {
@@ -424,25 +426,38 @@ describe("CodingAgentApp", () => {
       expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
     });
 
-    it("runs the harness test and finishes when the owner asks for it", async () => {
+    it("hands the first run to the chat and finishes when the owner asks for it", async () => {
+      // "Try it in the chat" (2026-10-30): the wizard starts no run itself.
+      // The chat is handed the one message that asks the assistant for the
+      // smoke run, and the run then appears as a card there.
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
-      render(<CodingAgentApp />);
-      await leaveWizardIntro();
-      await passGithubStep();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
-      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
-      const run = posts.find((p) => p.url === "/setup-api/coding-agent/run");
-      // A bare folder name, resolved inside the folder the owner just chose on
-      // the previous step — not a code project under data/.
-      expect((run!.body as { directory: string }).directory).toBe("harness-test");
-      // ...and setup completes, landing the owner on the RUN's page with it
-      // already in flight — not on home, where the run was a dot in the rail
-      // (the wizard sweep, 2026-09-06).
-      await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
-      expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-smoke001");
-      expect(screen.queryByTestId("coding-agent-wizard")).toBeNull();
+      const heard: string[] = [];
+      const onMessage = (e: Event) => heard.push((e as CustomEvent<{ text: string }>).detail.text);
+      window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
+      try {
+        render(<CodingAgentApp />);
+        await leaveWizardIntro();
+        await passGithubStep();
+        fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+        fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
+        fireEvent.click(await screen.findByTestId("coding-agent-wizard-try-chat"));
+        await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
+        await waitFor(() => expect(heard).toHaveLength(1));
+        // The message names the scratch folder by its BARE name — the run
+        // resolver reads that as "inside the default project folder" — and
+        // calls the task a smoke test, so the brief does not inflate it.
+        expect(heard[0]).toContain("\"harness-test\"");
+        expect(heard[0]).toContain("smoke test");
+        expect(heard[0]).toContain("coding_agent_run");
+        // Nothing was posted to the run or browse routes from the app.
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
+        // ...and setup completes, landing the owner on home, the wizard gone.
+        expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
+        expect(screen.queryByTestId("coding-agent-wizard")).toBeNull();
+      } finally {
+        window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage);
+      }
     });
   });
 
@@ -531,10 +546,10 @@ describe("CodingAgentApp", () => {
     expect(within(gitInfo).getByTestId("coding-agent-project-create-pr")).toBeInTheDocument();
     expect(within(gitInfo).queryByTestId("coding-agent-project-github-backup")).toBeNull();
     expect(gitReads).toEqual(["/setup-api/coding-agent/git?projectId=site"]);
-    // The project page lists the project's runs — in its Runs tab, with the
-    // count on the tab — and not the stranger.
-    expect(screen.getByTestId("coding-agent-workspace-runs").textContent).toContain("(1)");
-    fireEvent.click(screen.getByTestId("coding-agent-workspace-runs"));
+    // The project page lists the project's runs — its Activity tab, open by
+    // default — and not the stranger. The git line is three facts: no subject.
+    expect(gitInfo.textContent).not.toContain("Coding agent: add a dark mode toggle");
+    expect(screen.getByTestId("coding-agent-workspace-runs")).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByText("inside the project")).toBeInTheDocument();
     expect(screen.queryByText("somewhere else")).toBeNull();
 
@@ -710,26 +725,53 @@ describe("CodingAgentApp", () => {
   });
 
   describe("recent runs", () => {
-    it("opens a project on its Team tab — first in the row, selected by default — with the runs one tab over, counted, and never a toggle", async () => {
+    it("opens a project on its Activity — teams and runs as one list, open by default — with Files, Changes and a plain Team tab after it, never a toggle, and no input anywhere on the page", async () => {
       stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
-      await screen.findByTestId("coding-agent-project-page");
-      // The team first (the owner's ask, 2026-10-12), then the runs.
-      const team = screen.getByTestId("coding-agent-workspace-team");
-      const tab = screen.getByTestId("coding-agent-workspace-runs");
-      expect(team).toHaveAttribute("aria-selected", "true");
-      expect(screen.getAllByRole("tab")[0]).toBe(team);
-      expect(screen.getAllByRole("tab")[1]).toBe(tab);
-      expect(tab.textContent).toContain("(1)");
-      expect(screen.getByTestId("coding-agent-project-runs").closest("[role=tabpanel]")).toHaveAttribute("hidden");
-      fireEvent.click(tab);
-      expect(tab).toHaveAttribute("aria-selected", "true");
+      const page = await screen.findByTestId("coding-agent-project-page");
+      // Activity first and by default (2026-10-30), the Team tab last until
+      // the team has a page of its own; no Setup tab.
+      const tabs = screen.getAllByRole("tab");
+      const activity = screen.getByTestId("coding-agent-workspace-runs");
+      expect(activity).toHaveAttribute("aria-selected", "true");
+      expect(tabs[0]).toBe(activity);
+      expect(tabs.at(-1)).toBe(screen.getByTestId("coding-agent-workspace-team"));
+      expect(screen.queryByTestId("coding-agent-workspace-setup")).toBeNull();
       expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
       expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
+      // The hand-offs into the chat, and the one primary.
+      expect(within(page).getByTestId("coding-agent-project-start-run")).toBeInTheDocument();
+      expect(within(page).getByTestId("coding-agent-project-start-team")).toBeInTheDocument();
       // The other tabs keep the list mounted but hidden.
       fireEvent.click(screen.getByTestId("coding-agent-workspace-files"));
       expect(screen.getByTestId("coding-agent-project-runs").closest("[role=tabpanel]")).toHaveAttribute("hidden");
+      // Nothing on the page is an input: the chat composes, the app shows.
+      expect(page.querySelectorAll("input, textarea, select")).toHaveLength(0);
+      // Delete is the last row of the page.
+      const buttons = Array.from(page.querySelectorAll("button"));
+      expect(buttons.at(-1)).toBe(screen.getByTestId("coding-agent-delete-site"));
+    });
+
+    it("hands a new run or a new team to the chat's Create card on this project — the app composes nothing", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+      const seen: unknown[] = [];
+      const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+      window.addEventListener(NEW_APP_EVENT, handler);
+      try {
+        render(<CodingAgentApp />);
+        fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+        await screen.findByTestId("coding-agent-project-page");
+        fireEvent.click(screen.getByTestId("coding-agent-project-start-run"));
+        fireEvent.click(screen.getByTestId("coding-agent-project-start-team"));
+        expect(seen).toEqual([
+          expect.objectContaining({ project: SITE_PROJECT.directory }),
+          expect.objectContaining({ project: SITE_PROJECT.directory, team: true }),
+        ]);
+        expect((seen[0] as { team?: boolean }).team).toBeFalsy();
+      } finally {
+        window.removeEventListener(NEW_APP_EVENT, handler);
+      }
     });
 
     it("pages the list rather than showing an unbounded history", async () => {
@@ -917,8 +959,6 @@ describe("CodingAgentApp", () => {
       // Nor the effort it was drafted at: settings are read when it starts.
       expect(screen.getByText(translations.en["codingAgent.startedByAgent"]).textContent)
         .toBe(translations.en["codingAgent.startedByAgent"]);
-      expect(screen.getByTestId("coding-agent-run-stats").textContent)
-        .toContain(`${translations.en["codingAgent.updated"]} ${t("clawkeep.hoursAgo", { count: 1 })}`);
     });
 
     it("offers the terminal only once the run has a session — one paused before Claude Code announced it has nothing to resume", async () => {
@@ -932,9 +972,15 @@ describe("CodingAgentApp", () => {
       try {
         render(<CodingAgentApp />);
         await openRuns();
+        // The terminal control is the run page's (2026-10-30: a row carries
+        // Stop alone). The session-less run's page offers none — the button
+        // only ran `cd`.
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-paused01"));
+        const first = await screen.findByTestId("coding-agent-run-page");
+        expect(within(first).queryByTestId("coding-agent-terminal-run-paused01")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-paused02"));
         const terminal = await screen.findByTestId("coding-agent-terminal-run-paused02");
-        // The session-less row offered a button that only ran `cd`.
-        expect(screen.queryByTestId("coding-agent-terminal-run-paused01")).not.toBeInTheDocument();
         fireEvent.click(terminal);
         // The id is quoted like the paths: run metadata typed into a shell.
         expect(opened).toEqual([`cd '${RUN.directory}' && claude-ds --resume '${session}'`]);
@@ -953,6 +999,7 @@ describe("CodingAgentApp", () => {
       try {
         render(<CodingAgentApp />);
         await openRuns();
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-anthro01"));
         fireEvent.click(await screen.findByTestId("coding-agent-terminal-run-anthro01"));
         expect(opened).toEqual([`cd '${RUN.directory}' && CLAUDE_DS_PROVIDER=anthropic claude-ds --resume '${session}'`]);
       } finally {
@@ -971,13 +1018,17 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: true, readiness: READY }, [review, reviewed], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
-      const chip = await screen.findByTestId("coding-agent-review-of");
+      // The row names the pass; the relation chips are the run page's
+      // (2026-10-30), so the review run's page is where the chip is.
+      expect(await screen.findByText(t("codingAgent.reviewPassTitle", { id: "run-reviewed1" }))).toBeInTheDocument();
+      expect(screen.queryByText(/Adversarially review/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId("coding-agent-review-of")).toBeNull();
+      fireEvent.click(screen.getByTestId("coding-agent-details-run-review001"));
+      const reviewPage = await screen.findByTestId("coding-agent-run-page");
+      expect(reviewPage).toHaveAttribute("data-run-id", "run-review001");
+      const chip = within(reviewPage).getByTestId("coding-agent-review-of");
       expect(chip.textContent).toBe(t("codingAgent.reviewOf", { id: "run-reviewed1" }));
       expect(chip.tagName).toBe("BUTTON");
-      expect(screen.getByText(t("codingAgent.reviewPassTitle", { id: "run-reviewed1" }))).toBeInTheDocument();
-      expect(screen.queryByText(/Adversarially review/)).not.toBeInTheDocument();
-      // The reviewed run says who reviewed it.
-      expect(screen.getByTestId("coding-agent-reviewed-by").textContent).toBe(t("codingAgent.reviewedBy", { id: "run-review001" }));
 
       expect(screen.queryByText(/Added the toggle/)).not.toBeInTheDocument();
       fireEvent.click(chip);
@@ -1018,6 +1069,8 @@ describe("CodingAgentApp", () => {
       try {
         render(<CodingAgentApp />);
         await openRuns();
+        // Start is the run page's control (a row carries Stop alone).
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-draft001"));
         fireEvent.click(await screen.findByTestId("coding-agent-start-run-draft001"));
         await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/start", body: { runId: "run-draft001" } }));
         await waitFor(() => expect(heard).toBe(1));
@@ -1300,43 +1353,43 @@ describe("CodingAgentApp", () => {
       expect(within(bare).queryByTestId("coding-agent-run-activity-time")).toBeNull();
     });
 
-    it("opens the run from anywhere on its row, but not from a control on it; terminal, back up and details are three glyphs in one row", async () => {
+    it("opens the run from anywhere on its row, but not from its one control — Stop while it is held; resume, the terminal and backup are the page's", async () => {
       const paused = { ...RUN, id: "run-rowpause", status: "paused", sessionId: "sess-1" };
       stubFetch({ enabled: true, readiness: READY }, [paused], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
       const row = await screen.findByTestId("coding-agent-run-row-run-rowpause");
-      // The terminal control: a glyph named in full for the screen reader.
-      const terminal = within(row).getByTestId("coding-agent-terminal-run-rowpause");
-      expect(terminal).toHaveAttribute("aria-label", translations.en["codingAgent.openResume"]);
-      expect(terminal.textContent).toBe("terminal");
-      // Show details: a glyph the same size as the terminal's, named in full.
+      // ONE control on the row (2026-10-30): Stop. The glyphs left for the page.
+      expect(within(row).getByTestId("coding-agent-stop-run-rowpause")).toBeInTheDocument();
+      expect(within(row).queryByTestId("coding-agent-terminal-run-rowpause")).toBeNull();
+      expect(within(row).queryByTestId("coding-agent-resume-run-rowpause")).toBeNull();
+      expect(within(row).queryByTestId("coding-agent-backup-run-rowpause")).toBeNull();
+      // Show details: the row's chevron, named in full.
       const details = within(row).getByTestId("coding-agent-details-run-rowpause");
       expect(details).toHaveAttribute("aria-label", translations.en["codingAgent.showDetails"]);
       expect(details.textContent).toBe("chevron_right");
-      expect(details.className).toBe(terminal.className);
-      // The two sit in one row of controls.
-      expect(details.parentElement).toBe(terminal.parentElement);
-      // A click on a control does not open the run…
-      fireEvent.click(within(row).getByTestId("coding-agent-resume-run-rowpause"));
+      // A click on the control does not open the run…
+      fireEvent.click(within(row).getByTestId("coding-agent-stop-run-rowpause"));
       expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
-      // …a click on the row itself does.
+      // …a click on the row itself does, and the page carries the controls.
       fireEvent.click(within(row).getByText(RUN.task.slice(0, 20), { exact: false }));
-      expect(await screen.findByTestId("coding-agent-run-page")).toBeInTheDocument();
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(within(page).getByTestId("coding-agent-resume-run-rowpause")).toBeInTheDocument();
+      expect(within(page).getByTestId("coding-agent-terminal-run-rowpause")).toBeInTheDocument();
     });
 
-    it("backs up from a glyph in the same row once GitHub is connected and the run has a commit", async () => {
+    it("carries no control on a settled run's row — backup is the page's once GitHub is connected and the run has a commit", async () => {
       const done = { ...RUN, id: "run-rowdone", commit: "caea00d" };
       stubFetch({ enabled: true, readiness: READY }, [done], { projects: [SITE_PROJECT], github: { installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" } });
       render(<CodingAgentApp />);
       await openRuns();
       const row = await screen.findByTestId("coding-agent-run-row-run-rowdone");
-      const backup = await within(row).findByTestId("coding-agent-backup-run-rowdone");
-      expect(backup).toHaveAttribute("aria-label", translations.en["codingAgent.backup"]);
-      expect(backup.textContent).toBe("cloud_upload");
-      const details = within(row).getByTestId("coding-agent-details-run-rowdone");
-      expect(backup.className).toBe(details.className);
-      expect(backup.parentElement).toBe(details.parentElement);
+      expect(within(row).queryByTestId("coding-agent-backup-run-rowdone")).toBeNull();
+      expect(within(row).queryByTestId("coding-agent-stop-run-rowdone")).toBeNull();
+      expect(within(row).getAllByRole("button")).toHaveLength(1);
+      fireEvent.click(within(row).getByTestId("coding-agent-details-run-rowdone"));
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(await within(page).findByTestId("coding-agent-backup-run-rowdone")).toBeInTheDocument();
     });
 
     it("breathes on a running badge and counts the tokens up rather than jumping", async () => {
@@ -1633,95 +1686,49 @@ describe("CodingAgentApp", () => {
 });
 
 describe("the harness self-test", () => {
-  const TRANSCRIPT = "/home/clawbox/.claude-ds/projects/-home-clawbox-clawbox-data-code-projects-harness-test/61400ab6-0da9-4feb-8ad5-b547239c1367.jsonl";
-
-  it("dispatches the canned smoke run into its scratch project and opens the live view", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [], { transcriptPath: TRANSCRIPT });
-    const opened: string[] = [];
-    const onTerminal = (e: Event) => opened.push((e as CustomEvent<{ command: string }>).detail.command);
-    window.addEventListener("clawbox:open-terminal", onTerminal);
+  // Since 2026-10-30 the owner tool is a hand-off: the app no longer posts
+  // to `browse` and `run` and opens a terminal on the transcript; it hands
+  // the chat the one message that asks the assistant for the smoke run.
+  it("hands the canned smoke run to the chat, and asks the box for nothing", async () => {
+    stubFetch({ enabled: true, readiness: READY }, []);
+    const heard: string[] = [];
+    const onMessage = (e: Event) => heard.push((e as CustomEvent<{ text: string }>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
     try {
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-      fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
-      await waitFor(() => {
-        // The folder is made inside the owner's OWN project folder — it used
-        // to be scaffolded as a code project under data/code-projects, which
-        // is a ClawBox-internal directory they never browse.
-        expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse"
-          && (p.body as { name?: string }).name === "harness-test")).toBe(true);
-        // A BARE NAME, which the run resolver reads as "inside the default
-        // project folder" — so the default stays the one place that decides
-        // where "inside" is.
-        expect(posts.some((p) => p.url === "/setup-api/coding-agent/run"
-          && (p.body as { directory?: string }).directory === "harness-test")).toBe(true);
-      });
-      const runPost = posts.find((p) => p.url === "/setup-api/coding-agent/run");
-      // The task names itself a smoke test, so the brief's "complete, polished
-      // app" bar does not inflate it into a real feature build.
-      expect(String((runPost?.body as { task?: string }).task)).toContain("smoke test");
-      // The live view: the Terminal app is handed the preview script on the
-      // run's transcript, single-quoted, once the listing carries the path.
-      await waitFor(() => expect(opened).toEqual([`/home/clawbox/clawbox/scripts/coding-run-preview '${TRANSCRIPT}'`]));
+      const button = await screen.findByTestId("coding-agent-harness-test");
+      expect(button).toHaveTextContent(translations.en["codingAgent.harnessTest"]);
+      expect(translations.en["codingAgent.harnessTest"]).toBe("Test in the chat");
+      fireEvent.click(button);
+      expect(heard).toHaveLength(1);
+      // The scratch folder by its BARE name — the run resolver reads that as
+      // "inside the default project folder", so the default stays the one
+      // place that decides where "inside" is — and the task names itself a
+      // smoke test, so the brief's "complete, polished app" bar does not
+      // inflate it into a real feature build.
+      expect(heard[0]).toContain("\"harness-test\"");
+      expect(heard[0]).toContain("smoke test");
+      expect(heard[0]).toContain("coding_agent_run");
+      expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
+      expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
     } finally {
-      window.removeEventListener("clawbox:open-terminal", onTerminal);
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage);
     }
   });
 
-  it("is not offered while a run is already in flight — one run at a time is the runner's rule", async () => {
+  it("is offered while a run is already in flight — the chat queues, the app starts nothing", async () => {
     stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null }]);
-    render(<CodingAgentApp />);
-    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-    expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
-  });
-
-  it("is offered while a settled run only waits on GitHub Actions — the CI wait occupies no harness", async () => {
-    const pr = {
-      phase: "waiting", number: 7, url: "https://github.com/o/r/pull/7", branch: "coding/run-k3x9q2ab", base: "main",
-      checks: { total: 2, passed: 0, failed: 0, pending: 2 }, detail: null, startedAt: Date.now() - 30_000, endedAt: null,
-      reviewOk: true,
-    };
-    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, pr }]);
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
     expect(await screen.findByTestId("coding-agent-harness-test")).toBeEnabled();
   });
 
-  it("refuses, in the owner's words, when no project folder is set — and asks the box for nothing", async () => {
-    // The smoke run lives INSIDE the default project folder, so without one
-    // there is nowhere to put it. The refusal is worded through the
-    // component's own `t` (the helper is not a component and cannot reach the
-    // locale itself), and it happens before any route is touched: a scratch
-    // folder made against a folder that does not exist, or a run posted for
-    // the resolver to refuse, would each be a worse answer than the sentence.
-    stubFetch({ enabled: true, readiness: READY }, [], { projectsDir: null });
+  it("is not offered while the agent is switched off — there is nothing to hand the chat", async () => {
+    stubFetch({ enabled: false, readiness: READY }, []);
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-    fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
-    expect(await screen.findByText(translations.en["codingAgent.harnessTestNoFolder"])).toBeInTheDocument();
-    expect(translations.en["codingAgent.harnessTestNoFolder"]).toBe("Choose a project folder first.");
-    expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
-    expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
-    // The button is handed back: the owner fixes the folder and tries again.
-    expect(screen.getByTestId("coding-agent-harness-test")).toBeEnabled();
-  });
-
-  it("tells the desktop a run started, once the route has said so", async () => {
-    // The chat's run card only probes the box when told; a run started from
-    // here while the chat sat open was never adopted.
-    stubFetch({ enabled: true, readiness: READY }, []);
-    let heard = 0;
-    const onStarted = () => { heard += 1; };
-    window.addEventListener(CODING_RUN_STARTED_EVENT, onStarted);
-    try {
-      render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
-      fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
-      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
-      await waitFor(() => expect(heard).toBe(1));
-    } finally {
-      window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
-    }
+    expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
   });
 });
 
@@ -1930,33 +1937,26 @@ describe("projects", () => {
     expect(icon).toHaveClass("w-full", "h-full");
     expect(icon.parentElement).toHaveClass("w-6", "h-6");
 
-    // The project's own page shows the same picture, one size up.
+    // The project's own page shows the same picture at 40 px, in its title block.
     fireEvent.click(screen.getByTestId("coding-agent-project-site"));
     await screen.findByTestId("coding-agent-project-page");
-    expect((await screen.findByAltText(PROJECT.name)).parentElement).toHaveClass("w-7", "h-7");
+    expect((await screen.findByAltText(PROJECT.name)).parentElement).toHaveClass("w-10", "h-10");
   });
 
-  it("keeps the home row to a name, a commit line and a chevron — the folder copy lives on the project page", async () => {
+  it("keeps the home row to a name, a commit line and a chevron — the folder is text in the project page's Files header", async () => {
     // The home list is the way IN: what a row carries is what tells the
-    // projects apart. The folder path, the git line and the copy button
-    // are the project page's, one tap further.
+    // projects apart. The folder path is the project page's, one tap
+    // further, as TEXT (the copy button went with the inputs, 2026-10-30).
     stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT] });
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    try {
-      render(<CodingAgentApp />);
-      const row = await screen.findByTestId("coding-agent-project-site");
-      expect(screen.queryByTestId("coding-agent-copy-site")).toBeNull();
-      expect(row.textContent).not.toContain(PROJECT.directory);
-      fireEvent.click(row);
-      const copy = await screen.findByTestId("coding-agent-project-copy");
-      expect(copy.textContent).toContain(PROJECT.directory);
-      fireEvent.click(copy);
-      await waitFor(() => expect(writeText).toHaveBeenCalledWith(PROJECT.directory));
-      expect(await screen.findByText(translations.en["codingAgent.copied"])).toBeInTheDocument();
-    } finally {
-      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
-    }
+    render(<CodingAgentApp />);
+    const row = await screen.findByTestId("coding-agent-project-site");
+    expect(screen.queryByTestId("coding-agent-copy-site")).toBeNull();
+    expect(row.textContent).not.toContain(PROJECT.directory);
+    fireEvent.click(row);
+    await screen.findByTestId("coding-agent-project-page");
+    expect(screen.queryByTestId("coding-agent-project-copy")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-workspace-files"));
+    expect(screen.getByTestId("coding-agent-project-path")).toHaveTextContent(PROJECT.directory);
   });
 
   it("opens a project row from the keyboard — Enter or Space, the way a click does", async () => {
@@ -1975,26 +1975,6 @@ describe("projects", () => {
 
     fireEvent.keyDown(screen.getByTestId("coding-agent-project-site"), { key: " " });
     expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
-  });
-
-  it("the project page copies the directory it shows, and names the button for a screen reader", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT] });
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    try {
-      render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
-      await screen.findByTestId("coding-agent-project-page");
-      const copy = screen.getByTestId("coding-agent-project-copy");
-      expect(copy.textContent).toContain(PROJECT.directory);
-      expect(copy).toHaveAttribute("aria-label", translations.en["codingAgent.copyFolder"]);
-      expect(copy).toHaveAttribute("title", translations.en["codingAgent.copyFolder"]);
-      fireEvent.click(copy);
-      await waitFor(() => expect(writeText).toHaveBeenCalledWith(PROJECT.directory));
-      expect(copy.textContent).toContain(translations.en["codingAgent.copied"]);
-    } finally {
-      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
-    }
   });
 
   it("files a run pointed at a code project under that project only, never under the folder holding it", async () => {
@@ -2800,7 +2780,10 @@ describe("CodingAgentApp — the run page's honesty", () => {
       await openProject("shop");
       fireEvent.click(screen.getByTestId("coding-agent-delete-shop"));
       await screen.findByTestId("coding-agent-delete-facts");
-      fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+      // Two taps, no typed name: the first arms and names the project.
+      fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+      expect(screen.getByTestId("coding-agent-delete-confirm")).toHaveTextContent(t("codingAgent.delete.really", { name: "My Shop" }));
+      expect(posts.filter((p) => p.url === "/setup-api/coding-agent/projects/delete")).toEqual([]);
       fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
 
       await waitFor(() => expect(screen.queryByTestId("coding-agent-project-shop")).toBeNull());
@@ -3201,8 +3184,8 @@ describe("the whole task", () => {
   });
 });
 
-describe("publishing a ClawBox app to the Store", () => {
-  it("offers Publish to ClawBox Store only on a project with clawbox.json, and opens its dialog", async () => {
+describe("a ClawBox app's project", () => {
+  it("marks the app on its page and offers no Store button anywhere — publishing is a sentence in the chat (app_publish)", async () => {
     stubFetch({ enabled: true, readiness: READY }, [], {
       projects: [
         { ...PROJECT, app: { name: "My Site", description: null, kind: "webapp", port: null } },
@@ -3211,21 +3194,19 @@ describe("publishing a ClawBox app to the Store", () => {
     });
     render(<CodingAgentApp />);
     await screen.findByTestId("coding-agent-projects");
-    // The home row carries neither the Store button nor the app badge any
-    // more; the project's page does (lean home, 2026-10-28).
-    expect(screen.queryByTestId("coding-agent-publish-site")).not.toBeInTheDocument();
+    // The home row carries no badge (lean home, 2026-10-28); the page does.
     expect(screen.queryByTestId("coding-agent-app-chip-site")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("coding-agent-project-scratch"));
     await screen.findByTestId("coding-agent-project-page");
-    expect(screen.queryByTestId("coding-agent-publish-scratch")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-app-chip-scratch")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("coding-agent-project-back"));
     fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
     await screen.findByTestId("coding-agent-project-page");
     expect(screen.getByTestId("coding-agent-app-chip-site")).toBeInTheDocument();
-    const publish = screen.getByTestId("coding-agent-publish-site");
-    expect(publish).toHaveAccessibleName(translations.en["codingAgent.publishFor"].replace("{name}", "My Site"));
-    fireEvent.click(publish);
-    expect(await screen.findByTestId("store-publish-dialog")).toBeInTheDocument();
+    // The Store dialog and its glyph went with the inputs (2026-10-30).
+    expect(screen.queryByTestId("coding-agent-publish-site")).toBeNull();
+    expect(screen.queryByTestId("store-publish-dialog")).toBeNull();
+    expect(screen.queryByText(/ClawBox Store/)).toBeNull();
   });
 });
 
@@ -3289,12 +3270,13 @@ describe("a run that hit a ceiling", () => {
 });
 
 /**
- * The project's Setup tab: its run notes and MCP servers, two cards that each
- * read the box on mount — so they are rendered only while the tab is open,
- * not hidden, and the count the servers card read rides on the tab.
+ * The project page's folds (2026-10-30, in place of the Setup tab): the run
+ * notes, read once the page opens and drawn READ-ONLY with a hand-off into
+ * the chat; and the Tools checklist (MCP servers — the owner's consent,
+ * kept as the owner's own control), read only when unfolded.
  */
-describe("the project's Setup tab", () => {
-  it("reads the run notes and the MCP servers only once the tab is opened, and carries the ticked count on it", async () => {
+describe("the project's notes and tools", () => {
+  function stubFolds(notes: string) {
     stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
     const real = globalThis.fetch as typeof fetch;
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -3302,22 +3284,96 @@ describe("the project's Setup tab", () => {
       if (url.startsWith("/setup-api/coding-agent/mcp-servers?")) {
         return json({ selected: ["clawbox", "github"], options: [{ id: "clawbox", kind: "clawbox", usable: true }, { id: "github", kind: "harness", harness: "openclaw", transport: "stdio", usable: true }], unreadable: [] });
       }
-      if (url.startsWith("/setup-api/coding-agent/run-notes?")) return json({ notes: "", maxChars: 4000, file: "/home/clawbox/Projects/site/.clawbox/run-notes.md" });
+      if (url.startsWith("/setup-api/coding-agent/run-notes?")) return json({ notes, maxChars: 4000, file: "/srv/projects/site/.clawbox/run-notes.md" });
+      return real(input, init);
+    }));
+    return () => vi.mocked(globalThis.fetch).mock.calls.map(([input]) => input.toString());
+  }
+
+  it("draws the run notes read-only once the page opens, with Ask to change handing a prompt that names the project to the chat", async () => {
+    const urls = stubFolds("- The tests run with: bun run test\n");
+    const seen: string[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent<{ text: string }>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, handler);
+    try {
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      await screen.findByTestId("coding-agent-project-page");
+      const notes = await screen.findByTestId("coding-run-notes");
+      expect(urls().filter((u) => u.includes("/run-notes?"))).toEqual([`/setup-api/coding-agent/run-notes?projectId=${SITE_PROJECT.folder}`]);
+      expect(notes).toHaveTextContent(translations.en["codingAgent.runNotes.title"]);
+      expect(within(notes).getByTestId("coding-run-notes-body")).toHaveTextContent("The tests run with: bun run test");
+      // Read-only: no editor, no Save, no Clear.
+      expect(notes.querySelectorAll("input, textarea")).toHaveLength(0);
+      expect(screen.queryByTestId("coding-run-notes-save")).toBeNull();
+      fireEvent.click(within(notes).getByTestId("coding-run-notes-ask"));
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain(SITE_PROJECT.name);
+      expect(seen[0]).toContain(`${SITE_PROJECT.directory}/.clawbox/run-notes.md`);
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
+    }
+  });
+
+  it("draws no notes fold while the file is empty, and reads the Tools checklist only when it is unfolded", async () => {
+    const urls = stubFolds("");
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    const page = await screen.findByTestId("coding-agent-project-page");
+    await waitFor(() => expect(urls().some((u) => u.includes("/run-notes?"))).toBe(true));
+    expect(screen.queryByTestId("coding-run-notes")).toBeNull();
+    // The Tools line is there; its checklist (the owner's consent, inputs and
+    // all) is read and drawn only on Change.
+    const tools = screen.getByTestId("coding-project-tools");
+    expect(tools).toHaveTextContent(translations.en["codingAgent.mcp.toolsLine"]);
+    expect(urls().some((u) => u.includes("/mcp-servers"))).toBe(false);
+    expect(page.querySelectorAll("input, textarea, select")).toHaveLength(0);
+    fireEvent.click(within(tools).getByTestId("coding-project-tools-change"));
+    await screen.findByTestId("coding-project-mcp-servers");
+    await waitFor(() => expect(urls().some((u) => u.includes("/mcp-servers?project=site"))).toBe(true));
+    fireEvent.click(within(tools).getByTestId("coding-project-tools-change"));
+    expect(screen.queryByTestId("coding-project-mcp-servers")).toBeNull();
+  });
+
+  it("lists a team of this project in Activity — live first, its tasks counted, Stop on the row — and its row opens the Team tab", async () => {
+    const team = {
+      id: "team-live000001", goal: "Ship the toggle and the settings drawer", projectId: "site", directory: SITE_PROJECT.directory, source: "agent", status: "working",
+      plannerRunId: null, branch: null, base: null, runs: [],
+      tasks: [
+        { task_id: "t1", task_description: "Settings drawer", assigned_to: null, status: "complete", result: "done", depends_on: [], review: { verdict: "accepted", notes: "", at: RUN.startedAt }, attempts: 1 },
+        { task_id: "t2", task_description: "Toggle", assigned_to: null, status: "in_progress", result: null, depends_on: [], review: null, attempts: 1 },
+      ],
+      log: [], alerts: 0, error: null, shape: null, repoMap: null, singleRun: false, dynamic: false, lastLeadAt: 0, finalReview: null, pr: null,
+      createdAt: RUN.startedAt - 1000, updatedAt: RUN.startedAt - 1000, finishedAt: null,
+    };
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    const real = globalThis.fetch as typeof fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/team") && !url.includes("/stop")) return json({ teams: [team] });
+      if (url === "/setup-api/coding-agent/team/stop" && init?.method === "POST") {
+        posts.push({ url, body: JSON.parse(String(init.body)) });
+        return json({ team: { ...team, status: "stopped" } });
+      }
       return real(input, init);
     }));
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
     await screen.findByTestId("coding-agent-project-page");
-    const urls = () => vi.mocked(globalThis.fetch).mock.calls.map(([input]) => input.toString());
-    expect(urls().some((u) => u.includes("/run-notes") || u.includes("/mcp-servers"))).toBe(false);
-    expect(screen.queryByTestId("coding-agent-project-setup")).toBeNull();
-    const tab = screen.getByTestId("coding-agent-workspace-setup");
-    expect(tab).toHaveTextContent(translations.en["codingAgent.setupTab"]);
-    expect(screen.getAllByRole("tab").at(-1)).toBe(tab);
-    fireEvent.click(tab);
-    await screen.findByTestId("coding-agent-project-setup");
-    await waitFor(() => expect(urls().some((u) => u.includes("/run-notes?"))).toBe(true));
-    await waitFor(() => expect(urls().some((u) => u.includes("/mcp-servers?"))).toBe(true));
-    expect(await screen.findByTestId("coding-agent-workspace-setup-count")).toHaveTextContent("(2)");
+    const row = await screen.findByTestId("coding-team-row-team-live000001");
+    // Before the settled run, though older: live first.
+    const rows = Array.from(screen.getByTestId("coding-agent-runs").children).map((li) => li.getAttribute("data-testid"));
+    expect(rows).toEqual(["coding-team-row-team-live000001", `coding-agent-run-row-${RUN.id}`]);
+    expect(within(row).getByTestId("coding-team-row-status-team-live000001")).toHaveTextContent(translations.en["codingAgent.team.status.working"]);
+    expect(within(row).getByTestId("coding-team-row-tasks-team-live000001")).toHaveTextContent(t("codingAgent.teamTasksDone", { done: 1, total: 2 }));
+    expect(row).toHaveTextContent("Ship the toggle and the settings drawer");
+    // Stop on the row posts the team's id and does not open anything.
+    fireEvent.click(within(row).getByTestId("coding-team-row-stop-team-live000001"));
+    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/team/stop")).toBe(true));
+    expect(posts.find((p) => p.url === "/setup-api/coding-agent/team/stop")?.body).toEqual({ id: "team-live000001" });
+    expect(screen.getByTestId("coding-agent-workspace-runs")).toHaveAttribute("aria-selected", "true");
+    // The row itself opens the Team tab.
+    fireEvent.click(within(row).getByText("Ship the toggle and the settings drawer"));
+    expect(screen.getByTestId("coding-agent-workspace-team")).toHaveAttribute("aria-selected", "true");
   });
 });

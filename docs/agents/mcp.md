@@ -39,7 +39,11 @@ of them kept failing.
     `{ kind, id, projectId, directory, title, status, queuePosition? }`, `ToolResult.structuredContent`
     in `mcp/lib/register.ts`; their prose tells the assistant the chat shows
     the card and not to poll), `coding_run_message`, `coding_run_list`,
-    `coding_agent_resume`, `coding_project_status`, `coding_secret_list`
+    `coding_agent_resume`, `coding_project_status`, `coding_project_import`
+    (the app's Import panel as a tool since 2026-10-30: a GitHub repository
+    or a folder on the box into the project folder; `POST
+    coding-agent/projects/import` admits the MCP bearer for it),
+    `coding_secret_list`
     (registered only while the owner's switch is on
     and the `claude-ds` harness is ready — probed at startup, and unlike
     `email_list` never re-probed after it),
