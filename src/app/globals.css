@@ -780,41 +780,18 @@ h6 {
   border-color: rgba(255, 230, 203, 0.15);
 }
 
-/* The Coding Agent's delegation diagram (CodingAgentDelegationArt).
- *
- * Two motions: a dash travelling OUTWARD along each connector — the task going
- * to a sub-agent — and a soft pulse arriving at the node a beat later. Both are
- * defined only under `prefers-reduced-motion: no-preference`, so an owner who
- * turned animation off gets the same static diagram rather than a still frame
- * of a broken one.
- */
-@media (prefers-reduced-motion: no-preference) {
-  @keyframes ca-art-flow {
-    to { stroke-dashoffset: -22; }
-  }
-  @keyframes ca-art-node {
-    0%, 100% { opacity: 0.55; }
-    50%      { opacity: 1; }
-  }
-  @keyframes ca-art-hub {
-    0%, 100% { opacity: 0.85; }
-    50%      { opacity: 1; }
-  }
-  .ca-art-flow { animation: ca-art-flow 1.6s linear infinite; }
-  .ca-art-node { animation: ca-art-node 2.6s ease-in-out infinite; }
-  .ca-art-hub  { animation: ca-art-hub 2.6s ease-in-out infinite; }
-}
-
-/* The coding team's tree (CodingTeamTree): the goal flows out along every
- * connector, each node breathes, and a worker at work breathes faster in the
- * product's coral. Guarded exactly like ca-art-*: with motion turned off the
- * tree is still drawn, it simply holds still.
+/* The agent chart (CodingAgentDiagram): the edge into an agent at work
+ * flows, and the agent itself breathes in the product's coral. Everything is
+ * under `prefers-reduced-motion: no-preference`: with motion turned off the
+ * chart is still drawn, it simply holds still. (The `ca-art-*` rules of the
+ * delegation drawing and the team tree that used these went on 2026-10-30
+ * with those drawings.)
  *
  * The flow is PAUSED here and stepped by the component (FLOW_FPS in
- * CodingTeamTree.tsx): stroke-dashoffset is not a property the compositor can
- * animate, so left running it cost a style recalc and a repaint of the drawing
- * every frame, on every run page left open. The breathing is opacity and runs
- * on the compositor as it is. */
+ * src/lib/coding-agent-flow.ts): stroke-dashoffset is not a property the
+ * compositor can animate, so left running it cost a style recalc and a repaint
+ * of the drawing every frame, on every page left open. The breathing is
+ * opacity and runs on the compositor as it is. */
 @media (prefers-reduced-motion: no-preference) {
   @keyframes ct-art-flow {
     to { stroke-dashoffset: -22; }
@@ -842,7 +819,7 @@ h6 {
  * Three motions: the lanes flow INWARD (the mirror of the Coding Agent's
  * outward dash — that one fans out, this one converges), the fragments drift
  * along and fade as they are absorbed, and the shard pulses as it takes each
- * one in. Guarded exactly like ca-art-*: with motion turned off the diagram is
+ * one in. Guarded exactly like ct-art-*: with motion turned off the diagram is
  * still drawn, it simply holds still.
  */
 @media (prefers-reduced-motion: no-preference) {

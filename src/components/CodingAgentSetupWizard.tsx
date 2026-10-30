@@ -5,7 +5,6 @@ import { useT } from "@/lib/i18n";
 import { buildHarnessTestPrompt, dispatchChatMessage, notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
-import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
 import CodingAgentFolderPicker from "./CodingAgentFolderPicker";
 import Switch from "./CodingAgentSwitch";
 import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
@@ -373,11 +372,12 @@ export default function CodingAgentSetupWizard({
         // Centred body copy makes the eye hunt for the start of every line,
         // because no two lines begin in the same place — fine for one line, bad
         // for three. So the column is centred and everything inside it hangs
-        // off one left edge: the diagram, the heading, the paragraph and the
-        // button all start at the same x.
+        // off one left edge: the heading, the paragraph and the button all
+        // start at the same x. (The delegation drawing that stood above the
+        // heading went on 2026-10-30 with the fake team chart — the owner's
+        // objection to a decorative picture of agents was the same.)
         <div className="flex-1 flex flex-col items-center justify-center px-4 pb-8">
           <div className="w-full max-w-[26rem] text-left">
-            <CodingAgentDelegationArt className="mb-7" />
             <h2 className="text-base font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
               {t("codingAgent.wizardTitle")}
             </h2>

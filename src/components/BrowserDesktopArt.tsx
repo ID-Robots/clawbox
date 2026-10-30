@@ -8,7 +8,7 @@ import { useT } from "@/lib/i18n";
  * dashes run BOTH ways, because this is the one browser where what the
  * assistant opens is what the owner is looking at.
  *
- * A deliberate sibling of CodingAgentDelegationArt, MemoryShardArt and
+ * A deliberate sibling of MemoryShardArt and
  * ClawKeepArt: same viewBox, stroke weights and muted palette over the
  * product's coral, a diagram rather than an illustration. Where the coding
  * agent FANS OUT, the memory shard CONVERGES and ClawKeep PASSES THROUGH,

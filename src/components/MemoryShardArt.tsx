@@ -7,7 +7,7 @@ import { useT } from "@/lib/i18n";
  * documents — drift in from the left, gather at a waist, and condense into one
  * faceted shard that pulses as it takes each one in.
  *
- * A deliberate sibling of CodingAgentDelegationArt: same viewBox height, same
+ * A deliberate sibling of the Coding Agent's delegation drawing (gone since 2026-10-30): same viewBox height, same
  * stroke weights, the same muted palette over the product's coral, and the same
  * restraint — a diagram, not an illustration. Where that one FANS OUT (one run
  * to many sub-agents), this one CONVERGES, which is the whole difference

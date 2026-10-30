@@ -1,32 +1,40 @@
 "use client";
 
 /**
- * The agents, first: what the Coding Agent home opens on, and what a run's
- * page opens on (the owner's brief, 2026-10-12 — "diagram first, then you can
- * see more").
+ * Home's **Now** section — what the Coding Agent opens on (the owner's brief,
+ * 2026-10-12: "when you open it we first must see the agents, like a chart").
  *
- * Home draws one chart per team at work and one per run at work outside a
- * team; with nothing at work, the newest team or run that was, so the window
- * never opens on a blank. A run's page draws its TEAM when it belongs to one —
- * the run marked on it — and itself with its helpers when it does not.
+ * Since the 2026-10-30 redesign the chart is drawn ONLY where there are agents
+ * to draw: a team at work is a card with the real chart, compact, sized to
+ * its content (the same CodingAgentDiagram the Team page draws large; one
+ * rendering per card, never two); a solo run that sent helpers out is the
+ * same kind of card; a solo run WITHOUT helpers is a plain row — one node is
+ * no chart (the owner: "the space in the run diagram is almost all empty").
+ * Queued teams and runs are rows with their place in line. With nothing at
+ * work, the newest thing that was is one row. With nothing ever run, one
+ * sentence and the way to the chat — the delegation drawing that stood here
+ * (CodingAgentDelegationArt) went with the fake team chart: "a decorative
+ * picture of agents" was the same objection.
  *
- * It reads nothing on a clock of its own: the boards and the runs are the
- * app's (its live poll reads the team list beside the runs), and a team the
- * list no longer carries is asked for by id only when the app's data moves on.
+ * Every card and row taps through to its page (the Team page, the run's
+ * page); the chart's own nodes keep their click (the agent's panel). It reads
+ * nothing on a clock of its own: the boards and the runs are the app's.
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { isLive, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { taskProgress } from "@/lib/coding-agent-graph";
 import CodingAgentDiagram, { DiagramFigures, type DiagramRun } from "./CodingAgentDiagram";
-import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
-import { TEAM_STATUS_TONE, isTeamActive, type TeamView } from "./CodingTeamCard";
+import { describeStep } from "./CodingRunTimeline";
+import { TEAM_STATUS_TONE, isTeamActive, type TeamView } from "./CodingTeamPage";
 import { RUN_TONE } from "./RunProgressBar";
-import { BTN_QUIET, CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
+import { BTN_PRIMARY_WIDE, CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 
-/** A run as the home chart reads it: the diagram's run, and the team it belongs to. */
+/** A run as home reads it: the diagram's run, the team it belongs to, its place in the queue. */
 export interface LiveRun extends DiagramRun {
   team?: { id: string; role: "planner" | "worker" | "reviewer" | "lead"; taskId: string | null } | null;
+  queued?: { position?: number } | null;
 }
 
 /** The catalogue key of a run's status word — `gave_up` is camelCased there. */
@@ -34,106 +42,38 @@ export function runStatusKey(status: CodingRunStatus): string {
   return status === "gave_up" ? "codingAgent.statusGaveUp" : `codingAgent.status${status.charAt(0).toUpperCase()}${status.slice(1)}`;
 }
 
-/**
- * A team's board: the app's copy when its list has it, else asked of the box
- * by id — once, and again whenever `refreshKey` (the app's runs) moves on.
- */
-export function useTeamBoard(teamId: string | null, known: TeamView | null, refreshKey: unknown): TeamView | null {
-  const [fetched, setFetched] = useState<{ id: string; team: TeamView } | null>(null);
-  const missing = teamId !== null && !known;
-  useEffect(() => {
-    if (!missing || !teamId) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch(`/setup-api/coding-agent/team?id=${encodeURIComponent(teamId)}`, { cache: "no-store" });
-        const data = await res.json().catch(() => null) as { team?: TeamView } | null;
-        if (!cancelled && res.ok && data?.team) setFetched({ id: teamId, team: data.team });
-      } catch {
-        // The run's own chart stands in until the board can be read.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [missing, teamId, refreshKey]);
-  if (!teamId) return null;
-  return known ?? (fetched?.id === teamId ? fetched.team : null);
-}
-
-const chipClass = "shrink-0 text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5";
-
-/** A chart's heading row: what it is of, how it stands, and the way to its page. */
-function ChartHeader({ icon, chip, title, action, onAction, testId }: { icon: string; chip: ReactNode; title: string; action: string; onAction?: () => void; testId?: string }) {
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="material-symbols-rounded shrink-0 text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">{icon}</span>
-      {chip}
-      <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]" title={title}>{title}</p>
-      {onAction && (
-        <button type="button" onClick={onAction} className={`${BTN_QUIET} !px-2`} data-testid={testId}>
-          {action}
-          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">chevron_right</span>
-        </button>
-      )}
-    </div>
-  );
-}
+const chipClass = "shrink-0 text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5";
 
 function firstLine(text: string, max = 120): string {
   const line = text.split("\n").find((l) => l.trim()) ?? "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line.trim();
 }
 
-/** Whether a run sent any helper out — the one case a solo run's page draws a chart for. */
+/** Whether a run sent any helper out — the one case a solo run draws a chart for. */
 export function runHasHelpers(run: Pick<LiveRun, "subagents" | "activeSubagents">): boolean {
   return (run.subagents?.length ?? 0) > 0 || (run.activeSubagents?.length ?? 0) > 0;
 }
 
 /**
- * The run page's **Helpers** chart: its team with this run marked (until the
- * team has a page of its own), or — solo — the run and the helpers it sent
- * out. NOTHING for a solo run without helpers (2026-10-30): a one-node chart
- * in a full-width card was the owner's "the space in the run diagram is
- * almost all empty", and the page's status, Now line and figures already say
- * everything that node did. Bare and without the legend: the host's block
- * is the card, and three nodes with their icons need no key.
+ * The run page's **Helpers** chart: the run and the helpers it sent out.
+ * NOTHING for a run without helpers (2026-10-30): a one-node chart in a
+ * full-width card was the owner's "the space in the run diagram is almost all
+ * empty", and the page's status, Now line and figures already say everything
+ * that node did. Nothing for a team member either: its team's chart is on the
+ * Team page, which the member's team chip opens (until step 5 the member's
+ * page drew its team here). Bare and without the legend: the host's block is
+ * the card, and three nodes with their icons need no key.
  */
-export function RunAgentsDiagram({ run, teams, runOf, onOpenRun, onChanged, refreshKey }: {
+export function RunAgentsDiagram({ run, onOpenRun, onChanged, refreshKey }: {
   run: LiveRun;
-  teams: TeamView[];
-  runOf: (id: string) => DiagramRun | undefined;
   onOpenRun: (id: string) => void;
   onChanged?: () => void;
   refreshKey?: unknown;
 }) {
   const { t } = useT();
-  const known = run.team ? teams.find((x) => x.id === run.team!.id) ?? null : null;
-  const board = useTeamBoard(run.team?.id ?? null, known, refreshKey);
-  // A team member's page: its TEAM, the run marked — once the board is read;
-  // nothing stands in meanwhile (the run's one node said nothing the status
-  // block above does not). The team's own page takes this over when it exists.
-  if (run.team) {
-    if (!board) return null;
-    return (
-      <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-helpers" data-kind="team">
-        <p className={SECTION_LABEL}>{t("codingAgent.teamTab")}</p>
-        <CodingAgentDiagram
-          source={{ kind: "team", team: board }}
-          runOf={runOf}
-          current={run.id}
-          onOpenRun={onOpenRun}
-          onChanged={onChanged}
-          refreshKey={refreshKey}
-          bare
-          testId="coding-agent-run-diagram"
-          className="mt-2"
-        />
-      </div>
-    );
-  }
   if (!runHasHelpers(run)) return null;
-  // No figure chips over a solo run's chart: the page's figure tiles hold
-  // those numbers, and the same four sat twice on one screen. A team chart
-  // keeps its task and role bars, which the tiles do not draw.
+  // No figure chips over the chart: the page's figure tiles hold those
+  // numbers, and the same four sat twice on one screen.
   return (
     <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-helpers" data-kind="run">
       <p className={SECTION_LABEL}>{t("codingAgent.statHelpers")}</p>
@@ -153,12 +93,36 @@ export function RunAgentsDiagram({ run, teams, runOf, onOpenRun, onChanged, refr
   );
 }
 
-export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, openTeamFor, onChanged, refreshKey }: {
+/**
+ * A card's or a row's heading: the whole of it is the way to the page — a
+ * 44-px button across the card — with the glyph, the status, the title and a
+ * chevron. `extra` sits between the title and the chevron (a task count).
+ */
+function Heading({ icon, chip, title, extra, onOpen, testId }: { icon: string; chip: ReactNode; title: string; extra?: ReactNode; onOpen: () => void; testId: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      data-testid={testId}
+      className="flex w-full min-w-0 items-center gap-2 min-h-[44px] @md:min-h-[36px] text-left rounded-lg -mx-1 px-1 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)] cursor-pointer"
+    >
+      <span className="material-symbols-rounded shrink-0 text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">{icon}</span>
+      {chip}
+      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]" title={title}>{title}</span>
+      {extra}
+      <span className="material-symbols-rounded shrink-0 text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
+    </button>
+  );
+}
+
+export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, onOpenTeam, onAsk, onChanged, refreshKey }: {
   runs: LiveRun[];
   teams: TeamView[];
   onOpenRun: (id: string) => void;
-  /** How to open the project page a team works in, on its Team tab — undefined for a team whose project is not on the list. */
-  openTeamFor?: (team: TeamView) => (() => void) | undefined;
+  /** Open a team's own page. */
+  onOpenTeam: (team: TeamView) => void;
+  /** The way to the chat when nothing has ever run — absent on `/app/coding`, where no desktop listens. */
+  onAsk?: () => void;
   onChanged?: () => void;
   refreshKey?: unknown;
 }) {
@@ -170,10 +134,12 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, openTeam
   const solo = (r: LiveRun) => !r.team && !inTeam.has(r.id);
   const liveTeams = teams.filter((x) => isTeamActive(x.status));
   const liveRuns = runs.filter((r) => isLive(r.status) && solo(r));
-  const waiting = teams.filter((x) => x.status === "queued");
+  const queuedTeams = teams.filter((x) => x.status === "queued").sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
+  const queuedRuns = runs.filter((r) => r.status === "queued" && solo(r)).sort((a, b) => (a.queued?.position ?? 0) - (b.queued?.position ?? 0));
   const atWork = liveTeams.length + liveRuns.length;
+  const waiting = queuedTeams.length + queuedRuns.length;
 
-  // Nothing at work: the newest thing that was, so the chart is still the first thing here.
+  // Nothing at work: the newest thing that was, as one row.
   let latest: { kind: "team"; team: TeamView } | { kind: "run"; run: LiveRun } | null = null;
   if (atWork === 0) {
     const lastTeam = [...teams].filter((x) => x.status !== "queued").sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null;
@@ -182,91 +148,128 @@ export default function CodingAgentLiveAgents({ runs, teams, onOpenRun, openTeam
     else if (lastRun) latest = { kind: "run", run: lastRun };
   }
 
-  const teamChart = (team: TeamView) => (
-    <CodingAgentDiagram
-      key={team.id}
-      source={{ kind: "team", team }}
-      runOf={runOf}
-      onOpenRun={onOpenRun}
-      onChanged={onChanged}
-      refreshKey={refreshKey}
-      testId={`coding-agent-live-team-${team.id}`}
-      className="mt-2"
-      header={(
-        <ChartHeader
-          icon="groups"
-          chip={<span className={`${chipClass} ${TEAM_STATUS_TONE[team.status] ?? TEAM_STATUS_TONE.stopped}`}>{t(`codingAgent.team.status.${team.status}`)}</span>}
-          title={firstLine(team.goal)}
-          action={t("codingAgent.diagram.openTeam")}
-          onAction={openTeamFor?.(team)}
-          testId={`coding-agent-live-open-team-${team.id}`}
-        />
-      )}
-    />
+  const teamChip = (team: TeamView) => (
+    <span className={`${chipClass} ${TEAM_STATUS_TONE[team.status] ?? TEAM_STATUS_TONE.stopped} ${isTeamActive(team.status) ? "coding-agent-pulse" : ""}`}>
+      {isTeamActive(team.status) && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+      {t(`codingAgent.team.status.${team.status}`)}
+    </span>
   );
-  /** A run that sent out no helper: one node is no chart, so the newest such run is a plain row. */
-  const lone = (run: LiveRun) => (run.subagents?.length ?? 0) + (run.activeSubagents?.length ?? 0) === 0;
-  const runRow = (run: LiveRun) => (
-    <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2`} data-testid={`coding-agent-live-run-${run.id}`} data-plain="true">
-      <ChartHeader
-        icon="smart_toy"
-        chip={<span className={`${chipClass} ${RUN_TONE[run.status]?.chip ?? ""}`}>{t(runStatusKey(run.status))}</span>}
-        title={firstLine(run.task)}
-        action={t("codingAgent.diagram.openRun")}
-        onAction={() => onOpenRun(run.id)}
-        testId={`coding-agent-live-open-run-${run.id}`}
+  const runChip = (run: LiveRun) => (
+    <span className={`${chipClass} ${RUN_TONE[run.status]?.chip ?? ""} ${run.status === "running" ? "coding-agent-pulse" : ""}`}>
+      {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
+      {t(runStatusKey(run.status))}
+    </span>
+  );
+  const tasksCount = (team: TeamView) => {
+    const p = taskProgress(team);
+    return p.total > 0 ? <span className="shrink-0 text-[11px] text-[var(--text-muted)]">{t("codingAgent.teamTasksDone", { done: p.accepted, total: p.total })}</span> : null;
+  };
+  /** The card's whole surface opens the page; a control on it keeps its own meaning. */
+  const cardOpen = (open: () => void) => (e: MouseEvent<HTMLElement>) => {
+    if ((e.target as HTMLElement).closest("button, a")) return;
+    open();
+  };
+
+  /** A team at work: its heading, and the real chart, compact. */
+  const teamCard = (team: TeamView) => (
+    <div key={team.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-team-${team.id}`} data-kind="team" data-shape="team" onClick={cardOpen(() => onOpenTeam(team))}>
+      <Heading icon="groups" chip={teamChip(team)} title={firstLine(team.goal)} extra={tasksCount(team)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
+      <CodingAgentDiagram
+        source={{ kind: "team", team }}
+        runOf={runOf}
+        onOpenRun={onOpenRun}
+        onChanged={onChanged}
+        refreshKey={refreshKey}
+        compact
+        bare
+        figures={false}
+        legend={false}
+        testId={`coding-agent-live-chart-${team.id}`}
+        className="mt-1"
       />
-      <DiagramFigures source={{ kind: "run", run }} lookup={runOf} />
     </div>
   );
-  const runChart = (run: LiveRun) => (
-    <CodingAgentDiagram
-      key={run.id}
-      source={{ kind: "run", run }}
-      onOpenRun={onOpenRun}
-      onChanged={onChanged}
-      refreshKey={refreshKey}
-      testId={`coding-agent-live-run-${run.id}`}
-      className="mt-2"
-      header={(
-        <ChartHeader
-          icon="smart_toy"
-          chip={<span className={`${chipClass} ${RUN_TONE[run.status]?.chip ?? ""} ${run.status === "running" ? "coding-agent-pulse" : ""}`}>{t(runStatusKey(run.status))}</span>}
-          title={firstLine(run.task)}
-          action={t("codingAgent.diagram.openRun")}
-          onAction={() => onOpenRun(run.id)}
-          testId={`coding-agent-live-open-run-${run.id}`}
-        />
-      )}
-    />
+  /** A solo run that sent helpers out: the same card, its own chart. */
+  const runCard = (run: LiveRun) => (
+    <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-run-${run.id}`} data-kind="run" data-shape="run" onClick={cardOpen(() => onOpenRun(run.id))}>
+      <Heading icon="smart_toy" chip={runChip(run)} title={firstLine(run.task)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
+      <CodingAgentDiagram
+        source={{ kind: "run", run }}
+        onOpenRun={onOpenRun}
+        onChanged={onChanged}
+        refreshKey={refreshKey}
+        compact
+        bare
+        figures={false}
+        legend={false}
+        testId={`coding-agent-live-chart-${run.id}`}
+        className="mt-1"
+      />
+    </div>
+  );
+  /** A run without helpers — at work or the newest that was: a plain row, its Now line while it works, its figures. */
+  const runRow = (run: LiveRun) => {
+    const steps = run.progress ?? [];
+    const last = run.status === "running" && steps.length > 0 ? steps[steps.length - 1] : null;
+    return (
+      <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-run-${run.id}`} data-plain="true" onClick={cardOpen(() => onOpenRun(run.id))}>
+        <Heading icon="smart_toy" chip={runChip(run)} title={firstLine(run.task)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
+        {last && (
+          <p className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]" data-testid={`coding-agent-live-now-${run.id}`}>
+            {t("codingAgent.rowNow", { step: describeStep(t, last).label })}
+          </p>
+        )}
+        <DiagramFigures source={{ kind: "run", run }} lookup={runOf} />
+      </div>
+    );
+  };
+  /** The newest settled team: one row — the chart is on its page. */
+  const teamRow = (team: TeamView) => (
+    <div key={team.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-team-${team.id}`} data-kind="team" data-plain="true" onClick={cardOpen(() => onOpenTeam(team))}>
+      <Heading icon="groups" chip={teamChip(team)} title={firstLine(team.goal)} extra={tasksCount(team)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
+    </div>
+  );
+  /** Something waiting its turn: the same row, with its place in line. */
+  const queuedChip = (position: number | undefined) => (
+    <span className={`${chipClass} ${TEAM_STATUS_TONE.queued}`}>
+      {t("codingAgent.team.status.queued")}
+      {position ? <span className="normal-case tracking-normal font-normal">· {t("codingAgent.team.queuePosition", { n: position })}</span> : null}
+    </span>
+  );
+  const queuedTeamRow = (team: TeamView) => (
+    <div key={team.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-team-${team.id}`} data-kind="team" data-queued="true" onClick={cardOpen(() => onOpenTeam(team))}>
+      <Heading icon="groups" chip={queuedChip(team.queuePosition)} title={firstLine(team.goal)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
+    </div>
+  );
+  const queuedRunRow = (run: LiveRun) => (
+    <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-run-${run.id}`} data-queued="true" onClick={cardOpen(() => onOpenRun(run.id))}>
+      <Heading icon="smart_toy" chip={queuedChip(run.queued?.position)} title={firstLine(run.task)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
+    </div>
   );
 
+  const label = atWork > 0 ? t("codingAgent.diagram.liveTitle") : latest ? t("codingAgent.diagram.latestTitle") : t("codingAgent.agentsTitle");
   return (
-    <section className="mt-3" data-testid="coding-agent-live-agents" data-live={atWork} aria-label={atWork > 0 ? t("codingAgent.diagram.liveTitle") : t("codingAgent.diagram.latestTitle")}>
+    <section className="mt-3" data-testid="coding-agent-live-agents" data-live={atWork} data-queued={waiting || undefined} aria-label={label}>
       <p className={SECTION_LABEL}>
         <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{atWork > 0 ? "bolt" : "history"}</span>
-        {atWork > 0 ? t("codingAgent.diagram.liveTitle") : latest ? t("codingAgent.diagram.latestTitle") : t("codingAgent.agentsTitle")}
+        {label}
         {atWork > 0 && <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{atWork}</span>}
       </p>
-      {liveTeams.map(teamChart)}
-      {liveRuns.map(runChart)}
-      {latest?.kind === "team" && teamChart(latest.team)}
-      {latest?.kind === "run" && (lone(latest.run) ? runRow(latest.run) : runChart(latest.run))}
-      {waiting.length > 0 && (
-        <ul className="mt-2 space-y-1" data-testid="coding-agent-live-queued">
-          {waiting.map((q) => (
-            <li key={q.id} className="flex min-w-0 items-center gap-2 text-[11px] text-[var(--text-secondary)]">
-              <span className={`${chipClass} ${TEAM_STATUS_TONE.queued}`}>{t("codingAgent.team.status.queued")}</span>
-              {q.queuePosition && <span className="shrink-0 text-indigo-200/90">{t("codingAgent.team.queuePosition", { n: q.queuePosition })}</span>}
-              <span className="min-w-0 truncate">{firstLine(q.goal)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {atWork === 0 && !latest && (
-        <div className={`mt-2 ${CARD_SURFACE} flex flex-col items-center gap-2 px-4 py-4`} data-testid="coding-agent-live-empty">
-          <CodingAgentDelegationArt className="opacity-80" />
-          <p className="max-w-[36rem] text-center text-[12px] leading-relaxed text-[var(--text-muted)]">{t("codingAgent.diagram.empty")}</p>
+      {liveTeams.map(teamCard)}
+      {liveRuns.map((run) => (runHasHelpers(run) ? runCard(run) : runRow(run)))}
+      {queuedTeams.map(queuedTeamRow)}
+      {queuedRuns.map(queuedRunRow)}
+      {latest?.kind === "team" && teamRow(latest.team)}
+      {latest?.kind === "run" && runRow(latest.run)}
+      {atWork === 0 && waiting === 0 && !latest && (
+        <div className={`mt-2 ${CARD_SURFACE} flex flex-col items-center gap-3 px-4 py-5`} data-testid="coding-agent-live-empty">
+          <p className="max-w-[36rem] text-center text-[13px] leading-relaxed text-[var(--text-secondary)]">{t("codingAgent.nothingRunYet")}</p>
+          {onAsk && (
+            <button type="button" onClick={onAsk} data-testid="coding-agent-live-ask" className={BTN_PRIMARY_WIDE}>
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">chat</span>
+              {t("codingAgent.askInChat")}
+            </button>
+          )}
         </div>
       )}
     </section>

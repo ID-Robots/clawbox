@@ -98,8 +98,8 @@ export function takePendingCodingRun(): string | null {
  * desktop's team finish card end here, and the app opens on the team rather
  * than on its home. The same two handoffs — the `window` slot survives a
  * cold open, the event reaches an app already on screen — and the same
- * take-once read on the app's side. Until the team has a page of its own,
- * the app lands on the team's project with its Team tab selected.
+ * take-once read on the app's side. The app opens the team's own page
+ * (CodingTeamPage, since the redesign's step 5), its project behind it.
  */
 export const OPEN_CODING_TEAM_EVENT = "clawbox:open-coding-team";
 

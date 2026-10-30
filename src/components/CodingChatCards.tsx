@@ -214,9 +214,9 @@ export function CodingChatCards({ cards, openFromChat, onPreview, onDismissRun }
           team={team}
           labels={teamLabels}
           openLabel={openLabel}
-          // Open: the Coding Agent app on the team — its page once it has one
-          // (plan step 5); until then its project's Team tab (CodingAgentApp
-          // `openTeamFor`). A normal window, like the run's.
+          // Open: the Coding Agent app on the team's own page (CodingTeamPage;
+          // the app takes the id from the hand-off slot or the event). A
+          // normal window, like the run's.
           onOpen={() => openFromChat(() => dispatchOpenCodingTeam(team.id))}
           onDismiss={() => cards.dismiss(teamCardKey(team.id))}
           autoHiding={cards.finishing.has(teamCardKey(team.id))}

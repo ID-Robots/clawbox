@@ -120,22 +120,23 @@ beforeEach(() => { calls = []; });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("the tabs", () => {
-  it("opens on Activity when the host hands one — Activity, Files, Changes, then the Team tab last — and on Files otherwise", async () => {
+  it("opens on Activity when the host hands one — Activity, Files, Changes, three tabs and no Team tab — and on Files otherwise", async () => {
     stubDevice();
     const { unmount } = render(
-      <CodingProjectWorkspace query="projectId=site" live={false} activity={<div data-testid="activity-pane" />} activityLive team={<div data-testid="team-pane" />} />,
+      <CodingProjectWorkspace query="projectId=site" live={false} activity={<div data-testid="activity-pane" />} activityLive />,
     );
     await screen.findByTestId("coding-agent-workspace");
     const tabs = screen.getAllByRole("tab").map((tab) => tab.getAttribute("data-testid"));
-    expect(tabs).toEqual(["coding-agent-workspace-runs", "coding-agent-workspace-files", "coding-agent-workspace-changes", "coding-agent-workspace-team"]);
+    expect(tabs).toEqual(["coding-agent-workspace-runs", "coding-agent-workspace-files", "coding-agent-workspace-changes"]);
     const activity = screen.getByTestId("coding-agent-workspace-runs");
     expect(activity).toHaveAttribute("aria-selected", "true");
     expect(activity).toHaveTextContent(t("codingAgent.activityTab"));
     expect(within(activity).getByTestId("coding-agent-workspace-runs-live")).toBeInTheDocument();
     expect(screen.getByTestId("activity-pane").closest("[role=tabpanel]")).not.toHaveAttribute("hidden");
-    expect(screen.getByTestId("team-pane").closest("[role=tabpanel]")).toHaveAttribute("hidden");
-    // No Setup tab, no Runs tab: notes and tools are folds on the page.
+    // No Setup tab, no Runs tab, no Team tab (a team is a row in Activity and
+    // a page of its own since 2026-10-30): notes and tools are folds on the page.
     expect(screen.queryByTestId("coding-agent-workspace-setup")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-workspace-team")).toBeNull();
     // Zero inputs on every tab.
     fireEvent.click(screen.getByTestId("coding-agent-workspace-files"));
     await screen.findByTestId("coding-agent-file-tree");
@@ -151,14 +152,14 @@ describe("the tabs", () => {
     expect(screen.getByTestId("coding-agent-workspace-files")).toHaveAttribute("aria-selected", "true");
   });
 
-  it("follows a tab the host asks for after mount — a team's row opening the Team tab", async () => {
+  it("follows a tab the host asks for after mount — a run's See the diff opening Changes", async () => {
     stubDevice();
-    const { rerender } = render(<CodingProjectWorkspace query="projectId=site" live={false} activity={<div />} team={<div data-testid="team-pane" />} />);
+    const { rerender } = render(<CodingProjectWorkspace query="projectId=site" live={false} activity={<div />} />);
     await screen.findByTestId("coding-agent-workspace");
     expect(screen.getByTestId("coding-agent-workspace-runs")).toHaveAttribute("aria-selected", "true");
-    rerender(<CodingProjectWorkspace query="projectId=site" live={false} activity={<div />} team={<div data-testid="team-pane" />} initialTab="team" />);
-    expect(screen.getByTestId("coding-agent-workspace-team")).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("team-pane").closest("[role=tabpanel]")).not.toHaveAttribute("hidden");
+    rerender(<CodingProjectWorkspace query="projectId=site" live={false} activity={<div />} initialTab="changes" />);
+    expect(screen.getByTestId("coding-agent-workspace-changes")).toHaveAttribute("aria-selected", "true");
+    expect(document.getElementById("coding-agent-workspace-pane-changes")).not.toHaveAttribute("hidden");
   });
 });
 

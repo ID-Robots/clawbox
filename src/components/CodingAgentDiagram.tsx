@@ -13,7 +13,7 @@
  * node is a role glyph, a short label, and its state twice — the colour of
  * its ring and the icon on its badge — so the chart reads without colour too.
  * The ones at work pulse (`ct-art-live`) and the edge into them flows
- * (`ct-art-flow`, stepped by CodingTeamTree's `useSteppedFlow`); both rules
+ * (`ct-art-flow`, stepped by `useSteppedFlow` in src/lib/coding-agent-flow.ts); both rules
  * live under `prefers-reduced-motion: no-preference`, so with motion off the
  * chart is the same chart, still.
  *
@@ -25,7 +25,7 @@
  * arrows while it is open. Escape closes it and gives focus back to the node.
  *
  * Nothing here polls. The chart is drawn from what its host already reads on
- * its own beat (the app's live poll, the Team card's) and redraws with it, so
+ * its own beat (the app's live poll, which the Team page draws from) and redraws with it, so
  * the open panel is as fresh as the page.
  */
 
@@ -54,8 +54,8 @@ import {
 import type { RunMessage } from "@/lib/coding-run-messages";
 import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
 import { codingModelName } from "@/lib/coding-model-names";
-import type { TeamTaskView, TeamView } from "./CodingTeamCard";
-import { useSteppedFlow } from "./CodingTeamTree";
+import type { TeamTaskView, TeamView } from "./CodingTeamPage";
+import { useSteppedFlow } from "@/lib/coding-agent-flow";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
 import { BTN_DANGER, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
 import { dispatchOpenChat } from "@/lib/ui-events";
@@ -97,7 +97,7 @@ const PANEL_FILES = 6;
 
 /**
  * Each state's colour, over the app's dark ground: the product's coral for
- * work, the board's own tones for the rest (CodingTeamCard's STATUS_TONE).
+ * work, the board's own tones for the rest (CodingTeamPage's TEAM_STATUS_TONE).
  * Every one is a 300/400 tint, legible against the near-black window.
  */
 export const STATE_COLOR: Record<AgentState, string> = {
@@ -310,18 +310,25 @@ interface Props {
    * not need a key and the legend was the widest line on a phone.
    */
   legend?: boolean;
+  /**
+   * The compact geometry whatever the width — home's Now cards (2026-10-30),
+   * where a team's chart is a glance at who is at work, sized to its content,
+   * and the full geometry would be a second rendering of the Team page's.
+   * The panel's beside/sheet choice still follows the measured width.
+   */
+  compact?: boolean;
   testId?: string;
   className?: string;
 }
 
-export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, figures = true, legend = true, testId = "coding-agent-diagram", className = "" }: Props) {
+export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged, current = null, initialSelected = null, refreshKey, header, bare = false, figures = true, legend = true, compact: forceCompact = false, testId = "coding-agent-diagram", className = "" }: Props) {
   const { t } = useT();
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const wrap = useRef<HTMLDivElement>(null);
   const svg = useRef<SVGSVGElement>(null);
   useSteppedFlow(svg);
   const width = useMeasuredWidth(wrap);
-  const compact = width > 0 && width < COMPACT_BELOW;
+  const compact = forceCompact || (width > 0 && width < COMPACT_BELOW);
 
   const lookup = useCallback(
     (id: string): DiagramRun | undefined => (source.kind === "run" && source.run.id === id ? source.run : runOf?.(id)),
@@ -380,7 +387,7 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
   const name = team ? firstLine(team.goal, 60) : source.kind === "run" ? firstLine(source.run.task, 60) : "";
 
   return (
-    <div ref={wrap} className={`${bare ? "" : `${CARD_SURFACE} px-4 py-3`} ${className}`} data-testid={testId} data-shape={graph.shape} data-layout={sheet ? "sheet" : "beside"}>
+    <div ref={wrap} className={`${bare ? "" : `${CARD_SURFACE} px-4 py-3`} ${className}`} data-testid={testId} data-shape={graph.shape} data-layout={sheet ? "sheet" : "beside"} data-compact={compact || undefined}>
       {header}
       {figures && <DiagramFigures source={source} lookup={lookup} />}
       {/* What the colours mean, counted: the chart's own summary, and the words
