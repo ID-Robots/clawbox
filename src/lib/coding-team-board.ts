@@ -131,10 +131,13 @@ export interface RepoMap {
  * Why a single run would have been cheaper than this team (`teamAdvice`):
  * the plan has one task, or its tasks' files mostly overlap — `overlap` is
  * the share of the plan's hinted files another task names too, in percent.
+ * `catchAll`: the planned tasks that name every file the others own
+ * (`catchAllTasks`) — on an overlap verdict only, and only when there are any.
  */
 export interface TeamAdvice {
   reason: "one_task" | "overlap";
   overlap: number;
+  catchAll?: string[];
 }
 
 /** Tokens the team's runs spent, by the role they ran in. */
@@ -1106,6 +1109,26 @@ export function reviewTask(board: TeamBoard, actor: Actor, taskId: string, verdi
 }
 
 /**
+ * A task its review just sent back that gets NO further attempt — the one run
+ * of a plan run as a single run (coding-team.ts runAsSingleRun) was every
+ * attempt there is — closed as `rejected` for good, rather than left pending
+ * on a team that has settled. The system's alone; the review's line already
+ * says why.
+ */
+export function closeRejected(board: TeamBoard, actor: Actor, taskId: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "close_rejected", `Only the system closes a rejected task; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.review?.verdict !== "rejected" || (task.status !== "pending" && task.status !== "rejected")) {
+    throw new Error(`Task ${taskId} is ${task.status}; only a task its review rejected is closed.`);
+  }
+  task.status = "rejected";
+  task.assigned_to = null;
+  task.updated_at = Date.now();
+  board.updatedAt = task.updated_at;
+  return task;
+}
+
+/**
  * HOLD a task that started on a dependency which has since been rejected or
  * reopened: the system's, and only for a task that really depends on it and
  * that started — a running attempt (the orchestrator stops its worker and
@@ -1747,7 +1770,15 @@ function hintsOverlap(a: string, b: string): boolean {
 export function teamAdvice(board: Pick<TeamBoard, "tasks">): TeamAdvice | null {
   const planned = board.tasks.filter((t) => t.origin !== "lead");
   if (planned.length === 1) return { reason: "one_task", overlap: 100 };
-  const hinted = planned.filter((t) => t.files_hint.some((h) => hintKey(h)));
+  const share = overlapShare(planned);
+  if (share === null || share < OVERLAP_ADVICE_SHARE) return null;
+  const catchAll = catchAllTasks(planned);
+  return { reason: "overlap", overlap: Math.round(share * 100), ...(catchAll.length ? { catchAll } : {}) };
+}
+
+/** The share of the hinted files of `tasks` that another of them names too — null where fewer than two tasks name files. */
+function overlapShare(tasks: readonly Pick<TeamTask, "files_hint">[]): number | null {
+  const hinted = tasks.filter((t) => t.files_hint.some((h) => hintKey(h)));
   if (hinted.length < 2) return null;
   let total = 0;
   let shared = 0;
@@ -1759,9 +1790,145 @@ export function teamAdvice(board: Pick<TeamBoard, "tasks">): TeamAdvice | null {
       if (others.some((o) => hintsOverlap(hint, o))) shared += 1;
     }
   }
-  if (total === 0) return null;
-  const share = shared / total;
-  return share >= OVERLAP_ADVICE_SHARE ? { reason: "overlap", overlap: Math.round(share * 100) } : null;
+  return total === 0 ? null : shared / total;
+}
+
+/** Does hint `a` name what hint `b` names: the same path, or a folder holding it? */
+function hintCovers(a: string, b: string): boolean {
+  const x = hintKey(a);
+  const y = hintKey(b);
+  return Boolean(x && y) && (x === y || y.startsWith(`${x}/`));
+}
+
+/**
+ * The planned tasks whose `files_hint` names every file each OTHER hinted
+ * planned task names — with at least two such others. A task like that makes
+ * every file of the plan "shared" on its own, whatever the rest split into: a
+ * planner that could not tell the work apart hedged with one (a blind plan's
+ * "integrate everything" task), and so does an honest plan whose last task
+ * ties the others together. Which of the two it is, `catchAllLeftOut` says.
+ */
+export function catchAllTasks(tasks: readonly TeamTask[]): string[] {
+  const hinted = tasks.filter((t) => t.origin !== "lead" && t.files_hint.some((h) => hintKey(h)));
+  return hinted
+    .filter((task) => {
+      const others = hinted.filter((t) => t !== task);
+      return others.length >= 2 && others.every((o) => o.files_hint.every((h) => !hintKey(h) || task.files_hint.some((mine) => hintCovers(mine, h))));
+    })
+    .map((t) => t.task_id);
+}
+
+/**
+ * The plan measured with its catch-all tasks (`catchAllTasks`) left out:
+ * `overlapWithout` is the overlap of the rest in percent (null where too few
+ * tasks are left to judge), `runsLast` says every catch-all task waits —
+ * directly or through another task — on every other planned task. Both
+ * together (`leftOut`) is an INTEGRATION step: it runs after the work it
+ * names, never beside it, so its files conflict with nothing, and the plan
+ * runs as the team it is.
+ */
+export function catchAllLeftOut(board: Pick<TeamBoard, "tasks">, catchAll: readonly string[]): { overlapWithout: number | null; runsLast: boolean; leftOut: boolean } {
+  const planned = board.tasks.filter((t) => t.origin !== "lead");
+  const share = overlapShare(planned.filter((t) => !catchAll.includes(t.task_id)));
+  const runsLast = catchAll.length > 0 && catchAll.every((id) => {
+    const waits = waitsOnTransitively(planned, id);
+    return planned.every((t) => t.task_id === id || waits.has(t.task_id));
+  });
+  return {
+    overlapWithout: share === null ? null : Math.round(share * 100),
+    runsLast,
+    leftOut: runsLast && (share === null || share < OVERLAP_ADVICE_SHARE),
+  };
+}
+
+/** Every task `taskId` waits on, directly or through another. */
+function waitsOnTransitively(tasks: readonly Pick<TeamTask, "task_id" | "depends_on">[], taskId: string): Set<string> {
+  const seen = new Set<string>();
+  const next = [...(tasks.find((t) => t.task_id === taskId)?.depends_on ?? [])];
+  while (next.length) {
+    const id = next.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    next.push(...(tasks.find((t) => t.task_id === id)?.depends_on ?? []));
+  }
+  return seen;
+}
+
+/**
+ * What a planner says when it could not read the project: the words its brief
+ * tells it to write then ("source not inspected" — a contract with
+ * coding-team-planner.ts PLANNER_BRIEF), and the ways a model says so unasked.
+ */
+const BLIND_PLAN = /source not inspected|not inspected|no source (was )?read|could not (read|inspect)|unable to (read|inspect)|tools? (were|was|are) unavailable/i;
+
+/**
+ * Why a parsed plan reads as written WITHOUT reading the project — or null.
+ * Its repo map, its shape's rationale and the prose around its JSON are read;
+ * the tasks are not (a task may well ask its worker to inspect something).
+ * A plan like that hedges: every repo-map entry "source not inspected", and a
+ * catch-all task naming every file because the planner could not tell the
+ * work apart.
+ */
+export function blindPlanReason(answer: string | null | undefined, repoMap: RepoMap | null, shape: TeamShape | null): string | null {
+  const said: string[] = [];
+  const entries = repoMap ? [...repoMap.files, ...repoMap.entryPoints, ...repoMap.testCommands, ...repoMap.gotchas] : [];
+  const hits = entries.map((e) => BLIND_PLAN.exec(e)?.[0]).filter((m): m is string => Boolean(m));
+  if (hits.length) said.push(`its repo map says "${hits[0]}" (${hits.length} of ${entries.length} entries)`);
+  const rationale = shape ? BLIND_PLAN.exec(shape.rationale) : null;
+  if (rationale) said.push(`its shape's rationale says "${rationale[0]}"`);
+  const prose = BLIND_PLAN.exec(planProse(answer ?? ""));
+  if (prose) said.push(`its answer says "${prose[0]}"`);
+  return said.length ? said.join("; ") : null;
+}
+
+/** A planner's answer without its JSON: fenced blocks out, and every top-level bracket that parses as JSON. */
+function planProse(answer: string): string {
+  const text = answer.replace(/```[\s\S]*?(?:```|$)/g, " ");
+  let prose = "";
+  let from = 0;
+  for (const [start, end] of jsonSpans(text)) {
+    prose += `${text.slice(from, start)} `;
+    from = end + 1;
+  }
+  return prose + text.slice(from);
+}
+
+/**
+ * The top-level `[…]` and `{…}` spans of `text` that parse as JSON, in order.
+ * Strings are skipped only INSIDE a bracket: a quote in the prose around the
+ * plan must not swallow the plan's own opening bracket.
+ */
+function jsonSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const open: string[] = [];
+  let start = -1;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"' && open.length) inString = true;
+    else if (ch === "[" || ch === "{") {
+      if (!open.length) start = i;
+      open.push(ch);
+    } else if ((ch === "]" || ch === "}") && open.length) {
+      if ((ch === "]") !== (open.pop() === "[")) {
+        open.length = 0;
+        continue;
+      }
+      if (open.length) continue;
+      try {
+        JSON.parse(text.slice(start, i + 1));
+        spans.push([start, i]);
+      } catch {
+        // Prose in brackets, not JSON: it stays prose.
+      }
+    }
+  }
+  return spans;
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
