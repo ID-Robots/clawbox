@@ -20,7 +20,7 @@
 #   * for the record: MemAvailable before the model loaded and its lowest
 #     during the turn, llama-server's RSS, and its prefill and decode speed
 #     on one fixed prompt (llama-server's own timings). Decode under 10 tok/s
-#     fails: the model is no longer on the GPU.
+#     fails (the model is no longer on the GPU), and so does no measurement.
 #
 # Two attempts, each on a session of its own: the turn passes when one does,
 # and a miss is noted. Afterwards the box is put back — the primary model and
@@ -44,7 +44,9 @@ MIN_DECODE_TOK_S=10
 # tags are dropped first; then letters and whole words only Russian has (ы э ё,
 # "что", "это", "создал", …) make it Russian, and a Cyrillic reply with no
 # Russian marker and at least one Bulgarian-only one (ъ inside a word, ѝ,
-# "това", "ето", "създадох", …) makes it Bulgarian.
+# "това", "ето", "създадох", …) makes it Bulgarian. A word both languages
+# use ("привет", "нужно", "ваш", "вам", "ли", "само") is in neither list: one
+# such word must not turn a correct Bulgarian reply into a Russian one.
 # shellcheck disable=SC2016  # jq's own variables
 LANG_JQ='
 def lower: explode | map(if . >= 1040 and . <= 1071 then . + 32 elif . >= 1024 and . <= 1039 then . + 80 elif . >= 65 and . <= 90 then . + 32 else . end) | implode;
@@ -55,8 +57,8 @@ def hits(list): . as $words | [$words[] | select(. as $w | list | index([$w]))] 
 | ($t | [scan("[ыэёЫЭЁ]")] | length) as $ru_letters
 | ($t | [scan("\\p{Cyrillic}[ъЪ]\\p{Cyrillic}|[ѝЍ]")] | length) as $bg_letters
 | ($t | lower | [scan("\\p{L}+")]) as $words
-| ($words | hits(["что","это","этот","эта","вот","создал","создала","сделал","сделала","страницу","простую","можно","конечно","пожалуйста","есть","задачу","нужно","если","теперь","вы","вам","ваш","ваша","мне","меня","создан","создана","создано","объект","который","которая","которые","привет","здравствуйте","спасибо","хорошо","сейчас","только","также","здесь","открыть","откройте","добавить","удалить"])) as $ru_words
-| ($words | hits(["това","тази","тези","ето","създадох","направих","страницата","ще","може","можеш","със","във","към","също","задачите","бутон","добави","изтрий","които","който","която","нещо","е","сега","само","ли","искаш"])) as $bg_words
+| ($words | hits(["что","это","этот","эта","вот","создал","создала","сделал","сделала","страницу","простую","можно","конечно","пожалуйста","есть","задачу","если","теперь","вы","мне","меня","создан","создана","создано","объект","который","которая","которые","здравствуйте","спасибо","хорошо","сейчас","только","также","здесь","открыть","откройте","добавить","удалить"])) as $ru_words
+| ($words | hits(["това","тази","тези","ето","създадох","направих","страницата","ще","може","можеш","със","във","към","също","задачите","бутон","добави","изтрий","които","който","която","нещо","е","сега","искаш"])) as $bg_words
 | if $cyr == 0 then "unclear: no Cyrillic in the reply"
   elif $cyr * 10 < ($cyr + $lat) * 4 then "unclear: mostly Latin (\($cyr) Cyrillic, \($lat) Latin letters)"
   elif $ru_letters > 0 or $ru_words > 0 then "ru: \($ru_letters) Russian-only letters, \($ru_words) Russian-only words"
@@ -350,7 +352,12 @@ fi
 if [ "$LLAMA_UP_BEFORE" = 1 ]; then BEFORE_STATE="with llama-server already up"; else BEFORE_STATE="with the model in standby"; fi
 note "memory: MemAvailable ${AVAIL_BEFORE:-?} MB before the test ($BEFORE_STATE), ${MIN_AVAIL:-?} MB at the lowest during the last turn; llama-server RSS ${SERVER_RSS:-?} MB"
 
-if [ -n "$LLAMA_URL" ]; then
+# The turn has just woken llama-server and the runtime is configured, so no
+# measurement is a fault (a server that died or stopped after the turn), not
+# a reason to let the speed requirement pass unchecked.
+if [ -z "$LLAMA_URL" ]; then
+  not_ok "llamacpp/status named no llama-server URL: the decode speed could not be measured"
+else
   # About 900 prompt tokens and up to 200 out, thinking off: prefill and decode
   # as llama-server itself times them. cache_prompt off, so the prefill is real.
   SPEED_BODY=$(jq -cn --arg p "$(printf 'The quick brown fox jumps over the lazy dog near the river bank at dawn. %.0s' {1..60})Summarize this text in five sentences." \
@@ -361,7 +368,7 @@ if [ -n "$LLAMA_URL" ]; then
   PREFILL=$(jq -r '.timings.prompt_per_second // empty | floor' <<<"$SPEED" 2>/dev/null)
   NOTE_SPEED=$(jq -r '"\(.timings.prompt_n // "?") prompt tokens, \(.timings.predicted_n // "?") generated"' <<<"$SPEED" 2>/dev/null)
   if [ -z "$DECODE" ]; then
-    note "no timings from llama-server: $(printf '%s' "$SPEED" | head -c 200)"
+    not_ok "no decode speed from llama-server right after the turn: $(printf '%s' "${SPEED:-no answer}" | tr '\n' ' ' | head -c 200)"
   elif [ "$DECODE" -ge "$MIN_DECODE_TOK_S" ]; then
     ok "llama-server decodes at $DECODE tok/s and prefills at ${PREFILL:-?} tok/s ($NOTE_SPEED)"
   else

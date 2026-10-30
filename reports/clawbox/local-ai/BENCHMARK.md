@@ -167,24 +167,37 @@ header offers Off / High for Gemma, and `/think high` turns it on for one messag
 
 ## On the shipped path (2026-10-30)
 
-The step this report left for a person — the shipped path end to end, through ClawBox's own
-launcher, proxy and routes after an update — now runs on a lab board in the on-device suite
-as `scripts/nano-tests/tests/68-local-ai-chat.sh` (see `docs/nano-hardware-tests.md`). Its
-first run, on a freshly reflashed Jetson Orin Nano 8 GB rebuilt to commit `ddc80e44e`,
-OpenClaw 2026.10.7, the board on ClawBox AI:
+The step this report left for a person was the shipped path end to end, through ClawBox's
+own launcher, proxy and routes after an update. It now runs on a lab board in the on-device
+suite as `scripts/nano-tests/tests/68-local-ai-chat.sh` (see `docs/nano-hardware-tests.md`).
+It ran twice on the full suite, dispatched through `nano-hardware-tests.yml`. Each run took a
+freshly reflashed Jetson Orin Nano 8 GB, rebuilt it to the commit named below, and ran
+OpenClaw 2026.10.7 with ClawBox AI as the chat model.
 
-- Settings → Local AI's Install configured the GGUF already on the board, and the chat
-  header's pick made `llamacpp/gemma4-e2b-it-q4_0` the primary with `tools.toolSearch`
-  `{"enabled": false}`.
-- "направи ми проста todo страница", asked on a fresh session, was answered by `llamacpp`
-  itself on the first attempt in **51 s**. The reply was in Bulgarian ("Сега имаш страница за
-  задачи (Todo List) на твоят настолен компютър. Можеш да използваш бутона в долната част на
-  екрана за добавяне на нови задачи."), and the turn called `clawbox__webapp_create`, which
-  wrote a 2,685-byte `todo-list` page with an input field and a script. The turn used
-  **1,671 prompt tokens over 2 model calls** (lean prompt) and produced 886 output tokens.
-- MemAvailable was **3,784 MB** with the model in standby, **1,355 MB** at its lowest during
-  the turn, and llama-server's RSS was **3,023 MB**. Neither the gateway nor the web server
-  restarted. On a fixed 977-token prompt, llama-server decoded at **29 tok/s** and prefilled
-  at **977 tok/s**: the same as the raw-server measurements above.
-- The other 17 tests of the suite passed on the same board, `75-full-reboot`'s chat turn
-  among them (back on ClawBox AI after the test put the primary back).
+Both runs went through the same steps. Settings → Local AI's Install configured the GGUF
+already on the board. The chat header's pick then made `llamacpp/gemma4-e2b-it-q4_0` the
+primary, with `tools.toolSearch` `{"enabled": false}`. Finally "направи ми проста todo
+страница" was asked on a fresh session.
+
+| | run 41091053969, commit `ddc80e44e` | run 41094108069, commit `ec73ec733` |
+|---|---|---|
+| answered by | `llamacpp` itself, first attempt | `llamacpp` itself, first attempt |
+| reply | "Сега имаш страница за задачи (Todo List) на твоят настолен компютър. Можеш да използваш бутона в долната част на екрана за добавяне на нови задачи." | "Създадох за теб проста Todo страница и я отворих. Можеш да използваш нея." |
+| `clawbox__webapp_create` | called; a 2,685-byte `todo-list` page with an input field and a script | called; a 2,742-byte `todo-list` page with an input field and a script |
+| turn | **51 s**; **1,671 prompt tokens over 2 model calls** (lean prompt), 886 out | **48 s**; **2,106 prompt tokens over 2 model calls**, 823 out |
+| llama-server, fixed 977-token prompt | **29 tok/s** decode, **977 tok/s** prefill | **29 tok/s** decode, **978 tok/s** prefill |
+| MemAvailable | **3,784 MB** in standby, **1,355 MB** lowest during the turn; RSS **3,023 MB** | **3,585 MB** in standby, **1,636 MB** lowest during the turn; RSS **2,590 MB** |
+| gateway, web server | not restarted | not restarted |
+| `68-local-ai-chat` | **failed**: the turn passed every check, then the test's own clean-up check failed (below) | **passed** |
+| rest of the suite | 17 passed, 3 skipped | 17 passed, 3 skipped |
+
+The 3 skips in each run are `60-media-tools` (image and audio generation off on the board)
+and the long-tier `85` and `90`. The speeds match the raw-server measurements above.
+
+The first run's failure was in the test, not in Local AI. The board's primary was the legacy
+`deepseek/deepseek-v4-pro`, and `chat/model` writes every ClawBox AI pick as the Flash id
+(`canonicalChatModel`; the proxy serves Flash under the Pro id too). Putting the primary
+back therefore answered `deepseek/deepseek-v4-flash`, and the test compared the two
+exactly. The next commit counts a ClawBox AI primary as restored when it comes back as
+ClawBox AI; any other provider must still come back exactly. In both runs `75-full-reboot`'s
+chat turn passed after the test, back on ClawBox AI.
