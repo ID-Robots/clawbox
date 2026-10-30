@@ -28,6 +28,15 @@
 // surfaces a non-owner had: the exceptions are what is named, and a route
 // added later is the owner's desktop for every user, like everything else.
 //
+// THE OWNER MAY SHARE OPENCLAW. "Share OpenClaw with all users" (Settings →
+// Users, `OPENCLAW_SHARED_KEY`, off unless the owner turns it on) hands the
+// first exception's OpenClaw half to every signed-in user: its desktop app,
+// its Control UI pages and HTTP trees, and the gateway token those pages carry.
+// The owner is told as much beside the switch. Each user's own ClawBox chat
+// stays theirs either way — it goes on through the relay on its own socket
+// path (`USER_CHAT_WS_PATH`) — and the Hermes dashboard and the owner's
+// account are never shared.
+//
 // Pure (no `fs`, no Next) so middleware.test.ts and non-owner-scope.test.ts
 // judge exactly the table middleware uses.
 
@@ -39,6 +48,33 @@ import { mayUseChatKey } from "./chat-scope";
  * signed-in user's.
  */
 export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes"];
+
+/** The one owner-only app the owner can share (see the header). */
+export const SHAREABLE_OPENCLAW_APP_ID = "openclaw";
+
+/**
+ * The owner's "Share OpenClaw with all users" switch in data/config.json.
+ * Mirrored in production-server.js, which reads config.json itself because
+ * socket upgrades never reach Next (a unit test pins the two together).
+ */
+export const OPENCLAW_SHARED_KEY = "openclaw_shared_with_users";
+
+/**
+ * The socket path of a ClawBox user's own chat: always relayed, so it reaches
+ * only their own conversations whether or not the owner shares OpenClaw (the
+ * root path is then the shared Control UI's). Mirrored in production-server.js.
+ */
+export const USER_CHAT_WS_PATH = "/user-chat-ws";
+
+/** Only a literal `true` shares: anything else — absent, a string, a corrupt file — is the owner's. */
+export function openclawSharedFrom(value: unknown): boolean {
+  return value === true;
+}
+
+/** The owner-only apps a non-owner's desktop hides, given the owner's switch. */
+export function ownerOnlyAppIds(openclawShared: boolean): readonly string[] {
+  return openclawShared ? OWNER_ONLY_APP_IDS.filter((id) => id !== SHAREABLE_OPENCLAW_APP_ID) : OWNER_ONLY_APP_IDS;
+}
 
 /** The owner's account: its password, and the factory reset that wipes it. */
 const OWNER_ACCOUNT_API: ReadonlySet<string> = new Set([
@@ -115,7 +151,11 @@ export interface NonOwnerRequest {
   intent: RequestIntent;
   /** Who is asking: the media of their own chat is theirs. */
   username: string;
+  /** The owner shares OpenClaw (`OPENCLAW_SHARED_KEY`); absent is not shared. */
+  openclawShared?: boolean;
 }
+
+const SHARED_OPENCLAW_PAGE = `/app/${SHAREABLE_OPENCLAW_APP_ID}`;
 
 function underPrefix(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(prefix + "/");
@@ -175,14 +215,18 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const isRead = method === "GET" || method === "HEAD";
   const canon = canonicalPath(pathname);
   if (canon === null) return "deny";
+  const shared = req.openclawShared === true;
 
   // The exceptions first, on the canonical path.
-  if (OWNER_ACCOUNT_API.has(canon) || OWNER_SECRET_API.has(canon)) return "deny";
+  if (OWNER_ACCOUNT_API.has(canon)) return "deny";
+  // The Control UI page with the token in it: shared with the rest of OpenClaw.
+  if (OWNER_SECRET_API.has(canon)) return shared ? "allow" : "deny";
   // API trees answer code, so they answer 403 JSON however they are asked.
   if (GATEWAY_PREFIXES.some((p) => underPrefix(canon, p))) {
+    if (shared) return "allow";
     return isRead && isOwnChatMedia(pathname, req.username) ? "allow" : "deny";
   }
-  if (OWNER_ONLY_PAGES.has(canon)) return ownerPage(req);
+  if (OWNER_ONLY_PAGES.has(canon)) return shared && canon === SHARED_OPENCLAW_PAGE ? "allow" : ownerPage(req);
 
   if (underPrefix(pathname, "/setup-api")) return "allow";
 
@@ -191,6 +235,8 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   // What is left is a file out of public/, or the gateway's catch-all — its
   // Control UI's pages and files, which are the owner's.
   if (STATIC_MEDIA_RE.test(pathname) || CLAWBOX_PUBLIC_FILES.has(pathname)) return isRead ? "allow" : "deny";
+  // The catch-all IS the Control UI, so a shared one is the user's like the rest.
+  if (shared) return "allow";
   if (!looksLikePage(pathname)) return "deny";
   return ownerPage(req);
 }

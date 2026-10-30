@@ -46,6 +46,7 @@ import { clearOwnerChoice, noteOwnerChoice, readChoiceSource, restoreChoiceSourc
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { logSafe } from "@/lib/log-safe";
+import { clawaiPlanFollowPending } from "@/lib/clawai-plan-follow";
 
 /**
  * GET  /setup-api/tts            → who speaks for this box
@@ -167,6 +168,13 @@ type VoiceStatusBody = VoiceOutputStatus & {
    * reason as the one above.
    */
   shortSpoken: boolean;
+  /**
+   * A ClawBox AI plan change is still being followed (`@/lib/clawai-plan-follow`):
+   * on OpenClaw the gateway may be restarting to arm the cloud voice of a new
+   * Max plan. Present only while true, so the panel says "setting up" rather
+   * than "not available" and looks again.
+   */
+  cloudPending?: true;
 };
 
 async function status(): Promise<VoiceStatusBody> {
@@ -185,6 +193,7 @@ async function status(): Promise<VoiceStatusBody> {
     autoReply,
     autoPlayAll,
     shortSpoken,
+    ...(clawaiPlanFollowPending() ? { cloudPending: true as const } : {}),
   };
 }
 

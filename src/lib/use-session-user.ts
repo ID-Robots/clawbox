@@ -16,6 +16,8 @@ export interface SessionUser {
   isOwner: boolean;
   /** The box has users besides the owner — the desktop then names who is signed in. */
   multiUser: boolean;
+  /** The owner shares OpenClaw with every user, so its icon is theirs too (src/lib/non-owner-scope.ts). */
+  openclawShared: boolean;
 }
 
 let pending: Promise<SessionUser | null> | null = null;
@@ -24,7 +26,12 @@ function parse(data: unknown): SessionUser | null {
   if (typeof data !== "object" || data === null) return null;
   const d = data as Record<string, unknown>;
   if (typeof d.username !== "string" || !d.username) return null;
-  return { username: d.username, isOwner: d.isOwner === true, multiUser: d.multiUser === true };
+  return {
+    username: d.username,
+    isOwner: d.isOwner === true,
+    multiUser: d.multiUser === true,
+    openclawShared: d.openclawShared === true,
+  };
 }
 
 /** One request per page load, shared by every component that asks. A failure is retried on the next ask. */

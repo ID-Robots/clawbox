@@ -230,26 +230,43 @@ export function _resetClawaiPlanGeneration(): void {
  * reason the refusal stamp is: a badge poll must not fail because a hint could
  * not be saved. What it costs when it fails is honest and bounded — the boot
  * scripts go on reading the badge for the ARM and withdraw nothing at all.
+ *
+ * Answers the change it WROTE, and null whenever it wrote nothing — so a plan
+ * that moved is acted on once, by the poll that recorded it.
  */
 export async function persistClawaiPlanTier(
   portalPlan: ClawaiPortalPlan,
   askedAtGeneration?: number,
-): Promise<void> {
-  if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return;
+): Promise<ClawaiPlanChange | null> {
+  if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return null;
   // "WE CANNOT TELL" MAY NOT OVERWRITE "WE WERE TOLD", about the same account.
   // The credential has not changed here — this is a poll, not a link — so a
   // plan already on record is still that account's, and one unreadable response
   // is no reason to forget it. The credential WRITERS delete on the same value,
   // and must: there the account may have changed under it.
-  if (portalPlan.verdict === null) return;
+  if (portalPlan.verdict === null) return null;
   try {
-    const next = clawaiPlanTierForStore(portalPlan);
-    if (normalizeClawboxAiPlanTier(await get(CLAWAI_PLAN_TIER_KEY)) === (next ?? null)) return;
+    const next = clawaiPlanTierForStore(portalPlan) ?? null;
+    const previous = normalizeClawboxAiPlanTier(await get(CLAWAI_PLAN_TIER_KEY));
+    if (previous === next) return null;
     // Asked again after the read: a re-link can land in that await, and its
     // writer records the new account's plan the moment it bumps the counter.
-    if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return;
-    await set(CLAWAI_PLAN_TIER_KEY, next);
+    if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return null;
+    await set(CLAWAI_PLAN_TIER_KEY, next ?? undefined);
+    return { previous, next };
   } catch {
     // See the docblock. The next poll writes it again.
+    return null;
   }
+}
+
+/**
+ * The plan on record moved, as {@link persistClawaiPlanTier} wrote it: an
+ * account upgraded or downgraded on the portal while the box kept running.
+ * What has to follow it (the cloud voice of a new Max plan) is
+ * `@/lib/clawai-plan-follow`'s, which the status route hands this to.
+ */
+export interface ClawaiPlanChange {
+  previous: ClawboxAiPlanTier | null;
+  next: ClawboxAiPlanTier | null;
 }

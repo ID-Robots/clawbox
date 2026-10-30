@@ -1,9 +1,14 @@
+import { createRequire } from "module";
 import { describe, expect, it } from "vitest";
 import {
   nonOwnerVerdict,
   NON_OWNER_HOME,
+  OPENCLAW_SHARED_KEY,
   OWNER_ONLY_APP_IDS,
+  openclawSharedFrom,
+  ownerOnlyAppIds,
   requestIntent,
+  USER_CHAT_WS_PATH,
   type RequestIntent,
 } from "@/lib/non-owner-scope";
 import { apps } from "@/lib/desktop-apps";
@@ -12,9 +17,14 @@ import { apps } from "@/lib/desktop-apps";
 // Settings — with three exceptions: the owner's chat (each user has their
 // own), secrets in clear, and the owner's account itself.
 
-function verdict(url: string, method = "GET", intent: RequestIntent = "fetch", username = "alice") {
+function verdict(url: string, method = "GET", intent: RequestIntent = "fetch", username = "alice", openclawShared?: boolean) {
   const u = new URL(url, "http://clawbox.local");
-  return nonOwnerVerdict({ pathname: u.pathname, method, searchParams: u.searchParams, intent, username });
+  return nonOwnerVerdict({ pathname: u.pathname, method, searchParams: u.searchParams, intent, username, openclawShared });
+}
+
+/** The same judge, with the owner's "Share OpenClaw with all users" switch on. */
+function sharedVerdict(url: string, method = "GET", intent: RequestIntent = "fetch") {
+  return verdict(url, method, intent, "alice", true);
 }
 
 describe("nonOwnerVerdict — the owner's desktop for every signed-in user", () => {
@@ -179,5 +189,72 @@ describe("requestIntent", () => {
   it("calls a request that says nothing unknown", () => {
     expect(intent({})).toBe("unknown");
     expect(intent({ accept: "*/*" })).toBe("unknown");
+  });
+});
+
+describe("nonOwnerVerdict — the owner shares OpenClaw with every user", () => {
+  it("opens OpenClaw's app page, its Control UI pages and the page that carries the token", () => {
+    for (const url of ["/app/openclaw", "/App/OpenClaw", "/chat", "/sessions", "/settings", "/overview"]) {
+      for (const intent of ["navigation", "unknown", "fetch"] as const) {
+        expect(sharedVerdict(url, "GET", intent), `${url} ${intent}`).toBe("allow");
+      }
+    }
+    expect(sharedVerdict("/setup-api/gateway")).toBe("allow");
+    expect(sharedVerdict("/setup-api/gateway/")).toBe("allow");
+  });
+
+  it("opens the gateway's HTTP trees and the Control UI's own files — every method the owner's Control UI uses", () => {
+    for (const url of ["/api/chat", "/api/sessions", "/assets/index.js", "/__openclaw__/plugin-icon/x.png", "/avatar/main", "/control-ui-config.json", "/something.js"]) {
+      expect(sharedVerdict(url), url).toBe("allow");
+    }
+    expect(sharedVerdict("/api/sessions", "POST")).toBe("allow");
+    const owners = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:main")}/1b2c/full`;
+    expect(sharedVerdict(owners)).toBe("allow");
+  });
+
+  it("keeps the Hermes dashboard and the owner's account the owner's", () => {
+    expect(sharedVerdict("/app/hermes", "GET", "navigation")).toBe("redirect-home");
+    expect(sharedVerdict("/app/hermes", "GET", "fetch")).toBe("deny");
+    for (const [method, url] of [
+      ["GET", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials/verify"],
+      ["POST", "/setup-api/setup/reset"],
+    ]) {
+      expect(sharedVerdict(url, method), `${method} ${url}`).toBe("deny");
+    }
+  });
+
+  it("changes nothing while the switch is off or absent — exactly today's table", () => {
+    for (const shared of [undefined, false]) {
+      expect(verdict("/app/openclaw", "GET", "navigation", "alice", shared)).toBe("redirect-home");
+      expect(verdict("/chat", "GET", "navigation", "alice", shared)).toBe("redirect-home");
+      expect(verdict("/setup-api/gateway", "GET", "fetch", "alice", shared)).toBe("deny");
+      expect(verdict("/api/sessions", "GET", "fetch", "alice", shared)).toBe("deny");
+      expect(verdict("/something.js", "GET", "fetch", "alice", shared)).toBe("deny");
+    }
+  });
+
+  it("hides only Hermes from a non-owner's desktop while OpenClaw is shared", () => {
+    expect(ownerOnlyAppIds(false)).toEqual(OWNER_ONLY_APP_IDS);
+    expect(ownerOnlyAppIds(true)).toEqual(["hermes"]);
+  });
+
+  it("shares only on a literal true", () => {
+    expect(openclawSharedFrom(true)).toBe(true);
+    for (const value of [undefined, null, false, "true", 1, {}]) expect(openclawSharedFrom(value), String(value)).toBe(false);
+  });
+
+  it("names the switch and the user-chat socket path exactly as production-server.js reads them", () => {
+    const mirror = createRequire(import.meta.url)("../../../scripts/openclaw-sharing.js") as {
+      OPENCLAW_SHARED_KEY: string;
+      USER_CHAT_WS_PATH: string;
+      openclawSharedFrom: (value: unknown) => boolean;
+    };
+    expect(mirror.OPENCLAW_SHARED_KEY).toBe(OPENCLAW_SHARED_KEY);
+    expect(mirror.USER_CHAT_WS_PATH).toBe(USER_CHAT_WS_PATH);
+    for (const value of [true, false, "true", 1, null]) {
+      expect(mirror.openclawSharedFrom(value), String(value)).toBe(openclawSharedFrom(value));
+    }
   });
 });

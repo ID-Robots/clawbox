@@ -115,6 +115,10 @@ async function route() {
   return await import("@/app/setup-api/tts/route");
 }
 
+// A ClawBox AI plan change still being followed (src/lib/clawai-plan-follow.ts).
+const planFollow = vi.hoisted(() => ({ pending: false }));
+vi.mock("@/lib/clawai-plan-follow", () => ({ clawaiPlanFollowPending: () => planFollow.pending }));
+
 function post(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://box/setup-api/tts", {
     method: "POST",
@@ -775,3 +779,39 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect((await (await GET()).json()).cloudModel).toBe("tts-1-hd");
   });
 });
+
+describe("a ClawBox AI plan that moved while the box runs", () => {
+  it("says the box is still following it, so the panel says so and looks again", async () => {
+    planFollow.pending = true;
+    try {
+      const { GET } = await route();
+      const body = await (await GET()).json();
+      expect(body.cloudPending).toBe(true);
+      // The fact the panel shows beside it is still the box's own reading.
+      expect(body.engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(false);
+    } finally {
+      planFollow.pending = false;
+    }
+  });
+
+  it("says nothing when no change is being followed", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).cloudPending).toBeUndefined();
+  });
+
+  it("reads the cloud voice as available the moment the gateway's boot script has armed it — no restart of the web server", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(false);
+    readConfigMock.mockResolvedValue(config({
+      tts: {
+        provider: LOCAL,
+        providers: {
+          [LOCAL]: { command: "/opt/clawbox-tts.sh" },
+          openai: { apiKey: "claw_84d065b", baseUrl: "https://proxy.example/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+        },
+      },
+    }));
+    expect((await (await GET()).json()).engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(true);
+  });
+});
+

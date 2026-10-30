@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { sessionIdentity } from "@/lib/route-auth";
+import { USER_CHAT_WS_PATH } from "@/lib/non-owner-scope";
 import fs from "fs/promises";
 
 export const dynamic = "force-dynamic";
@@ -51,9 +52,14 @@ export async function GET(request: NextRequest) {
   // upgrade proxy forwards these WS upgrades to the OpenClaw gateway on 18789,
   // which keeps the flow working on the LAN, through the Cloudflare tunnel,
   // and under HTTPS (no mixed-content, no external port exposure).
+  //
+  // A relayed user's chat gets a socket path of its own, which the proxy always
+  // relays: the root path is the Control UI's, and the owner can share that
+  // one with every user (src/lib/non-owner-scope.ts) — their chat must stay
+  // theirs either way.
   return NextResponse.json(
     {
-      wsUrl: `${scheme}://${host}`,
+      wsUrl: `${scheme}://${host}${relayed ? USER_CHAT_WS_PATH : ""}`,
       token: token || "",
       model,
       ...(relayed ? { relayed: true } : {}),

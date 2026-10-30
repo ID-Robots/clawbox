@@ -14,6 +14,11 @@ vi.mock("@/lib/gateway-proxy", () => ({
 
 const who = vi.hoisted(() => ({ identity: null as { username: string; isOwner: boolean } | null }));
 vi.mock("@/lib/route-auth", () => ({ sessionIdentity: vi.fn(async () => who.identity) }));
+// The owner's "Share OpenClaw with all users" switch (src/lib/openclaw-sharing.ts).
+const sharing = vi.hoisted(() => ({ shared: false }));
+vi.mock("@/lib/openclaw-sharing", () => ({
+  mayHaveGatewayToken: vi.fn(async (person: { isOwner: boolean } | null) => !!person && (person.isOwner || sharing.shared)),
+}));
 
 vi.mock("@/lib/gateway-health", () => ({
   getGatewayServiceHealth: vi.fn().mockResolvedValue({
@@ -157,6 +162,26 @@ describe("/setup-api/gateway", () => {
       expect(await page()).not.toContain("test-token");
     } finally {
       who.identity = null;
+    }
+  });
+
+  it("hands another ClawBox user the token only while the owner shares OpenClaw", async () => {
+    const page = () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve("<html><head></head><body>Gateway</body></html>"),
+      });
+      return GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway"))).then((r) => r.text());
+    };
+    try {
+      who.identity = { username: "alice", isOwner: false };
+      sharing.shared = true;
+      expect(await page()).toContain("test-token");
+      sharing.shared = false;
+      expect(await page()).not.toContain("test-token");
+    } finally {
+      who.identity = null;
+      sharing.shared = false;
     }
   });
 
