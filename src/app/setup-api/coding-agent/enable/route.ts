@@ -117,15 +117,15 @@ function forbidden() {
  * once. Each run works in a git worktree of its own, so the limit is a
  * question about the box's memory rather than about the filesystem; the range
  * is refused rather than clamped.
- * (The review rounds, the attempts at a deliverable and the extended
- * history's N are no longer settings since SCA C3: a run gets the constants
- * — DEFAULT_REVIEW_ROUNDS, DEFAULT_COMPLETION_ATTEMPTS,
- * DEFAULT_HISTORY_EXTENDED_LIMIT — and a body naming them is answered 400.)
- * POST { historyRetention: "standard"|"extended"|"everything"|"archive" } →
- * what the box keeps of finished runs (see @/lib/coding-run-history); a value
- * this box does not offer is refused before anything is saved. Choosing "everything"
- * also tells Claude Code to keep its transcripts (merged into its settings
- * files, never overwriting them); choosing anything else hands that back.
+ * (The review rounds and the attempts at a deliverable are no longer settings
+ * since SCA C3: a run gets the constants — DEFAULT_REVIEW_ROUNDS,
+ * DEFAULT_COMPLETION_ATTEMPTS — and a body naming them, or the extended
+ * history's N that went with its mode in SCA2 C1, is answered 400.)
+ * POST { historyRetention: "standard"|"everything" } → what the box keeps of
+ * finished runs (see @/lib/coding-run-history); a value this box does not
+ * offer is refused before anything is saved. Choosing "everything" also tells
+ * Claude Code to keep its transcripts (merged into its settings files, never
+ * overwriting them); choosing standard hands that back.
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
  * shows the wizard instead of its home page until this is true; the reset
  * route is what puts it back to false).
@@ -423,9 +423,9 @@ export async function POST(request: Request) {
       console.error("[coding-agent] the number of coding runs at once was changed by the owner");
     }
     if (hasHistoryRetention) {
-      const { policy, transcripts } = await setHistoryRetention({ mode: fields.historyRetention });
+      const { policy, transcripts } = await setHistoryRetention(fields.historyRetention);
       // Both are values from the setter's own fixed lists by now.
-      console.error(`[coding-agent] run history set to ${logSafe(policy.mode)}${policy.mode === "extended" ? ` (${logSafe(String(policy.limit))} runs)` : ""} by the owner`);
+      console.error(`[coding-agent] run history set to ${logSafe(policy.mode)} by the owner`);
       for (const t of transcripts) {
         if (t.state !== "already") console.error(`[coding-agent] Claude Code transcript period ${t.state}: ${logSafe(t.file)}`);
       }

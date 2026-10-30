@@ -1,8 +1,7 @@
 /**
  * The run-history store (src/lib/coding-run-history.ts, TASK-1178) on its own:
- * the policy parse, the disk guard, the archive move, the two self-healing
- * indexes, the Claude Code settings merge, the usage walk and the export's
- * layout. The trim that drives all of this through the runs store is pinned
+ * the policy parse, the disk guard, the self-healing older-runs index, the
+ * Claude Code settings merge, the usage walk and the export's layout. The trim that drives all of this through the runs store is pinned
  * in coding-agent-history-retention.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,24 +49,24 @@ afterEach(() => {
 });
 
 describe("the setting", () => {
-  it("reads anything unknown as standard, and an unoffered limit as the default", () => {
-    expect(lib.historyPolicyFrom(undefined, undefined)).toEqual({ mode: "standard", limit: 100 });
-    expect(lib.historyPolicyFrom("forever", 7)).toEqual({ mode: "standard", limit: 100 });
-    expect(lib.historyPolicyFrom("extended", 300)).toEqual({ mode: "extended", limit: 300 });
-    expect(lib.historyPolicyFrom("archive", "1000")).toEqual({ mode: "archive", limit: 100 });
+  it("offers two modes, reads anything unknown as standard, and a retired mode as the one that keeps", () => {
+    expect(lib.HISTORY_RETENTION_MODES).toEqual(["standard", "everything"]);
+    expect(lib.historyPolicyFrom(undefined)).toEqual({ mode: "standard" });
+    expect(lib.historyPolicyFrom("forever")).toEqual({ mode: "standard" });
+    expect(lib.historyPolicyFrom(7)).toEqual({ mode: "standard" });
+    expect(lib.historyPolicyFrom("everything")).toEqual({ mode: "everything" });
+    // `extended` kept the newest N and `archive` moved a leaving run into a
+    // bundle: both kept rather than deleted, so both read as "everything".
+    expect(lib.historyPolicyFrom("extended")).toEqual({ mode: "everything" });
+    expect(lib.historyPolicyFrom("archive")).toEqual({ mode: "everything" });
+    // A property of Object.prototype is not a retired mode.
+    expect(lib.historyPolicyFrom("constructor")).toEqual({ mode: "standard" });
+    expect(lib.historyPolicyFrom("__proto__")).toEqual({ mode: "standard" });
   });
 
-  it("keeps older runs only in extended and everything, and caps them at N minus the live list", () => {
-    const at = (mode: string, limit = 100) => lib.historyPolicyFrom(mode, limit);
-    expect(lib.keepsOlderRuns(at("standard"))).toBe(false);
-    expect(lib.keepsOlderRuns(at("archive"))).toBe(false);
-    expect(lib.keepsOlderRuns(at("extended"))).toBe(true);
-    expect(lib.keepsOlderRuns(at("everything"))).toBe(true);
-    expect(lib.olderRunsCap(at("extended", 100), 30)).toBe(70);
-    expect(lib.olderRunsCap(at("extended", 100), 140)).toBe(0);
-    expect(lib.olderRunsCap(at("everything"), 30)).toBe(Number.POSITIVE_INFINITY);
-    expect(lib.olderRunsCap(at("standard"), 30)).toBe(0);
-    expect(lib.olderRunsCap(at("archive"), 30)).toBe(0);
+  it("keeps older runs under everything alone", () => {
+    expect(lib.keepsOlderRuns(lib.historyPolicyFrom("standard"))).toBe(false);
+    expect(lib.keepsOlderRuns(lib.historyPolicyFrom("everything"))).toBe(true);
   });
 });
 
@@ -123,175 +122,10 @@ describe("older runs", () => {
   });
 });
 
-describe("the archive", () => {
-  function parts(id: string) {
-    const evidence = path.join(data, "coding-agent-artifacts", id);
-    const inputs = path.join(data, "coding-agent-inputs", id);
-    const streams = path.join(data, "coding-agent-streams");
-    const transcriptDir = path.join(home, ".claude-ds", "projects", "-home-x-Projects-site");
-    for (const d of [evidence, inputs, streams, transcriptDir]) fs.mkdirSync(d, { recursive: true });
-    fs.writeFileSync(path.join(evidence, "shot.png"), "png-bytes");
-    fs.writeFileSync(path.join(evidence, "report.md"), "# Done");
-    fs.writeFileSync(path.join(inputs, "brief.txt"), "the brief");
-    fs.writeFileSync(path.join(streams, `${id}.jsonl`), '{"type":"result"}\n');
-    fs.writeFileSync(path.join(streams, `${id}.err`), "");
-    const transcript = path.join(transcriptDir, "sess-1.jsonl");
-    fs.writeFileSync(transcript, '{"type":"user"}\n');
-    return {
-      evidenceDir: evidence,
-      inputsDir: inputs,
-      streamLog: path.join(streams, `${id}.jsonl`),
-      stderrLog: path.join(streams, `${id}.err`),
-      transcript,
-    };
-  }
-
-  it("moves the record, evidence, inputs and logs in, copies the transcript, and lists it", () => {
-    const id = "run-bbbbbbb1";
-    const sources = parts(id);
-    const entry = lib.archiveRun(record(id, { startedAt: 5_000 }), sources, "trimmed", 9_000);
-    expect(entry).toMatchObject({ id, title: `Task ${id}`, status: "completed", archivedAt: 9_000, evidence: 2, inputs: 1, transcript: true, stream: true, reason: "trimmed" });
-    const bundle = path.join(data, "coding-agent-archive", id);
-    expect(readJson(path.join(bundle, "run.json")).id).toBe(id);
-    expect(fs.readFileSync(path.join(bundle, "evidence", "shot.png"), "utf-8")).toBe("png-bytes");
-    expect(fs.readFileSync(path.join(bundle, "inputs", "brief.txt"), "utf-8")).toBe("the brief");
-    expect(fs.existsSync(path.join(bundle, "stream.jsonl"))).toBe(true);
-    expect(fs.existsSync(path.join(bundle, "stream.err"))).toBe(true);
-    expect(fs.readFileSync(path.join(bundle, "transcript.jsonl"), "utf-8")).toBe('{"type":"user"}\n');
-    // MOVED — not a second copy on the flash — except the transcript, which is
-    // Claude Code's file and is left where Claude Code keeps it.
-    expect(fs.existsSync(sources.evidenceDir)).toBe(false);
-    expect(fs.existsSync(sources.inputsDir)).toBe(false);
-    expect(fs.existsSync(sources.streamLog)).toBe(false);
-    expect(fs.existsSync(sources.transcript)).toBe(true);
-    expect(entry!.bytes).toBeGreaterThan(0);
-    expect(fs.readdirSync(path.join(data, "coding-agent-archive")).filter((n) => n.startsWith("."))).toEqual([]);
-
-    expect(lib.listArchive(0, 10)).toMatchObject({ total: 1, entries: [{ id }] });
-    const detail = lib.readArchivedRun(id)!;
-    expect(detail.evidence.map((f) => [f.name, f.kind])).toEqual(expect.arrayContaining([["shot.png", "image"], ["report.md", "markdown"]]));
-    expect(detail.inputs).toEqual([{ name: "brief.txt", bytes: 9 }]);
-    expect(detail.transcriptBytes).toBe(16);
-    expect(lib.archivedEvidencePath(id, "shot.png")).toBe(fs.realpathSync(path.join(bundle, "evidence", "shot.png")));
-  });
-
-  it("drops the harness's thinking_tokens progress lines from the archived stream log, and nothing else", () => {
-    // 99.4% of a worker's stream log on the owner's box (12.4 MB, 53,014 lines
-    // in 12.5 minutes): read live for the idle clock, worth nothing after.
-    const id = "run-bbbbbbb9";
-    const sources = parts(id);
-    const progress = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":12,"session_id":"s"}';
-    const kept = ['{"type":"system","subtype":"init","session_id":"s"}', '{"type":"assistant","message":{"content":[{"type":"text","text":"thinking_tokens is a word"}]}}', '{"type":"result","subtype":"success"}'];
-    const lines = [kept[0], ...Array.from({ length: 2_000 }, () => progress), kept[1], progress, kept[2]];
-    fs.writeFileSync(sources.streamLog, `${lines.join("\n")}\n`);
-    expect(lib.archiveRun(record(id), sources, "trimmed")).toMatchObject({ id, stream: true });
-    const archived = path.join(data, "coding-agent-archive", id, "stream.jsonl");
-    expect(fs.readFileSync(archived, "utf-8")).toBe(`${kept.join("\n")}\n`);
-    expect(fs.existsSync(`${archived}.slim`)).toBe(false);
-  });
-
-  it("keeps a multi-byte character that a 1 MiB chunk boundary cuts in two", () => {
-    // Decoded chunk by chunk, the two halves of an "é" on the boundary came
-    // out as two U+FFFD in the archived log.
-    const id = "run-bbbbbbd0";
-    const sources = parts(id);
-    const head = '{"type":"assistant","message":{"content":[{"type":"text","text":"';
-    const chunk = 1 << 20; // SLIM_CHUNK
-    // The boundary falls on an odd byte of the run of two-byte characters: inside one.
-    const pad = (chunk - Buffer.byteLength(head)) % 2 === 0 ? "x" : "";
-    const long = `${head}${pad}${"é".repeat(600_000)}"}]}}`;
-    const progress = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":12,"session_id":"s"}';
-    const tail = '{"type":"result","subtype":"success"}';
-    expect(Buffer.byteLength(long)).toBeGreaterThan(chunk);
-    fs.writeFileSync(sources.streamLog, `${[long, progress, tail].join("\n")}\n`);
-    expect(lib.archiveRun(record(id), sources, "trimmed")).toMatchObject({ id, stream: true });
-    const archived = fs.readFileSync(path.join(data, "coding-agent-archive", id, "stream.jsonl"), "utf-8");
-    expect(archived).not.toContain("\uFFFD");
-    expect(archived).toBe(`${long}\n${tail}\n`);
-  });
-
-  it("keeps the team role a run was started under, and reads a bundle from before the field as none", () => {
-    const bulk = lib.archiveRun(record("run-bbbbbbc1", { modelRole: "bulk" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
-    expect(bulk.modelRole).toBe("bulk");
-    const solo = lib.archiveRun(record("run-bbbbbbc2", { modelRole: null }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
-    expect(solo.modelRole).toBeNull();
-    // A role this code never writes is none, not a new kind of role.
-    expect(lib.archiveRun(record("run-bbbbbbc3", { modelRole: "lead" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!.modelRole).toBeNull();
-    expect(lib.listArchive(0, 10).entries.find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBe("bulk");
-
-    // A bundle archived before the field: its archive.json and the index carry
-    // no role at all, and the entry reads back with null rather than undefined.
-    const meta = path.join(data, "coding-agent-archive", "run-bbbbbbc1", "archive.json");
-    const older = readJson(meta) as Record<string, unknown>;
-    delete older.modelRole;
-    fs.writeFileSync(meta, JSON.stringify(older));
-    fs.rmSync(path.join(data, "coding-agent-archive", "index.json"), { force: true });
-    expect(lib.archiveIndex().find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBeNull();
-    expect(lib.readArchivedRun("run-bbbbbbc1")!.record.modelRole).toBe("bulk");
-  });
-
-  it("reads a stored role as one of the roles a choice is made for, or none", () => {
+describe("a stored team role", () => {
+  it("reads as one of the roles a choice is made for, or none", () => {
     for (const role of ["planner", "worker", "reviewer", "bulk"]) expect(lib.readModelRole(role)).toBe(role);
     for (const junk of ["lead", "Planner", "", 1, null, undefined, {}]) expect(lib.readModelRole(junk)).toBeNull();
-  });
-
-  it("archives what is there, and says so, when parts are missing", () => {
-    const id = "run-bbbbbbb2";
-    const entry = lib.archiveRun(record(id), { evidenceDir: path.join(data, "none"), inputsDir: null, streamLog: null, stderrLog: null, transcript: path.join(home, "gone.jsonl") }, "cleared")!;
-    expect(entry).toMatchObject({ evidence: 0, inputs: 0, transcript: false, stream: false, reason: "cleared" });
-    expect(lib.readArchivedRun(id)!.transcriptBytes).toBeNull();
-  });
-
-  it("never follows a link a run left where its folders should be", () => {
-    const id = "run-bbbbbbb3";
-    const outside = path.join(base, "outside");
-    fs.mkdirSync(outside);
-    fs.writeFileSync(path.join(outside, "keep.txt"), "not the run's");
-    fs.mkdirSync(path.join(data, "coding-agent-artifacts"), { recursive: true });
-    const evidence = path.join(data, "coding-agent-artifacts", id);
-    fs.symlinkSync(outside, evidence);
-    const transcriptLink = path.join(base, "t.jsonl");
-    fs.symlinkSync(path.join(outside, "keep.txt"), transcriptLink);
-    const entry = lib.archiveRun(record(id), { evidenceDir: evidence, inputsDir: null, streamLog: null, stderrLog: null, transcript: transcriptLink }, "trimmed")!;
-    expect(entry.evidence).toBe(0);
-    expect(entry.transcript).toBe(false);
-    expect(fs.existsSync(evidence)).toBe(false);
-    expect(fs.readFileSync(path.join(outside, "keep.txt"), "utf-8")).toBe("not the run's");
-  });
-
-  it("refuses to serve anything but a plain evidence file inside the bundle", () => {
-    const id = "run-bbbbbbb4";
-    lib.archiveRun(record(id), parts(id), "trimmed");
-    const evidence = path.join(data, "coding-agent-archive", id, "evidence");
-    fs.symlinkSync(path.join(data, "config.json"), path.join(evidence, "config.json"));
-    expect(lib.archivedEvidencePath(id, "config.json")).toBeNull();
-    expect(lib.archivedEvidencePath(id, "../run.json")).toBeNull();
-    expect(lib.archivedEvidencePath(id, ".hidden")).toBeNull();
-    expect(lib.archivedEvidencePath("run-../../x", "shot.png")).toBeNull();
-    expect(lib.readArchivedRun("../config")).toBeNull();
-  });
-
-  it("heals its index from the bundles, and clears", () => {
-    lib.archiveRun(record("run-bbbbbbb5", { startedAt: 1 }), parts("run-bbbbbbb5"), "trimmed");
-    lib.archiveRun(record("run-bbbbbbb6", { startedAt: 2 }), parts("run-bbbbbbb6"), "trimmed");
-    const archive = path.join(data, "coding-agent-archive");
-    fs.rmSync(path.join(archive, "index.json"));
-    // A bundle that lost its archive.json is rebuilt from its run.json.
-    fs.rmSync(path.join(archive, "run-bbbbbbb5", "archive.json"));
-    expect(lib.archiveIndex().map((e) => [e.id, e.title])).toEqual([["run-bbbbbbb6", "Task run-bbbbbbb6"], ["run-bbbbbbb5", "Task run-bbbbbbb5"]]);
-    fs.rmSync(path.join(archive, "run-bbbbbbb6"), { recursive: true });
-    expect(lib.archiveIndex().map((e) => e.id)).toEqual(["run-bbbbbbb5"]);
-    expect(lib.clearArchive()).toBe(1);
-    expect(fs.existsSync(archive)).toBe(false);
-    expect(lib.archiveIndex()).toEqual([]);
-  });
-
-  it("zips one bundle under its own name", () => {
-    const id = "run-bbbbbbb7";
-    lib.archiveRun(record(id), parts(id), "trimmed");
-    const names = lib.archivedRunZipSources(id)!.map((s) => s.name).sort();
-    expect(names).toEqual([`${id}/archive.json`, `${id}/evidence/report.md`, `${id}/evidence/shot.png`, `${id}/inputs/brief.txt`, `${id}/run.json`, `${id}/stream.err`, `${id}/stream.jsonl`, `${id}/transcript.jsonl`]);
-    expect(lib.archivedRunZipSources("run-zzzzzzzz")).toBeNull();
   });
 });
 
@@ -360,7 +194,8 @@ describe("usage and export", () => {
     fs.mkdirSync(transcripts, { recursive: true });
     fs.writeFileSync(path.join(transcripts, "t.jsonl"), "t".repeat(50));
     const usage = await lib.historyUsage({ runsFile, streamsDir: path.join(data, "coding-agent-streams"), transcriptDirs: [transcripts, transcripts] });
-    expect(usage).toMatchObject({ runsFile: 100, evidence: 1000, inputs: 10, archive: 0, olderRuns: 0, transcripts: 50, total: 1110, truncated: false });
+    expect(usage).toMatchObject({ runsFile: 100, evidence: 1000, inputs: 10, olderRuns: 0, transcripts: 50, total: 1110, truncated: false });
+    expect(usage).not.toHaveProperty("archive");
 
     // Cached until something changes it.
     fs.writeFileSync(path.join(data, "coding-agent-artifacts", "run-ccccccc1", "b.png"), "y".repeat(1000));
@@ -377,10 +212,10 @@ describe("usage and export", () => {
     lib.writeOlderRun(record("run-ddddddd2"));
     const transcript = path.join(base, "t.jsonl");
     fs.writeFileSync(transcript, "{}");
-    lib.archiveRun(record("run-ddddddd3"), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed");
-    // A half-made bundle is not the archive.
-    fs.mkdirSync(path.join(data, "coding-agent-archive", ".run-ddddddd4.partial"), { recursive: true });
-    fs.writeFileSync(path.join(data, "coding-agent-archive", ".run-ddddddd4.partial", "run.json"), "{}");
+    // An archive an earlier build filled is not the history any more: left
+    // on the flash, not exported.
+    fs.mkdirSync(path.join(data, "coding-agent-archive", "run-ddddddd3"), { recursive: true });
+    fs.writeFileSync(path.join(data, "coding-agent-archive", "run-ddddddd3", "run.json"), "{}");
     const names: string[] = [];
     for await (const s of lib.historyExportSources({
       manifest: { kind: "test" },
@@ -390,8 +225,6 @@ describe("usage and export", () => {
     // The manifest and the live list first; the rest in whatever order the walks find it.
     expect(names.slice(0, 2)).toEqual(["manifest.json", "runs.json"]);
     expect([...names].sort()).toEqual([
-      "archive/run-ddddddd3/archive.json",
-      "archive/run-ddddddd3/run.json",
       "evidence/run-ddddddd1/shot.png",
       "manifest.json",
       "older-runs/run-ddddddd2.json",

@@ -161,10 +161,10 @@ describe("the body", () => {
   });
 
   it("answers 400 to the knobs SCA C3 took away, and writes nothing for them", async () => {
-    // The review rounds, the attempts at a deliverable and the extended
-    // history's N are constants now (DEFAULT_REVIEW_ROUNDS,
-    // DEFAULT_COMPLETION_ATTEMPTS, DEFAULT_HISTORY_EXTENDED_LIMIT): a body
-    // that names one alone is a body the route does not know.
+    // The review rounds and the attempts at a deliverable are constants now
+    // (DEFAULT_REVIEW_ROUNDS, DEFAULT_COMPLETION_ATTEMPTS), and the extended
+    // history's N went with its mode (SCA2 C1): a body that names one alone
+    // is a body the route does not know.
     for (const body of [{ reviewRounds: 3 }, { completionAttempts: 2 }, { historyLimit: 300 }, { generateImages: false }, { generateAudio: false }]) {
       const res = await POST(request({ cookie: ownerCookie(), body }));
       expect(res.status, JSON.stringify(body)).toBe(400);

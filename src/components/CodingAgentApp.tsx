@@ -11,7 +11,6 @@ import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
-import CodingRunHistoryPage from "./CodingRunHistoryPage";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
@@ -350,8 +349,10 @@ const SIDEBAR_ITEM = "w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text
 const SIDEBAR_ACTIVE = "bg-white/[0.08] text-[var(--text-primary)]";
 /** How many runs the sidebar lists; the pages list them all. */
 const SIDEBAR_RUNS = 12;
-/** Older runs a window keeps open copies of — the pages it has visited, not the history. */
+/** Older runs a window keeps open copies of — the pages it has visited and the "Show older" pages it asked for, not the history. */
 const MAX_OLDER_RUNS_HELD = 100;
+/** Older runs one "Show older" fetches for a project's Runs tab (the route caps a page at 50). */
+const OLDER_PAGE = 20;
 /** The window width (px) from which the sidebar is shown beside the page. */
 const SIDEBAR_MIN_WIDTH = 860;
 
@@ -661,15 +662,17 @@ export default function CodingAgentApp() {
   useEffect(() => () => { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); }, []);
   // Which face the window shows — see `view` below. The settings page sits
   // over whichever project was open, so Back returns there.
-  const [page, setPage] = useState<"home" | "settings" | "history">("home");
+  const [page, setPage] = useState<"home" | "settings">("home");
   /**
-   * Older runs this window has opened — from the Run history page, or by id
-   * for a run past the recent thirty. Kept beside `runs` rather than in it:
-   * the poll replaces `runs` wholesale, and these are not on that list.
+   * Older runs this window holds — the pages a project's "Show older" asked
+   * for, or one looked up by id for a run past the recent thirty. Kept beside
+   * `runs` rather than in it: the poll replaces `runs` wholesale, and these
+   * are not on that list. A project's Runs tab lists its own among them.
    */
   const [olderRuns, setOlderRuns] = useState<Run[]>([]);
-  /** An archived run to open the Run history page on, when a run page was asked for one. */
-  const [archivedOpenId, setArchivedOpenId] = useState<string | null>(null);
+  /** How far a project's "Show older" has paged: the box's total for the folder and how many were fetched. */
+  const [olderPage, setOlderPage] = useState<{ project: string; total: number; loaded: number } | null>(null);
+  const [olderBusy, setOlderBusy] = useState(false);
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
   /** The tab a project page opens on when it was asked for by a team chart — read once, as the workspace mounts. */
   const [workspaceTab, setWorkspaceTab] = useState<{ directory: string; tab: WorkspaceTab } | null>(null);
@@ -1167,10 +1170,12 @@ export default function CodingAgentApp() {
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
       setOpenRunId(null);
       // Said aloud, not just re-read here: the Run history card on this very
-      // page counts the runs this Clear just deleted or archived, and it
-      // re-reads on this event — without it the card kept "0 archived" and a
-      // disabled Clear archive over an archive the Clear had just filled.
+      // page counts the runs this Clear just deleted, and it re-reads on this
+      // event — without it the card kept the old figures.
       notifyCodingAgentChanged();
+      // The older runs went with the Clear; a "Show older" asks again.
+      setOlderRuns([]);
+      setOlderPage(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.clearFailed"));
@@ -1263,11 +1268,10 @@ export default function CodingAgentApp() {
     () => (openRunId ? runs.find((r) => r.id === openRunId) ?? olderRuns.find((r) => r.id === openRunId) ?? null : null),
     [runs, olderRuns, openRunId],
   );
-  // A run page asked for (a chat card, the desktop, the Run history page) for
-  // a run the recent list does not hold: an OLDER run a history mode kept, or
-  // one that has since moved to the archive. Asked of the box once per id —
-  // the runs route finds an older run by id, and the archive answers for the
-  // rest — rather than falling back to the home page as if it had been cleared.
+  // A run page asked for (a chat card, the desktop) for a run the recent list
+  // does not hold: an OLDER run "keep everything" kept. Asked of the box once
+  // per id — the runs route finds an older run by id — rather than falling
+  // back to the home page as if it had been cleared.
   const lookedUp = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (loading || !openRunId || runs.some((r) => r.id === openRunId) || olderRuns.some((r) => r.id === openRunId)) return;
@@ -1281,13 +1285,6 @@ export default function CodingAgentApp() {
           const { run } = await res.json() as { run?: Run };
           // Held and live runs are the recent list's; the next poll has them.
           if (run && isSettled(run.status)) setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
-          return;
-        }
-        const archived = await fetch(`/setup-api/coding-agent/history?view=archive&id=${encodeURIComponent(id)}`, { cache: "no-store" });
-        if (archived.ok) {
-          setOpenRunId((current) => (current === id ? null : current));
-          setArchivedOpenId(id);
-          setPage("history");
         }
       } catch {
         // Nothing to add: the page falls back to where it was, as it always did.
@@ -1300,9 +1297,37 @@ export default function CodingAgentApp() {
    *  (the sidebar's recent runs reach every run). */
   // Live view: only for the run whose page is open, and only while it runs.
 
-  const visibleRuns = useMemo(() => (
-    openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
-  ), [runs, openProject]);
+  const visibleRuns = useMemo(() => {
+    if (!openProject) return [];
+    const live = runs.filter((r) => runBelongsTo(r, openProject));
+    // The project's older runs this window holds come after the polled list,
+    // newest first: the live list is always newer than what left it.
+    const seen = new Set(live.map((r) => r.id));
+    const older = olderRuns.filter((r) => !seen.has(r.id) && runBelongsTo(r, openProject)).sort((a, b) => b.startedAt - a.startedAt);
+    return [...live, ...older];
+  }, [runs, olderRuns, openProject]);
+  /** "Show older" on a project's Runs tab: the next page of the older runs "keep everything" kept for this folder. */
+  const showOlder = async () => {
+    if (!openProject) return;
+    const project = openProject.directory;
+    const loaded = olderPage?.project === project ? olderPage.loaded : 0;
+    setOlderBusy(true);
+    setError(null);
+    try {
+      // With the evidence listing: a row opens the ordinary run page, which draws it.
+      const res = await fetch(`/setup-api/coding-agent/runs?history=1&project=${encodeURIComponent(project)}&offset=${loaded}&limit=${OLDER_PAGE}&artifacts=1`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.history.loadFailed")));
+      const { runs: fetched, total } = await res.json() as { runs: Run[]; total: number };
+      setOlderRuns((prev) => [...fetched, ...prev.filter((r) => !fetched.some((f) => f.id === r.id))].slice(0, MAX_OLDER_RUNS_HELD));
+      setOlderPage({ project, total, loaded: loaded + fetched.length });
+      // Drawn at once, not behind another More.
+      setRunsShown((n) => n + fetched.length);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.history.loadFailed"));
+    } finally {
+      setOlderBusy(false);
+    }
+  };
   /**
    * The rail's recent runs: EVERY held run — running, paused, drafted —
    * whatever its age, ahead of the newest SIDEBAR_RUNS settled ones. A run
@@ -1324,10 +1349,6 @@ export default function CodingAgentApp() {
    */
   const view = page === "settings"
     ? { face: "settings" as const }
-    // Like Settings, reachable whatever state setup is in: the history on the
-    // flash is the owner's whether or not the agent is configured today.
-    : page === "history"
-      ? { face: "history" as const }
     // Before anything else on this window: a box whose owner has not been
     // through setup has no folder for a run to work in and no consent for one
     // to start, so the home page would be a list of things that cannot happen.
@@ -1347,7 +1368,6 @@ export default function CodingAgentApp() {
   const phoneLayout = usePhoneLayout();
   const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
-  useMobileBack(phoneLayout && page === "history", () => { setArchivedOpenId(null); setPage("home"); });
   useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
   useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
   useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
@@ -1915,6 +1935,30 @@ export default function CodingAgentApp() {
           {t("codingAgent.more")} ({visibleRuns.length - runsShown})
         </button>
       )}
+      {/* The runs past the newest thirty that "keep everything" kept for this
+          folder (`runs?history=1&project=`), a page at a time, once every run
+          the poll holds is on the page. Asked for, not read on open: the
+          history is a file per run, and most visits never want it. */}
+      {openProject && visibleRuns.length <= runsShown && (
+        olderPage?.project === openProject.directory && olderPage.loaded >= olderPage.total ? (
+          olderPage.total === 0 && (
+            <p className="text-[11px] text-[var(--text-muted)] mt-2 px-1 leading-relaxed" data-testid="coding-agent-older-empty">
+              {t("codingAgent.history.olderEmpty", { count: status?.historyLiveKept ?? 30 })}
+            </p>
+          )
+        ) : (
+          <button
+            type="button"
+            onClick={() => void showOlder()}
+            disabled={olderBusy}
+            data-testid="coding-agent-show-older"
+            className={`${BTN_SECONDARY} w-full mt-2`}
+          >
+            {t("codingAgent.history.showOlder")}
+            {olderPage?.project === openProject.directory && ` (${olderPage.total - olderPage.loaded})`}
+          </button>
+        )
+      )}
     </>
   );
 
@@ -1954,16 +1998,6 @@ export default function CodingAgentApp() {
             >
               <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">settings</span>
               {t("codingAgent.openSettings")}
-            </button>
-            <button
-              type="button"
-              onClick={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }}
-              aria-current={view.face === "history" ? "page" : undefined}
-              data-testid="coding-agent-sidebar-history"
-              className={`${SIDEBAR_ITEM} ${view.face === "history" ? SIDEBAR_ACTIVE : ""}`}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">manage_history</span>
-              {t("codingAgent.history.title")}
             </button>
           </div>
           {/* No projects list here: the home page lists every project, and
@@ -2160,32 +2194,6 @@ export default function CodingAgentApp() {
               </div>
             </div>
           </div>
-        </>)}
-
-        {view.face === "history" && (<>
-          <CodingAgentBreadcrumb
-            crumbs={[
-              { label: t("codingAgent.navHome"), onClick: () => { setArchivedOpenId(null); setPage("home"); }, testId: "coding-agent-history-crumb-home" },
-              { label: t("codingAgent.history.title") },
-            ]}
-            onBack={() => { setArchivedOpenId(null); setPage("home"); }}
-            backLabel={t("codingAgent.back")}
-            navLabel={t("codingAgent.breadcrumbLabel")}
-            backTestId="coding-agent-history-back"
-          />
-          <CodingRunHistoryPage
-            // A fresh page per archived run asked for, so it opens on that run.
-            key={archivedOpenId ?? "lists"}
-            initialArchivedId={archivedOpenId}
-            liveKept={status?.historyLiveKept ?? 30}
-            onOpenRun={(row) => {
-              const run = row as unknown as Run;
-              setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
-              setOpenProjectDir(null);
-              setOpenRunId(run.id);
-              setPage("home");
-            }}
-          />
         </>)}
 
         {view.face === "wizard" && status && (

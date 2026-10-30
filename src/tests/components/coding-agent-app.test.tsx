@@ -88,6 +88,8 @@ function json(body: unknown, status = 200) {
 let posts: { url: string; body: unknown }[];
 /** Every git-block read, query string included — which project it asked about. */
 let gitReads: string[];
+/** Every page of older runs asked for, query string included. */
+let olderReads: string[];
 
 /** The device, as far as this component can tell. */
 /** Past the GitHub step, onto the project folder. */
@@ -113,11 +115,14 @@ function stubFetch(
     changes?: Record<string, unknown>;
     /** The delete route's preview, as `GET projects/delete?folder=…` answers it. */
     deletePreview?: Record<string, unknown>;
+    /** The older runs "keep everything" kept, as `runs?history=1&project=` pages them. */
+    older?: unknown[];
   } = {},
 ) {
   let runs = runsArg;
   posts = [];
   gitReads = [];
+  olderReads = [];
   const projects = {
     directory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
     projects: opts.projects ?? [],
@@ -166,6 +171,13 @@ function stubFetch(
       // The device keeps a run still in flight, whatever was asked.
       runs = runs.filter((r) => (r as { status?: string }).status === "running");
       return json({ cleared: before - runs.length });
+    }
+    if (url.startsWith("/setup-api/coding-agent/runs?history=1")) {
+      const q = new URL(url, "http://box").searchParams;
+      olderReads.push(url);
+      const all = opts.older ?? [];
+      const offset = Number(q.get("offset") ?? "0");
+      return json({ runs: all.slice(offset, offset + Number(q.get("limit") ?? "20")), total: all.length, offset });
     }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });
     // Removing a project folder — BEFORE the listing below, whose `startsWith`
@@ -730,6 +742,54 @@ describe("CodingAgentApp", () => {
       fireEvent.click(more);
       expect(screen.getByText("task number 10")).toBeInTheDocument();
       expect(screen.queryByText("task number 20")).not.toBeInTheDocument();
+    });
+
+    it("shows the project's older runs on request — a page at a time, this folder's alone — and says when there are none", async () => {
+      // "keep everything" kept 25 runs past the live thirty for this folder;
+      // the Runs tab lists them only when asked (SCA2 C1 folded the Run
+      // history page into it).
+      const older = Array.from({ length: 25 }, (_, i) => ({ ...RUN, id: `run-older${String(i).padStart(3, "0")}`, task: `older task ${i}`, startedAt: RUN.startedAt - (i + 1) * 60_000 }));
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT], older });
+      render(<CodingAgentApp />);
+      await openRuns();
+      expect(screen.getByText("Add a dark mode toggle")).toBeInTheDocument();
+      expect(screen.queryByText("older task 0")).not.toBeInTheDocument();
+      // Nothing read until asked.
+      expect(olderReads).toEqual([]);
+
+      const show = screen.getByTestId("coding-agent-show-older");
+      expect(show.textContent).toBe(t("codingAgent.history.showOlder"));
+      fireEvent.click(show);
+      expect(await screen.findByText("older task 0")).toBeInTheDocument();
+      expect(screen.getByText("older task 19")).toBeInTheDocument();
+      expect(screen.queryByText("older task 20")).not.toBeInTheDocument();
+      // Asked for this folder's runs, with their evidence, newest first after the live list.
+      expect(olderReads).toHaveLength(1);
+      const q = new URL(olderReads[0], "http://box").searchParams;
+      expect(q.get("project")).toBe(SITE_PROJECT.directory);
+      expect(q.get("offset")).toBe("0");
+      expect(q.get("artifacts")).toBe("1");
+      const rows = screen.getAllByTestId(/^coding-agent-run-row-/).map((el) => el.getAttribute("data-run-id"));
+      expect(rows[0]).toBe(RUN.id);
+      expect(rows[1]).toBe("run-older000");
+      // The remaining five, then nothing more to show.
+      expect(screen.getByTestId("coding-agent-show-older").textContent).toContain("(5)");
+      fireEvent.click(screen.getByTestId("coding-agent-show-older"));
+      expect(await screen.findByText("older task 24")).toBeInTheDocument();
+      expect(new URL(olderReads[1], "http://box").searchParams.get("offset")).toBe("20");
+      await waitFor(() => expect(screen.queryByTestId("coding-agent-show-older")).not.toBeInTheDocument());
+      expect(screen.queryByTestId("coding-agent-older-empty")).not.toBeInTheDocument();
+    });
+
+    it("says why there are no older runs, once it has asked", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(screen.getByTestId("coding-agent-show-older"));
+      expect((await screen.findByTestId("coding-agent-older-empty")).textContent).toBe(t("codingAgent.history.olderEmpty", { count: 30 }));
+      expect(screen.queryByTestId("coding-agent-show-older")).not.toBeInTheDocument();
+      // The rail has no Run history entry any more: the page is gone.
+      expect(screen.queryByTestId("coding-agent-sidebar-history")).not.toBeInTheDocument();
     });
 
     it("opens on the button, with the outcome and the summary on demand", async () => {

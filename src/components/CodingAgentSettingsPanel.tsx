@@ -128,8 +128,6 @@ export interface AgentStatus {
    *  the counted settings are: an older server answers with none and the Run
    *  history card is then not drawn at all. */
   historyRetention?: HistoryRetentionMode;
-  /** The extended mode's N — read for the card's hint; no longer set from here (SCA C3). */
-  historyLimit?: number;
   historyLiveKept?: number;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
@@ -1451,7 +1449,6 @@ export default function CodingAgentSettingsPanel() {
       {status?.historyRetention && (
         <CodingRunHistoryCard
           mode={status.historyRetention}
-          limit={status.historyLimit ?? 100}
           liveKept={status.historyLiveKept ?? 30}
           saving={saving}
           onSave={(patch) => saveSetting(patch, "history", t("codingAgent.history.saveFailed"))}

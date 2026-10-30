@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { clearFinishedRuns, getHistoryPolicy, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
+import { clearFinishedRuns, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
 import { slimRun } from "@/lib/coding-agent-slim";
 import { hasPersonSession } from "@/lib/owner-session";
@@ -28,8 +28,7 @@ export const dynamic = "force-dynamic";
  *                            optionally one project folder's. `?id=` already
  *                            finds one of them on its own.
  *
- * DELETE                   → forget the finished runs; { cleared: n }. Under
- *                            the archive mode they are archived instead.
+ * DELETE                   → forget the finished runs; { cleared: n }.
  *
  * GET is read-only, and middleware's cookie-or-bearer gate is the whole gate
  * for it. The 404 carries a JSON { error } body on purpose — the MCP
@@ -57,7 +56,7 @@ export async function DELETE(request: Request) {
     );
   }
   try {
-    return NextResponse.json({ cleared: clearFinishedRuns(await getHistoryPolicy()) });
+    return NextResponse.json({ cleared: clearFinishedRuns() });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not clear the coding runs" },
