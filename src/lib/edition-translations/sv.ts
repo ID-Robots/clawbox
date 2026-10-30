@@ -570,6 +570,10 @@ export const sv: Record<string, string> = {
   "codingAgent.harnessNotReady": "inte redo",
   "codingAgent.harnessNotReadyDetail": "Kodningsmiljön på den här ClawBoxen fick ingen modell att svara. Det är ett problem med enheten, inte med din uppgift — kontrollera under Inställningar → AI-modeller att ClawBox AI är ansluten och att din plan täcker modellen som begärs, och starta sedan körningen igen.",
   "codingAgent.harnessRetry": "Försök igen",
+  "codingAgent.clearRuns": "Rensa historiken",
+  "codingAgent.showAllProjects": "Visa alla ({count})",
+  "codingAgent.showFewerProjects": "Visa färre",
+  "codingAgent.notReady": "Inte redo: {what}",
   "codingAgent.harnessRetrying": "Kontrollerar…",
   "codingAgent.harnessRetryFailed": "Det gick inte att be ClawBoxen försöka igen.",
   // Vilket konto som betalar en körning: den här ClawBoxens egen plan, eller
@@ -665,7 +669,6 @@ export const sv: Record<string, string> = {
   "codingAgent.backupBusy": "Säkerhetskopierar…",
   "codingAgent.backupDone": "Säkerhetskopierad till {repo}",
   "codingAgent.backupFailed": "Kunde inte säkerhetskopiera till GitHub.",
-  "codingAgent.recentRuns": "Senaste körningar",  "codingAgent.clearRuns": "Rensa historiken",
   "codingAgent.clearRunsHint": "Tar bort avslutade körningar och deras bevismappar från listan. Pågående, pausade och utkast behålls — de håller fortfarande en session du kan återuppta.",
   "codingAgent.clearConfirm": "Rensa — tryck igen",
   "codingAgent.clearFailed": "Historiken kunde inte rensas.",
@@ -749,7 +752,6 @@ export const sv: Record<string, string> = {
   "codingAgent.stop": "Stoppa",
   "codingAgent.back": "Tillbaka",
   "codingAgent.backTo": "Tillbaka till {name}",
-  "codingAgent.breadcrumbLabel": "Sökväg",
   "codingAgent.workspaceTitle": "Projektets arbetsyta",
   "codingAgent.filesTab": "Filer",
   "codingAgent.changesTab": "Ändringar",
@@ -928,7 +930,6 @@ export const sv: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Projekt",
-  "codingAgent.navHome": "Hem",
   "codingAgent.projectFolderUnset": "Välj en projektmapp i Inställningar, så visas varje projekt med egen git-historik här.",
   "codingAgent.noProjects": "Inga projekt ännu. Tryck på Ny app eller be din assistent bygga något i {folder}.",
   "codingAgent.onDesktop": "på skrivbordet",

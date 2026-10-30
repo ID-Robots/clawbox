@@ -585,6 +585,10 @@ export const zh: Record<string, string> = {
   "codingAgent.harnessNotReady": "尚未就绪",
   "codingAgent.harnessNotReadyDetail": "本 ClawBox 的编程环境无法让任何模型作出回应。这是设备的问题，与你的任务无关 — 请到设置 → AI 模型中确认 ClawBox AI 已连接，并且你的套餐包含环境所请求的模型，然后重新开始运行。",
   "codingAgent.harnessRetry": "再试一次",
+  "codingAgent.clearRuns": "清除历史记录",
+  "codingAgent.showAllProjects": "显示全部（{count}）",
+  "codingAgent.showFewerProjects": "收起",
+  "codingAgent.notReady": "尚未就绪：{what}",
   "codingAgent.harnessRetrying": "检查中…",
   "codingAgent.harnessRetryFailed": "无法请求 ClawBox 重试。",
   // 由哪个账户支付一次运行：本 ClawBox 自己的套餐，还是机主自己的 Anthropic
@@ -679,7 +683,6 @@ export const zh: Record<string, string> = {
   "codingAgent.backupBusy": "备份中…",
   "codingAgent.backupDone": "已备份到 {repo}",
   "codingAgent.backupFailed": "无法备份到 GitHub。",
-  "codingAgent.recentRuns": "最近的运行",  "codingAgent.clearRuns": "清除历史记录",
   "codingAgent.clearRunsHint": "从列表中移除已结束的运行及其证据文件夹。进行中、已暂停和草稿状态的运行会保留——它们仍持有可恢复的会话。",
   "codingAgent.clearConfirm": "再次点击以清除",
   "codingAgent.clearFailed": "无法清除历史记录。",
@@ -763,7 +766,6 @@ export const zh: Record<string, string> = {
   "codingAgent.stop": "停止",
   "codingAgent.back": "返回",
   "codingAgent.backTo": "返回 {name}",
-  "codingAgent.breadcrumbLabel": "面包屑导航",
   "codingAgent.workspaceTitle": "项目工作区",
   "codingAgent.filesTab": "文件",
   "codingAgent.changesTab": "更改",
@@ -942,7 +944,6 @@ export const zh: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "项目",
-  "codingAgent.navHome": "首页",
   "codingAgent.projectFolderUnset": "在设置中选择一个项目文件夹，拥有独立 git 历史的项目就会列在这里。",
   "codingAgent.noProjects": "还没有项目。点击“新建应用”，或让助手在 {folder} 里构建点什么。",
   "codingAgent.onDesktop": "已在桌面",

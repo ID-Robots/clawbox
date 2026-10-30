@@ -576,6 +576,10 @@ export const ja: Record<string, string> = {
   "codingAgent.harnessNotReady": "準備できていません",
   "codingAgent.harnessNotReadyDetail": "この ClawBox のコーディング環境はモデルから応答を得られませんでした。これはタスクではなくデバイス側の問題です。設定 → AI モデルで ClawBox AI が接続されていることと、現在のプランが要求されたモデルを含むことを確認してから、もう一度実行してください。",
   "codingAgent.harnessRetry": "もう一度試す",
+  "codingAgent.clearRuns": "履歴を消去",
+  "codingAgent.showAllProjects": "すべて表示（{count}）",
+  "codingAgent.showFewerProjects": "表示を減らす",
+  "codingAgent.notReady": "準備ができていません: {what}",
   "codingAgent.harnessRetrying": "確認中…",
   "codingAgent.harnessRetryFailed": "ClawBox に再試行を依頼できませんでした。",
   // 実行の費用をどのアカウントが払うか: この ClawBox 自身のプランか、オーナー
@@ -670,7 +674,6 @@ export const ja: Record<string, string> = {
   "codingAgent.backupBusy": "バックアップ中…",
   "codingAgent.backupDone": "{repo} にバックアップしました",
   "codingAgent.backupFailed": "GitHub へのバックアップに失敗しました。",
-  "codingAgent.recentRuns": "最近の実行",  "codingAgent.clearRuns": "履歴を消去",
   "codingAgent.clearRunsHint": "終了した実行とその証跡フォルダーを一覧から削除します。実行中・一時停止中・下書きの実行は残ります（再開できるセッションを保持しているためです）。",
   "codingAgent.clearConfirm": "もう一度タップで消去",
   "codingAgent.clearFailed": "履歴を消去できませんでした。",
@@ -754,7 +757,6 @@ export const ja: Record<string, string> = {
   "codingAgent.stop": "停止",
   "codingAgent.back": "戻る",
   "codingAgent.backTo": "{name} に戻る",
-  "codingAgent.breadcrumbLabel": "パンくずリスト",
   "codingAgent.workspaceTitle": "プロジェクトのワークスペース",
   "codingAgent.filesTab": "ファイル",
   "codingAgent.changesTab": "変更",
@@ -933,7 +935,6 @@ export const ja: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "プロジェクト",
-  "codingAgent.navHome": "ホーム",
   "codingAgent.projectFolderUnset": "設定でプロジェクトフォルダーを選ぶと、独自の git 履歴を持つプロジェクトがここに並びます。",
   "codingAgent.noProjects": "まだプロジェクトはありません。「新しいアプリ」を押すか、{folder} に何かを作るようアシスタントに頼んでください。",
   "codingAgent.onDesktop": "デスクトップにあり",

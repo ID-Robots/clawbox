@@ -13,7 +13,12 @@
  */
 export const BTN_BASE =
   "inline-flex items-center justify-center gap-1.5 shrink-0 select-none no-underline cursor-pointer"
-  + " rounded-lg px-3 py-1.5 text-xs font-medium"
+  // 44 px tall on a phone (the touch target every face is designed at, 390 px
+  // first) and 32 px once the CONTAINER is `@md` (448 px) wide — a container
+  // variant, never a viewport one, because the app is a window the owner
+  // resizes independently of the screen. One change here and every button in
+  // the Coding Agent follows (2026-10-30 redesign).
+  + " rounded-lg min-h-[44px] @md:min-h-[32px] px-4 @md:px-3 py-1.5 text-sm @md:text-xs font-medium"
   + " transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
   + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)]"
   + " disabled:opacity-50 disabled:cursor-not-allowed";
@@ -28,6 +33,13 @@ export const BTN_BASE =
  * shadow stacked on a class that already had one.
  */
 export const BTN_PRIMARY = `${BTN_BASE} btn-gradient text-white font-semibold`;
+
+/**
+ * The face's ONE primary action on a phone: the whole width and 48 px tall,
+ * so the thing the page is for is the easiest thing on it to hit; from `@md`
+ * it is an ordinary button again.
+ */
+export const BTN_PRIMARY_WIDE = `${BTN_PRIMARY} w-full min-h-[48px] @md:w-auto @md:min-h-[36px]`;
 
 /**
  * Everything else you can do from a screen.
@@ -96,8 +108,6 @@ export const APP_GROUND = "bg-[var(--win-ground)]";
 export const CARD_SURFACE = "rounded-xl bg-black/20 border border-white/[0.07]";
 /** A quieter inset inside a card — a row, a log, a viewer. */
 export const INSET_SURFACE = "rounded-lg bg-black/25 border border-white/[0.06]";
-/** The sidebar and a pane's header strip. */
-export const RAIL_SURFACE = "bg-black/30 border-white/[0.06]";
 
 export const CARD = `rounded-2xl border border-white/[0.07] bg-black/20 p-5`;
 
@@ -105,6 +115,12 @@ export const CARD = `rounded-2xl border border-white/[0.07] bg-black/20 p-5`;
 export const FIELD =
   "rounded-lg border border-white/[0.08] bg-black/20 px-3 py-1.5 text-[var(--text-primary)]"
   + " outline-none transition-colors focus:border-[var(--coral-bright)]/50";
+
+/**
+ * The content column's gutter: 16 px on a phone (the desktop's own gutter,
+ * so nothing touches the window's edge) and 20 px from `@md`.
+ */
+export const PAGE_PAD = "px-4 py-3 @md:px-5 @md:py-4";
 
 /** Small caps section label — the rhythm every list on these pages starts with. */
 export const SECTION_LABEL =

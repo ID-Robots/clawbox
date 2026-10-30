@@ -585,6 +585,10 @@ export const it: Record<string, string> = {
   "codingAgent.harnessNotReady": "non pronto",
   "codingAgent.harnessNotReadyDetail": "L'ambiente di sviluppo di questo ClawBox non è riuscito a far rispondere alcun modello. È un problema del dispositivo, non della tua richiesta: controlla in Impostazioni → Modelli IA che ClawBox AI sia collegato e che il tuo piano copra il modello richiesto, poi riavvia l'esecuzione.",
   "codingAgent.harnessRetry": "Riprova",
+  "codingAgent.clearRuns": "Cancella la cronologia",
+  "codingAgent.showAllProjects": "Mostra tutti ({count})",
+  "codingAgent.showFewerProjects": "Mostra meno",
+  "codingAgent.notReady": "Non pronto: {what}",
   "codingAgent.harnessRetrying": "Verifica in corso…",
   "codingAgent.harnessRetryFailed": "Non è stato possibile chiedere al ClawBox di riprovare.",
   // Quale account paga un'esecuzione: il piano di questa ClawBox, o l'accesso
@@ -680,7 +684,6 @@ export const it: Record<string, string> = {
   "codingAgent.backupBusy": "Backup in corso…",
   "codingAgent.backupDone": "Backup su {repo}",
   "codingAgent.backupFailed": "Impossibile eseguire il backup su GitHub.",
-  "codingAgent.recentRuns": "Esecuzioni recenti",  "codingAgent.clearRuns": "Cancella la cronologia",
   "codingAgent.clearRunsHint": "Rimuove dall'elenco le esecuzioni concluse e le loro cartelle di prove. Restano quelle attive, in pausa o in bozza: mantengono ancora una sessione che puoi riprendere.",
   "codingAgent.clearConfirm": "Cancella — tocca ancora",
   "codingAgent.clearFailed": "Impossibile cancellare la cronologia.",
@@ -764,7 +767,6 @@ export const it: Record<string, string> = {
   "codingAgent.stop": "Interrompi",
   "codingAgent.back": "Indietro",
   "codingAgent.backTo": "Torna a {name}",
-  "codingAgent.breadcrumbLabel": "Percorso di navigazione",
   "codingAgent.workspaceTitle": "Area di lavoro del progetto",
   "codingAgent.filesTab": "File",
   "codingAgent.changesTab": "Modifiche",
@@ -943,7 +945,6 @@ export const it: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Progetti",
-  "codingAgent.navHome": "Inizio",
   "codingAgent.projectFolderUnset": "Scegli una cartella dei progetti nelle Impostazioni: ogni progetto con una propria cronologia git comparirà qui.",
   "codingAgent.noProjects": "Ancora nessun progetto. Tocca «Nuova app» o chiedi al tuo assistente di costruire qualcosa in {folder}.",
   "codingAgent.onDesktop": "sul desktop",

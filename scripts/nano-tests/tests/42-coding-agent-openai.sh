@@ -128,7 +128,7 @@ const out = (line) => process.stdout.write(line + "\n");
     await context.addCookies([{ name: "clawbox_session", value: process.env.OWNER_COOKIE, url: "http://127.0.0.1" }]);
     const page = await context.newPage();
     await page.goto("http://127.0.0.1/app/coding", { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.locator("[data-testid=coding-agent-sidebar-settings]").first().click({ timeout: 60000 });
+    await page.locator("[data-testid=coding-agent-open-settings]").first().click({ timeout: 60000 });
     const row = page.locator("[data-testid=coding-agent-provider-openai]").first();
     await row.waitFor({ timeout: 60000 });
     const connect = page.locator("[data-testid=coding-agent-provider-connect-openai]");

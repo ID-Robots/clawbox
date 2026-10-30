@@ -561,6 +561,10 @@ export const bg: Record<string, string> = {
   "codingAgent.harnessNotReady": "не е готова",
   "codingAgent.harnessNotReadyDetail": "Средата за кодиране на тази ClawBox не успя да получи отговор от никой модел. Проблемът е в устройството, а не в задачата ви — проверете в Настройки → AI модели дали ClawBox AI е свързана и дали планът ви покрива искания модел, и стартирайте изпълнението отново.",
   "codingAgent.harnessRetry": "Опитайте отново",
+  "codingAgent.clearRuns": "Изчисти историята",
+  "codingAgent.showAllProjects": "Покажи всички ({count})",
+  "codingAgent.showFewerProjects": "Покажи по-малко",
+  "codingAgent.notReady": "Не е готово: {what}",
   "codingAgent.harnessRetrying": "Проверка…",
   "codingAgent.harnessRetryFailed": "ClawBox не можа да бъде помолена да опита отново.",
   // Коя сметка плаща за изпълнение: планът на самия ClawBox, или акаунтът на
@@ -655,7 +659,6 @@ export const bg: Record<string, string> = {
   "codingAgent.backupBusy": "Архивиране…",
   "codingAgent.backupDone": "Архивирано в {repo}",
   "codingAgent.backupFailed": "Архивирането в GitHub не бе успешно.",
-  "codingAgent.recentRuns": "Последни изпълнения",  "codingAgent.clearRuns": "Изчисти историята",
   "codingAgent.clearRunsHint": "Премахва от списъка приключилите изпълнения и папките им с доказателства. Активните, поставените на пауза и черновите се запазват — те още държат сесия, която можете да подновите.",
   "codingAgent.clearConfirm": "Изчисти — натисни пак",
   "codingAgent.clearFailed": "Историята не можа да бъде изчистена.",
@@ -739,7 +742,6 @@ export const bg: Record<string, string> = {
   "codingAgent.stop": "Спри",
   "codingAgent.back": "Назад",
   "codingAgent.backTo": "Назад към {name}",
-  "codingAgent.breadcrumbLabel": "Навигационна пътека",
   "codingAgent.workspaceTitle": "Работно пространство на проекта",
   "codingAgent.filesTab": "Файлове",
   "codingAgent.changesTab": "Промени",
@@ -918,7 +920,6 @@ export const bg: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Проекти",
-  "codingAgent.navHome": "Начало",
   "codingAgent.projectFolderUnset": "Изберете папка за проекти в Настройки и всеки проект със собствена git история ще се появи тук.",
   "codingAgent.noProjects": "Още няма проекти. Натиснете „Ново приложение“ или помолете асистента си да построи нещо в {folder}.",
   "codingAgent.onDesktop": "на работния плот",
