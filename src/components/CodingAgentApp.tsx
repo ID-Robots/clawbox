@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { holdsResumableSession, isHeld, isLive, isRollingPauseMeter, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
-import { formatFreesUpAt } from "@/lib/clawai-allowance";
+import { holdsResumableSession, isHeld, isLive, isSettled, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { pauseReasonText } from "@/lib/coding-pause-reason-copy";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import type { Deliverable, DeliverableVerdict, RunAttempt } from "@/lib/coding-deliverable";
 import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
@@ -550,22 +550,6 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
 /** What a Continue asks the harness for, in its own language — the session holds the task. */
 const CONTINUE_TASK = "Continue the task you were working on in this session: finish what remains, then report what you did.";
 
-/**
- * The sentence for each spent meter, keyed by the meter the record names.
- *
- * A table rather than a key built by hand from the meter string: the
- * catalogue parity test can only see keys that are written down, and a
- * `codingAgent.pausedAllowance${meter}` assembled at runtime would be
- * invisible to it — untranslated in nine languages, and nothing would say so.
- */
-const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
-  images: "codingAgent.pausedAllowanceImages",
-  speech: "codingAgent.pausedAllowanceSpeech",
-  weekly: "codingAgent.pausedAllowanceWeekly",
-  burst: "codingAgent.pausedAllowanceBurst",
-  embeddings: "codingAgent.pausedAllowanceEmbeddings",
-  anthropic: "codingAgent.pausedAllowanceAnthropic",
-};
 
 /**
  * `meta` rides on the window's record (page.tsx `openApp(appId, forceNew,
@@ -2687,32 +2671,11 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
               {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
                 <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
                   <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
+                  {/* The sentence is shared with the chat's run card
+                      (src/lib/coding-pause-reason-copy.ts), so the two
+                      surfaces cannot word the same pause two ways. */}
                   <p className="text-[11px] text-[var(--text-secondary)] break-words">
-                    {t(PAUSE_METER_KEY[run.pauseReason.meter])}
-                    {" "}
-                    {(() => {
-                      // ClawBox AI's rolling allowances free up as old usage
-                      // ages out, possibly days from now: said in the owner's
-                      // clock with the day in front. The per-day meters keep
-                      // the UTC hour they are counted in. Every Anthropic
-                      // account at its limit: nobody has to press Resume — the
-                      // box carries on by itself at the first reset, and says
-                      // so rather than inviting a click that would only buy
-                      // the same refusal.
-                      if (run.pauseReason.meter === "anthropic") {
-                        const at = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                        return at ? t("codingAgent.pausedAnthropicResumesAt", { time: at }) : t("codingAgent.pausedAnthropicResumes");
-                      }
-                      if (isRollingPauseMeter(run.pauseReason.meter)) {
-                        const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
-                        return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                      }
-                      const clock = pauseResetClock(run.pauseReason.resetsAt);
-                      // No reset time means the far side never said when — so
-                      // the card says "when it is back" rather than inventing
-                      // an hour the owner would plan around.
-                      return clock ? t("codingAgent.pausedAllowanceResets", { time: clock }) : t("codingAgent.pausedAllowanceResetsUnknown");
-                    })()}
+                    {pauseReasonText(run.pauseReason, t, locale)}
                   </p>
                 </div>
               )}

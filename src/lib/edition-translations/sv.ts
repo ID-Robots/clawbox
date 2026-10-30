@@ -896,6 +896,8 @@ export const sv: Record<string, string> = {
   "codingAgent.noticeOpenRun": "Öppna körningen",
   "codingAgent.liveView": "Öppna",
   "codingAgent.chatNeedsYou": "Behöver dig",
+  "codingAgent.chatPausing": "Pausar…",
+  "codingAgent.chatResuming": "Återupptar…",
   "codingAgent.chatFiles": "{n} filer",
   "codingAgent.chatPr": "PR nr {n}",
   "codingAgent.chatTeam.queued": "I kö",

@@ -901,6 +901,8 @@ export const ja: Record<string, string> = {
   "codingAgent.noticeOpenRun": "実行を開く",
   "codingAgent.liveView": "開く",
   "codingAgent.chatNeedsYou": "確認が必要",
+  "codingAgent.chatPausing": "一時停止中…",
+  "codingAgent.chatResuming": "再開中…",
   "codingAgent.chatFiles": "{n} ファイル",
   "codingAgent.chatPr": "プルリク #{n}",
   "codingAgent.chatTeam.queued": "待機中",

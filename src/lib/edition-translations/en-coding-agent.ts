@@ -469,6 +469,8 @@ export const codingAgentEn: Record<string, string> = {
   // its status chip, the phase line, each task's state, why a team stopped, and
   // the desktop's team finish card (page.tsx), whose Open hands the app the team.
   "codingAgent.chatNeedsYou": "Needs you",
+  "codingAgent.chatPausing": "Pausing…",
+  "codingAgent.chatResuming": "Resuming…",
   "codingAgent.chatFiles": "{n} files",
   "codingAgent.chatPr": "PR #{n}",
   "codingAgent.chatTeam.queued": "Queued",

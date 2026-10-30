@@ -910,6 +910,8 @@ export const zh: Record<string, string> = {
   "codingAgent.noticeOpenRun": "打开此运行",
   "codingAgent.liveView": "打开",
   "codingAgent.chatNeedsYou": "需要你处理",
+  "codingAgent.chatPausing": "正在暂停…",
+  "codingAgent.chatResuming": "正在恢复…",
   "codingAgent.chatFiles": "{n} 个文件",
   "codingAgent.chatPr": "拉取请求 #{n}",
   "codingAgent.chatTeam.queued": "排队中",

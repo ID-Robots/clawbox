@@ -900,6 +900,8 @@ export const nl: Record<string, string> = {
   "codingAgent.noticeOpenRun": "Run openen",
   "codingAgent.liveView": "Openen",
   "codingAgent.chatNeedsYou": "Heeft u nodig",
+  "codingAgent.chatPausing": "Pauzeren…",
+  "codingAgent.chatResuming": "Hervatten…",
   "codingAgent.chatFiles": "{n} bestanden",
   "codingAgent.chatPr": "PR nr. {n}",
   "codingAgent.chatTeam.queued": "In de wachtrij",

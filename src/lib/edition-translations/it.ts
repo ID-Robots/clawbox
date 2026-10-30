@@ -911,6 +911,8 @@ export const it: Record<string, string> = {
   "codingAgent.noticeOpenRun": "Apri l'esecuzione",
   "codingAgent.liveView": "Apri",
   "codingAgent.chatNeedsYou": "Serve il tuo intervento",
+  "codingAgent.chatPausing": "Messa in pausa…",
+  "codingAgent.chatResuming": "Ripresa…",
   "codingAgent.chatFiles": "{n} file",
   "codingAgent.chatPr": "PR n. {n}",
   "codingAgent.chatTeam.queued": "In coda",
