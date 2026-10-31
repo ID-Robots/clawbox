@@ -134,6 +134,15 @@ function readEffectiveBranch(value: unknown): EffectiveBranch | null {
 
 const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
 
+/** How often a run's poll asks again while the box answers "idle" (each answer reads git on the box). */
+const IDLE_POLL_MS = 10_000;
+/**
+ * "idle" answers, before the run was ever seen, that mean the click started
+ * nothing. The run route marks the run running before it answers, so a run it
+ * started never reads "idle" first.
+ */
+const NOT_STARTED_AFTER_IDLE = 3;
+
 /**
  * A translated sentence with one or more rendered elements inside it.
  *
@@ -318,17 +327,24 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     pollControllerRef.current = controller;
     let serverWentDown = false;
     let failures = 0;
+    let inFlight = false;
+    // "idle" answers: when the last one came, and how many came before this
+    // screen ever saw the run.
+    let idleAt = 0;
+    let idleBeforeRun = 0;
+    let sawRun = false;
     pollRef.current = window.setInterval(async () => {
+      if (inFlight) return;
+      // Each "idle" answer reads git for drift on the box: while that is the
+      // answer, ask less often.
+      if (idleAt && Date.now() - idleAt < IDLE_POLL_MS) return;
+      inFlight = true;
       try {
         const res = await fetch("/setup-api/update/status", { signal: controller.signal });
         if (controller.signal.aborted) return;
         if (!res.ok) {
           failures++;
           if (failures >= 3) serverWentDown = true;
-          return;
-        }
-        if (serverWentDown) {
-          window.location.reload();
           return;
         }
         failures = 0;
@@ -340,8 +356,23 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         // then reports as "failed" with the step to resume from. Stopping here
         // left the screen on "Don't power off" with every step waiting, for
         // good, over a run nothing was running any more. Keep the progress
-        // last seen and keep asking.
-        if (data.phase === "idle") return;
+        // last seen and keep asking — and do not reload over it either: the
+        // page that came back would adopt no run and offer "Update everything".
+        // Only a run this screen never saw is one that did not start.
+        if (data.phase === "idle") {
+          idleAt = Date.now();
+          if (!sawRun && ++idleBeforeRun >= NOT_STARTED_AFTER_IDLE) {
+            stopPolling();
+            setUpdateError(tr("update.startFailed", "Failed to start update"));
+          }
+          return;
+        }
+        idleAt = 0;
+        sawRun = true;
+        if (serverWentDown) {
+          window.location.reload();
+          return;
+        }
         setUpdateState(data);
         if (data.phase !== "running") {
           stopPolling();
@@ -357,9 +388,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         if (controller.signal.aborted) return;
         failures++;
         if (failures >= 3) serverWentDown = true;
+      } finally {
+        inFlight = false;
       }
     }, 2000);
-  }, [stopPolling, fetchVersions]);
+  }, [stopPolling, fetchVersions, tr]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -390,9 +423,10 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         return;
       }
       // A 200 can still say the click started nothing: another run holds the
-      // box, or a database compaction does. Join the run if there is one; else
-      // say why. Polled blindly, the "idle" answer that follows is no verdict
-      // (see startPolling) and the screen would wait on it for ever.
+      // box, or a database compaction does. Show the run if there is one — a
+      // live one to join, or one that has just failed (an interrupted run's
+      // verdict carries its Resume) — and otherwise say the server's reason at
+      // once rather than after the poll gives up on "idle".
       let started: { started?: unknown; error?: unknown } | null = null;
       try {
         started = await res.json();
@@ -401,9 +435,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         const live = await fetch("/setup-api/update/status", { cache: "no-store" })
           .then((r) => (r.ok ? (r.json() as Promise<UpdateState>) : null))
           .catch(() => null);
-        if (live?.phase === "running") {
+        if (live?.phase === "running" || live?.phase === "failed") {
           setUpdateState(live);
-          startPolling();
+          if (live.phase === "running") startPolling();
           return;
         }
         setUpdateError(typeof started.error === "string"

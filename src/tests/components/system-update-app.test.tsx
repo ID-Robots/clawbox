@@ -236,10 +236,13 @@ describe("SystemUpdateApp — a poll that answers idle mid-run", () => {
     + "\"Installing Chromium\" was running. Nothing was rolled back — Resume continues the update from there.";
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   it("keeps the progress it saw and keeps asking until the server's verdict", async () => {
+    // The poll's interval and clock only: Testing Library's own waits stay real.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
     const answers = [
       { phase: "running", currentStepIndex: 2, steps: at(2, "running") },
       { phase: "idle", currentStepIndex: -1, steps: at(0, "pending") },
@@ -268,17 +271,27 @@ describe("SystemUpdateApp — a poll that answers idle mid-run", () => {
     const view = render(<SystemUpdateApp />);
     expect(await view.findByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
 
-    // Two "idle" answers (the poll runs every 2 s): the run seen last stays on
-    // screen, and the poll goes on.
-    await waitFor(() => expect(statusCalls).toBe(3), { timeout: 6_000 });
+    // The first poll answers "idle": the run seen last stays on screen.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(statusCalls).toBe(2);
     expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
     expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
 
-    await view.findAllByText(/Resume continues the update from there/, undefined, { timeout: 4_000 });
+    // While the answer is "idle" the box is asked every 10 s, not every 2 s.
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(statusCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(statusCalls).toBe(3);
+    expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
+
+    // The verdict, when it comes, is shown with its Resume.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(statusCalls).toBe(4);
+    await view.findAllByText(/Resume continues the update from there/);
     expect(view.getByRole("button", { name: "Resume update" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
     expect(view.queryByTestId("update-run-notice")).toBeNull();
-  }, 15_000);
+  });
 });
 
 // The run route answers 200 for a click that started nothing — another run
@@ -324,6 +337,36 @@ describe("SystemUpdateApp — a click the run route did not start", () => {
     await view.findByText("A database maintenance pass is running");
     expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "failed");
     expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+
+  it("shows a run that has just failed, with its Resume", async () => {
+    const view = mount(
+      { started: false, error: "Update already in progress" },
+      {
+        phase: "failed",
+        error: "The update was interrupted before it could finish: the web server was replaced while "
+          + "\"Updating OpenClaw\" was running. Nothing was rolled back — Resume continues the update from there.",
+        currentStepIndex: -1,
+        steps: [{ id: "openclaw_install", label: "Updating OpenClaw", status: "failed", error: "The web server was replaced while this step was running." }],
+      },
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Update everything" }));
+    expect(await view.findByRole("button", { name: "Resume update" })).toBeTruthy();
+    expect(view.queryByText("Update already in progress")).toBeNull();
+  });
+
+  it("gives up on a run that never appears, when the run route said nothing", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const view = mount({}, { phase: "idle", steps: [] });
+      fireEvent.click(await view.findByRole("button", { name: "Update everything" }));
+      await vi.advanceTimersByTimeAsync(2_000 + 2 * 10_000);
+      await view.findByText("Failed to start update");
+      expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "failed");
+      expect(view.queryByTestId("update-run-notice")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("joins the run that holds the box", async () => {
