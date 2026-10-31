@@ -16,7 +16,7 @@ import {
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
 import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
-import { isNamedChannel, updateWhatsNewPanel } from "@/lib/update-whats-new";
+import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
@@ -334,6 +334,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         failures = 0;
         const data = (await res.json()) as UpdateState;
         if (controller.signal.aborted) return;
+        // "idle" is no verdict on the run this screen is following. A web
+        // server that replaced the one running it answers "idle" until it has
+        // judged that run's lock — a live run, or an interrupted one, which it
+        // then reports as "failed" with the step to resume from. Stopping here
+        // left the screen on "Don't power off" with every step waiting, for
+        // good, over a run nothing was running any more. Keep the progress
+        // last seen and keep asking.
+        if (data.phase === "idle") return;
         setUpdateState(data);
         if (data.phase !== "running") {
           stopPolling();
@@ -379,6 +387,28 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         setUpdateError(typeof data.error === "string"
           ? data.error
           : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
+        return;
+      }
+      // A 200 can still say the click started nothing: another run holds the
+      // box, or a database compaction does. Join the run if there is one; else
+      // say why. Polled blindly, the "idle" answer that follows is no verdict
+      // (see startPolling) and the screen would wait on it for ever.
+      let started: { started?: unknown; error?: unknown } | null = null;
+      try {
+        started = await res.json();
+      } catch { /* no body to read: the poll says what happened */ }
+      if (started?.started === false) {
+        const live = await fetch("/setup-api/update/status", { cache: "no-store" })
+          .then((r) => (r.ok ? (r.json() as Promise<UpdateState>) : null))
+          .catch(() => null);
+        if (live?.phase === "running") {
+          setUpdateState(live);
+          startPolling();
+          return;
+        }
+        setUpdateError(typeof started.error === "string"
+          ? started.error
+          : tr("update.startFailed", "Failed to start update"));
         return;
       }
       startPolling();
@@ -1240,6 +1270,17 @@ function stepNumber(index: number): string {
 }
 
 /**
+ * A version as the run view's version row writes it: a release always with its
+ * `v` (the device says `v4.3.0`, the notes `4.3.0`, and the two must compare
+ * equal), anything else — a branch build like `beta@a2c1718` — as it is.
+ */
+function runVersion(version: string | null): string | null {
+  if (!version) return null;
+  const release = normalizeVersion(version);
+  return release ? `v${release}` : version;
+}
+
+/**
  * The System Update window while a run is on screen — running, finished or
  * failed.
  *
@@ -1312,9 +1353,16 @@ function UpdateRunView({
   const warnings = state?.warnings ?? [];
   const restarts = steps.some((s) => s.id === RESTART_STEP_ID);
 
-  const current = versions ? cleanVersion(versions.clawbox.current) ?? versions.clawbox.current : null;
-  const target = panel.version
-    ?? (versions?.clawbox.target ? cleanVersion(versions.clawbox.target) ?? versions.clawbox.target : null);
+  const current = versions ? runVersion(cleanVersion(versions.clawbox.current) ?? versions.clawbox.current) : null;
+  const nextBuild = versions?.clawbox.target
+    ? runVersion(cleanVersion(versions.clawbox.target) ?? versions.clawbox.target)
+    : null;
+  // The notes name a package version, and every build a channel like beta
+  // ships carries the one already installed until the next bump. There the
+  // version said nothing — "v4.3.0 → 4.3.0" on a real board — and the build
+  // the box is going to (`beta@a2c1718`) is what is being installed.
+  const notesVersion = runVersion(panel.version);
+  const target = notesVersion && notesVersion !== current ? notesVersion : nextBuild ?? notesVersion;
   const shownChannel = panel.channel ?? channel;
 
   const header = (

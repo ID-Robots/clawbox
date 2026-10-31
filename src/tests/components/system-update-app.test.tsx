@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 
@@ -214,5 +214,126 @@ describe("SystemUpdateApp — an interrupted run offers Resume", () => {
     expect(view.queryByRole("button", { name: "Resume update" })).toBeNull();
     expect(view.queryByRole("button", { name: "Start the update again" })).toBeNull();
     expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+});
+
+// On a board, the web server was replaced while "Installing Chromium" ran. The
+// one that came back answered "idle" until it had judged the dead run's lock,
+// and then "failed" with the step to resume from — but this screen had stopped
+// polling at the first "idle" and sat on "Don't power off" with every step
+// waiting, for good, over a run nothing was running.
+describe("SystemUpdateApp — a poll that answers idle mid-run", () => {
+  const RUN = [
+    { id: "bootstrap_updater", label: "Refreshing updater scripts" },
+    { id: "apt_update", label: "Updating system packages" },
+    { id: "chromium_install", label: "Installing Chromium" },
+    { id: "restart", label: "Updating ClawBox and restarting" },
+  ];
+  const at = (done: number, current: "running" | "failed" | "pending") =>
+    RUN.map((s, i) => ({ ...s, status: i < done ? "completed" : i === done ? current : "pending" }));
+  const INTERRUPTED =
+    "The update was interrupted before it could finish: the web server was replaced while "
+    + "\"Installing Chromium\" was running. Nothing was rolled back — Resume continues the update from there.";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the progress it saw and keeps asking until the server's verdict", async () => {
+    const answers = [
+      { phase: "running", currentStepIndex: 2, steps: at(2, "running") },
+      { phase: "idle", currentStepIndex: -1, steps: at(0, "pending") },
+      { phase: "idle", currentStepIndex: -1, steps: at(0, "pending") },
+      { phase: "failed", error: INTERRUPTED, currentStepIndex: -1, steps: at(2, "failed") },
+    ];
+    let statusCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/setup-api/update/versions")) {
+          return jsonResponse({
+            clawbox: { current: "v4.3.0", target: "beta@a2c1718", updateAvailable: true },
+            openclaw: { current: "2026.10.7", target: null, updateAvailable: false },
+          });
+        }
+        if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: "beta" });
+        if (url.includes("/setup-api/update/status")) {
+          return jsonResponse(answers[Math.min(statusCalls++, answers.length - 1)]);
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    const view = render(<SystemUpdateApp />);
+    expect(await view.findByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
+
+    // Two "idle" answers (the poll runs every 2 s): the run seen last stays on
+    // screen, and the poll goes on.
+    await waitFor(() => expect(statusCalls).toBe(3), { timeout: 6_000 });
+    expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+
+    await view.findAllByText(/Resume continues the update from there/, undefined, { timeout: 4_000 });
+    expect(view.getByRole("button", { name: "Resume update" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect(view.queryByTestId("update-run-notice")).toBeNull();
+  }, 15_000);
+});
+
+// The run route answers 200 for a click that started nothing — another run
+// holds the box, or a database compaction does. With a poll that waits out
+// "idle" (above), following that click blindly would wait for ever.
+describe("SystemUpdateApp — a click the run route did not start", () => {
+  function mount(run: unknown, statusAfterClick: unknown) {
+    let clicked = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/setup-api/update/versions")) {
+          return jsonResponse({
+            clawbox: { current: "v4.3.0", target: "beta@a2c1718", updateAvailable: true },
+            openclaw: { current: "2026.10.7", target: null, updateAvailable: false },
+          });
+        }
+        if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: "beta" });
+        if (url.includes("/setup-api/update/run")) {
+          clicked = true;
+          return jsonResponse(run);
+        }
+        if (url.includes("/setup-api/update/status")) {
+          return jsonResponse(clicked ? statusAfterClick : { phase: "idle", steps: [] });
+        }
+        return jsonResponse({});
+      }),
+    );
+    return render(<SystemUpdateApp />);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("says the server's reason when no run is going", async () => {
+    const view = mount(
+      { started: false, error: "A database maintenance pass is running" },
+      { phase: "idle", steps: [] },
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Update everything" }));
+    await view.findByText("A database maintenance pass is running");
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "failed");
+    expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+
+  it("joins the run that holds the box", async () => {
+    const view = mount(
+      { started: false, error: "Update already in progress" },
+      { phase: "running", currentStepIndex: 0, steps: [{ id: "apt_update", label: "Updating system packages", status: "running" }] },
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Update everything" }));
+    await view.findAllByText("Updating system packages");
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(view.queryByText("Update already in progress")).toBeNull();
   });
 });
