@@ -85,17 +85,31 @@ describe("a read-only run", () => {
   });
 
   it("may run read-only git through Bash and nothing else", () => {
-    const named = ["log", "status", "diff", "show", "branch", "rev-parse", "ls-files", "blame", "shortlog", "describe"].map((cmd) => `Bash(git ${cmd}:*)`);
+    const named = ["log", "status", "diff", "show", "rev-parse", "ls-files", "blame", "shortlog", "describe"].map((cmd) => `Bash(git ${cmd}:*)`);
+    // git branch only as exact listings: by prefix it would take a mutation flag anywhere in the line.
+    const listings = ["", " -a", " -r", " --list", " --show-current", " -v", " -vv"].map((rest) => `Bash(git branch${rest})`);
     for (const run of [PLANNER, undefined]) {
       const args = buildRunArgs({ readOnly: true, run });
       const bash = flag(args, "--allowedTools").filter((rule) => rule.startsWith("Bash"));
-      expect(bash).toEqual(expect.arrayContaining(named));
+      expect(bash).toEqual(expect.arrayContaining([...named, ...listings]));
       expect(bash).toEqual([...READ_ONLY_GIT_RULES]);
-      for (const rule of bash) expect(rule).toMatch(/^Bash\(git [a-z-]+:\*\)$/);
+      expect(bash).not.toContain("Bash(git branch:*)");
+      for (const rule of bash) expect(rule).toMatch(/^Bash\(git (?:[a-z-]+:\*|branch(?: --?[a-z-]+)?)\)$/);
 
-      for (const command of ["git log --oneline -20", "git status", "git diff origin/beta -- src", "git show HEAD:src/lib/a.ts", "git branch -a", "git rev-parse HEAD", "git ls-files src", "git blame -L 1,9 a.ts", "git shortlog -sn", "git describe --tags"]) {
+      for (const command of ["git log --oneline -20", "git status", "git diff origin/beta -- src", "git show HEAD:src/lib/a.ts", "git branch", "git branch -a", "git branch -r", "git branch --list", "git branch --show-current", "git branch -vv", "git rev-parse HEAD", "git ls-files src", "git blame -L 1,9 a.ts", "git shortlog -sn", "git describe --tags"]) {
         expect(verdict(args, command), command).toBe("allowed");
       }
+      // A listing flag first and a mutation flag after it is no listing: never approved.
+      const mutations = ["-D", "-d", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy", "-f", "--force", "--set-upstream-to=origin/main", "--set-upstream-to origin/main", "-u origin/main", "--unset-upstream", "--edit-description"];
+      for (const mutation of mutations) {
+        for (const listing of ["-r", "-a", "-v", "-vv", "--list", "--show-current"]) {
+          const command = `git branch ${listing} ${mutation} origin/main`;
+          expect(verdict(args, command), command).not.toBe("allowed");
+        }
+        expect(verdict(args, `git branch ${mutation} main`), mutation).not.toBe("allowed");
+      }
+      // Nor a new branch by name, which a bare `git branch <name>` makes.
+      expect(verdict(args, "git branch scratch")).toBe("unapproved");
       for (const command of ["git push origin HEAD", "git commit -m x", "git add .", "git checkout -- a.ts", "git reset --hard", "git branch -D main", "git branch -d old", "git stash", "git worktree add ../x", "git remote set-url origin x", "git config user.name x", "git clean -fd", "git fetch", "git pull", "gh pr merge 1", "gh pr create", "gh api repos", "pkill -f next-server", "killall node"]) {
         expect(verdict(args, command), command).toBe("denied");
       }
@@ -105,6 +119,30 @@ describe("a read-only run", () => {
       // The diff family's --output writes a file wherever it is told.
       for (const command of ["git log --output=/tmp/x", "git diff --output x", "git show --output=a HEAD"]) {
         expect(verdict(args, command), command).toBe("denied");
+      }
+    }
+  });
+
+  it("is refused every git read that opens a file outside the repository — git opens it, so no file deny rule sees it", () => {
+    // Git takes any unambiguous abbreviation of a long option: `--no-i` up to `--no-index`, `--con` up to `--contents`.
+    const prefixes = (option: string, from: string) => Array.from({ length: option.length - from.length + 1 }, (_, i) => option.slice(0, from.length + i));
+    expect(prefixes("--no-index", "--no-i")).toEqual(["--no-i", "--no-in", "--no-ind", "--no-inde", "--no-index"]);
+    for (const run of [PLANNER, undefined]) {
+      const args = buildRunArgs({ readOnly: true, run });
+      const leaks = [
+        ...prefixes("--no-index", "--no-i").flatMap((option) => [`git diff ${option} -- /dev/null /etc/hostname`, `git diff --stat ${option} a.txt b.txt`]),
+        ...prefixes("--contents", "--con").flatMap((option) => [`git blame ${option} /etc/hostname a.ts`, `git blame -L 1,9 ${option}=/etc/hostname a.ts`]),
+        // No --no-index at all: two paths, one outside the repository, and git diffs them as files.
+        "git diff /dev/null /etc/hostname", "git diff a.txt /etc/hostname", "git diff -p a.txt ../other/.env", "git diff a.txt ~/.ssh/id_ed25519", "git diff ~/.netrc a.txt", "git diff a.txt ..", "git diff .. a.txt",
+        // A list file read and echoed line by line in the error.
+        "git blame -S /etc/hostname a.ts", "git blame --ignore-revs-file /etc/hostname a.ts", "git blame --ignore-revs /etc/hostname a.ts",
+        // Revisions from a redirected file, echoed as a bad revision.
+        "git log --stdin", "git show --stdin",
+      ];
+      for (const command of leaks) expect(verdict(args, command), command).toBe("denied");
+      // The reads inside the repository these rules sit beside stay approved.
+      for (const command of ["git diff origin/beta -- src", "git diff HEAD~1..HEAD -- src/lib", "git diff origin/beta...HEAD --stat", "git diff --no-color HEAD", "git blame -L 1,9 src/a.ts", "git blame --ignore-rev abc1234 src/a.ts", "git describe --contains HEAD", "git log --oneline origin/beta..HEAD", "git show HEAD~2:src/a.ts"]) {
+        expect(verdict(args, command), command).toBe("allowed");
       }
     }
   });
@@ -134,7 +172,12 @@ describe("a read-only run", () => {
   it("is told the truth about its tools: read-only git by name, everything else refused, still no writing and no push", () => {
     expect(READ_ONLY_BRIEF).not.toMatch(/no shell/);
     expect(READ_ONLY_BRIEF).toMatch(/Bash for read-only git only/);
-    for (const rule of READ_ONLY_GIT_RULES) expect(READ_ONLY_BRIEF).toContain(/^Bash\((.*):\*\)$/.exec(rule)?.[1] ?? rule);
+    // Each rule as the command it approves, with or without a `:*` suffix.
+    for (const rule of READ_ONLY_GIT_RULES) expect(READ_ONLY_BRIEF).toContain(/^Bash\((.*?)(?::\*)?\)$/.exec(rule)![1]);
+    expect(READ_ONLY_BRIEF).toContain("git log, git status, git diff, git show, git branch, git branch -a, git branch -r, git branch --list, git branch --show-current, git branch -v, git branch -vv, git rev-parse");
+    // Never a rule cut short ("git bran") or one left in its rule syntax.
+    expect(READ_ONLY_BRIEF).not.toMatch(/git bran(?!ch)|Bash\(|:\*/);
+    expect(READ_ONLY_BRIEF).toMatch(/git branch exactly as listed, paths only inside the folder/);
     expect(READ_ONLY_BRIEF).toMatch(/any other command is refused and wastes a step/);
     expect(READ_ONLY_BRIEF).toMatch(/do not try to edit, create, delete or push anything/);
     expect(READ_ONLY_BRIEF).toMatch(/Read, Grep and Glob/);

@@ -279,9 +279,10 @@ describe("D1: the planner can read the project and cannot write", () => {
     expect(allowed).not.toContain("Bash(*)");
     expect(allowed).not.toContain("Write");
     expect(allowed).not.toContain("Edit");
-    // Every command it is approved is read-only git.
+    // Every command it is approved is read-only git; git branch only as exact listings, never by prefix.
+    expect(allowed).not.toContain("Bash(git branch:*)");
     for (const rule of allowed.filter((a) => a.startsWith("Bash("))) {
-      expect(rule).toMatch(/^Bash\(git (log|status|diff|show|branch|rev-parse|ls-files|blame|shortlog|describe):\*\)$/);
+      expect(rule).toMatch(/^Bash\(git (?:(log|status|diff|show|rev-parse|ls-files|blame|shortlog|describe):\*|branch(?: (-a|-r|--list|--show-current|-v|-vv))?)\)$/);
     }
 
     const denied = flag(args, "--disallowedTools");

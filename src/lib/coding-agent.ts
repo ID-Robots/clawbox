@@ -1410,24 +1410,34 @@ export const READ_ONLY_TOOLS = `Read,Grep,Glob,${SUBAGENT_TOOL}`;
  * Bash call no rule approves is refused, so this list IS a reading run's
  * shell — never `Bash(*)`.
  *
- * Two of them can still write, and MUTATING_GIT_DENYLIST closes what a prefix
- * rule can: the diff family's `--output=<file>` (git log, show, diff) writes
- * wherever it is told, refused anywhere in a git command line; `git branch`
- * deletes, moves or forces with a flag, each refused by name. A bare
- * `git branch <name>` still creates a ref under .git — no file in the tree,
- * nothing pushed — which no prefix rule can tell apart from a listing.
+ * The diff family's `--output=<file>` (git log, show, diff) still writes
+ * wherever it is told, and git diff and blame can read a file outside the
+ * repository: MUTATING_GIT_DENYLIST refuses those forms. `git branch` is
+ * approved only as the exact listings below, never by prefix: it creates,
+ * deletes, moves or forces a branch with a flag anywhere in the line
+ * (`git branch -r -D origin/main`), which no prefix or deny rule tells apart
+ * from a listing.
  */
 export const READ_ONLY_GIT_RULES: readonly string[] = [
-  "Bash(git log:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git branch:*)",
+  "Bash(git log:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git show:*)",
+  "Bash(git branch)", "Bash(git branch -a)", "Bash(git branch -r)", "Bash(git branch --list)",
+  "Bash(git branch --show-current)", "Bash(git branch -v)", "Bash(git branch -vv)",
   "Bash(git rev-parse:*)", "Bash(git ls-files:*)", "Bash(git blame:*)", "Bash(git shortlog:*)", "Bash(git describe:*)",
 ];
+
+/** A rule of READ_ONLY_GIT_RULES as the command it approves: `git log` for `Bash(git log:*)`, `git branch -a` for `Bash(git branch -a)`. */
+export function readOnlyGitCommand(rule: string): string {
+  return /^Bash\((.*?)(?::\*)?\)$/.exec(rule)?.[1] ?? rule;
+}
 
 /**
  * Every git command that changes the repository, its work tree, its config or
  * a remote, and the GitHub CLI's pull-request and API roads: refused to a
  * read-only run by rule. None of them is approved (READ_ONLY_GIT_RULES) and
  * -p refuses what is not, but a deny rule outranks any allow, so no future
- * widening of the approvals can reach them.
+ * widening of the approvals can reach them. With them, the forms of an
+ * approved read that read a file OUTSIDE the repository, which the file deny
+ * rules (`fileDenyRules`) never see because git, not a file tool, opens it.
  */
 export const MUTATING_GIT_DENYLIST: readonly string[] = [
   "Bash(git push:*)", "Bash(git commit:*)", "Bash(git add:*)", "Bash(git rm:*)", "Bash(git mv:*)",
@@ -1446,6 +1456,17 @@ export const MUTATING_GIT_DENYLIST: readonly string[] = [
   // Code (2.1); a CLI that reads only the `:*` suffix takes it as one literal
   // command nobody types, which denies nothing and breaks nothing.
   "Bash(git *--output*)",
+  // Reads past the repository. `git diff --no-index` diffs any two files, and
+  // so does a plain `git diff` given two paths when one of them lies outside
+  // the repository (an absolute, home or parent path); `git blame --contents`
+  // takes any file as the blamed one's text; `git blame -S` and
+  // `--ignore-revs-file` read a list file and echo its lines in their error;
+  // `--stdin` (git log, show) reads revisions from a redirected file the same
+  // way. Git takes any unambiguous abbreviation of a long option, so each is
+  // refused from its shortest prefix up (`--no-i`, `--con`, `--ignore-revs`).
+  "Bash(git diff *--no-i*)", "Bash(git diff /*)", "Bash(git diff * /*)", "Bash(git diff ~*)", "Bash(git diff * ~*)",
+  "Bash(git diff *../*)", "Bash(git diff .. *)", "Bash(git diff * ..)",
+  "Bash(git blame *--con*)", "Bash(git blame *-S*)", "Bash(git blame *--ignore-revs*)", "Bash(git *--stdin*)",
   "Bash(gh pr:*)", "Bash(gh api:*)",
 ];
 
@@ -6262,7 +6283,7 @@ export const PR_DRAFT_BRIEF =
  */
 export const READ_ONLY_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
-  `Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob, the read-only helper agents, and Bash for read-only git only (${READ_ONLY_GIT_RULES.map((rule) => rule.slice("Bash(".length, -":*)".length)).join(", ")}) — any other command is refused and wastes a step. You have no browser and no way to write: do not try to edit, create, delete or push anything; your ANSWER is your final message.`,
+  `Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob, the read-only helper agents, and Bash for read-only git only (${READ_ONLY_GIT_RULES.map(readOnlyGitCommand).join(", ")}) — git branch exactly as listed, paths only inside the folder; any other command is refused and wastes a step. You have no browser and no way to write: do not try to edit, create, delete or push anything; your ANSWER is your final message.`,
   "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps: each reply you send spends one step, however many tool calls it carries, so put independent calls in one message.",
   "The task text may carry copy-paste artifacts; read past them. Your final message is delivered to the party that started you and is read by a program as well as a person: answer in exactly the form the task asks for, with nothing before or after it.",
 ].join(" ");
