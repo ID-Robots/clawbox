@@ -12,7 +12,7 @@
 //      "Download again" when the model is already here — and Settings must
 //      draw it inline (steps, percentage, log).
 //   3. The Settings window is CLOSED.
-//   4. Every 3 s until it ends: the desktop's corner card for the task (its
+//   4. Every second until it ends: the desktop's corner card for the task (its
 //      state, percentage, time left, headline) and the box's own record of it
 //      (GET /setup-api/background-jobs/tasks). The work must keep running with
 //      Settings closed, the card must move with it, and both must end
@@ -127,20 +127,35 @@ async function run() {
     }
     say("ok - the board's desktop loads for the owner in a browser of the test's own");
 
-    // 2. Settings -> Local AI, and the download as the owner starts it.
+    // The desktop holds its corner notices — the task card among them — behind
+    // its "What's new" dialog, which a board that never dismissed it shows on
+    // load and which leaves on its own after 30 s. Waited out, not dismissed:
+    // a dismissal is recorded on the board.
+    const whatsNew = `!!document.querySelector('[data-testid="whats-new-card"]')`;
+    if (await waitFor("the What's new dialog", () => page.evaluate(whatsNew), 10_000).catch(() => false)) {
+      await waitFor("the What's new dialog to leave", async () => !(await page.evaluate(whatsNew)), 60_000, 1000)
+        .catch(() => note("the What's new dialog was still up after 60 s; it holds the corner card back"));
+    }
+
+    // 2. Settings -> Local AI, and the download as the owner starts it: the
+    // row's Install, or the card's Download again where the model is here.
+    // Whichever is offered, not what FORCE expected: once memory search is on
+    // the box, clawbox-embed.service fetches a missing model itself the first
+    // time a search wakes it.
     await page.evaluate(`window.__clawboxPendingSettingsSection = "localAi";
       window.dispatchEvent(new CustomEvent("clawbox:open-app", { detail: { appId: "settings" } })); true`);
-    const button = force ? "local-ai-embed-download" : "local-model-action-embeddings-install";
+    const controls = force ? ["local-ai-embed-download", "local-model-action-embeddings-install"] : ["local-model-action-embeddings-install", "local-ai-embed-download"];
+    let button;
     try {
-      await waitFor(`Settings -> Local AI's ${button}`, () => page.evaluate(`!!document.querySelector('[data-testid="${button}"]:not([disabled])')`), 90_000, 1000);
+      button = await waitFor("Settings -> Local AI's memory-model download", () => page.evaluate(`${JSON.stringify(controls)}.find((id) => document.querySelector('[data-testid="' + id + '"]:not([disabled]):not([aria-disabled="true"])')) ?? null`), 90_000, 1000);
     } catch {
       // What the row said instead, so a board that offered nothing says why.
       const row = await page.evaluate(`document.querySelector('[data-testid="local-model-embeddings"]')?.textContent.replace(/\\s+/g, " ").trim().slice(0, 200) ?? null`).catch(() => null);
-      say(`not ok - Settings -> Local AI never offered ${force ? "Download again on the memory-model card" : "Install on the memory-search row"} (${row ? `the row said: ${row}` : "no memory-search row was drawn"})`);
+      say(`not ok - Settings -> Local AI never offered the memory model: no Install on its row, no Download again on its card (${row ? `the row said: ${row}` : "no memory-search row was drawn"})`);
       return;
     }
     await page.evaluate(`document.querySelector('[data-testid="${button}"]').click(); true`);
-    say(`ok - the download was started from Settings -> Local AI (${force ? "the card's Download again: the model was already here" : "the memory-search row's Install"})`);
+    say(`ok - the download was started from Settings -> Local AI (${button === "local-ai-embed-download" ? "the card's Download again: the model was already here" : "the memory-search row's Install"})`);
 
     const inline = await waitFor("Settings' inline progress", () => page.evaluate(`(() => {
       const view = document.querySelector('[data-testid="local-model-task-embeddings"], [data-testid="local-ai-embed-task"]');
@@ -178,7 +193,9 @@ async function run() {
       // stays for 30 s. Read until it has drawn it, or 25 s after the end.
       if (ended && (s.card?.state === s.task.state || Date.now() - endedAt > 25_000)) break;
       if (Date.now() - started > deadlineMs) break;
-      await sleep(3_000);
+      // Every second: a lab link brings the 640 MB in about ten seconds, and
+      // the card redraws every 2 s.
+      await sleep(1_000);
     }
 
     for (const [i, s] of samples.entries()) {
