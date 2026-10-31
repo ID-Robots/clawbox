@@ -341,34 +341,33 @@ async function startOllamaIfNeeded(): Promise<void> {
 }
 
 /**
- * Put a running llama-server whose window is too small for Hermes back to
- * standby, so the start that follows brings it up with the window Hermes needs.
+ * Put a running llama-server whose window is not the one the active runtime
+ * launches back to standby, so the start that follows brings it up sized for
+ * that runtime (getLlamaCppServerContextSize).
  *
- * A server started while OpenClaw was the runtime keeps its 32k window when the
- * box moves to Hermes: neither the runtime switch nor the edition swap restarts
- * the web server it is a child of. Hermes reads that window and refuses every
- * turn on it. Every wake passes through here, so this is where it is caught.
- *
- * Asked on Hermes only. On OpenClaw the server's window is the configured one
- * (getLlamaCppServerContextSize), so a server already running there is that
- * size or a Hermes-sized one, and OpenClaw works on either. A window the server
- * does not report is left alone: unknown is not too small.
+ * The window follows the runtime — Hermes refuses one under its 64k floor —
+ * and neither the runtime switch nor the edition swap restarts the web server
+ * llama-server is a child of. So a server started under OpenClaw keeps its 32k
+ * window when the box moves to Hermes, which then refuses every turn on it;
+ * and one started under Hermes keeps 64k when the box moves back, holding
+ * memory OpenClaw never uses. Every wake passes through here, so this is where
+ * either is caught. A window the server does not report is left alone: unknown
+ * is not wrong.
  */
-async function retireUndersizedLlamaCpp(alias: string): Promise<void> {
+async function retireMisfitLlamaCpp(alias: string): Promise<void> {
   const harness = await getActiveHarness();
-  if (harness !== "hermes") return;
   const spec = getLlamaCppLaunchSpec(alias, harness);
   const served = await queryLlamaCppServedContext(spec.baseUrl);
-  if (served === null || served >= spec.contextWindow) return;
+  if (served === null || served === spec.contextWindow) return;
   console.log(
-    `[local-ai] llama.cpp serves a ${served}-token window and Hermes needs ${spec.contextWindow}; restarting it`,
+    `[local-ai] llama.cpp serves a ${served}-token window and ${harness} runs it at ${spec.contextWindow}; restarting it`,
   );
   await stopLlamaCppServer();
 }
 
 async function startLlamaCppAndWait(): Promise<void> {
   const alias = await getConfiguredLlamaCppAlias();
-  await retireUndersizedLlamaCpp(alias);
+  await retireMisfitLlamaCpp(alias);
   // Pass the alias explicitly: reaching this function means a caller asked
   // for the local runtime, so the launcher must not re-derive whether it is
   // "configured" from a config file that belongs to another harness.

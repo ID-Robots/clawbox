@@ -30,6 +30,8 @@ vi.mock("@/lib/project-import", () => ({ freeBytes: async () => disk.free }));
 
 const spec = { hfBin: "", wired: null as string | null };
 vi.mock("@/lib/llamacpp-server", () => ({
+  // The wake asks the running server its window (local-ai-runtime.ts); unknown here.
+  queryLlamaCppServedContext: async () => null,
   getLlamaCppLaunchSpec: () => ({
     modelDir,
     hfRepo: "google/gemma-4-E2B-it-qat-q4_0-gguf",

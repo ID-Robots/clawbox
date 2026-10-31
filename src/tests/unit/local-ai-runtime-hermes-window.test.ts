@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * Hermes refuses a session on a window under 64,000 tokens, read off the
- * running llama-server. A server started while OpenClaw was the runtime keeps
- * its 32k window after the box moves to Hermes (neither the runtime switch nor
- * the edition swap restarts the web server it belongs to), so the wake path
- * puts such a server back to standby before it starts the model again — and
- * leaves every other server alone.
+ * The llama-server window follows the runtime: Hermes refuses a session on a
+ * window under 64,000 tokens, read off the running server, and OpenClaw runs
+ * the configured 32k. Neither the runtime switch nor the edition swap restarts
+ * the web server llama-server belongs to, so a server started under one keeps
+ * its window under the other. The wake path puts such a server back to standby
+ * before it starts the model again — and leaves every other server alone.
  */
 
 const calls: string[] = [];
@@ -70,12 +70,12 @@ describe("the llama.cpp wake on a Hermes box", () => {
     expect(startLlamaCppServerMock).toHaveBeenCalledWith("gemma4-e2b-it-q4_0");
   });
 
-  it("keeps a server that already serves the window Hermes needs, or more", async () => {
+  it("keeps a server that already serves the window the runtime runs", async () => {
     getActiveHarnessMock.mockResolvedValue("hermes");
-
     servedContextMock.mockResolvedValue(65536);
     await wake();
-    servedContextMock.mockResolvedValue(131072);
+    getActiveHarnessMock.mockResolvedValue("openclaw");
+    servedContextMock.mockResolvedValue(32768);
     await wake();
 
     expect(stopLlamaCppServerMock).not.toHaveBeenCalled();
@@ -92,13 +92,13 @@ describe("the llama.cpp wake on a Hermes box", () => {
     expect(calls).toEqual(["start"]);
   });
 
-  it("asks nothing on OpenClaw, where a running server is never too small", async () => {
+  it("gives OpenClaw back its own window after a Hermes period", async () => {
+    // Started under Hermes at its floor; the box is on OpenClaw again.
     getActiveHarnessMock.mockResolvedValue("openclaw");
+    servedContextMock.mockResolvedValue(65536);
 
     await wake();
 
-    expect(servedContextMock).not.toHaveBeenCalled();
-    expect(stopLlamaCppServerMock).not.toHaveBeenCalled();
-    expect(calls).toEqual(["start"]);
+    expect(calls).toEqual(["stop", "start"]);
   });
 });
