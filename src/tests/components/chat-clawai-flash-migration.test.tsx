@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { translations } from "@/lib/translations";
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
@@ -59,11 +60,14 @@ function modelState(activeModel = "deepseek/deepseek-v4-pro", needsFlashModelMig
 type FetchCall = { url: string; init?: RequestInit };
 
 function installFetch({
+  sessionUser = { username: "clawbox", isOwner: true, multiUser: false, openclawShared: false } as unknown,
   statusResponder = async () => ({ ok: true, json: async () => ({}) }),
   modelPostResponder = async () => ({ ok: true, json: async () => modelState(FLASH_MODEL) }),
   activeModel = "deepseek/deepseek-v4-pro",
   needsFlashModelMigration = false,
 }: {
+  /** /setup-api/users/me's answer; null for one that could not be had. */
+  sessionUser?: unknown;
   statusResponder?: () => Promise<unknown>;
   modelPostResponder?: () => Promise<unknown>;
   activeModel?: string;
@@ -77,6 +81,9 @@ function installFetch({
       calls.push({ url, init });
       if (url.includes("/setup-api/harness/active")) {
         return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
+      }
+      if (url.includes("/setup-api/users/me")) {
+        return sessionUser === null ? { ok: false, status: 503, json: async () => ({}) } : { ok: true, json: async () => sessionUser };
       }
       if (url.includes("/setup-api/ai-models/status")) return statusResponder();
       if (url.includes("/setup-api/chat/model")) {
@@ -115,6 +122,7 @@ async function settle(calls: FetchCall[]) {
 
 beforeEach(() => {
   resetHarnessCache();
+  _resetSessionUserForTest();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
@@ -183,7 +191,10 @@ describe("ClawBox AI chat's automatic Flash migration", () => {
   });
 
   it("never moves the box's model from another user's chat — their first desktop load moved the owner's", async () => {
-    const calls = installFetch({ activeModel: "deepseek/deepseek-v4-pro" });
+    const calls = installFetch({
+      activeModel: "deepseek/deepseek-v4-pro",
+      sessionUser: { username: "alice", isOwner: false, multiUser: true, openclawShared: false },
+    });
     render(<ChatPopup isOpen onClose={() => {}} chatUser="alice" />);
     await settle(calls);
 
@@ -191,6 +202,14 @@ describe("ClawBox AI chat's automatic Flash migration", () => {
     // The model is shown to them and moved by the owner: the picker is not theirs to open.
     const picker = screen.getByRole("button", { name: /chat provider/i });
     expect(picker).toBeDisabled();
+  });
+
+  it("does not move it either while nobody has said who is signed in", async () => {
+    const calls = installFetch({ activeModel: "deepseek/deepseek-v4-pro", sessionUser: null });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await settle(calls);
+
+    expect(modelWrites(calls)).toEqual([]);
   });
 });
 

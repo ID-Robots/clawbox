@@ -44,6 +44,7 @@ import {
 } from "@/lib/voice-reply";
 import { clearOwnerChoice, noteOwnerChoice, readChoiceSource, restoreChoiceSource } from "@/lib/clawai-cloud-choice";
 import { hasPersonSession } from "@/lib/owner-session";
+import { sessionIdentity } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { logSafe } from "@/lib/log-safe";
 import { clawaiPlanFollowPending, followClawaiPlanOnRecord } from "@/lib/clawai-plan-follow";
@@ -259,10 +260,13 @@ async function handleShortSpoken(enabled: unknown) {
  * by the binary's presence would land in the config of the harness that is
  * not talking.
  */
-export async function GET() {
+export async function GET(request?: Request) {
   // Detached: the answer already reads the voice through the plan on record;
-  // this only brings the gateway's own file round to it, once per plan.
-  void followClawaiPlanOnRecord();
+  // this only brings the gateway's own file round to it, once per plan — for
+  // the owner and the box's own agent, never on another user's read.
+  void sessionIdentity(request)
+    .then((who) => (who && !who.isOwner ? undefined : followClawaiPlanOnRecord()))
+    .catch(() => {});
   try {
     return NextResponse.json(await status(), { headers: NO_STORE });
   } catch (err) {

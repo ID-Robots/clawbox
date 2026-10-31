@@ -296,7 +296,8 @@ describe("withoutClawboxCloudVoice — the voice a plan without it may still use
         openai: { apiKey: "claw_example_not_a_real_token", baseUrl: `${PROXY}/`, model: "gpt-4o-mini-tts", clawboxManaged: true, ...entry },
       },
     };
-    return (home === "tts" ? { tts } : { messages: { tts } }) as unknown as VoiceConfigView;
+    const models = { providers: { deepseek: { apiKey: "claw_example_not_a_real_token" } } };
+    return (home === "tts" ? { tts, models } : { messages: { tts }, models }) as unknown as VoiceConfigView;
   };
 
   it("leaves out the entry the boot stamped, in either home, so the box speaks locally", () => {
@@ -328,10 +329,15 @@ describe("withoutClawboxCloudVoice — the voice a plan without it may still use
       { baseUrl: "https://speech.owner.example/v1" },
       { clawboxManaged: undefined },
       { clawboxManaged: "true" },
+      // Somebody else's key on our stamped entry: re-aimed by the owner.
+      { apiKey: "sk-owners-own" },
     ]) {
       const before = armed("tts", entry);
       expect(withoutClawboxCloudVoice(before, [PROXY])).toBe(before);
     }
+    // A box that holds no ClawBox AI chat credential: the boot would not call the proxy ours.
+    const unlinked = { ...armed(), models: { providers: { deepseek: { apiKey: "sk-deepseek-own" } } } } as VoiceConfigView;
+    expect(withoutClawboxCloudVoice(unlinked, [PROXY])).toBe(unlinked);
     const fresh = {} as VoiceConfigView;
     expect(withoutClawboxCloudVoice(fresh, [PROXY])).toBe(fresh);
   });

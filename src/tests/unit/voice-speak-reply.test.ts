@@ -113,6 +113,7 @@ describe("speakReply", () => {
           openai: { apiKey: "claw_example_not_a_real_token", baseUrl: "https://clawbox.com/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
         },
       },
+      models: { providers: { deepseek: { apiKey: "claw_example_not_a_real_token" } } },
     });
     let order: string[] = [];
     await speakReply("Hello", { local: speaks("local", order), cloud: speaks("cloud", order) });

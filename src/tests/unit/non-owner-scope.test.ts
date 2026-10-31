@@ -99,6 +99,7 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     ["POST", "/setup-api/providers/enabled"],
     ["POST", "/setup-api/anthropic/accounts"],
     ["POST", "/setup-api/harness/swap"],
+    ["POST", "/setup-api/harness/select"],
     ["POST", "/setup-api/hermes/models"],
     ["POST", "/setup-api/hermes/provider-key"],
     ["POST", "/setup-api/hermes/oauth/start"],

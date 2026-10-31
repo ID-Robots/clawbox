@@ -117,6 +117,12 @@ async function route() {
 
 // A ClawBox AI plan change still being followed (src/lib/clawai-plan-follow.ts).
 const planFollow = vi.hoisted(() => ({ pending: false, onRecord: vi.fn(async () => {}) }));
+// Who a request's cookie speaks for: nobody (curl, the agent's bearer) unless a test says.
+const identity = vi.hoisted(() => ({ current: null as { username: string; isOwner: boolean } | null }));
+vi.mock("@/lib/route-auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/route-auth")>()),
+  sessionIdentity: vi.fn(async () => identity.current),
+}));
 vi.mock("@/lib/clawai-plan-follow", () => ({
   clawaiPlanFollowPending: () => planFollow.pending,
   followClawaiPlanOnRecord: planFollow.onRecord,
@@ -150,6 +156,7 @@ beforeEach(() => {
   shortSpokenMock.mockReset().mockResolvedValue(false);
   setShortSpokenMock.mockReset().mockResolvedValue(undefined);
   ownerMock.mockReset().mockResolvedValue(true);
+  planFollow.onRecord.mockClear();
 });
 
 describe("spoken replies", () => {
@@ -826,6 +833,7 @@ describe("a ClawBox AI plan that moved while the box runs", () => {
         openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
       },
     },
+    models: { providers: { openai: { apiKey: "claw_84d065b" }, deepseek: { apiKey: "claw_84d065b" } } },
   });
   const planOnRecord = (plan: string | undefined) =>
     preferenceMock.mockImplementation(async (key: string) => (key === "clawai_plan_tier" ? plan : undefined));
@@ -851,6 +859,22 @@ describe("a ClawBox AI plan that moved while the box runs", () => {
     expect(cloud(await (await GET()).json())?.configured).toBe(false);
     planOnRecord("pro");
     expect(cloud(await (await GET()).json())?.configured).toBe(true);
+  });
+
+  it("brings the gateway round for the owner's read, never for another user's", async () => {
+    const { GET } = await route();
+    const read = new Request("http://box/setup-api/tts");
+    try {
+      identity.current = { username: "alice", isOwner: false };
+      await GET(read);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(planFollow.onRecord).not.toHaveBeenCalled();
+      identity.current = { username: "clawbox", isOwner: true };
+      await GET(read);
+      await vi.waitFor(() => expect(planFollow.onRecord).toHaveBeenCalledTimes(1));
+    } finally {
+      identity.current = null;
+    }
   });
 
   it("never hides an owner's own cloud voice, whatever the ClawBox AI plan", async () => {

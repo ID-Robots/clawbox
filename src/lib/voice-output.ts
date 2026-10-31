@@ -290,11 +290,16 @@ function normalizedUrl(url: string): string {
   return url.trim().replace(/\/+$/, "").toLowerCase();
 }
 
-/** `providers.openai` carrying our stamp and pointing at one of our proxy addresses. */
+/**
+ * `providers.openai` carrying our stamp, our credential (or none) and one of
+ * our proxy addresses — never a key of somebody else's, which the boot reads
+ * as an owner's re-aimed entry.
+ */
 function isClawboxCloudVoiceEntry(entry: unknown, proxyUrls: readonly string[]): boolean {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  const { baseUrl, [CLAWBOX_SPEECH_MANAGED_KEY]: managed } = entry as Record<string, unknown>;
+  const { apiKey, baseUrl, [CLAWBOX_SPEECH_MANAGED_KEY]: managed } = entry as Record<string, unknown>;
   if (managed !== true || typeof baseUrl !== "string" || !baseUrl.trim()) return false;
+  if (apiKey !== undefined && !(typeof apiKey === "string" && (!apiKey.trim() || isClawboxAiToken(apiKey)))) return false;
   const url = normalizedUrl(baseUrl);
   return proxyUrls.some((u) => normalizedUrl(u) === url);
 }
@@ -315,14 +320,18 @@ function homeWithoutClawboxCloudVoice<T extends { providers?: unknown } | undefi
  * object back when there is no such entry, so a caller can ask "is there one"
  * by identity.
  *
- * Narrower than the boot script's own rule on purpose — it also recognises
- * proxy hosts the box learned at runtime — so this never hides more than the
- * next gateway start removes: an entry it does not recognise stays as it is and
- * the boot decides about it. `provider` is left alone, as the boot leaves it:
- * a customer who picked the cloud voice is shown that it is gone and that the
- * box speaks locally instead.
+ * Narrower than the boot script's own rule on purpose, in everything the
+ * speech config shows: the box must hold a ClawBox AI chat credential (the
+ * `claw_` token the boot reads before it calls the proxy ours), the entry our
+ * credential or none, and the address one this build knows — the boot also
+ * recognises hosts it learned at runtime. An entry this does not recognise
+ * stays as it is and the boot decides about it. `provider` is left alone, as
+ * the boot leaves it: a customer who picked the cloud voice is shown that it
+ * is gone and that the box speaks locally instead.
  */
 export function withoutClawboxCloudVoice(config: VoiceConfigView, proxyUrls: readonly string[]): VoiceConfigView {
+  const chatKey = config.models?.providers?.deepseek?.apiKey;
+  if (typeof chatKey !== "string" || !isClawboxAiToken(chatKey)) return config;
   const tts = homeWithoutClawboxCloudVoice(config.tts, proxyUrls);
   const legacy = homeWithoutClawboxCloudVoice(config.messages?.tts, proxyUrls);
   if (tts === config.tts && legacy === config.messages?.tts) return config;

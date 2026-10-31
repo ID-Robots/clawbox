@@ -55,8 +55,11 @@ vi.mock("@/lib/clawai-cloud-defaults", () => ({
 
 /** The voice of a Free box: our token in the slot, no endpoint — the panel's "not available". */
 const UNARMED = { tts: { providers: { openai: { apiKey: "claw_device_token" } } } };
+/** The box's ClawBox AI chat credential, which the boot reads before it calls the proxy ours. */
+const LINKED = { models: { providers: { deepseek: { apiKey: "claw_device_token" } } } };
 /** What gateway-pre-start.sh writes for a Max box. */
 const ARMED = {
+  ...LINKED,
   tts: {
     providers: {
       openai: { apiKey: "claw_device_token", baseUrl: "https://proxy.example/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
@@ -208,20 +211,26 @@ describe("followClawaiPlanChange — a downgrade", () => {
   });
 
   it("takes back only the entry the boot stamped: an owner's own voice, or ours re-aimed, stays", async () => {
-    h.rawConfig.mockResolvedValue({ tts: { providers: { openai: { apiKey: "sk-owners-own", baseUrl: "https://api.openai.com/v1" } } } });
-    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
-    h.rawConfig.mockResolvedValue({
-      tts: { providers: { openai: { apiKey: "claw_device_token", baseUrl: "https://speech.owner.example/v1", clawboxManaged: true } } },
-    });
-    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
-    // Ours without the stamp is somebody's hand-written config.
-    h.rawConfig.mockResolvedValue({ tts: { providers: { openai: { apiKey: "claw_device_token", baseUrl: "https://proxy.example/api/ai" } } } });
+    const openai = (entry: Record<string, unknown>) => ({ ...LINKED, tts: { providers: { openai: entry } } });
+    for (const entry of [
+      { apiKey: "sk-owners-own", baseUrl: "https://api.openai.com/v1" },
+      { apiKey: "claw_device_token", baseUrl: "https://speech.owner.example/v1", clawboxManaged: true },
+      // Somebody else's key on our stamped entry: the owner re-aimed it.
+      { apiKey: "sk-owners-own", baseUrl: "https://proxy.example/api/ai", clawboxManaged: true },
+      // Ours without the stamp is somebody's hand-written config.
+      { apiKey: "claw_device_token", baseUrl: "https://proxy.example/api/ai" },
+    ]) {
+      h.rawConfig.mockResolvedValue(openai(entry));
+      await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    }
+    // And a box that no longer holds a ClawBox AI chat credential is not ours to touch.
+    h.rawConfig.mockResolvedValue({ tts: ARMED.tts });
     await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
     expect(h.order).toEqual([]);
   });
 
   it("finds the stamped entry in the legacy home too", async () => {
-    h.rawConfig.mockResolvedValue({ messages: { tts: ARMED.tts } });
+    h.rawConfig.mockResolvedValue({ ...LINKED, messages: { tts: ARMED.tts } });
     await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
     expect(h.order).toEqual(["restart"]);
   });
@@ -277,6 +286,20 @@ describe("followClawaiPlanOnRecord", () => {
     h.rawConfig.mockResolvedValue(UNARMED);
     await follow.followClawaiPlanOnRecord();
     expect(h.order).toEqual([]);
+  });
+
+  it("does not repeat a withdrawal the recorded change already restarted for; retries one whose restart was refused", async () => {
+    h.store.clawai_plan_tier = "free";
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual(["restart"]);
+    h.order.length = 0;
+    h.store.clawai_plan_tier = "flash";
+    h.restart.mockRejectedValueOnce(new Error("Start request repeated too quickly"));
+    await follow.followClawaiPlanChange({ previous: "free", next: "flash" });
+    await follow.followClawaiPlanOnRecord();
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual(["restart", "apply", "restart"]);
   });
 
   it("may look again once a recorded change has been followed", async () => {

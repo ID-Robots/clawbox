@@ -32,6 +32,10 @@
 //      desktop load used to move the owner's chat model, because the chat's
 //      own model migration posted `/setup-api/chat/model` for them. Their own
 //      chat, its spoken replies and the local engines' inference stay theirs.
+//      FOLLOWING THE CLAWBOX AI PLAN is not one of these settings: the plan is
+//      the account's, recorded from the portal by whichever signed-in page
+//      polls `/setup-api/ai-models/status`, and the box follows it exactly as
+//      it would for the owner's own poll (src/lib/clawai-plan-follow.ts).
 //
 // A DENY-list now, where it used to be an allow-list of the four per-user
 // surfaces a non-owner had: the exceptions are what is named, and a route
@@ -106,6 +110,7 @@ const OWNER_SECRET_API: ReadonlySet<string> = new Set([
 const BOX_AI_SETTINGS_API: ReadonlySet<string> = new Set([
   "/setup-api/chat/model",
   "/setup-api/harness/swap",
+  "/setup-api/harness/select",
   "/setup-api/hermes/provider-key",
   "/setup-api/hermes/models",
   "/setup-api/hermes/clawai",

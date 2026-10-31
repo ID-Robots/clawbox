@@ -48,10 +48,10 @@ const withFollow = createSerialLock();
 let pending = 0;
 
 /**
- * The plan on record a read last tried to withdraw for, so reading the voice
- * (`followClawaiPlanOnRecord`) restarts the gateway at most once per plan on
- * record — never in a loop over an entry the boot script declines to remove.
- * Forgotten when the plan moves.
+ * The plan on record a withdrawal last restarted the gateway for (a recorded
+ * change's, or a read's), so reading the voice (`followClawaiPlanOnRecord`)
+ * restarts it at most once per plan on record — never in a loop over an entry
+ * the boot script declines to remove. Forgotten when the plan moves.
  */
 let withdrawTriedFor: ClawaiPlanTier | null = null;
 
@@ -84,7 +84,8 @@ export function followClawaiPlanChange(change: ClawaiPlanChange): Promise<void> 
  * voice, when it still holds the entry the boot stamped — the case no change
  * is left to follow: a follow whose restart was refused, or a store that moved
  * while the box was down. Asked by the Voice panel's read (`GET
- * /setup-api/tts`); at most one restart per plan on record. Never rejects.
+ * /setup-api/tts`) for the owner and the box's own agent; at most one restart
+ * per plan on record. Never rejects.
  */
 export function followClawaiPlanOnRecord(): Promise<void> {
   return withFollow(async () => {
@@ -105,9 +106,13 @@ async function followOnce(change: ClawaiPlanChange): Promise<void> {
   withdrawTriedFor = null;
   // The defaults below are worth applying whatever happened here.
   const voice = change.next === CLOUD_TTS_ENTITLED_TIER ? armOpenclawCloudVoice() : withdrawOpenclawCloudVoice();
-  await voice.catch((err: unknown) => {
+  const restarted = await voice.catch((err: unknown) => {
     console.warn("[clawai-plan-follow] could not follow the cloud voice:", err instanceof Error ? err.message : err);
+    return false;
   });
+  // A withdrawal this follow restarted for is not a read's to repeat; one whose
+  // restart was refused is, once.
+  if (restarted && change.next !== CLOUD_TTS_ENTITLED_TIER) withdrawTriedFor = change.next;
   // An unpaid plan covers nothing to promote to.
   if (change.next === CLAWBOX_AI_PLAN_UNPAID) return;
   const { applyClawaiCloudDefaults } = await import("@/lib/clawai-cloud-defaults");
