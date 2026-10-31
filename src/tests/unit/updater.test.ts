@@ -96,11 +96,14 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 // is the seam: nothing in these tests may spawn a real `hermes`.
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
-const { mockX64Integration, mockX64Install } = vi.hoisted(() => ({
+const { mockX64Integration, mockX64Install, mockDesktopCoreNoop } = vi.hoisted(() => ({
   mockX64Integration: vi.fn(() => false),
   mockX64Install: vi.fn(() => false),
+  // The desktop core check reads host files; "not a no-op" keeps every other test on the adapter's step.
+  mockDesktopCoreNoop: vi.fn((): { noop: true; version: string } | { noop: false; reason: string } => ({ noop: false, reason: "fixture" })),
 }));
 vi.mock("@/lib/x64-integration", () => ({
+  desktopCoreStepIsNoop: mockDesktopCoreNoop,
   hasX64DesktopIntegration: mockX64Integration,
   hasX64Install: mockX64Install,
   X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000, X64_DESKTOP_GATEWAY_READY_WAIT_MS: 240_000,
@@ -2952,6 +2955,47 @@ describe("updater", () => {
       expect(calls[harnessIndex]).toContain("--ambient-caps=-all --inh-caps=-all --no-new-privs -- /bin/bash /var/lib/clawbox/root-exec-mirror/scripts/x64-migration/install-coding-harness.sh");
       expect(calls[harnessIndex]).toContain("/var/lib/clawbox/root-exec-mirror/scripts/claude-ds");
       expectNoApplianceMaintenance();
+    });
+
+    it("leaves the desktop gateway running when its core is already at the pin (#1269)", async () => {
+      // The adapter stops the gateway before it looks; at the pin with nothing
+      // to recover that stop only cost the owner's running agents.
+      mockDesktopCoreNoop.mockReturnValueOnce({ noop: true, version: "2026.10.7" });
+      setupExecFileMock({
+        "clawbox-run-root-step.sh gateway_setup": new Error("stop the run after the core step"),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(mockDesktopCoreNoop).toHaveBeenCalledTimes(1);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_setup")?.status).toBe("failed");
+      const calls = commands();
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh openclaw_install"))).toBe(false);
+      expect(calls.some((call) => call.includes("openclaw_install_fast"))).toBe(false);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh apt_update"))).toBe(true);
+      expectNoApplianceMaintenance();
+    });
+
+    it("runs the desktop core step when the check says so or cannot answer", async () => {
+      for (const answer of [
+        () => ({ noop: false as const, reason: "OpenClaw 2026.10.3 is installed and the pin is 2026.10.7" }),
+        () => { throw new Error("Cannot read the installed x64 integration; repair it before updating."); },
+      ]) {
+        vi.clearAllMocks();
+        mockDesktopCoreNoop.mockImplementationOnce(answer);
+        setupExecFileMock({
+          "clawbox-run-root-step.sh openclaw_install": new Error("the adapter's own step ran"),
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        expect(updater.getUpdateState().error).toContain("the adapter's own step ran");
+        expect(commands().some((call) => call.includes("clawbox-run-root-step.sh openclaw_install"))).toBe(true);
+        expectNoApplianceMaintenance();
+      }
     });
 
     it("reports a coding installer failure before cycling the desktop gateway", async () => {
