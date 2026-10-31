@@ -364,9 +364,12 @@ import {
   CODING_AGENT_GIT_NAME_CONFIG_KEY,
   CODING_GIT_EMAIL_REFUSAL,
   CODING_GIT_NAME_REFUSAL,
+  CODING_GIT_PLACEHOLDER,
   MAX_GIT_IDENTITY_CHARS,
   normalizeCodingGitEmail,
   normalizeCodingGitName,
+  resolveCodingGitIdentity,
+  type CodingGitIdentity,
 } from "@/lib/coding-git-identity";
 import {
   EXPERIENCE_BLOCK_MAX_CHARS,
@@ -5159,6 +5162,8 @@ interface RunStore {
   runMcpPlan: Map<string, RunMcpPlan>;
   /** An `openai` run's API key — see runOpenAIKey. Optional: a store from an older module. */
   runOpenAIKey?: Map<string, string>;
+  /** Who a run's own `git commit` is authored as — see runGitIdentity. */
+  runGitIdentity?: Map<string, CodingGitIdentity>;
   /** The runs whose pull request or review is already being watched. */
   prWatchers: Set<string>;
   reviewWatchers: Set<string>;
@@ -7102,6 +7107,8 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
   // …and the project's MCP servers, whose credentials the table below must
   // know before the child that holds them exists.
   await prepareRunMcp(run, project);
+  // …and who its own commits are authored as.
+  await prepareRunGitIdentity(run);
   registerRunRedaction(run.id);
   run.secretNames = resolved.names;
   if (resolved.names.length > 0) pushProgress(run, RUNNER_STEP.secretsInjected(resolved.names));
@@ -7133,6 +7140,31 @@ const runAnthropicCredential: Map<string, RunAnthropicCredential> =
  */
 const runOpenAIKey: Map<string, string> =
   store.runOpenAIKey ?? (store.runOpenAIKey = new Map<string, string>());
+
+/**
+ * Who the HARNESS's own commits are authored as, resolved on the async path
+ * before each spawn (`prepareRunGitIdentity`) the way the box's own commits
+ * are: the project's git identity, else the owner's setting, else the
+ * placeholder. Without it a box with no global identity — every flashed board,
+ * once the factory one is cleared — answered the agent's `git commit` in its
+ * worktree with "Author identity unknown", and the agent made one up:
+ * `-c user.name="Claude Code" -c user.email=noreply@anthropic.com`.
+ */
+const runGitIdentity: Map<string, CodingGitIdentity> =
+  store.runGitIdentity ?? (store.runGitIdentity = new Map<string, CodingGitIdentity>());
+
+async function prepareRunGitIdentity(run: CodingRun): Promise<void> {
+  const found = await resolveCodingGitIdentity(run.directory).catch(() => null);
+  // A look git could not make leaves the placeholder (`gitIdentityFor`) rather
+  // than a name guessed from half an answer.
+  if (found?.ok) runGitIdentity.set(run.id, { name: found.identity.name, email: found.identity.email });
+  else runGitIdentity.delete(run.id);
+}
+
+/** The identity a spawn of this run commits as: resolved, or the box's placeholder. */
+function gitIdentityFor(runId: string): CodingGitIdentity {
+  return runGitIdentity.get(runId) ?? CODING_GIT_PLACEHOLDER;
+}
 
 /**
  * The MCP servers a run's project opted into (src/lib/project-mcp-servers.ts),
@@ -7283,6 +7315,7 @@ function dropRunSecrets(runId: string): void {
   runAnthropicCredential.delete(runId);
   runOpenAIKey.delete(runId);
   runMcpPlan.delete(runId);
+  runGitIdentity.delete(runId);
   forgetRunSecrets(runId);
 }
 
@@ -7306,7 +7339,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string> } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -7368,6 +7401,17 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // `--maxWorkers` and `-j`. A CLAWBOX_ name, so no stored secret can raise it.
   if (typeof opts.cpuBudget === "number" && Number.isInteger(opts.cpuBudget) && opts.cpuBudget >= 1) {
     env[RUN_CPU_BUDGET_ENV] = String(opts.cpuBudget);
+  }
+  // Who the run's own `git commit` is authored as (runGitIdentity). The
+  // environment rather than a written config: it reaches every git the harness
+  // starts, in its worktree or a worker's, and leaves nothing in the owner's
+  // repository. Set ahead of the secrets, so no stored entry can sign a run's
+  // commits as somebody else, and over any `-c user.name=` the agent passes.
+  if (opts.gitIdentity) {
+    env.GIT_AUTHOR_NAME = opts.gitIdentity.name;
+    env.GIT_AUTHOR_EMAIL = opts.gitIdentity.email;
+    env.GIT_COMMITTER_NAME = opts.gitIdentity.name;
+    env.GIT_COMMITTER_EMAIL = opts.gitIdentity.email;
   }
   // The owner's secrets, LAST and never over the top of anything above.
   //
@@ -12007,7 +12051,7 @@ function spawnRun(
   // from a `close` handler and cannot read the disk (restoreRunSecrets).
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id) });
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id) });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
