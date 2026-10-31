@@ -316,15 +316,28 @@ export async function setAsideFavicons(dir: string, branch: string, favicons: re
     // `./`: the path relative to `dir` in the branch's tree, not to the repository's root.
     if (!ok(await git(dir, ["cat-file", "-e", `${branch}:./${name}`]))) continue;
     const file = path.join(dir, name);
+    // One handle for the check and the read: O_NOFOLLOW refuses a symlink, and
+    // stat/readFile on the same handle cannot race a swap of the path, so the
+    // bytes put back are the favicon's and nothing else's. Handle methods, not
+    // fs calls on a descriptor, which the build would trace (runtime-path.ts).
+    let handle;
     try {
-      const stat = fs.lstatSync(file);
+      handle = await fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    } catch {
+      // Left where it lies: the merge then says why it cannot go on, in git's words.
+      continue;
+    }
+    try {
+      const stat = await handle.stat();
       // The box writes plain files; anything else is not its to move.
       if (!stat.isFile()) continue;
-      const bytes = fs.readFileSync(file);
+      const bytes = await handle.readFile();
       fs.unlinkSync(file);
       aside.push({ file, bytes, mode: stat.mode & 0o777 });
     } catch {
-      // Left where it lies: the merge then says why it cannot go on, in git's words.
+      // Left where it lies, as above.
+    } finally {
+      await handle.close().catch(() => undefined);
     }
   }
   return aside;

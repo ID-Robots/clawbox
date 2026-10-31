@@ -149,6 +149,18 @@ describe("a coding team's git plumbing", () => {
     expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
   });
 
+  it("never moves or reads through a favicon that is a symlink, even when the branch brings its own", async () => {
+    expect((await ensureTeamBranch(dir, "team-x")).ok).toBe(true);
+    const wt = await workerWith({ "index.html": "<h1>hi</h1>\n", "favicon.png": "the worker's png" });
+    const target = path.join(dir, ".git", "not-a-favicon");
+    fs.writeFileSync(target, "not the box's");
+    fs.symlinkSync(target, path.join(dir, "favicon.png"));
+    // Git then refuses to write over the untracked link, in its own words.
+    expect(await mergeWorkerBranch(dir, wt.branch, "merge t1")).toMatchObject({ ok: false, conflict: false });
+    expect(fs.lstatSync(path.join(dir, "favicon.png")).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target, "utf8")).toBe("not the box's");
+  });
+
   it("reads the box's favicons at the root of the folder it is asked about, which may be a sub-folder of the repository", async () => {
     fs.mkdirSync(path.join(dir, "site"));
     fs.writeFileSync(path.join(dir, "site", "index.html"), "<h1>site</h1>\n");
