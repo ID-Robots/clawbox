@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { sessionIdentity } from "@/lib/route-auth";
+import { mayHaveGatewayToken } from "@/lib/openclaw-sharing";
 import { controlUiEmailDirectiveScript, controlUiLocale } from "@/lib/control-ui-email-directives";
 import { controlUiSessionGuardScript, injectAtHeadStart } from "@/lib/control-ui-session-guard";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
@@ -19,10 +20,12 @@ export async function GET(request: NextRequest) {
         signal: AbortSignal.timeout(3000),
       }),
       // The shared token reads every conversation on the box, so another
-      // ClawBox user's session is never handed it — middleware keeps them off
-      // this page already (src/lib/non-owner-scope.ts); this stands on its
-      // own because this handler holds the secret.
-      sessionIdentity(request).then((me) => (me && !me.isOwner ? "" : getGatewayToken())),
+      // ClawBox user's session is handed it only while the owner shares
+      // OpenClaw — middleware keeps them off this page otherwise
+      // (src/lib/non-owner-scope.ts); this stands on its own because this
+      // handler holds the secret.
+      sessionIdentity(request).then(async (me) =>
+        (me && !me.isOwner && !(await mayHaveGatewayToken(me)) ? "" : getGatewayToken())),
     ]);
     if (!res.ok) {
       return gatewayOfflineResponse(await getGatewayServiceHealth());

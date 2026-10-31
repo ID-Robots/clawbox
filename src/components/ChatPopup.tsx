@@ -105,6 +105,7 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { chatKeyUser, defaultTranscriptKeyFor } from '@/lib/chat-scope'
+import { useSessionUser } from '@/lib/use-session-user'
 import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
 import { splitMediaDirectives, mediaFileName, mediaUrl, isImageMedia, boundedAudio } from '@/lib/chat-media'
@@ -6937,12 +6938,18 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // saved chat choice to the Flash alias once, without clearing its history.
   // Remember failed attempts until the model changes or chat reopens, so a
   // failed request cannot become a render-triggered retry loop.
+  // The OWNER's chat only, and only once /users/me has SAID it is the owner:
+  // the model is the whole box's, and another user's first desktop load moving
+  // it moved the owner's chat with it (the server refuses them as well —
+  // src/lib/non-owner-scope.ts). An answer that could not be had is not one.
+  const ownerConfirmed = useSessionUser()?.isOwner === true
   const flashModelAttemptRef = useRef<string | null>(null)
   useEffect(() => {
     if (!isOpen) {
       flashModelAttemptRef.current = null
       return
     }
+    if (!ownerConfirmed) return
     if (!harnessLoaded || harnessId !== 'openclaw') return
     const active = chatModelState?.activeModel
     if (!isClawboxAiChat || (active === CLAWBOX_AI_MODEL_BY_TIER.flash && !chatModelState?.needsFlashModelMigration)) {
@@ -6957,7 +6964,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       label: CLAWBOX_AI_CHAT_MODEL_LABEL,
       automatic: true,
     })
-  }, [isOpen, harnessLoaded, harnessId, isClawboxAiChat, chatModelState?.activeModel, chatModelState?.needsFlashModelMigration, switchChatModel, switchingModel])
+  }, [isOpen, ownerConfirmed, harnessLoaded, harnessId, isClawboxAiChat, chatModelState?.activeModel, chatModelState?.needsFlashModelMigration, switchChatModel, switchingModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
@@ -9291,7 +9298,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 }))}
                 onChange={handleChatSourceChange}
                 onPointerDown={stopHeaderDrag}
-                disabled={switchingModel}
+                // The box's model: shown to every user, moved by the owner.
+                disabled={switchingModel || chatUser !== null}
                 triggerMaxWidth={130}
                 popoverWidth={220}
               />
@@ -9410,7 +9418,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                   })
                 }}
                 onPointerDown={stopHeaderDrag}
-                disabled={switchingModel}
+                disabled={switchingModel || chatUser !== null}
                 triggerMaxWidth={140}
                 popoverWidth={240}
               />

@@ -13,7 +13,13 @@ import { isAllowedHostHeader, isTunnelRequest, systemHostLabel } from "@/lib/hos
 import { USERS_CONFIG_KEY, identityFromClaims, parseUserRegistry, registryVersions } from "@/lib/session-identity";
 import type { SessionIdentity } from "@/lib/session-identity";
 import { ownerUsername } from "@/lib/owner-username";
-import { NON_OWNER_HOME, nonOwnerVerdict, requestIntent } from "@/lib/non-owner-scope";
+import {
+  NON_OWNER_HOME,
+  OPENCLAW_SHARED_KEY,
+  nonOwnerVerdict,
+  openclawSharedFrom,
+  requestIntent,
+} from "@/lib/non-owner-scope";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
@@ -45,6 +51,8 @@ interface ConfigSnapshot {
   // version their cookie must carry. Removing a user drops the entry, which is
   // what revokes their sessions here.
   users: ReadonlyMap<string, string>;
+  /** The owner shares OpenClaw with every signed-in user (src/lib/non-owner-scope.ts). */
+  openclawShared: boolean;
 }
 
 const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
@@ -91,6 +99,7 @@ function readConfigCached(): ConfigSnapshot {
       "pref:installed_meta"?: unknown;
       [UPDATE_LOCK_KEY]?: unknown;
       [USERS_CONFIG_KEY]?: unknown;
+      [OPENCLAW_SHARED_KEY]?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -103,6 +112,7 @@ function readConfigCached(): ConfigSnapshot {
       updateInProgress: parsed[UPDATE_LOCK_KEY] === true,
       publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
       users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
+      openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
     };
     return configCache;
   } catch (err) {
@@ -129,6 +139,8 @@ function readConfigCached(): ConfigSnapshot {
       // No non-owner can sign in on a box whose config cannot be read: fail
       // closed to "only the owner exists".
       users: NO_USERS,
+      // Closed like the users: an unreadable switch shares nothing.
+      openclawShared: false,
     };
     return configCache;
   } finally {
@@ -717,6 +729,8 @@ export async function middleware(request: NextRequest) {
     // JSON, carrying the notice the desktop turns into "only the owner can open
     // that" — `requestIntent`, not `isDocumentRequest`, because the box is
     // reached over plain HTTP, where browsers send no Sec-Fetch-Dest at all.
+    // The owner's "Share OpenClaw with all users" switch rides in from the same
+    // cached config.json read, so turning it off holds from the next request.
     if (!identity.isOwner) {
       const verdict = nonOwnerVerdict({
         pathname: request.nextUrl.pathname,
@@ -724,6 +738,7 @@ export async function middleware(request: NextRequest) {
         searchParams: request.nextUrl.searchParams,
         intent: requestIntent(request.headers),
         username: identity.username,
+        openclawShared: readConfigCached().openclawShared,
       });
       if (verdict === "redirect-home") {
         return NextResponse.redirect(new URL(NON_OWNER_HOME, request.url), {

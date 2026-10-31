@@ -281,7 +281,7 @@ const withApply = createSerialLock();
 
 export interface ApplyOptions {
   /** For the log line, so a boot apply and a link apply are tellable apart. */
-  trigger?: "boot" | "link" | "owner";
+  trigger?: "boot" | "link" | "owner" | "plan";
   /** The credential changed: anything learned about the last one is stale. */
   credentialChanged?: boolean;
 }

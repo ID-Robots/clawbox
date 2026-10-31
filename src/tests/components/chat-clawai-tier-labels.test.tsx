@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { translations } from "@/lib/translations";
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
@@ -99,6 +100,10 @@ function installFetch(status: unknown, initialModel = ON_PRO) {
     vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       calls.push({ url, init });
+      // The owner's desktop: the automatic Flash switch is the owner's alone.
+      if (url.includes("/setup-api/users/me")) {
+        return { ok: true, json: async () => ({ username: "clawbox", isOwner: true, multiUser: false, openclawShared: false }) };
+      }
       if (url.includes("/setup-api/harness/active")) {
         return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
       }
@@ -150,6 +155,7 @@ class RefusedSocket {
 
 beforeEach(() => {
   resetHarnessCache();
+  _resetSessionUserForTest();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal("WebSocket", InertSocket);

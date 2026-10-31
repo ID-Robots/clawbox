@@ -745,3 +745,16 @@ export function onCodingTeamChanged(listener: () => void): () => void {
  * from before it existed never names it, and must not switch it off.
  */
 export const VOICE_SETTINGS_CHANGED_EVENT = "clawbox:voice-settings-changed";
+
+/**
+ * The ClawBox AI plan this box records moved — an upgrade or downgrade on the
+ * portal while the box was running, seen by the status poll
+ * (`use-clawbox-login`). What follows the plan re-reads on it: Settings → Voice
+ * (the cloud voice comes with Max) among them. No detail.
+ */
+export const CLAWAI_PLAN_CHANGED_EVENT = "clawbox:clawai-plan-changed";
+
+export function notifyClawaiPlanChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CLAWAI_PLAN_CHANGED_EVENT));
+}
