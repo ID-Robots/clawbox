@@ -337,14 +337,21 @@ All three now read ✅ in section 1.
 - **Re-adoption after a restart of the web server.**
   - A root step runs in its own unit, which outlives the web server. `ctx.rootStep(step, …)` follows it (`followRootStep`) and records which run it is on the task: the step, when it was dispatched, and systemd's `InvocationID`, read once while the instance is loaded.
   - A server that finds such a task still `running` adopts it instead of closing it `interrupted`. It follows the same run again (`followRootStepRun`) and closes the task the way the run ended.
-  - The run is matched by its invocation. A unit now running another invocation, or a run that was never seen running, reads `interrupted` as before: what happened to it is unknown.
-  - What a dead process would have done AFTER the unit cannot be re-run. A task whose unit was its last real work says so (`finishes`, the result it then closes with); one whose unit was not closes `interrupted` with a sentence that says the install itself finished.
+  - The run is matched by its invocation, and an adopted run ends well only on systemd's own word for that invocation: PID 1's `INVOCATION_ID=` journal lines, which outlive the instance. An instance collected as it exited, and one that never loaded, both answer "inactive". So the following all read `interrupted` as before, because what happened to them is unknown:
+    - a unit now running another invocation;
+    - a run that was never seen running;
+    - a run systemd said nothing about;
+    - a run from another boot (the boot id is recorded with the run).
+
+    A `systemctl` that does not answer is unknown and asked again, never an ending, in every follow.
+  - What a dead process would have done AFTER the unit cannot be re-run from its closure, so each kind names it in `src/lib/background-task-finishers.ts`, which the runner loads only when it adopts or closes such a task. The memory-model download checks that the model is really there, drops the aside copy and stops the embedder holding it, or puts the old copy back. A kind without hooks closes on `finishes` (the unit was its last real work) or `interrupted` with a sentence that says the install itself finished.
   - A task that had already moved past its unit is not adopted.
   - The Kokoro install, the Whisper engine install and the memory-model download follow their root step this way. The llama.cpp install keeps its own inline follow and still reads `interrupted` after a restart.
 - **One progress view, two places** (`src/components/BackgroundTaskProgress.tsx`).
   - The view: steps with their states, a bar with the percentage, the time left once there is a rate, the collapsible live log, and Cancel where the task allows it.
   - The desktop card draws it (design 5). So does Settings, inline under the control that started the task (design 3): the Local AI rows, the memory-model card and the Whisper size rows.
   - Settings polls the one task every 1.5 s while it runs (`GET .../tasks?id=`). A Cancel or a re-attach asks again at once.
+  - A stream cut short after naming its task (a restart, a dropped tunnel) is followed again with backoff for about two and a half minutes (`readTaskStream`), instead of painting a running or adopted install as failed.
 
 **The processes moved onto it.** The criterion was the Local AI rows that still lost their progress and download the most: the brief's "model downloads".
 
