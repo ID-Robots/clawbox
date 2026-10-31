@@ -428,18 +428,20 @@ def bridge_deferred_calls(response: Any, request: Any, original_request: Any) ->
     bridged = _names(request.get("tools")) - original
     if not bridged:
         return 0
-    handed = 0
+    # Every call is read before any is changed, so a response this cannot read
+    # is left exactly as it came.
+    targets = []
     for choice in _field(response, "choices") or []:
         message = _field(choice, "message")
         for call in _field(message, "tool_calls") or []:
             fn = _field(call, "function")
             name = _field(fn, "name")
-            if name not in bridged:
-                continue
-            arguments = _field(fn, "arguments")
-            _set_field(fn, "name", BRIDGE_CALL)
-            _set_field(fn, "arguments", json.dumps(
-                {"calls": [{"name": name, "arguments": arguments if arguments is not None else "{}"}]},
-                ensure_ascii=False))
-            handed += 1
-    return handed
+            if name in bridged:
+                arguments = _field(fn, "arguments")
+                targets.append((fn, json.dumps(
+                    {"calls": [{"name": name, "arguments": arguments if arguments is not None else "{}"}]},
+                    ensure_ascii=False)))
+    for fn, arguments in targets:
+        _set_field(fn, "arguments", arguments)
+        _set_field(fn, "name", BRIDGE_CALL)
+    return len(targets)

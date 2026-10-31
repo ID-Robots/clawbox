@@ -29,8 +29,9 @@ vi.mock("@/lib/llamacpp", () => ({
 }));
 
 const getActiveHarnessMock = vi.fn();
+let harnessDefaulted = false;
 vi.mock("@/lib/harness", () => ({
-  getActiveHarness: () => getActiveHarnessMock(),
+  getActiveHarnessSource: async () => ({ active: await getActiveHarnessMock(), defaulted: harnessDefaulted }),
 }));
 
 const servedContextMock = vi.fn();
@@ -56,12 +57,14 @@ describe("the llama.cpp wake on a Hermes box", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     calls.length = 0;
+    harnessDefaulted = false;
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
 
   it("restarts a server that serves less than Hermes' floor, before it starts the model", async () => {
     getActiveHarnessMock.mockResolvedValue("hermes");
-    servedContextMock.mockResolvedValue(32768);
+    // Serves 32k until it is stopped, then nothing.
+    servedContextMock.mockResolvedValueOnce(32768).mockResolvedValue(null);
 
     await wake();
 
@@ -95,10 +98,51 @@ describe("the llama.cpp wake on a Hermes box", () => {
   it("gives OpenClaw back its own window after a Hermes period", async () => {
     // Started under Hermes at its floor; the box is on OpenClaw again.
     getActiveHarnessMock.mockResolvedValue("openclaw");
-    servedContextMock.mockResolvedValue(65536);
+    servedContextMock.mockResolvedValueOnce(65536).mockResolvedValue(null);
 
     await wake();
 
     expect(calls).toEqual(["stop", "start"]);
+  });
+
+  it("waits for the retired server to stop answering before it starts the model", async () => {
+    getActiveHarnessMock.mockResolvedValue("hermes");
+    // The check, then two polls the old server still answers, then silence.
+    servedContextMock
+      .mockResolvedValueOnce(32768)
+      .mockResolvedValueOnce(32768)
+      .mockResolvedValueOnce(32768)
+      .mockResolvedValue(null);
+
+    await wake();
+
+    expect(calls).toEqual(["stop", "start"]);
+    expect(servedContextMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("decides nothing on a runtime answered only by default", async () => {
+    // The edition lock mid-rewrite or an unreadable store answers "openclaw"
+    // by default: not proof enough to stop a Hermes-sized server.
+    harnessDefaulted = true;
+    getActiveHarnessMock.mockResolvedValue("openclaw");
+    servedContextMock.mockResolvedValue(65536);
+
+    await wake();
+
+    expect(servedContextMock).not.toHaveBeenCalled();
+    expect(calls).toEqual(["start"]);
+  });
+
+  it("does not cut a stream another request is still reading", async () => {
+    getActiveHarnessMock.mockResolvedValue("openclaw");
+    servedContextMock.mockResolvedValue(65536);
+    vi.resetModules();
+    const runtime = await import("@/lib/local-ai-runtime");
+    runtime.beginLocalAiUse("llamacpp");
+    await runtime.ensureLocalAiReady("llamacpp");
+
+    expect(stopLlamaCppServerMock).not.toHaveBeenCalled();
+    expect(calls).toEqual(["start"]);
+    runtime.endLocalAiUse("llamacpp");
   });
 });

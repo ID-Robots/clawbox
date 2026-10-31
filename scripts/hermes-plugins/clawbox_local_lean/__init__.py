@@ -69,7 +69,7 @@ def llm_execution(request=None, original_request=None, next_call=None, base_url=
         try:
             bridge_deferred_calls(response, request, original_request)
         except Exception:
-            logger.warning("clawbox_local_lean: leaving the response unchanged", exc_info=True)
+            logger.warning("clawbox_local_lean: could not hand a deferred call to the bridge", exc_info=True)
     return response
 
 

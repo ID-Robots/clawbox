@@ -79,9 +79,11 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
  * its own (`reconcileLocalAiWithHermes`).
  *
  * Registered the way Settings → Local AI's Enable does it — the configure
- * route, `scope: local`, not activated: the box's chat model stays whatever
- * OpenClaw had. Only when the store says llama.cpp Local AI is on and
- * openclaw.json has no `llamacpp` row. Fail-soft: a note, never a failed swap.
+ * route, `scope: local`, not activated — so the chat model follows Enable's
+ * own rule: a box with a chat model keeps it, and one with none configured
+ * (or whose local model was the default before it was turned off) gets Gemma.
+ * Only when the store says llama.cpp Local AI is on and openclaw.json has no
+ * `llamacpp` row. Fail-soft: a note, never a failed swap.
  */
 async function carryLocalAiToOpenclaw(say: (status: string) => void): Promise<string | null> {
   try {
