@@ -2,12 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Following a ClawBox AI plan that moved while the box runs
- * (src/lib/clawai-plan-follow.ts). The defect: an account upgraded from Free to
- * Max kept "ClawBox cloud — not available" in Settings → Voice until the box
- * restarted, because on OpenClaw only the gateway's boot script arms the cloud
- * voice. Pinned here: the gateway is restarted ONCE to let that script arm it —
- * only on OpenClaw, only for the plan that covers the voice, only when the box
- * cannot call one yet — and the cloud defaults are applied after it.
+ * (src/lib/clawai-plan-follow.ts). The defects: an account upgraded from Free
+ * to Max kept "ClawBox cloud — not available" in Settings → Voice until the box
+ * restarted, and one moved from Max to Free kept every cloud voice — because on
+ * OpenClaw only the gateway's boot script arms and withdraws the cloud voice.
+ * Pinned here: the gateway is restarted ONCE to let that script do it — only on
+ * OpenClaw; up for the plan that covers the voice when the box cannot call one
+ * yet, down for a plan we were told does not cover it when the box still holds
+ * the entry the boot stamped — and the cloud defaults are applied after it for
+ * a paid plan.
  */
 
 const h = vi.hoisted(() => ({
@@ -16,15 +19,26 @@ const h = vi.hoisted(() => ({
   gatewayAbsent: vi.fn(() => false),
   token: vi.fn(async (): Promise<string | null> => "claw_device_token"),
   voiceConfig: vi.fn(async (): Promise<Record<string, unknown>> => ({})),
+  /** openclaw.json as it is on disk — what the withdrawal reads. */
+  rawConfig: vi.fn(async (): Promise<Record<string, unknown>> => ({})),
+  /** data/config.json — the plan on record. */
+  store: {} as Record<string, unknown>,
   updateLocked: vi.fn(async () => false),
   restart: vi.fn(async () => ({ back: Promise.resolve(true) })),
   apply: vi.fn<(options?: unknown) => Promise<{ moved: string[]; failed: unknown[] }>>(async () => ({ moved: [], failed: [] })),
 }));
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: h.harness }));
-vi.mock("@/lib/openclaw-config", () => ({ gatewayIsAbsent: h.gatewayAbsent }));
+vi.mock("@/lib/openclaw-config", () => ({ gatewayIsAbsent: h.gatewayAbsent, readConfig: h.rawConfig }));
 vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken: h.token }));
-vi.mock("@/lib/voice-box", () => ({ readVoiceConfig: h.voiceConfig }));
+vi.mock("@/lib/voice-box", () => ({
+  readVoiceConfig: h.voiceConfig,
+  clawboxAiProxyUrls: () => ["https://proxy.example/api/ai"],
+}));
+vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(async (key: string) => h.store[key]),
+  set: vi.fn(async (key: string, value: unknown) => { h.store[key] = value; }),
+}));
 vi.mock("@/lib/update-lock", () => ({ isUpdateLocked: h.updateLocked }));
 vi.mock("@/lib/gateway-hot-apply", () => ({
   restartGatewayAnsweringEarly: vi.fn(async () => {
@@ -60,6 +74,8 @@ beforeEach(async () => {
   h.gatewayAbsent.mockReturnValue(false);
   h.token.mockResolvedValue("claw_device_token");
   h.voiceConfig.mockResolvedValue(UNARMED);
+  h.rawConfig.mockResolvedValue(UNARMED);
+  for (const key of Object.keys(h.store)) delete h.store[key];
   h.updateLocked.mockResolvedValue(false);
   h.restart.mockImplementation(async () => ({ back: Promise.resolve(true) }));
   h.apply.mockResolvedValue({ moved: [], failed: [] });
@@ -120,11 +136,13 @@ describe("followClawaiPlanChange", () => {
     expect(h.order).toEqual(["apply"]);
   });
 
-  it("a plan without the cloud voice restarts nothing; an unpaid or unknown one does nothing at all", async () => {
+  it("a plan without the cloud voice and nothing of ours armed restarts nothing; an unknown plan does nothing at all", async () => {
     await follow.followClawaiPlanChange({ previous: "free", next: "flash" });
     expect(h.order).toEqual(["apply"]);
     h.order.length = 0;
     await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual([]);
+    h.rawConfig.mockResolvedValue(ARMED);
     await follow.followClawaiPlanChange({ previous: "pro", next: null });
     expect(h.order).toEqual([]);
   });
@@ -151,5 +169,130 @@ describe("followClawaiPlanChange", () => {
     gatewayBack(true);
     await Promise.all([first, second]);
     expect(h.order).toEqual(["restart", "apply", "apply"]);
+  });
+});
+
+describe("followClawaiPlanChange — a downgrade", () => {
+  beforeEach(() => {
+    // A Max box: the boot script armed the voice.
+    h.voiceConfig.mockResolvedValue(ARMED);
+    h.rawConfig.mockResolvedValue(ARMED);
+  });
+
+  it("Max → Free on OpenClaw: restarts the gateway once so its boot script withdraws the voice, and applies no defaults", async () => {
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual(["restart"]);
+    expect(h.apply).not.toHaveBeenCalled();
+  });
+
+  it("Max → Flash: withdraws the voice, then still applies the Flash plan's defaults", async () => {
+    await follow.followClawaiPlanChange({ previous: "pro", next: "flash" });
+    expect(h.order).toEqual(["restart", "apply"]);
+    expect(h.apply).toHaveBeenCalledWith({ trigger: "plan" });
+  });
+
+  it("reads the gateway's FILE, not the voice view — the view already leaves a withdrawn voice out", async () => {
+    h.voiceConfig.mockResolvedValue(UNARMED);
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual(["restart"]);
+  });
+
+  it("is never 'setting up': the panel says not available at once", async () => {
+    let gatewayBack!: (ok: boolean) => void;
+    h.restart.mockImplementation(async () => ({ back: new Promise<boolean>((r) => { gatewayBack = r; }) }));
+    const run = follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    await vi.waitFor(() => expect(h.order).toEqual(["restart"]));
+    expect(follow.clawaiPlanFollowPending()).toBe(false);
+    gatewayBack(true);
+    await run;
+  });
+
+  it("takes back only the entry the boot stamped: an owner's own voice, or ours re-aimed, stays", async () => {
+    h.rawConfig.mockResolvedValue({ tts: { providers: { openai: { apiKey: "sk-owners-own", baseUrl: "https://api.openai.com/v1" } } } });
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    h.rawConfig.mockResolvedValue({
+      tts: { providers: { openai: { apiKey: "claw_device_token", baseUrl: "https://speech.owner.example/v1", clawboxManaged: true } } },
+    });
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    // Ours without the stamp is somebody's hand-written config.
+    h.rawConfig.mockResolvedValue({ tts: { providers: { openai: { apiKey: "claw_device_token", baseUrl: "https://proxy.example/api/ai" } } } });
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual([]);
+  });
+
+  it("finds the stamped entry in the legacy home too", async () => {
+    h.rawConfig.mockResolvedValue({ messages: { tts: ARMED.tts } });
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual(["restart"]);
+  });
+
+  it("restarts nothing on Hermes, without a gateway, or while an update owns the box", async () => {
+    h.harness.mockResolvedValue("hermes");
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    h.harness.mockResolvedValue("openclaw");
+    h.gatewayAbsent.mockReturnValue(true);
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    h.gatewayAbsent.mockReturnValue(false);
+    h.updateLocked.mockResolvedValue(true);
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual([]);
+  });
+
+  it("never rejects when the restart is refused", async () => {
+    h.restart.mockRejectedValue(new Error("Start request repeated too quickly"));
+    await expect(follow.followClawaiPlanChange({ previous: "pro", next: "free" })).resolves.toBeUndefined();
+    expect(h.order).toEqual(["restart"]);
+  });
+});
+
+describe("followClawaiPlanOnRecord", () => {
+  beforeEach(() => {
+    h.rawConfig.mockResolvedValue(ARMED);
+  });
+
+  it("brings the gateway round to a plan on record without the voice, at most once per plan", async () => {
+    h.store.clawai_plan_tier = "free";
+    await follow.followClawaiPlanOnRecord();
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual(["restart"]);
+    // A different plan on record is a new reason to look.
+    h.store.clawai_plan_tier = "flash";
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual(["restart", "restart"]);
+    expect(h.apply).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for a plan that covers the voice, or one not on record", async () => {
+    h.store.clawai_plan_tier = "pro";
+    await follow.followClawaiPlanOnRecord();
+    delete h.store.clawai_plan_tier;
+    await follow.followClawaiPlanOnRecord();
+    h.store.clawai_plan_tier = "something-new";
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual([]);
+  });
+
+  it("does nothing once the boot script has taken the entry away", async () => {
+    h.store.clawai_plan_tier = "free";
+    h.rawConfig.mockResolvedValue(UNARMED);
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual([]);
+  });
+
+  it("may look again once a recorded change has been followed", async () => {
+    h.store.clawai_plan_tier = "free";
+    await follow.followClawaiPlanOnRecord();
+    // Free → Max → Free while the box runs: the second downgrade is its own.
+    h.voiceConfig.mockResolvedValue(ARMED);
+    await follow.followClawaiPlanChange({ previous: "free", next: "pro" });
+    await follow.followClawaiPlanOnRecord();
+    expect(h.order).toEqual(["restart", "apply", "restart"]);
+  });
+
+  it("never rejects", async () => {
+    h.store.clawai_plan_tier = "free";
+    h.rawConfig.mockRejectedValue(new Error("EACCES"));
+    await expect(follow.followClawaiPlanOnRecord()).resolves.toBeUndefined();
+    expect(h.order).toEqual([]);
   });
 });

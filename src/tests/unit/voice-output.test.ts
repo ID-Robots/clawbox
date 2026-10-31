@@ -4,6 +4,7 @@ import {
   buildVoiceOutputStatus,
   cloudCredentialIsUnusable,
   cloudProviderIdFor,
+  cloudSpeechTarget,
   configuredTtsProviderId,
   DEFAULT_VOICE_STATE,
   engineForProviderId,
@@ -13,6 +14,7 @@ import {
   providerIdForChoice,
   resolvePreferredEngine,
   selectionError,
+  withoutClawboxCloudVoice,
   type LocalVoiceProbe,
   type VoiceConfigView,
   type VoiceEngine,
@@ -280,5 +282,57 @@ describe("refusing an explicit pick", () => {
     const engines = buildVoiceOutputStatus(config(), healthyLocal, state()).engines;
     expect(selectionError("cloud", engines)).toContain("not available");
     expect(providerIdForChoice("cloud", engines)).toBeNull();
+  });
+});
+
+describe("withoutClawboxCloudVoice — the voice a plan without it may still use", () => {
+  const PROXY = "https://clawbox.com/api/ai";
+  /** What gateway-pre-start.sh writes for a Max box, beside the local voice. */
+  const armed = (home: "tts" | "messages.tts" = "tts", entry: Record<string, unknown> = {}) => {
+    const tts = {
+      provider: "openai",
+      providers: {
+        [LOCAL_TTS_PROVIDER_ID]: { command: "/opt/clawbox-tts.sh" },
+        openai: { apiKey: "claw_example_not_a_real_token", baseUrl: `${PROXY}/`, model: "gpt-4o-mini-tts", clawboxManaged: true, ...entry },
+      },
+    };
+    return (home === "tts" ? { tts } : { messages: { tts } }) as unknown as VoiceConfigView;
+  };
+
+  it("leaves out the entry the boot stamped, in either home, so the box speaks locally", () => {
+    for (const home of ["tts", "messages.tts"] as const) {
+      const before = armed(home);
+      expect(cloudSpeechTarget(before)).not.toBeNull();
+      const after = withoutClawboxCloudVoice(before, [PROXY]);
+      expect(cloudSpeechTarget(after)).toBeNull();
+      const status = buildVoiceOutputStatus(after, healthyLocal, state());
+      expect(status.engines.find((e) => e.id === "cloud")?.configured).toBe(false);
+      expect(resolvePreferredEngine("auto", status.engines)).toBe("local");
+      // The local voice and the customer's pick stay as the boot leaves them.
+      const view = home === "tts" ? after.tts : after.messages?.tts;
+      expect(view?.provider).toBe("openai");
+      expect(Object.keys(view?.providers as object)).toEqual([LOCAL_TTS_PROVIDER_ID]);
+    }
+  });
+
+  it("never touches the config it was handed", () => {
+    const before = armed();
+    const snapshot = JSON.stringify(before);
+    withoutClawboxCloudVoice(before, [PROXY]);
+    expect(JSON.stringify(before)).toBe(snapshot);
+  });
+
+  it("answers the same object when there is nothing of ours: an owner's own voice, ours re-aimed, ours unstamped", () => {
+    for (const entry of [
+      { apiKey: "sk-owners-own", baseUrl: "https://api.openai.com/v1", clawboxManaged: undefined },
+      { baseUrl: "https://speech.owner.example/v1" },
+      { clawboxManaged: undefined },
+      { clawboxManaged: "true" },
+    ]) {
+      const before = armed("tts", entry);
+      expect(withoutClawboxCloudVoice(before, [PROXY])).toBe(before);
+    }
+    const fresh = {} as VoiceConfigView;
+    expect(withoutClawboxCloudVoice(fresh, [PROXY])).toBe(fresh);
   });
 });

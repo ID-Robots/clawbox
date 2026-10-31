@@ -127,6 +127,25 @@ export async function readClawaiEntitlementTier(): Promise<ClawboxAiPlanTier | n
   return clawaiEntitlementTier(planTier, deviceTier);
 }
 
+/** The plan on record, or null when the portal has not told this box one. */
+export async function readClawaiPlanOnRecord(): Promise<ClawboxAiPlanTier | null> {
+  return normalizeClawboxAiPlanTier(await get(CLAWAI_PLAN_TIER_KEY));
+}
+
+/**
+ * The WITHDRAW rule over the store: has the portal told this box a plan that
+ * does not cover the cloud voice? False when no plan is on record and when the
+ * store cannot be read — not knowing is not a downgrade, here as in the boot
+ * scripts.
+ */
+export async function readClawaiSpeechWithdrawable(entitledTier: string): Promise<boolean> {
+  try {
+    return clawaiSpeechWithdrawable(await readClawaiPlanOnRecord(), entitledTier);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A portal answer about this box's plan, or the absence of one.
  *

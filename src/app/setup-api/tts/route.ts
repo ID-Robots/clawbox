@@ -46,7 +46,7 @@ import { clearOwnerChoice, noteOwnerChoice, readChoiceSource, restoreChoiceSourc
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { logSafe } from "@/lib/log-safe";
-import { clawaiPlanFollowPending } from "@/lib/clawai-plan-follow";
+import { clawaiPlanFollowPending, followClawaiPlanOnRecord } from "@/lib/clawai-plan-follow";
 
 /**
  * GET  /setup-api/tts            → who speaks for this box
@@ -260,6 +260,9 @@ async function handleShortSpoken(enabled: unknown) {
  * not talking.
  */
 export async function GET() {
+  // Detached: the answer already reads the voice through the plan on record;
+  // this only brings the gateway's own file round to it, once per plan.
+  void followClawaiPlanOnRecord();
   try {
     return NextResponse.json(await status(), { headers: NO_STORE });
   } catch (err) {
