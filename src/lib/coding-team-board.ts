@@ -505,6 +505,13 @@ export interface TeamBoard {
   updatedAt: number;
   /** When the team settled (done, failed, stopped); null while it works. */
   finishedAt: number | null;
+  /**
+   * On a team the owner STOPPED: when the user asked for its work again and
+   * the assistant started it with `userAskedAgain` — the end of the hold that
+   * stop puts on the assistant's own starts (coding-team.ts ownerStopRefusal).
+   * Absent while it holds.
+   */
+  holdReleasedAt?: number;
 }
 
 /** One of the team's runs waiting for a free slot on the box: which, why, since when (ms). */
@@ -687,6 +694,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
     finishedAt: typeof b.finishedAt === "number" ? b.finishedAt : null,
+    ...(typeof b.holdReleasedAt === "number" ? { holdReleasedAt: b.holdReleasedAt } : {}),
   };
   // Worked out again rather than trusted from the file: they are the board's, not the file's.
   board.metrics = teamMetrics(board);

@@ -1539,9 +1539,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         MAX_RUN_MESSAGE_CHARS,
         "Plain text the run reads as it resumes: what it missed, or what the user wants done differently. Not a new task.",
       ),
+      user_asked_again: zBool(false, USER_ASKED_AGAIN_DESCRIPTION),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 2_000 },
-    async ({ run_id, message }: { run_id: string; message?: string }) => {
+    async ({ run_id, message, user_asked_again }: { run_id: string; message?: string; user_asked_again?: boolean }) => {
       const before = await apiGet<{ run?: RunPayload }>("/setup-api/coding-agent/runs", {
         query: { id: run_id },
         timeoutMs: 15_000,
@@ -1594,12 +1595,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       }
       let res: { run?: RunPayload };
       try {
-        res = await apiPost<{ run?: RunPayload }>("/setup-api/coding-agent/resume", { runId: run_id }, {
+        res = await apiPost<{ run?: RunPayload }>("/setup-api/coding-agent/resume", { runId: run_id, ...(user_asked_again === true ? { userAskedAgain: true } : {}) }, {
           // The resume passes the same gates a start does — the switch, the
           // harness, the folder, one run at a time — and may re-create the
           // run's copy of the project from its branch first.
           timeoutMs: 30_000,
           rules: [
+            OWNER_STOPPED_RULE,
             {
               status: 403,
               code: "CONFLICT",

@@ -1083,10 +1083,11 @@ the main chat; a Hermes box has no way into its chat, so there the tool says
 to look again only when the user asks. A team the OWNER stopped gets no chat
 line — given one, the assistant started the team again on its own — and it
 stays stopped: `coding_team_status` says so (`stopped_by` in the list), and
-for 12 hours after the stop the box refuses the assistant's own
-`coding_team_run` or `coding_agent_run` on that team's folder or goal (409
-`owner_stopped`) until something else has started there, unless the call
-passes `user_asked_again: true` — the user asked again in a new message. A
+the box refuses the assistant's own `coding_team_run`, `coding_agent_run` or
+`coding_agent_resume` on that team's work — its folder and the worktrees in
+it, its goal, one of its runs — with 409 `owner_stopped`, unless the call
+passes `user_asked_again: true`: the user asked again in a new message. That
+start is what lifts the hold; time does not. A
 task starts only once every
 `depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
 reopened after a dependent started HOLDS the dependent — its worker stopped

@@ -22,10 +22,14 @@ vi.mock("@/lib/coding-agent", async () => {
   return { ...actual, startRun, startOrQueueRun };
 });
 
-// The owner's-stop hold (coding-team.ts ownerStopRefusalForRun, tested
-// there): nothing held unless a case says so.
-const ownerStopRefusalForRun = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/coding-team", () => ({ ownerStopRefusalForRun }));
+// The owner's-stop hold (coding-team.ts ownerStopRefusal, tested there):
+// nothing held unless a case says so.
+const hold = vi.hoisted(() => ({
+  ownerStopWorkForRun: vi.fn(),
+  ownerStopRefusal: vi.fn(),
+  releaseOwnerStopHold: vi.fn(),
+}));
+vi.mock("@/lib/coding-team", () => hold);
 
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
@@ -57,7 +61,8 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   startRun.mockResolvedValue(RUN);
-  ownerStopRefusalForRun.mockResolvedValue(null);
+  hold.ownerStopWorkForRun.mockImplementation(async (input: { task: string; resumeRunId: string | null }) => ({ directory: "/home/clawbox/clawbox/data/code-projects/site", text: input.task, runId: input.resumeRunId }));
+  hold.ownerStopRefusal.mockReturnValue(null);
   startOrQueueRun.mockImplementation(async (input: unknown) => ({ run: await startRun(input), queued: false }));
   const lib = await import("@/lib/coding-agent");
   CodingAgentError = lib.CodingAgentError;
@@ -102,18 +107,28 @@ describe("the gate", () => {
 describe("a team the owner stopped", () => {
   it("refuses the agent's run on its work 409 owner_stopped, before any start is announced", async () => {
     const { OwnerStoppedTeamError } = await import("@/lib/coding-agent");
-    ownerStopRefusalForRun.mockResolvedValueOnce(new OwnerStoppedTeamError("team-stop0001", "The owner stopped coding team team-stop0001 on this work."));
+    hold.ownerStopRefusal.mockReturnValueOnce(new OwnerStoppedTeamError("team-stop0001", "The owner stopped coding team team-stop0001 on this work."));
     const res = await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", resumeRunId: "run-aaaaaaaa" } }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "The owner stopped coding team team-stop0001 on this work.", kind: "busy", code: "owner_stopped" });
-    expect(ownerStopRefusalForRun).toHaveBeenCalledWith({ task: "Finish it", projectId: "site", directory: null, resumeRunId: "run-aaaaaaaa" });
+    expect(hold.ownerStopWorkForRun).toHaveBeenCalledWith({ task: "Finish it", projectId: "site", directory: null, resumeRunId: "run-aaaaaaaa" });
+    expect(hold.ownerStopRefusal).toHaveBeenCalledWith({ directory: "/home/clawbox/clawbox/data/code-projects/site", text: "Finish it", runId: "run-aaaaaaaa" });
     expect(startOrQueueRun).not.toHaveBeenCalled();
+    expect(hold.releaseOwnerStopHold).not.toHaveBeenCalled();
   });
 
-  it("never holds the owner's run, nor the agent's once the user asked again", async () => {
+  it("never holds the owner's run; the agent's run once the user asked again starts, and lifts the hold", async () => {
     expect((await POST(req({ auth: "cookie" }))).status).toBe(202);
+    expect(hold.ownerStopWorkForRun).not.toHaveBeenCalled();
     expect((await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", userAskedAgain: true } }))).status).toBe(202);
-    expect(ownerStopRefusalForRun).not.toHaveBeenCalled();
+    expect(hold.ownerStopRefusal).not.toHaveBeenCalled();
+    expect(hold.releaseOwnerStopHold).toHaveBeenCalledWith({ directory: "/home/clawbox/clawbox/data/code-projects/site", text: "Finish it", runId: null });
+  });
+
+  it("lifts no hold for a start that failed", async () => {
+    startRun.mockRejectedValueOnce(new CodingAgentError("busy", "A coding run is already in progress."));
+    expect((await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", userAskedAgain: true } }))).status).toBe(409);
+    expect(hold.releaseOwnerStopHold).not.toHaveBeenCalled();
   });
 });
 

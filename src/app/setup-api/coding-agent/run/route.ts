@@ -3,7 +3,7 @@ import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, newRunId, startOrQueueRun } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
-import { ownerStopRefusalForRun } from "@/lib/coding-team";
+import { ownerStopRefusal, ownerStopWorkForRun, releaseOwnerStopHold } from "@/lib/coding-team";
 import { pushPendingAction } from "@/lib/pending-actions";
 
 export const dynamic = "force-dynamic";
@@ -108,13 +108,18 @@ export async function POST(request: Request) {
   // The assistant's run on the work of a team of its own that the owner
   // stopped waits for the user to ask again (`userAskedAgain`), as a team
   // does — refused before the desktops hear of a start, so no card appears.
-  if (source === "agent" && body.userAskedAgain !== true) {
-    const held = await ownerStopRefusalForRun({
+  // A start that says the user asked again lifts the hold once it has begun.
+  const askedAgain = body.userAskedAgain === true;
+  const holdWork = source === "agent"
+    ? await ownerStopWorkForRun({
       task,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
       resumeRunId: typeof body.resumeRunId === "string" ? body.resumeRunId : null,
-    });
+    })
+    : null;
+  if (holdWork && !askedAgain) {
+    const held = ownerStopRefusal(holdWork);
     if (held) return NextResponse.json({ error: held.message, kind: held.kind, code: held.code }, { status: httpStatusForCodingError(held.kind) });
   }
 
@@ -171,6 +176,7 @@ export async function POST(request: Request) {
       { type: "coding_run", phase: queued ? "queued" : "started", runId: run.id, projectId: run.projectId, ...(run.team ? { teamId: run.team.id } : {}) },
       `coding-run:${run.id}`,
     );
+    if (holdWork && askedAgain) releaseOwnerStopHold(holdWork);
     return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
   } catch (err) {
     // The start the desktops were told of will not happen: they re-read, and

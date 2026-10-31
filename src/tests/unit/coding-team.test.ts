@@ -878,42 +878,58 @@ describe("a team the owner stopped stays stopped", () => {
     expect(starts).toHaveLength(0);
   });
 
-  it("never holds the owner's own start — and once something has started on that work, the hold is over", async () => {
-    await stoppedTeam();
+  it("never holds the owner's own start — and the owner's own work there does not lift the assistant's hold", async () => {
+    const stopped = await stoppedTeam();
     outcomes = [{ summary: PLAN }];
     const owners = await team.startTeam({ goal: "Build the invoice app", directory: "site", source: "owner" });
     expect((await finished(owners.id)).status).toBe("done");
-    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" })).toBeNull();
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" })).toMatchObject({ teamId: stopped.id });
   });
 
-  it("lets the assistant start the work again when the user asked in a new message (userAskedAgain)", async () => {
-    await stoppedTeam();
+  it("lets the assistant start the work again when the user asked in a new message (userAskedAgain), and that lifts the hold", async () => {
+    const stopped = await stoppedTeam();
     outcomes = [{ summary: PLAN }];
     const again = await team.startTeam({ goal: "Build the invoice app", directory: "site", source: "agent", userAskedAgain: true });
     expect((await finished(again.id)).status).toBe("done");
+    const { loadBoard } = await import("@/lib/coding-team-board");
+    expect(loadBoard(stopped.id)?.holdReleasedAt).toEqual(expect.any(Number));
+    expect(loadBoard(stopped.id)?.status).toBe("stopped");
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Next part" })).toBeNull();
   });
 
-  it("holds nothing for other work in another folder, for an owner's team, or past OWNER_STOP_HOLD_MS", async () => {
+  it("holds on, however long ago the stop was, until the user asks again", async () => {
+    const stopped = await stoppedTeam({ agoMs: 30 * 24 * 60 * 60_000 });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" })).toMatchObject({ teamId: stopped.id });
+  });
+
+  it("holds the team's folder, the worktrees inside it, its goal and its own runs — and nothing else", async () => {
     const stopped = await stoppedTeam();
-    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/other", text: "Add a README" })).toBeNull();
+    const { loadBoard, saveBoard } = await import("@/lib/coding-team-board");
+    const board = loadBoard(stopped.id)!;
+    board.runs.push({ id: "run-0000000w", role: "worker", taskId: "t1" } as (typeof board.runs)[number]);
+    saveBoard(board);
     expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Add a README" })).toMatchObject({ teamId: stopped.id });
-    const later = (stopped.finishedAt ?? 0) + team.OWNER_STOP_HOLD_MS + 1;
-    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" }, later)).toBeNull();
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", text: "carry on" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/elsewhere", text: "carry on", runId: "run-0000000w" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/other", text: "  BUILD the invoice app" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/other", text: "Add a README" })).toBeNull();
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site-2", text: "Add a README" })).toBeNull();
   });
 
-  it("an owner's stopped team holds nothing: its id and goal are the owner's, not the bearer's", async () => {
+  it("an owner's stopped team holds nothing: the assistant cannot read it, and its id and goal are the owner's", async () => {
     await stoppedTeam({ source: "owner", directory: "/home/clawbox/Projects/mine", goal: "Owner work" });
     expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/mine", text: "Owner work" })).toBeNull();
   });
 
-  it("holds the assistant's run in that folder too (ownerStopRefusalForRun), from the run it resumes or the folder it names", async () => {
-    const stopped = await stoppedTeam();
-    expect(await team.ownerStopRefusalForRun({ task: "Finish the last part", projectId: null, directory: "site", resumeRunId: null })).toMatchObject({ code: "owner_stopped", teamId: stopped.id });
-    runner.getRun.mockReturnValueOnce({ id: "run-00000009", directory: "/home/clawbox/Projects/site" } as never);
-    expect(await team.ownerStopRefusalForRun({ task: "continue", projectId: null, directory: null, resumeRunId: "run-00000009" })).toMatchObject({ code: "owner_stopped" });
+  it("places a run's work the way startRun will (ownerStopWorkForRun): the run it resumes, else the folder named", async () => {
+    expect(await team.ownerStopWorkForRun({ task: "Finish the last part", projectId: null, directory: "site", resumeRunId: null }))
+      .toEqual({ directory: "/home/clawbox/Projects/site", text: "Finish the last part", runId: null });
+    runner.getRun.mockReturnValueOnce({ id: "run-0000000w", directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1" } as never);
+    expect(await team.ownerStopWorkForRun({ task: "continue", projectId: null, directory: null, resumeRunId: "run-0000000w" }))
+      .toEqual({ directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", text: "continue", runId: "run-0000000w" });
     // A folder the run route cannot place holds nothing here: startRun refuses it itself.
     runner.resolveWorkingDirectory.mockRejectedValueOnce(new Error("That folder is off limits."));
-    expect(await team.ownerStopRefusalForRun({ task: "x", projectId: null, directory: "/etc", resumeRunId: null })).toBeNull();
+    expect(await team.ownerStopWorkForRun({ task: "x", projectId: null, directory: "/etc", resumeRunId: null })).toBeNull();
   });
 });
 
