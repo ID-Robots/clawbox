@@ -12,16 +12,24 @@
  *  1. The gateway's auth profile, NATIVELY: `openclaw models auth logout
  *     deepseek:default --yes` removes it from the store the gateway reads and
  *     drops it from `auth.profiles` and every `auth.order` (docs/cli/models.md,
- *     the pinned core). What it leaves — an `auth.profiles` entry with no store
- *     row behind it, the token inline in `models.providers.deepseek.apiKey`, the
- *     copy the image provider reads at `models.providers.litellm.apiKey` — goes
- *     with `config unset`. The provider definition itself stays: the default
- *     model still names ClawBox AI, and the chat answers a turn on it with the
- *     "Sign in to ClawBox AI again" line rather than a provider it cannot find.
+ *     the pinned core). What it leaves goes with `config unset`: an
+ *     `auth.profiles` entry with no store row behind it, the token inline in
+ *     `models.providers.deepseek.apiKey`, every other copy of a ClawBox AI key
+ *     under `models.providers` (the image provider's `litellm` slot, the legacy
+ *     `openai` image slot — the `claw_` keys `provider-status.ts` counts as
+ *     ClawBox AI), and the cloud voice the boot script arms with the token
+ *     (`tts.providers.openai`, stamped `clawboxManaged`; `messages.tts` on an
+ *     older core), which it never withdraws once the token is gone. The
+ *     provider definition itself stays: the default model still names ClawBox
+ *     AI, and the chat answers a turn on it with the "Sign in to ClawBox AI
+ *     again" line rather than a provider it cannot find. The image model slots
+ *     still name ClawBox AI models too, and fail as unauthenticated until the
+ *     next sign-in.
  *  2. ClawBox's own records of the account, in ONE store write: the token
  *     (`clawai_token`), the device badge and the plan (`clawai_tier`,
- *     `clawai_plan_tier`, the pair the boot scripts read), and the owner's
- *     ClawBox AI model pick. Left behind, they are the stale profile: a
+ *     `clawai_plan_tier`, the pair the boot scripts read), then the owner's
+ *     ClawBox AI model pick through its own serialised writer. Left behind,
+ *     they are the stale profile: a
  *     re-login with another account kept the old account's plan until the
  *     portal next answered, and its model pick.
  *  3. The memory of a refused credential (`forgetClawaiCredentialRefusal`,
@@ -30,28 +38,33 @@
  *     an open sign-in card that the account it just left is signed in.
  *
  * Then the gateway is brought onto it the way the configure route does — hot
- * applied and confirmed, a restart otherwise — and the result is READ BACK:
- * a credential still on the box afterwards is a failure, never a success.
+ * applied and confirmed, a restart otherwise, and a restart that was refused
+ * is a failure (the running gateway may still hold the old sign-in) — and
+ * the result is READ BACK with the strict readers: a credential still on the
+ * box, or a store that cannot be read to say it is gone, is a failure, never
+ * a success.
  *
  * OpenClaw only. A Hermes box keeps the credential in Hermes' own config,
  * whose `providers.clawai` block is also what says "configured" there; that
  * edition's sign-out is not built, and the route says so rather than clearing
- * half of it.
+ * half of it. On a dual box running OpenClaw, a key Hermes was given while it
+ * was the active harness stays in Hermes' config: the swap back to Hermes
+ * links that edition again.
  *
  * SERVER ONLY.
  */
 
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { CLAWAI_PLAN_TIER_KEY } from "@/lib/clawai-plan-tier";
-import { clearClawAiSession, isClawAiSessionExpired, readClawAiSession } from "@/lib/clawai-connect";
-import { get as getConfigValue, setMany } from "@/lib/config-store";
-import { EXPLICIT_MODEL_PICKS_KEY, explicitPicksFrom, picksWithoutProvider } from "@/lib/explicit-model-pick";
+import { clearClawAiSession, isClawAiSessionConfiguring, readClawAiSession } from "@/lib/clawai-connect";
+import { get as getConfigValue, getKnown, setMany } from "@/lib/config-store";
+import { forgetClawboxAiPick } from "@/lib/explicit-model-pick";
 import { awaitGatewayHotApply, diffConfigPaths, readGatewayConfigBaseline, restartGatewayAnsweringEarly } from "@/lib/gateway-hot-apply";
 import { getActiveHarness } from "@/lib/harness";
 import { forgetClawaiCredentialRefusal, resolveClawaiToken } from "@/lib/harness/credentials";
 import { logSafe } from "@/lib/log-safe";
 import { readGatewayAuthProfile } from "@/lib/openclaw-auth-store";
-import { flushConfigWrites, readConfig, runOpenclawConfigUnset, spawnOpenclawCli, type OpenClawConfig } from "@/lib/openclaw-config";
+import { flushConfigWrites, readConfig, readConfigStrict, runOpenclawConfigUnset, spawnOpenclawCli, type OpenClawConfig } from "@/lib/openclaw-config";
 
 /** The auth profile the configure route writes the device's key to. */
 export const CLAWAI_AUTH_PROFILE_ID = `${CLAWBOX_AI_PROVIDER}:default`;
@@ -73,7 +86,7 @@ export type ClawaiSignOutResult =
   }
   | {
     ok: false;
-    kind: "not_supported" | "sign_in_in_progress" | "still_signed_in";
+    kind: "not_supported" | "sign_in_in_progress" | "still_signed_in" | "restart_refused";
     error: string;
   };
 
@@ -90,14 +103,41 @@ function hasProfileEntry(config: OpenClawConfig | null): boolean {
   return !!profiles && Object.hasOwn(profiles, CLAWAI_AUTH_PROFILE_ID);
 }
 
-/** The config paths that still hold the account once `models auth logout` has run. */
+/** A ClawBox AI key: the token itself, or any portal token (`claw_`, the shape `provider-status.ts` counts). */
+function isClawaiKey(value: unknown, token: string | null): boolean {
+  return typeof value === "string" && (value === token || value.startsWith("claw_"));
+}
+
+/** `node[key]` when it is a plain object, else null. */
+function child(node: unknown, key: string): Record<string, unknown> | null {
+  const next = node && typeof node === "object" && !Array.isArray(node) ? (node as Record<string, unknown>)[key] : undefined;
+  return next && typeof next === "object" && !Array.isArray(next) ? next as Record<string, unknown> : null;
+}
+
+/**
+ * The config paths that still hold the account once `models auth logout`
+ * has run — see the file header for each.
+ */
 function leftoverConfigPaths(config: OpenClawConfig | null, token: string | null): string[] {
-  const providers = config?.models?.providers;
   const paths: string[] = [];
   if (hasProfileEntry(config)) paths.push(`auth.profiles.${CLAWAI_AUTH_PROFILE_ID}`);
-  if (providers?.[CLAWBOX_AI_PROVIDER]?.apiKey !== undefined) paths.push(`models.providers.${CLAWBOX_AI_PROVIDER}.apiKey`);
-  // Only OUR copy: the image provider's slot may hold an owner's own LiteLLM key.
-  if (token && providers?.litellm?.apiKey === token) paths.push("models.providers.litellm.apiKey");
+  const providers = child(child(config, "models"), "providers") ?? {};
+  for (const id of Object.keys(providers)) {
+    // An id that is not a plain word cannot be named as a dotted path.
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) continue;
+    const apiKey = child(providers, id)?.apiKey;
+    if (id === CLAWBOX_AI_PROVIDER ? apiKey !== undefined : isClawaiKey(apiKey, token)) {
+      paths.push(`models.providers.${id}.apiKey`);
+    }
+  }
+  for (const home of ["tts", "messages.tts"]) {
+    const ttsNode = home.split(".").reduce<unknown>((node, key) => child(node, key), config);
+    const speech = child(child(ttsNode, "providers"), "openai");
+    if (!speech || !isClawaiKey(speech.apiKey, token)) continue;
+    // Our own entry goes whole — a voice pointed at the proxy with no key is
+    // no voice; a key of ours in the owner's own entry goes alone.
+    paths.push(speech.clawboxManaged === true ? `${home}.providers.openai` : `${home}.providers.openai.apiKey`);
+  }
   return paths;
 }
 
@@ -123,7 +163,7 @@ export async function signOutOfClawboxAi(): Promise<ClawaiSignOutResult> {
   // A device login that is writing its token right now would land it after
   // this sign-out, and the box would be signed in to that account after all.
   const session = await readClawAiSession().catch(() => null);
-  if (session?.status === "configuring" && !isClawAiSessionExpired(session)) {
+  if (session && isClawAiSessionConfiguring(session)) {
     return {
       ok: false,
       kind: "sign_in_in_progress",
@@ -165,20 +205,18 @@ export async function signOutOfClawboxAi(): Promise<ClawaiSignOutResult> {
   }
   await flushConfigWrites().catch(() => undefined);
 
-  // 2. ClawBox's records of the account, in one write. `undefined` deletes.
-  const picks = explicitPicksFrom(await getConfigValue(EXPLICIT_MODEL_PICKS_KEY).catch(() => undefined));
-  const withoutClawai = picksWithoutProvider(picks, "clawai");
-  const withoutEither = picksWithoutProvider(withoutClawai ?? picks, CLAWBOX_AI_PROVIDER) ?? withoutClawai;
+  // 2. ClawBox's records of the account, in one write (`undefined` deletes),
+  //    then the model pick through its own serialised writer.
   try {
     await setMany({
       [CLAWAI_TOKEN_KEY]: undefined,
       [CLAWAI_DEVICE_TIER_KEY]: undefined,
       [CLAWAI_PLAN_TIER_KEY]: undefined,
-      ...(withoutEither ? { [EXPLICIT_MODEL_PICKS_KEY]: withoutEither } : {}),
     });
   } catch (err) {
     console.warn("[clawai/sign-out] could not clear the account's records:", err instanceof Error ? logSafe(err.message) : err);
   }
+  await forgetClawboxAiPick();
 
   // 3. What the box remembers about the old credential.
   await forgetClawaiCredentialRefusal().catch(() => undefined);
@@ -186,6 +224,7 @@ export async function signOutOfClawboxAi(): Promise<ClawaiSignOutResult> {
 
   // The gateway, onto the change: hot-applied and confirmed, else restarted.
   let gatewayRestarting = false;
+  let restartRefused = false;
   if (held) {
     const after = await readConfigOrNull();
     const hot = await awaitGatewayHotApply({
@@ -202,22 +241,44 @@ export async function signOutOfClawboxAi(): Promise<ClawaiSignOutResult> {
           await restartGatewayAnsweringEarly();
           gatewayRestarting = true;
         } catch (err) {
+          restartRefused = true;
           console.error("[clawai/sign-out] the gateway restart was refused:", err instanceof Error ? logSafe(err.message) : err);
         }
       }
     }
   }
 
-  // Read back: never a success over a credential that is still here.
+  // Read back, with the readers that say when they could not read: never a
+  // success over a credential that is still here, or one nobody could check.
   const left: string[] = [];
-  if (readGatewayAuthProfile(CLAWAI_AUTH_PROFILE_ID).kind === "present") left.push("the gateway's auth store");
-  if (leftoverConfigPaths(await readConfigOrNull(), token).length > 0) left.push("openclaw.json");
-  if ((await getConfigValue(CLAWAI_TOKEN_KEY).catch(() => undefined)) !== undefined) left.push("the ClawBox config store");
-  if (left.length > 0) {
+  const unread: string[] = [];
+  const storeRow = readGatewayAuthProfile(CLAWAI_AUTH_PROFILE_ID);
+  if (storeRow.kind === "present") left.push("the gateway's auth store");
+  else if (storeRow.kind === "unreadable") unread.push("the gateway's auth store");
+  try {
+    if (leftoverConfigPaths(await readConfigStrict(), token).length > 0) left.push("openclaw.json");
+  } catch {
+    unread.push("openclaw.json");
+  }
+  const tokenNow = await getKnown(CLAWAI_TOKEN_KEY);
+  if (!tokenNow.known) unread.push("the ClawBox config store");
+  else if (tokenNow.value !== undefined) left.push("the ClawBox config store");
+  if (left.length > 0 || unread.length > 0) {
+    const parts = [
+      left.length ? `could not be removed from ${left.join(" and ")}` : null,
+      unread.length ? `could not be checked in ${unread.join(" and ")}` : null,
+    ].filter(Boolean);
     return {
       ok: false,
       kind: "still_signed_in",
-      error: `The ClawBox AI sign-in could not be removed from ${left.join(" and ")}. Try again; if it stays, restart the box and sign out again.`,
+      error: `The ClawBox AI sign-in ${parts.join(", and ")}. Try again; if it stays, restart the box and sign out again.`,
+    };
+  }
+  if (restartRefused) {
+    return {
+      ok: false,
+      kind: "restart_refused",
+      error: "Signed out on this box, but the AI gateway could not be restarted to let go of the old sign-in. Restart the box to finish.",
     };
   }
 

@@ -39,8 +39,8 @@ describe("POST /setup-api/ai-models/clawai/sign-out", () => {
     expect(signOut.signOutOfClawboxAi).not.toHaveBeenCalled();
   });
 
-  it("passes the sign-out's refusals through: 409 for the edition and a sign-in mid-write, 500 for a credential still there", async () => {
-    for (const [kind, status] of [["not_supported", 409], ["sign_in_in_progress", 409], ["still_signed_in", 500]] as const) {
+  it("passes the sign-out's refusals through: 409 for the edition and a sign-in mid-write, 500 for a credential still there, 502 for a refused restart", async () => {
+    for (const [kind, status] of [["not_supported", 409], ["sign_in_in_progress", 409], ["still_signed_in", 500], ["restart_refused", 502]] as const) {
       signOut.signOutOfClawboxAi.mockResolvedValueOnce({ ok: false, kind, error: `refused: ${kind}` });
       const res = await POST(req());
       expect(res.status, kind).toBe(status);

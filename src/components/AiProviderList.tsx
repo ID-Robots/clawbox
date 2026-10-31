@@ -104,11 +104,13 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
         throw new Error(typeof data.error === "string" && data.error ? data.error : t("settings.providers.signOutFailed"));
       }
       setSignOutNote(t("settings.providers.signedOut"));
-      refresh();
-      notifyProvidersChanged();
     } catch (e) {
       setToggleError(e instanceof Error && e.message ? e.message : t("settings.providers.signOutFailed"));
     } finally {
+      // Re-read either way: a refusal can come after part of the sign-in was
+      // removed, and the rows are the box's answer, not this click's.
+      refresh();
+      notifyProvidersChanged();
       setSigningOut(false);
     }
   }, [disarmSignOut, refresh, t]);

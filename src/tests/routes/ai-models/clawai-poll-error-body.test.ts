@@ -21,6 +21,7 @@ vi.mock("@/lib/clawai-connect", () => ({
   createClawAiUserCode: vi.fn(() => "ABCD-1234"),
   createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
   CLAWAI_USER_CODE_LENGTH: 8,
+  CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
   writeClawAiSession: vi.fn(),
   readClawAiSession: vi.fn(),
   clearClawAiSession: vi.fn(),

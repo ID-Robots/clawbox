@@ -18,7 +18,10 @@ import { hasPersonSession } from "@/lib/owner-session";
  *   of its AI account is the owner's, the same rule as providers/enabled.
  * - 409 `not_supported`: the Hermes edition, whose sign-out is not built.
  * - 409 `sign_in_in_progress`: a device login is writing its token right now.
- * - 500 `still_signed_in`: something of the credential is still on the box.
+ * - 500 `still_signed_in`: something of the credential is still on the box,
+ *   or a store could not be read to say it is gone.
+ * - 502 `restart_refused`: the box is signed out on disk, but the gateway
+ *   could not be restarted to let go of the sign-in it is running with.
  */
 export async function POST(request: Request) {
   if (!(await hasPersonSession(request))) {
@@ -31,7 +34,7 @@ export async function POST(request: Request) {
   if (!result.ok) {
     return NextResponse.json(
       { error: result.error, kind: result.kind },
-      { status: result.kind === "still_signed_in" ? 500 : 409 },
+      { status: result.kind === "still_signed_in" ? 500 : result.kind === "restart_refused" ? 502 : 409 },
     );
   }
   return NextResponse.json({ signedOut: true, changed: result.changed, gatewayRestarting: result.gatewayRestarting });
