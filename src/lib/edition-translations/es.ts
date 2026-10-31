@@ -31,6 +31,10 @@ export const es: Record<string, string> = {
   "settings.providers.switchedOff": "Desactivado",
   "settings.providers.makeDefault": "Hacer predeterminado",
   "settings.providers.lockedHint": "Primero haz que otro proveedor sea el predeterminado.",
+  "settings.providers.signOut": "Cerrar sesión en ClawBox AI",
+  "settings.providers.signOutConfirm": "Cerrar sesión — toca de nuevo",
+  "settings.providers.signOutFailed": "No se pudo cerrar la sesión en ClawBox AI.",
+  "settings.providers.signedOut": "Sesión cerrada en ClawBox AI. Vuelve a iniciar sesión abajo para usarlo.",
   "settings.providers.empty": "Aún no hay ningún proveedor conectado — conecta uno más abajo.",
 
   // === System password card ===
