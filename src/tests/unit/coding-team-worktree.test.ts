@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, adoptOwnBranchWork, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -336,5 +336,123 @@ describe("generated artifacts", () => {
     // A task can be asked to produce these, so they stay visible.
     expect(isGeneratedArtifact("dist/bundle.js")).toBe(false);
     expect(isGeneratedArtifact("src/calc.py")).toBe(false);
+  });
+});
+
+describe("work a run committed on a branch of its own", () => {
+  /** A worker's worktree on the team branch, and a commit helper in it. */
+  async function worker(task = "t1") {
+    await ensureTeamBranch(dir, "team-abc");
+    const wt = await addWorkerWorktree(dir, "team-abc", task, 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    const commit = (file: string, content: string, message = `write ${file}`) => {
+      fs.writeFileSync(path.join(wt.path, file), content);
+      git(wt.path, "add", "-A");
+      git(wt.path, "commit", "-q", "-m", message);
+      return git(wt.path, "rev-parse", "HEAD");
+    };
+    return { ...wt, commit };
+  }
+
+  it("moves the given branch forward to a branch the run made with `git checkout -b`, and puts HEAD back on it", async () => {
+    const wt = await worker();
+    git(wt.path, "checkout", "-q", "-b", "fix/arrows");
+    const work = wt.commit("app.js", "console.log(1)\n");
+    expect(await adoptOwnBranchWork(wt.path, wt.branch)).toEqual({ ok: true, from: "fix/arrows" });
+    expect(git(dir, "rev-parse", wt.branch)).toBe(work);
+    expect(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);
+    expect(git(wt.path, "status", "--porcelain")).toBe("");
+    expect(await changedFiles(dir, wt.branch)).toEqual(["app.js"]);
+    // The run's own branch is left as it is.
+    expect(git(dir, "rev-parse", "fix/arrows")).toBe(work);
+  });
+
+  it("keeps what the run left uncommitted on its own branch in the tree, for the harvest", async () => {
+    const wt = await worker();
+    git(wt.path, "checkout", "-q", "-b", "fix/own");
+    wt.commit("app.js", "console.log(1)\n");
+    fs.writeFileSync(path.join(wt.path, "notes.md"), "left over\n");
+    expect(await adoptOwnBranchWork(wt.path, wt.branch)).toEqual({ ok: true, from: "fix/own" });
+    expect(await harvestWorktree(wt.path, "harvest")).toEqual({ ok: true, files: ["notes.md"] });
+    expect(git(dir, "show", `${wt.branch}:notes.md`)).toBe("left over");
+  });
+
+  it("takes a detached HEAD's commits too", async () => {
+    const wt = await worker();
+    git(wt.path, "checkout", "-q", "--detach");
+    const work = wt.commit("app.js", "console.log(1)\n");
+    expect(await adoptOwnBranchWork(wt.path, wt.branch)).toEqual({ ok: true, from: work.slice(0, 12) });
+    expect(git(dir, "rev-parse", wt.branch)).toBe(work);
+    expect(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);
+  });
+
+  it("finds the run's branch when it committed there and checked its given branch out again", async () => {
+    const wt = await worker();
+    git(wt.path, "checkout", "-q", "-b", "fix/arrow-back");
+    const work = wt.commit("app.js", "console.log(1)\n");
+    git(wt.path, "checkout", "-q", wt.branch);
+    expect(await adoptOwnBranchWork(wt.path, wt.branch)).toEqual({ ok: true, from: "fix/arrow-back" });
+    expect(git(dir, "rev-parse", wt.branch)).toBe(work);
+    expect(fs.readFileSync(path.join(wt.path, "app.js"), "utf8")).toBe("console.log(1)\n");
+  });
+
+  it("merges the run's work into the given branch when it forked it from somewhere else", async () => {
+    const wt = await worker();
+    const given = wt.commit("given.txt", "on the given branch\n");
+    git(wt.path, "checkout", "-q", "-b", "fix/from-master", "master");
+    wt.commit("app.js", "console.log(1)\n");
+    const r = await adoptOwnBranchWork(wt.path, wt.branch);
+    expect(r).toEqual({ ok: true, from: "fix/from-master" });
+    expect(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);
+    expect(git(dir, "merge-base", "--is-ancestor", given, wt.branch)).toBe("");
+    expect(git(dir, "show", `${wt.branch}:app.js`)).toBe("console.log(1)");
+    expect(git(dir, "show", `${wt.branch}:given.txt`)).toBe("on the given branch");
+  });
+
+  it("reports a merge git cannot do alone, aborted, and leaves the given branch where it was", async () => {
+    const wt = await worker();
+    const given = wt.commit("index.html", "<h1>Given</h1>\n");
+    git(wt.path, "checkout", "-q", "-b", "fix/clash", "master");
+    wt.commit("index.html", "<h1>Clash</h1>\n");
+    const r = await adoptOwnBranchWork(wt.path, wt.branch);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toMatch(/Merging fix\/clash into clawbox\/team-abc-t1-1/);
+    expect(git(dir, "rev-parse", wt.branch)).toBe(given);
+    expect(git(wt.path, "status", "--porcelain")).toBe("");
+  });
+
+  it("changes nothing for a run that stayed on its given branch — an amended or reset-away commit stays undone", async () => {
+    const wt = await worker();
+    wt.commit("app.js", "console.log(1)\n");
+    git(wt.path, "commit", "-q", "--amend", "-m", "amended");
+    const amended = git(wt.path, "rev-parse", "HEAD");
+    wt.commit("tmp.txt", "scratch\n");
+    git(wt.path, "reset", "-q", "--hard", "HEAD~1");
+    expect(await adoptOwnBranchWork(wt.path, wt.branch)).toEqual({ ok: true, from: null });
+    expect(git(dir, "rev-parse", wt.branch)).toBe(amended);
+    expect(fs.existsSync(path.join(wt.path, "tmp.txt"))).toBe(false);
+  });
+
+  it("never takes a sibling worker's branch, nor the base branch it did not stand on", async () => {
+    const mine = await worker("t1");
+    const sibling = await addWorkerWorktree(dir, "team-abc", "t2", 1);
+    if (!sibling.ok) throw new Error(sibling.detail);
+    git(sibling.path, "checkout", "-q", "-b", "fix/sibling");
+    fs.writeFileSync(path.join(sibling.path, "theirs.js"), "1\n");
+    git(sibling.path, "add", "-A");
+    git(sibling.path, "commit", "-q", "-m", "theirs");
+    git(dir, "branch", "-f", "master", "fix/sibling");
+    const tip = mine.commit("app.js", "console.log(1)\n");
+    expect(await adoptOwnBranchWork(mine.path, mine.branch)).toEqual({ ok: true, from: null });
+    expect(git(dir, "rev-parse", mine.branch)).toBe(tip);
+  });
+
+  it("puts a HEAD left on another branch at the very same commit back on the given branch", async () => {
+    const wt = await worker();
+    const tip = wt.commit("app.js", "console.log(1)\n");
+    git(wt.path, "checkout", "-q", "-b", "fix/no-commit");
+    expect(await adoptOwnBranchWork(wt.path, wt.branch)).toEqual({ ok: true, from: null });
+    expect(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);
+    expect(git(dir, "rev-parse", wt.branch)).toBe(tip);
   });
 });

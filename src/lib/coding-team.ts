@@ -35,7 +35,9 @@
  * reviewer waiting for room is neither. Reviewers that give no verdict
  * count. A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
- * re-posted once. A worker's branch that comes home empty has what the
+ * re-posted once. What a worker committed on a branch it made itself is
+ * brought onto the branch the team gave it before anything is judged. A
+ * worker's branch that comes home empty has what the
  * worker left uncommitted in its worktree committed first; still empty while
  * its own run's record names files it wrote there, it is rejected (NO
  * CHANGE) — never accepted by rule, whatever the review mode. One that wrote
@@ -122,7 +124,7 @@ import {
   type TeamRole,
 } from "@/lib/coding-team-messages";
 import { buildCommitMessage } from "@/lib/coding-git";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, adoptOwnBranchWork, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { isInside } from "@/lib/file-guard";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
@@ -1880,6 +1882,15 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       // the worktree is removed below, and its files with it (team-v0wcl4mj,
       // 2026-09-26: a worker's two files were never committed, the empty
       // branch was accepted by rule, and three tasks built against nothing).
+      // Before both: what the worker committed on a branch it made itself
+      // goes on the branch the team gave it (team-sso0e0wq, 2026-10-29: real
+      // commits on `fix/task-…`, rejected as NO CHANGE).
+      const adopted = await adoptOwnBranchWork(worktree.path, worktree.branch);
+      if (!adopted.ok) {
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} committed on a branch of its own, and it could not be brought onto ${worktree.branch}: ${firstLine(adopted.detail, 200)}` });
+      } else if (adopted.from) {
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} committed on a branch of its own (${adopted.from}); its commits were brought onto ${worktree.branch}.` });
+      }
       let diffed = await changedFiles(board.directory, worktree.branch);
       if (!diffed.length) {
         const harvested = await harvestWorktree(worktree.path, buildCommitMessage({ runId: run.id, task: settled.task, summary: settled.summary }));

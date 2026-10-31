@@ -309,6 +309,7 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
+import { adoptOwnBranchWork } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
@@ -8863,6 +8864,27 @@ export function isTransientFailure(error: string | null): boolean {
 }
 
 /**
+ * What a run with a worktree of its own committed on a branch it made itself
+ * (`git checkout -b fix/…`), brought onto the branch the box gave it — before
+ * the commit, the pull request and the merge home, which all read that one.
+ * Without it the run's branch counted as empty: the copy was removed, the
+ * branch deleted, and the run said "completed" with nothing merged home — the
+ * single-run side of a team worker rejected as NO CHANGE for the same move
+ * (team-sso0e0wq, 2026-10-29). See adoptOwnBranchWork. Never throws.
+ */
+async function adoptRunBranchWork(run: CodingRun): Promise<void> {
+  const wt = run.worktree;
+  if (!wt || wt.removed || run.readOnly || !fs.existsSync(wt.path)) return;
+  try {
+    const adopted = await adoptOwnBranchWork(wt.path, wt.branch);
+    if (!adopted.ok) console.error(`[coding-agent] ${run.id} committed on a branch of its own, not brought onto ${wt.branch}: ${adopted.detail}`);
+    else if (adopted.from) console.error(`[coding-agent] ${run.id} committed on ${adopted.from}; brought onto ${wt.branch}`);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} own branch:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Commit what the run changed, in its own folder.
  *
  * Never throws: a run that did its work is finished whether or not the
@@ -11599,6 +11621,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   store.unannounced.add(run.id);
   trackSettleWork((async () => {
     try {
+      await adoptRunBranchWork(run);
       await recordRunWork(run);
       // The lessons the run proposed for its project's notes
       // (src/lib/coding-run-notes.ts), vetted and merged before anyone waiting

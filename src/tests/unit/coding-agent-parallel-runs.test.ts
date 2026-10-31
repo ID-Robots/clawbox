@@ -420,6 +420,26 @@ describe("a run's own copy of the project", () => {
     expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
   });
 
+  it("merges the work home when the run made a branch of its own in its copy and committed there", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([
+      'git checkout -q -b fix/own-branch',
+      ...wrote("made.txt"),
+      'git add -A && git -c user.name=t -c user.email=t@x commit -q -m "fix on my own branch"',
+      `echo '${result("wrote a file on fix/own-branch")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    const branch = lib.getRun(started.id)!.worktree!.branch;
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    // Home, on the project's branch — not left on a branch nothing merges.
+    expect(fs.existsSync(path.join(dir, "made.txt"))).toBe(true);
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
+    expect(lib.getRun(started.id)?.worktree?.branchRemoved).toBe(false);
+    expect(git(dir, "log", "--format=%s", branch)).toMatch(/fix on my own branch/);
+  });
+
   it("removes the copy AND its branch when the run left nothing on it", async () => {
     const dir = makeGitProject("alpha");
     const started = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
