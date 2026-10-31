@@ -280,6 +280,114 @@ run_account() {
   printf '%s' "${text:-the run gave no account}"
 }
 
+# ---- coding teams (80-, 81-) -------------------------------------------------
+
+# make_sim_repo — a simulated project in PROJECT_DIR: `develop` as its base, a
+# local bare origin beside it (PROJECT_DIR.origin) whose HEAD is develop, a
+# fake suite (./test.sh) and small modules. The repository's own identity is a
+# placeholder, so nothing of the board's is in its history.
+make_sim_repo() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board '
+    set -e
+    case "$1" in /home/clawbox/?*/nano-ci-*) ;; *) echo "refusing to prepare $1"; exit 2 ;; esac
+    P=$1; O=$1.origin
+    rm -rf -- "$O"
+    mkdir -p "$P/src" "$P/spec"
+    cd "$P"
+    git init -q -b develop
+    git config user.name "nano-ci"
+    git config user.email "nano-ci@example.invalid"
+    printf "export const up = -1;\n" > src/up.js
+    printf "export const down = 1;\n" > src/down.js
+    printf "export const up = -1;\nexport const down = 1;\n" > src/keyboard.js
+    printf "expect(up).toBe(-1);\nexpect(down).toBe(1);\n" > spec/keyboard.spec.js
+    printf "# Changelog\n\n" > CHANGELOG.md
+    printf "# keyboard (simulated)\n" > README.md
+    printf "#!/bin/sh\necho \"keyboard.spec.js: 2 passing\"\n" > test.sh
+    chmod +x test.sh
+    git add -A
+    git commit -q -m "first"
+    git init -q --bare -b develop "$O"
+    git remote add origin "$O"
+    git push -q origin develop
+    git remote set-head origin develop
+  ' "$PROJECT_DIR"
+}
+
+# remove_sim_repo — PROJECT_DIR and its origin; best effort.
+remove_sim_repo() {
+  [ -n "$PROJECT_DIR" ] || return 0
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'case "$1" in /home/clawbox/?*/nano-ci-*) rm -rf -- "$1.origin" ;; esac' "$PROJECT_DIR" >/dev/null 2>&1
+  remove_project_dir
+}
+
+# start_coding_team GOAL — POST /setup-api/coding-agent/team in PROJECT_DIR.
+# Sets TEAM_ID; returns non-zero (with API_STATUS/API_BODY for the reason).
+TEAM_ID=
+start_coding_team() {
+  board_api POST /setup-api/coding-agent/team "$(jq -cn --arg goal "$1" --arg dir "$PROJECT_DIR" '{goal: $goal, directory: $dir}')"
+  TEAM_ID=$(api_json '.team.id // empty')
+  [ "$API_STATUS" = 202 ] && [ -n "$TEAM_ID" ]
+}
+
+# wait_coding_team SECONDS [JQ] — long-poll GET /setup-api/coding-agent/team?id=
+# until the team settles, or until the jq test JQ holds for `.team` (then it
+# is stopped: what the caller wanted to see is there). On the deadline the
+# team is stopped too, so a stuck team does not keep spending the plan. Sets
+# TEAM_STATUS (`timeout` at the deadline) and TEAM_JSON, the last board.
+TEAM_STATUS=
+TEAM_JSON=
+wait_coding_team() {
+  local deadline=$(( $(date +%s) + $1 )) until=${2:-false}
+  TEAM_STATUS=working
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    board_api GET "/setup-api/coding-agent/team?id=$TEAM_ID&wait=30"
+    if [ "$API_STATUS" = 200 ]; then
+      TEAM_JSON=$API_BODY
+      TEAM_STATUS=$(team_json '.team.status // empty')
+      case "$TEAM_STATUS" in done | failed | stopped) return 0 ;; esac
+      if [ "$(team_json ".team | ($until)")" = true ]; then
+        stop_coding_team
+        TEAM_STATUS=$(team_json '.team.status // empty')
+        return 0
+      fi
+    else
+      note "polling $TEAM_ID: $(api_error)"
+      sleep 10
+    fi
+  done
+  stop_coding_team
+  TEAM_STATUS=timeout
+  return 1
+}
+
+# stop_coding_team — POST team/stop for TEAM_ID, and wait for it to settle.
+stop_coding_team() {
+  local i
+  board_api POST /setup-api/coding-agent/team/stop "$(jq -cn --arg id "$TEAM_ID" '{id: $id}')"
+  note "stopped $TEAM_ID: HTTP $API_STATUS"
+  for i in 1 2 3 4; do
+    board_api GET "/setup-api/coding-agent/team?id=$TEAM_ID&wait=15"
+    [ "$API_STATUS" = 200 ] && TEAM_JSON=$API_BODY
+    case "$(team_json '.team.status // empty')" in done | failed | stopped) return 0 ;; esac
+    [ "$i" -lt 4 ] && sleep 5
+  done
+}
+
+# team_json JQ — jq over the last board (TEAM_JSON).
+team_json() { printf '%s' "$TEAM_JSON" | jq -r "$@" 2>/dev/null; }
+
+# note_team LABEL — the board's account of itself, for the log: status, error,
+# base and branch, its tasks, and every alert and note it raised.
+note_team() {
+  local line
+  note "$1 $TEAM_ID: $(team_json -c '.team | {status, error, base, branch, singleRun, alerts, advice, shape, pr: (.pr | if . then {number, phase} else null end)}')"
+  while IFS= read -r line; do note "  $line"; done < <(team_json '.team.tasks[] | "\(.task_id) \(.status) attempts=\(.attempts) review=\(.review.verdict // "-") files=\(.files_hint | join(","))"')
+  while IFS= read -r line; do note "  $line"; done < <(team_json '.team.log[] | select(.type == "alert" or .type == "note") | "\(.type): \(.message[0:240])"')
+}
+
 # ---- gateway readiness (25-, 50-, 75-, 85-, 90-) ----------------------------
 
 # gateway_probe PATH — GET http://127.0.0.1:18789PATH ON the board (the
