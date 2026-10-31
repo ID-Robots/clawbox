@@ -134,6 +134,8 @@ describe("a read-only run", () => {
         ...prefixes("--contents", "--con").flatMap((option) => [`git blame ${option} /etc/hostname a.ts`, `git blame -L 1,9 ${option}=/etc/hostname a.ts`]),
         // No --no-index at all: two paths, one outside the repository, and git diffs them as files.
         "git diff /dev/null /etc/hostname", "git diff a.txt /etc/hostname", "git diff -p a.txt ../other/.env", "git diff a.txt ~/.ssh/id_ed25519", "git diff ~/.netrc a.txt", "git diff a.txt ..", "git diff .. a.txt",
+        // The same path quoted, or built by the shell from a variable.
+        `git diff a.txt "/etc/hostname"`, `git diff "/etc/hostname" a.txt`, "git diff a.txt '/etc/hostname'", `git diff a.txt "$HOME/.netrc"`, "git diff a.txt ${HOME}/.netrc", "git diff a.txt $(pwd)/../other/.env",
         // A list file read and echoed line by line in the error.
         "git blame -S /etc/hostname a.ts", "git blame --ignore-revs-file /etc/hostname a.ts", "git blame --ignore-revs /etc/hostname a.ts",
         // Revisions from a redirected file, echoed as a bad revision.
