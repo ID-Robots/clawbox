@@ -50,6 +50,22 @@ export const FAVICON_PNG = "favicon.png";
 export const FAVICON_ICO = "favicon.ico";
 
 /**
+ * The two files the box itself writes into a project's ROOT — the only ones,
+ * which is what lets a merge home tell them from the owner's own work.
+ *
+ * They are drawn into the project folder while a run or a team is already out
+ * in its worktree, so they turn up UNTRACKED in a checkout nobody touched: a
+ * run's merge home then refused with "the project folder has uncommitted
+ * changes of its own" and the finished work stayed off the branch, and a
+ * team's pre-merge commit put them in the owner's history by accident. Only
+ * untracked and only at the root: a favicon the project tracks, or one in a
+ * sub-folder, is the project's own and counts like any other file. Never
+ * written into .gitignore or info/exclude either — the pages a run writes link
+ * to them, and the owner may well commit them on purpose.
+ */
+export const BOX_FAVICONS: readonly string[] = [FAVICON_PNG, FAVICON_ICO];
+
+/**
  * 64 px, which is what a favicon is: the tab renders it at 16 CSS px and a
  * pinned tile at 32, so this is crisp on a 2× display and still a few
  * kilobytes rather than the icon's hundred.

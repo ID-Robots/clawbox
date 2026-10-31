@@ -349,6 +349,83 @@ describe("merging a run's branch home", () => {
     expect(git(dir, "rev-parse", "HEAD")).toBe(head);
   });
 
+  /** What the box draws into the project folder at a run's start, while the run is out in its worktree. */
+  const drawBoxFavicons = () => {
+    fs.writeFileSync(path.join(dir, "favicon.png"), "box-png");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "box-ico");
+  };
+  const untracked = () => git(dir, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).sort();
+
+  it("does not count the box's own untracked favicons at the root as the owner's changes, and never commits them", async () => {
+    const made = await withWork("run-icons0001");
+    drawBoxFavicons();
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true });
+    expect(fs.existsSync(path.join(dir, "feature.js"))).toBe(true);
+    // Still there, still untracked, still the box's bytes: in nobody's history.
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+    expect(git(dir, "log", "--all", "--format=", "--name-only")).not.toMatch(/favicon/);
+  });
+
+  it("still refuses `dirty` over any other untracked file beside the favicons, one in a sub-folder, and a favicon the project tracks", async () => {
+    const made = await withWork("run-icons0002");
+    const head = git(dir, "rev-parse", "HEAD");
+    drawBoxFavicons();
+    fs.writeFileSync(path.join(dir, "notes.txt"), "the owner's\n");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    expect(fs.readFileSync(path.join(dir, "notes.txt"), "utf8")).toBe("the owner's\n");
+    fs.rmSync(path.join(dir, "notes.txt"));
+
+    // The root only: a favicon in a sub-folder is the project's own.
+    fs.mkdirSync(path.join(dir, "assets"));
+    fs.writeFileSync(path.join(dir, "assets", "favicon.png"), "the owner's");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    fs.rmSync(path.join(dir, "assets"), { recursive: true });
+
+    // Untracked only: a favicon the project committed and then changed is the owner's change.
+    fs.rmSync(path.join(dir, "favicon.png"));
+    fs.writeFileSync(path.join(dir, "favicon.png"), "committed");
+    git(dir, "add", "favicon.png");
+    git(dir, "commit", "-q", "-m", "the owner's favicon");
+    fs.writeFileSync(path.join(dir, "favicon.png"), "changed, not committed");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("changed, not committed");
+    expect(git(dir, "log", "-1", "--format=%s")).toBe("the owner's favicon");
+    expect(git(dir, "rev-list", "--count", `${head}..HEAD`)).toBe("1");
+  });
+
+  it("lets a favicon the branch brought win over the box's untracked copy, and leaves the one it did not bring alone", async () => {
+    const made = await withWork("run-icons0003");
+    fs.writeFileSync(path.join(made.path, "favicon.png"), "the run's png");
+    git(made.path, "add", "favicon.png");
+    git(made.path, "commit", "-q", "-m", "the run's favicon");
+    drawBoxFavicons();
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true });
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("the run's png");
+    expect(git(dir, "ls-files", "favicon.png")).toBe("favicon.png");
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("box-ico");
+    expect(untracked()).toEqual(["favicon.ico"]);
+  });
+
+  it("puts the box's favicon back when a merge that brought one does not land", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-icons0004", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    fs.writeFileSync(path.join(made.path, "index.html"), "<h1>the run's line</h1>\n");
+    fs.writeFileSync(path.join(made.path, "favicon.png"), "the run's png");
+    git(made.path, "add", "-A");
+    git(made.path, "commit", "-q", "-m", "the run's edit and favicon");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>the owner's line</h1>\n");
+    git(dir, "commit", "-q", "-am", "the owner's edit");
+    const head = git(dir, "rev-parse", "HEAD");
+    drawBoxFavicons();
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "conflict" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
+  });
+
   it("refuses `not_on_base` when the project has moved to another branch, and never moves it back", async () => {
     const made = await withWork("run-moved0001");
     git(dir, "checkout", "-q", "-b", "release");
