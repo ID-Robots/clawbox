@@ -1056,3 +1056,94 @@ describe("the board's effort", () => {
     expect(lib.loadBoard(b.id)?.effort).toBe("max");
   });
 });
+
+/** A planner that could not read the project said so, and the team must not take its plan in silence. */
+describe("blindPlanReason", () => {
+  const MAP = { files: ["src/app.ts — the entry"], entryPoints: ["src/app.ts"], testCommands: ["npm test"], gotchas: [] };
+  const PLAN = JSON.stringify({ tasks: [{ task_description: "Inspect src/app.ts and fix the bug the logs could not read", files_hint: ["src/app.ts"] }] });
+
+  it("names a repo map whose entries say the source was not inspected, whatever the case", () => {
+    const map = { ...MAP, files: ["src/app.ts — Source NOT inspected", "src/b.ts — source not inspected"] };
+    expect(lib.blindPlanReason(PLAN, map, null)).toBe('its repo map says "Source NOT inspected" (2 of 4 entries)');
+  });
+
+  it("reads the shape's rationale and the prose around the JSON", () => {
+    const shape = { parallelism: 2, review: "each" as const, rationale: "Two parts; the tools were unavailable, so files are guessed" };
+    expect(lib.blindPlanReason(PLAN, MAP, shape)).toBe('its shape\'s rationale says "tools were unavailable"');
+    expect(lib.blindPlanReason(`I could not read the folder, so this is a guess.\n\`\`\`json\n${PLAN}\n\`\`\``, MAP, null)).toBe('its answer says "could not read"');
+    expect(lib.blindPlanReason(`${PLAN}\nNo source was read.`, MAP, null)).toBe('its answer says "No source was read"');
+    // A quote in the prose before the plan does not hide the plan's own bracket.
+    expect(lib.blindPlanReason(`The "plan": ${PLAN}`, MAP, null)).toBeNull();
+  });
+
+  it("does not read the tasks: a task may well ask its worker to inspect something", () => {
+    expect(lib.blindPlanReason(PLAN, MAP, { parallelism: 1, review: "each", rationale: "One file." })).toBeNull();
+    expect(lib.blindPlanReason(PLAN, null, null)).toBeNull();
+    expect(lib.blindPlanReason(null, null, null)).toBeNull();
+  });
+
+  it("says every place at once", () => {
+    const map = { ...MAP, gotchas: ["unable to read the tests"] };
+    expect(lib.blindPlanReason(`Note: source not inspected.\n${PLAN}`, map, null)).toBe('its repo map says "unable to read" (1 of 4 entries); its answer says "source not inspected"');
+  });
+});
+
+/** A task naming every file the others own makes every task overlap on its own. */
+describe("catch-all tasks and the overlap advice", () => {
+  const post = (b: ReturnType<typeof board>, ...tasks: Array<{ hint: string[]; deps?: string[] }>) => {
+    for (const t of tasks) lib.postTask(b, PLANNER, { task_description: `Touch ${t.hint.join(", ") || "nothing"}`, files_hint: t.hint, depends_on: t.deps ?? [] });
+  };
+
+  it("finds the task whose hint covers every hint of every other hinted task — a folder covering the files in it", () => {
+    const b = board();
+    post(b, { hint: ["src/a.ts"] }, { hint: ["./src/b.ts", "docs/b.md"] }, { hint: [] }, { hint: ["src/", "docs/b.md"], deps: ["t1", "t2"] });
+    expect(lib.catchAllTasks(b.tasks)).toEqual(["t4"]);
+    // On the advice, beside the fields it always had.
+    expect(lib.teamAdvice(b)).toEqual({ reason: "overlap", overlap: 100, catchAll: ["t4"] });
+  });
+
+  it("needs two other hinted tasks, and a hint that really covers theirs", () => {
+    const two = board();
+    post(two, { hint: ["src/a.ts"] }, { hint: ["src/a.ts", "src/b.ts"] });
+    expect(lib.catchAllTasks(two.tasks)).toEqual([]);
+    expect(lib.teamAdvice(two)).toEqual({ reason: "overlap", overlap: 67 });
+    // A file inside a folder another task names does not cover that folder.
+    const narrow = board();
+    post(narrow, { hint: ["src/"] }, { hint: ["docs/"] }, { hint: ["src/a.ts", "docs/a.md"] });
+    expect(lib.catchAllTasks(narrow.tasks)).toEqual([]);
+  });
+
+  it("leaves out an integration step — it waits on every other task, directly or through one — when the rest splits", () => {
+    const b = board();
+    post(b, { hint: ["src/a.ts"] }, { hint: ["src/b.ts"], deps: ["t1"] }, { hint: ["src/a.ts", "src/b.ts"], deps: ["t2"] });
+    expect(lib.catchAllLeftOut(b, ["t3"])).toEqual({ overlapWithout: 0, runsLast: true, leftOut: true });
+  });
+
+  it("keeps a catch-all task in the measure when it does not wait for the others, or the others overlap anyway", () => {
+    const early = board();
+    post(early, { hint: ["src/a.ts"] }, { hint: ["src/b.ts"] }, { hint: ["src/a.ts", "src/b.ts"], deps: ["t1"] });
+    expect(lib.catchAllLeftOut(early, ["t3"])).toEqual({ overlapWithout: 0, runsLast: false, leftOut: false });
+    const tangled = board();
+    post(tangled, { hint: ["src/a.ts"] }, { hint: ["src/a.ts"] }, { hint: ["src/a.ts"], deps: ["t1", "t2"] });
+    expect(lib.catchAllLeftOut(tangled, ["t1", "t2", "t3"]).leftOut).toBe(false);
+    expect(lib.catchAllLeftOut(tangled, ["t3"])).toEqual({ overlapWithout: 100, runsLast: true, leftOut: false });
+  });
+});
+
+describe("closeRejected: a rejection with no attempt left", () => {
+  it("closes a task its review just rejected, for good — the system's alone", () => {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Write index.html", files_hint: ["index.html"] });
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "complete");
+    expect(() => lib.closeRejected(b, SYSTEM, "t1")).toThrow(/only a task its review rejected/);
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "Deliverable missing: index.html (missing)");
+    // A first rejection alone would wait for another attempt.
+    expect(b.tasks[0].status).toBe("pending");
+    expect(() => lib.closeRejected(b, REVIEWER, "t1")).toThrow(lib.BoardAccessError);
+    expect(lib.closeRejected(b, SYSTEM, "t1")).toMatchObject({ status: "rejected", assigned_to: null, review: { verdict: "rejected" } });
+    expect(lib.isExhausted(b)).toBe(true);
+    expect(lib.allComplete(b)).toBe(false);
+  });
+});

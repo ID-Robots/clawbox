@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, reopenAfterStop, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
 import { MAX_TEAM_WORKERS, TEAM_TASK_CHARS } from "@/lib/coding-agent";
-import { clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask, SOURCE_NOT_INSPECTED, type ReplanContext } from "@/lib/coding-team-planner";
 
 describe("parsePlan", () => {
   it("reads a bare array, and one fenced in prose", () => {
@@ -658,6 +658,20 @@ describe("leadTask — the lead's batch and its inbox", () => {
     delete old.lastLeadAt;
     const text = leadTask(old as TeamBoard, ["t1"], replanContext(old as TeamBoard));
     expect(inboxOf(text)).toBe("Messages to the lead since your last turn:\n- worker run-aaaaaaaa (task t1): t2 needs the form ids first.");
+  });
+});
+
+describe("the planner reads before it plans", () => {
+  it("is told it can read, that every repo_map entry comes from a file it opened, and the exact words for a project it could not read", () => {
+    // The words are a contract: the team detects a blind plan by them.
+    expect(SOURCE_NOT_INSPECTED).toBe("source not inspected");
+    expect(PLANNER_BRIEF).toContain(
+      "You have Read, Grep, Glob and read-only git (git log, git status, git diff, git show and the like): every repo_map entry must come from a file you actually opened, and if you could not read the project, write the exact words 'source not inspected' in repo_map.gotchas and in shape.rationale instead of guessing.",
+    );
+    // Said once, after the order to read and before the answer's form.
+    expect(PLANNER_BRIEF.split("source not inspected")).toHaveLength(2);
+    expect(PLANNER_BRIEF.indexOf("You have Read, Grep, Glob")).toBeGreaterThan(PLANNER_BRIEF.indexOf("Read the folder first"));
+    expect(PLANNER_BRIEF.indexOf("You have Read, Grep, Glob")).toBeLessThan(PLANNER_BRIEF.indexOf("Answer with ONLY"));
   });
 });
 

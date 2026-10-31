@@ -1331,9 +1331,10 @@ const SHELL_HELPERS: ReadonlySet<string> = new Set(["tester", "workflow-subagent
 
 /**
  * The `--agents` payload for a run on this provider. A read-only run gets no
- * tester and no workflow-subagent: both carry Bash, which the run itself does
- * not have (READ_ONLY_TOOLS), and three read-only team runs sent the tester
- * anyway before this. The two no-Bash decoys (`general-purpose`, `claude`)
+ * tester and no workflow-subagent: both carry Bash, and three read-only team
+ * runs sent the tester when they had no Bash of their own. They have read-only
+ * git now (READ_ONLY_GIT_RULES), and that is the one road to git a reading run
+ * has: its helpers stay Bash-less. The two no-Bash decoys (`general-purpose`, `claude`)
  * stay: they exist to catch a name the brief cannot stop a model from typing.
  */
 export function subagentDefinitionsFor(provider: CodingProvider, opts: { readOnly?: boolean } = {}): Record<string, unknown> {
@@ -1367,7 +1368,6 @@ export function subagentDefinitionsFor(provider: CodingProvider, opts: { readOnl
  */
 export const WORKFLOW_TOOL = "Workflow";
 
-/** The tools of a run that may only read — a team's planner. */
 /**
  * The one place outside its folder a run may read: /tmp, where it puts what
  * it curls out of its own server or a build's log. Claude Code asks before
@@ -1395,7 +1395,84 @@ export function inputsReadRule(): string {
   return `Read(/${inputsRoot()}/**)`;
 }
 
+/**
+ * The reading tools of a run that may only read — a team's planner, reviewer
+ * and lead. Its `--tools` adds Bash beside them, approved for
+ * READ_ONLY_GIT_RULES and nothing else; its `--allowedTools` names these four
+ * bare, so a read outside the folder never waits on a prompt nobody answers.
+ */
 export const READ_ONLY_TOOLS = `Read,Grep,Glob,${SUBAGENT_TOOL}`;
+
+/**
+ * The commands a read-only run may run: read-only git, by prefix. A team's
+ * planner once had no shell at all, so no git history to read either, and
+ * with its reading tools unapproved it planned blind. In headless -p mode a
+ * Bash call no rule approves is refused, so this list IS a reading run's
+ * shell — never `Bash(*)`.
+ *
+ * The diff family's `--output=<file>` (git log, show, diff) still writes
+ * wherever it is told, and git diff and blame can read a file outside the
+ * repository: MUTATING_GIT_DENYLIST refuses those forms. `git branch` is
+ * approved only as the exact listings below, never by prefix: it creates,
+ * deletes, moves or forces a branch with a flag anywhere in the line
+ * (`git branch -r -D origin/main`), which no prefix or deny rule tells apart
+ * from a listing.
+ */
+export const READ_ONLY_GIT_RULES: readonly string[] = [
+  "Bash(git log:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git show:*)",
+  "Bash(git branch)", "Bash(git branch -a)", "Bash(git branch -r)", "Bash(git branch --list)",
+  "Bash(git branch --show-current)", "Bash(git branch -v)", "Bash(git branch -vv)",
+  "Bash(git rev-parse:*)", "Bash(git ls-files:*)", "Bash(git blame:*)", "Bash(git shortlog:*)", "Bash(git describe:*)",
+];
+
+/** A rule of READ_ONLY_GIT_RULES as the command it approves: `git log` for `Bash(git log:*)`, `git branch -a` for `Bash(git branch -a)`. */
+export function readOnlyGitCommand(rule: string): string {
+  return /^Bash\((.*?)(?::\*)?\)$/.exec(rule)?.[1] ?? rule;
+}
+
+/**
+ * Every git command that changes the repository, its work tree, its config or
+ * a remote, and the GitHub CLI's pull-request and API roads: refused to a
+ * read-only run by rule. None of them is approved (READ_ONLY_GIT_RULES) and
+ * -p refuses what is not, but a deny rule outranks any allow, so no future
+ * widening of the approvals can reach them. With them, the forms of an
+ * approved read that read a file OUTSIDE the repository, which the file deny
+ * rules (`fileDenyRules`) never see because git, not a file tool, opens it.
+ */
+export const MUTATING_GIT_DENYLIST: readonly string[] = [
+  "Bash(git push:*)", "Bash(git commit:*)", "Bash(git add:*)", "Bash(git rm:*)", "Bash(git mv:*)",
+  "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)", "Bash(git reset:*)",
+  "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git cherry-pick:*)", "Bash(git revert:*)", "Bash(git stash:*)",
+  "Bash(git branch -D:*)", "Bash(git branch -d:*)", "Bash(git branch --delete:*)",
+  "Bash(git branch -m:*)", "Bash(git branch -M:*)", "Bash(git branch --move:*)",
+  "Bash(git branch -c:*)", "Bash(git branch -C:*)", "Bash(git branch --copy:*)",
+  "Bash(git branch -f:*)", "Bash(git branch --force:*)", "Bash(git branch -u:*)", "Bash(git branch --set-upstream-to:*)",
+  "Bash(git branch --unset-upstream:*)", "Bash(git branch --edit-description:*)",
+  "Bash(git worktree:*)", "Bash(git tag:*)", "Bash(git remote add:*)", "Bash(git remote set-url:*)",
+  "Bash(git remote remove:*)", "Bash(git remote rename:*)", "Bash(git config:*)", "Bash(git clean:*)",
+  "Bash(git am:*)", "Bash(git apply:*)", "Bash(git fetch:*)", "Bash(git pull:*)", "Bash(git gc:*)",
+  "Bash(git init:*)", "Bash(git clone:*)", "Bash(git update-ref:*)", "Bash(git submodule:*)", "Bash(git notes:*)",
+  // The `*` mid-rule is the wildcard-anywhere grammar of the pinned Claude
+  // Code (2.1); a CLI that reads only the `:*` suffix takes it as one literal
+  // command nobody types, which denies nothing and breaks nothing.
+  "Bash(git *--output*)",
+  // Reads past the repository. `git diff --no-index` diffs any two files, and
+  // so does a plain `git diff` given two paths when one of them lies outside
+  // the repository (an absolute, home or parent path, quoted or not, or one
+  // the shell builds from a variable such as `$HOME`); `git blame --contents`
+  // takes any file as the blamed one's text; `git blame -S` (an argument of
+  // its own, its file attached or not: a file name such as `Foo-Service.ts`
+  // stays readable) and `--ignore-revs-file` read a list file and echo its
+  // lines in their error;
+  // `--stdin` (git log, show) reads revisions from a redirected file the same
+  // way. Git takes any unambiguous abbreviation of a long option, so each is
+  // refused from its shortest prefix up (`--no-i`, `--con`, `--ignore-revs`).
+  "Bash(git diff *--no-i*)", "Bash(git diff /*)", "Bash(git diff * /*)", "Bash(git diff ~*)", "Bash(git diff * ~*)",
+  "Bash(git diff *\"/*)", "Bash(git diff *'/*)", "Bash(git diff *$*)",
+  "Bash(git diff *../*)", "Bash(git diff .. *)", "Bash(git diff * ..)",
+  "Bash(git blame *--con*)", "Bash(git blame -S*)", "Bash(git blame * -S*)", "Bash(git blame *--ignore-revs*)", "Bash(git *--stdin*)",
+  "Bash(gh pr:*)", "Bash(gh api:*)",
+];
 
 export function toolsFor(subagents: boolean, effort?: CodingEffort): string {
   const tools = subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
@@ -6062,6 +6139,13 @@ export const TEAM_MERGE_DENYLIST: readonly string[] = [
 ];
 
 /**
+ * The commands a read-only run is refused — which has Bash since it got
+ * read-only git: the kill list every run gets, the merge list, team or not,
+ * and every mutating git command. Each rule once, in that order.
+ */
+const READ_ONLY_BASH_DENYLIST: readonly string[] = [...new Set([...BASH_KILL_DENYLIST, ...TEAM_MERGE_DENYLIST, ...MUTATING_GIT_DENYLIST])];
+
+/**
  * What every run that can write is told about a pull request its task wants
  * merged — one sentence of the headless brief, exported for its test.
  *
@@ -6195,13 +6279,15 @@ export const PR_DRAFT_BRIEF =
  */
 /**
  * The brief for a run that may only READ — a team's planner. The headless
- * brief describes Bash, the browser tools, the evidence folder and the
- * workflow fan-out, none of which such a run has; a model told about them
- * spends its steps on calls that are refused.
+ * brief describes a free shell, the browser tools, the evidence folder and
+ * the workflow fan-out, none of which such a run has; a model told about them
+ * spends its steps on calls that are refused. Its Bash is named for what it
+ * is: the read-only git commands READ_ONLY_GIT_RULES approves, by name, and
+ * nothing else.
  */
 export const READ_ONLY_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
-  "Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob and the read-only helper agents, no shell, no browser and no way to write — do not try to edit, create or run anything; your ANSWER is your final message.",
+  `Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob, the read-only helper agents, and Bash for read-only git only (${READ_ONLY_GIT_RULES.map(readOnlyGitCommand).join(", ")}) — git branch exactly as listed, paths only inside the folder; any other command is refused and wastes a step. You have no browser and no way to write: do not try to edit, create, delete or push anything; your ANSWER is your final message.`,
   "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps: each reply you send spends one step, however many tool calls it carries, so put independent calls in one message.",
   "The task text may carry copy-paste artifacts; read past them. Your final message is delivered to the party that started you and is read by a program as well as a person: answer in exactly the form the task asks for, with nothing before or after it.",
 ].join(" ");
@@ -6651,8 +6737,9 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
   // The media the run actually holds: none for a run without the tools.
   const media = visual ? opts.run?.media : undefined;
   const brief = [
-    // A read-only run has no Bash, no browser and no Write: the brief that
-    // describes them would spend its steps on calls that are refused.
+    // A read-only run has read-only git for a shell, no browser and no Write:
+    // the brief that describes more would spend its steps on calls that are
+    // refused.
     opts.readOnly
       ? READ_ONLY_BRIEF
       : (opts.effort === ULTRACODE_EFFORT ? `${headless} ${ULTRACODE_BRIEF}` : headless),
@@ -6669,7 +6756,7 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
     ...(media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
     ...(opts.draftPullRequests && !opts.readOnly ? [PR_DRAFT_BRIEF] : []),
     // The run's share of the CPU (src/lib/coding-run-cpu.ts). Not for a
-    // read-only run: it runs no command, so it starts no build to cap.
+    // read-only run: it runs nothing but read-only git, so no build to cap.
     ...(typeof opts.cpuBudget === "number" && opts.cpuBudget >= 1 && !opts.readOnly ? [cpuBudgetBrief(opts.cpuBudget)] : []),
     // How a writing run adds a lesson to its project's run notes
     // (src/lib/coding-run-notes.ts); a read-only run cannot write one.
@@ -6742,7 +6829,11 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     "-p",
     "--verbose",
     "--output-format", "stream-json",
-    "--permission-mode", "acceptEdits",
+    // acceptEdits accepts file edits — and the CLI's common filesystem
+    // commands — in the folder without a rule. A read-only run holds Bash for
+    // read-only git, so it gets the default mode: what its rules do not
+    // approve, -p refuses.
+    "--permission-mode", opts.readOnly ? "default" : "acceptEdits",
     "--setting-sources", "user",
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", systemPrompt,
@@ -6788,7 +6879,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
   if (opts.hookSettings) args.push("--settings", opts.hookSettings);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
-  args.push("--tools", opts.readOnly ? READ_ONLY_TOOLS : toolsFor(true, opts.effort));
+  args.push("--tools", opts.readOnly ? `${READ_ONLY_TOOLS},Bash` : toolsFor(true, opts.effort));
   // The Agent tool with nothing to delegate to is a tool that never fires.
   // Per provider: the helper models named in the definitions are the cheap
   // tier of the account that answers, and the two accounts do not share a
@@ -6804,10 +6895,13 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // Full access is about commands, not secrets.
     // The Workflow tool is listed AND pre-approved under ultracode: listed
     // alone it is refused headlessly (see WORKFLOW_TOOL).
-    // A read-only run has no Bash to approve and no browser to drive: it
-    // reads, and the helpers it delegates to read. Nor the Workflow tool:
-    // startRun never leaves such a run on ultracode, and a resume of a record
-    // from before that clamp must not be handed the fan-out either.
+    // A read-only run gets no Bash(*) and no browser to drive: its reading
+    // tools are approved by name — a headless planner otherwise waits on a
+    // prompt for any read outside its folder, and a deny rule still outranks
+    // the bare name — and its Bash only for READ_ONLY_GIT_RULES. Nor the
+    // Workflow tool: startRun never leaves such a run on ultracode, and a
+    // resume of a record from before that clamp must not be handed the
+    // fan-out either.
     // `Read(//tmp/**)`: a run may READ what it put in /tmp — the HTML it
     // curled out of its own server, a build log — without a permission
     // prompt it cannot answer in headless mode. Reads only, and only there:
@@ -6836,7 +6930,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // the read-only ClawBox tools by name, a harness server as a whole or by
     // the tools its own filter names.
     const mcpAllowed = mcp ? [...(mcp.readOnlyTools ? MCP_READ_ONLY_TOOLS : []), ...mcp.allowedTools] : [];
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT && !opts.readOnly ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    args.push("--allowedTools", ...(opts.readOnly ? [...READ_ONLY_TOOLS.split(","), ...READ_ONLY_GIT_RULES] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT && !opts.readOnly ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -6846,7 +6940,9 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // wholesale `~/.claude-ds/**` deny and grant exactly nothing.
     // A harness server's exclude filter holds in the run too, and a deny
     // outranks the whole-server approval above.
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST), ...(opts.run?.team && !opts.readOnly ? TEAM_MERGE_DENYLIST : []), ...(mcp?.disallowedTools ?? []));
+    // A read-only run, which has Bash for read-only git, is refused all of it
+    // and every mutating git command too, in a team or not (READ_ONLY_BASH_DENYLIST).
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? READ_ONLY_BASH_DENYLIST : [...BASH_KILL_DENYLIST, ...(opts.run?.team ? TEAM_MERGE_DENYLIST : [])]), ...(mcp?.disallowedTools ?? []));
   }
   return args;
 }
@@ -12248,7 +12344,9 @@ function spawnHookSettings(run: CodingRun): { json: string; inbox: boolean } | n
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: no inbox:`, err instanceof Error ? err.message : err);
   }
-  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null && !run.readOnly });
+  // The merge guard for every team run, a read-only one included: it has Bash
+  // for read-only git, and the guard reads whole command lines.
+  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null });
   return json ? { json, inbox: inbox !== null } : null;
 }
 

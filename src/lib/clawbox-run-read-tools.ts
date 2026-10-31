@@ -22,6 +22,15 @@
  * Nothing that writes is ever in it: `readOnly` and `destructive` cannot both
  * be declared (mcp/lib/register.ts contractViolations), and a write tool
  * declares neither.
+ *
+ * NOT how a read-only run — a coding team's planner, reviewer or lead —
+ * reads its project, and never handed to one (buildRunArgs and prepareRunMcp
+ * in coding-agent.ts give such a run no project servers and its own server
+ * no `run-read` profile). This set reads the DEVICE — mail, logs, the
+ * screen, the box's status, secrets' names — which a plan has no business
+ * with, and its file tools are fenced by the server's own guards, not by the
+ * run's file deny rules (a Claude Code rule is per tool). A planner reads with Claude Code's Read, Grep
+ * and Glob and with read-only git (READ_ONLY_GIT_RULES), under those rules.
  */
 
 /** The CLAWBOX_MCP_PROFILE a run's server gets when its project ticked the read-only tools. */

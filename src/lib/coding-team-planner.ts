@@ -2,7 +2,8 @@
  * The Planner of a coding team: what it is told, and how its answer is read.
  *
  * The planner is one read-only headless run (the coding agent's own runner,
- * with a brief that forbids edits) whose final message is the plan: a JSON
+ * with a brief that forbids edits; it reads with Read, Grep, Glob and
+ * read-only git — see READ_ONLY_GIT_RULES) whose final message is the plan: a JSON
  * array of tasks, or — the form it is asked for — that array wrapped in an
  * object with the team's SHAPE beside it (how many workers side by side, how
  * the work is reviewed). This module owns that brief and the parser. The
@@ -61,9 +62,20 @@ const TASK_RULES = [
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
 ];
 
+/**
+ * What a planner writes in its repo_map's gotchas and its shape's rationale
+ * when it could not read the project. A CONTRACT with the team
+ * (coding-team.ts and coding-team-board.ts look for these exact words to
+ * catch a blind plan): a planner that planned blind once hedged with a
+ * catch-all task over every other task's files, and the team collapsed into
+ * one run. Change it only together with them.
+ */
+export const SOURCE_NOT_INSPECTED = "source not inspected";
+
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
+  `You have Read, Grep, Glob and read-only git (git log, git status, git diff, git show and the like): every repo_map entry must come from a file you actually opened, and if you could not read the project, write the exact words '${SOURCE_NOT_INSPECTED}' in repo_map.gotchas and in shape.rationale instead of guessing.`,
   `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. The rationale is at most ${MAX_RATIONALE_CHARS} characters; longer text is cut.`,
   `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",

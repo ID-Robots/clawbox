@@ -122,8 +122,9 @@ import {
   type TeamRole,
 } from "@/lib/coding-team-messages";
 import { buildCommitMessage } from "@/lib/coding-git";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
+import { isInside } from "@/lib/file-guard";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, SUITE_GATE_TIMEOUT_MS, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
@@ -133,9 +134,12 @@ import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/codin
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
   allComplete,
+  blindPlanReason,
   blockedBy,
   BoardAccessError,
   boardDigest,
+  catchAllLeftOut,
+  closeRejected,
   countedAttempts,
   createBoard,
   harnessStateDenial,
@@ -176,7 +180,7 @@ import {
  */
 export type TeamView = TeamBoard & { agents: TeamAgents; advice: TeamAdvice | null; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
-import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, providerWords, REPLAN_BRIEF, replanContext, replanTask, withBoxWidth } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, providerWords, REPLAN_BRIEF, replanContext, replanTask, withBoxWidth, type PlanFailure, type PlanParse } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -1044,6 +1048,14 @@ function recordedTeamBase(branch: string): string | null {
 }
 
 
+/**
+ * The ask for the one fresh planner run a blind plan gets (`blindPlanReason`):
+ * the goal again, what the first plan said, and that this run CAN read.
+ */
+function blindReplanTask(goal: string, reason: string): string {
+  return `${goal}\n\n---\nYour previous plan for this goal said you read no source (${reason}). In this run you have Read, Grep, Glob and read-only git: read the project — the files this goal touches — and answer the JSON plan again, with a repo map of what you actually read.`;
+}
+
 async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const { board, bus } = team;
   // The box's real width — how many of the team's runs may go at once — is
@@ -1077,58 +1089,120 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     saveBoard(board);
     return;
   }
-  let answer = planned.resultText ?? planned.summary;
-  let plan = parsePlan(answer);
-  // The planner run whose answer is being corrected: the re-ask continues ITS
-  // session, which has the folder read already.
-  let lastPlanner = planner.id;
-  // More than one correction, because one was not enough. On the box, a planner
-  // told only to "shorten" a 2835-character description answered 3013 the second
-  // time and the board died with no task ever posted — twice, on two devices.
-  // Each ask now carries every fault, and text over its length bound is cut
-  // rather than refused (a note on the log, not an alert); the budget is
-  // small because a planner that cannot answer an array in three tries is
-  // not going to on the fourth, and every try is a paid run.
-  for (let attempt = 2; !plan.ok && attempt <= MAX_PLANNER_ATTEMPTS; attempt++) {
-    // Once more, and for the plan alone: a planner that wrote its plan as
-    // prose is asked to say it as the JSON the team reads. On the record as
-    // an alert, so a team that needed another ask says so.
-    bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON plan (attempt ${attempt} of ${MAX_PLANNER_ATTEMPTS}).` });
-    const reask = replanTask(board.goal, answer, plan.reason);
-    // In the planner's own session (`resumeRunId`): the folder is read, and
-    // the ask is for the plan alone. A session the runner cannot continue (it
-    // never opened one, the record is gone) is a fresh read-only run instead,
-    // the way the first was — never a lost attempt.
-    const fresh = { task: reask, projectId: board.projectId, directory: board.directory, source, team: plannerRole, readOnly: true as const, extraBrief: brief(), effort: board.effort };
-    const resumed = { task: reask, resumeRunId: lastPlanner, source, team: plannerRole, readOnly: true as const, extraBrief: brief(), effort: board.effort };
-    const again = await startWhenRoom(team, plannerRole, () => 0, async () => {
-      try {
-        return await startRun(resumed);
-      } catch (err) {
-        if (!(err instanceof CodingAgentError) || err.wait) throw err;
-        bus.send(SYSTEM, { type: "note", text: `The planner's session (${lastPlanner}) could not be continued (${firstLine(err.message, 200)}); asking in a fresh run.` });
-        return startRun(fresh);
+  /**
+   * A planner run's answer read as a plan — and, while it is not one, asked
+   * again in that planner's session. Null when the team was stopped meanwhile.
+   */
+  const readPlan = async (first: string | null, firstRun: string): Promise<{ plan: PlanParse | PlanFailure; answer: string | null } | null> => {
+    let answer = first;
+    let plan = parsePlan(answer);
+    // The planner run whose answer is being corrected: the re-ask continues ITS
+    // session, which has the folder read already.
+    let lastPlanner = firstRun;
+    // More than one correction, because one was not enough. On the box, a planner
+    // told only to "shorten" a 2835-character description answered 3013 the second
+    // time and the board died with no task ever posted — twice, on two devices.
+    // Each ask now carries every fault, and text over its length bound is cut
+    // rather than refused (a note on the log, not an alert); the budget is
+    // small because a planner that cannot answer an array in three tries is
+    // not going to on the fourth, and every try is a paid run.
+    for (let attempt = 2; !plan.ok && attempt <= MAX_PLANNER_ATTEMPTS; attempt++) {
+      // Once more, and for the plan alone: a planner that wrote its plan as
+      // prose is asked to say it as the JSON the team reads. On the record as
+      // an alert, so a team that needed another ask says so.
+      bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON plan (attempt ${attempt} of ${MAX_PLANNER_ATTEMPTS}).` });
+      const reask = replanTask(board.goal, answer, plan.reason);
+      // In the planner's own session (`resumeRunId`): the folder is read, and
+      // the ask is for the plan alone. A session the runner cannot continue (it
+      // never opened one, the record is gone) is a fresh read-only run instead,
+      // the way the first was — never a lost attempt.
+      const fresh = { task: reask, projectId: board.projectId, directory: board.directory, source, team: plannerRole, readOnly: true as const, extraBrief: brief(), effort: board.effort };
+      const resumed = { task: reask, resumeRunId: lastPlanner, source, team: plannerRole, readOnly: true as const, extraBrief: brief(), effort: board.effort };
+      const again = await startWhenRoom(team, plannerRole, () => 0, async () => {
+        try {
+          return await startRun(resumed);
+        } catch (err) {
+          if (!(err instanceof CodingAgentError) || err.wait) throw err;
+          bus.send(SYSTEM, { type: "note", text: `The planner's session (${lastPlanner}) could not be continued (${firstLine(err.message, 200)}); asking in a fresh run.` });
+          return startRun(fresh);
+        }
+      });
+      if (!again) return null;
+      lastPlanner = again.id;
+      board.runs.push(castRef(again, "planner", null));
+      saveBoard(board);
+      const replanned = await settle(team, again.id);
+      if (team.stopRequested) return null;
+      if (replanned?.status !== "completed") {
+        // A planner run that did not finish is not a wording problem, so it is
+        // not re-asked: the team fails with what actually happened to it.
+        plan = { ok: false, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` };
+        break;
       }
-    });
-    if (!again) return;
-    lastPlanner = again.id;
-    board.runs.push(castRef(again, "planner", null));
-    saveBoard(board);
-    const replanned = await settle(team, again.id);
-    if (team.stopRequested) return;
-    if (replanned?.status !== "completed") {
-      // A planner run that did not finish is not a wording problem, so it is
-      // not re-asked: the team fails with what actually happened to it.
-      plan = { ok: false, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` };
-      break;
+      answer = replanned.resultText ?? replanned.summary;
+      plan = parsePlan(answer);
     }
-    answer = replanned.resultText ?? replanned.summary;
-    plan = parsePlan(answer);
-  }
+    return { plan, answer };
+  };
+  const read = await readPlan(planned.resultText ?? planned.summary, planner.id);
+  if (!read) return;
+  let { plan } = read;
   if (!plan.ok) {
     setTeamStatus(board, SYSTEM, "failed", plan.reason);
     saveBoard(board);
     return;
+  }
+
+  // A plan written WITHOUT reading the project (`blindPlanReason`) hedges: a
+  // repo map of "source not inspected" and a catch-all task naming every file,
+  // which made every task overlap and the team one run that nothing checked.
+  // Asked once more, in a FRESH read-only run — the first planner's session
+  // believes it cannot read, and continuing it would only hear that again.
+  const blind = blindPlanReason(read.answer, plan.repoMap, plan.shape);
+  if (blind) {
+    bus.send(SYSTEM, { type: "note", text: `The planner's plan was written without reading the project (${blind}); asking once more in a fresh read-only run.` });
+    let second: Awaited<ReturnType<typeof readPlan>> | "unasked";
+    try {
+      const again = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
+        task: blindReplanTask(board.goal, blind),
+        projectId: board.projectId,
+        directory: board.directory,
+        source,
+        team: plannerRole,
+        readOnly: true,
+        extraBrief: brief(),
+        effort: board.effort,
+      }));
+      if (!again) return;
+      board.runs.push(castRef(again, "planner", null));
+      saveBoard(board);
+      const replanned = await settle(team, again.id);
+      if (team.stopRequested) return;
+      second = replanned?.status === "completed"
+        ? await readPlan(replanned.resultText ?? replanned.summary, again.id)
+        : { plan: { ok: false as const, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` }, answer: null };
+    } catch (err) {
+      // A start the box refused for good (the switch off, an account that
+      // cannot run) or that threw — of this run or of a re-ask of its answer:
+      // the first plan is a valid plan, so it stands on the record and the
+      // team goes on with it, rather than fail for an ask it never needed.
+      if (team.stopRequested) return;
+      const why = firstLine(err instanceof Error ? err.message : String(err), 200).replace(/\.$/, "");
+      bus.send(SYSTEM, { type: "alert", reason: `The planner could not be asked again (${why}); the first plan, written without reading the project (${blind}), stands with that caveat.` });
+      second = "unasked";
+    }
+    if (!second) return;
+    if (second === "unasked") {
+      // Its alert is on the record; the first plan goes on as it is.
+    } else if (!second.plan.ok) {
+      // A blind plan is still a plan: the team goes on with it, on the record,
+      // rather than fail for an ask it never needed to answer.
+      bus.send(SYSTEM, { type: "alert", reason: `The planner was asked again and gave no plan (${second.plan.reason.replace(/\.$/, "")}); the first plan, written without reading the project (${blind}), stands with that caveat.` });
+    } else {
+      plan = second.plan;
+      const still = blindPlanReason(second.answer, plan.repoMap, plan.shape);
+      if (still) bus.send(SYSTEM, { type: "alert", reason: `The planner planned without reading the project twice (${still}); the plan stands with that caveat.` });
+    }
   }
 
   // The shape first, when the planner gave one: it is the frame the tasks
@@ -1150,8 +1224,19 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // 2026-10-29: 93-96% overlap on every team). Either runs as one ordinary run,
   // not inside the team's branch, worktree and reviewer machinery around it.
   const advice = teamAdvice(board);
-  if ((plan.tasks.length === 1 && board.tasks.length === 1) || advice?.reason === "overlap") {
-    await runAsSingleRun(team, board.tasks, source, advice?.reason === "overlap" ? advice.overlap : null);
+  // A task naming every file the others own (`catchAllTasks`) makes every
+  // task overlap on its own. One that runs AFTER all of them is the plan's
+  // integration step: measured without it, a plan that splits runs as the
+  // team it is. Either way the board says which task decided it.
+  const catchAll = advice?.reason === "overlap" && advice.catchAll?.length ? advice.catchAll : null;
+  const leftOut = catchAll ? catchAllLeftOut(board, catchAll) : null;
+  if (catchAll && leftOut?.leftOut) {
+    bus.send(SYSTEM, { type: "note", text: `${taskList(catchAll)} ${catchAll.length === 1 ? "names" : "name"} every file the other tasks own; ${catchAll.length === 1 ? "it is the integration step and runs" : "they are integration steps and run"} after them, so ${catchAll.length === 1 ? "it is" : "they are"} left out of the overlap measure and the team runs as planned.` });
+  } else if ((plan.tasks.length === 1 && board.tasks.length === 1) || advice?.reason === "overlap") {
+    const why = catchAll && leftOut
+      ? `${taskList(catchAll)} ${catchAll.length === 1 ? "names" : "name"} every file the other tasks own, and ${leftOut.runsLast ? `the others still overlap ${leftOut.overlapWithout ?? 0}% without ${catchAll.length === 1 ? "it" : "them"}` : `${catchAll.length === 1 ? "it does" : "they do"} not wait for all of them, so ${catchAll.length === 1 ? "it is" : "they are"} no integration step`}`
+      : null;
+    await runAsSingleRun(team, board.tasks, source, advice?.reason === "overlap" ? { share: advice.overlap, why } : null);
     return;
   }
 
@@ -1408,15 +1493,21 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
  * A box already running every run the owner allows makes it WAIT for a slot,
  * as a worker waits for room, up to the run budget — never fail for being
  * asked at a busy moment.
+ *
+ * The run's settle judges the RUN; each task is judged on what it named
+ * (`missingDeliverables`): one run doing several tasks once left a task's
+ * named outputs unwritten, and "the run's own settle judged it" accepted it.
+ * A task whose named files are missing or empty is rejected for good — this
+ * run was every attempt it gets — and the team fails naming them.
  */
-async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source: CodingRunSource, overlap: number | null): Promise<void> {
+async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source: CodingRunSource, overlap: { share: number; why: string | null } | null): Promise<void> {
   const { board, bus } = team;
   const [first] = tasks;
   const what = tasks.length === 1 ? "the plan's one task" : "the plan's tasks";
   board.singleRun = true;
   bus.send(SYSTEM, overlap === null
     ? { type: "note", task_id: first.task_id, text: "The plan has one task, so it runs as one ordinary run — no team branch, worktree or reviewer run around it; the run settles the owner's usual way." }
-    : { type: "note", text: `${overlap}% of the files this plan's tasks name are named by another task too: side by side they would only conflict, so its ${tasks.length} tasks run as one ordinary run, in order — no team branch, worktrees or reviewer runs around it; the run settles the owner's usual way.` });
+    : { type: "note", text: `${overlap.share}% of the files this plan's tasks name are named by another task too${overlap.why ? ` (${overlap.why})` : ""}: side by side they would only conflict, so its ${tasks.length} tasks run as one ordinary run, in order — no team branch, worktrees or reviewer runs around it; the run settles the owner's usual way.` });
   setTeamStatus(board, SYSTEM, "working");
   saveBoard(board);
 
@@ -1456,16 +1547,210 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
   if (team.stopRequested) return;
   const ok = settled?.status === "completed";
   const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
+  // Each task's named files, looked for where the run's work is — before any
+  // verdict, so one task's look never waits on another's review line.
+  const gaps = new Map<string, { named: string[]; missing: string[]; removed: string[] }>();
+  if (ok && settled) {
+    const place = deliverablePlace(settled, board.directory);
+    // A file the run removed was the task's to delete (a hint names what a
+    // task touches, not only what it leaves): it is not missing.
+    const removed = await removedByRun(settled, place);
+    for (const task of tasks) {
+      const named = namedDeliverables(task.files_hint);
+      if (!named.length) continue;
+      const kept = named.filter((n) => !removed.has(n));
+      gaps.set(task.task_id, { named: kept, missing: await missingDeliverables(place, kept), removed: named.filter((n) => removed.has(n)) });
+    }
+  }
   for (const task of tasks) {
     bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
     bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
-    if (ok) {
-      bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "accepted", notes: "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on." });
+    if (!ok) continue;
+    const gap = gaps.get(task.task_id);
+    if (gap?.missing.length) {
+      bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: `Deliverable missing: ${gap.missing.join(", ")}` });
+      closeRejected(board, SYSTEM, task.task_id);
+    } else {
+      bus.send(REVIEWER, {
+        type: "review",
+        task_id: task.task_id,
+        verdict: "accepted",
+        notes: gap
+          ? `Ran as a single run, and the files it names are ${[gap.named.length ? `present (${clipList(gap.named)})` : "", gap.removed.length ? `removed by the run (${clipList(gap.removed)})` : ""].filter(Boolean).join(" or ")}: the run's own settle judged the rest — the owner's review pass, deliverable check and pull request, when switched on.`
+          : "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on.",
+      });
     }
   }
+  const short = [...gaps].filter(([, g]) => g.missing.length);
   if (allComplete(board)) setTeamStatus(board, SYSTEM, "done");
+  else if (ok && short.length) setTeamStatus(board, SYSTEM, "failed", `The run for ${what} finished, but named deliverables are missing — ${short.map(([id, g]) => `${id}: ${g.missing.join(", ")}`).join("; ")}.`);
   else setTeamStatus(board, SYSTEM, "failed", `The run for ${what} did not finish: ${settled?.error ?? settled?.status ?? "no run"}.`);
   saveBoard(board);
+}
+
+/** "Task t3", "Tasks t3 and t4", "Tasks t2, t3 and t4". */
+function taskList(ids: readonly string[]): string {
+  if (ids.length === 1) return `Task ${ids[0]}`;
+  return `Tasks ${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}`;
+}
+
+/** A list of paths for one line: the first few, and how many more. */
+function clipList(paths: readonly string[], max = 4): string {
+  return paths.length > max ? `${paths.slice(0, max).join(", ")} and ${paths.length - max} more` : paths.join(", ");
+}
+
+/**
+ * The files a planned task NAMES, as paths a check can look for: its
+ * `files_hint` read the way `outsideHint` reads it — no `./`, no trailing `/`,
+ * `/**` or `/*` (a folder is the folder) — with every entry that is still a
+ * pattern (`**`, `*`, `?`) left out: a pattern names no file that must exist.
+ */
+export function namedDeliverables(hint: readonly string[]): string[] {
+  const named: string[] = [];
+  for (const raw of hint) {
+    const p = raw.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+$/, "").replace(/\/\*{1,2}$/, "").replace(/\/+$/, "");
+    if (!p || p === "." || /[*?]/.test(p) || named.includes(p)) continue;
+    named.push(p);
+  }
+  return named;
+}
+
+/**
+ * Where a settled run's files are to be looked for: the folder it worked in
+ * — its own worktree while that is still on disk, else the project — and the
+ * branch its work was committed on, when that branch is still there. A run
+ * whose work did not come home (a merge the project refused, a pull request
+ * that owns the branch) has its files on the branch only, and a look in the
+ * folder alone would call every one of them missing.
+ */
+export interface DeliverablePlace {
+  dir: string;
+  branch: { repo: string; name: string; roots: string[] } | null;
+}
+
+export function deliverablePlace(run: Pick<CodingRun, "directory" | "worktree">, fallback: string): DeliverablePlace {
+  const wt = run.worktree;
+  if (!wt) return { dir: run.directory || fallback, branch: null };
+  const branch = wt.branchRemoved ? null : { repo: wt.project, name: wt.branch, roots: [wt.path, wt.project] };
+  const treeThere = !wt.removed && fs.existsSync(wt.path);
+  return { dir: treeThere ? wt.path : wt.project, branch };
+}
+
+/**
+ * The entries of `named` (`namedDeliverables`) that are not there, each with
+ * why — "a/b.ts (missing)", "c.md (empty)". A file must exist and hold
+ * something; a folder must hold at least one file (coding-deliverable.ts reads
+ * an empty one as missing too). Present in the folder or on the run's branch
+ * is present. A path that resolves outside the folder (`../x`, `/etc/x`) is
+ * never looked for on disk — a file there is not the run's work — but may
+ * still be on the branch, when one of its roots holds it. Never throws:
+ * whatever cannot be looked at is missing.
+ */
+export async function missingDeliverables(place: DeliverablePlace, named: readonly string[]): Promise<string[]> {
+  const missing: string[] = [];
+  for (const entry of named) {
+    let state: NamedState = "missing";
+    try {
+      const file = path.resolve(place.dir, entry);
+      state = isInside(file, path.resolve(place.dir)) ? diskState(file) : "missing";
+      if (state !== "present" && place.branch) {
+        const onBranch = await branchState(place.branch, entry);
+        if (onBranch === "present" || (onBranch === "empty" && state === "missing")) state = onBranch;
+      }
+    } catch {
+      // Whatever went wrong looking, the file was not seen: missing.
+    }
+    if (state !== "present") missing.push(`${entry} (${state})`);
+  }
+  return missing;
+}
+
+/**
+ * The paths a settled run deleted, relative to its folder: the files it
+ * recorded touching that are gone (`vanishedFiles`), and — since a removal
+ * made through Bash (`rm`, `git rm`) is never recorded as touched — the files
+ * its branch deleted against the base it was forked from, and the tracked
+ * files missing from its working tree while that is still there. Never
+ * throws: what cannot be looked at was not removed.
+ */
+export async function removedByRun(run: Pick<CodingRun, "directory" | "filesTouched" | "worktree">, place: DeliverablePlace): Promise<Set<string>> {
+  const removed = vanishedFiles(run.directory, run.filesTouched ?? []);
+  const add = (out: string) => { for (const line of out.split("\n")) if (line.trim()) removed.add(line.trim()); };
+  try {
+    const base = run.worktree?.base;
+    if (place.branch && base) {
+      const r = await gitIn(place.branch.repo, ["diff", "--name-only", "--no-renames", "--diff-filter=D", `${base}...${place.branch.name}`, "--"]);
+      if (r.code === 0) add(r.stdout);
+    }
+    // The run's own tree only: the project behind a removed worktree holds
+    // the owner's changes, not the run's.
+    const own = !run.worktree || place.dir === run.worktree.path;
+    if (own && path.isAbsolute(place.dir) && fs.existsSync(place.dir)) {
+      const r = await gitIn(place.dir, ["ls-files", "--deleted"]);
+      if (r.code === 0) add(r.stdout);
+    }
+  } catch {
+    // Not looked at: nothing more counts as removed.
+  }
+  return removed;
+}
+
+type NamedState = "present" | "missing" | "empty";
+
+/** A named path on disk: a file with something in it, or a folder holding a file. */
+function diskState(file: string): NamedState {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return "missing";
+  }
+  if (stat.isFile()) return stat.size > 0 ? "present" : "empty";
+  if (stat.isDirectory()) return holdsAFile(file) ? "present" : "empty";
+  return "missing";
+}
+
+/** Does `dir` hold a file, at any depth (`.git` aside) — looked for in at most a few thousand entries. */
+function holdsAFile(dir: string): boolean {
+  const next = [dir];
+  let seen = 0;
+  while (next.length && seen < 5_000) {
+    const at = next.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(at, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      seen += 1;
+      if (e.isFile()) return true;
+      if (e.isDirectory() && e.name !== ".git") next.push(path.join(at, e.name));
+    }
+  }
+  return false;
+}
+
+/**
+ * A named path on the run's branch (`git ls-tree`): a blob with bytes in it,
+ * or a tree — git keeps no empty folder, so a tree holds a file. Missing for
+ * anything git would not answer, and for a path outside the repository.
+ */
+async function branchState(branch: NonNullable<DeliverablePlace["branch"]>, entry: string): Promise<NamedState> {
+  let rel = entry;
+  if (path.isAbsolute(entry)) {
+    const root = branch.roots.find((r) => entry.startsWith(`${r.replace(/\/+$/, "")}/`));
+    if (!root) return "missing";
+    rel = entry.slice(root.replace(/\/+$/, "").length + 1);
+  }
+  if (!rel || rel.split("/").includes("..")) return "missing";
+  const r = await gitIn(branch.repo, ["--literal-pathspecs", "ls-tree", "-l", branch.name, "--", rel]);
+  if (r.code !== 0) return "missing";
+  const line = r.stdout.split("\n").find((l) => l.endsWith(`\t${rel}`));
+  const m = line ? /^\d+ (blob|tree|commit) [0-9a-f]+\s+(-|\d+)\t/.exec(line) : null;
+  if (!m) return "missing";
+  if (m[1] === "blob") return Number(m[2]) > 0 ? "present" : "empty";
+  return "present";
 }
 
 /**
@@ -2893,7 +3178,19 @@ function settleOrphan(board: TeamBoard): TeamBoard {
 /** The board as the routes answer it, with the agent count worked out from it and the figures as of now (a working team's clock runs). */
 function snapshot(board: TeamBoard, queue?: readonly string[]): TeamView {
   const at = board.status === "queued" ? (queue ?? queuedBoards().map((b) => b.id)).indexOf(board.id) : -1;
-  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board), advice: teamAdvice(board), ...(at >= 0 ? { queuePosition: at + 1 } : {}) };
+  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board), advice: shownAdvice(board), ...(at >= 0 ? { queuePosition: at + 1 } : {}) };
+}
+
+/**
+ * `teamAdvice` as the card shows it: none for a team that left its
+ * integration step out of the overlap measure and ran as planned
+ * (`catchAllLeftOut`) — its note says why, and "a single run would have been
+ * cheaper" beside it would say the opposite.
+ */
+function shownAdvice(board: TeamBoard): TeamAdvice | null {
+  const advice = teamAdvice(board);
+  if (board.singleRun || !advice?.catchAll?.length) return advice;
+  return catchAllLeftOut(board, advice.catchAll).leftOut ? null : advice;
 }
 
 function firstLine(text: string, max: number): string {
