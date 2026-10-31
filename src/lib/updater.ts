@@ -6327,6 +6327,12 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           // The desktop adapter's with_gateway_stopped stops the owner's user
           // gateway itself, first thing: the wait and the drain come here.
           await withGatewayStopHeldForAgentWork(step.id, { drain: true }, () => execAsRoot(step.id, timeoutMs));
+        } else if (!desktopIntegration && step.id === "gateway_setup") {
+          // install.sh's step_gateway_setup ends in `systemctl restart
+          // clawbox-gateway.service` on every update, changed unit or not, so
+          // it is a gateway stop like the others: the wait and the drain come
+          // first. (The desktop adapter's gateway_setup only reloads units.)
+          await withGatewayStopHeldForAgentWork(step.id, { drain: true }, () => execAsRoot(step.id, timeoutMs));
         } else {
           await execAsRoot(step.id, timeoutMs);
         }

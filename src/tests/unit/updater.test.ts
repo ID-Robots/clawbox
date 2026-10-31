@@ -3509,11 +3509,48 @@ describe("updater", () => {
       await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
       // The fast path stopped nothing, so nothing was counted for it…
       expect(commands().some((call) => call.includes(STOP))).toBe(false);
-      // …and the reboot was: counted once, no drain, and a card for going ahead.
-      expect(mockActiveAgentWork).toHaveBeenCalledTimes(1);
-      expect(mockActiveAgentWork.mock.invocationCallOrder[0]).toBeLessThan(execOrder("--no-block rebuild_reboot"));
+      // …the gateway service step (it restarts the gateway) and the reboot
+      // were: counted once each, no drain after a wait that ran out, and a
+      // card for going ahead.
+      expect(mockActiveAgentWork).toHaveBeenCalledTimes(2);
+      expect(mockActiveAgentWork.mock.invocationCallOrder[0]).toBeLessThan(execOrder("clawbox-run-root-step.sh gateway_setup"));
+      expect(mockActiveAgentWork.mock.invocationCallOrder[1]).toBeLessThan(execOrder("--no-block rebuild_reboot"));
       expect(mockGatewayCall).not.toHaveBeenCalled();
       expect((updater.getUpdateState().warnings ?? []).some((w) => w.code === updater.UPDATE_BUSY_WAIT_EXPIRED)).toBe(true);
+    });
+
+    it("holds and drains before the appliance's gateway service step, which restarts the gateway on every update", async () => {
+      // install.sh's step_gateway_setup ends in `systemctl restart
+      // clawbox-gateway.service` whether or not the unit changed — seen on a
+      // lab board as the gateway's SIGTERM in the middle of every beta update.
+      mockGatewayCall.mockImplementation(async (method: string) => {
+        if (method === "gateway.suspend.prepare") return { status: "ready", suspensionId: "lease-setup", activeCount: 0, expiresAtMs: Date.now() + 120_000 };
+        throw new Error(`unexpected ${method}`);
+      });
+      setupExecFileMock({
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), { stderr: "sudo: a password is required\n" }),
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  OpenClaw refresh: fast path (the core is at the pin and the gateway is serving) — no gateway stop\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      expect(updater.startUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const setupStep = execOrder("clawbox-run-root-step.sh gateway_setup");
+      expect(setupStep).toBeGreaterThan(0);
+      const prepareIndex = mockGatewayCall.mock.calls.findIndex(([m, params]) =>
+        m === "gateway.suspend.prepare" && /^clawbox-update-gateway_setup-\d+$/.test(String(params.requestId)));
+      expect(prepareIndex).toBeGreaterThanOrEqual(0);
+      expect(mockGatewayCall.mock.calls[prepareIndex][1]).toMatchObject({ drain: true, terminalPolicy: "terminate" });
+      // Counted, then drained, then the step that restarts the gateway; the
+      // lease is handed back once the step is over.
+      expect(mockActiveAgentWork.mock.invocationCallOrder[0]).toBeLessThan(mockGatewayCall.mock.invocationCallOrder[prepareIndex]);
+      expect(mockGatewayCall.mock.invocationCallOrder[prepareIndex]).toBeLessThan(setupStep);
+      expect(mockResumeGatewayAdmission).toHaveBeenCalledWith("lease-setup");
+      expect(mockResumeGatewayAdmission.mock.invocationCallOrder[0]).toBeGreaterThan(setupStep);
     });
 
     it("gates the x64 desktop's core step, which stops the owner's gateway inside the root adapter", async () => {
