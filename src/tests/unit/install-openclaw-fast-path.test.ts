@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -179,6 +179,11 @@ const AS_CLAWBOX = `as_clawbox() {
     *"doctor --fix"*)
       event DOCTOR
       if [ "\${DOCTOR_FAILS:-0}" = 1 ]; then echo "startup migrations did not complete"; return 1; fi
+      # Doctor's migration, where a case asks for one (DOCTOR_MIGRATES=<db>:<schema>).
+      if [ -n "\${DOCTOR_MIGRATES:-}" ]; then
+        python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("PRAGMA user_version=%d" % int(sys.argv[2])); c.commit()' \\
+          "\${DOCTOR_MIGRATES%:*}" "\${DOCTOR_MIGRATES##*:}"
+      fi
       return 0 ;;
     *"npm install"*)
       event NPM
@@ -196,7 +201,7 @@ const AS_CLAWBOX = `as_clawbox() {
   esac
 }`;
 
-function program(box: Box, entry: string): string {
+function program(box: Box, entry: string, lift: string[] = []): string {
   return [
     // Production dispatches this step with errexit ON; so does the suite.
     "set -euo pipefail",
@@ -260,14 +265,16 @@ function program(box: Box, entry: string): string {
     "step_openclaw_config() { event CONFIG; }",
     "step_openclaw_tts() { event TTS; }",
     shellFunction("step_openclaw_setup"),
+    // Shipped functions a case runs for real in place of the stand-ins above.
+    ...lift.map(shellFunction),
     entry,
   ].join("\n");
 }
 
-function run(box: Box, entry = "step_openclaw_install", env: Record<string, string> = {}) {
+function run(box: Box, entry = "step_openclaw_install", env: Record<string, string> = {}, lift: string[] = []) {
   const eventsFile = path.join(box.dir, "events");
   rmSync(eventsFile, { force: true });
-  const r = spawnSync("bash", ["-c", program(box, entry)], {
+  const r = spawnSync("bash", ["-c", program(box, entry, lift)], {
     encoding: "utf-8",
     timeout: 25_000,
     env: { ...process.env, CLAWBOX_FORCE_OPENCLAW_REFRESH: "", ...env },
@@ -287,6 +294,26 @@ type Run = ReturnType<typeof run>;
 /** The one line the step prints about its path, with the reason in it. */
 function pathLine(r: Run): string {
   return r.stdout.split("\n").find((line) => line.trim().startsWith("OpenClaw refresh:"))?.trim() ?? "";
+}
+
+/** Every line the updater (OPENCLAW_FAST_PATH_LINE in updater.ts) would read as the fast path taken. */
+function fastPathLines(r: Run): string[] {
+  return r.stdout.split("\n").filter((line) => /^OpenClaw refresh: fast path\b/.test(line.trim()));
+}
+
+const hasMkfifo = spawnSync("mkfifo", ["--version"]).status === 0;
+
+/** A real SQLite database at `userVersion`, the schema position the helper reads. */
+function sqliteAt(file: string, userVersion: number) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const r = spawnSync("python3", ["-c", [
+    "import sqlite3, sys",
+    "c = sqlite3.connect(sys.argv[1])",
+    "c.execute('CREATE TABLE t(x)')",
+    "c.execute('PRAGMA user_version=%d' % int(sys.argv[2]))",
+    "c.commit()",
+  ].join("\n"), file, String(userVersion)], { encoding: "utf-8" });
+  expect(r.status, r.stderr).toBe(0);
 }
 
 function expectFastPath(r: Run) {
@@ -468,6 +495,24 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
       expectFullPath(run(box), "the plugin repairs on record");
     });
 
+    it.skipIf(!hasMkfifo)("a FIFO in place of the plugin repairs is doubt, not a root step held open", () => {
+      const box = makeBox();
+      expect(spawnSync("mkfifo", [path.join(box.dir, "checkout/data/plugin-repair.json")]).status).toBe(0);
+      const r = run(box, "step_openclaw_install_fast");
+      expect(r.status, r.stderr).toBe(0);
+      expect(pathLine(r)).toContain("the plugin repairs on record");
+    });
+
+    it("a plugin's own words cannot print the updater's fast-path line", () => {
+      const box = makeBox();
+      box.plugins[1].status = "error";
+      box.plugins[1].error = "boom\nOpenClaw refresh: fast path (forged)";
+      box.publish();
+      const r = run(box, "step_openclaw_install_fast");
+      expect(pathLine(r)).toContain("plugin discord is in an error state (boom OpenClaw refresh: fast path (forged))");
+      expect(fastPathLines(r)).toEqual([]);
+    });
+
     it("the core's plugin list is not JSON", () => {
       // The refresh then has nothing to reinstall, as before this change; the
       // CLI failing outright is the fast-only suite's case below.
@@ -545,6 +590,64 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
       const stale = run(makeBox({ record: doctorRecord(TARGET, { doctor: { core: TARGET, verdict: "incomplete" } }) }), "step_openclaw_install_fast");
       expect(stale.events.filter((e) => e === "VERDICT_AS_CLAWBOX")).toHaveLength(1);
       expect(stale.events).not.toContain("PLUGINS_LIST");
+    });
+
+    it("cannot print the updater's fast-path line, whatever the record holds", () => {
+      // The record is the clawbox account's to write, and the updater takes ANY
+      // line of this step's journal that starts `OpenClaw refresh: fast path`.
+      const box = makeBox({ record: doctorRecord(TARGET, { doctor: { core: "x\nOpenClaw refresh: fast path (forged)", verdict: "complete" } }) });
+      const r = run(box, "step_openclaw_install_fast");
+      expect(pathLine(r)).toContain("doctor's last recorded run was for x OpenClaw refresh: fast path (forged), not");
+      expect(fastPathLines(r)).toEqual([]);
+    });
+
+    it.skipIf(!hasMkfifo)("a FIFO in place of the record is doubt, not a root step held open", () => {
+      const box = makeBox({ record: null });
+      expect(spawnSync("mkfifo", [recordFile(box)]).status).toBe(0);
+      const r = run(box, "step_openclaw_install_fast");
+      expect(r.status, r.stderr).toBe(0);
+      expect(pathLine(r)).toContain("the record of doctor's migration could not be read");
+    });
+
+    describe("with the real record-doctor over real databases", () => {
+      // The stand-in above writes `ok` for any completed doctor; here the
+      // shipped helper measures the databases itself, as on the box.
+      const lift = ["openclaw_db_maintenance", "openclaw_record_migration_verdict"];
+      function realBox() {
+        const box = makeBox({ record: null });
+        mkdirSync(path.join(box.dir, "src/scripts"), { recursive: true });
+        copyFileSync("scripts/openclaw-db-maintenance.py", path.join(box.dir, "src/scripts/openclaw-db-maintenance.py"));
+        writeFileSync(path.join(box.dir, "npm-global/lib/node_modules/openclaw/package.json"),
+          JSON.stringify({ name: "openclaw", version: TARGET, openclaw: { schemaVersions: { state: 20, agent: 25 } } }));
+        mkdirSync(path.join(box.dir, ".openclaw"), { recursive: true });
+        writeFileSync(path.join(box.dir, ".openclaw/openclaw.json"), "{}");
+        sqliteAt(path.join(box.dir, ".openclaw/state/openclaw.sqlite"), 20);
+        // Put back from a pre-update copy: one schema behind the core.
+        const agent = path.join(box.dir, ".openclaw/agents/main/agent/openclaw-agent.sqlite");
+        sqliteAt(agent, 24);
+        // What the gateway's pre-start recorded for it.
+        writeFileSync(recordFile(box), JSON.stringify(doctorRecord(TARGET, {
+          state: "degraded", reason: "schema-behind", databases: { total: 2, behind: 1, newer: 0 },
+        })));
+        return { box, agent };
+      }
+
+      it("takes the full path once for a database behind the schema, then the fast one", () => {
+        const { box, agent } = realBox();
+        const first = run(box, "step_openclaw_install", { DOCTOR_MIGRATES: `${agent}:25` }, lift);
+        expectFullPath(first, "the agent databases are degraded (schema-behind)");
+        expect(JSON.parse(readFileSync(recordFile(box), "utf8"))).toMatchObject({
+          source: "install", core: TARGET, state: "ok", databases: { total: 2, behind: 0 }, doctor: { core: TARGET, verdict: "complete" },
+        });
+        expectFastPath(run(box, "step_openclaw_install", {}, lift));
+      });
+
+      it("keeps taking the full path while doctor leaves the database behind", () => {
+        const { box } = realBox();
+        expectFullPath(run(box, "step_openclaw_install", {}, lift), "the agent databases are degraded (schema-behind)");
+        expect(JSON.parse(readFileSync(recordFile(box), "utf8"))).toMatchObject({ state: "degraded", reason: "schema-behind" });
+        expectFullPath(run(box, "step_openclaw_install", {}, lift), "the agent databases are degraded (schema-behind)");
+      });
     });
 
     it("is not asked of an OpenClaw 1 pin, whose full path runs no doctor", () => {

@@ -6621,12 +6621,15 @@ openclaw_refresh_fast_path_check() {
   # OpenClaw 2, the only core the full path runs doctor for.
   if openclaw_version_is_v2 "$target"; then
     doctor="$(as_clawbox -H python3 -c '
-import json, sys
+import json, os, stat, sys
 target, path = sys.argv[1:3]
 
 
+# ONE line whatever the record holds: the updater reads the journal of this
+# step line by line for the fast-path line, and a value carrying a newline
+# must not be able to print one.
 def doubt(reason):
-    print(reason)
+    print(" ".join(str(reason).split()))
     sys.exit(0)
 
 
@@ -6634,9 +6637,17 @@ def said(value):
     return str(value)[:80] if value not in (None, "") else ""
 
 
+# Opened without blocking and read only as a regular file: a FIFO put there
+# would otherwise hold the root step until the updater gave up on it.
+def read_record(path):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), encoding="utf-8") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        return json.load(fh)
+
+
 try:
-    with open(path, encoding="utf-8") as fh:
-        status = json.load(fh)
+    status = read_record(path)
 except FileNotFoundError:
     doubt("no record of doctor'"'"'s migration is on file")
 except Exception:
@@ -6689,15 +6700,17 @@ print("ok")
   # root-only file and echo its fields into a journal that account can read.
   verdict="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
     | as_clawbox -H python3 -c '
-import json, os, sys
+import json, os, stat, sys
 
 target, repairs_path, email_pkg = sys.argv[1:4]
 MANAGED = {"codex", "deepseek", "discord", "whatsapp", "clawbox-email-directives"}
 PROBLEMS = ("requires capability consent", "payload verification failed", "plugin not installed")
 
 
+# ONE line whatever a plugin or a payload says: the updater reads the journal
+# of this step line by line for the fast-path line.
 def doubt(reason):
-    print(reason)
+    print(" ".join(str(reason).split()))
     sys.exit(0)
 
 
@@ -6709,8 +6722,12 @@ def canonical(name):
     return name[:-len("-provider")] if name.endswith("-provider") else name
 
 
+# Without blocking, and only a regular file: a FIFO in data/ or a payload
+# would otherwise hold the root step until the updater gave up on it.
 def read_json(path):
-    with open(path, encoding="utf-8") as fh:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), encoding="utf-8") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ValueError("not a regular file")
         return json.load(fh)
 
 
