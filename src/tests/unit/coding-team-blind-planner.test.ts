@@ -12,6 +12,7 @@
  * on disk where the team looks for it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -451,5 +452,42 @@ describe("D3: a plan run as one run judges each task on the files it names", () 
       ["t3", "complete", "accepted"],
     ]);
     expect(done.status).toBe("done");
+  });
+});
+
+describe("removedByRun: a named file the run deleted is not missing", () => {
+  const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { stdio: "pipe" }).toString();
+
+  it("counts a file the run's branch deleted with git rm — never recorded as touched — as removed", async () => {
+    git(project, "init", "-q", "-b", "main");
+    fs.mkdirSync(path.join(project, "lib"), { recursive: true });
+    fs.writeFileSync(path.join(project, "lib", "legacy.js"), "export const legacy = 1;\n");
+    fs.writeFileSync(path.join(project, "lib", "case.js"), "export const a = 1;\n");
+    git(project, "add", "-A");
+    git(project, "commit", "-qm", "base");
+    git(project, "checkout", "-qb", "clawbox/run-x");
+    git(project, "rm", "-q", "lib/legacy.js");
+    fs.writeFileSync(path.join(project, "lib", "case.js"), "export const a = 1;\nexport const b = 2;\n");
+    git(project, "commit", "-qam", "work");
+    git(project, "checkout", "-q", "main");
+
+    const wt = path.join(project, ".clawbox", "worktrees", "run-x");
+    const run = { directory: wt, filesTouched: ["lib/case.js"], worktree: { path: wt, branch: "clawbox/run-x", base: "main", project, removed: true, branchRemoved: false } };
+    const place = teams.deliverablePlace(run as never, project);
+    const removed = await teams.removedByRun(run as never, place);
+    expect([...removed]).toEqual(["lib/legacy.js"]);
+    const named = ["lib/case.js", "lib/legacy.js", "lib/never.js"];
+    expect(await teams.missingDeliverables(place, named.filter((n) => !removed.has(n)))).toEqual(["lib/never.js (missing)"]);
+  });
+
+  it("counts a tracked file deleted from the run's own folder, uncommitted, as removed", async () => {
+    git(project, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(project, "old.md"), "old\n");
+    git(project, "add", "-A");
+    git(project, "commit", "-qm", "base");
+    fs.rmSync(path.join(project, "old.md"));
+    const run = { directory: project, filesTouched: [], worktree: null };
+    const removed = await teams.removedByRun(run as never, teams.deliverablePlace(run as never, project));
+    expect([...removed]).toEqual(["old.md"]);
   });
 });

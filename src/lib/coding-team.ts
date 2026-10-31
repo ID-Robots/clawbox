@@ -1552,10 +1552,9 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
   const gaps = new Map<string, { named: string[]; missing: string[] }>();
   if (ok && settled) {
     const place = deliverablePlace(settled, board.directory);
-    // A file the run recorded touching and then removed was the task's to
-    // delete (a hint names what a task touches, not only what it leaves): it
-    // is not missing. A removal made only through Bash is not recorded there.
-    const removed = vanishedFiles(settled.directory, settled.filesTouched ?? []);
+    // A file the run removed was the task's to delete (a hint names what a
+    // task touches, not only what it leaves): it is not missing.
+    const removed = await removedByRun(settled, place);
     for (const task of tasks) {
       const named = namedDeliverables(task.files_hint);
       if (named.length) gaps.set(task.task_id, { named, missing: await missingDeliverables(place, named.filter((n) => !removed.has(n))) });
@@ -1662,6 +1661,36 @@ export async function missingDeliverables(place: DeliverablePlace, named: readon
     if (state !== "present") missing.push(`${entry} (${state})`);
   }
   return missing;
+}
+
+/**
+ * The paths a settled run deleted, relative to its folder: the files it
+ * recorded touching that are gone (`vanishedFiles`), and — since a removal
+ * made through Bash (`rm`, `git rm`) is never recorded as touched — the files
+ * its branch deleted against the base it was forked from, and the tracked
+ * files missing from its working tree while that is still there. Never
+ * throws: what cannot be looked at was not removed.
+ */
+export async function removedByRun(run: Pick<CodingRun, "directory" | "filesTouched" | "worktree">, place: DeliverablePlace): Promise<Set<string>> {
+  const removed = vanishedFiles(run.directory, run.filesTouched ?? []);
+  const add = (out: string) => { for (const line of out.split("\n")) if (line.trim()) removed.add(line.trim()); };
+  try {
+    const base = run.worktree?.base;
+    if (place.branch && base) {
+      const r = await gitIn(place.branch.repo, ["diff", "--name-only", "--no-renames", "--diff-filter=D", `${base}...${place.branch.name}`, "--"]);
+      if (r.code === 0) add(r.stdout);
+    }
+    // The run's own tree only: the project behind a removed worktree holds
+    // the owner's changes, not the run's.
+    const own = !run.worktree || place.dir === run.worktree.path;
+    if (own && path.isAbsolute(place.dir) && fs.existsSync(place.dir)) {
+      const r = await gitIn(place.dir, ["ls-files", "--deleted"]);
+      if (r.code === 0) add(r.stdout);
+    }
+  } catch {
+    // Not looked at: nothing more counts as removed.
+  }
+  return removed;
 }
 
 type NamedState = "present" | "missing" | "empty";
