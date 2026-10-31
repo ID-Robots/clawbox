@@ -1,6 +1,6 @@
 // What a signed-in ClawBox user who is NOT the owner may reach.
 //
-// EVERYTHING THE OWNER GETS, with three exceptions. Every ClawBox user signs
+// EVERYTHING THE OWNER GETS, with four exceptions. Every ClawBox user signs
 // in with their own Linux password and gets the same desktop as the owner:
 // every built-in and installed app, Files, the browser, the coding agent, the
 // app store, the remote desktop, Prime Radiant, Memory Shard — and Settings.
@@ -23,6 +23,15 @@
 //   3. The owner's account itself: its password and the factory reset that
 //      wipes it. Removing the owner is refused for everyone
 //      (src/lib/clawbox-users.ts).
+//   4. The box's AI settings. Which model the whole box chats on, its
+//      providers and their sign-ins, its assistant, its local AI engines, its
+//      cloud defaults, its voice and its transcription are ONE setting for
+//      everybody on the box, so a user reads them like the owner — the
+//      desktop and Settings show them — and only the owner changes them: a
+//      user's WRITE to `BOX_AI_SETTINGS_API` answers 403. A user's first
+//      desktop load used to move the owner's chat model, because the chat's
+//      own model migration posted `/setup-api/chat/model` for them. Their own
+//      chat, its spoken replies and the local engines' inference stay theirs.
 //
 // A DENY-list now, where it used to be an allow-list of the four per-user
 // surfaces a non-owner had: the exceptions are what is named, and a route
@@ -87,6 +96,41 @@ const OWNER_ACCOUNT_API: ReadonlySet<string> = new Set([
 const OWNER_SECRET_API: ReadonlySet<string> = new Set([
   "/setup-api/gateway",
 ]);
+
+/**
+ * The box's AI settings (the header's fourth exception): a WRITE to one of
+ * these is the owner's; reading them is everybody's. Exact paths, so the local
+ * engines' inference (`/setup-api/local-ai/<engine>/…`) and the speech a
+ * user's chat plays (`/setup-api/tts/speak`, `/sample`, `/warm`) stay theirs.
+ */
+const BOX_AI_SETTINGS_API: ReadonlySet<string> = new Set([
+  "/setup-api/chat/model",
+  "/setup-api/harness/swap",
+  "/setup-api/hermes/provider-key",
+  "/setup-api/hermes/models",
+  "/setup-api/hermes/clawai",
+  "/setup-api/local-ai",
+  "/setup-api/local-ai/exclusive",
+  "/setup-api/local-models",
+  "/setup-api/ollama/pull",
+  "/setup-api/ollama/delete",
+  "/setup-api/llamacpp/models",
+  "/setup-api/llamacpp/install",
+  "/setup-api/embed/install",
+  "/setup-api/whisper",
+  "/setup-api/ai-cloud-defaults",
+  "/setup-api/tts",
+  "/setup-api/tts/install",
+  "/setup-api/stt",
+]);
+
+/** Trees where every write is one of the box's AI settings: model and provider config, sign-ins, account pools. */
+const BOX_AI_SETTINGS_PREFIXES = [
+  "/setup-api/ai-models",
+  "/setup-api/providers",
+  "/setup-api/anthropic",
+  "/setup-api/hermes/oauth",
+];
 
 /** Standalone pages of the owner-only apps above. */
 const OWNER_ONLY_PAGES: ReadonlySet<string> = new Set(OWNER_ONLY_APP_IDS.map((id) => `/app/${id}`));
@@ -219,6 +263,9 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
 
   // The exceptions first, on the canonical path.
   if (OWNER_ACCOUNT_API.has(canon)) return "deny";
+  if (!isRead && (BOX_AI_SETTINGS_API.has(canon) || BOX_AI_SETTINGS_PREFIXES.some((p) => underPrefix(canon, p)))) {
+    return "deny";
+  }
   // The Control UI page with the token in it: shared with the rest of OpenClaw.
   if (OWNER_SECRET_API.has(canon)) return shared ? "allow" : "deny";
   // API trees answer code, so they answer 403 JSON however they are asked.

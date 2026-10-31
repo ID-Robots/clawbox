@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, waitFor } from "@/tests/helpers/test-utils";
+import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
@@ -180,6 +180,17 @@ describe("ClawBox AI chat's automatic Flash migration", () => {
     await settle(calls);
 
     expect(modelWrites(calls)).toEqual([]);
+  });
+
+  it("never moves the box's model from another user's chat — their first desktop load moved the owner's", async () => {
+    const calls = installFetch({ activeModel: "deepseek/deepseek-v4-pro" });
+    render(<ChatPopup isOpen onClose={() => {}} chatUser="alice" />);
+    await settle(calls);
+
+    expect(modelWrites(calls)).toEqual([]);
+    // The model is shown to them and moved by the owner: the picker is not theirs to open.
+    const picker = screen.getByRole("button", { name: /chat provider/i });
+    expect(picker).toBeDisabled();
   });
 });
 

@@ -134,6 +134,20 @@ describe("middleware — multi-user", () => {
     }
   });
 
+  it("a second user reads the box's AI settings but may not change them: 403 owner_only, while the owner still may", async () => {
+    const alice = await sign({ u: "alice", sv: ALICE_SV });
+    const owner = await sign({ u: "clawbox" });
+    for (const p of ["/setup-api/chat/model", "/setup-api/ai-models/status", "/setup-api/tts"]) {
+      expect((await middleware(request(p, alice))).headers.get("x-middleware-next"), `GET ${p}`).toBe("1");
+    }
+    for (const p of ["/setup-api/chat/model", "/setup-api/ai-models/configure", "/setup-api/providers/default", "/setup-api/tts"]) {
+      await expectOwnerOnlyJson(await middleware(request(p, alice, { method: "POST" })), `POST ${p}`);
+      expect((await middleware(request(p, owner, { method: "POST" }))).headers.get("x-middleware-next"), `owner POST ${p}`).toBe("1");
+    }
+    // Their own chat's speech is still theirs.
+    expect((await middleware(request("/setup-api/tts/speak", alice, { method: "POST" }))).headers.get("x-middleware-next")).toBe("1");
+  });
+
   it("a second user reaches the media of their own chat, and nobody else's", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     const own = await middleware(request("/api/chat/media/outgoing/agent%3Amain%3Aclawbox-user-alice/1/full", alice));

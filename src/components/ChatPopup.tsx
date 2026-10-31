@@ -6916,12 +6916,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // saved chat choice to the Flash alias once, without clearing its history.
   // Remember failed attempts until the model changes or chat reopens, so a
   // failed request cannot become a render-triggered retry loop.
+  // The OWNER's chat only: the model is the whole box's, and another user's
+  // first desktop load moving it moved the owner's chat with it (the server
+  // refuses them as well — src/lib/non-owner-scope.ts).
   const flashModelAttemptRef = useRef<string | null>(null)
   useEffect(() => {
     if (!isOpen) {
       flashModelAttemptRef.current = null
       return
     }
+    if (chatUser !== null) return
     if (!harnessLoaded || harnessId !== 'openclaw') return
     const active = chatModelState?.activeModel
     if (!isClawboxAiChat || (active === CLAWBOX_AI_MODEL_BY_TIER.flash && !chatModelState?.needsFlashModelMigration)) {
@@ -6936,7 +6940,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       label: CLAWBOX_AI_CHAT_MODEL_LABEL,
       automatic: true,
     })
-  }, [isOpen, harnessLoaded, harnessId, isClawboxAiChat, chatModelState?.activeModel, chatModelState?.needsFlashModelMigration, switchChatModel, switchingModel])
+  }, [isOpen, chatUser, harnessLoaded, harnessId, isClawboxAiChat, chatModelState?.activeModel, chatModelState?.needsFlashModelMigration, switchChatModel, switchingModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
@@ -9270,7 +9274,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 }))}
                 onChange={handleChatSourceChange}
                 onPointerDown={stopHeaderDrag}
-                disabled={switchingModel}
+                // The box's model: shown to every user, moved by the owner.
+                disabled={switchingModel || chatUser !== null}
                 triggerMaxWidth={130}
                 popoverWidth={220}
               />
@@ -9389,7 +9394,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                   })
                 }}
                 onPointerDown={stopHeaderDrag}
-                disabled={switchingModel}
+                disabled={switchingModel || chatUser !== null}
                 triggerMaxWidth={140}
                 popoverWidth={240}
               />

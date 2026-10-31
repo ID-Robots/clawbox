@@ -14,8 +14,9 @@ import {
 import { apps } from "@/lib/desktop-apps";
 
 // A ClawBox user who is not the owner gets the owner's desktop — every app and
-// Settings — with three exceptions: the owner's chat (each user has their
-// own), secrets in clear, and the owner's account itself.
+// Settings — with four exceptions: the owner's chat (each user has their
+// own), secrets in clear, the owner's account itself, and changing the box's
+// AI settings.
 
 function verdict(url: string, method = "GET", intent: RequestIntent = "fetch", username = "alice", openclawShared?: boolean) {
   const u = new URL(url, "http://clawbox.local");
@@ -84,6 +85,61 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     ["POST", "/setup-api/setup/reset"],
   ])("the owner's account: refuses %s %s", (method, url) => {
     expect(verdict(url, method)).toBe("deny");
+  });
+
+  it.each([
+    // The model the whole box chats on — a user's first desktop load moved it.
+    ["POST", "/setup-api/chat/model"],
+    ["POST", "/setup-api/ai-models/configure"],
+    ["POST", "/setup-api/ai-models/model-fallback"],
+    ["POST", "/setup-api/ai-models/clawai/start"],
+    ["POST", "/setup-api/ai-models/clawai/poll"],
+    ["POST", "/setup-api/ai-models/oauth/exchange"],
+    ["POST", "/setup-api/providers/default"],
+    ["POST", "/setup-api/providers/enabled"],
+    ["POST", "/setup-api/anthropic/accounts"],
+    ["POST", "/setup-api/harness/swap"],
+    ["POST", "/setup-api/hermes/models"],
+    ["POST", "/setup-api/hermes/provider-key"],
+    ["POST", "/setup-api/hermes/oauth/start"],
+    ["DELETE", "/setup-api/hermes/oauth/cancel"],
+    ["POST", "/setup-api/local-ai"],
+    ["POST", "/setup-api/local-ai/exclusive"],
+    ["POST", "/setup-api/local-models"],
+    ["POST", "/setup-api/ollama/pull"],
+    ["DELETE", "/setup-api/llamacpp/models"],
+    ["POST", "/setup-api/whisper"],
+    ["POST", "/setup-api/ai-cloud-defaults"],
+    ["POST", "/setup-api/tts"],
+    ["POST", "/setup-api/tts/install"],
+    ["POST", "/setup-api/stt"],
+  ])("the box's AI settings: refuses %s %s", (method, url) => {
+    expect(verdict(url, method)).toBe("deny");
+  });
+
+  it("the box's AI settings: every user still READS them, however they are spelled", () => {
+    for (const url of ["/setup-api/chat/model", "/setup-api/ai-models/status", "/setup-api/ai-models/catalog", "/setup-api/providers/status", "/setup-api/tts", "/setup-api/stt", "/setup-api/local-ai/exclusive"]) {
+      expect(verdict(url, "GET")).toBe("allow");
+    }
+    for (const url of ["/setup-api/chat/model/", "/setup-api//chat/model", "/setup-api/Chat/Model", "/setup-api/chat%2Fmodel"]) {
+      expect(verdict(url, "POST")).toBe("deny");
+    }
+  });
+
+  it("the box's AI settings: a user's own chat, its speech and the local engines' inference stay theirs", () => {
+    for (const url of [
+      "/setup-api/chat/tabs",
+      "/setup-api/chat/transcribe",
+      "/setup-api/hermes/chat",
+      "/setup-api/tts/speak",
+      "/setup-api/tts/sample",
+      "/setup-api/tts/warm",
+      "/setup-api/local-ai/llamacpp/v1/chat/completions",
+      "/setup-api/local-ai/ollama/api/chat",
+      "/setup-api/local-ai/embed/v1/embeddings",
+    ]) {
+      expect(verdict(url, "POST")).toBe("allow");
+    }
   });
 
   it("the gateway token: refuses the Control UI page that carries it", () => {
