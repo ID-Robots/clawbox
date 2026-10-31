@@ -134,7 +134,9 @@ async function run() {
     try {
       await waitFor(`Settings -> Local AI's ${button}`, () => page.evaluate(`!!document.querySelector('[data-testid="${button}"]:not([disabled])')`), 90_000, 1000);
     } catch {
-      say(`not ok - Settings -> Local AI never offered ${force ? "Download again on the memory-model card" : "Install on the memory-search row"}`);
+      // What the row said instead, so a board that offered nothing says why.
+      const row = await page.evaluate(`document.querySelector('[data-testid="local-model-embeddings"]')?.textContent.replace(/\\s+/g, " ").trim().slice(0, 200) ?? null`).catch(() => null);
+      say(`not ok - Settings -> Local AI never offered ${force ? "Download again on the memory-model card" : "Install on the memory-search row"} (${row ? `the row said: ${row}` : "no memory-search row was drawn"})`);
       return;
     }
     await page.evaluate(`document.querySelector('[data-testid="${button}"]').click(); true`);

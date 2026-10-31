@@ -13,12 +13,16 @@
 #      memory-search model (about 640 MB) is downloaded from Settings → Local
 #      AI the way the owner does it: the row's Install, or the card's
 #      "Download again" when the model is already on the board. Settings
-#      draws it inline (steps, percentage, log).
+#      draws it inline (steps, percentage, log). Local AI offers the model
+#      only where memory search embeds on the box, so a board whose ClawBox AI
+#      plan has it in the cloud is moved onto the box first (Memory Shard's
+#      "On this box").
 #   2. The Settings window is closed. The download must keep running, the
 #      desktop's corner card must draw it with a rising percentage, and both
 #      the card and the box's own record must end `succeeded`.
 #   3. The board is left as it was found: a model that was not there is
-#      removed again; one that was there was replaced by a fresh copy.
+#      removed again; one that was there was replaced by a fresh copy; memory
+#      search moved off the cloud goes back to it.
 #
 # The flow runs on the board from its own checkout of the commit under test
 # (scripts/nano-tests/board/background-task-card.sh, which drives

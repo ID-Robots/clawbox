@@ -14,6 +14,15 @@
 # switched back at the end; a swap is not — the test that asks for one runs
 # last and the board is recycled after the run.
 #
+# Settings → Local AI offers the memory model only where memory search embeds
+# ON THIS BOX. A board whose ClawBox AI plan covers it embeds in the cloud by
+# default (src/lib/clawai-cloud-defaults.ts), and its row reads "Searching your
+# memory in the cloud" with no Install and no card under it. Such a board is
+# first moved onto the box the way the owner moves it — Memory Shard's "On
+# this box", `POST /setup-api/clawkeep/memory/provider` — and handed back at
+# the end: to its plan's default (`POST /setup-api/ai-cloud-defaults`), or to
+# the cloud the owner had picked.
+#
 # Prints `RESULT ok - …`, `RESULT not ok - …`, `RESULT skip - …` and
 # `NOTE …` lines, each result prefixed with `[<runtime>] `, the agent runtime
 # the board ran it under, so the OpenClaw and Hermes runs can be told apart.
@@ -149,6 +158,51 @@ PRESENT=$(body_of "$st" | python3 -c 'import json,sys; print(1 if json.load(sys.
 if [ "$(status_of "$st")" != 200 ] || [ -z "$PRESENT" ]; then
   say "not ok - the memory model status answered $(status_of "$st")"
   exit 0
+fi
+
+# memory_placement -> "<cloud|local> <True|False>": where memory search embeds,
+# and whether the owner picked that. Nothing when it cannot be read.
+memory_placement() {
+  local r
+  r=$(call GET /setup-api/ai-cloud-defaults)
+  [ "$(status_of "$r")" = 200 ] || return 0
+  body_of "$r" | python3 -c 'import json,sys; c=json.load(sys.stdin)["capabilities"]["embeddings"]; print(c["source"], c["ownerChoice"])' 2>/dev/null
+}
+MEMORY_MOVED=""
+# The plan's default comes back through the applier every boot runs (which
+# also re-indexes); an owner's own cloud pick the way Memory Shard's card
+# makes it: the switch, then a full pass (a 409 is one already running).
+hand_memory_back() {
+  [ -n "$MEMORY_MOVED" ] || return 0
+  local owner_pick=$MEMORY_MOVED r now
+  MEMORY_MOVED=""
+  if [ "$owner_pick" = True ]; then
+    r=$(call POST /setup-api/clawkeep/memory/provider '{"source":"cloud"}')
+    [ "$(status_of "$r")" = 200 ] && call POST /setup-api/clawkeep/memory/index '{"mode":"full"}' >/dev/null
+  else r=$(call POST /setup-api/ai-cloud-defaults '{"capability":"embeddings"}'); fi
+  read -r now _ <<<"$(memory_placement)"
+  if [ "$(status_of "$r")" = 200 ] && [ "${now:-}" = cloud ]; then
+    say "ok - memory search is back in the ClawBox AI cloud, where the board had it"
+  else
+    say "not ok - handing memory search back to the ClawBox AI cloud answered $(status_of "$r") and left it ${now:-unreadable}: $(body_of "$r" | head -c 200)"
+  fi
+}
+read -r MEMORY_SOURCE MEMORY_OWNER_PICK <<<"$(memory_placement)"
+if [ -z "${MEMORY_SOURCE:-}" ]; then
+  printf 'NOTE where memory search embeds could not be read; the board is tested as it is\n'
+elif [ "$MEMORY_SOURCE" = cloud ]; then
+  # Armed before the answer is read: the route records the owner's pick before
+  # it switches, so even a refused move may have something to hand back. Runs
+  # after the model is removed again, and before a selected runtime goes back.
+  MEMORY_MOVED=${MEMORY_OWNER_PICK:-False}
+  trap 'hand_memory_back; switch_back' EXIT
+  r=$(call POST /setup-api/clawkeep/memory/provider '{"source":"local"}')
+  if [ "$(status_of "$r")" != 200 ]; then
+    say "not ok - moving memory search onto the box (Memory Shard's \"On this box\") answered $(status_of "$r"): $(body_of "$r" | head -c 200)"
+    exit 0
+  fi
+  printf 'NOTE memory search embedded in the ClawBox AI cloud (%s), where Local AI offers no memory model; it is moved onto the box for the test\n' \
+    "$([ "$MEMORY_OWNER_PICK" = True ] && echo "the owner's pick" || echo "the plan's default")"
 fi
 
 PROFILE=$(mktemp -d /tmp/nano-bg-task-XXXXXX)
