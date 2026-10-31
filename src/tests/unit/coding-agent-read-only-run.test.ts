@@ -137,13 +137,13 @@ describe("a read-only run", () => {
         // The same path quoted, or built by the shell from a variable.
         `git diff a.txt "/etc/hostname"`, `git diff "/etc/hostname" a.txt`, "git diff a.txt '/etc/hostname'", `git diff a.txt "$HOME/.netrc"`, "git diff a.txt ${HOME}/.netrc", "git diff a.txt $(pwd)/../other/.env",
         // A list file read and echoed line by line in the error.
-        "git blame -S /etc/hostname a.ts", "git blame --ignore-revs-file /etc/hostname a.ts", "git blame --ignore-revs /etc/hostname a.ts",
+        "git blame -S /etc/hostname a.ts", "git blame -S/etc/hostname a.ts", "git blame -L 1,9 -S /etc/hostname a.ts", "git blame --ignore-revs-file /etc/hostname a.ts", "git blame --ignore-revs /etc/hostname a.ts",
         // Revisions from a redirected file, echoed as a bad revision.
         "git log --stdin", "git show --stdin",
       ];
       for (const command of leaks) expect(verdict(args, command), command).toBe("denied");
       // The reads inside the repository these rules sit beside stay approved.
-      for (const command of ["git diff origin/beta -- src", "git diff HEAD~1..HEAD -- src/lib", "git diff origin/beta...HEAD --stat", "git diff --no-color HEAD", "git blame -L 1,9 src/a.ts", "git blame --ignore-rev abc1234 src/a.ts", "git describe --contains HEAD", "git log --oneline origin/beta..HEAD", "git show HEAD~2:src/a.ts"]) {
+      for (const command of ["git diff origin/beta -- src", "git diff HEAD~1..HEAD -- src/lib", "git diff origin/beta...HEAD --stat", "git diff --no-color HEAD", "git blame -L 1,9 src/a.ts", "git blame -L 1,9 src/Foo-Service.ts", "git blame Makefile-SO", "git blame --ignore-rev abc1234 src/a.ts", "git describe --contains HEAD", "git log --oneline origin/beta..HEAD", "git show HEAD~2:src/a.ts"]) {
         expect(verdict(args, command), command).toBe("allowed");
       }
     }

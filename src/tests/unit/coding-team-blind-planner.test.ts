@@ -96,7 +96,7 @@ let starts: Array<Record<string, unknown>>;
 let seq: number;
 /** Planner, worker and single runs take the scripted `outcomes` in the order they start; reviewers accept. */
 let workerSeq: number;
-let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; writes: Record<string, string> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; writes: Record<string, string>; removes: string[] }>>;
 /** Each worker's view of the board as it started: its task's dependencies' status and verdict. */
 let boardAtStart: Map<string, Array<{ task_id: string; status: string; verdict: string | null }>>;
 
@@ -173,6 +173,7 @@ beforeEach(async () => {
       fs.mkdirSync(path.dirname(at), { recursive: true });
       fs.writeFileSync(at, content);
     }
+    for (const file of (outcome as { removes?: string[] }).removes ?? []) fs.rmSync(path.join(String(run.directory), file), { force: true });
     return run;
   });
   runner.getRun.mockImplementation((id: string) => runs.get(id) ?? null);
@@ -422,5 +423,33 @@ describe("D3: a plan run as one run judges each task on the files it names", () 
       ["t3", "complete", "accepted"],
     ]);
     expect(done.tasks.every((t) => /^Ran as a single run, and the files it names are present/.test(t.review?.notes ?? ""))).toBe(true);
+  });
+
+  it("does not count a named file the run touched and removed as missing", async () => {
+    const plan = answer(
+      ["src/core.ts — the shared core", "src/types.ts — the shared types", "src/legacy.ts — the old widget"],
+      [
+        { task_description: "Add the first widget", files_hint: ["src/core.ts", "src/types.ts", "notes/one.md"] },
+        { task_description: "Retire the old widget", depends_on: ["t1"], files_hint: ["src/core.ts", "src/types.ts", "src/legacy.ts"] },
+        { task_description: "Add the third widget", depends_on: ["t2"], files_hint: ["src/core.ts", "src/types.ts", "notes/three.md"] },
+      ],
+    );
+    fs.mkdirSync(path.join(project, "src"), { recursive: true });
+    fs.writeFileSync(path.join(project, "src", "legacy.ts"), "export const legacy = true;\n");
+    outcomes = [
+      { summary: plan },
+      { summary: "Done.", writes: { ...SHARED, "notes/one.md": "one\n", "notes/three.md": "three\n" }, removes: ["src/legacy.ts"], filesTouched: ["src/core.ts", "src/types.ts", "src/legacy.ts", "notes/one.md", "notes/three.md"] },
+    ];
+    const board = await teams.startTeam({ goal: GOAL, directory: "widgets", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.singleRun).toBe(true);
+    expect(fs.existsSync(path.join(project, "src", "legacy.ts"))).toBe(false);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.review?.verdict])).toEqual([
+      ["t1", "complete", "accepted"],
+      ["t2", "complete", "accepted"],
+      ["t3", "complete", "accepted"],
+    ]);
+    expect(done.status).toBe("done");
   });
 });

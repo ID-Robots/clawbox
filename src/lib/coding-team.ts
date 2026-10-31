@@ -1552,9 +1552,13 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
   const gaps = new Map<string, { named: string[]; missing: string[] }>();
   if (ok && settled) {
     const place = deliverablePlace(settled, board.directory);
+    // A file the run recorded touching and then removed was the task's to
+    // delete (a hint names what a task touches, not only what it leaves): it
+    // is not missing. A removal made only through Bash is not recorded there.
+    const removed = vanishedFiles(settled.directory, settled.filesTouched ?? []);
     for (const task of tasks) {
       const named = namedDeliverables(task.files_hint);
-      if (named.length) gaps.set(task.task_id, { named, missing: await missingDeliverables(place, named) });
+      if (named.length) gaps.set(task.task_id, { named, missing: await missingDeliverables(place, named.filter((n) => !removed.has(n))) });
     }
   }
   for (const task of tasks) {

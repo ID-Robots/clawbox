@@ -1460,15 +1460,17 @@ export const MUTATING_GIT_DENYLIST: readonly string[] = [
   // so does a plain `git diff` given two paths when one of them lies outside
   // the repository (an absolute, home or parent path, quoted or not, or one
   // the shell builds from a variable such as `$HOME`); `git blame --contents`
-  // takes any file as the blamed one's text; `git blame -S` and
-  // `--ignore-revs-file` read a list file and echo its lines in their error;
+  // takes any file as the blamed one's text; `git blame -S` (an argument of
+  // its own, its file attached or not: a file name such as `Foo-Service.ts`
+  // stays readable) and `--ignore-revs-file` read a list file and echo its
+  // lines in their error;
   // `--stdin` (git log, show) reads revisions from a redirected file the same
   // way. Git takes any unambiguous abbreviation of a long option, so each is
   // refused from its shortest prefix up (`--no-i`, `--con`, `--ignore-revs`).
   "Bash(git diff *--no-i*)", "Bash(git diff /*)", "Bash(git diff * /*)", "Bash(git diff ~*)", "Bash(git diff * ~*)",
   "Bash(git diff *\"/*)", "Bash(git diff *'/*)", "Bash(git diff *$*)",
   "Bash(git diff *../*)", "Bash(git diff .. *)", "Bash(git diff * ..)",
-  "Bash(git blame *--con*)", "Bash(git blame *-S*)", "Bash(git blame *--ignore-revs*)", "Bash(git *--stdin*)",
+  "Bash(git blame *--con*)", "Bash(git blame -S*)", "Bash(git blame * -S*)", "Bash(git blame *--ignore-revs*)", "Bash(git *--stdin*)",
   "Bash(gh pr:*)", "Bash(gh api:*)",
 ];
 
