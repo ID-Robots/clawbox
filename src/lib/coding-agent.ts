@@ -2690,6 +2690,19 @@ export class SlotsFullError extends CodingAgentError {
 }
 
 /**
+ * A start by the assistant refused because the owner stopped a team of its
+ * own on that work (coding-team.ts `ownerStopRefusal`): a 409 whose `code`
+ * the MCP tools turn into "tell the user and stop".
+ */
+export class OwnerStoppedTeamError extends CodingAgentError {
+  readonly code = "owner_stopped";
+  constructor(readonly teamId: string, message: string) {
+    super("busy", message);
+    this.name = "OwnerStoppedTeamError";
+  }
+}
+
+/**
  * The HTTP status a route answers a CodingAgentError with — ONE table, so the
  * five routes that catch one cannot disagree. The three refusals are 409:
  * "the request cannot be satisfied as things stand" — the switch is off, the

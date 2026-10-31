@@ -22,6 +22,11 @@ vi.mock("@/lib/coding-agent", async () => {
   return { ...actual, startRun, startOrQueueRun };
 });
 
+// The owner's-stop hold (coding-team.ts ownerStopRefusalForRun, tested
+// there): nothing held unless a case says so.
+const ownerStopRefusalForRun = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-team", () => ({ ownerStopRefusalForRun }));
+
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
 let POST: (req: Request) => Promise<Response>;
@@ -52,6 +57,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   startRun.mockResolvedValue(RUN);
+  ownerStopRefusalForRun.mockResolvedValue(null);
   startOrQueueRun.mockImplementation(async (input: unknown) => ({ run: await startRun(input), queued: false }));
   const lib = await import("@/lib/coding-agent");
   CodingAgentError = lib.CodingAgentError;
@@ -90,6 +96,24 @@ describe("the gate", () => {
     const res = await POST(req({ auth: "cookie" }));
     expect(res.status).toBe(202);
     expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ source: "owner" }));
+  });
+});
+
+describe("a team the owner stopped", () => {
+  it("refuses the agent's run on its work 409 owner_stopped, before any start is announced", async () => {
+    const { OwnerStoppedTeamError } = await import("@/lib/coding-agent");
+    ownerStopRefusalForRun.mockResolvedValueOnce(new OwnerStoppedTeamError("team-stop0001", "The owner stopped coding team team-stop0001 on this work."));
+    const res = await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", resumeRunId: "run-aaaaaaaa" } }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The owner stopped coding team team-stop0001 on this work.", kind: "busy", code: "owner_stopped" });
+    expect(ownerStopRefusalForRun).toHaveBeenCalledWith({ task: "Finish it", projectId: "site", directory: null, resumeRunId: "run-aaaaaaaa" });
+    expect(startOrQueueRun).not.toHaveBeenCalled();
+  });
+
+  it("never holds the owner's run, nor the agent's once the user asked again", async () => {
+    expect((await POST(req({ auth: "cookie" }))).status).toBe(202);
+    expect((await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", userAskedAgain: true } }))).status).toBe(202);
+    expect(ownerStopRefusalForRun).not.toHaveBeenCalled();
   });
 });
 

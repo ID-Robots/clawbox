@@ -1332,6 +1332,12 @@ export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus
   if (actor.kind === "worker" || actor.kind === "planner" || actor.kind === "reviewer") {
     throw new BoardAccessError(actor, "team_status", `${describeActor(actor)} may not change the team's status.`);
   }
+  // Only the owner stops a team (above), and the stop is the last word on the
+  // board: an orchestrator step that was awaiting something when the stop
+  // landed — the team branch, a worker's start — must not write the team back
+  // to `working`, which kept it holding the box with nobody working, or to
+  // `failed`, which the assistant reads as "start a fresh run".
+  if (board.status === "stopped" && status !== "stopped") return;
   const now = Date.now();
   board.status = status;
   if (status === "failed" && note) board.error = note;

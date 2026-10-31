@@ -1080,7 +1080,14 @@ asked to wait. Otherwise the assistant does NOT poll: the box tells the owner
 ONCE when a team settles — a desktop notice and the Telegram message, never
 one per member run — and on OpenClaw posts `[Coding team <id>] finished` into
 the main chat; a Hermes box has no way into its chat, so there the tool says
-to look again only when the user asks. A task starts only once every
+to look again only when the user asks. A team the OWNER stopped gets no chat
+line — given one, the assistant started the team again on its own — and it
+stays stopped: `coding_team_status` says so (`stopped_by` in the list), and
+for 12 hours after the stop the box refuses the assistant's own
+`coding_team_run` or `coding_agent_run` on that team's folder or goal (409
+`owner_stopped`) until something else has started there, unless the call
+passes `user_asked_again: true` — the user asked again in a new message. A
+task starts only once every
 `depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
 reopened after a dependent started HOLDS the dependent — its worker stopped
 or its result set aside — said on the board, and it runs again on the new
