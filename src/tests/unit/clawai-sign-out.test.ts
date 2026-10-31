@@ -69,6 +69,12 @@ vi.mock("@/lib/openclaw-auth-store", () => ({
 const store = vi.hoisted(() => ({
   DATA_DIR: "/nonexistent-clawai-sign-out-test",
   get: vi.fn(async (key: string) => box.store[key]),
+  // `@/lib/clawai-credential-refusal` writes the remembered refusal through
+  // this; like the real store, undefined removes the key.
+  set: vi.fn(async (key: string, value: unknown) => {
+    if (value === undefined) delete box.store[key];
+    else box.store[key] = value;
+  }),
   getKnown: vi.fn(async (key: string) => (box.configStoreUnreadable ? { value: undefined, known: false } : { value: box.store[key], known: true })),
   setMany: vi.fn(async (entries: Record<string, unknown>) => {
     for (const [k, v] of Object.entries(entries)) {
@@ -77,7 +83,16 @@ const store = vi.hoisted(() => ({
     }
   }),
 }));
-vi.mock("@/lib/config-store", () => store);
+// Each member named, not `() => store`: the config-store mock gate
+// (openclaw-config-mock-completeness.test.ts) reads only a literal factory
+// object, and a suite that can reach the refusal reader must carry get/set.
+vi.mock("@/lib/config-store", () => ({
+  DATA_DIR: store.DATA_DIR,
+  get: store.get,
+  set: store.set,
+  getKnown: store.getKnown,
+  setMany: store.setMany,
+}));
 const credentials = vi.hoisted(() => ({
   forgetClawaiCredentialRefusal: vi.fn(async () => undefined),
   resolveClawaiToken: vi.fn(),
