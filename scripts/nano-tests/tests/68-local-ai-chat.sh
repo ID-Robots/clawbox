@@ -3,6 +3,7 @@
 # covers: scripts/openclaw-plugins/clawbox-local-lean/* scripts/start-llamacpp.sh
 # covers: src/lib/llamacpp.ts src/lib/llamacpp-server.ts src/lib/local-tool-search.ts src/lib/local-ai-thinking.ts
 # covers: src/app/setup-api/llamacpp/* src/app/setup-api/local-ai/llamacpp/*
+# covers: src/lib/local-ai-proxy.ts scripts/gateway-pre-start.sh
 #
 # Local AI as the chat model, used the way an owner uses it: Gemma 4 E2B on
 # llama.cpp picked in the chat header (POST /setup-api/chat/model, the
@@ -22,6 +23,18 @@
 #     on one fixed prompt (llama-server's own timings). Decode under 10 tok/s
 #     fails (the model is no longer on the GPU), and so does no measurement.
 #
+# Then the two launch decisions behind it, read off the running box:
+#
+#   * the window and KV cache: llama-server runs with the window OpenClaw's
+#     row is told, and neither is still a superseded shipped value (131072
+#     tokens, q4_0 cache, 131072-token answers) — the shipped 32768 / q8_0 /
+#     8192 pass, an owner's own .env value is noted;
+#   * thinking on demand: the row declares binary reasoning (`none`/`high`)
+#     with `off` as the model's default and llama-server starts with
+#     `--reasoning off`; then one short question through the gateway, once at
+#     the default level and once with `--thinking high` — the second must
+#     spend clearly more output tokens (its reasoning) than the first.
+#
 # Two attempts, each on a session of its own: the turn passes when one does,
 # and a miss is noted. Afterwards the box is put back — the primary model and
 # tools.toolSearch as they were, the web apps the turn made uninstalled, Local
@@ -39,6 +52,19 @@ TURN_SECONDS=300
 # prompt is ~13.4k on its own.
 LEAN_MAX_PROMPT_PER_CALL=8000
 MIN_DECODE_TOK_S=10
+
+# The thinking check: a question with a one-word answer, so the output tokens
+# of a turn without thinking are a handful and a turn with it adds its
+# reasoning (253 tokens on a like question in the benchmark).
+THINK_PROMPT="Колко е 17 × 23? Отговори само с числото."
+THINK_TURN_SECONDS=150
+THINK_MIN_EXTRA_OUTPUT=40
+# What the test may have spent before the thinking turns start, out of its
+# 900 s: both turns and the way out must still fit.
+THINK_START_BY=$((900 - 2 * THINK_TURN_SECONDS - 60))
+# The shipped launch values (src/lib/llamacpp.ts) and the ones they replaced.
+SHIPPED_CTX=32768 SHIPPED_KV=q8_0 SHIPPED_MAX_TOKENS=8192
+SUPERSEDED_CTX=131072 SUPERSEDED_KV=q4_0 SUPERSEDED_MAX_TOKENS=131072
 
 # "bg: …", "ru: …" or "unclear: …" for one reply, on stdin. Code blocks and
 # tags are dropped first; then letters and whole words only Russian has (ы э ё,
@@ -98,6 +124,50 @@ box_snapshot() {
     pid=$(cat "$REPO/data/llamacpp/server.pid" 2>/dev/null)
     up=0; [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && up=1
     echo "$avail ${gw:-0} ${st:-0} $up"
+  ' | tail -n 1
+}
+
+# The on-device row as openclaw.json tells OpenClaw about it, and the model's
+# own thinking default, one JSON line: {"contextWindow": …, "maxTokens": …,
+# "reasoning": …, "efforts": […], "thinking": …}; "{}" when unreadable.
+# shellcheck disable=SC2016  # expanded on the board
+local_row_snapshot() {
+  board '
+    python3 - "$HOME/.openclaw/openclaw.json" "$1" <<"PY" 2>/dev/null || echo "{}"
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    print("{}"); raise SystemExit
+ref = sys.argv[2]
+mid = ref.split("/", 1)[1] if "/" in ref else ref
+prov = ((c.get("models") or {}).get("providers") or {}).get("llamacpp") or {}
+rows = prov.get("models") if isinstance(prov, dict) else None
+row = next((m for m in (rows or []) if isinstance(m, dict) and m.get("id") == mid), {})
+compat = row.get("compat") if isinstance(row.get("compat"), dict) else {}
+entry = (((c.get("agents") or {}).get("defaults") or {}).get("models") or {}).get(ref)
+params = entry.get("params") if isinstance(entry, dict) else None
+print(json.dumps({
+    "contextWindow": row.get("contextWindow"),
+    "maxTokens": row.get("maxTokens"),
+    "reasoning": row.get("reasoning"),
+    "efforts": compat.get("supportedReasoningEfforts"),
+    "thinking": params.get("thinking") if isinstance(params, dict) else None,
+}, sort_keys=True))
+PY
+  ' "$1" | tail -n 1
+}
+
+# The flags the running llama-server was started with, one line:
+# "ctx=… ctk=… ctv=… reasoning=…", or "none" when it is not running.
+# shellcheck disable=SC2016  # expanded on the board
+server_flags() {
+  board '
+    pid=$(cat "$REPO/data/llamacpp/server.pid" 2>/dev/null)
+    if [ -z "$pid" ] || [ ! -r "/proc/$pid/cmdline" ]; then echo none; exit 0; fi
+    args=" $(tr "\0" " " < "/proc/$pid/cmdline") "
+    flag() { sed -n -E "s/.* $1 ([^ ]+) .*/\\1/p" <<<"$args" | head -n 1; }
+    echo "ctx=$(flag --ctx-size) ctk=$(flag --cache-type-k) ctv=$(flag --cache-type-v) reasoning=$(flag --reasoning)"
   ' | tail -n 1
 }
 
@@ -373,6 +443,108 @@ else
     ok "llama-server decodes at $DECODE tok/s and prefills at ${PREFILL:-?} tok/s ($NOTE_SPEED)"
   else
     not_ok "llama-server decodes at only $DECODE tok/s (want at least $MIN_DECODE_TOK_S): is the model still on the GPU?"
+  fi
+fi
+
+# ---- the window, the KV cache and thinking on demand ---------------------------
+
+# word KEY LINE — the value after "KEY=" in a "k=v k=v" line, "" when absent.
+word() { sed -n -E "s/.* $1=([^ ]*).*/\\1/p" <<<" $2" | head -n 1; }
+
+# llama-server has just answered the speed prompt, so it is up: read the flags
+# it really runs with, not the .env that should have produced them.
+ROW=$(local_row_snapshot "$LOCAL_MODEL")
+FLAGS=$(server_flags)
+note "OpenClaw's row for $LOCAL_MODEL: ${ROW:-unreadable}; llama-server runs with: ${FLAGS:-unreadable}"
+ROW_CTX=$(jq -r '.contextWindow // empty' <<<"$ROW" 2>/dev/null)
+ROW_MAX=$(jq -r '.maxTokens // empty' <<<"$ROW" 2>/dev/null)
+S_CTX=$(word ctx "$FLAGS") S_CTK=$(word ctk "$FLAGS") S_CTV=$(word ctv "$FLAGS") S_REASONING=$(word reasoning "$FLAGS")
+
+# start-llamacpp.sh always passes all four, so a missing one is a failed read.
+if [ -z "$S_CTX" ] || [ -z "$S_CTK" ] || [ -z "$S_CTV" ] || [ -z "$S_REASONING" ]; then
+  not_ok "llama-server's launch flags could not be read after the turn (${FLAGS:-no answer})"
+else
+  if [ "$S_CTX" = "$ROW_CTX" ]; then
+    ok "OpenClaw is told the window llama-server has: $S_CTX tokens"
+  else
+    not_ok "llama-server runs a $S_CTX-token window but OpenClaw's row says ${ROW_CTX:-nothing}"
+  fi
+  if [ "$S_CTX" = "$SUPERSEDED_CTX" ] || [ "$S_CTK" = "$SUPERSEDED_KV" ] || [ "$S_CTV" = "$SUPERSEDED_KV" ]; then
+    not_ok "llama-server still runs a superseded launch value: window $S_CTX, KV cache $S_CTK/$S_CTV (shipped: $SHIPPED_CTX, $SHIPPED_KV/$SHIPPED_KV)"
+  elif [ "$S_CTX" = "$SHIPPED_CTX" ] && [ "$S_CTK" = "$SHIPPED_KV" ] && [ "$S_CTV" = "$SHIPPED_KV" ]; then
+    ok "llama-server runs the shipped launch: a $SHIPPED_CTX-token window and a $SHIPPED_KV KV cache"
+  else
+    note "llama-server runs window $S_CTX, KV cache $S_CTK/$S_CTV, not the shipped $SHIPPED_CTX, $SHIPPED_KV/$SHIPPED_KV (an owner's own .env value)"
+  fi
+fi
+if [ -z "$ROW_MAX" ]; then
+  not_ok "OpenClaw's row for $LOCAL_MODEL names no maxTokens (the gateway pre-start always writes one)"
+elif [ "$ROW_MAX" = "$SUPERSEDED_MAX_TOKENS" ]; then
+  not_ok "OpenClaw's row still lets one answer run to the superseded $SUPERSEDED_MAX_TOKENS tokens"
+elif [ "$ROW_MAX" = "$SHIPPED_MAX_TOKENS" ]; then
+  ok "one answer is capped at $SHIPPED_MAX_TOKENS tokens"
+else
+  note "OpenClaw's row caps one answer at ${ROW_MAX:-nothing} tokens (shipped: $SHIPPED_MAX_TOKENS)"
+fi
+
+EFFORTS=$(jq -c '.efforts' <<<"$ROW" 2>/dev/null)
+THINK_DEFAULT=$(jq -r '.thinking // empty' <<<"$ROW" 2>/dev/null)
+if [ "$(jq -r '.reasoning' <<<"$ROW" 2>/dev/null)" = true ] && [ "$EFFORTS" = '["none","high"]' ] \
+  && [ "$THINK_DEFAULT" = off ] && [ "$S_REASONING" = off ]; then
+  ok "thinking is per request: the row offers none/high, the model's default is off and llama-server starts with --reasoning off"
+else
+  not_ok "thinking is not declared per request and off by default: row reasoning $(jq -c '.reasoning' <<<"$ROW" 2>/dev/null), efforts ${EFFORTS:-?}, model default ${THINK_DEFAULT:-unset}, llama-server --reasoning ${S_REASONING:-?}"
+fi
+
+# One short turn on a session of its own: a TURN line, then the CLI's JSON.
+# $5 is a --thinking level, or "" for the level the model has by default.
+# shellcheck disable=SC2016  # expanded on the board
+THINK_TURN='
+  bin=$1 key=$2 prompt=$3 secs=$4 level=$5
+  extra=()
+  [ -n "$level" ] && extra=(--thinking "$level")
+  out=$(mktemp)
+  start=$(date +%s)
+  timeout "$secs" "$bin" agent --agent main --session-key "$key" -m "$prompt" "${extra[@]}" --json --timeout $((secs - 20)) > "$out"
+  rc=$?
+  echo "TURN rc=$rc secs=$(( $(date +%s) - start ))"
+  sed -n "/^{/,\$p" "$out"
+  rm -f "$out"
+'
+
+# think_turn LEVEL — one THINK_PROMPT turn; sets T_RC, T_SECS, T_PROVIDER, T_OUT.
+think_turn() {
+  local answer line json meta reply
+  answer=$(board "$THINK_TURN" "$OPENCLAW_BIN" "nano-ci-$NANO_RUN_ID-local-think-${1:-default}-$(date +%s)" "$THINK_PROMPT" "$THINK_TURN_SECONDS" "$1")
+  line=$(grep -m 1 '^TURN ' <<<"$answer")
+  json=$(sed -n '/^{/,$p' <<<"$answer")
+  meta=$(jq -c 'first(.. | objects | select(has("agentMeta")) | .agentMeta) // {}' <<<"$json" 2>/dev/null)
+  [ -n "$meta" ] || meta='{}'
+  T_RC=$(val rc "$line") T_SECS=$(val secs "$line")
+  T_PROVIDER=$(jq -r '.provider // empty' <<<"$meta" 2>/dev/null)
+  T_OUT=$(jq -r '.usage.output // empty' <<<"$meta" 2>/dev/null)
+  reply=$(jq -r '[ (.result.payloads // [])[]?.text, .result.text, .reply, .text ]
+    | map(select(type == "string")) | join(" ")' <<<"$json" 2>/dev/null | tr '\n' ' ' | head -c 200)
+  note "thinking ${1:-at the default level}: ${line:-no answer from the board}; answered by ${T_PROVIDER:-?}, ${T_OUT:-?} output tokens; reply: ${reply:-none}"
+}
+
+if [ "$SECONDS" -gt "$THINK_START_BY" ]; then
+  not_ok "no time left for the thinking check: $SECONDS s spent, its two turns may take $((2 * THINK_TURN_SECONDS)) s"
+else
+  think_turn ""
+  OFF_RC=$T_RC OFF_SECS=$T_SECS OFF_PROVIDER=$T_PROVIDER OFF_OUT=$T_OUT
+  think_turn high
+  HIGH_RC=$T_RC HIGH_SECS=$T_SECS HIGH_PROVIDER=$T_PROVIDER HIGH_OUT=$T_OUT
+  if [ "$OFF_RC" != 0 ] || [ "$HIGH_RC" != 0 ]; then
+    not_ok "a thinking-check turn failed (default level: exit ${OFF_RC:-?}, --thinking high: exit ${HIGH_RC:-?})"
+  elif [ "$OFF_PROVIDER" != llamacpp ] || [ "$HIGH_PROVIDER" != llamacpp ]; then
+    not_ok "a thinking-check turn was not answered by the on-device model (default level: ${OFF_PROVIDER:-?}, --thinking high: ${HIGH_PROVIDER:-?})"
+  elif ! [[ $OFF_OUT =~ ^[0-9]+$ && $HIGH_OUT =~ ^[0-9]+$ ]]; then
+    not_ok "the CLI's JSON names no output tokens for a thinking-check turn (default level: ${OFF_OUT:-none}, --thinking high: ${HIGH_OUT:-none})"
+  elif [ "$HIGH_OUT" -ge $((OFF_OUT + THINK_MIN_EXTRA_OUTPUT)) ]; then
+    ok "thinking is off by default and on when asked: $OFF_OUT output tokens in ${OFF_SECS:-?} s at the default level, $HIGH_OUT in ${HIGH_SECS:-?} s with --thinking high"
+  else
+    not_ok "thinking did not follow the level: $HIGH_OUT output tokens with --thinking high against $OFF_OUT at the default level (want at least $THINK_MIN_EXTRA_OUTPUT more)"
   fi
 fi
 
