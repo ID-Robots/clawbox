@@ -3553,6 +3553,36 @@ describe("updater", () => {
       expect(mockResumeGatewayAdmission.mock.invocationCallOrder[0]).toBeGreaterThan(setupStep);
     });
 
+    it("does not hold the gateway service step on a box with no agent chosen yet, where it restarts nothing", async () => {
+      // install.sh's step_gateway_setup returns before the restart while the
+      // edition lock says `unselected`: no wait, no drain, no card for it.
+      const editionSource = await import("@/lib/edition-source");
+      const unselected = vi.spyOn(editionSource, "readEditionSource").mockReturnValue({ edition: "openclaw", defaulted: true, unselected: true });
+      try {
+        process.env.CLAWBOX_UPDATE_BUSY_WAIT_MS = "0";
+        mockActiveAgentWork.mockResolvedValue(busy(1));
+        setupExecFileMock({
+          "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), { stderr: "sudo: a password is required\n" }),
+          "-u clawbox-root-update@openclaw_install_fast.service": {
+            stdout: "  OpenClaw refresh: fast path (the core is at the pin and the gateway is serving) — no gateway stop\n",
+            stderr: "",
+          },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const setupStep = execOrder("clawbox-run-root-step.sh gateway_setup");
+        expect(setupStep).toBeGreaterThan(0);
+        // Counted once, for the reboot only — after the gateway service step.
+        expect(mockActiveAgentWork).toHaveBeenCalledTimes(1);
+        expect(mockActiveAgentWork.mock.invocationCallOrder[0]).toBeGreaterThan(setupStep);
+        expect(mockGatewayCall).not.toHaveBeenCalled();
+      } finally {
+        unselected.mockRestore();
+      }
+    });
+
     it("gates the x64 desktop's core step, which stops the owner's gateway inside the root adapter", async () => {
       mockX64Integration.mockReturnValue(true);
       mockGatewayCall.mockImplementation(async (method: string) => {

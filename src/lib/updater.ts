@@ -21,7 +21,7 @@ import {
   DOCTOR_SERVICE_OWNERSHIP_RE,
   withExternalGatewaySupervisor,
 } from "./openclaw-doctor-ownership";
-import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
+import { hasHermesHarness, readEdition, readEditionSource, type EditionName } from "./edition-source";
 import { runHermesCli } from "./hermes-cli";
 import { hermesHome } from "./hermes-env";
 import { waitForPortOpen } from "./port-probe";
@@ -6327,11 +6327,13 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           // The desktop adapter's with_gateway_stopped stops the owner's user
           // gateway itself, first thing: the wait and the drain come here.
           await withGatewayStopHeldForAgentWork(step.id, { drain: true }, () => execAsRoot(step.id, timeoutMs));
-        } else if (!desktopIntegration && step.id === "gateway_setup") {
+        } else if (!desktopIntegration && step.id === "gateway_setup" && readEditionSource().unselected !== true) {
           // install.sh's step_gateway_setup ends in `systemctl restart
           // clawbox-gateway.service` on every update, changed unit or not, so
           // it is a gateway stop like the others: the wait and the drain come
-          // first. (The desktop adapter's gateway_setup only reloads units.)
+          // first. Not before an agent is chosen: the step returns before the
+          // restart there. (The desktop adapter's gateway_setup only reloads
+          // units.)
           await withGatewayStopHeldForAgentWork(step.id, { drain: true }, () => execAsRoot(step.id, timeoutMs));
         } else {
           await execAsRoot(step.id, timeoutMs);
