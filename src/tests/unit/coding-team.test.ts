@@ -799,6 +799,124 @@ describe("a stop that lands while a worker is being made", () => {
   });
 });
 
+describe("a stop that lands while the team branch is being made", () => {
+  it("stays stopped — never written back to working — starts no worker, and frees the box", async () => {
+    outcomes = [{ summary: PLAN }];
+    let release: () => void = () => {};
+    let branching = false;
+    plumbing.ensureTeamBranch.mockImplementationOnce(async (_dir: string, teamId: string) => {
+      branching = true;
+      await new Promise<void>((r) => { release = r; });
+      return { ok: true, branch: `clawbox/${teamId}`, base: "master" };
+    });
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "agent" });
+    for (let i = 0; i < 200 && !branching; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(branching).toBe(true);
+    expect(team.stopTeam(board.id).status).toBe("stopped");
+    release();
+    // The orchestrator goes on from the branch and settles the team: the
+    // owner hears of the stop once, and the box is free for the next team.
+    // Written back to `working`, it never settled and held the box.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
+    expect(team.getTeam(board.id)?.status).toBe("stopped");
+    expect(team.activeTeamId()).toBeNull();
+    expect(starts.filter((s) => (s.team as { role: string }).role === "worker")).toHaveLength(0);
+  });
+});
+
+describe("a team the owner stopped stays stopped", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /** A team the assistant started in `directory`, stopped by the owner `agoMs` ago. */
+  async function stoppedTeam(over: { goal?: string; directory?: string; source?: "agent" | "owner"; agoMs?: number } = {}): Promise<Board> {
+    const { createBoard, saveBoard, setTeamStatus } = await import("@/lib/coding-team-board");
+    const board = createBoard(
+      { goal: over.goal ?? "Build the invoice app", projectId: null, directory: over.directory ?? "/home/clawbox/Projects/site", source: over.source ?? "agent" },
+      over.source === "owner" ? { kind: "owner" } : { kind: "system" },
+    );
+    setTeamStatus(board, { kind: "owner" }, "stopped", "Stopped by the owner");
+    const at = Date.now() - (over.agoMs ?? 60_000);
+    board.createdAt = at - 60_000;
+    board.finishedAt = at;
+    board.updatedAt = at;
+    saveBoard(board);
+    return board;
+  }
+
+  it("never posts the owner's stop into the assistant's chat — that turn is where it started the team again", async () => {
+    outcomes = [{ summary: PLAN }];
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementation(async (id: string) => {
+      const run = runs.get(id)!;
+      if (id === "run-00000001") { Object.assign(run, { status: "completed", summary: PLAN }); return run; }
+      await new Promise<void>((r) => { release = r; });
+      return runs.get(id);
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
+    for (let i = 0; i < 100 && !runs.has("run-00000002"); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(team.stopTeam(board.id).status).toBe("stopped");
+    release();
+    expect((await finished(board.id)).status).toBe("stopped");
+    // The owner hears, once; the assistant's chat is not handed a turn.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(harness.getActiveHarness).not.toHaveBeenCalled();
+    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+  });
+
+  it("refuses the assistant's new team in that folder, or on that goal anywhere — 409 owner_stopped, before anything is made", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    const stopped = await stoppedTeam();
+    const err = await team.startTeam({ goal: "Finish the invoice app", directory: "site", source: "agent" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CodingAgentError);
+    expect(err).toMatchObject({ kind: "busy", code: "owner_stopped", teamId: stopped.id });
+    expect((err as Error).message).toContain(stopped.id);
+    // The same goal in another folder is the same work.
+    runner.resolveWorkingDirectory.mockResolvedValueOnce({ directory: "/home/clawbox/Projects/invoice-2", projectId: null });
+    await expect(team.startTeam({ goal: "  build the INVOICE app ", directory: "invoice-2", source: "agent" })).rejects.toMatchObject({ code: "owner_stopped" });
+    expect(team.listTeams().map((t) => t.id)).toEqual([stopped.id]);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("never holds the owner's own start — and once something has started on that work, the hold is over", async () => {
+    await stoppedTeam();
+    outcomes = [{ summary: PLAN }];
+    const owners = await team.startTeam({ goal: "Build the invoice app", directory: "site", source: "owner" });
+    expect((await finished(owners.id)).status).toBe("done");
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" })).toBeNull();
+  });
+
+  it("lets the assistant start the work again when the user asked in a new message (userAskedAgain)", async () => {
+    await stoppedTeam();
+    outcomes = [{ summary: PLAN }];
+    const again = await team.startTeam({ goal: "Build the invoice app", directory: "site", source: "agent", userAskedAgain: true });
+    expect((await finished(again.id)).status).toBe("done");
+  });
+
+  it("holds nothing for other work in another folder, for an owner's team, or past OWNER_STOP_HOLD_MS", async () => {
+    const stopped = await stoppedTeam();
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/other", text: "Add a README" })).toBeNull();
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Add a README" })).toMatchObject({ teamId: stopped.id });
+    const later = (stopped.finishedAt ?? 0) + team.OWNER_STOP_HOLD_MS + 1;
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" }, later)).toBeNull();
+  });
+
+  it("an owner's stopped team holds nothing: its id and goal are the owner's, not the bearer's", async () => {
+    await stoppedTeam({ source: "owner", directory: "/home/clawbox/Projects/mine", goal: "Owner work" });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/mine", text: "Owner work" })).toBeNull();
+  });
+
+  it("holds the assistant's run in that folder too (ownerStopRefusalForRun), from the run it resumes or the folder it names", async () => {
+    const stopped = await stoppedTeam();
+    expect(await team.ownerStopRefusalForRun({ task: "Finish the last part", projectId: null, directory: "site", resumeRunId: null })).toMatchObject({ code: "owner_stopped", teamId: stopped.id });
+    runner.getRun.mockReturnValueOnce({ id: "run-00000009", directory: "/home/clawbox/Projects/site" } as never);
+    expect(await team.ownerStopRefusalForRun({ task: "continue", projectId: null, directory: null, resumeRunId: "run-00000009" })).toMatchObject({ code: "owner_stopped" });
+    // A folder the run route cannot place holds nothing here: startRun refuses it itself.
+    runner.resolveWorkingDirectory.mockRejectedValueOnce(new Error("That folder is off limits."));
+    expect(await team.ownerStopRefusalForRun({ task: "x", projectId: null, directory: "/etc", resumeRunId: null })).toBeNull();
+  });
+});
+
 describe("many agents at once", () => {
   it("starts every task whose dependencies are done side by side, each in its own worktree, and merges each home", async () => {
     // A worker settles on its sixth wait, so two of them overlap: every worker

@@ -113,6 +113,18 @@ describe("who may do what", () => {
     lib.setTeamStatus(b, OWNER, "stopped", "Owner pressed Stop");
     expect(b.status).toBe("stopped");
   });
+
+  it("keeps the owner's stop: nothing writes a stopped team back to work, or to failed", () => {
+    const b = board();
+    lib.setTeamStatus(b, OWNER, "stopped", "Owner pressed Stop");
+    const logged = b.log.length;
+    for (const status of ["working", "reviewing", "failed", "done", "planning"] as const) {
+      lib.setTeamStatus(b, { kind: "system" }, status, "an orchestrator step that was awaiting something");
+      expect(b.status, status).toBe("stopped");
+    }
+    expect(b.error ?? null).toBeNull();
+    expect(b.log).toHaveLength(logged);
+  });
 });
 
 describe("the audit log and the file", () => {

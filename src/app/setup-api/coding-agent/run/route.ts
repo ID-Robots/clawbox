@@ -3,6 +3,7 @@ import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, newRunId, startOrQueueRun } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
+import { ownerStopRefusalForRun } from "@/lib/coding-team";
 import { pushPendingAction } from "@/lib/pending-actions";
 
 export const dynamic = "force-dynamic";
@@ -74,7 +75,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; effort?: unknown; deliverable?: unknown;
-    inputs?: unknown; experience?: unknown; fixCi?: unknown;
+    inputs?: unknown; experience?: unknown; fixCi?: unknown; userAskedAgain?: unknown;
   };
   try {
     body = await request.json();
@@ -103,6 +104,19 @@ export async function POST(request: Request) {
   // Who is asking decides how the run is labelled, nothing more: an owner
   // clicking in Settings holds a cookie, the agent holds the bearer.
   const source = (await hasPersonSession(request)) ? "owner" : "agent";
+
+  // The assistant's run on the work of a team of its own that the owner
+  // stopped waits for the user to ask again (`userAskedAgain`), as a team
+  // does — refused before the desktops hear of a start, so no card appears.
+  if (source === "agent" && body.userAskedAgain !== true) {
+    const held = await ownerStopRefusalForRun({
+      task,
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
+      directory: typeof body.directory === "string" ? body.directory : null,
+      resumeRunId: typeof body.resumeRunId === "string" ? body.resumeRunId : null,
+    });
+    if (held) return NextResponse.json({ error: held.message, kind: held.kind, code: held.code }, { status: httpStatusForCodingError(held.kind) });
+  }
 
   // The id the run will carry, named now: the runs list shows this start
   // under it from this moment (startOrQueueRun announces it before its first

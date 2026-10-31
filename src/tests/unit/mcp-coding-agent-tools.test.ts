@@ -155,6 +155,22 @@ describe("coding_agent_run", () => {
     );
   });
 
+  it("answers the box's owner_stopped refusal with CONFLICT ahead of busy, and sends userAskedAgain only for user_asked_again true", async () => {
+    apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "The owner stopped coding team team-k3x9q2ab on this work.", kind: "busy", code: "owner_stopped" })));
+    const out = await harness().call("coding_agent_run", { task: "Finish the invoice app", project_id: "site" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/owner stopped a coding team on this work/);
+    expect(out.error.next).toMatch(/Do not start it again, as a team or a run/);
+    expect(out.error.next).toMatch(/user_asked_again true/);
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    await harness().call("coding_agent_run", { task: "Finish the invoice app", project_id: "site", user_asked_again: true });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "Finish the invoice app", projectId: "site", userAskedAgain: true }, expect.anything());
+    await harness().call("coding_agent_run", { task: "Finish the invoice app", project_id: "site" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "Finish the invoice app", projectId: "site" }, expect.anything());
+  });
+
   it("splits input_files into the list the device judges, and reports what actually arrived", async () => {
     // The whole reason the parameter exists: the assistant writes its generated
     // media inside a store no run may read, so a picture only MENTIONED in the
