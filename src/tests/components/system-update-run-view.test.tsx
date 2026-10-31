@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@/tests/helpers/test-utils";
+import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import UpdateStep, { describeUpdateFailure } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel, {
@@ -58,21 +58,27 @@ const WHATS_NEW: UpdateWhatsNew = {
   releaseUrl: releasePageUrl(TARGET),
 };
 
-function mount(status: Partial<UpdateState>) {
+function mount(
+  status: Partial<UpdateState>,
+  { clawbox = { current: "4.2.5", target: TARGET }, whatsNew = WHATS_NEW }: {
+    clawbox?: { current: string; target: string | null };
+    whatsNew?: UpdateWhatsNew;
+  } = {},
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/setup-api/update/versions")) {
         return jsonResponse({
-          clawbox: { current: "4.2.5", target: TARGET, updateAvailable: true },
+          clawbox: { ...clawbox, updateAvailable: clawbox.target !== null },
           openclaw: { current: "2026.10.3", target: "2026.10.7", updateAvailable: true },
           edition: "openclaw",
           remote: { reachable: true },
         });
       }
       if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: "beta" });
-      if (url.includes("/setup-api/update/whats-new")) return jsonResponse(WHATS_NEW);
+      if (url.includes("/setup-api/update/whats-new")) return jsonResponse(whatsNew);
       if (url.includes("/setup-api/update/status")) return jsonResponse({ currentStepIndex: -1, ...status });
       return jsonResponse({});
     }),
@@ -138,6 +144,48 @@ describe("SystemUpdateApp — a run in progress", () => {
       .toEqual(expected.map((item) => item.image));
     expect(within(region).getByRole("link", { name: "Read the full release notes" }))
       .toHaveAttribute("href", releasePageUrl(TARGET));
+  });
+
+  // On a board, a beta update read "ClawBox v4.3.0 → 4.3.0": the device names
+  // its release with a `v`, the notes without, and every beta build carries
+  // the installed package version until the next bump.
+  it("names the build being installed when the notes' version is the one installed", async () => {
+    mount(
+      { phase: "running", currentStepIndex: 2, steps: steps(2) },
+      { clawbox: { current: "v4.3.0", target: "beta@a2c1718" }, whatsNew: { ...WHATS_NEW, version: "4.3.0" } },
+    );
+
+    // Asserted once the notes have arrived: before that the row has only the versions route to go on.
+    await screen.findByRole("region", { name: "What's new in ClawBox 4.3.0" });
+    const versions = screen.getByTestId("update-run-versions");
+    await waitFor(() => expect(versions.textContent).toContain("beta@a2c1718"));
+    expect(versions.textContent).toContain("v4.3.0");
+    expect(versions.textContent).not.toMatch(/v4\.3\.0.*4\.3\.0/);
+  });
+
+  it("writes both releases alike when the notes name a newer one", async () => {
+    mount(
+      { phase: "running", currentStepIndex: 2, steps: steps(2) },
+      { clawbox: { current: "v4.2.5", target: `v${TARGET}` } },
+    );
+
+    await screen.findByRole("region", { name: `What's new in ClawBox ${TARGET}` });
+    const versions = screen.getByTestId("update-run-versions");
+    await waitFor(() => expect(versions.textContent).toContain(`v${TARGET}`));
+    expect(versions.textContent).toContain("v4.2.5");
+  });
+
+  it("shows no arrow to the release already installed", async () => {
+    // A forced re-run of the installed build: nothing newer to name.
+    mount(
+      { phase: "running", currentStepIndex: 2, steps: steps(2) },
+      { clawbox: { current: "v4.3.0", target: null }, whatsNew: { ...WHATS_NEW, version: "4.3.0" } },
+    );
+
+    const versions = await screen.findByTestId("update-run-versions");
+    await screen.findByRole("region", { name: "What's new in ClawBox 4.3.0" });
+    expect(versions.textContent).toContain("v4.3.0");
+    expect(within(versions).queryByText("arrow_forward")).toBeNull();
   });
 });
 
