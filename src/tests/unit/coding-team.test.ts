@@ -2252,6 +2252,31 @@ describe("picking a team back up after a restart (claimOrphanedTeams, resumeOrph
     expect(starts).toEqual([]);
   });
 
+  it("takes back the final reviewer the restart interrupted, rather than start a second", async () => {
+    const board = await twoWorkersOut();
+    const { saveBoard, loadBoard } = await import("@/lib/coding-team-board");
+    const b = loadBoard(board.id)!;
+    b.shape = { parallelism: 2, review: "final", rationale: "one look at the whole" };
+    for (const t of b.tasks) {
+      t.status = "complete";
+      t.result = "done";
+      t.worktree = null;
+      t.review = { verdict: "accepted", notes: "Accepted by rule: the team's final review checks the merged result.", at: Date.now() };
+    }
+    b.status = "reviewing";
+    b.runs.push({ id: "run-00000004", role: "reviewer", taskId: null });
+    saveBoard(b);
+    seq = 4;
+    runs.set("run-00000003", { ...runs.get("run-00000003")!, status: "completed", summary: "styles done" });
+    runs.set("run-00000004", { id: "run-00000004", status: "completed", summary: JSON.stringify({ verdict: "accepted", notes: "the whole is right" }), directory: path.join(root, "site") });
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.finalReview).toMatchObject({ verdict: "accepted", notes: "the whole is right" });
+    expect(starts).toEqual([]);
+  });
+
   it("is one team to every copy of the module in the process: a route's read never settles the team the boot hook took back", async () => {
     // Next compiles the boot hook apart from the routes, so the process holds
     // two copies of this module. With module-level maps the route's copy read

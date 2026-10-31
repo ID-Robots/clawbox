@@ -156,3 +156,29 @@ describe("Resume of a stopped run", () => {
     expect(fs.readFileSync(resumedIn, "utf8").trim()).toBe(started.directory);
   });
 });
+
+describe("A run that leaves something running in its worktree", () => {
+  it("brings its work home but leaves the folder under what is still running there", async () => {
+    const dir = makeGitProject("gamma");
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(binDir, "claude-ds"), [
+      "#!/usr/bin/env bash",
+      readFirstTurn(),
+      `echo '${init}'`,
+      `echo "page" > "$PWD/page.html"`,
+      `printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"%s/page.html"}}]}}\\n' "$PWD"`,
+      `echo '${JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: false }] } })}'`,
+      // A server it leaves behind, in its own process group like the harness's.
+      "sleep 6 >/dev/null 2>&1 &",
+      `echo '${result("served")}'`,
+      "exit 0",
+    ].join("\n"), { mode: 0o755 });
+    const started = await lib.startRun({ task: "serve the page", directory: "gamma", source: "owner" });
+    expect((await lib.waitForRun(started.id, 20_000))?.status).toBe("completed");
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.worktree?.result?.kind).toBe("merged"), { timeout: 20_000 });
+    expect(git(dir, "ls-tree", "--name-only", "main")).toContain("page.html");
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/still running in it/), { timeout: 10_000 });
+    expect(fs.existsSync(started.directory)).toBe(true);
+    expect(lib.getRun(started.id)?.worktree?.removed).toBe(false);
+  });
+});

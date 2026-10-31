@@ -755,15 +755,22 @@ export async function resumeOrphanedTeams(): Promise<number> {
   if (!orphans.length) return 0;
   const toClose: string[] = [];
   let resumed = 0;
-  for (const board of orphans) {
-    if (resumed > 0 || sweeping.get(board.id)?.stopRequested) {
-      toClose.push(board.id);
-      continue;
+  try {
+    for (const board of orphans) {
+      if (resumed > 0 || sweeping.get(board.id)?.stopRequested) {
+        toClose.push(board.id);
+        continue;
+      }
+      // Live before the claim goes, so no read in between finds it neither.
+      launchTeam(board, true);
+      sweeping.delete(board.id);
+      resumed += 1;
     }
-    // Live before the claim goes, so no read in between finds it neither.
-    launchTeam(board, true);
-    sweeping.delete(board.id);
-    resumed += 1;
+  } catch (err) {
+    // A board that could not be picked up is closed like the rest: a claim
+    // left behind would hold the box, and the queue, until the next restart.
+    console.error("[coding-team] could not pick a team back up after the restart:", err instanceof Error ? err.message : err);
+    for (const b of orphans) if (!live.has(b.id) && !toClose.includes(b.id)) toClose.push(b.id);
   }
   return resumed + (toClose.length ? await closeOrphanedTeams(toClose) : 0);
 }
@@ -1465,6 +1472,13 @@ async function runTeam(team: LiveTeam, source: CodingRunSource, resume: TeamResu
   if (!board.branch && asksPr && resume?.phase !== "work") {
     bus.send(SYSTEM, { type: "note", text: "The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project." });
   }
+  // The final reviewer the last web server had going, if it got that far.
+  let finalAdopt: string | null = null;
+  if (resume?.phase === "work" && !board.finalReview) {
+    for (let i = board.runs.length - 1; i >= 0 && !finalAdopt; i--) {
+      if (board.runs[i].role === "reviewer" && board.runs[i].taskId === null) finalAdopt = board.runs[i].id;
+    }
+  }
   // Picked back up after a restart: every task the last web server had in
   // flight is taken back where it was — its worker reattached in its scope or
   // settled meanwhile, its reviewer likewise — and the loop goes on around it.
@@ -1580,7 +1594,8 @@ async function runTeam(team: LiveTeam, source: CodingRunSource, resume: TeamResu
     //    rather than one per task — and only for work that is all there. Once:
     //    a CI round's fix is judged by the checks it was made for.
     if (allComplete(board) && board.shape?.review === "final" && !board.finalReview) {
-      const verdict = await finalReview(team, source, suitePassed);
+      const verdict = await finalReview(team, source, suitePassed, finalAdopt);
+      finalAdopt = null;
       if (team.stopRequested || isSettledStatus(board.status)) return;
       if (verdict?.verdict === "rejected") {
         setTeamStatus(board, SYSTEM, "failed", `The final review rejected the merged work: ${verdict.notes}`);
@@ -2321,7 +2336,9 @@ function adoptTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, star
     const worktree = task.worktree && task.branch ? { path: task.worktree, branch: task.branch } : null;
     return finishWork(team, task, source, starting, runId, worktree);
   }
-  if (task.status === "complete" && underReview(board, task.task_id)) return adoptReview(team, task, source, starting);
+  // Finished and not yet ruled on — no verdict, or only the one an earlier
+  // attempt was sent back with: its review was under way.
+  if (task.status === "complete" && (!task.review || task.review.verdict === "rejected")) return adoptReview(team, task, source, starting);
   return null;
 }
 
@@ -2555,7 +2572,7 @@ async function verdictOf(
  * what the project's own suite said when the harness ran it green on this
  * tree (`suiteGate`) — the reviewer may not run it.
  */
-async function finalReview(team: LiveTeam, source: CodingRunSource, tests: string | null): Promise<{ verdict: "accepted" | "rejected"; notes: string } | null> {
+async function finalReview(team: LiveTeam, source: CodingRunSource, tests: string | null, adopt: string | null = null): Promise<{ verdict: "accepted" | "rejected"; notes: string } | null> {
   const { board, bus } = team;
   setTeamStatus(board, SYSTEM, "reviewing");
   saveBoard(board);
@@ -2567,8 +2584,12 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
   };
   const files = [...new Set(board.tasks.filter((t) => t.status === "complete").flatMap((t) => t.files_hint))];
   const where = { goal: board.goal, branch: board.branch, base: board.base, files, tests };
+  // A final reviewer the last web server started (`continueTeam`) is taken
+  // back rather than started twice — one running on unwatched beside a second.
+  const adopted = adopt ? getRun(adopt) : null;
   let run: CodingRun;
-  try {
+  if (adopted) run = adopted;
+  else try {
     run = await startRun({
       // Workers' worktree paths in their results said in the project, where this reviewer reads: never longer.
       task: finalReviewerTask({ ...where, digest: toFolderPaths(boardDigest(board, null, Math.min(MAX_DIGEST_CHARS, finalReviewRoom(where))), board.directory, board.directory) }),
@@ -2583,8 +2604,10 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
   } catch (err) {
     return byRule("the final reviewer could not start.", `No final reviewer: ${err instanceof Error ? err.message : String(err)}`);
   }
-  board.runs.push(castRef(run, "reviewer", null));
-  saveBoard(board);
+  if (!adopted) {
+    board.runs.push(castRef(run, "reviewer", null));
+    saveBoard(board);
+  }
   const settled = await settle(team, run.id);
   if (team.stopRequested) return null;
   if (settled?.status !== "completed") {

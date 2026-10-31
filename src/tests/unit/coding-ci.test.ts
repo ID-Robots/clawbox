@@ -146,6 +146,11 @@ describe("what a team's goal asks for", () => {
     ["Submit the work as a pull request", true, false],
     ["Fix the bug, then open PRs for each package", true, false],
     ["I need a pull request for this", true, false],
+    // Another thing's noun is not a pull request asked for.
+    ["Create the PR template for the repo", false, false],
+    ["Draft the PR description in NOTES.md", false, false],
+    // A negator's clause ends where the next one begins.
+    ["Don't merge it, but open a PR", true, false],
   ])("%s → PR %s, merge %s", (goal, pr, merge) => {
     expect(goalWantsPullRequest(goal)).toBe(pr);
     expect(goalWantsMerge(goal)).toBe(merge);

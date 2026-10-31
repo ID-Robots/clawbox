@@ -336,13 +336,14 @@ export async function unitActive(unit: string): Promise<boolean | null> {
  * list of `clawbox-run-<runId>-*.scope`, the newest one still up. A record is
  * written "running" before its spawn, and a web server that went before the
  * unit reached the disk left a run alive in its scope with nothing on record
- * to find it by (reconcileAfterRestart). Null when there is none, or when
- * systemd cannot be asked — nothing could be reattached through it then.
+ * to find it by (reconcileAfterRestart). TRI-STATE, like `unitActive`: null
+ * when systemd says there is none, undefined when it could not be asked —
+ * "could not look" must never be read as "it is gone".
  */
-export async function findRunScopeUnit(runId: string): Promise<string | null> {
+export async function findRunScopeUnit(runId: string): Promise<string | null | undefined> {
   if (typeof runId !== "string" || !RUN_ID.test(runId)) return null;
   const binary = await findSystemdTool("systemctl");
-  if (!binary) return null;
+  if (!binary) return undefined;
   const prefix = `${RUN_UNIT_PREFIX}${runId}-`;
   try {
     const { stdout } = await execFileAsync(binary, ["--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager", `${prefix}*.scope`], {
@@ -358,7 +359,7 @@ export async function findRunScopeUnit(runId: string): Promise<string | null> {
       .sort();
     return up.length ? up[up.length - 1] : null;
   } catch {
-    return null;
+    return undefined;
   }
 }
 

@@ -783,6 +783,33 @@ describe("after a restart", () => {
     expect(run?.error).toBeNull();
     // Asked more than once before it counted as unanswered.
     expect(shimCalls(systemctlLog()).filter((l) => l.includes("is-active")).length).toBeGreaterThan(1);
+    // And the watch does not read its own unanswered polls as "gone" either,
+    // with no process group on record to second them.
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    expect(lib.getRun("run-detach01")?.status).toBe("running");
+  });
+
+  it("settles a unit-less live run as lost when systemd cannot be asked for its scope, but leaves its worktree alone", async () => {
+    installSystemdRun();
+    fs.writeFileSync(
+      path.join(shimDir, "systemctl"),
+      ["#!/usr/bin/env bash", `printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog())}`, "echo 'Failed to connect to bus: No such file or directory' >&2", "exit 1"].join("\n"),
+      { mode: 0o755 },
+    );
+    const tree = path.join(home, "Projects", "site", ".clawbox", "worktrees", "run-detach01");
+    fs.mkdirSync(tree, { recursive: true });
+    const worktree = { path: tree, branch: "clawbox/run-detach01", base: "main", project: path.join(home, "Projects", "site"), removed: false };
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({ unit: null, directory: tree, worktree })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(1);
+    expect(lib.getRun("run-detach01")?.status).toBe("failed");
+    // Looked for by name more than once before it counted as unanswered.
+    expect(shimCalls(systemctlLog()).filter((l) => l.includes("list-units")).length).toBeGreaterThan(1);
+    await vi.waitFor(() => expect(lib.getRun("run-detach01")?.progress.join("\n")).toMatch(/could not tell whether the run was still working in it/), { timeout: 10_000 });
+    expect(fs.existsSync(tree)).toBe(true);
+    expect(lib.getRun("run-detach01")?.worktree?.removed).toBe(false);
   });
 });
 

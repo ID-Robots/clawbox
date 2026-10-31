@@ -192,7 +192,8 @@ function mentionsPullRequest(goal: string): boolean {
   return /\bpull[\s-]?requests?\b/i.test(text) || /\bPRs?\b/.test(text);
 }
 
-const PR_NOUN = String.raw`(?:pull[\s-]?requests?\b|PRs?\b)`;
+// Never the noun of another thing: "the PR template", "a PR description".
+const PR_NOUN = String.raw`(?:pull[\s-]?requests?\b|PRs?\b)(?!\s+(?:templates?|descriptions?|body|bodies|checklists?|titles?|comments?|labels?)\b)`;
 const PR_KIND = String.raw`(?:(?:new|draft|single|separate|proper|github)\s+)?`;
 
 /**
@@ -228,7 +229,8 @@ const PULL_REQUEST_ASKS: readonly RegExp[] = [
  */
 export function goalRefusesPullRequest(goal: string): boolean {
   if (!mentionsPullRequest(goal)) return false;
-  return /\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(withoutPullRequestReferences(goal));
+  // The negator's own clause only: "Don't merge it, but open a PR" asks for one.
+  return /\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b(?:(?!\bbut\b|,\s*(?:and|then|but)\b)[^.;\n])*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(withoutPullRequestReferences(goal));
 }
 
 /**
