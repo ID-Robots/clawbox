@@ -25,6 +25,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 SETTINGS_BEFORE=
+# shellcheck disable=SC2317  # run by the EXIT trap
 cleanup() {
   if [ -n "$SETTINGS_BEFORE" ]; then
     board_api POST /setup-api/coding-agent/settings "$SETTINGS_BEFORE"
@@ -92,6 +93,7 @@ if [ -n "$PLANNER" ]; then
 fi
 
 # Own branch.
+# shellcheck disable=SC2016  # expanded on the board
 if [ "$(board 'git -C "$1" rev-parse --verify --quiet refs/heads/fix/arrow-up-own >/dev/null && echo made' "$PROJECT_DIR")" != made ]; then
   note "own branch: no worker made fix/arrow-up-own, so this run did not test it"
 elif grep -q 'NO CHANGE' <<<"$(team_json '.team.log[].message')"; then
@@ -115,7 +117,7 @@ else
 fi
 ACCEPTED=$(team_json '[.team.tasks[] | select(.status == "complete" and .review.verdict == "accepted")] | length')
 if [ "${ACCEPTED:-0}" -gt 0 ] && [ "$ACCEPTED" = "$(team_json '.team.tasks | length')" ]; then
-  if [ "$A_STATUS" = done ]; then
+  if [ "$A_STATUS" = "done" ]; then
     ok "alerts: every task ($ACCEPTED) accepted, and the team ended done"
   elif grep -q 'Stopped after' <<<"$(team_json '.team.error // ""')"; then
     not_ok "alerts: every task ($ACCEPTED) was accepted, yet the team was stopped on its alert count: $(team_json '.team.error')"
@@ -156,7 +158,8 @@ for rid in $REVIEWERS; do
 done
 
 # Publish.
-if [ "$A_STATUS" = done ] && [ -n "$A_BRANCH" ]; then
+# shellcheck disable=SC2016  # expanded on the board
+if [ "$A_STATUS" = "done" ] && [ -n "$A_BRANCH" ]; then
   if board 'git -C "$1" rev-parse --verify --quiet "refs/heads/$2" >/dev/null' "$PROJECT_DIR.origin" "$A_BRANCH"; then
     ok "publish: the team pushed $A_BRANCH to origin ($(team_json '.team.pr.url // ([.team.log[] | select(.message | test("pull request")) | .message[0:200]] | first) // "no note"'))"
   else
@@ -167,6 +170,7 @@ else
 fi
 
 # ---- the second team, where the first left the checkout ----------------------
+# shellcheck disable=SC2016  # expanded on the board
 LEFT=$(board 'git -C "$1" rev-parse --abbrev-ref HEAD' "$PROJECT_DIR")
 note "the checkout is on $LEFT after the first team"
 GOAL="Two independent tasks that can run side by side: 1. create docs/a.md holding the line A. 2. create docs/b.md holding the line B. Change nothing else."
@@ -180,6 +184,7 @@ wait_coding_team 120 '.branch != null'
 note_team "second team"
 B_BRANCH=$(team_json '.team.branch // empty')
 B_BASE=$(team_json '.team.base // empty')
+# shellcheck disable=SC2016  # expanded on the board
 if [ -z "$A_BRANCH" ] || [ "$LEFT" != "$A_BRANCH" ]; then
   note "base: the first team left the checkout on $LEFT, not on its branch, so this run did not test it"
 elif [ -z "$B_BRANCH" ]; then

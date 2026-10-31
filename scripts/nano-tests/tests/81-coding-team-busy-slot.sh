@@ -24,6 +24,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 SETTINGS_BEFORE=
 HOLDER_DIR=
 HOLDER=
+# shellcheck disable=SC2317  # run by the EXIT trap
 cleanup() {
   if [ -n "$HOLDER" ]; then
     board_api POST /setup-api/coding-agent/stop "$(jq -cn --arg id "$HOLDER" '{runId: $id}')"
@@ -105,7 +106,7 @@ BUSY=$(team_json '[.team.log[] | select(.type == "alert" and (.message | test("a
 WAITS=$(team_json '[.team.log[] | select(.type == "note" and (.message | test("Waiting for a free slot")))] | length')
 if [ "${BUSY:-0}" -gt 0 ]; then
   not_ok "busy slot: the team raised $BUSY alert(s) over the slot run $HOLDER held"
-elif [ "${WAITS:-0}" -gt 0 ] && [ "$TEAM_STATUS" = done ]; then
+elif [ "${WAITS:-0}" -gt 0 ] && [ "$TEAM_STATUS" = "done" ]; then
   ok "busy slot: the team waited for the slot run $HOLDER held, raised no alert for it, and ended done"
 elif [ "${WAITS:-0}" -gt 0 ]; then
   not_ok "busy slot: the team waited for the slot, then ended $TEAM_STATUS: $(team_json '.team.error')"
@@ -130,6 +131,7 @@ if [ -n "$RID" ]; then
   board_api GET "/setup-api/coding-agent/runs?id=$RID"
   WT_BASE=$(api_json '.run.worktree.base // empty')
   WT_BRANCH=$(api_json '.run.worktree.branch // empty')
+  # shellcheck disable=SC2016  # expanded on the board
   if [ -n "$WT_BRANCH" ] && ! board 'git -C "$1" rev-parse --verify --quiet "refs/heads/$2" >/dev/null' "$PROJECT_DIR" "$WT_BRANCH"; then
     note "base: the single run $RID's branch $WT_BRANCH is gone (forked from ${WT_BASE:-<none>}), so its history could not be read"
   elif [ "$WT_BASE" = develop ] && [ -n "$WT_BRANCH" ] && ! board 'git -C "$1" merge-base --is-ancestor clawbox/team-nanoci01 "$2"' "$PROJECT_DIR" "$WT_BRANCH"; then
