@@ -36,7 +36,7 @@ import { storePortalBase } from "./store-publish";
 import { CLAWBOX_APP_SOURCE } from "./store-categories";
 import { readStoreMarker, STORE_MARKER, type StoreMarker } from "./store-install-receipt";
 import { isPng, placeIcon, readIconBytes, safeAppId, webappIconPath } from "./webapp-icon";
-import { getDefaultDirectory } from "./coding-agent";
+import { ensureProjectFolder } from "./coding-agent";
 import { ensureRepository, freeBytes, IMPORT_FREE_RESERVE_BYTES } from "./project-import";
 import { installAppDependencies, registerOrStartServerApp } from "./app-server-start";
 import { bundleFolderHtml, deployWebapp, webappPath } from "./code-projects";
@@ -90,7 +90,6 @@ export function clawboxStoreAppFrom(raw: unknown): ClawboxStoreApp | null {
 
 export type StoreInstallFailureCode =
   | "invalid_listing"
-  | "no_project_folder"
   | "exists"
   | "download_failed"
   | "package_too_large"
@@ -385,10 +384,10 @@ async function desktopIdTaken(appId: string): Promise<boolean> {
 export async function installClawboxApp(app: ClawboxStoreApp): Promise<StoreInstallOutcome> {
   const appId = safeAppId(app.slug);
   if (!appId) return failure("invalid_listing", "The Store listed this app under an id the box cannot use.", 502);
-  const projectsRoot = await getDefaultDirectory();
-  if (!projectsRoot) {
-    return failure("no_project_folder", "Set a project folder in the Coding Agent's settings first: a ClawBox app is installed there as a project.", 409);
-  }
+  // The owner's project folder, or ~/Projects made on the spot when they
+  // never chose one: a fresh or factory-reset box installs without a detour
+  // through the Coding Agent's settings.
+  const projectsRoot = await ensureProjectFolder();
   const root = path.resolve(projectsRoot);
   const directory = path.resolve(root, appId);
   if (path.dirname(directory) !== root) return failure("invalid_listing", "The Store listed this app under an id the box cannot use.", 502);

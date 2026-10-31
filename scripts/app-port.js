@@ -10,6 +10,7 @@
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
@@ -90,6 +91,17 @@ function appListenerOwned(port, directory) {
 }
 
 /**
+ * The owner's project folder from config.json: the one they chose, else the
+ * ~/Projects default — src/lib/project-folder.ts's `projectFolderFrom`, which
+ * every TypeScript reader resolves, so the proxy and the public links look in
+ * the same place the Store installed into.
+ */
+function projectFolderOf(config) {
+  const chosen = config && typeof config.coding_agent_default_directory === "string" ? config.coding_agent_default_directory.trim() : "";
+  return chosen && path.isAbsolute(chosen) ? chosen : path.join(os.homedir(), "Projects");
+}
+
+/**
  * The registered server app `id` under `root`, or null: no registration, no
  * port, or a listener that is not the project's own.
  */
@@ -103,8 +115,7 @@ function resolveRegisteredApp(root, id, opts = {}) {
   let directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : null;
   if (!directory) {
     const config = readJsonSync(path.join(root, "data", "config.json"));
-    const projects = config && typeof config.coding_agent_default_directory === "string" && path.isAbsolute(config.coding_agent_default_directory) ? config.coding_agent_default_directory : null;
-    for (const candidate of [...(projects ? [path.join(projects, id)] : []), path.join(root, "data", "code-projects", id)]) {
+    for (const candidate of [path.join(projectFolderOf(config), id), path.join(root, "data", "code-projects", id)]) {
       try { if (fs.statSync(candidate).isDirectory()) { directory = candidate; break; } } catch {}
     }
   }
@@ -113,4 +124,4 @@ function resolveRegisteredApp(root, id, opts = {}) {
   return { port: meta.port, strip: meta.stripBasePath === true, id };
 }
 
-module.exports = { APP_ID_RE, readJsonSync, isProxyablePort, appListenerOwned, resolveRegisteredApp };
+module.exports = { APP_ID_RE, readJsonSync, isProxyablePort, appListenerOwned, projectFolderOf, resolveRegisteredApp };

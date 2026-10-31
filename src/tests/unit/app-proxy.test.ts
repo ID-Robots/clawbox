@@ -140,6 +140,14 @@ describe("the path and the request", () => {
     const { CODING_AGENT_DIR_CONFIG_KEY } = await import("@/lib/coding-agent");
     expect(lib.PROJECT_FOLDER_CONFIG_KEY).toBe(CODING_AGENT_DIR_CONFIG_KEY);
   });
+
+  it("finds an app's folder under ~/Projects when the owner never chose a project folder", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({}));
+    fs.mkdirSync(path.join(projects, "audiobook-player"));
+    // HOME is `base`, so ~/Projects is `projects`: the default every reader resolves.
+    expect(await lib.projectFolderFor("audiobook-player")).toBe(path.join(projects, "audiobook-player"));
+    expect(await lib.projectFolderFor("not-there")).toBeNull();
+  });
 });
 
 describe("whose listener it is", () => {

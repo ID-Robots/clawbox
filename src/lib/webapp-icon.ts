@@ -3,6 +3,7 @@ import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { pushPendingAction } from "@/lib/pending-actions";
+import { appProxyPath, isProxyablePort } from "@/lib/clawbox-manifest";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { generateClawaiImage } from "@/lib/harness/clawai-images";
 
@@ -669,12 +670,31 @@ async function nudgeDesktop(appId: string, hints: WebappIconHints): Promise<void
       appId,
       name: oneLine(hints.name, MAX_NAME_CHARS) || appId,
       color,
-      url: `/setup-api/webapps?app=${appId}`,
+      url: await desktopUrlOf(appId),
       iconUrl: `/setup-api/apps/icon/${appId}?v=${Date.now()}`,
     });
   } catch {
     // A nudge that fails to land is a reload away from being moot.
   }
+}
+
+/**
+ * Where the desktop opens the app the nudge is about. A server app registered
+ * under `/apps/<id>/` (its meta.json carries the port — src/lib/app-proxy.ts)
+ * opens THERE. Its `/setup-api/webapps` page is only a stub that moves the
+ * frame on with a script, and a navigation a sandboxed frame makes itself
+ * carries no cookie: the owner, signed in, met the box's login screen inside
+ * the app's window the moment its icon arrived and this nudge replaced the
+ * window's address. Anything else opens its page, as before.
+ */
+async function desktopUrlOf(appId: string): Promise<string> {
+  try {
+    const meta = JSON.parse(await fsp.readFile(path.join(WEBAPPS_DIR, appId, "meta.json"), "utf-8")) as { port?: unknown } | null;
+    if (isProxyablePort(meta?.port)) return appProxyPath(appId);
+  } catch {
+    // No registration, or one that cannot be read: the app's page.
+  }
+  return `/setup-api/webapps?app=${appId}`;
 }
 
 export function isPng(bytes: Buffer): boolean {

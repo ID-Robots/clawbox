@@ -32,7 +32,7 @@ export async function readStoreMarker(directory: string): Promise<StoreMarker | 
   }
 }
 
-/** The owner's project folder; null when it is unset or cannot be read. Loaded on demand — see the module comment. */
+/** The owner's project folder (chosen, else the ~/Projects default); null when the config cannot be read. Loaded on demand — see the module comment. */
 async function projectsRoot(): Promise<string | null> {
   try {
     const { getDefaultDirectory } = await import("./coding-agent");
