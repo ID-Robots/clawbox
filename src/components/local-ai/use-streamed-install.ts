@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/lib/format-bytes";
 import { useT } from "@/lib/i18n";
-import { followBackgroundTask, notifyBackgroundTaskStarted } from "@/lib/background-task-client";
-import { readInstallStream, type InstallOutcome, type InstallProgress } from "@/lib/install-stream";
+import { followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
+import type { InstallOutcome, InstallProgress } from "@/lib/install-stream";
 
 type Translate = ReturnType<typeof useT>["t"];
 
@@ -84,6 +84,10 @@ export function useStreamedInstall(): StreamedInstall {
   const [outcome, setOutcome] = useState<InstallOutcome | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Which run is the current one: a run that settles after a newer one began
+  // (a click in the moment before a re-attach answered) must not clear the
+  // newer one's spinner, task or verdict.
+  const runRef = useRef(0);
 
   const reset = useCallback(() => {
     setProgress(null);
@@ -106,6 +110,11 @@ export function useStreamedInstall(): StreamedInstall {
   );
 
   const run = useCallback(async (key: string, request: (signal: AbortSignal) => Promise<Response>) => {
+    // One reader at a time; the work behind an older one is the box's and
+    // goes on.
+    abortRef.current?.abort();
+    const mine = ++runRef.current;
+    const current = () => runRef.current === mine;
     const controller = new AbortController();
     abortRef.current = controller;
     setBusy(key);
@@ -115,14 +124,15 @@ export function useStreamedInstall(): StreamedInstall {
       const res = await request(controller.signal);
       if (!res.ok) {
         const data = await res.json().catch(() => ({} as Record<string, unknown>));
-        setOutcome({ ok: false, error: refusalText(data as Record<string, unknown>) });
+        if (current()) setOutcome({ ok: false, error: refusalText(data as Record<string, unknown>) });
         return false;
       }
-      const settled = await readInstallStream(res, setProgress, (id) => {
-        setTaskId(id);
+      const settled = await readTaskStream(res, (p) => { if (current()) setProgress(p); }, (id) => {
+        if (current()) setTaskId(id);
         // The desktop's corner card asks at once rather than at its next poll.
         notifyBackgroundTaskStarted(id);
-      });
+      }, controller.signal);
+      if (!current()) return settled.ok;
       setOutcome(settled.ok
         ? { ok: true }
         : settled.cancelled
@@ -132,14 +142,17 @@ export function useStreamedInstall(): StreamedInstall {
     } catch {
       // A stream the owner cancelled is not a failure to report: the request
       // was dropped on purpose and the row goes back to idle.
+      if (!current()) return false;
       if (controller.signal.aborted) setOutcome(null);
       else setOutcome({ ok: false, error: t("localModels.error.unreachable") });
       return false;
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      setBusy(null);
-      setProgress(null);
-      setTaskId(null);
+      if (current()) {
+        setBusy(null);
+        setProgress(null);
+        setTaskId(null);
+      }
     }
   }, [refusalText, t]);
 

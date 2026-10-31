@@ -8,7 +8,7 @@ vi.mock("@/lib/route-auth", () => ({ requireSession: vi.fn() }));
 
 import { GET as followGET } from "@/app/setup-api/background-jobs/tasks/follow/route";
 import { GET, POST } from "@/app/setup-api/background-jobs/tasks/route";
-import { resetBackgroundTasksForTests, startBackgroundTask } from "@/lib/background-tasks";
+import { BackgroundTaskCancelled, resetBackgroundTasksForTests, startBackgroundTask } from "@/lib/background-tasks";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
@@ -126,7 +126,7 @@ describe("POST /setup-api/background-jobs/tasks (cancel)", () => {
       kind: "fetch",
       title: "Downloading",
       cancellable: true,
-      run: (task) => new Promise((_, reject) => task.signal.addEventListener("abort", () => reject(new Error("stopped")))),
+      run: (task) => new Promise((_, reject) => task.signal.addEventListener("abort", () => reject(new BackgroundTaskCancelled()))),
     });
     if (!started.started) throw new Error("not started");
     return started.task.id;

@@ -290,6 +290,45 @@ describe("POST /setup-api/whisper", () => {
     expect(spawned).toHaveLength(1);
   });
 
+  it("follows a running download of the same size before measuring the disk it is filling", async () => {
+    child.hold = true;
+    const { POST } = await load();
+    const first = await POST(post({ size: "small" }));
+    const reader = first.body!.getReader();
+    const firstLine = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await reader.cancel();
+    // The download has eaten into the space a fresh check would ask for.
+    disk.free = 1024;
+    const again = await POST(post({ size: "small" }));
+    expect(again.status).toBe(200);
+    for (const size of state.sizes) if (size.id === "small") size.cached = true;
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+    heldClose?.(0);
+    const lines = await readStream(again);
+    expect(lines[0].taskId).toBe(firstLine.taskId);
+  });
+
+  it("refuses the removals while an engine install runs that this process has no flag for (adopted after a restart)", async () => {
+    const { DELETE } = await load();
+    const { startBackgroundTask } = await import("@/lib/background-tasks");
+    let release!: () => void;
+    const adopted = startBackgroundTask({
+      kind: "whisper-engine-install",
+      group: "whisper-engine",
+      title: "Installing speech (Whisper)",
+      run: () => new Promise<void>((resolve) => { release = resolve; }),
+    });
+    expect(adopted.started).toBe(true);
+    const engine = await DELETE(new Request("http://localhost/setup-api/whisper?scope=engine", { method: "DELETE" }));
+    expect(engine.status).toBe(409);
+    const one = await DELETE(new Request("http://localhost/setup-api/whisper?size=tiny", { method: "DELETE" }));
+    expect(one.status).toBe(409);
+    expect(uninstalled).not.toHaveBeenCalled();
+    expect(removed).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release();
+  });
+
   it("leaves the unit alone when the download fails, and says why", async () => {
     child.code = 1;
     child.stderr = "Download failed: connection reset\n";

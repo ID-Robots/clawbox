@@ -4,6 +4,7 @@ import { spawn } from "child_process";
 import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import {
+  BackgroundTaskCancelled,
   BackgroundTaskFailure,
   backgroundTaskResponse,
   runningBackgroundTask,
@@ -73,6 +74,29 @@ const CANCEL_GRACE_MS = 3000;
 let inFlight = false;
 /** The size fetch's background-task group. */
 const WHISPER_SIZE_GROUP = "whisper-size";
+
+/**
+ * Anything writing speech's files right now: this module's flags, or a task.
+ * A task counts on its own because a web server that restarted mid-install
+ * ADOPTS the engine's root step (src/lib/background-tasks.ts) with none of
+ * this module's flags set — its removal must still refuse.
+ */
+function speechBusy(): boolean {
+  return inFlight || engineInFlight
+    || runningBackgroundTask(WHISPER_ENGINE_GROUP) !== null
+    || runningBackgroundTask(WHISPER_SIZE_GROUP) !== null;
+}
+
+/** A size download already running: followed for the same size, refused (naming it) for another. */
+function followOrRefuseSize(size: string): Response | null {
+  const running = runningBackgroundTask(WHISPER_SIZE_GROUP);
+  if (!running) return null;
+  if (running.meta?.size === size) return backgroundTaskResponse(running.id);
+  return NextResponse.json(
+    { error: "A speech model is already being fetched.", code: "busy", taskId: running.id },
+    { status: 409 },
+  );
+}
 /**
  * One engine install at a time: two would fight over pip and the CTranslate2
  * build tree. Held for the whole install task, not only its start, so the size
@@ -166,6 +190,10 @@ export async function POST(req: Request) {
   if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }
+  // Before the disk check: the running download has used part of the space
+  // that check would measure it against, and this request only follows it.
+  const following = followOrRefuseSize(size);
+  if (following) return following;
 
   const state = await readWhisperState();
   if (!state.installed) {
@@ -184,17 +212,11 @@ export async function POST(req: Request) {
     if (!disk.ok) return diskRefusal(disk);
   }
 
-  // The same size already on its way is the one this request wants: follow
-  // it. Another size is a second writer into the Hub cache and the unit.
-  const runningSize = runningBackgroundTask(WHISPER_SIZE_GROUP);
-  if (runningSize) {
-    if (runningSize.meta?.size === size) return backgroundTaskResponse(runningSize.id);
-    return NextResponse.json(
-      { error: "A speech model is already being fetched.", code: "busy", taskId: runningSize.id },
-      { status: 409 },
-    );
-  }
-  if (inFlight || engineInFlight) {
+  // Again after the awaits above: one may have started meanwhile. Another
+  // size is a second writer into the Hub cache and the unit.
+  const startedMeanwhile = followOrRefuseSize(size);
+  if (startedMeanwhile) return startedMeanwhile;
+  if (speechBusy()) {
     return NextResponse.json({ error: "A speech model is already being fetched.", code: "busy" }, { status: 409 });
   }
   inFlight = true;
@@ -234,7 +256,7 @@ export async function POST(req: Request) {
             // A size that was not here before the click: what the fetcher left
             // is half a snapshot nothing can use, and the disk is the owner's.
             await removeWhisperSize(size).catch(() => null);
-            throw new BackgroundTaskFailure("The download was cancelled.");
+            throw new BackgroundTaskCancelled("The download was cancelled.");
           }
           if (!fetched.ok) {
             // The unit is untouched, so the box still transcribes with whatever
@@ -250,6 +272,9 @@ export async function POST(req: Request) {
           }
         }
 
+        // Seconds, and not to be stopped half-way: a failure here is said as
+        // what it is, never as the owner's Cancel.
+        task.cancellable(false);
         task.step("switch", "Pointing speech on this box at the new model…");
         const pointed = await setActiveWhisperSize(size);
         if (!pointed.ok) throw new BackgroundTaskFailure(pointed.error ?? "Could not switch to that speech model.");
@@ -301,7 +326,7 @@ async function installEngine(): Promise<Response> {
   // start two pip installs and two CTranslate2 builds in the same paths. Every
   // early answer below gives the reservation back; the stream's own `finally`
   // gives it back once an install has started.
-  if (engineInFlight || inFlight) {
+  if (speechBusy()) {
     return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
   }
   engineInFlight = true;
@@ -381,7 +406,7 @@ export async function DELETE(req: Request) {
     // stream would then point the unit at weights that are gone — and while
     // the ENGINE is being installed, whose own pre-download is the second
     // writer into that cache.
-    if (inFlight || engineInFlight) {
+    if (speechBusy()) {
       return NextResponse.json({ error: "Speech on this box is being installed, or a model is being fetched, right now.", code: "busy" }, { status: 409 });
     }
     // The same reservation as the install, for the whole removal: an install
@@ -417,7 +442,7 @@ export async function DELETE(req: Request) {
   // measurement through the re-read: the engine install pre-downloads `base`
   // and the engine removal measures and deletes every size, and a size removal
   // interleaved with either would measure or delete a cache under them.
-  if (inFlight || engineInFlight) {
+  if (speechBusy()) {
     return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
   }
   engineInFlight = true;

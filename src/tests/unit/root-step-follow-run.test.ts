@@ -20,6 +20,8 @@ const RUN_B = "b".repeat(32);
 let states: string[] = [];
 let invocation = "";
 let journal = "";
+/** What PID 1 logged for the run (`INVOCATION_ID=`), which outlives the instance. */
+let ending = "";
 let shows = 0;
 
 beforeEach(() => {
@@ -27,6 +29,7 @@ beforeEach(() => {
   states = [];
   invocation = "";
   journal = "";
+  ending = "";
   shows = 0;
   mockExecFile.mockImplementation(((
     cmd: string,
@@ -42,6 +45,8 @@ beforeEach(() => {
     } else if (cmd.includes("systemctl")) {
       stdout = states[Math.min(shows, states.length - 1)] ?? "ActiveState=inactive\nResult=success\n";
       shows += 1;
+    } else if (cmd.includes("journalctl") && args.some((a) => a.startsWith("INVOCATION_ID="))) {
+      stdout = args.includes(`INVOCATION_ID=${RUN_A}`) ? ending : "";
     } else if (cmd.includes("journalctl")) {
       stdout = journal;
     }
@@ -96,6 +101,7 @@ describe("followRootStepRun follows a run somebody else dispatched", () => {
     states = [ACTIVE, ACTIVE, DONE];
     invocation = RUN_A;
     journal = "  Downloading the memory-search model...\n";
+    ending = "clawbox-root-update@embed_model.service: Deactivated successfully.\n";
     const lines: string[] = [];
 
     const result = await run(followRootStepRun(
@@ -108,9 +114,10 @@ describe("followRootStepRun follows a run somebody else dispatched", () => {
     expect(lines).toContain("Downloading the memory-search model...");
   });
 
-  it("reads a recorded run that has already ended as its ending", async () => {
+  it("reads a recorded run that has already ended as its ending, on systemd's own word for it", async () => {
     const { followRootStepRun } = await import("@/lib/root-step-follow");
     states = [DONE];
+    ending = "Finished clawbox-root-update@embed_model.service.\nclawbox-root-update@embed_model.service: Deactivated successfully.\n";
     expect(await run(followRootStepRun(
       { step: "embed_model", sinceMs: 1, invocationId: RUN_A },
       { timeoutMs: 60_000, label: "the download", onStatus: () => {} },
@@ -126,6 +133,32 @@ describe("followRootStepRun follows a run somebody else dispatched", () => {
     expect(failed.ok).toBe(false);
     expect(failed.lost).toBeUndefined();
     expect(failed.error).toContain("failed to download");
+  });
+
+  it("does not read an idle unit as a run that ended well when systemd never said so (a reboot, a collected instance)", async () => {
+    const { followRootStepRun } = await import("@/lib/root-step-follow");
+    states = [DONE];
+    ending = "";
+    const result = await run(followRootStepRun(
+      { step: "embed_model", sinceMs: 1, invocationId: RUN_A },
+      { timeoutMs: 60_000, label: "the download", onStatus: () => {} },
+    ));
+    expect(result.ok).toBe(false);
+    expect(result.lost).toBe(true);
+  });
+
+  it("reads systemd's own failure for the run as a failure", async () => {
+    const { followRootStepRun } = await import("@/lib/root-step-follow");
+    states = [DONE];
+    ending = "clawbox-root-update@embed_model.service: Main process exited, code=exited, status=1/FAILURE\nclawbox-root-update@embed_model.service: Failed with result 'exit-code'.\n";
+    journal = "Error: failed to download the memory-search model\n";
+    const result = await run(followRootStepRun(
+      { step: "embed_model", sinceMs: 1, invocationId: RUN_A },
+      { timeoutMs: 60_000, label: "the download", onStatus: () => {} },
+    ));
+    expect(result.ok).toBe(false);
+    expect(result.lost).toBeUndefined();
+    expect(result.error).toContain("failed to download");
   });
 
   it("does not claim another run's ending", async () => {
@@ -149,5 +182,29 @@ describe("followRootStepRun follows a run somebody else dispatched", () => {
     ));
     expect(result.ok).toBe(false);
     expect(result.lost).toBe(true);
+  });
+});
+
+describe("an unanswered systemd is not an ending", () => {
+  it("asks again instead of reading a failed query as the unit having stopped", async () => {
+    const { followRootStep } = await import("@/lib/root-step-follow");
+    // Seen running, then three polls systemd did not answer, then really done.
+    states = [ACTIVE, "", "", "", DONE];
+    invocation = RUN_A;
+    const result = await run(followRootStep("embed_model", { timeoutMs: 120_000, label: "the download", onStatus: () => {} }));
+    expect(result).toEqual({ ok: true });
+    expect(shows).toBe(5);
+  });
+
+  it("gives up, without claiming success, when systemd never answers", async () => {
+    const { followRootStep } = await import("@/lib/root-step-follow");
+    states = [""];
+    let settled = false;
+    const pending = followRootStep("embed_model", { timeoutMs: 600_000, label: "the download", onStatus: () => {} });
+    void pending.finally(() => { settled = true; });
+    for (let i = 0; i < 40 && !settled; i += 1) await vi.advanceTimersByTimeAsync(3_000);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("could not be asked");
   });
 });

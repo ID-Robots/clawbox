@@ -11,9 +11,8 @@ import type {
   VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { cloudVoicesFor, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
-import { findRunningBackgroundTask, followBackgroundTask, notifyBackgroundTaskStarted } from "@/lib/background-task-client";
+import { findRunningBackgroundTask, followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
 import { KOKORO_INSTALL_KIND } from "@/lib/background-task-kinds";
-import { readInstallStream } from "@/lib/install-stream";
 import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
 
 /**
@@ -346,7 +345,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           body: "{}",
         });
       // A refusal answers JSON, which the reader takes as its closing line.
-      const outcome = await readInstallStream(res, () => {}, (taskId) => {
+      const outcome = await readTaskStream(res, () => {}, (taskId) => {
         setInstallTaskId(taskId);
         // The desktop's corner card asks at once rather than at its next poll.
         notifyBackgroundTaskStarted(taskId);

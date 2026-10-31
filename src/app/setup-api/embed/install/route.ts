@@ -14,6 +14,12 @@ import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { getEmbedLaunchSpec, getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { EMBED_HF_FILE } from "@/lib/embed-runtime-ids";
+import {
+  EMBED_MODEL_DONE_STATUS,
+  EMBED_MODEL_MISSING_ERROR,
+  embedModelAsidePath,
+  settleEmbedModelAside,
+} from "@/lib/embed-model-download";
 import { dirBytes } from "@/lib/install-disk";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 
@@ -62,31 +68,9 @@ const PROGRESS_POLL_MS = 1500;
  * gets a moving bar without a figure.
  */
 const DEFAULT_MODEL_BYTES = 639 * 1000 * 1000;
-const DONE_STATUS = "The memory-search model is on this box.";
-
-/**
- * Where "Download again" keeps the copy it replaces until the new one is
- * whole: beside the models directory, never in it — `dirBytes` of that
- * directory is the bar, and the old copy would count as downloaded.
- */
-function asidePath(modelPath: string): string {
-  return path.join(path.dirname(path.dirname(modelPath)), `${path.basename(modelPath)}.previous`);
-}
 
 async function exists(file: string): Promise<boolean> {
   return fs.stat(file).then(() => true, () => false);
-}
-
-/**
- * Settle what a download that never finished left aside: an attempt the web
- * server died in (its task was adopted and closed, but nobody was left to
- * tidy). Back in place when there is no model, gone when there is one.
- */
-async function settleAside(modelPath: string): Promise<void> {
-  const aside = asidePath(modelPath);
-  if (!(await exists(aside))) return;
-  if (await exists(modelPath)) await fs.rm(aside, { force: true }).catch(() => {});
-  else await fs.rename(aside, modelPath).catch(() => {});
 }
 
 function closingLine(payload: Record<string, unknown>): Response {
@@ -136,11 +120,12 @@ export async function POST(req: Request) {
     status: "Fetching the memory-search model (Qwen3-Embedding, about 640 MB)…",
     async run(task) {
       const modelDir = path.dirname(spec.modelPath);
-      const aside = asidePath(spec.modelPath);
+      const aside = embedModelAsidePath(spec.modelPath);
       // Inside the task, where the group lock serialises it: a request that
       // tidied this up beside a running "Download again" would put the copy it
-      // had just moved aside back under it.
-      await settleAside(spec.modelPath);
+      // had just moved aside back under it. (A server that restarts mid-way
+      // settles it too: src/lib/background-task-finishers.ts.)
+      await settleEmbedModelAside(spec.modelPath);
       // "Download again" over a copy that is here: the step answers "already
       // cached" for ANY file at that path, a truncated one included, so the
       // copy is moved aside first — and put back if the new one never arrives,
@@ -165,7 +150,6 @@ export async function POST(req: Request) {
         result = await task.rootStep("embed_model", {
           timeoutMs: INSTALL_TIMEOUT_MS,
           label: "the memory model download",
-          finishes: { status: DONE_STATUS },
         });
       } finally {
         if (timer) clearInterval(timer);
@@ -177,7 +161,7 @@ export async function POST(req: Request) {
       const after = await getEmbedProvisioningStatus().catch(() => null);
       if (!after?.modelAvailable) {
         await restore();
-        throw new BackgroundTaskFailure("The download finished but the memory-search model is not on this box.");
+        throw new BackgroundTaskFailure(EMBED_MODEL_MISSING_ERROR);
       }
       if (previousBytes !== null) {
         await fs.rm(aside, { force: true }).catch(() => {});
@@ -185,7 +169,7 @@ export async function POST(req: Request) {
         // woken on the next search with the new one.
         await stopLocalAiProvider("embed").catch(() => {});
       }
-      return { status: DONE_STATUS };
+      return { status: EMBED_MODEL_DONE_STATUS };
     },
   });
   return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
@@ -219,7 +203,7 @@ export async function DELETE(req: Request) {
   const spec = getEmbedLaunchSpec();
   // A copy a dead "Download again" left aside would otherwise be put back by
   // the next download — and is disk the owner asked for back.
-  await fs.rm(asidePath(spec.modelPath), { force: true }).catch(() => {});
+  await fs.rm(embedModelAsidePath(spec.modelPath), { force: true }).catch(() => {});
   let freedBytes: number | null = null;
   try {
     freedBytes = (await fs.stat(spec.modelPath)).size;
@@ -227,6 +211,12 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "The memory model is not on this box.", code: "not_found" }, { status: 404 });
   }
   await stopLocalAiProvider("embed").catch(() => {});
+  // The stop is awaited: a download started from another tab meanwhile owns
+  // the file now (and a "Download again" may have moved it aside).
+  const startedMeanwhile = runningBackgroundTask(EMBED_GROUP);
+  if (startedMeanwhile) {
+    return NextResponse.json({ error: "The memory model is being fetched right now.", code: "busy", taskId: startedMeanwhile.id }, { status: 409 });
+  }
   try {
     await fs.unlink(spec.modelPath);
   } catch (err) {

@@ -6,6 +6,7 @@
  * so nothing of the server module reaches the bundle.
  */
 import type { BackgroundTaskView } from "@/lib/background-tasks";
+import { readInstallStream, type InstallOutcome, type InstallProgress } from "@/lib/install-stream";
 
 export type { BackgroundTaskView } from "@/lib/background-tasks";
 
@@ -46,6 +47,69 @@ export async function findRunningBackgroundTask(kinds: readonly string[]): Promi
  */
 export function followBackgroundTask(id: string, signal?: AbortSignal): Promise<Response> {
   return fetch(`${BACKGROUND_TASKS_URL}/follow?id=${encodeURIComponent(id)}`, { cache: "no-store", signal });
+}
+
+/**
+ * How long a reader keeps following a task whose stream was cut short: the
+ * web server restarting mid-install (a Jetson's takes a minute or two, and it
+ * is exactly when a root step's task is adopted), or a dropped tunnel.
+ */
+const REFOLLOW_DELAYS_MS = [1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 15_000, 20_000, 30_000, 30_000, 30_000];
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+/**
+ * Read an install route's stream to its verdict — following the TASK again
+ * when the stream is cut short after naming it, instead of calling an install
+ * that is still running (or that a restarted server adopted) a failure. A
+ * stream that never named a task is read as before. Gives up — the cut-short
+ * outcome — once the box no longer knows the task, or after about two and a
+ * half minutes without an answer.
+ */
+export async function readTaskStream(
+  res: Response,
+  onProgress: (progress: InstallProgress) => void,
+  onTask?: (taskId: string) => void,
+  signal?: AbortSignal,
+): Promise<InstallOutcome> {
+  let taskId: string | null = null;
+  const named = (id: string) => {
+    taskId = id;
+    onTask?.(id);
+  };
+  let current = res;
+  let tries = 0;
+  for (;;) {
+    let outcome: InstallOutcome;
+    try {
+      outcome = await readInstallStream(current, onProgress, named);
+    } catch (err) {
+      if (signal?.aborted || taskId === null) throw err;
+      outcome = { ok: false, lost: true };
+    }
+    if (!outcome.lost || taskId === null) return outcome;
+    let next: Response | null = null;
+    while (next === null) {
+      if (signal?.aborted || tries >= REFOLLOW_DELAYS_MS.length) return outcome;
+      await pause(REFOLLOW_DELAYS_MS[tries], signal);
+      tries += 1;
+      if (signal?.aborted) return outcome;
+      try {
+        const answer = await followBackgroundTask(taskId, signal);
+        if (answer.ok) next = answer;
+        // The box answered, and does not know it: nothing left to follow.
+        else if (answer.status === 404) return outcome;
+      } catch {
+        // Not back yet.
+      }
+    }
+    current = next;
+  }
 }
 
 export async function dismissBackgroundTaskCard(id: string): Promise<void> {

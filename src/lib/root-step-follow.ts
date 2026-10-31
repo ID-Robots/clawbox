@@ -22,6 +22,8 @@ const POLL_MS = 3000;
 /** `systemctl start --no-block` returns before the unit leaves "inactive". */
 const START_GRACE_MS = 1000;
 const START_GRACE_POLLS = 2;
+/** systemd unanswered this many polls in a row (a minute): give up asking. */
+const MAX_UNKNOWN_POLLS = 20;
 
 export interface FollowRootStepOptions {
   /** How long the whole step may take before it is reported as timed out. */
@@ -77,6 +79,26 @@ async function unitInvocation(unit: string): Promise<string | null> {
     );
     const id = /^InvocationID=([0-9a-f]{32})$/im.exec(stdout)?.[1];
     return id ? id.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How systemd itself said a run ended, from its own journal lines for that
+ * invocation (PID 1 tags them `INVOCATION_ID=`), which outlive the instance.
+ * Null when it said nothing that tells: the run cannot be vouched for.
+ */
+async function runEnding(invocationId: string): Promise<"ok" | "failed" | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["--no-pager", "-q", "-o", "cat", `INVOCATION_ID=${invocationId}`],
+      { timeout: 10_000 },
+    );
+    if (/Failed with result|Failed to start|status=\d+\/(?!SUCCESS)\S+/.test(stdout)) return "failed";
+    if (/Deactivated successfully|Succeeded\.|Finished /.test(stdout)) return "ok";
+    return null;
   } catch {
     return null;
   }
@@ -280,9 +302,24 @@ async function followLoop(
   let sawRunning = adopted && run.invocationId !== null;
   let invocationKnown = false;
   let gracePolls = 0;
+  let unknownPolls = 0;
 
   while (Date.now() < deadline) {
     const { active, result } = await unitState(unit);
+    // systemd did not answer (a failed query, a busy bus at boot): that is
+    // not "inactive", and must not count as the run having ended or as a
+    // start that never came. Ask again.
+    if (active === "") {
+      unknownPolls += 1;
+      if (unknownPolls >= MAX_UNKNOWN_POLLS) {
+        return adopted
+          ? { ok: false, lost: true, error: `systemd could not be asked how ${opts.label} is doing.` }
+          : { ok: false, error: lastLine || `systemd could not be asked how ${opts.label} is doing.` };
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      continue;
+    }
+    unknownPolls = 0;
     if (running(active)) {
       sawRunning = true;
       // Once: the first time the unit is seen running is the only moment a new
@@ -318,6 +355,17 @@ async function followLoop(
     }
 
     if (!running(active)) {
+      // A run somebody else dispatched ends well only on systemd's own word
+      // for THAT invocation: an instance collected as it exited, and one that
+      // never loaded at all, both answer "inactive" with "success".
+      if (adopted) {
+        const said = run.invocationId ? await runEnding(run.invocationId) : null;
+        if (said === "ok") return { ok: true };
+        if (said === "failed") {
+          return { ok: false, error: (await failureLine(step, startedAt)) || `${opts.label} failed` };
+        }
+        return { ok: false, lost: true, error: `${opts.label} is not running any more, and how it ended was not recorded.` };
+      }
       if (sawRunning || gracePolls >= START_GRACE_POLLS) {
         if (result && result !== "success") {
           return { ok: false, error: (await failureLine(step, startedAt)) || `${opts.label} failed (${result})` };

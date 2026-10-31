@@ -5,8 +5,7 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
-import { readInstallStream } from "@/lib/install-stream";
-import { fetchBackgroundTasks, followBackgroundTask, notifyBackgroundTaskStarted } from "@/lib/background-task-client";
+import { fetchBackgroundTasks, followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
 import { EMBED_MODEL_DOWNLOAD_KIND, KOKORO_INSTALL_KIND, LLAMACPP_INSTALL_KIND, WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { isConfigBusyPayload } from "@/lib/config-conflict";
 import { ConfirmDialog } from "@/components/clawkeep-ui";
@@ -144,7 +143,7 @@ interface Action {
   run: () => Promise<Response>;
   /** Red, for an action that takes a configured model away. */
   destructive?: boolean;
-  /** The route streams progress (see readInstallStream) instead of answering JSON. */
+  /** The route streams progress (see readTaskStream) instead of answering JSON. */
   streams?: true;
 }
 
@@ -417,7 +416,8 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         return;
       }
       if (action.streams) {
-        const outcome = await readInstallStream(res, (line) => {
+        // Follows the task again if the stream is cut short (a restart).
+        const outcome = await readTaskStream(res, (line) => {
           if (line.status) setProgress((p) => ({ ...p, [entry.id]: line.status as string }));
         }, (taskId) => {
           followedTasksRef.current.add(taskId);

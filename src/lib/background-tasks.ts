@@ -122,6 +122,13 @@ export interface BackgroundTaskUnit extends RootStepRun {
    * did after the unit never ran.
    */
   finishes: Record<string, unknown> | null;
+  /**
+   * The boot the run was seen in (/proc/sys/kernel/random/boot_id). A unit
+   * cannot outlive a reboot, and after one systemd answers an instance that
+   * never loaded as "inactive", which the follow must never read as the run
+   * having ended well. Null when it could not be read.
+   */
+  bootId: string | null;
 }
 
 /** What callers and the API see: the record plus figures derived from it. */
@@ -152,6 +159,13 @@ export interface BackgroundTaskContext {
   log(line: string): void;
   /** Byte or item progress inside the current step. */
   progress(completed: number, total: number): void;
+  /**
+   * Whether Cancel is offered from here on. Work that enters a part it must
+   * not be stopped in (a switch-over that takes seconds) turns it off, so the
+   * owner is not offered a stop that would only label that part's own
+   * failure "cancelled".
+   */
+  cancellable(on: boolean): void;
   /**
    * Run `install.sh --step <step>` as the current step's work and follow it to
    * its end ({@link followRootStep}), with its journal lines as the headline.
@@ -191,6 +205,32 @@ export type StartBackgroundTaskResult =
 export class BackgroundTaskFailure extends Error {
   constructor(message: string, readonly payload: Record<string, unknown> = {}) {
     super(message);
+  }
+}
+
+/**
+ * Raise from `run` once the owner's Cancel has stopped the work. Only this (or
+ * an `AbortError`) ends a task `cancelled`: any other failure after a Cancel
+ * is still that failure, said as such.
+ */
+export class BackgroundTaskCancelled extends Error {
+  constructor(message = "Cancelled.") {
+    super(message);
+    this.name = "BackgroundTaskCancelled";
+  }
+}
+
+function isCancellation(err: unknown): boolean {
+  if (err instanceof BackgroundTaskCancelled) return true;
+  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
+}
+
+/** This boot's id, or null. Read per call: it is one small procfs file. */
+function currentBootId(): string | null {
+  try {
+    return fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || null;
+  } catch {
+    return null;
   }
 }
 
@@ -239,7 +279,8 @@ interface Registry {
   persistTimer: ReturnType<typeof setTimeout> | null;
 }
 
-function registry(): Registry {
+/** The process's registry for the current file, as it is: not loaded here. */
+function rawRegistry(): Registry {
   const file = tasksFile();
   const reg = processStore<Registry>(`background-tasks:${file}`, () => ({
     file,
@@ -253,6 +294,11 @@ function registry(): Registry {
   // A registry an older copy of this module made (a dev server's hot reload)
   // predates the map.
   reg.controllers ??= new Map();
+  return reg;
+}
+
+function registry(): Registry {
+  const reg = rawRegistry();
   if (!reg.loaded) load(reg);
   return reg;
 }
@@ -300,6 +346,7 @@ function load(reg: Registry): void {
   const now = Date.now();
   let orphaned = false;
   const adopted: BackgroundTask[] = [];
+  const cleanedUp: string[] = [];
   for (const entry of list) {
     if (!isTask(entry)) continue;
     const unit = (entry as { unit?: unknown }).unit;
@@ -318,6 +365,7 @@ function load(reg: Registry): void {
           invocationId: unit.invocationId,
           taskStep: typeof unit.taskStep === "string" ? unit.taskStep : null,
           finishes: unit.finishes && typeof unit.finishes === "object" ? unit.finishes : null,
+          bootId: typeof unit.bootId === "string" ? unit.bootId : null,
         }
         : null,
       adoptedAt: typeof entry.adoptedAt === "number" ? entry.adoptedAt : null,
@@ -334,12 +382,23 @@ function load(reg: Registry): void {
         adopted.push(task);
       } else {
         closeOrphan(task, now);
+        cleanedUp.push(task.kind);
       }
     }
     reg.tasks.set(task.id, task);
   }
   if (orphaned) persistNow(reg);
   for (const task of adopted) setImmediate(() => { void adopt(reg, task); });
+  // What a cut-off task of these kinds left half-done is undone once, here —
+  // the work that would have done it died with the old process.
+  for (const kind of new Set(cleanedUp)) {
+    setImmediate(() => {
+      void import("./background-task-finishers")
+        .then(({ hooksFor }) => hooksFor(kind))
+        .then((hooks) => hooks.cleanup?.())
+        .catch((err) => console.warn("[background-tasks] cleanup after a restart failed:", err instanceof Error ? err.message : err));
+    });
+  }
 }
 
 function closeOrphan(task: BackgroundTask, now: number): void {
@@ -361,6 +420,20 @@ async function adopt(reg: Registry, task: BackgroundTask): Promise<void> {
   const unit = task.unit;
   if (!unit || task.state !== "running") return;
   const ctx = contextFor(reg, task, new AbortController().signal);
+  const hooks = await import("./background-task-finishers")
+    .then(({ hooksFor }) => hooksFor(task.kind))
+    .catch(() => ({} as Awaited<ReturnType<typeof import("./background-task-finishers").hooksFor>>));
+  const cleanUp = () => hooks.finish?.(false).catch(() => undefined);
+
+  // A reboot ends every unit; what systemd says about the instance afterwards
+  // is a fresh, never-run view of it, not this run's ending.
+  const boot = currentBootId();
+  if (unit.bootId && boot && unit.bootId !== boot) {
+    await cleanUp();
+    finishTask(reg, task, "interrupted", { error: INTERRUPTED_MESSAGE });
+    return;
+  }
+
   ctx.status(ADOPTED_STATUS);
   const budget = Math.max(ADOPT_MIN_MS, unit.sinceMs + ADOPT_MAX_MS - Date.now());
   let outcome: FollowRootStepResult;
@@ -373,9 +446,20 @@ async function adopt(reg: Registry, task: BackgroundTask): Promise<void> {
     outcome = { ok: false, lost: true, error: err instanceof Error ? err.message : undefined };
   }
   if (outcome.lost) {
+    await cleanUp();
     finishTask(reg, task, "interrupted", { error: INTERRUPTED_MESSAGE });
   } else if (!outcome.ok) {
+    await cleanUp();
     finishTask(reg, task, "failed", { error: outcome.error || `${task.title} did not finish.` });
+  } else if (hooks.finish) {
+    // The kind says what "ended well" means once the unit is done.
+    const ended = await hooks.finish(true).catch((err: unknown) => ({
+      ok: false as const,
+      error: err instanceof Error ? err.message : undefined,
+      result: undefined,
+    }));
+    if (ended.ok) finishTask(reg, task, "succeeded", { result: ended.result ?? unit.finishes ?? null });
+    else finishTask(reg, task, "failed", { error: ended.error || `${task.title} did not finish.` });
   } else if (unit.finishes) {
     finishTask(reg, task, "succeeded", { result: unit.finishes });
   } else {
@@ -594,7 +678,7 @@ export function startBackgroundTask(spec: StartBackgroundTaskSpec): StartBackgro
       (result) => finishTask(reg, task, "succeeded", { result: result ?? null }),
       (err: unknown) => {
         // The owner asked for this ending: not a failure to paint red.
-        if (task.cancelRequested) {
+        if (task.cancelRequested && isCancellation(err)) {
           finishTask(reg, task, "cancelled", { result: { status: CANCELLED_STATUS } });
           return;
         }
@@ -668,6 +752,15 @@ function contextFor(reg: Registry, task: BackgroundTask, signal: AbortSignal): B
       touch();
       emit(reg, task.id, { type: "progress", completed: task.completed, total });
     },
+    cancellable(on) {
+      if (!live() || task.cancellable === on) return;
+      // Only work that was started stoppable can be stoppable again: there is
+      // an abort to fire only then.
+      if (on && !reg.controllers.has(task.id)) return;
+      task.cancellable = on;
+      task.updatedAt = Date.now();
+      persistNow(reg);
+    },
     async rootStep(step, opts) {
       const taskStep = task.steps.find((s) => s.state === "running")?.id ?? null;
       const result = await followRootStep(step, {
@@ -676,7 +769,7 @@ function contextFor(reg: Registry, task: BackgroundTask, signal: AbortSignal): B
         onStatus: (line) => ctx.status(line),
         onRunning: (run) => {
           if (!live()) return;
-          task.unit = { ...run, taskStep, finishes: opts.finishes ?? null };
+          task.unit = { ...run, taskStep, finishes: opts.finishes ?? null, bootId: currentBootId() };
           // At once: this is the one fact a server that restarts in the next
           // second needs, and a throttled write could still be pending.
           persistNow(reg);
@@ -701,6 +794,9 @@ function finishTask(
   outcome: { result?: Record<string, unknown> | null; error?: string },
 ): void {
   if (task.state !== "running") return;
+  // A record this registry no longer holds (a test's reset; never a running
+  // task in production) is not the one any follower is listening to.
+  if (reg.tasks.get(task.id) !== task) return;
   const end = Date.now();
   task.state = state;
   task.finishedAt = end;
@@ -858,7 +954,9 @@ export function backgroundTaskResponse(id: string, init: { status?: number } = {
 
 /** For tests: forget this process's registry so the next call reloads the file. */
 export function resetBackgroundTasksForTests(): void {
-  const reg = registry();
+  // Not `registry()`: a reset must not load the file — and adopt what it
+  // finds — on its way to forgetting it.
+  const reg = rawRegistry();
   if (reg.persistTimer) clearTimeout(reg.persistTimer);
   reg.persistTimer = null;
   reg.tasks.clear();

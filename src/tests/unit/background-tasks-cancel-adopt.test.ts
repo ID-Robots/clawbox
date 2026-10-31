@@ -23,10 +23,22 @@ vi.mock("@/lib/root-step-follow", () => ({
   followRootStep: (...a: unknown[]) => h.followRootStep(...a),
   followRootStepRun: (...a: unknown[]) => h.followRootStepRun(...a),
 }));
+// What a restarted server does at the memory-model download's ending (the
+// runner reaches it through src/lib/background-task-finishers.ts).
+const embed = vi.hoisted(() => ({
+  finish: vi.fn<(ok: boolean) => Promise<{ ok: boolean; error?: string }>>(async () => ({ ok: true })),
+  settle: vi.fn(async () => ({ dropped: false })),
+}));
+vi.mock("@/lib/embed-model-download", () => ({
+  EMBED_MODEL_DONE_STATUS: "The memory-search model is on this box.",
+  finishEmbedModelDownload: (ok: boolean) => embed.finish(ok),
+  settleEmbedModelAside: () => embed.settle(),
+}));
 
 import {
   ADOPTED_STATUS,
   ADOPTED_UNFINISHED_MESSAGE,
+  BackgroundTaskCancelled,
   CANCELLED_STATUS,
   INTERRUPTED_MESSAGE,
   backgroundTaskStream,
@@ -71,6 +83,8 @@ beforeEach(() => {
   resetBackgroundTasksForTests();
   h.followRootStep.mockReset();
   h.followRootStepRun.mockReset();
+  embed.finish.mockReset().mockResolvedValue({ ok: true, error: undefined });
+  embed.settle.mockReset().mockResolvedValue({ dropped: false });
 });
 
 afterEach(() => {
@@ -90,7 +104,7 @@ describe("cancelBackgroundTask", () => {
         ctx.step("fetch");
         ctx.signal.addEventListener("abort", () => {
           sawAbort = true;
-          reject(new Error("killed"));
+          reject(new BackgroundTaskCancelled());
         });
       }),
     });
@@ -119,7 +133,7 @@ describe("cancelBackgroundTask", () => {
       run: async (ctx) => {
         await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve()));
         await stop.promise;
-        throw new Error("stopped");
+        throw new BackgroundTaskCancelled();
       },
     });
     if (!started.started) throw new Error("not started");
@@ -155,7 +169,7 @@ describe("cancelBackgroundTask", () => {
       kind: "fetch",
       title: "Downloading",
       cancellable: true,
-      run: (ctx) => new Promise((_, reject) => ctx.signal.addEventListener("abort", () => reject(new Error("x")))),
+      run: (ctx) => new Promise((_, reject) => ctx.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")))),
     });
     if (!started.started) throw new Error("not started");
     const lines = readAll(backgroundTaskStream(started.task.id));
@@ -164,6 +178,43 @@ describe("cancelBackgroundTask", () => {
 
     const all = await lines;
     expect(all.at(-1)).toMatchObject({ cancelled: true, code: "cancelled", error: CANCELLED_STATUS, taskId: started.task.id });
+  });
+
+  it("keeps a failure that was not the cancellation a failure, said as such", async () => {
+    const started = startBackgroundTask({
+      kind: "switching",
+      title: "Switching",
+      cancellable: true,
+      run: async (ctx) => {
+        await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve()));
+        throw new Error("Could not switch to that speech model.");
+      },
+    });
+    if (!started.started) throw new Error("not started");
+    await nextTick();
+    cancelBackgroundTask(started.task.id);
+    const ended = await settle(started.task.id);
+    expect(ended.state).toBe("failed");
+    expect(ended.error).toBe("Could not switch to that speech model.");
+  });
+
+  it("stops offering Cancel once the work says it must not be stopped", async () => {
+    const gate = deferred();
+    const started = startBackgroundTask({
+      kind: "two-part",
+      title: "Two parts",
+      cancellable: true,
+      run: async (ctx) => {
+        ctx.cancellable(false);
+        await gate.promise;
+      },
+    });
+    if (!started.started) throw new Error("not started");
+    await nextTick();
+    expect(getBackgroundTask(started.task.id)!.cancellable).toBe(false);
+    expect(cancelBackgroundTask(started.task.id)).toEqual({ ok: false, code: "not_cancellable" });
+    gate.resolve();
+    expect((await settle(started.task.id)).state).toBe("succeeded");
   });
 
   it("keeps a success that landed after the press a success", async () => {
@@ -222,6 +273,7 @@ describe("a root step outlives a restart of the web server", () => {
       invocationId: "a".repeat(32),
       taskStep: "install",
       finishes: { status: "Installed." },
+      bootId: expect.any(String),
     });
   });
 
@@ -237,11 +289,11 @@ describe("a root step outlives a restart of the web server", () => {
     const adopted = getBackgroundTask(id)!;
     expect(adopted.state).toBe("running");
     expect(adopted.adoptedAt).not.toBeNull();
-    await nextTick();
-    expect(h.followRootStepRun).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(h.followRootStepRun).toHaveBeenCalledWith(
       { step: "voice_install", sinceMs: 1_000, invocationId: "a".repeat(32) },
       expect.objectContaining({ label: "Installing the voice" }),
-    );
+    ));
+    await nextTick();
     const live = getBackgroundTask(id)!;
     expect(live.log).toContain(ADOPTED_STATUS);
     // As the unit said it: the installer's indent is how its own sub-steps read.
@@ -289,13 +341,62 @@ describe("a root step outlives a restart of the web server", () => {
     expect(h.followRootStepRun).not.toHaveBeenCalled();
   });
 
+  it("does not follow a unit across a reboot: systemd's answer then is a never-run instance's", async () => {
+    const id = await startRootStepTask({ finishes: { status: "Installed." } });
+    const raw = JSON.parse(fs.readFileSync(file(), "utf-8")) as { tasks: Array<{ id: string; unit: { bootId: string } }> };
+    raw.tasks.find((t) => t.id === id)!.unit.bootId = "another-boot";
+    fs.writeFileSync(file(), JSON.stringify(raw));
+    resetBackgroundTasksForTests();
+    const ended = await settle(id);
+    expect(ended.state).toBe("interrupted");
+    expect(h.followRootStepRun).not.toHaveBeenCalled();
+  });
+
+  it("asks the kind what a well-ended unit means: a memory-model step that left no model is a failure", async () => {
+    h.followRootStep.mockImplementation((step: string, o: { onRunning?: (run: unknown) => void }) => {
+      o.onRunning?.({ step, sinceMs: 1_000, invocationId: "c".repeat(32) });
+      return new Promise(() => {});
+    });
+    const started = startBackgroundTask({
+      kind: "embed-model-download",
+      title: "Downloading the memory-search model",
+      run: (ctx) => ctx.rootStep("embed_model", { timeoutMs: 1000, label: "the memory model download" }).then(() => undefined),
+    });
+    if (!started.started) throw new Error("not started");
+    await nextTick();
+    await nextTick();
+    h.followRootStepRun.mockResolvedValue({ ok: true });
+    embed.finish.mockResolvedValueOnce({ ok: false, error: "The download finished but the memory-search model is not on this box." });
+
+    resetBackgroundTasksForTests();
+    const ended = await settle(started.task.id);
+    expect(embed.finish).toHaveBeenCalledWith(true);
+    expect(ended.state).toBe("failed");
+    expect(ended.error).toContain("not on this box");
+  });
+
+  it("settles what a cut-off memory-model download left aside, adopted or not", async () => {
+    const started = startBackgroundTask({
+      kind: "embed-model-download",
+      title: "Downloading the memory-search model",
+      // Cut off before its unit was seen running: nothing to adopt.
+      run: () => new Promise(() => {}),
+    });
+    if (!started.started) throw new Error("not started");
+    await nextTick();
+    resetBackgroundTasksForTests();
+    expect(getBackgroundTask(started.task.id)!.state).toBe("interrupted");
+    await vi.waitFor(() => expect(embed.settle).toHaveBeenCalled());
+  });
+
   it("adopts once per process, however often the record is read", async () => {
     const id = await startRootStepTask({ finishes: { status: "Installed." } });
     h.followRootStepRun.mockImplementation(() => new Promise(() => {}));
     resetBackgroundTasksForTests();
     getBackgroundTask(id);
     getBackgroundTask(id);
-    await nextTick();
+    await vi.waitFor(() => expect(h.followRootStepRun).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
     expect(h.followRootStepRun).toHaveBeenCalledTimes(1);
     // And the group is held: a second install follows this one.
     const again = startBackgroundTask({ kind: "voice", title: "x", run: async () => {} });

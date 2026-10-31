@@ -33,6 +33,12 @@ export interface InstallOutcome {
    * a failure to paint red either.
    */
   cancelled?: boolean;
+  /**
+   * The stream ended with no verdict at all: the server went away mid-way.
+   * For a background task that is not the work's ending (see
+   * `readTaskStream`), only this stream's.
+   */
+  lost?: boolean;
 }
 
 /** `completed`/`total` as a whole percentage, or null when there is no bar to draw. */
@@ -113,5 +119,5 @@ export async function readInstallStream(
   }
   // The closing line may arrive without its newline; it still decides the
   // outcome — dropping it turned a finished multi-minute install into an error.
-  return consume(buffer.trim(), onProgress, onTask) ?? { ok: false };
+  return consume(buffer.trim(), onProgress, onTask) ?? { ok: false, lost: true };
 }
