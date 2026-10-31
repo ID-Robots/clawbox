@@ -1,3 +1,4 @@
+import type { Harness } from "@/lib/harness";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 
 const DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1";
@@ -154,13 +155,33 @@ export function getLlamaCppContextWindow(): number {
 }
 
 /**
- * The `--ctx-size` llama-server is started with: the same number OpenClaw is
- * told (getLlamaCppContextWindow). It used to be 0 when the variable was unset
- * — "the model's trained size", 128k for Gemma 4 — while OpenClaw was told the
- * default, so the two only agreed by coincidence.
+ * The smallest window llama-server runs while Hermes is the agent runtime.
+ *
+ * Hermes refuses to start a session on a model whose window is under 64,000
+ * tokens (`MINIMUM_CONTEXT_LENGTH`, enforced in agent/agent_init.py), and for a
+ * local server it reads the window off the running server — `/v1/models`,
+ * `meta.n_ctx`, through the Local AI proxy. With the 32k launch above, every
+ * Hermes turn on the on-device model ended before it reached the model: "has a
+ * context window of 32,768 tokens, which is below the minimum 64,000 required
+ * by Hermes Agent" (measured on a board). Hermes has no setting that lowers the
+ * floor for a llama.cpp endpoint, so the server has to serve it.
+ *
+ * 65536 is the first power of two over the floor. With the q8_0 cache it holds
+ * about the KV bytes the superseded q4_0 / 131072 launch held, which is what
+ * Hermes boxes ran before the 32k change.
  */
-export function getLlamaCppServerContextSize(): number {
-  return getLlamaCppContextWindow();
+export const HERMES_LLAMACPP_CONTEXT_WINDOW = 65536;
+
+/**
+ * The `--ctx-size` llama-server is started with: the same number OpenClaw is
+ * told (getLlamaCppContextWindow), raised to Hermes' floor while Hermes is the
+ * runtime. It used to be 0 when the variable was unset — "the model's trained
+ * size", 128k for Gemma 4 — while OpenClaw was told the default, so the two
+ * only agreed by coincidence.
+ */
+export function getLlamaCppServerContextSize(harness: Harness = "openclaw"): number {
+  const contextWindow = getLlamaCppContextWindow();
+  return harness === "hermes" ? Math.max(contextWindow, HERMES_LLAMACPP_CONTEXT_WINDOW) : contextWindow;
 }
 
 /**

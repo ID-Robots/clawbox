@@ -71,4 +71,52 @@ describe("getLlamaCppLaunchSpec", () => {
       expect(p.startsWith(`${root}/`), `${p} is not under ${root}`).toBe(true);
     }
   });
+
+  it("sizes the window for the runtime it is asked for, OpenClaw's when none is named", async () => {
+    vi.stubEnv("LLAMACPP_CONTEXT_WINDOW", "");
+    const { getLlamaCppLaunchSpec } = await loadWithRoot(BOX_ROOT);
+
+    expect(getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0", "hermes").contextWindow).toBe(65536);
+    expect(getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0", "openclaw").contextWindow).toBe(32768);
+    expect(getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0").contextWindow).toBe(32768);
+  });
+});
+
+describe("queryLlamaCppServedContext", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  function answer(status: number, body: unknown) {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status })));
+  }
+
+  it("reads the window the running server serves, as Hermes does", async () => {
+    // llama-server's own /v1/models entry on a board: n_ctx is the window it
+    // runs, n_ctx_train the model's trained one.
+    answer(200, {
+      data: [{ id: "gemma4-e2b-it-q4_0", meta: { n_ctx: 32768, n_ctx_train: 131072 } }],
+    });
+    const { queryLlamaCppServedContext } = await import("@/lib/llamacpp-server");
+
+    await expect(queryLlamaCppServedContext("http://127.0.0.1:8080/v1")).resolves.toBe(32768);
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith("http://127.0.0.1:8080/v1/models", expect.anything());
+  });
+
+  it("answers unknown, never a number, when the server does not say", async () => {
+    const { queryLlamaCppServedContext } = await import("@/lib/llamacpp-server");
+
+    answer(200, { data: [{ id: "gemma4-e2b-it-q4_0" }] });
+    await expect(queryLlamaCppServedContext("http://127.0.0.1:8080/v1")).resolves.toBeNull();
+
+    answer(200, { data: [{ id: "gemma4-e2b-it-q4_0", meta: { n_ctx: "32768" } }] });
+    await expect(queryLlamaCppServedContext("http://127.0.0.1:8080/v1")).resolves.toBeNull();
+
+    answer(503, { error: "loading model" });
+    await expect(queryLlamaCppServedContext("http://127.0.0.1:8080/v1")).resolves.toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+    await expect(queryLlamaCppServedContext("http://127.0.0.1:8080/v1")).resolves.toBeNull();
+  });
 });
