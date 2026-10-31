@@ -331,6 +331,38 @@ export async function unitActive(unit: string): Promise<boolean | null> {
   }
 }
 
+/**
+ * The live scope of a run whose record never got to NAME it: systemd's own
+ * list of `clawbox-run-<runId>-*.scope`, the newest one still up. A record is
+ * written "running" before its spawn, and a web server that went before the
+ * unit reached the disk left a run alive in its scope with nothing on record
+ * to find it by (reconcileAfterRestart). TRI-STATE, like `unitActive`: null
+ * when systemd says there is none, undefined when it could not be asked —
+ * "could not look" must never be read as "it is gone".
+ */
+export async function findRunScopeUnit(runId: string): Promise<string | null | undefined> {
+  if (typeof runId !== "string" || !RUN_ID.test(runId)) return null;
+  const binary = await findSystemdTool("systemctl");
+  if (!binary) return undefined;
+  const prefix = `${RUN_UNIT_PREFIX}${runId}-`;
+  try {
+    const { stdout } = await execFileAsync(binary, ["--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager", `${prefix}*.scope`], {
+      timeout: SYSTEMD_TIMEOUT_MS,
+      env: scopeEnv({ PATH: toolSearchPath() }) as NodeJS.ProcessEnv,
+    });
+    // `UNIT LOAD ACTIVE SUB DESCRIPTION`, one per line. The token after the run
+    // id is the spawn's time in base 36, so the greatest name is the newest.
+    const up = stdout.split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .filter(([unit, , active]) => isRunScopeUnit(unit) && unit.startsWith(prefix) && readActive(active ?? ""))
+      .map(([unit]) => unit)
+      .sort();
+    return up.length ? up[up.length - 1] : null;
+  } catch {
+    return undefined;
+  }
+}
+
 function readActive(stdout: string): boolean {
   const state = stdout.trim().split("\n")[0]?.trim() ?? "";
   return state === "active" || state === "activating" || state === "reloading";

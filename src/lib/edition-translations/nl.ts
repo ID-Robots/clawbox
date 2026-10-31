@@ -1146,6 +1146,7 @@ export const nl: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "Het werk staat op {branch}, niet in het project: het project staat op een andere branch dan {base}.",
   "codingAgent.worktreeUnmergedConflict": "Het werk staat op {branch}, niet in het project: het botst met de eigen wijzigingen van het project.",
   "codingAgent.worktreeUnmergedFailed": "Het werk staat op {branch}, niet in het project: git weigerde de merge.",
+  "codingAgent.worktreeUnmergedStopped": "Het werk staat op {branch}, niet in het project: de run is gestopt voordat hij klaar was, dus er is niets gemerged. Merge het zelf als je het wilt.",
   "codingAgent.worktreeOnDisk": "Zijn kopie van het project staat nog op schijf.",
   "codingAgent.worktreeMergedInto": "Samengevoegd in {base}.",
 

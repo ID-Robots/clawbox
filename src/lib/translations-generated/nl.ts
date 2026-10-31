@@ -1883,6 +1883,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "Het werk staat op {branch}, niet in het project: de projectmap heeft niet-gecommitte wijzigingen.",
   "codingAgent.worktreeUnmergedFailed": "Het werk staat op {branch}, niet in het project: git weigerde de merge.",
   "codingAgent.worktreeUnmergedNotOnBase": "Het werk staat op {branch}, niet in het project: het project staat op een andere branch dan {base}.",
+  "codingAgent.worktreeUnmergedStopped": "Het werk staat op {branch}, niet in het project: de run is gestopt voordat hij klaar was, dus er is niets gemerged. Merge het zelf als je het wilt.",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "Bevestigen",
   "connected": "Verbonden!",

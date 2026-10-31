@@ -1145,6 +1145,7 @@ export const de: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "Die Arbeit liegt auf {branch}, nicht im Projekt: Das Projekt steht auf einem anderen Branch als {base}.",
   "codingAgent.worktreeUnmergedConflict": "Die Arbeit liegt auf {branch}, nicht im Projekt: Sie kollidiert mit den eigenen Änderungen des Projekts.",
   "codingAgent.worktreeUnmergedFailed": "Die Arbeit liegt auf {branch}, nicht im Projekt: Git hat den Merge abgelehnt.",
+  "codingAgent.worktreeUnmergedStopped": "Die Arbeit liegt auf {branch}, nicht im Projekt: Der Lauf wurde vor dem Ende gestoppt, deshalb wurde nichts gemergt. Mergen Sie sie selbst, wenn Sie sie möchten.",
   "codingAgent.worktreeOnDisk": "Seine Kopie des Projekts liegt noch auf der Festplatte.",
   "codingAgent.worktreeMergedInto": "In {base} gemergt.",
 

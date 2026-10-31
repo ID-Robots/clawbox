@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, readCheckout, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -65,20 +65,117 @@ describe("a coding team's git plumbing", () => {
     expect(made.ok).toBe(true);
     const wt = await addWorkerWorktree(dir, "team-x", "t1", 1);
     if (!wt.ok) throw new Error(wt.detail);
-    // The worker writes its file AND a favicon; meanwhile the box drew the
-    // same favicon into the team's checkout, uncommitted.
+    // The worker writes its file AND a robots.txt; meanwhile the same
+    // robots.txt landed in the team's checkout, uncommitted.
     fs.writeFileSync(path.join(wt.path, "index.html"), "<h1>hi</h1>\n");
-    fs.writeFileSync(path.join(wt.path, "favicon.ico"), "icon-bytes");
+    fs.writeFileSync(path.join(wt.path, "robots.txt"), "User-agent: *\n");
     git(wt.path, "add", "-A");
-    git(wt.path, "commit", "-q", "-m", "worker: index and favicon");
-    fs.writeFileSync(path.join(dir, "favicon.ico"), "icon-bytes");
+    git(wt.path, "commit", "-q", "-m", "worker: index and robots.txt");
+    fs.writeFileSync(path.join(dir, "robots.txt"), "User-agent: *\n");
     const merged = await mergeWorkerBranch(dir, wt.branch, "merge t1");
     expect(merged).toEqual({ ok: true, merged: true });
     expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>hi</h1>\n");
-    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("icon-bytes");
+    expect(fs.readFileSync(path.join(dir, "robots.txt"), "utf8")).toBe("User-agent: *\n");
     // The stray file went on the team branch in a commit of its own, before the merge.
     expect(git(dir, "log", "--oneline", "-3")).toMatch(/files present in the checkout before a merge/);
     expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
+  /** What the box draws into the team's checkout at a run's start, while the workers are out in their worktrees. */
+  const drawBoxFavicons = () => {
+    fs.writeFileSync(path.join(dir, "favicon.png"), "box-png");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "box-ico");
+  };
+  const untracked = () => git(dir, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).sort();
+  /** A worker of `team-x` with one commit holding `files`. */
+  async function workerWith(files: Record<string, string>) {
+    const wt = await addWorkerWorktree(dir, "team-x", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(wt.path, name), text);
+    git(wt.path, "add", "-A");
+    git(wt.path, "commit", "-q", "-m", "worker's work");
+    return wt;
+  }
+
+  it("never commits the box's untracked favicons at the root before a merge, and makes no commit when they are all that lay there", async () => {
+    expect((await ensureTeamBranch(dir, "team-x")).ok).toBe(true);
+    const wt = await workerWith({ "app.js": "console.log(1)\n" });
+    drawBoxFavicons();
+    expect(await mergeWorkerBranch(dir, wt.branch, "merge t1")).toEqual({ ok: true, merged: true });
+    expect(fs.existsSync(path.join(dir, "app.js"))).toBe(true);
+    expect(git(dir, "log", "--format=%s")).not.toMatch(/files present in the checkout before a merge/);
+    expect(git(dir, "log", "--all", "--format=", "--name-only")).not.toMatch(/favicon/);
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+  });
+
+  it("still commits every other stray file before a merge — a favicon in a sub-folder included — and leaves only the root favicons out", async () => {
+    expect((await ensureTeamBranch(dir, "team-x")).ok).toBe(true);
+    const wt = await workerWith({ "app.js": "console.log(1)\n" });
+    drawBoxFavicons();
+    fs.writeFileSync(path.join(dir, "notes.txt"), "lay here\n");
+    fs.mkdirSync(path.join(dir, "assets"));
+    fs.writeFileSync(path.join(dir, "assets", "favicon.png"), "the project's own");
+    expect(await mergeWorkerBranch(dir, wt.branch, "merge t1")).toEqual({ ok: true, merged: true });
+    const kept = git(dir, "log", "--format=%H", "--grep", "files present in the checkout before a merge");
+    expect(kept).toMatch(/^[0-9a-f]{40}$/);
+    expect(git(dir, "show", "--format=", "--name-only", kept).split("\n").sort()).toEqual(["assets/favicon.png", "notes.txt"]);
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
+  });
+
+  it("lets a favicon the worker's branch brought win over the box's untracked copy", async () => {
+    expect((await ensureTeamBranch(dir, "team-x")).ok).toBe(true);
+    const wt = await workerWith({ "index.html": "<h1>hi</h1>\n", "favicon.ico": "the worker's ico" });
+    drawBoxFavicons();
+    expect(await mergeWorkerBranch(dir, wt.branch, "merge t1")).toEqual({ ok: true, merged: true });
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("the worker's ico");
+    expect(git(dir, "ls-files", "favicon.ico")).toBe("favicon.ico");
+    expect(git(dir, "log", "--format=%s")).not.toMatch(/files present in the checkout before a merge/);
+    // The one the branch did not bring is still the box's, untracked.
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+    expect(untracked()).toEqual(["favicon.png"]);
+  });
+
+  it("puts the box's favicon back when a merge that brought one is aborted", async () => {
+    expect((await ensureTeamBranch(dir, "team-x")).ok).toBe(true);
+    const wt = await workerWith({ "index.html": "<h1>From the worker</h1>\n", "favicon.png": "the worker's png" });
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>From the team branch</h1>\n");
+    git(dir, "commit", "-q", "-am", "the team branch's edit");
+    const head = git(dir, "rev-parse", "HEAD");
+    drawBoxFavicons();
+    expect(await mergeWorkerBranch(dir, wt.branch, "merge t1")).toMatchObject({ ok: false, conflict: true });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
+  });
+
+  it("never moves or reads through a favicon that is a symlink, even when the branch brings its own", async () => {
+    expect((await ensureTeamBranch(dir, "team-x")).ok).toBe(true);
+    const wt = await workerWith({ "index.html": "<h1>hi</h1>\n", "favicon.png": "the worker's png" });
+    const target = path.join(dir, ".git", "not-a-favicon");
+    fs.writeFileSync(target, "not the box's");
+    fs.symlinkSync(target, path.join(dir, "favicon.png"));
+    // Git then refuses to write over the untracked link, in its own words.
+    expect(await mergeWorkerBranch(dir, wt.branch, "merge t1")).toMatchObject({ ok: false, conflict: false });
+    expect(fs.lstatSync(path.join(dir, "favicon.png")).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target, "utf8")).toBe("not the box's");
+  });
+
+  it("reads the box's favicons at the root of the folder it is asked about, which may be a sub-folder of the repository", async () => {
+    fs.mkdirSync(path.join(dir, "site"));
+    fs.writeFileSync(path.join(dir, "site", "index.html"), "<h1>site</h1>\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "site");
+    fs.writeFileSync(path.join(dir, "site", "favicon.png"), "box-png");
+    fs.writeFileSync(path.join(dir, "site", "favicon.ico"), "box-ico");
+    expect(await readCheckout(path.join(dir, "site"), "all")).toEqual({ ok: true, changed: false, favicons: ["favicon.png", "favicon.ico"] });
+    // From the repository's root they are files in a sub-folder: the project's own.
+    expect(await readCheckout(dir, "all")).toEqual({ ok: true, changed: true, favicons: [] });
+    // A tracked favicon dropped from the index is the project's change, not the box's file.
+    git(dir, "add", "site/favicon.png");
+    git(dir, "commit", "-q", "-m", "the project's favicon");
+    git(dir, "rm", "-q", "--cached", "site/favicon.png");
+    expect(await readCheckout(path.join(dir, "site"), "all")).toEqual({ ok: true, changed: true, favicons: ["favicon.ico"] });
   });
 
   it("reports a branch that added nothing, and aborts a conflict instead of guessing", async () => {

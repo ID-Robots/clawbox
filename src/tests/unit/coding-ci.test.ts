@@ -128,6 +128,29 @@ describe("what a team's goal asks for", () => {
     ["Refactor the parser without a PR", false, false],
     ["Don't open a pull request, I will", false, false],
     ["Do not touch the README. Open a PR when done", true, false],
+    // A pull request that already exists, named, is a reference and asks for
+    // nothing: a live team's goal failed its finished work on "(PR #14)".
+    ["Add a pagination helper that an outside contributor sent in (PR #14), with tests", false, false],
+    ["Port the pagination helper sent in PR #14 to the new API", false, false],
+    ["Fix the flaky test; see pull request 12 for the history", false, false],
+    ["Rework the parser as discussed in https://github.com/acme/site/pull/12", false, false],
+    ["Review and merge PR #14", false, false],
+    ["The bug came in with PR 9. Fix it", false, false],
+    ["Review the open PRs and summarize them in NOTES.md", false, false],
+    ["Write the release notes for the PRs merged last week", false, false],
+    // …but an ask beside a reference is still an ask.
+    ["Build on PR #14 and open a pull request of your own", true, false],
+    ["Create a pull request for the fix", true, false],
+    ["Send me a PR when it works", true, false],
+    ["Raise a draft PR with the change", true, false],
+    ["Submit the work as a pull request", true, false],
+    ["Fix the bug, then open PRs for each package", true, false],
+    ["I need a pull request for this", true, false],
+    // Another thing's noun is not a pull request asked for.
+    ["Create the PR template for the repo", false, false],
+    ["Draft the PR description in NOTES.md", false, false],
+    // A negator's clause ends where the next one begins.
+    ["Don't merge it, but open a PR", true, false],
   ])("%s → PR %s, merge %s", (goal, pr, merge) => {
     expect(goalWantsPullRequest(goal)).toBe(pr);
     expect(goalWantsMerge(goal)).toBe(merge);

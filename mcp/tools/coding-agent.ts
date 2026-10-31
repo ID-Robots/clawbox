@@ -556,6 +556,12 @@ function describeRun(run: RunPayload, tail: number): string {
     parts.push(
       `This run works in its own copy of ${run.worktree.project} on branch ${run.worktree.branch} (forked from ${run.worktree.base})${gone}`,
     );
+    // Not in the project: said with whose call that is. An assistant told only
+    // "not merged: the project folder has uncommitted changes" deleted the
+    // owner's files and merged the branch into their folder on its own.
+    if (run.worktree.result?.kind === "unmerged" || (run.worktree.removed && !run.worktree.branchRemoved && run.worktree.result?.kind !== "merged")) {
+      parts.push(ownerDecidesMerge(run.worktree.branch));
+    }
   }
   const facts = [
     // Which account paid is said whenever it is not the box's own plan: the
@@ -734,6 +740,15 @@ const MAX_LISTED_RUNS = 30;
 /** The status filter: every status the record can hold, and "all". */
 const RUN_FILTERS = ["all", ...RUN_STATUSES] as const;
 
+/**
+ * What the assistant is told whenever a run's or a team's work is on a branch
+ * and not in the project folder: whose decision the merge is. Fixed words, the
+ * same everywhere, never an instruction to tidy the folder.
+ */
+export function ownerDecidesMerge(branch: string): string {
+  return `The work is on branch ${branch}, not in the project folder. Whether to merge it is the owner's decision: tell them where it is and why, and do not merge it, delete or move files, or clean up the owner's project folder yourself unless they ask you to.`;
+}
+
 /** Where the box keeps worktrees inside a project (`WORKTREES_DIR` in src/lib/coding-team-worktree.ts). */
 const WORKTREES_SEGMENT = "/.clawbox/worktrees/";
 
@@ -772,10 +787,10 @@ function worktreeState(run: RunPayload): string | null {
   const why = wt.result?.kind === "unmerged" && wt.result.detail ? redact(wt.result.detail.slice(0, 160)) : null;
   if (wt.removed) {
     if (wt.branchRemoved) return "removed with its branch — the run left nothing on it";
-    return `files removed; the work is kept on branch ${wt.branch}${why ? ` — not merged: ${why}` : ""}`;
+    return `files removed; the work is kept on branch ${wt.branch}${why ? ` — not merged: ${why}` : ""}; the owner decides whether to merge it`;
   }
   if (run.status === "running") return "in use";
-  if (wt.result?.kind === "unmerged") return `kept, could not be merged home${why ? `: ${why}` : ""}`;
+  if (wt.result?.kind === "unmerged") return `kept, could not be merged home${why ? `: ${why}` : ""}; the owner decides whether to merge it`;
   return "kept, not merged home yet";
 }
 
@@ -1911,6 +1926,8 @@ interface TeamPayload {
   advice?: { reason: "one_task" | "overlap"; overlap: number } | null;
   /** The plan had one task, so it ran as one ordinary run. Absent from an older server. */
   singleRun?: boolean;
+  /** The team's work is on this branch, NOT in the project folder (a merge home the project refused). Absent from an older server. */
+  unlanded?: { branch: string; reason: string } | null;
   /** The planner's map of what the goal touches. Absent from an older server, and before the plan. */
   repoMap?: { files: string[]; entryPoints: string[]; testCommands: string[]; gotchas: string[] } | null;
   finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
@@ -2059,6 +2076,7 @@ function describeTeam(team: TeamPayload, withLog: boolean, edition: Ed): string 
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
   if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"})${team.pr ? "." : "; the project page's Create PR compares it."}`);
   if (team.pr) parts.push(teamPrSentence(team.pr));
+  if (team.unlanded) parts.push(ownerDecidesMerge(team.unlanded.branch));
   if (team.agents && team.agents.total > 0) {
     const leads = team.agents.leads ?? 0;
     parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s)${leads > 0 ? `, ${leads} lead turn(s)` : ""}.`);

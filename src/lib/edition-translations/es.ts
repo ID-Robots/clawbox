@@ -1141,6 +1141,7 @@ export const es: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "El trabajo está en {branch}, no en el proyecto: el proyecto está en una rama distinta de {base}.",
   "codingAgent.worktreeUnmergedConflict": "El trabajo está en {branch}, no en el proyecto: entra en conflicto con los cambios propios del proyecto.",
   "codingAgent.worktreeUnmergedFailed": "El trabajo está en {branch}, no en el proyecto: git rechazó la fusión.",
+  "codingAgent.worktreeUnmergedStopped": "El trabajo está en {branch}, no en el proyecto: la ejecución se detuvo antes de terminar, así que no se fusionó nada. Fusiónalo tú si lo quieres.",
   "codingAgent.worktreeOnDisk": "Su copia del proyecto sigue en el disco.",
   "codingAgent.worktreeMergedInto": "Fusionado en {base}.",
 

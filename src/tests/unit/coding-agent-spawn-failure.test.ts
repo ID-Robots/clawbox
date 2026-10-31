@@ -51,6 +51,13 @@ vi.mock("@/lib/coding-git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-git")>()),
   headCommitShort: vi.fn(async () => null),
 }));
+// And for who the harness's commits are authored as (prepareRunGitIdentity):
+// `git config --get user.name/.email` through the same mocked `spawn`, asked on
+// the way to every spawn.
+vi.mock("@/lib/coding-git-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-git-identity")>()),
+  resolveCodingGitIdentity: vi.fn(async () => ({ ok: true as const, identity: { name: "ClawBox Coding Agent", email: "coding-agent@clawbox.local", source: "placeholder" as const } })),
+}));
 // Every run draws its project an icon through an upstream ClawBox AI call.
 // Nothing here asserts it, and left real it is one more thing racing the real
 // `git` below for a loaded runner's attention.

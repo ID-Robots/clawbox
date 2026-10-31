@@ -1883,6 +1883,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "Le travail est sur {branch}, pas dans le projet : le dossier du projet a des modifications non validées.",
   "codingAgent.worktreeUnmergedFailed": "Le travail est sur {branch}, pas dans le projet : git a refusé la fusion.",
   "codingAgent.worktreeUnmergedNotOnBase": "Le travail est sur {branch}, pas dans le projet : le projet est sur une autre branche que {base}.",
+  "codingAgent.worktreeUnmergedStopped": "Le travail est sur {branch}, pas dans le projet : l'exécution a été arrêtée avant la fin, donc rien n'a été fusionné. Fusionnez-le vous-même si vous le voulez.",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "Confirmer",
   "connected": "Connecté !",

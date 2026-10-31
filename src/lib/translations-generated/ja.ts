@@ -1883,6 +1883,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。プロジェクトフォルダーにコミットされていない変更があります。",
   "codingAgent.worktreeUnmergedFailed": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。git がマージを拒否しました。",
   "codingAgent.worktreeUnmergedNotOnBase": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。プロジェクトは {base} とは別のブランチにあります。",
+  "codingAgent.worktreeUnmergedStopped": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。実行が終わる前に停止されたため、何もマージされていません。必要ならご自身でマージしてください。",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "確認",
   "connected": "接続完了！",

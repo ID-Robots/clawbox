@@ -1147,6 +1147,7 @@ export const ja: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。プロジェクトは {base} とは別のブランチにあります。",
   "codingAgent.worktreeUnmergedConflict": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。プロジェクト自身の変更と競合しています。",
   "codingAgent.worktreeUnmergedFailed": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。git がマージを拒否しました。",
+  "codingAgent.worktreeUnmergedStopped": "作業内容はプロジェクト内ではなく、ブランチ {branch} にあります。実行が終わる前に停止されたため、何もマージされていません。必要ならご自身でマージしてください。",
   "codingAgent.worktreeOnDisk": "この実行専用のプロジェクトのコピーはまだディスクに残っています。",
   "codingAgent.worktreeMergedInto": "{base} にマージされました。",
 
