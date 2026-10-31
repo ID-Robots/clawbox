@@ -35,10 +35,6 @@ const drawsMock = vi.hoisted(() => vi.fn());
 const refreshMock = vi.hoisted(() => vi.fn());
 const resolveVisionMock = vi.hoisted(() => vi.fn());
 
-// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
-// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: vi.fn(async () => {}) }));
-
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
 vi.mock("@/lib/hermes-image-refresh", () => ({ refreshHermesImageTools: refreshMock }));

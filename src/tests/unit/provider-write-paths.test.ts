@@ -31,9 +31,6 @@ const resolveConfigMock = vi.hoisted(() =>
 );
 
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
-// Hermes' Tool Search follows the default (hermes-local-tool-search.ts, own suite).
-const toolSearchSyncMock = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: toolSearchSyncMock }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 const storeGetMock = vi.hoisted(() => vi.fn<(key: string) => Promise<unknown>>(async () => null));
@@ -119,7 +116,6 @@ beforeEach(() => {
   storeGetMock.mockReset();
   storeGetMock.mockResolvedValue(null);
   invalidateMock.mockClear();
-  toolSearchSyncMock.mockClear();
   _resetLocalAiReconcileForTests();
   _resetClawaiModelsReconcileForTests();
 });
@@ -129,13 +125,6 @@ describe("saving a cloud provider key through the OpenClaw-shaped panel", () => 
     catalogueGrows(["openrouter"], ["openrouter", "anthropic"], "openrouter");
     await applyCloudProviderKeyToHermes({ openclawProvider: "anthropic", apiKey: "sk-abcdefgh" });
     expect(reloadCount()).toBe(1);
-  });
-
-  it("lets Hermes' Tool Search follow the default when the key makes it the provider", async () => {
-    catalogueGrows(["openrouter"], ["openrouter", "anthropic"], "openrouter");
-    const result = await applyCloudProviderKeyToHermes({ openclawProvider: "anthropic", apiKey: "sk-abcdefgh" });
-    expect(toolSearchSyncMock).toHaveBeenCalledTimes(result.activated ? 1 : 0);
-    expect(result.activated).toBe(true);
   });
 
   it("asks for nothing when hermes refused the key", async () => {

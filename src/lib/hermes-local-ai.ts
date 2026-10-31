@@ -8,7 +8,6 @@ import {
   type HermesConfigRead,
 } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
-import { syncHermesToolSearchWithDefault } from "@/lib/hermes-local-tool-search";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
@@ -161,8 +160,6 @@ async function applyLocalAi(options: {
   }
 
   invalidateModelOptions();
-  // Hermes' Tool Search follows the default (hermes-local-tool-search.ts).
-  if (options.makeDefault) await syncHermesToolSearchWithDefault("hermes-local-ai");
   return { provider: HERMES_LOCAL_PROVIDER, model };
 }
 
@@ -580,8 +577,5 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     );
   }
 
-  // A default that was the local model is gone: Hermes' Tool Search comes
-  // back (hermes-local-tool-search.ts).
-  if (wasDefault) await syncHermesToolSearchWithDefault("hermes-local-ai");
   return { wasDefault, model };
 }

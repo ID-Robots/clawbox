@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import copy
 import datetime as _dt
+import json
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 #: The Local AI proxy path of the llama.cpp backend — ``providers.clawlocal.base_url``
 #: (src/lib/hermes-local-ai.ts). Hermes names the provider ``custom`` in the
@@ -44,6 +45,9 @@ THINKING_OFF_LEVEL = "minimal"
 
 #: The ClawBox MCP server's name, as Hermes prefixes its tools.
 _MCP_SERVER = "clawbox"
+
+#: Hermes' Tool Search bridge call (tools/tool_search.py, TOOL_CALL_NAME).
+BRIDGE_CALL = "tool_call"
 
 #: The tools a lean turn keeps, in the order the model is shown them: the web
 #: app tool first, because with Hermes' file tools listed ahead of it the model
@@ -287,14 +291,64 @@ def _tool_name(tool: Any) -> str:
     return name if isinstance(name, str) else ""
 
 
-def lean_request(request: Any, base_url: Any, platform: Any = None, now: Optional[_dt.datetime] = None) -> Optional[dict]:
+def _names(tools: Any) -> set[str]:
+    return {_tool_name(tool) for tool in tools or []} - {""}
+
+
+def _bridged_call(tool_call: Any) -> Optional[tuple[str, Any]]:
+    """``(name, arguments)`` of a bridge call that runs ONE lean MCP tool, else None."""
+    fn = tool_call.get("function") if isinstance(tool_call, dict) else None
+    if not isinstance(fn, dict) or fn.get("name") != BRIDGE_CALL:
+        return None
+    try:
+        args = json.loads(fn.get("arguments") or "{}")
+    except (TypeError, ValueError):
+        return None
+    calls = args.get("calls") if isinstance(args, dict) else None
+    if not (isinstance(calls, list) and len(calls) == 1 and isinstance(calls[0], dict)):
+        return None
+    name = calls[0].get("name")
+    if not isinstance(name, str) or not any(name in _mcp_names(tool) for kind, tool in LEAN_TOOLS if kind == "mcp"):
+        return None
+    return name, calls[0].get("arguments")
+
+
+def _direct_history(messages: list) -> list:
+    """The conversation with each bridge call this plugin made shown as the direct
+    call the model wrote, so the model reads back its own call, not the bridge."""
+    out = []
+    for message in messages:
+        calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if isinstance(calls, list) and any(_bridged_call(call) for call in calls):
+            unwrapped = []
+            for call in calls:
+                bridged = _bridged_call(call)
+                if bridged:
+                    name, args = bridged
+                    arguments = args if isinstance(args, str) else json.dumps(args if args is not None else {}, ensure_ascii=False)
+                    call = {**call, "function": {**call["function"], "name": name, "arguments": arguments}}
+                unwrapped.append(call)
+            message = {**message, "tool_calls": unwrapped}
+        out.append(message)
+    return out
+
+
+def lean_request(request: Any, base_url: Any, platform: Any = None, now: Optional[_dt.datetime] = None,
+                 lookup: Optional[Callable[[str], Optional[dict]]] = None) -> Optional[dict]:
     """The provider kwargs of a lean turn, or None to leave the request alone.
 
-    The system prompt is replaced, the tools are NARROWED to the lean set — never
-    widened: a tool the request does not carry (switched off by the owner, or
-    deferred behind Tool Search) is neither added nor taught — and a reasoning
-    level that is not a thinking one is sent as the model's off level. The
-    conversation itself is untouched.
+    The system prompt is replaced, the tools are NARROWED to the lean set, and a
+    reasoning level that is not a thinking one is sent as the model's off level.
+
+    Never widened past what the session has: a tool the request carries is kept;
+    a lean ClawBox MCP tool it does not carry is offered only when the request
+    carries Hermes' Tool Search bridge — the tool is then deferred, still the
+    session's, and reachable through ``tool_call`` — with the schema ``lookup``
+    finds for it (Hermes' registry). The model calls it by name; the response
+    side (:func:`bridge_deferred_calls`) hands that call to the bridge. A tool
+    switched off is in neither, so it is neither offered nor taught. The
+    conversation is untouched but for those bridged calls, which the model
+    reads back as the direct calls it made.
     """
     if not is_lean_request(base_url, platform) or not isinstance(request, dict):
         return None
@@ -308,6 +362,15 @@ def lean_request(request: Any, base_url: Any, platform: Any = None, now: Optiona
         tool_id = lean_tool_id(_tool_name(tool))
         if tool_id and tool_id not in offered:
             offered[tool_id] = tool
+    if BRIDGE_CALL in _names(request.get("tools")) and lookup is not None:
+        for kind, tool_id in LEAN_TOOLS:
+            if kind != "mcp" or tool_id in offered:
+                continue
+            for name in _mcp_names(tool_id):
+                schema = lookup(name)
+                if isinstance(schema, dict) and schema.get("name") == name:
+                    offered[tool_id] = {"type": "function", "function": schema}
+                    break
     order = [tool for _, tool in LEAN_TOOLS]
     kept = [offered[tool_id] for tool_id in order if tool_id in offered]
     if kept:
@@ -323,7 +386,7 @@ def lean_request(request: Any, base_url: Any, platform: Any = None, now: Optiona
         tools={tool_id: _tool_name(offered[tool_id]) for tool_id in order if tool_id in offered},
         today=today_line(now),
     )
-    rest = list(messages)
+    rest = _direct_history(messages)
     if rest and isinstance(rest[0], dict) and rest[0].get("role") == "system":
         rest[0] = {**rest[0], "content": prompt}
     else:
@@ -334,3 +397,49 @@ def lean_request(request: Any, base_url: Any, platform: Any = None, now: Optiona
     if isinstance(effort, str) and effort.strip().lower() not in THINKING_ON_LEVELS:
         lean["reasoning_effort"] = THINKING_OFF_LEVEL
     return lean
+
+
+def _field(obj: Any, key: str) -> Any:
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def _set_field(obj: Any, key: str, value: Any) -> None:
+    if isinstance(obj, dict):
+        obj[key] = value
+    else:
+        setattr(obj, key, value)
+
+
+def bridge_deferred_calls(response: Any, request: Any, original_request: Any) -> int:
+    """Hand the model's direct calls to deferred lean tools to Hermes' bridge.
+
+    Hermes checks each call's name against the tools the SESSION lists, where a
+    deferred tool is not — it is reached through ``tool_call``, whose documented
+    shape is ``{"calls": [{"name", "arguments"}]}`` (tools/tool_search.py). The
+    tools this plugin offered directly although the original request did not
+    carry them are exactly those; a call to one becomes that bridge call, with
+    the model's own arguments string, in place. Returns how many were handed on.
+    """
+    if not isinstance(request, dict) or not isinstance(original_request, dict):
+        return 0
+    original = _names(original_request.get("tools"))
+    if BRIDGE_CALL not in original:
+        return 0
+    bridged = _names(request.get("tools")) - original
+    if not bridged:
+        return 0
+    handed = 0
+    for choice in _field(response, "choices") or []:
+        message = _field(choice, "message")
+        for call in _field(message, "tool_calls") or []:
+            fn = _field(call, "function")
+            name = _field(fn, "name")
+            if name not in bridged:
+                continue
+            arguments = _field(fn, "arguments")
+            _set_field(fn, "name", BRIDGE_CALL)
+            _set_field(fn, "arguments", json.dumps(
+                {"calls": [{"name": name, "arguments": arguments if arguments is not None else "{}"}]},
+                ensure_ascii=False))
+            handed += 1
+    return handed

@@ -7,3 +7,4 @@ kind: standalone
 # does `provides_hooks` (hermes_cli/plugin_validate.py).
 provides_middleware:
   - llm_request
+  - llm_execution

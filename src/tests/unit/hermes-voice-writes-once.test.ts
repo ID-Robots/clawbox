@@ -31,10 +31,6 @@ const inventoryMock = vi.hoisted(() => vi.fn());
 /** What `hermes config get <key>` answers; a missing key is unset. */
 const box = vi.hoisted(() => ({ config: {} as Record<string, string> }));
 
-// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
-// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: vi.fn(async () => {}) }));
-
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGet: async (key: string) => box.config[key] ?? "",

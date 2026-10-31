@@ -12,7 +12,6 @@ import { hermesCliAnswered, hermesStoredValueAsText } from "@/lib/hermes-cli-ans
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
-import { syncHermesToolSearchWithDefault } from "@/lib/hermes-local-tool-search";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { setHermesEnvValues } from "@/lib/hermes-env";
 import {
@@ -522,8 +521,6 @@ export async function applyClawaiToHermes(
 
   // The device's provider/model just changed — don't serve the old selection.
   invalidateModelOptions();
-  // Hermes' Tool Search follows the default model (hermes-local-tool-search.ts).
-  await syncHermesToolSearchWithDefault("hermes/clawai");
 
   // A box with no on-device engine now has a voice, so give it one.
   //

@@ -24,10 +24,6 @@ const cliMock = vi.hoisted(() => vi.fn());
 const forgetRefusal = vi.hoisted(() => vi.fn(async () => {}));
 const storedToken = vi.hoisted(() => ({ value: "claw_stored" }));
 
-// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
-// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: vi.fn(async () => {}) }));
-
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => true) }));
 vi.mock("@/lib/config-store", () => ({

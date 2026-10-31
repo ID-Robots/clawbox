@@ -16,11 +16,6 @@ const cliMock = vi.hoisted(() => vi.fn());
 const getKnownMock = vi.hoisted(() => vi.fn());
 const setManyMock = vi.hoisted(() => vi.fn());
 
-// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
-// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
-const toolSearchSyncMock = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: toolSearchSyncMock }));
-
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/config-store", () => ({
   setMany: setManyMock,
@@ -64,7 +59,6 @@ function store(values: Record<string, unknown>) {
 }
 
 beforeEach(() => {
-  toolSearchSyncMock.mockClear();
   cliMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   getKnownMock.mockReset();
@@ -199,19 +193,5 @@ describe("a Hermes re-pair and the owner's own model", () => {
     await applyClawaiToHermes("claw_token_abc", "pro");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
-  });
-});
-
-describe("a Hermes link and Tool Search", () => {
-  it("lets Tool Search follow the default once ClawBox AI is the provider", async () => {
-    await applyClawaiToHermes("claw_token_abc", "flash");
-
-    // Hermes' Tool Search follows the default model (hermes-local-tool-search.ts):
-    // asked once, after the write that made ClawBox AI the default.
-    expect(toolSearchSyncMock).toHaveBeenCalledTimes(1);
-    const providerWrite = cliMock.mock.calls.findIndex(([args]) => args?.[2] === "model.provider");
-    expect(providerWrite).toBeGreaterThanOrEqual(0);
-    expect(toolSearchSyncMock.mock.invocationCallOrder[0])
-      .toBeGreaterThan(cliMock.mock.invocationCallOrder[providerWrite]);
   });
 });

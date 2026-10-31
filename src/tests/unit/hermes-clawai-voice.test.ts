@@ -26,10 +26,6 @@ const runnableMock = vi.hoisted(() => vi.fn());
 const writeCloudMock = vi.hoisted(() => vi.fn());
 const standdownMock = vi.hoisted(() => vi.fn());
 const clearStanddownMock = vi.hoisted(() => vi.fn());
-// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
-// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: vi.fn(async () => {}) }));
-
 vi.mock("@/lib/hermes-voice-standdown", () => ({
   readHermesVoiceStanddown: standdownMock,
   clearHermesVoiceStanddown: clearStanddownMock,

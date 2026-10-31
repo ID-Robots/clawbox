@@ -11,14 +11,9 @@ import { testEnv } from "@/tests/helpers/env";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // What scripts/register-mcp.sh does for the on-device model on a Hermes box, at
-// every web-server start:
-//
-//   * installs and enables the clawbox_local_lean plugin (llm_request
-//     middleware: the lean prompt and tools for the box's own llama.cpp model);
-//   * makes Hermes' Tool Search follow the default model — off while the
-//     default is the local llama.cpp model, Hermes' own default otherwise —
-//     touching only the legacy scalar `tools.tool_search: false` ClawBox writes
-//     (the boot half of src/lib/hermes-local-tool-search.ts).
+// every web-server start: it installs and enables the clawbox_local_lean plugin
+// (llm_request / llm_execution middleware: the lean prompt and tools for the
+// box's own llama.cpp model).
 //
 // Same sandbox as register-mcp-email-hook.test.ts: a temporary HOME, a stub
 // `hermes` and a fake bun, so nothing here reaches a real Hermes.
@@ -26,8 +21,6 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = path.resolve(__dirname, "../../..");
 const SCRIPT = path.join(REPO, "scripts", "register-mcp.sh");
 const LEAN = "clawbox_local_lean";
-const LLAMACPP = "http://127.0.0.1/setup-api/local-ai/llamacpp/v1";
-const OLLAMA = "http://127.0.0.1/setup-api/local-ai/ollama/v1";
 
 function have(bin: string, args: string[]): boolean {
   return spawnSync(bin, args, { stdio: "ignore" }).status === 0;
@@ -67,21 +60,6 @@ function readConfig(): Record<string, unknown> {
     { encoding: "utf-8" },
   );
   return JSON.parse(out);
-}
-
-const tools = () => readConfig().tools as Record<string, unknown> | undefined;
-
-function defaultOn(provider: string, localUrl: string | null, extra = ""): void {
-  fs.writeFileSync(
-    configPath,
-    [
-      "model:",
-      "  default: gemma4-e2b-it-q4_0",
-      `  provider: ${provider}`,
-      ...(localUrl ? ["providers:", "  clawlocal:", `    base_url: ${localUrl}`, "    api_mode: openai"] : []),
-      extra,
-    ].join("\n") + "\n",
-  );
 }
 
 beforeEach(() => {
@@ -139,45 +117,5 @@ d("register-mcp.sh — the lean-mode plugin", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(`could not install the ${LEAN} plugin`);
     expect(fs.existsSync(path.join(pluginsDir, LEAN))).toBe(false);
-  });
-});
-
-d("register-mcp.sh — Hermes' Tool Search follows the default model", () => {
-  it("turns it off while the default is the box's own llama.cpp model", () => {
-    defaultOn("clawlocal", LLAMACPP);
-    const r = run();
-    expect(r.status).toBe(0);
-    expect(tools()).toEqual({ tool_search: false });
-    expect(r.stdout).toContain("turned Hermes' Tool Search off");
-    // Idempotent.
-    expect(run().stdout).toContain("already current");
-  });
-
-  it("gives it back when the default moved on, keeping the rest of tools", () => {
-    defaultOn("clawai", LLAMACPP, "tools:\n  tool_search: false\n  other: 1\n");
-    const r = run();
-    expect(tools()).toEqual({ other: 1 });
-    expect(r.stdout).toContain("gave Hermes' Tool Search back its default");
-
-    defaultOn("clawai", null, "tools:\n  tool_search: false\n");
-    run();
-    expect(readConfig()).not.toHaveProperty("tools");
-  });
-
-  it("never touches an owner's own setting", () => {
-    for (const provider of ["clawlocal", "clawai"]) {
-      defaultOn(provider, LLAMACPP, "tools:\n  tool_search:\n    enabled: 'off'\n");
-      run();
-      expect(tools()).toEqual({ tool_search: { enabled: "off" } });
-      defaultOn(provider, LLAMACPP, "tools:\n  tool_search: true\n");
-      run();
-      expect(tools()).toEqual({ tool_search: true });
-    }
-  });
-
-  it("leaves an Ollama-backed local default alone: its tools are not narrowed", () => {
-    defaultOn("clawlocal", OLLAMA);
-    run();
-    expect(readConfig()).not.toHaveProperty("tools");
   });
 });

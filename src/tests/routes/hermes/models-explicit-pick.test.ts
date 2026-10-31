@@ -21,11 +21,6 @@ const runHermesCliMock = vi.hoisted(() => vi.fn());
 const getModelOptionsMock = vi.hoisted(() => vi.fn());
 const setManyMock = vi.hoisted(() => vi.fn());
 
-// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
-// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
-const toolSearchSyncMock = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: toolSearchSyncMock }));
-
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: runHermesCliMock }));
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hermes-model-options")>();
@@ -98,7 +93,6 @@ beforeEach(() => {
   getModelOptionsMock.mockResolvedValue(structuredClone(PAYLOAD));
   setManyMock.mockReset();
   setManyMock.mockResolvedValue(undefined);
-  toolSearchSyncMock.mockClear();
 });
 
 describe("POST /setup-api/hermes/models and the owner's explicit pick", () => {
@@ -121,22 +115,5 @@ describe("POST /setup-api/hermes/models and the owner's explicit pick", () => {
     expect(await save({ provider: "anthropic", model: "anthropic/claude-opus-5" })).toBe(200);
 
     expect(recordedPicks()).toEqual({ anthropic: "anthropic/claude-opus-5" });
-  });
-});
-
-describe("POST /setup-api/hermes/models and Hermes' Tool Search", () => {
-  it("lets Tool Search follow the default once the switch has landed", async () => {
-    expect(await save({ provider: "anthropic", model: "anthropic/claude-fable-5" })).toBe(200);
-
-    expect(toolSearchSyncMock).toHaveBeenCalledTimes(1);
-    const lastWrite = Math.max(...runHermesCliMock.mock.invocationCallOrder);
-    expect(toolSearchSyncMock.mock.invocationCallOrder[0]).toBeGreaterThan(lastWrite);
-  });
-
-  it("does not touch it when the switch failed", async () => {
-    runHermesCliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "boom" });
-    expect(await save({ provider: "anthropic", model: "anthropic/claude-fable-5" })).toBe(502);
-
-    expect(toolSearchSyncMock).not.toHaveBeenCalled();
   });
 });

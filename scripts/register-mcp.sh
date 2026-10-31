@@ -1054,38 +1054,6 @@ if repaired_enabled and image_plugin and image_plugin in (names or []):
         print("[register-mcp] re-armed image_gen.provider — the plugin list was repaired "
               "and the ClawBox AI backend is installed; hermes loads it at its next start")
 
-# ── Hermes' Tool Search follows the default model. ──────────────────────────
-# The boot half of src/lib/hermes-local-tool-search.ts, which says why: off
-# while the default is the box's own llama.cpp model (Hermes refuses a direct
-# call to a deferred tool, and the 2B model cannot drive tool_search /
-# tool_call), Hermes' own default otherwise. ClawBox's value is the legacy
-# scalar `tools.tool_search: false` and only that is ever removed; an owner's
-# block or `true` is left as it is. Here for a default Hermes moved itself
-# (`/model`, `hermes model`) and for a sync the web server could not finish.
-LOCAL_PROVIDER = "clawlocal"
-LOCAL_LLAMACPP_PROXY_PATH = "/setup-api/local-ai/llamacpp/"
-_model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
-_providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
-_local_cfg = _providers_cfg.get(LOCAL_PROVIDER) if isinstance(_providers_cfg.get(LOCAL_PROVIDER), dict) else {}
-_local_url = _local_cfg.get("base_url")
-on_device_default = (_model_cfg.get("provider") == LOCAL_PROVIDER
-                     and isinstance(_local_url, str) and LOCAL_LLAMACPP_PROXY_PATH in _local_url)
-tools_cfg = cfg.get("tools")
-if on_device_default and (tools_cfg is None or (isinstance(tools_cfg, dict) and "tool_search" not in tools_cfg)):
-    if tools_cfg is None:
-        tools_cfg = {}
-        cfg["tools"] = tools_cfg
-    tools_cfg["tool_search"] = False
-    changed = True
-    print("[register-mcp] turned Hermes' Tool Search off — the default model is the box's own, "
-          "which is given its tools directly")
-elif not on_device_default and isinstance(tools_cfg, dict) and tools_cfg.get("tool_search") is False:
-    del tools_cfg["tool_search"]
-    if not tools_cfg:
-        del cfg["tools"]
-    changed = True
-    print("[register-mcp] gave Hermes' Tool Search back its default — the default model is no longer the box's own")
-
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
     sys.exit(0)
