@@ -39,7 +39,7 @@
 import fs from "fs";
 import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
-import { excludeWorktrees, forkBase, gitIn, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
 
@@ -275,7 +275,12 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
  *     out now is a guess;
  *   - only when the checkout is clean. The team's merge commits what it finds
  *     lying there first; that is right for a tree only the team uses and
- *     wrong for the owner's own folder, where uncommitted work is theirs;
+ *     wrong for the owner's own folder, where uncommitted work is theirs.
+ *     The favicons the box itself draws at the root are not theirs and do not
+ *     count (`readCheckout`): drawn there while the run is out in its
+ *     worktree, they refused the merge home of every run that had pictures
+ *     on. One the branch brings its own of is moved aside for the merge, so
+ *     the run's file wins and git does not refuse to write over it;
  *   - a conflict is ABORTED and named, never resolved by guess. The worktree
  *     then stays, which is what the card's Remove worktree is for.
  */
@@ -296,13 +301,15 @@ export function mergeRunBranch(input: {
     }
     const ahead = await commitsAhead(dir, input.branch, input.base);
     if (ahead === 0) return { ok: true, merged: false, commit: null };
-    const dirty = await gitIn(dir, ["status", "--porcelain", "--untracked-files=normal"]);
-    if (!ok(dirty)) return { ok: false, reason: "failed", detail: failureDetail(dirty, "Reading the project before the merge") };
-    if (out(dirty)) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
+    const seen = await readCheckout(dir, "normal");
+    if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project before the merge") };
+    if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
     const as = await asBox(dir);
     if (!as.ok) return { ok: false, reason: "failed", detail: as.detail };
+    const aside = await setAsideFavicons(dir, input.branch, seen.favicons);
     const merged = await gitIn(dir, [...as.args, "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
     if (ok(merged)) {
+      putBackFavicons(aside);
       // The merge commit, for the record and for the card's "the work is now
       // in <base>, as <sha>". Best-effort: a rev-parse that will not answer
       // does not turn a landed merge into a failed one.
@@ -311,6 +318,7 @@ export function mergeRunBranch(input: {
     }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await gitIn(dir, ["merge", "--abort"]);
+    putBackFavicons(aside);
     return {
       ok: false,
       reason: conflict ? "conflict" : "failed",

@@ -24,6 +24,7 @@ import path from "./runtime-path";
 import fs from "fs";
 import { runChild, failureDetail, type ChildResult } from "./child-run";
 import { codingGitIdentityArgs } from "./coding-git-identity";
+import { BOX_FAVICONS } from "./project-icon";
 
 const CALL_TIMEOUT_MS = 60_000;
 export const WORKTREES_DIR = path.join(".clawbox", "worktrees");
@@ -263,6 +264,89 @@ async function addWorkerWorktreeNow(dir: string, teamId: string, taskId: string,
 }
 
 /**
+ * A checkout's uncommitted state as a merge home has to read it: `changed` is
+ * anything git lists APART from `favicons` — the box's own (`BOX_FAVICONS`)
+ * lying untracked at the folder's root, named relative to `dir`, the way the
+ * pathspecs and the files below want them. Shared by a team's merge and a
+ * run's merge home (coding-run-worktree.ts), so the two cannot disagree about
+ * which files are the box's.
+ *
+ * A favicon is the box's only when `?? <name>` is ALL git says of that path:
+ * one the project tracks, changed, renamed or dropped from the index, is the
+ * project's own and stays in `changed`. Porcelain paths are the repository's
+ * whatever folder git runs in, and a team may work in a sub-folder of one, so
+ * the folder's prefix goes in front. `-z` because a path then comes as it is:
+ * never quoted, and never a leading space the trimmed output could eat.
+ */
+export async function readCheckout(dir: string, untracked: "normal" | "all"): Promise<{ ok: true; changed: boolean; favicons: string[] } | { ok: false; failed: ChildResult }> {
+  const shown = await git(dir, ["rev-parse", "--show-prefix"]);
+  if (!ok(shown)) return { ok: false, failed: shown };
+  const prefix = out(shown);
+  const status = await git(dir, ["status", "--porcelain", "-z", `--untracked-files=${untracked}`]);
+  if (!ok(status)) return { ok: false, failed: status };
+  // `XY <path>` each, and a rename's source after it as a bare path.
+  const entries = status.stdout.split("\0").filter(Boolean);
+  const favicons = BOX_FAVICONS.filter((name) => {
+    const file = prefix + name;
+    const mentions = entries.filter((e) => e === file || e.slice(3) === file);
+    return mentions.length === 1 && mentions[0] === `?? ${file}`;
+  });
+  const box = new Set(favicons.map((name) => `?? ${prefix}${name}`));
+  return { ok: true, changed: entries.some((e) => !box.has(e)), favicons };
+}
+
+/** A box favicon moved out of a merge's way, with what it takes to put it back. */
+export interface FaviconAside {
+  file: string;
+  bytes: Buffer;
+  mode: number;
+}
+
+/**
+ * The box's untracked favicons that `branch` brings its own of, moved out of
+ * the merge's way. Git refuses to write over an untracked file even when the
+ * bytes are the same ("untracked working tree files would be overwritten by
+ * merge"), and a favicon the branch brought is the work: it wins. Held in
+ * memory rather than deleted, so `putBackFavicons` can return each one the
+ * merge left room for.
+ */
+export async function setAsideFavicons(dir: string, branch: string, favicons: readonly string[]): Promise<FaviconAside[]> {
+  const aside: FaviconAside[] = [];
+  for (const name of favicons) {
+    // `./`: the path relative to `dir` in the branch's tree, not to the repository's root.
+    if (!ok(await git(dir, ["cat-file", "-e", `${branch}:./${name}`]))) continue;
+    const file = path.join(dir, name);
+    try {
+      const stat = fs.lstatSync(file);
+      // The box writes plain files; anything else is not its to move.
+      if (!stat.isFile()) continue;
+      const bytes = fs.readFileSync(file);
+      fs.unlinkSync(file);
+      aside.push({ file, bytes, mode: stat.mode & 0o777 });
+    } catch {
+      // Left where it lies: the merge then says why it cannot go on, in git's words.
+    }
+  }
+  return aside;
+}
+
+/**
+ * Each favicon `setAsideFavicons` moved, back where it was if the name is
+ * still free: after a merge that did not land, or one whose result has no
+ * such file. Never over one ('wx'), so a favicon the branch brought stays.
+ */
+export function putBackFavicons(aside: readonly FaviconAside[]): void {
+  for (const { file, bytes, mode } of aside) {
+    try {
+      fs.writeFileSync(file, bytes, { flag: "wx", mode });
+    } catch {
+      // EEXIST is the branch's own favicon in its place, which is the point;
+      // anything else is a favicon the next run's start draws again.
+    }
+  }
+}
+
+/**
  * Bring a worker's branch into the team branch (the main checkout is on
  * it). `merged: false` when the branch added nothing. A conflict is
  * aborted, never resolved by guess, and reported with git's own words.
@@ -276,27 +360,36 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
     const as = await asBox(dir);
     if (!as.ok) return { ok: false, conflict: false, detail: as.detail };
     // Whatever landed in the team's checkout uncommitted while the workers
-    // were out — the favicons the box draws at a run's start above all —
-    // goes on the team branch first: a merge refuses to overwrite an
+    // were out goes on the team branch first: a merge refuses to overwrite an
     // untracked file a worker's branch also brought, and "MERGE FAILED …
     // untracked working tree files would be overwritten" rejected finished
     // work for that (team-8l9oudxd, t1, 2026-09-05). An identical file then
     // merges as one; a different one conflicts honestly, below.
-    const stray = await git(dir, ["status", "--porcelain", "--untracked-files=all"]);
-    if (!ok(stray)) return { ok: false, conflict: false, detail: failureDetail(stray, "Reading the team checkout before the merge") };
-    if (out(stray)) {
-      const added = await git(dir, ["add", "-A"]);
+    //
+    // Never the favicons the box draws at a run's start (`readCheckout`):
+    // they are not the team's work, and this commit put them in the owner's
+    // history. They stay untracked, and one a worker's branch brings its own
+    // of is moved aside for the merge instead, so the branch's file wins.
+    const seen = await readCheckout(dir, "all");
+    if (!seen.ok) return { ok: false, conflict: false, detail: failureDetail(seen.failed, "Reading the team checkout before the merge") };
+    if (seen.changed) {
+      const added = await git(dir, ["add", "-A", "--", ":/", ...seen.favicons.map((name) => `:(exclude)${name}`)]);
       if (!ok(added)) return { ok: false, conflict: false, detail: failureDetail(added, "Staging the team checkout's files before the merge") };
       const kept = await git(dir, [...as.args, "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
       if (!ok(kept)) return { ok: false, conflict: false, detail: failureDetail(kept, "Committing the team checkout's files before the merge") };
     }
+    const aside = await setAsideFavicons(dir, branch, seen.favicons);
     // `--no-ff` always writes a merge COMMIT, so this needs an identity for the
     // same reason the preservation commit above does — and for the same reason
     // the run worktrees' merge home has always passed one.
     const merged = await git(dir, [...as.args, "merge", "--no-ff", "--no-edit", "-m", message, branch]);
-    if (ok(merged)) return { ok: true, merged: true };
+    if (ok(merged)) {
+      putBackFavicons(aside);
+      return { ok: true, merged: true };
+    }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await git(dir, ["merge", "--abort"]);
+    putBackFavicons(aside);
     return { ok: false, conflict, detail: failureDetail(merged, `Merging ${branch} into the team branch`) };
   });
 }
