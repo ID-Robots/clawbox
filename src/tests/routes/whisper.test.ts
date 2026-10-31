@@ -80,7 +80,9 @@ vi.mock("@/lib/whisper-models", () => ({
  * the route re-measures rather than trusting the exit code, so the fake has to
  * be able to exit 0 and leave nothing behind.
  */
-const child = { code: 0, stdout: ["Fetching the small model..."], stderr: "", leavesWeights: true };
+const child = { code: 0, stdout: ["Fetching the small model..."], stderr: "", leavesWeights: true, hold: false };
+/** With `child.hold`, the fetcher runs until this is called — what a signal to its group does. */
+let heldClose: ((code?: number | null) => void) | null = null;
 /** Every spawn the route made: command, argv and the options it passed. */
 const spawned: [string, string[], { env?: NodeJS.ProcessEnv }][] = [];
 vi.mock("child_process", async (importOriginal) => ({
@@ -101,6 +103,10 @@ vi.mock("child_process", async (importOriginal) => ({
     };
     setTimeout(() => {
       for (const line of child.stdout) for (const fn of outHandlers) fn(`${line}\n`);
+      if (child.hold) {
+        heldClose = (code = null) => { for (const fn of handlers.close ?? []) fn(code); };
+        return;
+      }
       if (child.stderr) for (const fn of errHandlers) fn(child.stderr);
       if (child.code === 0 && child.leavesWeights) {
         for (const size of state.sizes) if (!size.cached) size.cached = true;
@@ -142,6 +148,8 @@ beforeEach(() => {
   child.stdout = ["Fetching the small model..."];
   child.stderr = "";
   child.leavesWeights = true;
+  child.hold = false;
+  heldClose = null;
   spawned.length = 0;
   pointed.mockClear().mockResolvedValue({ ok: true, error: undefined });
   restarted.mockClear().mockResolvedValue({ ok: true });
@@ -220,6 +228,66 @@ describe("POST /setup-api/whisper", () => {
     expect(pointed).toHaveBeenCalledWith("small");
     expect(restarted).toHaveBeenCalled();
     expect(lines.at(-1)).toMatchObject({ success: true, size: "small", restarted: true });
+  });
+
+  it("runs as a background task in two steps, named on the first line", async () => {
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ size: "small" })));
+    expect(lines[0]).toMatchObject({ taskId: expect.any(String), kind: "whisper-size-download" });
+    expect(lines.some((l) => typeof l.total === "number" && (l.total as number) > 0)).toBe(true);
+  });
+
+  it("stops on Cancel: the fetcher's group is signalled, the half-fetched size removed, the unit untouched", async () => {
+    child.hold = true;
+    // Never a real signal: the fake fetcher's group "exits" when it is asked to.
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, sig?: string | number) => {
+      if (pid === -4242 && sig === "SIGTERM") setTimeout(() => heldClose?.(), 0);
+      return true;
+    }) as typeof process.kill);
+    const { POST } = await load();
+    const { cancelBackgroundTask } = await import("@/lib/background-tasks");
+    const res = await POST(post({ size: "small" }));
+    const reader = res.body!.getReader();
+    const first = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+
+    expect(cancelBackgroundTask(first.taskId).ok).toBe(true);
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += new TextDecoder().decode(value);
+    }
+    const last = JSON.parse(rest.trim().split("\n").at(-1)!);
+
+    expect(kill).toHaveBeenCalledWith(-4242, "SIGTERM");
+    expect(last).toMatchObject({ cancelled: true, taskId: first.taskId });
+    expect(removed).toHaveBeenCalledWith("small");
+    expect(pointed).not.toHaveBeenCalled();
+    expect(restarted).not.toHaveBeenCalled();
+  });
+
+  it("follows a download of the same size already running, and refuses another size naming it", async () => {
+    child.hold = true;
+    const { POST } = await load();
+    const first = await POST(post({ size: "small" }));
+    const reader = first.body!.getReader();
+    const firstLine = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await reader.cancel();
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+
+    const other = await POST(post({ size: "medium" }));
+    expect(other.status).toBe(409);
+    expect(await other.json()).toMatchObject({ code: "busy", taskId: firstLine.taskId });
+
+    const again = await POST(post({ size: "small" }));
+    // The fetcher "finishes": the weights land and the stream closes.
+    for (const size of state.sizes) if (size.id === "small") size.cached = true;
+    heldClose?.(0);
+    const lines = await readStream(again);
+    expect(lines[0].taskId).toBe(firstLine.taskId);
+    expect(lines.at(-1)).toMatchObject({ success: true, size: "small", taskId: firstLine.taskId });
+    expect(spawned).toHaveLength(1);
   });
 
   it("leaves the unit alone when the download fails, and says why", async () => {

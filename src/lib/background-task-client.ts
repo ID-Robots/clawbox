@@ -61,6 +61,41 @@ export async function dismissBackgroundTaskCard(id: string): Promise<void> {
   }
 }
 
+/**
+ * Ask the box to stop a running task. True when it took the request — the
+ * work then stops and the task ends `cancelled`; the caller keeps reading the
+ * task for that ending rather than assuming it.
+ */
+export async function cancelBackgroundTask(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(BACKGROUND_TASKS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action: "cancel" }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** One task with its whole log ring, or null when the box does not know it (or did not answer). */
+export async function fetchBackgroundTask(id: string): Promise<BackgroundTaskView | null> {
+  try {
+    const res = await fetch(`${BACKGROUND_TASKS_URL}?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { task?: unknown };
+    return body.task && typeof body.task === "object" ? (body.task as BackgroundTaskView) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the owner can still stop it: running, stoppable, and not already stopping. */
+export function canCancelBackgroundTask(task: Pick<BackgroundTaskView, "state" | "cancellable" | "cancelRequested">): boolean {
+  return task.state === "running" && task.cancellable === true && task.cancelRequested !== true;
+}
+
 /** Seconds as the card says them: "<1 min", "12 min", "1 h 05 min". Null for no figure. */
 export function formatEtaParts(seconds: number | null): { hours: number; minutes: number } | null {
   if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return null;
@@ -75,14 +110,19 @@ export const SUCCESS_STALE_MS = 10 * 60 * 1000;
 
 /**
  * Which tasks the corner card draws: every running one; an ended one until it
- * is dismissed — a success only while it is fresh, a failure or an interruption
- * until the owner has seen it.
+ * is dismissed — a success (or a stop the owner asked for) only while it is
+ * fresh, a failure or an interruption until the owner has seen it.
  */
 export function visibleBackgroundTasks(tasks: readonly BackgroundTaskView[], now: number): BackgroundTaskView[] {
   return tasks.filter((task) => {
     if (task.state === "running") return true;
     if (task.dismissed) return false;
-    if (task.state === "succeeded") return now - (task.finishedAt ?? task.updatedAt) < SUCCESS_STALE_MS;
+    if (endsQuietly(task)) return now - (task.finishedAt ?? task.updatedAt) < SUCCESS_STALE_MS;
     return true;
   });
+}
+
+/** An ending that is not news to keep on screen: a success, or the owner's own Cancel. */
+export function endsQuietly(task: Pick<BackgroundTaskView, "state">): boolean {
+  return task.state === "succeeded" || task.state === "cancelled";
 }

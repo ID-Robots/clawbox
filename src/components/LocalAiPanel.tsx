@@ -7,10 +7,11 @@ import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
 import { readInstallStream } from "@/lib/install-stream";
 import { fetchBackgroundTasks, followBackgroundTask, notifyBackgroundTaskStarted } from "@/lib/background-task-client";
-import { KOKORO_INSTALL_KIND, LLAMACPP_INSTALL_KIND, WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
+import { EMBED_MODEL_DOWNLOAD_KIND, KOKORO_INSTALL_KIND, LLAMACPP_INSTALL_KIND, WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { isConfigBusyPayload } from "@/lib/config-conflict";
 import { ConfirmDialog } from "@/components/clawkeep-ui";
 import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
+import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
 
@@ -175,6 +176,9 @@ const BACKGROUND_TASK_ROWS: Record<string, string> = {
   [LLAMACPP_INSTALL_KIND]: "llamacpp",
   [WHISPER_ENGINE_INSTALL_KIND]: "whisper",
   [KOKORO_INSTALL_KIND]: "kokoro",
+  // The memory model's first download is this row's Install; "Download again"
+  // on a model that is here is the card under the row, which follows its own.
+  [EMBED_MODEL_DOWNLOAD_KIND]: "embeddings",
 };
 
 /** An engine whose extra settings are worth drawing: here, and not switched off. */
@@ -238,9 +242,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // The last progress line of a streaming action, by row.
   const [progress, setProgress] = useState<Record<string, string>>({});
-  // Rows whose action is a background task of the server: it runs on with
-  // Settings closed, and the row says so.
-  const [backgroundRows, setBackgroundRows] = useState<ReadonlySet<string>>(() => new Set());
+  // Rows whose action is a background task of the server, with the task: it
+  // runs on with Settings closed, the row says so, and draws the task's steps,
+  // time left and log (BackgroundTaskInline).
+  const [backgroundRows, setBackgroundRows] = useState<ReadonlyMap<string, string>>(() => new Map());
   // Tasks this mount already followed, so a re-read never follows one twice.
   const followedTasksRef = useRef(new Set<string>());
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -416,11 +421,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           if (line.status) setProgress((p) => ({ ...p, [entry.id]: line.status as string }));
         }, (taskId) => {
           followedTasksRef.current.add(taskId);
-          setBackgroundRows((rows) => new Set(rows).add(entry.id));
+          setBackgroundRows((rows) => new Map(rows).set(entry.id, taskId));
           // The desktop's corner card asks at once rather than at its next poll.
           notifyBackgroundTaskStarted(taskId);
         });
-        if (!outcome.ok) setError(outcome.error ?? t("localModels.error.changeFailed"));
+        // A Cancel the owner pressed is not a failure to paint red.
+        if (!outcome.ok && !outcome.cancelled) setError(outcome.error ?? t("localModels.error.changeFailed"));
         // A successful install/activation changes the device pairing. Tell
         // already-mounted chat and provider pickers only after the terminal
         // success line, not the initial HTTP 200 of a still-running stream.
@@ -459,7 +465,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       });
       setBackgroundRows((rows) => {
         if (!rows.has(entry.id)) return rows;
-        const next = new Set(rows);
+        const next = new Map(rows);
         next.delete(entry.id);
         return next;
       });
@@ -475,6 +481,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   // on its row, through the same reader, spinner and verdict as the click that
   // started it. Once the inventory has arrived, because the row is drawn from it.
   const hasSnapshot = snapshot !== null;
+  // The memory model's row flips to "not installed" while "Download again"
+  // has the old copy set aside — the card under it, which was following the
+  // download, unmounts with it — so the row looks again then and carries on.
+  const embeddingsInstalled = snapshot?.models.find((m) => m.id === "embeddings")?.installed ?? null;
   useEffect(() => {
     if (!active || !hasSnapshot) return;
     let cancelled = false;
@@ -486,6 +496,8 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         if (followedTasksRef.current.has(task.id) || pendingRef.current.has(rowId)) continue;
         const entry = snapshotRef.current?.models.find((m) => m.id === rowId);
         if (!entry) continue;
+        // An installed memory model's download is the card's to follow.
+        if (rowId === "embeddings" && entry.installed) continue;
         followedTasksRef.current.add(task.id);
         void runAction(entry, {
           id: "install",
@@ -496,7 +508,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       }
     });
     return () => { cancelled = true; };
-  }, [active, hasSnapshot, runAction]);
+  }, [active, hasSnapshot, embeddingsInstalled, runAction]);
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
@@ -811,9 +823,17 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                         </p>
                       )}
                       {busy && backgroundRows.has(entry.id) && (
-                        <p className="text-xs text-[var(--text-secondary)] mt-0.5" data-testid={`local-model-background-${entry.id}`}>
-                          {t("backgroundTasks.closeHint")}
-                        </p>
+                        <>
+                          <p className="text-xs text-[var(--text-secondary)] mt-0.5" data-testid={`local-model-background-${entry.id}`}>
+                            {t("backgroundTasks.closeHint")}
+                          </p>
+                          <BackgroundTaskInline
+                            taskId={backgroundRows.get(entry.id) ?? null}
+                            testId={`local-model-task-${entry.id}`}
+                            showHeadline={false}
+                            showHint={false}
+                          />
+                        </>
                       )}
                     </div>
 

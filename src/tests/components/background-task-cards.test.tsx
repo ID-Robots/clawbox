@@ -32,6 +32,7 @@ function task(over: Partial<BackgroundTaskView> = {}): BackgroundTaskView {
     startedAt: 1_000, updatedAt: 2_000, stepStartedAt: 1_000, finishedAt: null, error: null, result: null,
     log: ["Installing speech on this box (faster-whisper)…", "Building CTranslate2 (cmake)"], logCount: 2,
     runner: "r", dismissed: false, percent: 42.5, etaSeconds: 300,
+    cancellable: false, cancelRequested: false, unit: null, adoptedAt: null,
     ...over,
   };
 }
@@ -193,5 +194,54 @@ describe("useBackgroundTasks", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(most).toBe(1);
+  });
+});
+
+describe("Cancel on the corner card", () => {
+  it("is offered only on running work that can stop safely", () => {
+    renderCards([task()]);
+    expect(screen.queryByTestId("background-task-cancel")).toBeNull();
+    cleanup();
+    renderCards([task({ cancellable: true })]);
+    expect(screen.getByTestId("background-task-cancel")).toBeInTheDocument();
+  });
+
+  it("asks the box to stop it, and says it is stopping rather than claiming it stopped", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    renderCards([task({ cancellable: true })]);
+    fireEvent.click(screen.getByTestId("background-task-cancel"));
+
+    // The provider reads the owner's language too; the stop is the POST.
+    const stopCall = () => (fetchMock.mock.calls as unknown as [string, RequestInit?][])
+      .find(([url, init]) => url === "/setup-api/background-jobs/tasks" && init?.method === "POST");
+    await waitFor(() => expect(stopCall()).toBeDefined());
+    expect(JSON.parse(String(stopCall()![1]!.body))).toEqual({ id: "t1", action: "cancel" });
+    expect(screen.queryByTestId("background-task-cancel")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("background-task-percent")).toHaveTextContent("Stopping…"));
+  });
+
+  it("gives the button back when the box refused the stop", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: false, code: "not_running" }), { status: 409 })));
+    renderCards([task({ cancellable: true })]);
+    fireEvent.click(screen.getByTestId("background-task-cancel"));
+    await waitFor(() => expect(screen.getByTestId("background-task-cancel")).toBeInTheDocument());
+  });
+
+  it("draws a cancelled task plainly, as the owner's own ending, and lets it be closed", async () => {
+    renderCards([task({ state: "cancelled", finishedAt: 3_000, result: { status: "Cancelled." } })]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-state", "cancelled");
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Cancelled."));
+    expect(screen.getByTestId("background-task-dismiss")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("lets a cancelled task step aside like a success, never staying on the desktop like a failure", () => {
+    const now = 1_000_000;
+    const cancelled = task({ id: "c", state: "cancelled", finishedAt: now - 60_000 });
+    const stale = task({ id: "s", state: "cancelled", finishedAt: now - 11 * 60_000 });
+    const failed = task({ id: "f", state: "failed", finishedAt: now - 11 * 60_000, error: "boom" });
+    expect(visibleBackgroundTasks([cancelled, stale, failed], now).map((t) => t.id)).toEqual(["c", "f"]);
   });
 });

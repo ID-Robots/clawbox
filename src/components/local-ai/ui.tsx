@@ -108,6 +108,14 @@ export function InstallOutcomeView({
 }: { outcome: InstallOutcome | null; testId: string }) {
   const { t } = useT();
   if (!outcome) return null;
+  // The owner's own Cancel: said, plainly, and not in red.
+  if (outcome.cancelled) {
+    return (
+      <p role="status" className="text-xs mt-1 break-words text-[var(--text-secondary)]" data-testid={testId}>
+        {t("backgroundTasks.cancelled")}
+      </p>
+    );
+  }
   return (
     <p
       role={outcome.ok ? "status" : "alert"}

@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 
 import {
+  cancelBackgroundTask,
   dismissBackgroundTask,
   getBackgroundTask,
   listBackgroundTasks,
@@ -20,6 +21,13 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * GET              every kept task, newest first (`?kind=` / `?group=` narrow it)
  * GET ?id=<id>     one task, with its whole log ring
  * POST {id, action: "dismiss"}   hide an ENDED task's card (a person's browser, same origin)
+ * POST {id, action: "cancel"}    stop a RUNNING task whose work can stop safely
+ *                                 (`cancellable`); it ends `cancelled`. 409
+ *                                 `not_running` / `not_cancellable` otherwise.
+ *
+ * Both writes are a person's: the agent holds the MCP bearer the middleware
+ * also admits here, and stopping (or hiding) the owner's install is not its
+ * call to make.
  *
  * Any signed-in person reads it: every ClawBox user gets the owner's desktop,
  * and the card is that desktop's. The list carries only the last lines of each
@@ -65,11 +73,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
   }
   const asked = body as { id?: unknown; action?: unknown };
-  if (typeof asked.id !== "string" || asked.action !== "dismiss") {
+  if (typeof asked.id !== "string" || (asked.action !== "dismiss" && asked.action !== "cancel")) {
     return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
   }
   const existing = getBackgroundTask(asked.id);
   if (!existing) return NextResponse.json({ ok: false, code: "unknown_task" }, { status: 404 });
+  if (asked.action === "cancel") {
+    const cancelled = cancelBackgroundTask(asked.id);
+    if (!cancelled.ok) {
+      return NextResponse.json({ ok: false, code: cancelled.code }, { status: cancelled.code === "unknown_task" ? 404 : 409 });
+    }
+    return NextResponse.json({ ok: true, task: cancelled.task });
+  }
   const task = dismissBackgroundTask(asked.id);
   if (!task) return NextResponse.json({ ok: false, code: "still_running" }, { status: 409 });
   return NextResponse.json({ ok: true, task });

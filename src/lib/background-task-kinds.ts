@@ -13,3 +13,7 @@ export const LLAMACPP_INSTALL_KIND = "llamacpp-install";
 export const WHISPER_ENGINE_INSTALL_KIND = "whisper-engine-install";
 /** The box's own voice, Kokoro (POST /setup-api/tts/install). */
 export const KOKORO_INSTALL_KIND = "voice-kokoro-install";
+/** The memory-search model, the Qwen3-Embedding GGUF (POST /setup-api/embed/install). */
+export const EMBED_MODEL_DOWNLOAD_KIND = "embed-model-download";
+/** One Whisper size: fetch it, point the unit at it, restart (POST /setup-api/whisper {size}). */
+export const WHISPER_SIZE_DOWNLOAD_KIND = "whisper-size-download";
