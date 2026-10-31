@@ -3590,6 +3590,57 @@ describe("a planner that planned without reading the project", () => {
     expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
   });
 
+  /** The box refuses every planner start after the first `allowed` for good — the way a switch turned off mid-team is refused. */
+  function refusePlannerAfter(allowed: number): void {
+    const slot = runner.teamSpawnSlot.getMockImplementation()!;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }, starting?: number) =>
+      who.role === "planner" && plannerStarts().length >= allowed ? { ok: false, wait: false, reason: "The coding agent is switched off." } : slot(who, starting));
+  }
+  const FIRST_STANDS = "the first plan, written without reading the project (its repo map says \"source not inspected\" (2 of 2 entries)), stands with that caveat.";
+
+  it("keeps the first plan, with ONE alert, when the fresh run cannot be started, and the team goes on with it", async () => {
+    refusePlannerAfter(1);
+    outcomes = [{ summary: BLIND }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(1);
+    expect(done.alerts).toBe(1);
+    expect(alerts(done)).toEqual([`ALERT: The planner could not be asked again (The coding agent is switched off); ${FIRST_STANDS}`]);
+    expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete"]);
+  });
+
+  it("keeps the first plan, with an alert, when a re-ask of the fresh run's answer cannot be started", async () => {
+    refusePlannerAfter(2);
+    outcomes = [{ summary: BLIND }, { summary: "I read both files; the plan is to write the page, then its script." }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(2);
+    expect(alerts(done).at(-1)).toBe(`ALERT: The planner could not be asked again (The coding agent is switched off); ${FIRST_STANDS}`);
+    expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete"]);
+  });
+
+  it("posts no plan when the owner stopped the team while the fresh run was being refused", async () => {
+    const slot = runner.teamSpawnSlot.getMockImplementation()!;
+    let boardId = "";
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }, starting?: number) => {
+      if (who.role !== "planner" || plannerStarts().length < 1) return slot(who, starting);
+      team.stopTeam(boardId);
+      return { ok: false, wait: false, reason: "The coding agent is switched off." };
+    });
+    outcomes = [{ summary: BLIND }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    boardId = board.id;
+    const done = await finished(board.id);
+    expect(done.status).toBe("stopped");
+    expect(done.tasks).toEqual([]);
+    expect(done.alerts).toBe(0);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "worker")).toHaveLength(0);
+  });
+
   it("asks nothing more of a plan that read the project", async () => {
     outcomes = [{ summary: READ }, ...WORK];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
@@ -3727,5 +3778,36 @@ describe("a plan run as a single run: each task's named files", () => {
     expect(await team.missingDeliverables(bare, ["README.md", "docs/new.md"])).toEqual(["docs/new.md (missing)"]);
     // No worktree: the run's own folder.
     expect(team.deliverablePlace({ directory: site, worktree: null }, "/unused")).toEqual({ dir: site, branch: null });
+  });
+
+  it("never takes a file outside the folder as the run's work, and still finds one the branch's roots hold", async () => {
+    // Beside the project and far from it, both on disk with bytes in them: not the run's work.
+    fs.writeFileSync(path.join(site, "..", "beside.md"), "not the run's\n");
+    const far = path.join(root, "far.md");
+    fs.writeFileSync(far, "nor this\n");
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    const plain = { dir: site, branch: null };
+    expect(await team.missingDeliverables(plain, ["README.md", `${site}/README.md`, "../beside.md", `${site}/../beside.md`, far, "docs/../../beside.md"]))
+      .toEqual(["../beside.md (missing)", `${site}/../beside.md (missing)`, `${far} (missing)`, "docs/../../beside.md (missing)"]);
+
+    // The worktree is the folder; the project is outside it, but it is one of
+    // the branch's roots: what the branch holds there is present, nothing else is.
+    const { execFileSync } = await import("child_process");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: site, encoding: "utf8", env });
+    git("init", "-q", "-b", "main");
+    git("add", "README.md");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "clawbox/run-bbbbbbbb");
+    fs.mkdirSync(path.join(site, "docs"));
+    fs.writeFileSync(path.join(site, "docs", "new.md"), "new\n");
+    git("add", "docs");
+    git("commit", "-qm", "work");
+    git("checkout", "-q", "main");
+    const tree = path.join(root, "tree");
+    fs.mkdirSync(tree);
+    const place = { dir: tree, branch: { repo: site, name: "clawbox/run-bbbbbbbb", roots: [tree, site] } };
+    expect(await team.missingDeliverables(place, [`${site}/docs/new.md`, `${site}/README.md`, `${site}/gone.md`, "../beside.md", far]))
+      .toEqual([`${site}/gone.md (missing)`, "../beside.md (missing)", `${far} (missing)`]);
   });
 });

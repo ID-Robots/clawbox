@@ -124,6 +124,7 @@ import {
 import { buildCommitMessage } from "@/lib/coding-git";
 import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
+import { isInside } from "@/lib/file-guard";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, SUITE_GATE_TIMEOUT_MS, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
@@ -1160,26 +1161,40 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const blind = blindPlanReason(read.answer, plan.repoMap, plan.shape);
   if (blind) {
     bus.send(SYSTEM, { type: "note", text: `The planner's plan was written without reading the project (${blind}); asking once more in a fresh read-only run.` });
-    const again = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
-      task: blindReplanTask(board.goal, blind),
-      projectId: board.projectId,
-      directory: board.directory,
-      source,
-      team: plannerRole,
-      readOnly: true,
-      extraBrief: brief(),
-      effort: board.effort,
-    }));
-    if (!again) return;
-    board.runs.push(castRef(again, "planner", null));
-    saveBoard(board);
-    const replanned = await settle(team, again.id);
-    if (team.stopRequested) return;
-    const second = replanned?.status === "completed"
-      ? await readPlan(replanned.resultText ?? replanned.summary, again.id)
-      : { plan: { ok: false as const, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` }, answer: null };
+    let second: Awaited<ReturnType<typeof readPlan>> | "unasked";
+    try {
+      const again = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
+        task: blindReplanTask(board.goal, blind),
+        projectId: board.projectId,
+        directory: board.directory,
+        source,
+        team: plannerRole,
+        readOnly: true,
+        extraBrief: brief(),
+        effort: board.effort,
+      }));
+      if (!again) return;
+      board.runs.push(castRef(again, "planner", null));
+      saveBoard(board);
+      const replanned = await settle(team, again.id);
+      if (team.stopRequested) return;
+      second = replanned?.status === "completed"
+        ? await readPlan(replanned.resultText ?? replanned.summary, again.id)
+        : { plan: { ok: false as const, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` }, answer: null };
+    } catch (err) {
+      // A start the box refused for good (the switch off, an account that
+      // cannot run) or that threw — of this run or of a re-ask of its answer:
+      // the first plan is a valid plan, so it stands on the record and the
+      // team goes on with it, rather than fail for an ask it never needed.
+      if (team.stopRequested) return;
+      const why = firstLine(err instanceof Error ? err.message : String(err), 200).replace(/\.$/, "");
+      bus.send(SYSTEM, { type: "alert", reason: `The planner could not be asked again (${why}); the first plan, written without reading the project (${blind}), stands with that caveat.` });
+      second = "unasked";
+    }
     if (!second) return;
-    if (!second.plan.ok) {
+    if (second === "unasked") {
+      // Its alert is on the record; the first plan goes on as it is.
+    } else if (!second.plan.ok) {
       // A blind plan is still a plan: the team goes on with it, on the record,
       // rather than fail for an ask it never needed to answer.
       bus.send(SYSTEM, { type: "alert", reason: `The planner was asked again and gave no plan (${second.plan.reason.replace(/\.$/, "")}); the first plan, written without reading the project (${blind}), stands with that caveat.` });
@@ -1621,14 +1636,18 @@ export function deliverablePlace(run: Pick<CodingRun, "directory" | "worktree">,
  * why — "a/b.ts (missing)", "c.md (empty)". A file must exist and hold
  * something; a folder must hold at least one file (coding-deliverable.ts reads
  * an empty one as missing too). Present in the folder or on the run's branch
- * is present. Never throws: whatever cannot be looked at is missing.
+ * is present. A path that resolves outside the folder (`../x`, `/etc/x`) is
+ * never looked for on disk — a file there is not the run's work — but may
+ * still be on the branch, when one of its roots holds it. Never throws:
+ * whatever cannot be looked at is missing.
  */
 export async function missingDeliverables(place: DeliverablePlace, named: readonly string[]): Promise<string[]> {
   const missing: string[] = [];
   for (const entry of named) {
     let state: NamedState = "missing";
     try {
-      state = diskState(path.resolve(place.dir, entry));
+      const file = path.resolve(place.dir, entry);
+      state = isInside(file, path.resolve(place.dir)) ? diskState(file) : "missing";
       if (state !== "present" && place.branch) {
         const onBranch = await branchState(place.branch, entry);
         if (onBranch === "present" || (onBranch === "empty" && state === "missing")) state = onBranch;
