@@ -8,6 +8,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { requireSession } from "@/lib/route-auth";
 import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
+import { syncHermesToolSearchWithDefault } from "@/lib/hermes-local-tool-search";
 import {
   catalogStaleness,
   getModelOptions,
@@ -379,5 +380,7 @@ export async function POST(request: Request) {
     invalidateModelOptions();
   }
 
+  // Hermes' Tool Search follows the default model (hermes-local-tool-search.ts).
+  await syncHermesToolSearchWithDefault("hermes models");
   return NextResponse.json({ ok: true, model: targetModel, provider: targetProvider });
 }

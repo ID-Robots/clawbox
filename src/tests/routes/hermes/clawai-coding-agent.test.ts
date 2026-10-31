@@ -17,6 +17,10 @@ const rpcMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
 const optionsMock = vi.hoisted(() => vi.fn());
 
+// The real Tool Search sync reads and writes ~/.hermes/config.yaml directly
+// (src/lib/hermes-local-tool-search.ts); this suite stubs the CLI, not the file.
+vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: vi.fn(async () => {}) }));
+
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => store[key] ?? null),
   // The tri-state reader the explicit-pick marker uses (TASK-713), over the

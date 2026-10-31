@@ -23,6 +23,10 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
 }));
 const invalidateMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: invalidateMock }));
+// Hermes' Tool Search follows the default (hermes-local-tool-search.ts, which
+// has its own suite): asked after a write that can move the default, only then.
+const toolSearchSyncMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("@/lib/hermes-local-tool-search", () => ({ syncHermesToolSearchWithDefault: toolSearchSyncMock }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
 // Mirrors the REAL url builders byte-for-byte — the previous mock answered a
 // /v1 Ollama URL the real builder never produced, so this suite asserted a
@@ -177,12 +181,16 @@ describe("registering the local model with Hermes", () => {
     // move the customer off the provider they chose.
     expect(sets().some((s) => s.startsWith("model.provider="))).toBe(false);
     expect(sets().some((s) => s.startsWith("model.default="))).toBe(false);
+    expect(toolSearchSyncMock).not.toHaveBeenCalled();
   });
 
   it("switches the device only when asked", async () => {
     await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0", makeDefault: true });
     expect(sets()).toContain(`model.provider=${HERMES_LOCAL_PROVIDER}`);
     expect(sets()).toContain("model.default=gemma4-e2b-it-q4_0");
+    // ...and Tool Search follows the new default, after the write landed.
+    expect(toolSearchSyncMock).toHaveBeenCalledTimes(1);
+    expect(patchMock.mock.invocationCallOrder[0]).toBeLessThan(toolSearchSyncMock.mock.invocationCallOrder[0]);
   });
 
   it("refuses a model id that argv would read as a flag", async () => {
@@ -259,6 +267,8 @@ describe("registering the local model with Hermes", () => {
     expect(result).toEqual({ wasDefault: true, model: "qwen2.5:3b" });
     expect(unsets()).toContain("model.provider");
     expect(unsets()).toContain("model.default");
+    // The default left the local model: Tool Search comes back.
+    expect(toolSearchSyncMock).toHaveBeenCalledTimes(1);
   });
 
   it("leaves someone else's provider selection alone", async () => {
@@ -271,6 +281,7 @@ describe("registering the local model with Hermes", () => {
     expect(result.wasDefault).toBe(false);
     expect(unsets()).not.toContain("model.provider");
     expect(unsets()).not.toContain("model.default");
+    expect(toolSearchSyncMock).not.toHaveBeenCalled();
   });
 
   it("refuses to report a removal the config did not take", async () => {

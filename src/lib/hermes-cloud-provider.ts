@@ -9,6 +9,7 @@ import {
 } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
+import { syncHermesToolSearchWithDefault } from "@/lib/hermes-local-tool-search";
 
 // Applying an API-key cloud provider to a HERMES device.
 //
@@ -186,5 +187,7 @@ async function applyCloudProviderKey(opts: {
 
   // The device's provider/model just changed — don't serve the old selection.
   invalidateModelOptions();
+  // Hermes' Tool Search follows the default model (hermes-local-tool-search.ts).
+  await syncHermesToolSearchWithDefault("hermes cloud-provider");
   return { provider: slug, model, activated: true };
 }
