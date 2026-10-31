@@ -362,7 +362,7 @@ d("Hermes clawbox_local_lean middleware — Tool Search on", () => {
       { role: "tool", tool_call_id: "c1", content: "ok" },
     ];
     const out = leanWithRegistry(request({ tools: BRIDGED_TOOLS, messages: history }), DEFERRED);
-    const calls = (out?.messages[2] as { tool_calls: Array<{ id: string; function: { name: string; arguments: string } }> }).tool_calls;
+    const calls = (out?.messages[2] as unknown as { tool_calls: Array<{ id: string; function: { name: string; arguments: string } }> }).tool_calls;
     expect(calls[0]).toEqual({ id: "c1", type: "function", function: { name: "mcp__clawbox__webapp_create", arguments: "{\"app_id\":\"todo-list\"}" } });
     // A bridged call to a tool the lean turn does not have stays as Hermes made it.
     expect(calls[1]).toEqual(other);

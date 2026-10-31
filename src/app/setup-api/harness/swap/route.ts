@@ -1,6 +1,8 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { POST as configureAiModel } from "@/app/setup-api/ai-models/configure/route";
+import { get } from "@/lib/config-store";
 import {
   getActiveHarness,
   getEditionSource,
@@ -14,6 +16,7 @@ import {
   HARNESS_SWAP_MAX_PLAN_REQUIRED,
   HARNESS_SWAP_STEP,
   SWAP_FOLLOW_TIMEOUT_MS,
+  SWAP_NOTES,
   carryOverAfterSwap,
   claimSwap,
   harnessSwapUnitActive,
@@ -29,6 +32,8 @@ import {
   swapTargetFor,
   writeSwapRequest,
 } from "@/lib/harness-swap";
+import { getLocalAiConfigStoreAlias } from "@/lib/llamacpp-server";
+import { readConfig } from "@/lib/openclaw-config";
 import { hasPersonSession } from "@/lib/owner-session";
 import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -60,6 +65,54 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
   // A cancelled stream refuses further writes; the swap itself goes on (a
   // root unit), and the follow has to reach its real end to release the claim.
   try { controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`)); } catch { /* client gone */ }
+}
+
+/**
+ * Local AI, on the way back to OpenClaw.
+ *
+ * Turned on while the box ran Hermes, the on-device model is registered in
+ * Hermes' config and ClawBox's store and never in openclaw.json. OpenClaw's
+ * chat picker reads the store and offers it, and every turn on it then went to
+ * the cloud fallback, because OpenClaw has no `llamacpp` provider to send it to
+ * (measured on a board after a Hermes round trip). The way to Hermes needs no
+ * such step: Hermes' model list registers the local model from the store on
+ * its own (`reconcileLocalAiWithHermes`).
+ *
+ * Registered the way Settings → Local AI's Enable does it — the configure
+ * route, `scope: local`, not activated: the box's chat model stays whatever
+ * OpenClaw had. Only when the store says llama.cpp Local AI is on and
+ * openclaw.json has no `llamacpp` row. Fail-soft: a note, never a failed swap.
+ */
+async function carryLocalAiToOpenclaw(say: (status: string) => void): Promise<string | null> {
+  try {
+    const [configured, provider, model] = await Promise.all([
+      get("local_ai_configured"),
+      get("local_ai_provider"),
+      get("local_ai_model"),
+    ]);
+    const alias = getLocalAiConfigStoreAlias({
+      local_ai_configured: configured,
+      local_ai_provider: provider,
+      local_ai_model: model,
+    });
+    if (!alias) return null;
+    if ((await readConfig()).models?.providers?.llamacpp) return null;
+    say("Carrying Local AI over to OpenClaw…");
+    const res = await configureAiModel(new Request("http://localhost/setup-api/ai-models/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "llamacpp", apiKey: alias, authMode: "local", scope: "local", activate: false }),
+    }));
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body?.success) {
+      say("Local AI carried over.");
+      return SWAP_NOTES.localAiCarried;
+    }
+    say(`Local AI could not be carried over: ${String(body?.error || `HTTP ${res.status}`).slice(0, 200)}`);
+  } catch (err) {
+    say(`Local AI could not be carried over: ${(err instanceof Error ? err.message : "unknown error").slice(0, 200)}`);
+  }
+  return SWAP_NOTES.localAiNotCarried;
 }
 
 export async function GET() {
@@ -247,6 +300,10 @@ export async function POST(req: Request) {
         // list never jumps from `install` to `carry` (2026-10-14).
         phases.reach("provision");
         const notes = await carry();
+        if (target === "openclaw") {
+          const localAi = await carryLocalAiToOpenclaw(say);
+          if (localAi) notes.push(localAi);
+        }
         // The refresh reloads HERMES' MCP children — the only harness with a
         // dashboard to ask. On the way to Hermes that is the dashboard the
         // step just started; on the way to OpenClaw it is the one the step
