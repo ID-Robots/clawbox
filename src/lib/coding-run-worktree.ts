@@ -81,9 +81,11 @@ export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protec
  * the card words each one in the owner's language with the next step that
  * clears it. Three of the four are the owner's own project standing in the
  * way and are fixable from the desk; `failed` is git refusing for a reason
- * only its own sentence can give.
+ * only its own sentence can give. `stopped` is never `mergeRunBranch`'s: the
+ * settle does not try a stopped run's merge at all — half-finished work stays
+ * on its branch for the owner to decide on.
  */
-export type MergeHomeBlocker = "not_on_base" | "dirty" | "conflict" | "failed";
+export type MergeHomeBlocker = "not_on_base" | "dirty" | "conflict" | "failed" | "stopped";
 
 export interface RunWorktreeAdded {
   ok: true;

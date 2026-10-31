@@ -1883,6 +1883,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "工作在分支 {branch} 上，而不在项目里：项目文件夹有未提交的更改。",
   "codingAgent.worktreeUnmergedFailed": "工作在分支 {branch} 上，而不在项目里：git 拒绝了合并。",
   "codingAgent.worktreeUnmergedNotOnBase": "工作在分支 {branch} 上，而不在项目里：项目当前所在的分支不是 {base}。",
+  "codingAgent.worktreeUnmergedStopped": "工作在分支 {branch} 上，而不在项目里：运行在完成前被停止，因此没有合并任何内容。如需要，请自行合并。",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "确认",
   "connected": "已连接！",
