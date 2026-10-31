@@ -1549,7 +1549,7 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
   const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
   // Each task's named files, looked for where the run's work is — before any
   // verdict, so one task's look never waits on another's review line.
-  const gaps = new Map<string, { named: string[]; missing: string[] }>();
+  const gaps = new Map<string, { named: string[]; missing: string[]; removed: string[] }>();
   if (ok && settled) {
     const place = deliverablePlace(settled, board.directory);
     // A file the run removed was the task's to delete (a hint names what a
@@ -1557,7 +1557,9 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
     const removed = await removedByRun(settled, place);
     for (const task of tasks) {
       const named = namedDeliverables(task.files_hint);
-      if (named.length) gaps.set(task.task_id, { named, missing: await missingDeliverables(place, named.filter((n) => !removed.has(n))) });
+      if (!named.length) continue;
+      const kept = named.filter((n) => !removed.has(n));
+      gaps.set(task.task_id, { named: kept, missing: await missingDeliverables(place, kept), removed: named.filter((n) => removed.has(n)) });
     }
   }
   for (const task of tasks) {
@@ -1574,7 +1576,7 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
         task_id: task.task_id,
         verdict: "accepted",
         notes: gap
-          ? `Ran as a single run, and the files it names are present (${clipList(gap.named)}): the run's own settle judged the rest — the owner's review pass, deliverable check and pull request, when switched on.`
+          ? `Ran as a single run, and the files it names are ${[gap.named.length ? `present (${clipList(gap.named)})` : "", gap.removed.length ? `removed by the run (${clipList(gap.removed)})` : ""].filter(Boolean).join(" or ")}: the run's own settle judged the rest — the owner's review pass, deliverable check and pull request, when switched on.`
           : "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on.",
       });
     }
