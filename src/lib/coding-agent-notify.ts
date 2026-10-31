@@ -285,6 +285,9 @@ export function buildTeamAnnouncement(board: TeamBoard): string {
   const counts = `${done} of ${tasks.length} task${tasks.length === 1 ? "" : "s"} done`
     + (notDone > 0 ? `, ${notDone} failed` : "")
     + (board.branch ? `, on branch ${board.branch}` : "")
+    // A team whose work the project did not take says where it is instead:
+    // "did not finish" alone sent the reader looking in an empty folder.
+    + (board.unlanded ? `, the work is on branch ${board.unlanded.branch} and not in the project` : "")
     + (board.pr ? `, pull request #${board.pr.number}` : "");
   switch (board.status) {
     case "done":

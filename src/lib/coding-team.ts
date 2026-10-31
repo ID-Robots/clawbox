@@ -71,6 +71,7 @@
 import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "@/lib/runtime-path";
+import { processStore } from "@/lib/process-store";
 import {
   CodingAgentError,
   getAutoPr,
@@ -96,6 +97,8 @@ import {
   teamRoleModelMap,
   teamSpawnSlot,
   waitForRun,
+  waitForRunHome,
+  waitForRunSettled,
   type CodingRun,
   type CodingRunSource,
   type RunTeam,
@@ -122,7 +125,7 @@ import {
   type TeamRole,
 } from "@/lib/coding-team-messages";
 import { buildCommitMessage } from "@/lib/coding-git";
-import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, WORKTREES_DIR } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, workerBranchName, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { isInside } from "@/lib/file-guard";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
@@ -147,6 +150,7 @@ import {
   isSettledTeamStatus,
   listBoards,
   loadBoard,
+  TEAM_DIR,
   MAX_DIGEST_CHARS,
   outsideFolderWriteDenial,
   ownHarnessStateDenial,
@@ -286,13 +290,28 @@ interface LiveTeam {
   done: Promise<void>;
 }
 
-const live = new Map<string, LiveTeam>();
 /**
- * Boards the boot sweep is closing, by id: read as they stand under it
+ * The teams this PROCESS drives, shared by every copy of this module in it
+ * (src/lib/process-store.ts): Next compiles the boot hook apart from the
+ * routes, and with module-level maps a team the boot hook picked back up was
+ * not "live" to the route the app polls — whose next read settled it failed
+ * ("The web server restarted while the team was working") while its workers
+ * went on in their scopes. Keyed by the boards' folder, like the runs store.
+ */
+interface TeamStore {
+  live: Map<string, LiveTeam>;
+  sweeping: Map<string, { stopRequested: boolean }>;
+  queueRetry: NodeJS.Timeout | null;
+}
+const teamStore = processStore<TeamStore>(`coding-team:${TEAM_DIR}`, () => ({ live: new Map(), sweeping: new Map(), queueRetry: null }));
+const live = teamStore.live;
+/**
+ * Boards the boot pass has claimed, by id — ones it is picking back up
+ * (`claimOrphanedTeams`) or closing (`closeOrphanedTeams`): read as they stand
  * (`settleOrphan` leaves them), counted as the team at work (`activeTeamId`),
  * and stopped through `stopTeam` while it waits.
  */
-const sweeping = new Map<string, { stopRequested: boolean }>();
+const sweeping = teamStore.sweeping;
 
 /**
  * Teams that may wait at once behind the one working. One team works at a
@@ -302,7 +321,6 @@ const sweeping = new Map<string, { stopRequested: boolean }>();
 export const MAX_QUEUED_TEAMS = 5;
 /** How soon a queued team is looked at again when its turn came while the coding agent was switched off. */
 const TEAM_QUEUE_RETRY_MS = 60_000;
-let teamQueueRetry: NodeJS.Timeout | null = null;
 
 /** Planner runs a team will pay for before giving up on getting an array. */
 const MAX_PLANNER_ATTEMPTS = 3;
@@ -419,15 +437,19 @@ async function assertTeamRolesReady(): Promise<void> {
   );
 }
 
-/** The board's orchestrator, in this process, from its planner to its verdict; the next queued team once it settles. */
-function launchTeam(board: TeamBoard): void {
+/**
+ * The board's orchestrator, in this process, from its planner to its verdict;
+ * the next queued team once it settles. `resumed`: a board the last web server
+ * left working, picked back up where it was (`continueTeam`).
+ */
+function launchTeam(board: TeamBoard, resumed = false): void {
   const bus = new TeamBus(board);
   const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), budgetStopped: new Set(), workerSlots: 1, done: Promise.resolve() };
   // A task reopened — rejected, sent back by the suite, or itself held — sets
   // back whatever started on it, wherever the reopening came from.
   bus.subscribe((delivered) => holdDependents(team, delivered));
   live.set(board.id, team);
-  team.done = runTeam(team, board.source)
+  team.done = (resumed ? continueTeam(team) : runTeam(team, board.source))
     .catch((err) => {
       if (!isSettledStatus(board.status)) {
         setTeamStatus(board, SYSTEM, "failed", err instanceof Error ? err.message : String(err));
@@ -458,11 +480,13 @@ function launchTeam(board: TeamBoard): void {
  * bearer 403 `owner_only` on it), and the line would tell the assistant a
  * board's id, counts and branch and send it to a status it cannot read. A
  * single-run team's run has no `team` and settled the owner's usual way,
- * with its own card, so the team sends only the chat line. Best-effort,
- * like every notice: one that does not arrive changes nothing on the board.
+ * with its own card, so the team sends only the chat line — unless that
+ * run's work did not land in the project (`unlanded`): the run's card said it
+ * finished, and only the team's says where the work is. Best-effort, like
+ * every notice: one that does not arrive changes nothing on the board.
  */
 function announceTeamSettled(board: TeamBoard): void {
-  if (!board.singleRun) {
+  if (!board.singleRun || board.unlanded) {
     void announceCodingTeam(board).catch((err: unknown) => {
       console.error("[coding-team] notice failed:", err instanceof Error ? err.message : err);
     });
@@ -486,9 +510,23 @@ async function postTeamFinishedToOwnerAgent(board: TeamBoard): Promise<void> {
   const done = tasks.filter((t) => t.status === "complete").length;
   const gateway = await import("@/lib/openclaw-gateway-ws");
   await gateway.gatewayWsChatSendMain(
-    `[Coding team ${board.id}] finished: ${board.status} — ${done} of ${tasks.length} task${tasks.length === 1 ? "" : "s"} done${board.branch ? `, on branch ${board.branch}` : ""}. Read coding_team_status for the result and tell the user.`,
+    `[Coding team ${board.id}] finished: ${board.status} — ${done} of ${tasks.length} task${tasks.length === 1 ? "" : "s"} done${board.branch ? `, on branch ${board.branch}` : ""}.${teamMergeLine(board)} Read coding_team_status for the result and tell the user.`,
     { idempotencyKey: randomUUID(), timeoutMs: OWNER_AGENT_TIMEOUT_MS },
   );
+}
+
+/**
+ * Whose decision the merge is, on the chat line, whenever the team's work is
+ * on a branch rather than merged into the project's base: fixed words and the
+ * box's own branch name. After a settle notice that only said where the work
+ * was, the assistant deleted the owner's files and merged the run's branch
+ * into their folder on its own (bench, 2026-10-31).
+ */
+function teamMergeLine(board: TeamBoard): string {
+  const branch = board.unlanded?.branch ?? (board.pr?.phase === "merged" ? null : board.branch);
+  if (!branch) return "";
+  const where = board.unlanded ? ` The work is on branch ${branch}, not in the project folder.` : "";
+  return `${where} Whether to merge ${branch} is the owner's decision: tell them, and do not merge it, delete or move files, or clean up their project folder yourself unless they ask you to.`;
 }
 
 /** The queued boards in the order they start in: the order they were asked for. */
@@ -505,12 +543,12 @@ function queuedBoards(): TeamBoard[] {
 export async function startNextQueuedTeam(): Promise<TeamView | null> {
   if (activeTeamId() || !queuedBoards().length) return null;
   if (!(await isCodingAgentEnabled())) {
-    if (!teamQueueRetry) {
-      teamQueueRetry = setTimeout(() => {
-        teamQueueRetry = null;
+    if (!teamStore.queueRetry) {
+      teamStore.queueRetry = setTimeout(() => {
+        teamStore.queueRetry = null;
         void startNextQueuedTeam().catch(() => undefined);
       }, TEAM_QUEUE_RETRY_MS);
-      teamQueueRetry.unref?.();
+      teamStore.queueRetry.unref?.();
     }
     return null;
   }
@@ -646,14 +684,13 @@ export function _setSweepWaitForTests(ms: number): void {
  * (plan, section 6). Never throws: a board the sweep could not read or close
  * is still settled, so nothing is left "working" with nobody working.
  */
-export async function closeOrphanedTeams(): Promise<number> {
-  const orphans = listBoards()
-    .filter((b) => !isSettledStatus(b.status) && b.status !== "queued" && !live.has(b.id))
-    .sort((a, b) => a.createdAt - b.createdAt);
+export async function closeOrphanedTeams(only?: readonly string[]): Promise<number> {
+  const orphans = orphanBoards().filter((b) => !only || only.includes(b.id));
   if (!orphans.length) return 0;
   // Claimed together before any is waited on: a read of the second board
   // while the first's workers are awaited must not settle it under the sweep.
-  for (const b of orphans) sweeping.set(b.id, { stopRequested: false });
+  // A claim the boot hook already made is kept, with the owner's Stop on it.
+  for (const b of orphans) if (!sweeping.has(b.id)) sweeping.set(b.id, { stopRequested: false });
   let closed = 0;
   try {
     for (const board of orphans) {
@@ -676,6 +713,81 @@ export async function closeOrphanedTeams(): Promise<number> {
     for (const b of orphans) sweeping.delete(b.id);
   }
   return closed;
+}
+
+/** Every board the last web server left at work, oldest first: not settled, not queued, and not driven by this process. */
+function orphanBoards(): TeamBoard[] {
+  return listBoards()
+    .filter((b) => !isSettledStatus(b.status) && b.status !== "queued" && !live.has(b.id))
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+// ─── Picking a team back up (boot) ───────────────────────────────────────────
+
+/**
+ * Claim every board the last web server left at work — SYNCHRONOUSLY, from
+ * the boot hook, before the runs are reconciled (src/instrumentation.ts). The
+ * reconciliation awaits systemd, and a read meanwhile (`settleOrphan`, behind
+ * every poll of the app) settled such a board failed before anything could
+ * pick it up. Claimed, it is read as it stands and holds the box
+ * (`activeTeamId`) until `resumeOrphanedTeams` takes it over. Answers the ids.
+ */
+export function claimOrphanedTeams(): string[] {
+  const orphans = orphanBoards();
+  for (const b of orphans) if (!sweeping.has(b.id)) sweeping.set(b.id, { stopRequested: false });
+  return orphans.map((b) => b.id);
+}
+
+/**
+ * Pick back up the team the web server restarted under — at boot, after
+ * `reconcileAfterRestart` has reattached the member runs that survived in
+ * their scopes, and before the queue pump. The oldest board goes on where it
+ * was (`continueTeam`): its planner, its single run, or its workers and
+ * reviewers taken back, and the rest of its plan worked as if nothing had
+ * happened. A team used to be failed here ("The web server restarted while the
+ * team was working") while its workers finished in their scopes and nothing
+ * took their work back. Only one team works at a time, so any other board —
+ * and one the owner stopped while it was claimed — is closed the old way
+ * (`closeOrphanedTeams`). Answers how many boards it took on.
+ */
+export async function resumeOrphanedTeams(): Promise<number> {
+  const orphans = orphanBoards();
+  if (!orphans.length) return 0;
+  const toClose: string[] = [];
+  let resumed = 0;
+  for (const board of orphans) {
+    if (resumed > 0 || sweeping.get(board.id)?.stopRequested) {
+      toClose.push(board.id);
+      continue;
+    }
+    // Live before the claim goes, so no read in between finds it neither.
+    launchTeam(board, true);
+    sweeping.delete(board.id);
+    resumed += 1;
+  }
+  return resumed + (toClose.length ? await closeOrphanedTeams(toClose) : 0);
+}
+
+/**
+ * A board the last web server left at work, driven on from where it is: still
+ * planning (with the planner it started, if any), a single run (taken back),
+ * or past the plan (the worker loop, every task in flight taken back —
+ * `adoptTask`). The board says which; nothing is started twice.
+ */
+async function continueTeam(team: LiveTeam): Promise<void> {
+  const { board, bus } = team;
+  const going = board.runs.map((r) => r.id).filter((id) => {
+    const run = getRun(id);
+    return run !== null && !isSettled(run.status);
+  });
+  bus.send(SYSTEM, { type: "note", text: `${RESTARTED} It goes on from where it was${going.length ? `; ${going.join(", ")} kept working in their own scopes` : ""}.` });
+  if (!board.tasks.length) return runTeam(team, board.source, { phase: "plan", plannerRunId: board.plannerRunId });
+  if (board.singleRun) {
+    let run: string | null = null;
+    for (let i = board.runs.length - 1; i >= 0 && !run; i--) if (board.runs[i].role === "worker") run = board.runs[i].id;
+    return runAsSingleRun(team, board.tasks.filter((t) => t.status !== "retired"), board.source, null, run);
+  }
+  return runTeam(team, board.source, { phase: "work" });
 }
 
 /** One orphaned board closed — see `closeOrphanedTeams`. */
@@ -1032,8 +1144,9 @@ async function postToOwnerAgent(
 /** Tests only. */
 export function _resetCodingTeamStateForTests(): void {
   live.clear();
-  if (teamQueueRetry) clearTimeout(teamQueueRetry);
-  teamQueueRetry = null;
+  sweeping.clear();
+  if (teamStore.queueRetry) clearTimeout(teamStore.queueRetry);
+  teamStore.queueRetry = null;
 }
 
 // ─── The loop ────────────────────────────────────────────────────────────────
@@ -1056,19 +1169,24 @@ function blindReplanTask(goal: string, reason: string): string {
   return `${goal}\n\n---\nYour previous plan for this goal said you read no source (${reason}). In this run you have Read, Grep, Glob and read-only git: read the project — the files this goal touches — and answer the JSON plan again, with a repo map of what you actually read.`;
 }
 
-async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
+/**
+ * The team's plan: the planner run (`adoptPlanner`, a planner the last web
+ * server started, taken back), its answer read — and asked again while it is
+ * not one — and posted on the board. Answers how many tasks the plan posted,
+ * or null when the team ended (stopped, or settled with the reason).
+ */
+async function planTeam(team: LiveTeam, source: CodingRunSource, width: number, adoptPlanner: string | null): Promise<number | null> {
   const { board, bus } = team;
-  // The box's real width — how many of the team's runs may go at once — is
-  // told to the planner and written on the shape line: a plan for three on a
-  // box that runs two only waited for a seat, in silence.
-  const width = Math.max(1, Math.min(MAX_TEAM_WORKERS, await getMaxParallelRuns()));
   const brief = () => withBoxWidth(PLANNER_BRIEF, width);
 
   // 1. The planner: a read-only run whose final message is the plan — once
   //    the box has a slot for it. A box busy with other runs makes the team
   //    wait for one (the board says so), never fail.
   const plannerRole: RunTeam = { id: board.id, role: "planner", taskId: null };
-  const planner = await startWhenRoom(team, plannerRole, () => 0, () => startRun({
+  // A planner the last web server started is taken back (`continueTeam`):
+  // still going in its scope, or settled while nobody watched.
+  const adopted = adoptPlanner ? getRun(adoptPlanner) : null;
+  const planner = adopted ?? await startWhenRoom(team, plannerRole, () => 0, () => startRun({
     task: board.goal,
     projectId: board.projectId,
     directory: board.directory,
@@ -1078,16 +1196,18 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     extraBrief: brief(),
     effort: board.effort,
   }));
-  if (!planner) return;
-  board.plannerRunId = planner.id;
-  board.runs.push(castRef(planner, "planner", null));
-  saveBoard(board);
+  if (!planner) return null;
+  if (!adopted) {
+    board.plannerRunId = planner.id;
+    board.runs.push(castRef(planner, "planner", null));
+    saveBoard(board);
+  }
   const planned = await settle(team, planner.id);
-  if (team.stopRequested) return;
+  if (team.stopRequested) return null;
   if (!planned || planned.status !== "completed") {
     setTeamStatus(board, SYSTEM, "failed", `The planner did not finish: ${planned?.error ?? planned?.status ?? "no run"}.`);
     saveBoard(board);
-    return;
+    return null;
   }
   /**
    * A planner run's answer read as a plan — and, while it is not one, asked
@@ -1145,12 +1265,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     return { plan, answer };
   };
   const read = await readPlan(planned.resultText ?? planned.summary, planner.id);
-  if (!read) return;
+  if (!read) return null;
   let { plan } = read;
   if (!plan.ok) {
     setTeamStatus(board, SYSTEM, "failed", plan.reason);
     saveBoard(board);
-    return;
+    return null;
   }
 
   // A plan written WITHOUT reading the project (`blindPlanReason`) hedges: a
@@ -1173,11 +1293,11 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
         extraBrief: brief(),
         effort: board.effort,
       }));
-      if (!again) return;
+      if (!again) return null;
       board.runs.push(castRef(again, "planner", null));
       saveBoard(board);
       const replanned = await settle(team, again.id);
-      if (team.stopRequested) return;
+      if (team.stopRequested) return null;
       second = replanned?.status === "completed"
         ? await readPlan(replanned.resultText ?? replanned.summary, again.id)
         : { plan: { ok: false as const, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` }, answer: null };
@@ -1186,12 +1306,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       // cannot run) or that threw — of this run or of a re-ask of its answer:
       // the first plan is a valid plan, so it stands on the record and the
       // team goes on with it, rather than fail for an ask it never needed.
-      if (team.stopRequested) return;
+      if (team.stopRequested) return null;
       const why = firstLine(err instanceof Error ? err.message : String(err), 200).replace(/\.$/, "");
       bus.send(SYSTEM, { type: "alert", reason: `The planner could not be asked again (${why}); the first plan, written without reading the project (${blind}), stands with that caveat.` });
       second = "unasked";
     }
-    if (!second) return;
+    if (!second) return null;
     if (second === "unasked") {
       // Its alert is on the record; the first plan goes on as it is.
     } else if (!second.plan.ok) {
@@ -1217,42 +1337,73 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
   // Text over its bound was cut, not refused: one note says so — never an alert.
   if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
+  return plan.tasks.length;
+}
 
-  // ONE task is one run's worth of work, and so are tasks that mostly touch the
-  // same files (`teamAdvice`): side by side they only conflict and queue on
-  // each other — and saying so after the run helped nobody (night run,
-  // 2026-10-29: 93-96% overlap on every team). Either runs as one ordinary run,
-  // not inside the team's branch, worktree and reviewer machinery around it.
-  const advice = teamAdvice(board);
-  // A task naming every file the others own (`catchAllTasks`) makes every
-  // task overlap on its own. One that runs AFTER all of them is the plan's
-  // integration step: measured without it, a plan that splits runs as the
-  // team it is. Either way the board says which task decided it.
-  const catchAll = advice?.reason === "overlap" && advice.catchAll?.length ? advice.catchAll : null;
-  const leftOut = catchAll ? catchAllLeftOut(board, catchAll) : null;
-  if (catchAll && leftOut?.leftOut) {
-    bus.send(SYSTEM, { type: "note", text: `${taskList(catchAll)} ${catchAll.length === 1 ? "names" : "name"} every file the other tasks own; ${catchAll.length === 1 ? "it is the integration step and runs" : "they are integration steps and run"} after them, so ${catchAll.length === 1 ? "it is" : "they are"} left out of the overlap measure and the team runs as planned.` });
-  } else if ((plan.tasks.length === 1 && board.tasks.length === 1) || advice?.reason === "overlap") {
-    const why = catchAll && leftOut
-      ? `${taskList(catchAll)} ${catchAll.length === 1 ? "names" : "name"} every file the other tasks own, and ${leftOut.runsLast ? `the others still overlap ${leftOut.overlapWithout ?? 0}% without ${catchAll.length === 1 ? "it" : "them"}` : `${catchAll.length === 1 ? "it does" : "they do"} not wait for all of them, so ${catchAll.length === 1 ? "it is" : "they are"} no integration step`}`
-      : null;
-    await runAsSingleRun(team, board.tasks, source, advice?.reason === "overlap" ? { share: advice.overlap, why } : null);
-    return;
+
+/**
+ * Where a team picked back up after a restart (`continueTeam`) re-enters
+ * `runTeam`: still planning — with the planner the last server started, if it
+ * got that far — or past the plan, at the worker loop, taking back every task
+ * that was in flight.
+ */
+type TeamResume = { phase: "plan"; plannerRunId: string | null } | { phase: "work" };
+
+async function runTeam(team: LiveTeam, source: CodingRunSource, resume: TeamResume | null = null): Promise<void> {
+  const { board, bus } = team;
+  // The box's real width — how many of the team's runs may go at once — is
+  // told to the planner and written on the shape line: a plan for three on a
+  // box that runs two only waited for a seat, in silence.
+  const width = Math.max(1, Math.min(MAX_TEAM_WORKERS, await getMaxParallelRuns()));
+  let planned: number;
+  if (resume?.phase === "work") {
+    planned = board.tasks.filter((t) => t.status !== "retired").length;
+  } else {
+    const posted = await planTeam(team, source, width, resume?.plannerRunId ?? null);
+    if (posted === null) return;
+    planned = posted;
   }
-
-  // The team's own branch in a folder project: workers get worktrees off it
-  // and their branches merge back into it. A code project sits inside the
-  // ClawBox checkout under rules of its own, so its workers work in place,
-  // one at a time, as v0 did.
-  if (!board.projectId) {
-    const branched = await ensureTeamBranch(board.directory, board.id, recordedTeamBase);
-    if (!branched.ok) {
-      setTeamStatus(board, SYSTEM, "failed", branched.detail);
-      saveBoard(board);
+  // The plan's shape — one run, or a team on its own branch — was decided
+  // before the restart unless nothing of it had happened yet: no branch made,
+  // no code project, every task still waiting.
+  const decided = resume?.phase === "work" && (board.branch !== null || board.projectId !== null || board.tasks.some((t) => t.status !== "pending"));
+  if (!decided) {
+    // ONE task is one run's worth of work, and so are tasks that mostly touch the
+    // same files (`teamAdvice`): side by side they only conflict and queue on
+    // each other — and saying so after the run helped nobody (night run,
+    // 2026-10-29: 93-96% overlap on every team). Either runs as one ordinary run,
+    // not inside the team's branch, worktree and reviewer machinery around it.
+    const advice = teamAdvice(board);
+    // A task naming every file the others own (`catchAllTasks`) makes every
+    // task overlap on its own. One that runs AFTER all of them is the plan's
+    // integration step: measured without it, a plan that splits runs as the
+    // team it is. Either way the board says which task decided it.
+    const catchAll = advice?.reason === "overlap" && advice.catchAll?.length ? advice.catchAll : null;
+    const leftOut = catchAll ? catchAllLeftOut(board, catchAll) : null;
+    if (catchAll && leftOut?.leftOut) {
+      bus.send(SYSTEM, { type: "note", text: `${taskList(catchAll)} ${catchAll.length === 1 ? "names" : "name"} every file the other tasks own; ${catchAll.length === 1 ? "it is the integration step and runs" : "they are integration steps and run"} after them, so ${catchAll.length === 1 ? "it is" : "they are"} left out of the overlap measure and the team runs as planned.` });
+    } else if ((planned === 1 && board.tasks.length === 1) || advice?.reason === "overlap") {
+      const why = catchAll && leftOut
+        ? `${taskList(catchAll)} ${catchAll.length === 1 ? "names" : "name"} every file the other tasks own, and ${leftOut.runsLast ? `the others still overlap ${leftOut.overlapWithout ?? 0}% without ${catchAll.length === 1 ? "it" : "them"}` : `${catchAll.length === 1 ? "it does" : "they do"} not wait for all of them, so ${catchAll.length === 1 ? "it is" : "they are"} no integration step`}`
+        : null;
+      await runAsSingleRun(team, board.tasks, source, advice?.reason === "overlap" ? { share: advice.overlap, why } : null);
       return;
     }
-    board.branch = branched.branch;
-    board.base = branched.base;
+
+    // The team's own branch in a folder project: workers get worktrees off it
+    // and their branches merge back into it. A code project sits inside the
+    // ClawBox checkout under rules of its own, so its workers work in place,
+    // one at a time, as v0 did.
+    if (!board.projectId) {
+      const branched = await ensureTeamBranch(board.directory, board.id, recordedTeamBase);
+      if (!branched.ok) {
+        setTeamStatus(board, SYSTEM, "failed", branched.detail);
+        saveBoard(board);
+        return;
+      }
+      board.branch = branched.branch;
+      board.base = branched.base;
+    }
   }
   setTeamStatus(board, SYSTEM, "working");
   saveBoard(board);
@@ -1281,6 +1432,24 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // Tasks whose worker settled and that the lead has not looked at yet —
   // only ever filled while the owner's switch was on when the team started.
   const leadAfter: string[] = [];
+  // A task's work in flight, from its dispatch (or its adoption after a
+  // restart) to its verdict.
+  const track = (taskId: string, worked: Promise<boolean | { room: string }>): void => {
+    const work = worked
+      .then((settled) => {
+        if (typeof settled === "object") {
+          spawnRefusals.push({ taskId, reason: settled.room });
+          return;
+        }
+        // Accepted, rejected or failed alike: the plan may need a look.
+        if (settled && board.dynamic) leadAfter.push(taskId);
+      })
+      .catch((err) => {
+        bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `Task ${taskId} could not be worked: ${err instanceof Error ? err.message : String(err)}` });
+      })
+      .finally(() => { starting.delete(taskId); inFlight.delete(taskId); });
+    inFlight.set(taskId, work);
+  };
   // The project's own tests on the merged result (TASK-1321, `suiteGate`):
   // how many times they ran, the words the team fails with when they are
   // still red after the one re-attempt, and what they said when they passed.
@@ -1293,8 +1462,17 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // branch of its own) has nothing to open one from.
   const asksPr = goalWantsPullRequest(board.goal);
   // Asked for, and there is no branch to open one from: said once, not skipped in silence.
-  if (!board.branch && asksPr) {
+  if (!board.branch && asksPr && resume?.phase !== "work") {
     bus.send(SYSTEM, { type: "note", text: "The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project." });
+  }
+  // Picked back up after a restart: every task the last web server had in
+  // flight is taken back where it was — its worker reattached in its scope or
+  // settled meanwhile, its reviewer likewise — and the loop goes on around it.
+  if (resume?.phase === "work") {
+    for (const task of board.tasks) {
+      const taken = adoptTask(team, task, source, starting);
+      if (taken) track(task.task_id, taken);
+    }
   }
   for (;;) {
     suiteFailed = null;
@@ -1351,20 +1529,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
           break;
         }
         starting.add(task.task_id);
-        const work = workTask(team, task, source, starting, () => starting.delete(task.task_id))
-          .then((settled) => {
-            if (typeof settled === "object") {
-              spawnRefusals.push({ taskId: task.task_id, reason: settled.room });
-              return;
-            }
-            // Accepted, rejected or failed alike: the plan may need a look.
-            if (settled && board.dynamic) leadAfter.push(task.task_id);
-          })
-          .catch((err) => {
-            bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Task ${task.task_id} could not be worked: ${err instanceof Error ? err.message : String(err)}` });
-          })
-          .finally(() => { starting.delete(task.task_id); inFlight.delete(task.task_id); });
-        inFlight.set(task.task_id, work);
+        track(task.task_id, workTask(team, task, source, starting, () => starting.delete(task.task_id)));
       }
       // Every seat the OWNER allows is taken and a task is ready for one: said
       // on the board, so a team that only waits for a seat is not read as
@@ -1500,58 +1665,83 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
  * A task whose named files are missing or empty is rejected for good — this
  * run was every attempt it gets — and the team fails naming them.
  */
-async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source: CodingRunSource, overlap: { share: number; why: string | null } | null): Promise<void> {
+async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source: CodingRunSource, overlap: { share: number; why: string | null } | null, adopt: string | null = null): Promise<void> {
   const { board, bus } = team;
   const [first] = tasks;
   const what = tasks.length === 1 ? "the plan's one task" : "the plan's tasks";
-  board.singleRun = true;
-  bus.send(SYSTEM, overlap === null
-    ? { type: "note", task_id: first.task_id, text: "The plan has one task, so it runs as one ordinary run — no team branch, worktree or reviewer run around it; the run settles the owner's usual way." }
-    : { type: "note", text: `${overlap.share}% of the files this plan's tasks name are named by another task too${overlap.why ? ` (${overlap.why})` : ""}: side by side they would only conflict, so its ${tasks.length} tasks run as one ordinary run, in order — no team branch, worktrees or reviewer runs around it; the run settles the owner's usual way.` });
-  setTeamStatus(board, SYSTEM, "working");
-  saveBoard(board);
-
   let run: CodingRun | null = null;
-  const waitingSince = Date.now();
-  const who = { role: "worker" as const, taskId: first.task_id };
-  while (!run) {
-    if (team.stopRequested) return;
-    try {
-      run = await startRun({
-        task: singleRunTask(board, tasks),
-        projectId: board.projectId,
-        directory: board.directory,
-        source,
-        extraBrief: repoMapBrief(board, null),
-        effort: board.effort,
-      });
-    } catch (err) {
-      if (err instanceof SlotsFullError && Date.now() - waitingSince < RUN_BUDGET_MS) {
-        noteSlotWait(team, who, err.message);
-        await sleep(SLOT_WAIT_MS);
-        continue;
-      }
-      setTeamStatus(board, SYSTEM, "failed", `The run for ${what} could not start: ${err instanceof Error ? err.message : String(err)}`);
+  if (adopt) {
+    // Picked back up after a restart (`resumeTeam`): the run was started,
+    // assigned and cast before the web server went, and is still going in its
+    // scope or settled while nobody watched.
+    run = getRun(adopt);
+    if (!run) {
+      setTeamStatus(board, SYSTEM, "failed", `The run for ${what} (${adopt}) has no record any more.`);
       saveBoard(board);
       return;
     }
-  }
-  clearSlotWait(team, who);
-  const me = worker(run.id);
-  for (const task of tasks) bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
-  board.runs.push(castRef(run, "worker", first.task_id));
-  saveBoard(board);
-  for (const task of tasks) bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
+  } else {
+    board.singleRun = true;
+    bus.send(SYSTEM, overlap === null
+      ? { type: "note", task_id: first.task_id, text: "The plan has one task, so it runs as one ordinary run — no team branch, worktree or reviewer run around it; the run settles the owner's usual way." }
+      : { type: "note", text: `${overlap.share}% of the files this plan's tasks name are named by another task too${overlap.why ? ` (${overlap.why})` : ""}: side by side they would only conflict, so its ${tasks.length} tasks run as one ordinary run, in order — no team branch, worktrees or reviewer runs around it; the run settles the owner's usual way.` });
+    setTeamStatus(board, SYSTEM, "working");
+    saveBoard(board);
 
-  const settled = await settle(team, run.id);
+    const waitingSince = Date.now();
+    const who = { role: "worker" as const, taskId: first.task_id };
+    while (!run) {
+      if (team.stopRequested) return;
+      try {
+        run = await startRun({
+          task: singleRunTask(board, tasks),
+          projectId: board.projectId,
+          directory: board.directory,
+          source,
+          extraBrief: repoMapBrief(board, null),
+          effort: board.effort,
+        });
+      } catch (err) {
+        if (err instanceof SlotsFullError && Date.now() - waitingSince < RUN_BUDGET_MS) {
+          noteSlotWait(team, who, err.message);
+          await sleep(SLOT_WAIT_MS);
+          continue;
+        }
+        setTeamStatus(board, SYSTEM, "failed", `The run for ${what} could not start: ${err instanceof Error ? err.message : String(err)}`);
+        saveBoard(board);
+        return;
+      }
+    }
+    clearSlotWait(team, who);
+    const started = worker(run.id);
+    for (const task of tasks) bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
+    board.runs.push(castRef(run, "worker", first.task_id));
+    saveBoard(board);
+    for (const task of tasks) bus.send(started, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
+  }
+  const me = worker(run.id);
+
+  // Settled AND home: the run's status is set before its settle has merged
+  // the work into the project — or been refused — so the team waits for that
+  // end (`settleHome`) and judges what is in the PROJECT, never the run's own
+  // branch alone. A one-task team went done on "the files it names are
+  // present" while the project had refused the merge (it was dirty) and held
+  // none of the work.
+  const settled = await settleHome(team, run.id);
   if (team.stopRequested) return;
   const ok = settled?.status === "completed";
   const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
+  // Where the work landed is the word of whichever record settled the tree
+  // last: the run's, or its automatic review pass's, which carries on in the
+  // same tree and does the merge home itself.
+  const home = ok && settled ? ((await waitForRunHome(settled.id, SINGLE_RUN_SETTLE_WAIT_MS)) ?? settled) : null;
+  if (team.stopRequested) return;
+  const landing = ok && settled && home ? runLanding({ directory: settled.directory, worktree: home.worktree ?? settled.worktree, pr: home.pr ?? settled.pr }, board.directory) : null;
   // Each task's named files, looked for where the run's work is — before any
   // verdict, so one task's look never waits on another's review line.
   const gaps = new Map<string, { named: string[]; missing: string[]; removed: string[] }>();
-  if (ok && settled) {
-    const place = deliverablePlace(settled, board.directory);
+  if (ok && settled && landing?.landed) {
+    const place = landing.place;
     // A file the run removed was the task's to delete (a hint names what a
     // task touches, not only what it leaves): it is not missing.
     const removed = await removedByRun(settled, place);
@@ -1566,6 +1756,12 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
     bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
     bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
     if (!ok) continue;
+    if (landing && !landing.landed) {
+      // Neither accepted nor rejected: the work exists, it is just not where
+      // the team was to put it. The verdict below says so.
+      bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `${task.task_id}'s work is on ${landing.branch}, not in the project folder: ${landing.reason}.` });
+      continue;
+    }
     const gap = gaps.get(task.task_id);
     if (gap?.missing.length) {
       bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: `Deliverable missing: ${gap.missing.join(", ")}` });
@@ -1576,16 +1772,66 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
         task_id: task.task_id,
         verdict: "accepted",
         notes: gap
-          ? `Ran as a single run, and the files it names are ${[gap.named.length ? `present (${clipList(gap.named)})` : "", gap.removed.length ? `removed by the run (${clipList(gap.removed)})` : ""].filter(Boolean).join(" or ")}: the run's own settle judged the rest — the owner's review pass, deliverable check and pull request, when switched on.`
+          ? `Ran as a single run, and the files it names are ${[gap.named.length ? `present (${clipList(gap.named)})` : "", gap.removed.length ? `removed by the run (${clipList(gap.removed)})` : ""].filter(Boolean).join(" or ")}${landing?.landed && landing.where ? ` ${landing.where}` : ""}: the run's own settle judged the rest — the owner's review pass, deliverable check and pull request, when switched on.`
           : "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on.",
       });
     }
   }
   const short = [...gaps].filter(([, g]) => g.missing.length);
-  if (allComplete(board)) setTeamStatus(board, SYSTEM, "done");
+  if (landing && !landing.landed) {
+    // Not done, and said as what it is: finished work, on a branch, that the
+    // project would not take — the branch and the reason named, and whose
+    // call the merge is. Never "done" with the project folder empty.
+    board.unlanded = { branch: landing.branch, reason: landing.reason };
+    setTeamStatus(board, SYSTEM, "failed", `The run for ${what} finished, but its work did not land in the project folder: ${landing.reason}. The work is on branch ${landing.branch}; the owner decides whether to merge it.`);
+  } else if (allComplete(board)) setTeamStatus(board, SYSTEM, "done");
   else if (ok && short.length) setTeamStatus(board, SYSTEM, "failed", `The run for ${what} finished, but named deliverables are missing — ${short.map(([id, g]) => `${id}: ${g.missing.join(", ")}`).join("; ")}.`);
   else setTeamStatus(board, SYSTEM, "failed", `The run for ${what} did not finish: ${settled?.error ?? settled?.status ?? "no run"}.`);
   saveBoard(board);
+}
+
+/** How long a single run's team waits for the run's settle to end — its merge home above all — before it judges what it finds. */
+const SINGLE_RUN_SETTLE_WAIT_MS = 15 * 60_000;
+
+/**
+ * `settle`, and then the END of the run's own settle chain (`waitForRunSettled`):
+ * the commit, the review pass, the pull request and the merge home all come
+ * after the status a wait answers on. A chain that put the record back to work
+ * (the deliverable gate's next go) is waited out the same way, a few times.
+ */
+async function settleHome(team: LiveTeam, runId: string): Promise<CodingRun | null> {
+  for (let round = 0; ; round++) {
+    const settled = await settle(team, runId);
+    if (!settled || team.stopRequested) return settled;
+    await waitForRunSettled(runId, SINGLE_RUN_SETTLE_WAIT_MS);
+    const now = getRun(runId);
+    if (!now || isSettled(now.status) || round >= 2) return now ?? settled;
+  }
+}
+
+/**
+ * Where a settled single run's work IS once its settle is over: in the project
+ * (run in place, merged home, or a branch that held nothing), going home
+ * through a pull request (judged on its branch, the way it will land), or on a
+ * branch the project did not take — with why, in the device's own words.
+ */
+type RunLanding =
+  | { landed: true; place: DeliverablePlace; where: string | null }
+  | { landed: false; branch: string; reason: string };
+
+export function runLanding(run: Pick<CodingRun, "directory" | "worktree" | "pr">, fallback: string): RunLanding {
+  const wt = run.worktree;
+  if (!wt) return { landed: true, place: { dir: run.directory || fallback, branch: null }, where: "in the project folder" };
+  if (wt.result?.kind === "merged") return { landed: true, place: { dir: wt.project, branch: null }, where: `in the project folder (merged into ${wt.result.base ?? wt.base})` };
+  if (wt.result?.kind === "unmerged") {
+    return { landed: false, branch: wt.branch, reason: (wt.result.detail || wt.result.reason || "the project did not take the merge").replace(/\.+$/, "") };
+  }
+  // A pull request owns the branch: the work goes home through it, which is
+  // the owner's usual way — judged where it is, on the branch.
+  if (run.pr && run.pr.phase !== "failed") return { landed: true, place: deliverablePlace(run, fallback), where: run.pr.number ? `on pull request #${run.pr.number}` : `on ${wt.branch}, for its pull request` };
+  // Nothing on the branch: whatever the run left is in the project, if anywhere.
+  if (wt.branchRemoved) return { landed: true, place: { dir: wt.project, branch: null }, where: "in the project folder" };
+  return { landed: false, branch: wt.branch, reason: wt.removed ? "it was not merged into the project" : "its copy of the project was kept and not merged into the project" };
 }
 
 /** "Task t3", "Tasks t3 and t4", "Tasks t2, t3 and t4". */
@@ -1820,7 +2066,19 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   board.runs.push(castRef(run, "worker", task.task_id));
   saveBoard(board);
   bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
+  return finishWork(team, task, source, starting, run.id, worktree);
+}
 
+/**
+ * A worker's run, from its settle to its task's verdict: its branch merged into
+ * the team branch (or the reason it was not), its worktree removed, its
+ * refusals judged and its reviewer run. The second half of `workTask`, and
+ * all of it for a worker the last web server started (`adoptTask`).
+ */
+async function finishWork(team: LiveTeam, task: TeamTask, source: CodingRunSource, starting: ReadonlySet<string>, runId: string, worktree: { path: string; branch: string } | null): Promise<boolean> {
+  const { board, bus } = team;
+  const run = { id: runId };
+  const me = worker(runId);
   const settled = await settle(team, run.id);
   if (team.stopRequested) {
     if (worktree) await removeWorktree(board.directory, worktree.path);
@@ -2039,6 +2297,62 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     if (!underReview(board, task.task_id)) return true;
     bus.send(REVIEWER, { type: "review", task_id: task.task_id, ...verdict });
   }
+  return true;
+}
+
+/**
+ * A task the last web server had in flight, taken back by a team picked back
+ * up after a restart (`continueTeam`): a worker's task goes on from its settle
+ * (`finishWork` — merged, reviewed, as if this server had started it), a task
+ * whose review was under way gets its verdict (`adoptReview`). Null for a task
+ * that was in nobody's hands. Never stops a run: a worker still going in its
+ * scope is waited for like any other.
+ */
+function adoptTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, starting: ReadonlySet<string>): Promise<boolean> | null {
+  const { board, bus } = team;
+  if (task.status === "in_progress") {
+    const runId = workerRunOf(board, task.task_id);
+    if (!runId || runId !== task.assigned_to) {
+      // Assigned, and no run of its own on the cast list: nothing of it ran.
+      // Failed by its worker id, so the ordinary re-attempt offers it again.
+      if (task.assigned_to) bus.send(worker(task.assigned_to), { type: "status_update", task_id: task.task_id, status: "failed", worker_id: task.assigned_to });
+      return null;
+    }
+    const worktree = task.worktree && task.branch ? { path: task.worktree, branch: task.branch } : null;
+    return finishWork(team, task, source, starting, runId, worktree);
+  }
+  if (task.status === "complete" && underReview(board, task.task_id)) return adoptReview(team, task, source, starting);
+  return null;
+}
+
+/**
+ * The verdict on a task whose review the restart interrupted: its reviewer
+ * run's own, once that run has settled — reattached, or settled while nobody
+ * watched — or, when there was none or it gave no verdict, a review done
+ * again (`reviewTask`). The reviewer's throwaway checkout goes either way.
+ */
+async function adoptReview(team: LiveTeam, task: TeamTask, source: CodingRunSource, starting: ReadonlySet<string>): Promise<boolean> {
+  const { board, bus } = team;
+  if (task.reviewRunId) {
+    const settled = await settle(team, task.reviewRunId);
+    if (team.stopRequested) return false;
+    if (board.branch) {
+      const checkout = path.join(board.directory, WORKTREES_DIR, `review-${task.task_id}-${task.attempts}`);
+      if (fs.existsSync(checkout)) await removeWorktree(board.directory, checkout, { dropBranch: workerBranchName(board.id, `review-${task.task_id}`, task.attempts) });
+    }
+    if (!underReview(board, task.task_id)) return true;
+    const parsed = settled?.status === "completed" ? parseVerdict(settled.resultText ?? settled.summary) : null;
+    if (parsed?.ok) {
+      bus.send(REVIEWER, { type: "review", task_id: task.task_id, ...parsed.verdict });
+      return true;
+    }
+  }
+  const workerId = workerRunOf(board, task.task_id);
+  const files = (workerId ? getRun(workerId)?.filesTouched : null) ?? [];
+  const verdict = await reviewTask(team, task, source, { files, report: task.result ?? "", strayed: outsideHint(files, task.files_hint) }, starting);
+  if (team.stopRequested) return false;
+  if (!underReview(board, task.task_id)) return true;
+  bus.send(REVIEWER, { type: "review", task_id: task.task_id, ...verdict });
   return true;
 }
 

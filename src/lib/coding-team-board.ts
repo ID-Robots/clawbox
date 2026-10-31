@@ -470,6 +470,14 @@ export interface TeamBoard {
    * worktree, no reviewer run of the team's — and the board followed it.
    */
   singleRun: boolean;
+  /**
+   * The team's work is on this branch and NOT in the project folder — a single
+   * run whose merge home the project refused (it was dirty, on another branch,
+   * or conflicted) — with the reason, in the device's words. The team is not
+   * done then, and the owner decides what becomes of the branch. Null or
+   * absent: whatever the team made is in the project.
+   */
+  unlanded?: { branch: string; reason: string } | null;
   /** The `coding_team_dynamic` switch as it stood when the team started: may a lead add or retire tasks while it runs? */
   dynamic: boolean;
   /**
@@ -673,6 +681,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     shape: normalizeShape(b.shape),
     repoMap: normalizeRepoMap(b.repoMap),
     singleRun: b.singleRun === true,
+    unlanded: normalizeUnlanded(b.unlanded),
     dynamic: b.dynamic === true,
     // Re-read, never trusted: a level this box does not offer is dropped, and
     // the team runs on the owner's setting as a board without one does.
@@ -752,6 +761,14 @@ export function repoMapText(map: RepoMap | null): string {
 }
 
 /** A shape read back from disk: the planner's fields, or null — never a half-shape that would schedule oddly. */
+/** `TeamBoard.unlanded` as read back: both strings, bounded, or nothing. */
+function normalizeUnlanded(raw: unknown): { branch: string; reason: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { branch, reason } = raw as { branch?: unknown; reason?: unknown };
+  if (typeof branch !== "string" || !branch.trim() || typeof reason !== "string") return null;
+  return { branch: branch.slice(0, 200), reason: reason.slice(0, 500) };
+}
+
 function normalizeShape(raw: unknown): TeamShape | null {
   if (!raw || typeof raw !== "object") return null;
   const s = raw as Record<string, unknown>;

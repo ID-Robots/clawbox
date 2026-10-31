@@ -167,7 +167,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; tokenBreakdown: TokenBreakdown; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown>; writes: Record<string, string> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; tokenBreakdown: TokenBreakdown; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown>; writes: Record<string, string>; worktree: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -1855,7 +1855,8 @@ describe("the settle notice", () => {
     expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done", branch: `clawbox/${board.id}` });
     await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
     const [line, opts] = gateway.gatewayWsChatSendMain.mock.calls[0] as unknown as [string, { idempotencyKey: string; timeoutMs: number }];
-    expect(line).toBe(`[Coding team ${board.id}] finished: done — 2 of 2 tasks done, on branch clawbox/${board.id}. Read coding_team_status for the result and tell the user.`);
+    // The merge is said to be the owner's: never an invitation to merge or tidy their folder.
+    expect(line).toBe(`[Coding team ${board.id}] finished: done — 2 of 2 tasks done, on branch clawbox/${board.id}. Whether to merge clawbox/${board.id} is the owner's decision: tell them, and do not merge it, delete or move files, or clean up their project folder yourself unless they ask you to. Read coding_team_status for the result and tell the user.`);
     expect(opts.timeoutMs).toBe(team.OWNER_AGENT_TIMEOUT_MS);
     expect(opts.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
   });
@@ -2112,6 +2113,176 @@ describe("the closing sweep at boot (closeOrphanedTeams)", () => {
     expect(await team.closeOrphanedTeams()).toBe(0);
     expect(team.getTeam(queued.id)?.status).toBe("queued");
     expect(notify.announceCodingTeam).not.toHaveBeenCalled();
+  });
+});
+
+describe("picking a team back up after a restart (claimOrphanedTeams, resumeOrphanedTeams)", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /**
+   * A restart with two workers live, as on the bench: a `working` board with a
+   * team branch, t1's worker (run-00000002) finished while the box was down,
+   * t2's (run-00000003) still going in its scope, and nobody in this process
+   * driving the team.
+   */
+  async function twoWorkersOut(): Promise<Board> {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    const dir = path.join(root, "site");
+    const board = createBoard({ goal: "Build it", projectId: null, directory: dir, source: "agent" }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Scaffold index.html", files_hint: ["index.html"] });
+    const t2 = postTask(board, { kind: "planner" }, { task_description: "Write styles.css", files_hint: ["styles.css"] });
+    board.status = "working";
+    board.branch = `clawbox/${board.id}`;
+    board.base = "main";
+    for (const [task, n] of [[t1, 2], [t2, 3]] as const) {
+      task.worktree = path.join(dir, ".clawbox", "worktrees", `${task.task_id}-1`);
+      task.branch = `clawbox/${board.id}-${task.task_id}-1`;
+      task.attempts = 1;
+      task.assigned_to = `run-0000000${n}`;
+      task.status = "in_progress";
+      fs.mkdirSync(task.worktree, { recursive: true });
+    }
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" }, { id: "run-00000003", role: "worker", taskId: "t2" });
+    saveBoard(board);
+    seq = 3;
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PARALLEL_PLAN, directory: dir, tokensUsed: 10 });
+    runs.set("run-00000002", { id: "run-00000002", status: "completed", summary: "index done", directory: t1.worktree, filesTouched: ["index.html"], permissionDenials: 0, deniedActions: [], tokensUsed: 20 });
+    runs.set("run-00000003", { id: "run-00000003", status: "running", summary: null, directory: t2.worktree, filesTouched: [], permissionDenials: 0, deniedActions: [], waits: 0, outcomeAt: 0 });
+    return board;
+  }
+
+  it("goes on with the workers that kept running: merges and reviews their work, and finishes done — never failed for the restart", async () => {
+    const board = await twoWorkersOut();
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "styles done", filesTouched: ["styles.css"], tokensUsed: 30 }];
+    // Claimed at boot, before the runs are reconciled: a read meanwhile leaves it as it is.
+    expect(team.claimOrphanedTeams()).toEqual([board.id]);
+    expect(team.getTeam(board.id)?.status).toBe("working");
+    expect(team.listTeams().find((t) => t.id === board.id)?.status).toBe("working");
+    expect(team.activeTeamId()).toBe(board.id);
+
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    expect(team.activeTeamId()).toBe(board.id);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.error).toBeNull();
+    // Both workers' branches came home and their worktrees went; nothing was
+    // started again for either task, and nothing was stopped.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]).sort()).toEqual([`clawbox/${board.id}-t1-1`, `clawbox/${board.id}-t2-1`]);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "worker")).toEqual([]);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "planner")).toEqual([]);
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    // Each task reviewed as usual, and accepted.
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "reviewer")).toHaveLength(2);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.review?.verdict])).toEqual([["t1", "complete", "accepted"], ["t2", "complete", "accepted"]]);
+    expect(done.runs.find((r) => r.id === "run-00000003")?.tokens).toBe(30);
+    expect(done.log.map((e) => e.message)).toContain("The web server restarted while the team was working. It goes on from where it was; run-00000003 kept working in their own scopes.");
+    expect(done.log.map((e) => e.message).join("\n")).not.toMatch(/Team → failed/);
+    // One notice, for the finished team.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done" });
+  });
+
+  it("takes back a review the restart interrupted: the reviewer's own verdict, once it settles", async () => {
+    const board = await twoWorkersOut();
+    const { saveBoard, loadBoard } = await import("@/lib/coding-team-board");
+    const b = loadBoard(board.id)!;
+    // t1 was merged and under review by run-00000004 when the box went; t2's worker is done.
+    b.tasks[0].status = "complete";
+    b.tasks[0].result = "index done";
+    b.tasks[0].worktree = null;
+    b.tasks[0].reviewRunId = "run-00000004";
+    b.runs.push({ id: "run-00000004", role: "reviewer", taskId: "t1" });
+    saveBoard(b);
+    seq = 4;
+    runs.set("run-00000003", { ...runs.get("run-00000003")!, status: "completed", summary: "styles done", filesTouched: ["styles.css"] });
+    runs.set("run-00000004", { id: "run-00000004", status: "completed", summary: JSON.stringify({ verdict: "accepted", notes: "index is right" }), directory: path.join(root, "site") });
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "index is right" });
+    // Only t2 needed a reviewer of its own; t1's verdict was the one already given.
+    expect(starts.filter((s) => (s.team as { role?: string; taskId?: string } | null)?.role === "reviewer").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t2"]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t2-1`]);
+  });
+
+  it("goes on from the plan when the restart came while planning, with the planner the last server started", async () => {
+    const { createBoard, saveBoard } = await import("@/lib/coding-team-board");
+    inSite();
+    const board = createBoard({ goal: "Build it", projectId: null, directory: site, source: "owner" }, { kind: "owner" });
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null });
+    saveBoard(board);
+    seq = 1;
+    // The planner settled while the box was down; its answer is the plan.
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PLAN, resultText: PLAN, directory: site, tokensUsed: 10 });
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks.map((t) => t.task_id)).toEqual(["t1", "t2"]);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "planner")).toEqual([]);
+  });
+
+  it("takes back a single run that kept going, and judges it when it settles", async () => {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    inSite();
+    const board = createBoard({ goal: "Fix the typo", projectId: null, directory: site, source: "owner" }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Fix the typo in README.md", files_hint: ["README.md"] });
+    board.singleRun = true;
+    board.status = "working";
+    t1.status = "in_progress";
+    t1.assigned_to = "run-00000002";
+    t1.attempts = 1;
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" });
+    saveBoard(board);
+    seq = 2;
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: "[]", directory: site });
+    runs.set("run-00000002", { id: "run-00000002", status: "running", summary: null, directory: site, filesTouched: [], permissionDenials: 0, deniedActions: [], waits: 0, outcomeAt: 0, worktree: null });
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "Fixed the typo.", filesTouched: [path.join(site, "README.md")] }];
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0]).toMatchObject({ status: "complete", review: { verdict: "accepted" } });
+    expect(starts).toEqual([]);
+  });
+
+  it("is one team to every copy of the module in the process: a route's read never settles the team the boot hook took back", async () => {
+    // Next compiles the boot hook apart from the routes, so the process holds
+    // two copies of this module. With module-level maps the route's copy read
+    // the boot copy's live team as an orphan and settled it failed.
+    const board = await twoWorkersOut();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    team.claimOrphanedTeams();
+    vi.resetModules();
+    const routeCopy = await import("@/lib/coding-team");
+    expect(routeCopy.getTeam(board.id)?.status).toBe("working");
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    expect(routeCopy.getTeam(board.id)?.status).toBe("working");
+    expect(routeCopy.activeTeamId()).toBe(board.id);
+    // And the owner's Stop through the route reaches the team at work.
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    expect(routeCopy.stopTeam(board.id).status).toBe("stopped");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    expect((await finished(board.id)).status).toBe("stopped");
+  });
+
+  it("closes, rather than resumes, a claimed team the owner stopped before it was picked up", async () => {
+    const board = await twoWorkersOut();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    team.claimOrphanedTeams();
+    expect(team.stopTeam(board.id).status).toBe("working");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    runs.set("run-00000003", { ...runs.get("run-00000003")!, status: "stopped" });
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("stopped");
+    expect(starts).toEqual([]);
   });
 });
 
@@ -3734,6 +3905,83 @@ describe("a plan run as a single run: each task's named files", () => {
     // Not left pending on a settled board: this run was every attempt it gets.
     expect(t2).toMatchObject({ status: "rejected", review: { verdict: "rejected", notes: "Deliverable missing: docs (empty), notes.md (empty), CHANGELOG.md (missing)" } });
     expect(done.log.map((e) => e.message)).toContain("Task t2 rejected: Deliverable missing: docs (empty), notes.md (empty), CHANGELOG.md (missing)");
+  });
+
+  /**
+   * A project with the run's work on its OWN branch only — `clawbox/run-00000002`,
+   * the single run's — and not on `main`, which the project folder is on.
+   */
+  async function workOnRunBranch(file: string): Promise<{ tree: string; git: (...args: string[]) => string }> {
+    const { execFileSync } = await import("child_process");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: site, encoding: "utf8", env });
+    git("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    git("add", "-A");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "clawbox/run-00000002");
+    fs.mkdirSync(path.dirname(path.join(site, file)), { recursive: true });
+    fs.writeFileSync(path.join(site, file), "export const page = 1;\n");
+    git("add", "-A");
+    git("commit", "-qm", "work");
+    git("checkout", "-q", "main");
+    return { tree: path.join(site, ".clawbox", "worktrees", "run-00000002"), git };
+  }
+
+  it("is not done when the run's work did not land in the project: it fails naming the branch and the reason, and says the merge is the owner's", async () => {
+    // A one-task team on a bench: "accepted: the files it names are present"
+    // (they were, on the run's branch), team done — while the project had
+    // refused the merge home (the box's own favicons made it dirty) and held
+    // none of the work. The assistant then merged it into the owner's folder.
+    inSite();
+    const { tree } = await workOnRunBranch("src/paginate.js");
+    expect(fs.existsSync(path.join(site, "src", "paginate.js"))).toBe(false);
+    const detail = "the project folder has uncommitted changes of its own";
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Add a pagination helper", files_hint: ["src/paginate.js"] }]) },
+      {
+        summary: "Added the pagination helper.",
+        filesTouched: [path.join(tree, "src", "paginate.js")],
+        worktree: { path: tree, branch: "clawbox/run-00000002", base: "main", project: site, removed: true, branchRemoved: false, result: { kind: "unmerged", reason: "dirty", detail, base: null, commit: null } },
+      },
+    ];
+    const board = await team.startTeam({ goal: "Add a pagination helper", directory: "site", source: "agent" });
+    const done = await finished(board.id);
+    expect(done.singleRun).toBe(true);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The run for the plan's one task finished, but its work did not land in the project folder: ${detail}. The work is on branch clawbox/run-00000002; the owner decides whether to merge it.`);
+    expect(done.unlanded).toEqual({ branch: "clawbox/run-00000002", reason: detail });
+    // Never accepted on files that are only on the branch.
+    expect(done.tasks[0].review ?? null).toBeNull();
+    expect(done.log.map((e) => e.message).join("\n")).not.toMatch(/files it names are present/);
+    expect(done.log.map((e) => e.message)).toContain(`t1's work is on clawbox/run-00000002, not in the project folder: ${detail}.`);
+    // The owner hears it as it is — the run's own card only said it finished —
+    // and the assistant is told whose call the merge is.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ status: "failed", unlanded: { branch: "clawbox/run-00000002" } });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    const line = String((gateway.gatewayWsChatSendMain.mock.calls[0] as unknown[])[0]);
+    expect(line).toContain("The work is on branch clawbox/run-00000002, not in the project folder.");
+    expect(line).toContain("Whether to merge clawbox/run-00000002 is the owner's decision");
+    expect(line).not.toMatch(/uncommitted|favicon/);
+  });
+
+  it("judges a merged run's files in the project folder, and is done when they are there", async () => {
+    inSite();
+    const { tree, git } = await workOnRunBranch("src/paginate.js");
+    git("merge", "-q", "--no-ff", "-m", "home", "clawbox/run-00000002");
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Add a pagination helper", files_hint: ["src/paginate.js"] }]) },
+      {
+        summary: "Added the pagination helper.",
+        worktree: { path: tree, branch: "clawbox/run-00000002", base: "main", project: site, removed: true, branchRemoved: false, result: { kind: "merged", reason: null, detail: null, base: "main", commit: "abc1234" } },
+      },
+    ];
+    const board = await team.startTeam({ goal: "Add a pagination helper", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.unlanded ?? null).toBeNull();
+    expect(done.tasks[0].review?.notes).toMatch(/^Ran as a single run, and the files it names are present \(src\/paginate\.js\) in the project folder \(merged into main\): /);
   });
 
   it("accepts as before a task that names no file it could look for", async () => {
