@@ -6580,14 +6580,16 @@ remove_shadowing_system_openclaw() {
 #   2. the plugins ClawBox manages are at the version the full path would
 #      install, and the core's plugin list reports nothing broken, orphaned or
 #      waiting for consent;
-#   3. the marker says the full path last FINISHED for this very target;
+#   3. the marker says the full path last FINISHED for this very target, and on
+#      OpenClaw 2 doctor's own record agrees: its last run for this core
+#      completed and no database is behind (or ahead of) the core's schema;
 #   4. the gateway is running and listening.
 # A check that cannot answer is doubt, and doubt is the full path, unchanged.
 # Returns 0 for the fast path; otherwise 1, with OPENCLAW_REFRESH_WHY saying
 # which fact was missing. The order is cheapest first: the plugin list is a
 # CLI cold start and is asked last.
 openclaw_refresh_fast_path_check() {
-  local target="$1" recorded state active sub verdict
+  local target="$1" recorded doctor state active sub verdict
   OPENCLAW_REFRESH_WHY=""
   if [ "${CLAWBOX_FORCE_OPENCLAW_REFRESH:-0}" = 1 ]; then
     OPENCLAW_REFRESH_WHY="CLAWBOX_FORCE_OPENCLAW_REFRESH=1 asks for it"
@@ -6607,6 +6609,55 @@ openclaw_refresh_fast_path_check() {
   if [ "$recorded" != "$target" ]; then
     OPENCLAW_REFRESH_WHY="no full refresh has finished for $target; the last on record is ${recorded:-none}"
     return 1
+  fi
+  # The marker says the full path finished; it does not say nothing has moved
+  # under the core since. The start guard puts back a pre-update copy of a
+  # database the core refused, and a restore brings older ones: either leaves a
+  # database behind the core's schema while the marker still names the target,
+  # and migrating it is doctor's job, which only the full path runs. Doctor's
+  # verdict (record-doctor) and the databases' state (measured again at every
+  # gateway start) are in data/openclaw-migration-status.json, read as the
+  # clawbox account for the reason the plugin check below gives. Only on
+  # OpenClaw 2, the only core the full path runs doctor for.
+  if openclaw_version_is_v2 "$target"; then
+    doctor="$(as_clawbox -H python3 -c '
+import json, sys
+target, path = sys.argv[1:3]
+
+
+def doubt(reason):
+    print(reason)
+    sys.exit(0)
+
+
+def said(value):
+    return str(value)[:80] if value not in (None, "") else ""
+
+
+try:
+    with open(path, encoding="utf-8") as fh:
+        status = json.load(fh)
+except FileNotFoundError:
+    doubt("no record of doctor'"'"'s migration is on file")
+except Exception:
+    status = None
+if not isinstance(status, dict):
+    doubt("the record of doctor'"'"'s migration could not be read")
+run = status.get("doctor") if isinstance(status.get("doctor"), dict) else {}
+if run.get("core") != target:
+    doubt("doctor'"'"'s last recorded run was for %s, not %s" % (said(run.get("core")) or "no core", target))
+if run.get("verdict") != "complete":
+    doubt("doctor'"'"'s last run for %s ended %s" % (target, said(run.get("verdict")) or "with no verdict"))
+if status.get("core") != target:
+    doubt("the agent databases were last measured against %s, not %s" % (said(status.get("core")) or "no core", target))
+if status.get("state") != "ok":
+    doubt("the agent databases are %s (%s)" % (said(status.get("state")) or "of unknown state", said(status.get("reason")) or "no reason given"))
+print("ok")
+' "$target" "${PROJECT_DIR:-}/data/openclaw-migration-status.json" 2>/dev/null || true)"
+    if [ "$doctor" != ok ]; then
+      OPENCLAW_REFRESH_WHY="${doctor:-the check of the doctor record could not run}"
+      return 1
+    fi
   fi
   # Running, not merely active-ish: `activating` is a pre-start or a crash
   # loop, and a gateway the updater stopped for this step is `inactive`.

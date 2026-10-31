@@ -15,7 +15,10 @@ import { spawnSync } from "node:child_process";
  *   2. the ClawBox-managed plugins are at the version the refresh would install,
  *      and the core's plugin list reports nothing broken, orphaned or waiting
  *      for consent;
- *   3. the marker records a full path that FINISHED for this target;
+ *   3. the marker records a full path that FINISHED for this target, and — on
+ *      OpenClaw 2, where the full path runs `doctor --fix` — doctor's own record
+ *      (data/openclaw-migration-status.json) says its last run for this core
+ *      completed and no database is behind the core's schema;
  *   4. the gateway is active, running and listening.
  * Any doubt is the full path, unchanged. This suite drives the shipped step —
  * the check, the marker, the step itself and its fast-only twin — over a box
@@ -28,6 +31,29 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const source = readFileSync("install.sh", "utf8");
 const TARGET = "2026.10.7";
 const OLDER = "2026.10.3";
+/** A pre-OpenClaw-2 pin (the documented rollback override): no doctor runs. */
+const V1 = "2026.7.1";
+
+/**
+ * data/openclaw-migration-status.json as `record-doctor` and the gateway's
+ * pre-start leave it on a box whose last full path completed for `core`.
+ */
+function doctorRecord(core: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    updatedAt: "2026-10-28T10:05:00Z",
+    source: "gateway-pre-start",
+    core,
+    databases: { total: 2, behind: 0, newer: 0 },
+    doctor: { core, verdict: "complete", at: "2026-10-28T09:58:00Z" },
+    preflight: null,
+    state: "ok",
+    reason: null,
+    requiredBytes: null,
+    freeBytes: null,
+    ...over,
+  };
+}
 
 function shellFunction(name: string): string {
   const start = source.indexOf(`\n${name}() {`);
@@ -69,7 +95,14 @@ afterEach(() => {
   while (boxes.length) rmSync(boxes.pop()!, { recursive: true, force: true });
 });
 
-function makeBox(opts: { core?: string; marker?: string | null } = {}): Box {
+function makeBox(opts: {
+  /** The pin; the core, the marker, the record and the @openclaw plugins follow it unless set. */
+  target?: string;
+  core?: string;
+  marker?: string | null;
+  /** Doctor's record: an object, raw text, or null for no file at all. */
+  record?: Record<string, unknown> | string | null;
+} = {}): Box {
   const dir = mkdtempSync(path.join(tmpdir(), "openclaw-fast-path-"));
   boxes.push(dir);
   const write = (rel: string, text: string, mode?: number) => {
@@ -77,17 +110,22 @@ function makeBox(opts: { core?: string; marker?: string | null } = {}): Box {
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, text, mode === undefined ? undefined : { mode });
   };
+  const target = opts.target ?? TARGET;
   // The pin, read from the mirror's config/openclaw-target.txt as on the box.
-  write("src/config/openclaw-target.txt", `${TARGET}\n`);
+  write("src/config/openclaw-target.txt", `${target}\n`);
   // The managed core, answering --version the way the real launcher does.
-  write("npm-global/bin/openclaw", `#!/bin/sh\necho 'OpenClaw ${opts.core ?? TARGET} (abc1234)'\n`, 0o755);
-  write("npm-global/lib/node_modules/openclaw/package.json", JSON.stringify({ name: "openclaw", version: opts.core ?? TARGET }));
+  write("npm-global/bin/openclaw", `#!/bin/sh\necho 'OpenClaw ${opts.core ?? target} (abc1234)'\n`, 0o755);
+  write("npm-global/lib/node_modules/openclaw/package.json", JSON.stringify({ name: "openclaw", version: opts.core ?? target }));
   // The checkout clawbox-email-directives is copied out of.
   write("checkout/scripts/openclaw-plugins/clawbox-email-directives/package.json",
     JSON.stringify({ name: "clawbox-email-directives", version: "1.0.0" }));
   mkdirSync(path.join(dir, "checkout/data"), { recursive: true });
-  const marker = opts.marker === undefined ? TARGET : opts.marker;
+  const marker = opts.marker === undefined ? target : opts.marker;
   if (marker !== null) write("openclaw-refresh", `target=${marker}\nfinished=2026-10-28T10:00:00Z\n`);
+  const record = opts.record === undefined ? doctorRecord(target) : opts.record;
+  if (record !== null) {
+    write("checkout/data/openclaw-migration-status.json", typeof record === "string" ? record : JSON.stringify(record));
+  }
 
   const box: Box = {
     dir,
@@ -106,12 +144,12 @@ function makeBox(opts: { core?: string; marker?: string | null } = {}): Box {
   // What a current OpenClaw box carries: the four ClawBox plugins from npm and
   // ClawHub at the pin, ClawBox's own plugin from the checkout, a plugin the
   // owner installed at whatever version he chose, and a bundled one.
-  const npm = (name: string) => box.payload(`npm/projects/${name.replace("/", "-")}/node_modules/${name}`, { name, version: TARGET });
+  const npm = (name: string) => box.payload(`npm/projects/${name.replace("/", "-")}/node_modules/${name}`, { name, version: target });
   box.plugins = [
     { id: "codex", origin: "global", status: "loaded", rootDir: npm("@openclaw/codex"), dependencyStatus: { requiredInstalled: true } },
     { id: "discord", origin: "global", status: "loaded", rootDir: npm("@openclaw/discord") },
     { id: "whatsapp", origin: "global", status: "disabled", rootDir: npm("@openclaw/whatsapp") },
-    { id: "deepseek", origin: "global", status: "loaded", rootDir: box.payload("extensions/deepseek", { name: "@openclaw/deepseek-provider", version: TARGET }) },
+    { id: "deepseek", origin: "global", status: "loaded", rootDir: box.payload("extensions/deepseek", { name: "@openclaw/deepseek-provider", version: target }) },
     { id: "clawbox-email-directives", origin: "global", status: "loaded", rootDir: box.payload("extensions/clawbox-email-directives", { name: "clawbox-email-directives", version: "1.0.0" }) },
     { id: "owner-plugin", origin: "global", status: "loaded", rootDir: box.payload("npm/projects/owner/node_modules/owner-plugin", { name: "owner-plugin", version: "0.3.1" }) },
     { id: "a2a", origin: "bundled", status: "loaded" },
@@ -186,7 +224,17 @@ function program(box: Box, entry: string): string {
     // Suites of their own: install-openclaw-migration-preflight.test.ts and
     // install-migration-stop.test.ts.
     "openclaw_migration_disk_preflight() { return 0; }",
-    'openclaw_record_migration_verdict() { event "VERDICT $1"; }',
+    // `record-doctor` as the fast path sees it: the verdict, for the live core,
+    // and the databases measured again — every one migrated when doctor
+    // completed (openclaw-db-maintenance.test.ts covers the real helper).
+    `openclaw_record_migration_verdict() {
+  event "VERDICT $1"
+  local core state=ok
+  core="$("$OPENCLAW_BIN" --version | awk '{print $2}')"
+  [ "$1" = complete ] || state=degraded
+  printf '{"core":"%s","state":"%s","reason":null,"databases":{"total":2,"behind":0,"newer":0},"doctor":{"core":"%s","verdict":"%s"}}\\n' \\
+    "$core" "$state" "$core" "$1" > "$PROJECT_DIR/data/openclaw-migration-status.json"
+}`,
     "stop_openclaw_gateways_for_migration() { event STOP; }",
     // systemd's view of the gateway, set per case.
     `systemctl() {
@@ -435,6 +483,78 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
     });
   });
 
+  describe("doctor's own record, which the marker alone does not prove current", () => {
+    const recordFile = (box: Box) => path.join(box.dir, "checkout/data/openclaw-migration-status.json");
+
+    it("a database is behind the core's schema although the marker names the target", () => {
+      // The start guard puts back a pre-update copy of a database the core
+      // refused, and a restore brings older ones: the full path finished for
+      // this target, but there is migration work only doctor does.
+      const box = makeBox({
+        record: doctorRecord(TARGET, { state: "degraded", reason: "schema-behind", databases: { total: 2, behind: 1, newer: 0 } }),
+      });
+      const first = run(box);
+      expectFullPath(first, "the agent databases are degraded (schema-behind)");
+      expect(first.events).toContain("VERDICT complete");
+      // Doctor migrated it and said so; the next update has nothing to do.
+      expect(JSON.parse(readFileSync(recordFile(box), "utf8"))).toMatchObject({ state: "ok", doctor: { core: TARGET, verdict: "complete" } });
+      expectFastPath(run(box));
+    });
+
+    it("doctor's last run for this core did not complete", () => {
+      const box = makeBox({ record: doctorRecord(TARGET, { doctor: { core: TARGET, verdict: "incomplete" } }) });
+      expectFullPath(run(box), `doctor's last run for ${TARGET} ended incomplete`);
+    });
+
+    it("doctor's last recorded run was for another core", () => {
+      const box = makeBox({ record: doctorRecord(TARGET, { doctor: { core: OLDER, verdict: "complete" } }) });
+      expectFullPath(run(box), `doctor's last recorded run was for ${OLDER}, not ${TARGET}`);
+    });
+
+    it("the databases were last measured against another core", () => {
+      const box = makeBox({ record: doctorRecord(TARGET, { core: OLDER }) });
+      expectFullPath(run(box), `the agent databases were last measured against ${OLDER}, not ${TARGET}`);
+    });
+
+    it("a migration is blocked for want of disk", () => {
+      const box = makeBox({ record: doctorRecord(TARGET, { state: "blocked", reason: "insufficient-disk" }) });
+      expectFullPath(run(box), "the agent databases are blocked (insufficient-disk)");
+    });
+
+    it("no record is on file: the first update takes the full path, the second the fast one", () => {
+      // A box whose last full path ran before doctor's verdict was recorded.
+      const box = makeBox({ record: null });
+      expectFullPath(run(box), "no record of doctor's migration is on file");
+      expectFastPath(run(box));
+    });
+
+    it("the record cannot be read", () => {
+      expectFullPath(run(makeBox({ record: "{not json" })), "the record of doctor's migration could not be read");
+    });
+
+    it("the record is not an object", () => {
+      expectFullPath(run(makeBox({ record: "[]" })), "the record of doctor's migration could not be read");
+    });
+
+    it("is read as the clawbox account, before the plugin list", () => {
+      // data/ is that account's to write: as root, a symlink there would read a
+      // root-only file into a journal the account can read.
+      const fast = run(makeBox());
+      expectFastPath(fast);
+      expect(fast.events.filter((e) => e === "VERDICT_AS_CLAWBOX")).toHaveLength(2);
+      const stale = run(makeBox({ record: doctorRecord(TARGET, { doctor: { core: TARGET, verdict: "incomplete" } }) }), "step_openclaw_install_fast");
+      expect(stale.events.filter((e) => e === "VERDICT_AS_CLAWBOX")).toHaveLength(1);
+      expect(stale.events).not.toContain("PLUGINS_LIST");
+    });
+
+    it("is not asked of an OpenClaw 1 pin, whose full path runs no doctor", () => {
+      // The documented rollback override: nothing would ever write the record.
+      const r = run(makeBox({ target: V1, record: null }));
+      expectFastPath(r);
+      expect(pathLine(r)).toContain(`all at ${V1}`);
+    });
+  });
+
   it("does not version-check plugins the owner installed, or bundled ones", () => {
     // The core did not move, so the refresh has nothing to line them up with;
     // a broken one is still doubt (see the cases above).
@@ -493,6 +613,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install_fast: the updater's first as
   for (const [name, opts, env] of [
     ["the pin moved", { core: OLDER }, {}],
     ["no finished refresh is on record", { marker: null }, {}],
+    ["a database is behind the core's schema", { record: doctorRecord(TARGET, { state: "degraded", reason: "schema-behind" }) }, {}],
     ["the gateway is stopped", {}, { GW_ACTIVE: "inactive", GW_SUB: "dead" }],
     ["the plugin list cannot be read", {}, { LIST_FAILS: "1" }],
     ["the full path is forced", {}, { CLAWBOX_FORCE_OPENCLAW_REFRESH: "1" }],
