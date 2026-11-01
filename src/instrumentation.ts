@@ -399,6 +399,23 @@ export async function register() {
   }
   if (onDeviceAccount) {
     try {
+      // The owner's project folder, real on disk from the first boot and from
+      // the first boot after a factory reset (which empties config.json): the
+      // ~/Projects default when the owner never chose a folder
+      // (src/lib/project-folder.ts). A folder they chose is never touched.
+      // Every boot, not a one-shot: it is one config read and an mkdir that is
+      // a no-op once the folder is there.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { chosenProjectFolderFrom, ensureDefaultProjectFolder, PROJECT_FOLDER_CONFIG_KEY } = require('./lib/project-folder')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { get } = require('./lib/config-store')
+      if (!chosenProjectFolderFrom(await get(PROJECT_FOLDER_CONFIG_KEY))) await ensureDefaultProjectFolder()
+    } catch (err) {
+      console.error('[instrumentation] Could not make the default project folder:', err instanceof Error ? err.message : err)
+    }
+  }
+  if (onDeviceAccount) {
+    try {
       // The box's one browser, kept up: the gateway attaches to it and never
       // starts one, so a reboot or a closed window ends here. After the
       // migration above, which decides the profile it starts on.

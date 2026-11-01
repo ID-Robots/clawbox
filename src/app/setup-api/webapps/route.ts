@@ -13,8 +13,8 @@ import {
   webappPath,
   writeWebappIndex,
 } from "@/lib/code-projects";
-import { listenerOwnedBy, listenerRefusal, projectFolderFor, registerServerApp, serverAppStubHtml } from "@/lib/app-proxy";
-import { readClawboxManifest } from "@/lib/clawbox-manifest";
+import { listenerOwnedBy, listenerRefusal, projectFolderFor, registeredServer, registerServerApp } from "@/lib/app-proxy";
+import { appProxyPath, readClawboxManifest } from "@/lib/clawbox-manifest";
 import { createSerialLock } from "@/lib/serial-lock";
 import { get as configGet } from "@/lib/config-store";
 import { legacyWebappDocument } from "@/lib/webapp-legacy-storage";
@@ -63,6 +63,26 @@ function htmlPage(html: string, status = 200): NextResponse {
   return new NextResponse(html, {
     status,
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * A server app's page, answered by sending the frame to `/apps/<id>/` from
+ * HERE rather than with the stub's script. The navigation a sandboxed frame
+ * makes itself carries no cookie (that is what the sandbox is for), so the
+ * stub's `location.replace` reached `/apps/<id>/` without the owner's
+ * session and the signed-in owner met the box's login screen inside the
+ * app's window. A redirect stays the navigation the desktop started, and the
+ * cookie goes with it — on the LAN and through the tunnel alike.
+ *
+ * Relative, so it stays on whatever address the owner came in on (a tunnel's
+ * hostname is not this server's), and never cached: the id may be a plain
+ * page again after an uninstall.
+ */
+function serverAppRedirect(appId: string): NextResponse {
+  return new NextResponse(null, {
+    status: 302,
+    headers: { Location: appProxyPath(appId), "Cache-Control": "no-store" },
   });
 }
 
@@ -126,7 +146,7 @@ async function answerForLegacyStub(appId: string, html: string): Promise<NextRes
     const outcome = await withDesktopRegistration(() => registerServerApp({ id: appId, directory, manifest }));
     // A refusal is not the end of it: the manifest may name a port the owner
     // has not started while the stub's own port is serving happily.
-    if (outcome.ok) return htmlPage(serverAppStubHtml(manifest.name, appId));
+    if (outcome.ok) return serverAppRedirect(appId);
   }
 
   const verdict = await listenerOwnedBy(port, directory ?? webappPath(appId));
@@ -190,6 +210,12 @@ async function serveWebappFile(request: NextRequest): Promise<NextResponse> {
   const filePath = path.resolve(appDir, file);
   if (!filePath.startsWith(appDir + path.sep) && filePath !== appDir) {
     return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
+  }
+
+  // A registered server app's page is the stub registerServerApp wrote; the
+  // frame goes to the app itself instead. See serverAppRedirect.
+  if (filePath === path.join(appDir, "index.html") && await registeredServer(appId).catch(() => null)) {
+    return serverAppRedirect(appId);
   }
 
   try {

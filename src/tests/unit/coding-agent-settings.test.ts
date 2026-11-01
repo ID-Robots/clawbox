@@ -303,14 +303,26 @@ describe("the effort picker", () => {
 });
 
 describe("the folder the device proposes", () => {
-  it("suggests ~/Projects, and says so in the status", async () => {
+  it("has ~/Projects in force until the owner chooses, and says so in the status", async () => {
     configGetAll.mockResolvedValue({});
     const lib = await import("@/lib/coding-agent");
     const status = await lib.getCodingAgentStatus();
     expect(status.suggestedDirectory).toBe(lib.suggestedDefaultDirectory());
     expect(status.suggestedDirectory.endsWith("/Projects")).toBe(true);
-    // A suggestion, not a default in force: nothing is chosen until saved.
-    expect(status.defaultDirectory).toBeNull();
+    // A default in force, not only a suggestion: a fresh or factory-reset box
+    // installs a Store server app without anyone opening these settings, and
+    // Settings shows the folder that is actually used.
+    expect(status.defaultDirectory).toBe(status.suggestedDirectory);
+  });
+
+  it("keeps the folder the owner chose over the default", async () => {
+    configGetAll.mockResolvedValue({ coding_agent_default_directory: "/srv/work" });
+    configGet.mockImplementation(async (k: string) => (k === "coding_agent_default_directory" ? "/srv/work" : undefined));
+    const lib = await import("@/lib/coding-agent");
+    expect((await lib.getCodingAgentStatus()).defaultDirectory).toBe("/srv/work");
+    expect(await lib.getDefaultDirectory()).toBe("/srv/work");
+    expect(await lib.getChosenDirectory()).toBe("/srv/work");
+    expect(await lib.ensureProjectFolder()).toBe("/srv/work");
   });
 
   it("creates the folder when the owner saves one inside their home", async () => {
@@ -586,11 +598,27 @@ describe("working in a folder the owner already has", () => {
     }
   });
 
-  it("says so plainly when there is no default to resolve against", async () => {
+  it("resolves a bare name against ~/Projects when the owner never chose a folder", async () => {
     configGet.mockResolvedValue(undefined);
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.resolveWorkingDirectory({ directory: "some-folder" }))
-      .rejects.toThrow(/absolute path, or a folder name/i);
+    const home = fsSync.mkdtempSync(pathMod.join(osMod.tmpdir(), "bare-name-home-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const lib = await import("@/lib/coding-agent");
+      const app = pathMod.join(home, "Projects", "my-app");
+      await expect(lib.resolveWorkingDirectory({ directory: "my-app" })).rejects.toThrow(/does not exist/i);
+      fsSync.mkdirSync(app, { recursive: true });
+      expect((await lib.resolveWorkingDirectory({ directory: "my-app" })).directory).toBe(fsSync.realpathSync(app));
+      // The default is where things go, not a new fence: a box that never
+      // chose a folder keeps working in any other folder of its home.
+      const elsewhere = pathMod.join(home, "elsewhere");
+      fsSync.mkdirSync(elsewhere);
+      expect((await lib.resolveWorkingDirectory({ directory: elsewhere })).directory).toBe(fsSync.realpathSync(elsewhere));
+    } finally {
+      if (prev === undefined) delete process.env.HOME;
+      else process.env.HOME = prev;
+      fsSync.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("takes only an absolute path for the default folder itself", async () => {
