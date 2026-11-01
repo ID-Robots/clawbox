@@ -505,6 +505,13 @@ export interface TeamBoard {
   updatedAt: number;
   /** When the team settled (done, failed, stopped); null while it works. */
   finishedAt: number | null;
+  /**
+   * On a team the owner STOPPED: when the user asked for its work again and
+   * the assistant started it with `userAskedAgain` — the end of the hold that
+   * stop puts on the assistant's own starts (coding-team.ts ownerStopRefusal).
+   * Absent while it holds.
+   */
+  holdReleasedAt?: number;
 }
 
 /** One of the team's runs waiting for a free slot on the box: which, why, since when (ms). */
@@ -687,6 +694,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
     finishedAt: typeof b.finishedAt === "number" ? b.finishedAt : null,
+    ...(typeof b.holdReleasedAt === "number" ? { holdReleasedAt: b.holdReleasedAt } : {}),
   };
   // Worked out again rather than trusted from the file: they are the board's, not the file's.
   board.metrics = teamMetrics(board);
@@ -1332,6 +1340,12 @@ export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus
   if (actor.kind === "worker" || actor.kind === "planner" || actor.kind === "reviewer") {
     throw new BoardAccessError(actor, "team_status", `${describeActor(actor)} may not change the team's status.`);
   }
+  // Only the owner stops a team (above), and the stop is the last word on the
+  // board: an orchestrator step that was awaiting something when the stop
+  // landed — the team branch, a worker's start — must not write the team back
+  // to `working`, which kept it holding the box with nobody working, or to
+  // `failed`, which the assistant reads as "start a fresh run".
+  if (board.status === "stopped" && status !== "stopped") return;
   const now = Date.now();
   board.status = status;
   if (status === "failed" && note) board.error = note;

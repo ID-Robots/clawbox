@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { NextResponse } from "next/server";
-import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS } from "@/lib/coding-agent";
+import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS, OwnerStoppedTeamError } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { slimTeam, teamCard } from "@/lib/coding-agent-slim";
 import { failCodingStart } from "@/lib/coding-run-starts";
@@ -47,7 +47,12 @@ export const dynamic = "force-dynamic";
  *                                 400 `invalid` with `code: "effort"`) is kept
  *                                 on the board and handed to every member run
  *                                 in place of the owner's setting — the role
- *                                 caps and the read-only clamp still apply
+ *                                 caps and the read-only clamp still apply.
+ *                                 The bearer's start on the work of a team of
+ *                                 its own that the owner stopped is 409 `code:
+ *                                 "owner_stopped"` (coding-team.ts
+ *                                 ownerStopRefusal) unless it sends
+ *                                 `userAskedAgain: true`: the user asked again
  *
  * Session-gated like the runs. POST is admitted to the owner's cookie AND
  * the MCP bearer — the assistant is the party that usually delegates a goal —
@@ -111,6 +116,7 @@ export async function POST(request: Request) {
       directory,
       source,
       ...(body.effort !== undefined && body.effort !== null ? { effort: body.effort } : {}),
+      ...(body.userAskedAgain === true ? { userAskedAgain: true } : {}),
     });
     const queued = team.status === "queued";
     // Every open desktop hears that a team began (the run route does the
@@ -123,6 +129,11 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ started: !queued, queued, team }, { status: 202 });
   } catch (err) {
+    // The assistant starting again a team the owner stopped: nothing failed,
+    // so no failed-start card — the owner's stopped team is the card.
+    if (err instanceof OwnerStoppedTeamError) {
+      return NextResponse.json({ error: err.message, kind: err.kind, code: err.code }, { status: httpStatusForCodingError(err.kind) });
+    }
     // No board was written, so no card would ever appear: the runs list's
     // `starting` carries the refusal for a while (src/lib/coding-run-starts.ts),
     // and the desktops re-read at once, so the chat shows WHY no team began.
