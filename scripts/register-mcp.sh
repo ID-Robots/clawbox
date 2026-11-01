@@ -294,6 +294,31 @@ else
   log "WARNING: $EMAIL_HOOK_SRC is not a complete plugin — skipping the EMAIL: directive hook"
 fi
 
+# ── 2b. Install the on-device model's lean-mode plugin. ─────────────────────
+# scripts/hermes-plugins/clawbox_local_lean: `llm_request` middleware that gives
+# each model call on the box's own llama.cpp model a short system prompt, six
+# tools and thinking off unless asked (its __init__.py says why middleware). The
+# same rules as the hook plugin above: the sources are read before anything on
+# disk is touched, the copy is unconditional, stale bytecode goes, and a copy
+# that died half-way is removed rather than left for Hermes to import. Never
+# fatal: without it a turn on the local model runs on Hermes' full prompt.
+LEAN_PLUGIN="clawbox_local_lean"
+LEAN_PLUGIN_SRC="$PROJECT_DIR/scripts/hermes-plugins/$LEAN_PLUGIN"
+LEAN_PLUGIN_DST="$HERMES_PLUGINS_DIR/$LEAN_PLUGIN"
+LEAN_PLUGIN_SOURCES=("$LEAN_PLUGIN_SRC/__init__.py" "$LEAN_PLUGIN_SRC/plugin.yaml" "$LEAN_PLUGIN_SRC/local_lean.py")
+LEAN_PLUGIN_INSTALLED=0
+
+if ! cat "${LEAN_PLUGIN_SOURCES[@]}" >/dev/null 2>&1; then
+  log "WARNING: $LEAN_PLUGIN_SRC is not a complete, readable plugin — leaving whatever is already installed in place; turns on the local model keep Hermes' full prompt"
+elif mkdir -p "$LEAN_PLUGIN_DST" 2>/dev/null && cp -f "${LEAN_PLUGIN_SOURCES[@]}" "$LEAN_PLUGIN_DST/" 2>/dev/null; then
+  rm -rf "$LEAN_PLUGIN_DST/__pycache__" 2>/dev/null || true
+  LEAN_PLUGIN_INSTALLED=1
+elif rm -rf "$LEAN_PLUGIN_DST" 2>/dev/null; then
+  log "WARNING: could not install the $LEAN_PLUGIN plugin into $LEAN_PLUGIN_DST — anything partial there has been removed; turns on the local model keep Hermes' full prompt until the next boot repairs it"
+else
+  log "WARNING: could not install the $LEAN_PLUGIN plugin into $LEAN_PLUGIN_DST AND could not remove what is there — Hermes may import a partial copy"
+fi
+
 # ── 3. Reconcile mcp_servers.clawbox in ~/.hermes/config.yaml. ──────────────
 # Done in Python/PyYAML for the same reason gateway-pre-start.sh does its
 # openclaw.json pass in Python: read-modify-write with an atomic rename, and a
@@ -316,6 +341,9 @@ export CLAWBOX_MCP_API_BASE="$API_BASE"
 # false success this whole step exists to avoid.
 export CLAWBOX_EMAIL_HOOK_PLUGIN=""
 [ "$EMAIL_HOOK_INSTALLED" = "1" ] && export CLAWBOX_EMAIL_HOOK_PLUGIN="$EMAIL_HOOK_PLUGIN"
+# Likewise for the lean-mode plugin (2b).
+export CLAWBOX_LOCAL_LEAN_PLUGIN=""
+[ "$LEAN_PLUGIN_INSTALLED" = "1" ] && export CLAWBOX_LOCAL_LEAN_PLUGIN="$LEAN_PLUGIN"
 # The ClawAI image backend, for the re-arm below. Its files are written by the
 # LINK path (src/lib/hermes-image-plugin.ts), not by this script — this is only
 # where they would be if the box has ever been linked.
@@ -810,12 +838,14 @@ def config_name_list(value):
 # string is exactly the box that loads no plugins at all with nothing else on
 # it to put the type back. TASK-701.
 hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
+# The on-device model's lean-mode plugin (2b), merged the same way, after the hook.
+lean_plugin = os.environ.get("CLAWBOX_LOCAL_LEAN_PLUGIN") or ""
 # Set only where a STRING became a real list — the state a withdrawn image
 # claim is paired with. See the re-arm below.
 repaired_enabled = False
 names = None
 plugins_cfg = cfg.get("plugins")
-if plugins_cfg is None and hook_plugin:
+if plugins_cfg is None and (hook_plugin or lean_plugin):
     # Created only when there is a name to write into it; an absent key with
     # nothing to add is not a repair, it is a needless config rewrite.
     plugins_cfg = {}
@@ -861,6 +891,15 @@ elif isinstance(plugins_cfg, dict):
         repaired_enabled = True
         print("[register-mcp] rewrote plugins.enabled as a list — it was stored as text, "
               "which loads no plugins at all")
+    # After both branches above, so `names` is the list they left (a string
+    # residue is already a real list by now when either of them ran).
+    if names is not None and lean_plugin and lean_plugin not in names:
+        names = names + [lean_plugin]
+        plugins_cfg["enabled"] = names
+        changed = True
+        repaired_enabled = repaired_enabled or isinstance(raw_enabled, str)
+        print("[register-mcp] enabled the " + lean_plugin
+              + " plugin — model calls on the box's own model get the lean prompt and tools")
 
 # ── Re-arm the ClawAI image backend the repair above made loadable. ─────────
 # `enableHermesImageGeneration` (src/lib/hermes-clawai.ts) unsets

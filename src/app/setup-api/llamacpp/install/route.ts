@@ -15,6 +15,7 @@ import {
 import { LLAMACPP_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
+import { getActiveHarness } from "@/lib/harness";
 import {
   clearLlamaCppPid,
   ensureLlamaCppRuntimeDir,
@@ -295,6 +296,10 @@ export async function POST(request: Request) {
   if (!MODEL_ID_RE.test(alias)) {
     return NextResponse.json({ error: "Invalid llama.cpp model ID" }, { status: 400 });
   }
+  // Sizes the window the server starts with (Hermes has a floor). Read here,
+  // before the busy check below, so nothing awaits between that check and the
+  // task it guards.
+  const harness = await getActiveHarness();
 
   // Asked again while an install runs — a reopened Settings, the setup
   // wizard retrying, a second browser: the SAME install is followed rather than
@@ -314,7 +319,7 @@ export async function POST(request: Request) {
     return backgroundTaskResponse(running.id);
   }
 
-  const spec = getLlamaCppLaunchSpec(alias);
+  const spec = getLlamaCppLaunchSpec(alias, harness);
   const start = startBackgroundTask({
     kind: LLAMACPP_INSTALL_KIND,
     group: LLAMACPP_GROUP,

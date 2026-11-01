@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getLlamaCppProvisioningStatus } from "@/lib/llamacpp-server";
 
 vi.mock("@/lib/llamacpp-server", () => ({
+  // The wake asks the running server its window (local-ai-runtime.ts); unknown here.
+  queryLlamaCppServedContext: async () => null,
   getLlamaCppProvisioningStatus: vi.fn(),
 }));
 

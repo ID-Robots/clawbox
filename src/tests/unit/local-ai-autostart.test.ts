@@ -52,6 +52,11 @@ vi.mock("@/lib/llamacpp", () => ({
   getDefaultLlamaCppModel: vi.fn(() => "gemma4-e2b-it-q4_0"),
 }));
 
+const getActiveHarnessMock = vi.fn(async () => "openclaw");
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: () => getActiveHarnessMock(),
+}));
+
 const LAUNCH_SPEC = {
   alias: "gemma4-e2b-it-q4_0",
   baseUrl: "http://127.0.0.1:8080/v1",
@@ -135,6 +140,28 @@ describe("llama.cpp auto-start gate", () => {
     // The alias reaches the launcher script as argv[4].
     const [, argv] = spawnMock.mock.calls[0] as [string, string[]];
     expect(argv[4]).toBe("gemma4-e2b-it-q4_0");
+  });
+
+  it("sizes the launch for the active runtime: Hermes has a window floor", async () => {
+    readConfigMock.mockResolvedValue({});
+    getAllMock.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+    getActiveHarnessMock.mockResolvedValueOnce("hermes");
+    llamaCppMocks.getLlamaCppLaunchSpec.mockImplementation((_alias: string, harness?: string) => ({
+      ...LAUNCH_SPEC,
+      contextWindow: harness === "hermes" ? 65536 : 32768,
+    }));
+
+    const { startLlamaCppServer } = await loadModule();
+    expect(await startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    expect(llamaCppMocks.getLlamaCppLaunchSpec).toHaveBeenCalledWith("gemma4-e2b-it-q4_0", "hermes");
+    // The window reaches the launcher script as its last argument, --ctx-size.
+    const [, argv] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(argv.at(-1)).toBe("65536");
   });
 
   it("auto-starts from the config store when OpenClaw has no primary (boot path, no alias)", async () => {

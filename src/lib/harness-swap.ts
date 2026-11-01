@@ -119,6 +119,8 @@ export const SWAP_NOTES = {
     "The folders Memory Shard reads could not be carried over — add them again in Memory Shard → Settings",
   hermesGatewayLeft:
     "Hermes' message gateway may still be running — run `hermes gateway uninstall` in the Terminal so it does not fight OpenClaw for the Telegram bot",
+  localAiCarried: "Local AI carried over",
+  localAiNotCarried: "Local AI could not be carried over — turn it on again in Settings → Local AI",
 } as const;
 
 // ── Which way, and for whom ──────────────────────────────────────────────────
