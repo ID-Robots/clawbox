@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
-import { notifyProvidersChanged, PROVIDER_SIGNAL_DEBOUNCE_MS } from "@/lib/ui-events";
+import { CLAWAI_PLAN_CHANGED_EVENT, notifyProvidersChanged, PROVIDER_SIGNAL_DEBOUNCE_MS } from "@/lib/ui-events";
 
 const realFetch = globalThis.fetch;
 
@@ -636,3 +636,65 @@ describe("useClawboxLogin — one shared poll", () => {
     expect(statusCalls()).toBe(2);
   });
 });
+
+describe("useClawboxLogin — a plan that moved while the box runs", () => {
+  function countPlanEvents() {
+    const seen = { count: 0 };
+    const listener = () => { seen.count += 1; };
+    window.addEventListener(CLAWAI_PLAN_CHANGED_EVENT, listener);
+    return { seen, stop: () => window.removeEventListener(CLAWAI_PLAN_CHANGED_EVENT, listener) };
+  }
+
+  it("tells the page when its poll recorded a new plan, so Settings → Voice re-reads at once", async () => {
+    const events = countPlanEvents();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true, provider: "clawai", clawaiConfigured: true, clawaiPlan: "pro", clawaiPlanChanged: true,
+    })) as unknown as typeof fetch;
+    const { result, unmount } = renderHook(() => useClawboxLogin());
+    try {
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(events.seen.count).toBe(1);
+    } finally {
+      unmount();
+      events.stop();
+    }
+  });
+
+  it("tells it too when another page's poll recorded the change — the plan differs from the last one seen", async () => {
+    const events = countPlanEvents();
+    let plan = "free";
+    globalThis.fetch = vi.fn(async () => jsonResponse({
+      connected: true, provider: "clawai", clawaiConfigured: true, clawaiPlan: plan,
+    })) as unknown as typeof fetch;
+    const { result, unmount } = renderHook(() => useClawboxLogin());
+    try {
+      await waitFor(() => expect(result.current.plan).toBe("free"));
+      expect(events.seen.count).toBe(0);
+      plan = "pro";
+      act(() => notifyProvidersChanged());
+      await waitFor(() => expect(result.current.plan).toBe("pro"), { timeout: PROVIDER_SIGNAL_DEBOUNCE_MS + 2_000 });
+      expect(events.seen.count).toBe(1);
+    } finally {
+      unmount();
+      events.stop();
+    }
+  });
+
+  it("says nothing while the plan stays where it was", async () => {
+    const events = countPlanEvents();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true, provider: "clawai", clawaiConfigured: true, clawaiPlan: "pro",
+    })) as unknown as typeof fetch;
+    const { result, unmount } = renderHook(() => useClawboxLogin());
+    try {
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => notifyProvidersChanged());
+      await new Promise((r) => setTimeout(r, PROVIDER_SIGNAL_DEBOUNCE_MS + 100));
+      expect(events.seen.count).toBe(0);
+    } finally {
+      unmount();
+      events.stop();
+    }
+  });
+});
+

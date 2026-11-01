@@ -32,6 +32,9 @@ vi.mock("@/lib/voice-output-store", () => ({
 vi.mock("@/lib/harness", () => ({ getActiveHarness: (...a: unknown[]) => harnessMock(...a) }));
 vi.mock("@/lib/hermes-tts", () => ({ speakWithHermes: (...a: unknown[]) => hermesSpeakMock(...a) }));
 vi.mock("@/lib/tts-compress", () => ({ compressSpeech: (...a: unknown[]) => compressMock(...a) }));
+// data/config.json — only the ClawBox AI plan on record is read through it here.
+const storeMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/config-store", () => ({ get: (...a: unknown[]) => storeMock(...a), set: vi.fn() }));
 // The local engine's script is "present" as far as the probe can tell.
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
@@ -72,6 +75,7 @@ beforeEach(() => {
   harnessMock.mockReset().mockResolvedValue("openclaw");
   hermesSpeakMock.mockReset();
   compressMock.mockReset();
+  storeMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("speakReply", () => {
@@ -97,6 +101,28 @@ describe("speakReply", () => {
     const order: string[] = [];
     await speakReply("Hello", { local: speaks("local", order), cloud: speaks("cloud", order) });
     expect(order).toEqual(["cloud"]);
+  });
+
+  it("speaks from the box once a plan without the cloud voice is on record, before the gateway has withdrawn it", async () => {
+    // What gateway-pre-start.sh wrote while the plan was Max.
+    readConfigMock.mockResolvedValue({
+      tts: {
+        provider: "openai",
+        providers: {
+          [LOCAL]: { command: "/opt/clawbox-tts.sh" },
+          openai: { apiKey: "claw_example_not_a_real_token", baseUrl: "https://clawbox.com/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+        },
+      },
+      models: { providers: { deepseek: { apiKey: "claw_example_not_a_real_token" } } },
+    });
+    let order: string[] = [];
+    await speakReply("Hello", { local: speaks("local", order), cloud: speaks("cloud", order) });
+    expect(order).toEqual(["cloud"]);
+    storeMock.mockImplementation(async (key: string) => (key === "clawai_plan_tier" ? "free" : undefined));
+    order = [];
+    const res = await speakReply("Hello", { local: speaks("local", order), cloud: speaks("cloud", order) });
+    expect(res.headers.get("X-ClawBox-Voice-Engine")).toBe("local");
+    expect(order).toEqual(["local"]);
   });
 
   it("hands a Hermes box to its own speech route, whatever it answers with", async () => {

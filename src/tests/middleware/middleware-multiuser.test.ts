@@ -24,14 +24,18 @@ describe("middleware — multi-user", () => {
   let middleware: typeof import("@/middleware").middleware;
   let tmpRoot: string;
   const savedUser = process.env.CLAWBOX_USER;
+  let configWrites = 0;
 
-  function writeConfig(users: unknown[]) {
+  function writeConfig(users: unknown[], extra: Record<string, unknown> = {}) {
     const dataDir = path.join(tmpRoot, "data");
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dataDir, "config.json"),
-      JSON.stringify({ setup_complete: true, password_configured: true, clawbox_users: users }),
-    );
+    const file = path.join(dataDir, "config.json");
+    fs.writeFileSync(file, JSON.stringify({ setup_complete: true, password_configured: true, clawbox_users: users, ...extra }));
+    // The middleware caches config.json on its mtime; a rewrite inside the same
+    // tick must still read as a new file.
+    configWrites += 1;
+    const later = new Date(Date.now() + configWrites * 1_000);
+    fs.utimesSync(file, later, later);
   }
 
   function request(
@@ -130,6 +134,20 @@ describe("middleware — multi-user", () => {
     }
   });
 
+  it("a second user reads the box's AI settings but may not change them: 403 owner_only, while the owner still may", async () => {
+    const alice = await sign({ u: "alice", sv: ALICE_SV });
+    const owner = await sign({ u: "clawbox" });
+    for (const p of ["/setup-api/chat/model", "/setup-api/ai-models/status", "/setup-api/tts"]) {
+      expect((await middleware(request(p, alice))).headers.get("x-middleware-next"), `GET ${p}`).toBe("1");
+    }
+    for (const p of ["/setup-api/chat/model", "/setup-api/ai-models/configure", "/setup-api/providers/default", "/setup-api/tts"]) {
+      await expectOwnerOnlyJson(await middleware(request(p, alice, { method: "POST" })), `POST ${p}`);
+      expect((await middleware(request(p, owner, { method: "POST" }))).headers.get("x-middleware-next"), `owner POST ${p}`).toBe("1");
+    }
+    // Their own chat's speech is still theirs.
+    expect((await middleware(request("/setup-api/tts/speak", alice, { method: "POST" }))).headers.get("x-middleware-next")).toBe("1");
+  });
+
   it("a second user reaches the media of their own chat, and nobody else's", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     const own = await middleware(request("/api/chat/media/outgoing/agent%3Amain%3Aclawbox-user-alice/1/full", alice));
@@ -200,5 +218,47 @@ describe("middleware — multi-user", () => {
   it("a cookie naming an account that is not a ClawBox user is no session", async () => {
     const res = await middleware(request("/setup-api/users/me", await sign({ u: "root" })));
     expect(res.status).toBe(401);
+  });
+
+  describe("with the owner's \"Share OpenClaw with all users\" switch", () => {
+    const ALICE = [{ username: "alice", createdAt: "2026-09-27T10:00:00.000Z", sv: ALICE_SV }];
+
+    it("opens OpenClaw's app, its Control UI, its token page and its HTTP trees to a second user", async () => {
+      writeConfig(ALICE, { openclaw_shared_with_users: true });
+      const alice = await sign({ u: "alice", sv: ALICE_SV });
+      for (const p of ["/app/openclaw", "/chat", "/sessions"]) {
+        const res = await middleware(request(p, alice, { document: true }));
+        expect(res.headers.get("x-middleware-next"), p).toBe("1");
+      }
+      for (const p of ["/setup-api/gateway", "/api/chat", "/api/sessions"]) {
+        const res = await middleware(request(p, alice));
+        expect(res.headers.get("x-middleware-next"), p).toBe("1");
+      }
+    });
+
+    it("still keeps the Hermes dashboard and the owner's account the owner's", async () => {
+      writeConfig(ALICE, { openclaw_shared_with_users: true });
+      const alice = await sign({ u: "alice", sv: ALICE_SV });
+      expectDesktopWithNotice(await middleware(request("/app/hermes", alice, { document: true })), "/app/hermes");
+      await expectOwnerOnlyJson(await middleware(request("/setup-api/system/credentials", alice)), "credentials");
+      await expectOwnerOnlyJson(await middleware(request("/setup-api/setup/reset", alice, { method: "POST" })), "reset");
+    });
+
+    it("takes it back on the very next request once the owner switches it off", async () => {
+      const alice = await sign({ u: "alice", sv: ALICE_SV });
+      writeConfig(ALICE, { openclaw_shared_with_users: true });
+      expect((await middleware(request("/chat", alice, { document: true }))).headers.get("x-middleware-next")).toBe("1");
+      writeConfig(ALICE, { openclaw_shared_with_users: false });
+      expectDesktopWithNotice(await middleware(request("/chat", alice, { document: true })), "/chat after off");
+      await expectOwnerOnlyJson(await middleware(request("/setup-api/gateway", alice)), "token page after off");
+    });
+
+    it("shares nothing on anything but a literal true", async () => {
+      const alice = await sign({ u: "alice", sv: ALICE_SV });
+      for (const value of ["true", 1, null]) {
+        writeConfig(ALICE, { openclaw_shared_with_users: value });
+        expectDesktopWithNotice(await middleware(request("/app/openclaw", alice, { document: true })), String(value));
+      }
+    });
   });
 });

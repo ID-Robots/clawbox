@@ -17,6 +17,12 @@ vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGetMany: vi.fn(),
 }));
 
+// What follows a plan that moved (the cloud voice of a new Max plan, the cloud
+// defaults) — its own suite is clawai-plan-follow.test.ts; here, who hands a
+// change to it and when.
+const follow = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("@/lib/clawai-plan-follow", () => ({ followClawaiPlanChange: follow }));
+
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
@@ -314,6 +320,35 @@ describe("/setup-api/ai-models/status", () => {
       await GET();
 
       expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "free");
+    });
+
+    it("follows a plan that MOVED while the box runs, and tells the page", async () => {
+      // Free → Max on the portal, box stamped Flash: the poll records the new
+      // plan, and the voice it now covers must not wait for a restart.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "flash", clawai_plan_tier: "free" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "max", deviceTier: "flash" }), { status: 200 }));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiPlan).toBe("pro");
+      expect(body.clawaiPlanChanged).toBe(true);
+      await vi.waitFor(() => expect(follow).toHaveBeenCalledWith({ previous: "free", next: "pro" }));
+    });
+
+    it("follows nothing, and says nothing, when the plan on record has not moved", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "flash", clawai_plan_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "max", deviceTier: "flash" }), { status: 200 }));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiPlan).toBe("pro");
+      expect(body.clawaiPlanChanged).toBeUndefined();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(follow).not.toHaveBeenCalled();
     });
 
     it.each([

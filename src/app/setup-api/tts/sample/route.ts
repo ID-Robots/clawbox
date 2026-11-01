@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { getActiveHarness } from "@/lib/harness";
 import { hermesProviderFor, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
-import { readConfig } from "@/lib/openclaw-config";
+import { readVoiceConfig } from "@/lib/voice-box";
 import { refuse, speakInCloud, speakLocally, withSpeechLock } from "@/lib/voice-speak";
 import { readLocalVoice } from "@/lib/voice-output-store";
 import { DEFAULT_CLOUD_VOICE, DEFAULT_LOCAL_VOICE, isCloudVoiceFor, SAMPLE_MAX_CHARS } from "@/lib/voice-catalog";
@@ -135,7 +135,8 @@ export async function POST(req: Request) {
       // just wrote. Auditioning through a chain we built ourselves would be
       // auditioning a different box than the one that answers the customer.
       if ((await getActiveHarness()) === "hermes") return await speakWithHermesEngine(text, engine, voice);
-      const config = await readConfig();
+      // Through the plan, like the panel that offers the voice (voice-box.ts).
+      const config = await readVoiceConfig("openclaw");
       return engine === "local"
         ? await speakLocally(config, voice, text)
         : await speakInCloud(config, voice, text);

@@ -231,6 +231,8 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
   // plan), "pro" (the Max plan) — or null for "not known". A box with no
   // ClawBox AI account pays for nothing, which is an answer.
   let clawaiPlan: ClawboxAiPlanTier | null = state.hasClawaiProfile ? null : CLAWBOX_AI_PLAN_UNPAID;
+  // This poll recorded a different plan than the box had (see below).
+  let clawaiPlanChanged = false;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -286,7 +288,21 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
         // rather than `planTier`, because that one answers `null` to a
         // genuinely unpaid account, to an ABSENT `tier` and to a plan word this
         // build has never seen alike — and only the first is a downgrade.
-        await persistClawaiPlanTier({ verdict: lookup.planVerdict }, askedAtGeneration);
+        const planChange = await persistClawaiPlanTier({ verdict: lookup.planVerdict }, askedAtGeneration);
+        // A plan that MOVED (an upgrade on the portal while the box runs) is
+        // followed here and now, not at the next restart: the cloud voice of a
+        // Max plan is armed and the cloud defaults applied
+        // (`@/lib/clawai-plan-follow`). Detached — it can restart the gateway,
+        // and this answer is a badge poll — and asked once, by the poll that
+        // recorded the change.
+        if (planChange) {
+          clawaiPlanChanged = true;
+          void import("@/lib/clawai-plan-follow")
+            .then(({ followClawaiPlanChange }) => followClawaiPlanChange(planChange))
+            .catch((err: unknown) => {
+              console.warn("[ai-models/status] could not follow the plan change:", err instanceof Error ? err.message : err);
+            });
+        }
         // The portal ANSWERED about the credential this box holds, so any
         // refusal recorded against it is over. Same poll, same store, same
         // "write only on change" discipline as the tier stamp above — the
@@ -344,6 +360,9 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
     // null when it is not known. The tiers above are MODEL defaults; the plan
     // badge, the tier celebration and the paid-plan screens read this.
     clawaiPlan,
+    // True on the one answer whose poll recorded a CHANGED plan, so an open
+    // page re-reads what follows the plan (Settings → Voice) at once.
+    ...(clawaiPlanChanged ? { clawaiPlanChanged: true } : {}),
     // Model ids the portal says this account may run, or null when it did not
     // say. The picker gates on this, never on the tier badge above.
     clawaiAllowedModels,

@@ -807,3 +807,73 @@ describe("waking the voice on the box", () => {
     expect(posts.filter((p) => p.url === "/setup-api/tts/warm")).toEqual([]);
   });
 });
+
+describe("the cloud voice follows the ClawBox AI plan", () => {
+  // A Free box: our token in the slot, no endpoint behind it — what the panel
+  // showed as "ClawBox cloud — not available" after an upgrade to Max, until
+  // the box restarted.
+  const unarmed = () => {
+    const s = status({ activeProviderId: "tts-local-cli", activeEngine: "local", preferredEngine: "local" });
+    s.engines[1] = engine({
+      id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: false,
+      detail: "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one.",
+    });
+    return s;
+  };
+  const cloudOption = () =>
+    screen.getByTestId("voice-source").querySelector('option[value="cloud"]') as HTMLOptionElement;
+
+  let server: unknown;
+  const stubBox = () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const body = input.toString() === "/setup-api/tts" ? server : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+  };
+
+  it("reads the box again when the plan changes, and offers the cloud voice the new plan brings", async () => {
+    server = unarmed();
+    stubBox();
+    render(<VoiceOutputPanel active />);
+    await waitFor(() => expect(cloudOption()).toHaveTextContent("ClawBox cloud — not available"));
+    expect(cloudOption()).toBeDisabled();
+
+    server = status();
+    act(() => { window.dispatchEvent(new Event("clawbox:clawai-plan-changed")); });
+    await waitFor(() => expect(cloudOption()).not.toBeDisabled());
+    expect(cloudOption()).toHaveTextContent(/^ClawBox cloud$/);
+  });
+
+  it("says the box is setting the voice up while it follows the plan, and looks again until it has", async () => {
+    server = unarmed();
+    stubBox();
+    render(<VoiceOutputPanel active />);
+    await waitFor(() => expect(cloudOption()).toHaveTextContent("ClawBox cloud — not available"));
+
+    vi.useFakeTimers();
+    try {
+      // The poll recorded Max; the box is restarting its gateway to arm the voice.
+      server = { ...unarmed(), cloudPending: true };
+      await act(async () => {
+        window.dispatchEvent(new Event("clawbox:clawai-plan-changed"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(cloudOption()).toHaveTextContent("ClawBox cloud — setting up for your plan…");
+      expect(cloudOption()).toBeDisabled();
+
+      // Armed: the next look finds the voice, with no event and no reopen.
+      server = status();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(cloudOption()).not.toBeDisabled();
+      expect(cloudOption()).toHaveTextContent(/^ClawBox cloud$/);
+
+      // And it stops looking once nothing is pending.
+      const calls = vi.mocked(fetch).mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(vi.mocked(fetch).mock.calls.length).toBe(calls);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});

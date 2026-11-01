@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasOwnerSession, personSession } from "./owner-session";
 import { mayUseChatKey } from "./chat-scope";
+import { mayHaveGatewayToken } from "./openclaw-sharing";
 import fs from "fs/promises";
 import os from "os";
 import net from "net";
@@ -238,6 +239,16 @@ export async function getOrGenerateGatewayToken(): Promise<string | null> {
 }
 
 /**
+ * The token a Control UI page may carry for this request: the owner's session,
+ * or another ClawBox user's while the owner shares OpenClaw
+ * (src/lib/openclaw-sharing.ts) — otherwise none at all.
+ */
+async function gatewayTokenFor(request: NextRequest): Promise<string> {
+  if (await hasOwnerSession(request)) return await getGatewayToken();
+  return (await mayHaveGatewayToken(await personSession(request))) ? await getGatewayToken() : "";
+}
+
+/**
  * Fetches the gateway SPA HTML and injects the ClawBox bar, the auth token and
  * the `EMAIL:` directive handling. Its one caller is the catch-all gateway
  * route (`src/app/[...gateway]/route.ts`), which reaches it only for a
@@ -247,7 +258,9 @@ export async function serveGatewayHTML(
   request: NextRequest
 ): Promise<NextResponse> {
   try {
-    // The token is injected ONLY for a caller who proved they are the owner.
+    // The token is injected ONLY for a caller who proved they are the owner —
+    // or, while the owner shares OpenClaw, another signed-in ClawBox user
+    // (`gatewayTokenFor`). A cookie is required either way.
     //
     // This page is the one place a gateway credential leaves the device, and
     // it used to be handed to anyone who could reach a path that landed here.
@@ -268,7 +281,7 @@ export async function serveGatewayHTML(
         cache: "no-store",
         signal: AbortSignal.timeout(3000),
       }),
-      hasOwnerSession(request).then((owner) => (owner ? getGatewayToken() : "")),
+      gatewayTokenFor(request),
     ]);
     if (!res.ok) {
       return redirectToSetup(request);
@@ -478,7 +491,9 @@ async function mayFetchChatMedia(request: NextRequest): Promise<boolean> {
   if (await hasOwnerSession(request)) return true;
   const person = await personSession(request);
   if (!person || person.isOwner) return false;
-  return mayUseChatKey(person, chatMediaSessionKey(request.nextUrl.pathname));
+  if (mayUseChatKey(person, chatMediaSessionKey(request.nextUrl.pathname))) return true;
+  // A shared Control UI lists every conversation, and its pictures with them.
+  return await mayHaveGatewayToken(person);
 }
 
 /**

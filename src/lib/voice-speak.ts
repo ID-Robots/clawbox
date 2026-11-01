@@ -31,7 +31,7 @@ import { sanitizeErrorMessage } from "./safe-error-text";
 import { getActiveHarness } from "./harness";
 import { speakWithHermes } from "./hermes-tts";
 import { buildTtsInventory, KOKORO_STAMP } from "./local-models";
-import { readConfig } from "./openclaw-config";
+import { readVoiceConfig } from "./voice-box";
 import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "./voice-output";
 import { readLocalVoice, readVoiceState } from "./voice-output-store";
 import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "./voice-catalog";
@@ -438,7 +438,9 @@ export async function speakReply(
       const answer = new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
       return format ? await inReplyFormat(answer, format) : answer;
     }
-    const [config, models, state] = await Promise.all([readConfig(), buildTtsInventory(), readVoiceState()]);
+    // Through the plan, like the Voice panel: a plan on record without the
+    // cloud voice speaks from the box, not through a proxy that refuses it.
+    const [config, models, state] = await Promise.all([readVoiceConfig("openclaw"), buildTtsInventory(), readVoiceState()]);
     const installed = models.filter((m) => m.kind === "tts" && m.installed);
     const command = localCommandPath(config);
     const probe: LocalVoiceProbe = {
