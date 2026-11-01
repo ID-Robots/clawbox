@@ -108,6 +108,12 @@ if [ "${BUSY:-0}" -gt 0 ]; then
   not_ok "busy slot: the team raised $BUSY alert(s) over the slot run $HOLDER held"
 elif [ "${WAITS:-0}" -gt 0 ] && [ "$TEAM_STATUS" = "done" ]; then
   ok "busy slot: the team waited for the slot run $HOLDER held, raised no alert for it, and ended done"
+elif [ "${WAITS:-0}" -gt 0 ] && [ "$TEAM_STATUS" = "failed" ] && [ -n "$(team_json '.team.unlanded.branch // empty')" ] \
+  && team_json '.team.unlanded.reason // ""' | grep -q "not on"; then
+  # This test leaves the checkout on a team branch (the base check below), so a
+  # single run's merge home is refused as not on the base: the honest outcome
+  # is failed with the branch named, never done with the project folder empty.
+  ok "busy slot: the team waited for the slot run $HOLDER held, raised no alert for it, and ended failed only because the checkout this test left off its base would not take the merge (work on $(team_json '.team.unlanded.branch'))"
 elif [ "${WAITS:-0}" -gt 0 ]; then
   not_ok "busy slot: the team waited for the slot, then ended $TEAM_STATUS: $(team_json '.team.error')"
 else
