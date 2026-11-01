@@ -8,7 +8,7 @@ vi.mock("@/lib/route-auth", () => ({ requireSession: vi.fn() }));
 
 import { GET as followGET } from "@/app/setup-api/background-jobs/tasks/follow/route";
 import { GET, POST } from "@/app/setup-api/background-jobs/tasks/route";
-import { resetBackgroundTasksForTests, startBackgroundTask } from "@/lib/background-tasks";
+import { BackgroundTaskCancelled, resetBackgroundTasksForTests, startBackgroundTask } from "@/lib/background-tasks";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
@@ -117,6 +117,63 @@ describe("POST /setup-api/background-jobs/tasks (dismiss)", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).task.dismissed).toBe(true);
     expect((await POST(sameOrigin({ id: "nope", action: "dismiss" }))).status).toBe(404);
+  });
+});
+
+describe("POST /setup-api/background-jobs/tasks (cancel)", () => {
+  function startStoppable() {
+    const started = startBackgroundTask({
+      kind: "fetch",
+      title: "Downloading",
+      cancellable: true,
+      run: (task) => new Promise((_, reject) => task.signal.addEventListener("abort", () => reject(new BackgroundTaskCancelled()))),
+    });
+    if (!started.started) throw new Error("not started");
+    return started.task.id;
+  }
+
+  it("is a person's browser's, from this box's own pages — never the agent's bearer", async () => {
+    const id = startStoppable();
+    (hasPersonSession as Mock).mockResolvedValue(false);
+    expect((await POST(sameOrigin({ id, action: "cancel" }))).status).toBe(403);
+    (hasPersonSession as Mock).mockResolvedValue(true);
+    const crossSite = new Request("http://box/setup-api/background-jobs/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example", Host: "box" },
+      body: JSON.stringify({ id, action: "cancel" }),
+    });
+    expect((await POST(crossSite)).status).toBe(403);
+    const one = await (await GET(new Request(`http://box/setup-api/background-jobs/tasks?id=${id}`))).json();
+    expect(one.task.state).toBe("running");
+    expect(one.task.cancelRequested).toBe(false);
+  });
+
+  it("stops a cancellable task, which then ends cancelled", async () => {
+    const id = startStoppable();
+    await new Promise((r) => setImmediate(r));
+    const res = await POST(sameOrigin({ id, action: "cancel" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).task.cancelRequested).toBe(true);
+    await vi.waitFor(async () => {
+      const one = await (await GET(new Request(`http://box/setup-api/background-jobs/tasks?id=${id}`))).json();
+      expect(one.task.state).toBe("cancelled");
+    });
+  });
+
+  it("refuses a task that cannot stop safely, one that has ended, and an unknown one", async () => {
+    const { id, gate } = startDemo();
+    const fixed = await POST(sameOrigin({ id, action: "cancel" }));
+    expect(fixed.status).toBe(409);
+    expect((await fixed.json()).code).toBe("not_cancellable");
+    gate.resolve();
+    await vi.waitFor(async () => {
+      const one = await (await GET(new Request(`http://box/setup-api/background-jobs/tasks?id=${id}`))).json();
+      expect(one.task.state).toBe("succeeded");
+    });
+    const ended = await POST(sameOrigin({ id, action: "cancel" }));
+    expect(ended.status).toBe(409);
+    expect((await ended.json()).code).toBe("not_running");
+    expect((await POST(sameOrigin({ id: "nope", action: "cancel" }))).status).toBe(404);
   });
 });
 

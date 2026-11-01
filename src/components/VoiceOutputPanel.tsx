@@ -11,7 +11,9 @@ import type {
   VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { cloudVoicesFor, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
-import { notifyBackgroundTaskStarted } from "@/lib/background-task-client";
+import { findRunningBackgroundTask, followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
+import { KOKORO_INSTALL_KIND } from "@/lib/background-task-kinds";
+import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
 
 /**
  * Settings → Voice: three dropdowns and a sentence to hear.
@@ -177,6 +179,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [installing, setInstalling] = useState(false);
   const [installFailed, setInstallFailed] = useState(false);
   const [installingFor, setInstallingFor] = useState(0);
+  // The background task the repair follows (src/lib/background-tasks.ts), once
+  // the stream's first line named it: what the inline progress is drawn from.
+  const [installTaskId, setInstallTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The box settled on the default instead of the pick, and said so (the
   // tts route's `fallback`). Amber, not red: nothing is broken, the owner's
@@ -322,32 +327,30 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
    * not rendered here (a repair is one fact, not a build log), so the whole
    * body is read and only its last decision is kept; the panel then re-reads
    * the box, which is what makes the amber block disappear.
+   *
+   * The install is a background task of the server, so it runs on with
+   * Settings closed; `follow` is a task already running, which a reopened tab
+   * follows again (below) instead of showing the button as idle over it.
    */
-  const installVoiceNotes = useCallback(async () => {
+  const installVoiceNotes = useCallback(async (follow?: string) => {
     setInstallingFor(0);
     setInstalling(true);
     setInstallFailed(false);
     try {
-      const res = await fetch("/setup-api/tts/install", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
+      const res = follow
+        ? await followBackgroundTask(follow)
+        : await fetch("/setup-api/tts/install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+      // A refusal answers JSON, which the reader takes as its closing line.
+      const outcome = await readTaskStream(res, () => {}, (taskId) => {
+        setInstallTaskId(taskId);
+        // The desktop's corner card asks at once rather than at its next poll.
+        notifyBackgroundTaskStarted(taskId);
       });
-      // The install is a background task of the server: the desktop's corner
-      // card draws its steps and log while this waits for the verdict.
-      if (res.ok) notifyBackgroundTaskStarted();
-      const lines = (await res.text()).split("\n").map((l) => l.trim()).filter(Boolean);
-      let ok = false;
-      for (const line of lines) {
-        try {
-          const payload = JSON.parse(line) as { success?: unknown; error?: unknown };
-          if (payload.success === true) ok = true;
-          if (typeof payload.error === "string") ok = false;
-        } catch {
-          // A torn write: the stream is read for its verdict, and a line that
-          // is not JSON carries none.
-        }
-      }
+      const ok = outcome.ok;
       setInstallFailed(!ok);
       const refreshed = await load();
       // This button INSTALLS the voice, so it changes the one fact the chat
@@ -369,8 +372,23 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       setInstallFailed(true);
     } finally {
       setInstalling(false);
+      setInstallTaskId(null);
     }
   }, [load]);
+
+  // RE-ATTACH: an install this tab (or the Local AI row) started before
+  // Settings closed is followed again on the repair button. Once per mount.
+  const attachedRef = useRef(false);
+  useEffect(() => {
+    if (attachedRef.current) return;
+    let alive = true;
+    void findRunningBackgroundTask([KOKORO_INSTALL_KIND]).then((task) => {
+      if (!alive || !task || attachedRef.current) return;
+      attachedRef.current = true;
+      void installVoiceNotes(task.id);
+    });
+    return () => { alive = false; };
+  }, [installVoiceNotes]);
 
   /**
    * A refusal in the owner's language when the box sent a code for it, its
@@ -819,6 +837,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
               ? t("settings.voice.channelVoiceNotesInstalling", { seconds: installingFor })
               : t("settings.voice.channelVoiceNotesFix")}
           </button>
+          {installing && installTaskId && (
+            <BackgroundTaskInline taskId={installTaskId} testId="voice-channel-voice-notes-task" />
+          )}
         </div>
       )}
 

@@ -1,8 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/lib/format-bytes";
 import { useT } from "@/lib/i18n";
+import { findRunningBackgroundTask } from "@/lib/background-task-client";
+import { WHISPER_SIZE_DOWNLOAD_KIND } from "@/lib/background-task-kinds";
+import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
 import { BUTTON, CARD, CardHeading, DiskNote, InstallOutcomeView, InstallProgressView, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 import { describeRefusal, useStreamedInstall } from "@/components/local-ai/use-streamed-install";
 
@@ -66,6 +69,25 @@ export default function WhisperSizesCard({ onChanged }: { onChanged?: () => void
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  // RE-ATTACH. A size download is a background task of the box: a Settings
+  // reopened while one runs follows it again on its own row, with its
+  // progress, its Cancel and its verdict. Once per mount.
+  const { follow } = install;
+  const attachedRef = useRef(false);
+  useEffect(() => {
+    if (attachedRef.current) return;
+    let alive = true;
+    void findRunningBackgroundTask([WHISPER_SIZE_DOWNLOAD_KIND]).then(async (task) => {
+      const size = typeof task?.meta?.size === "string" ? task.meta.size : null;
+      if (!alive || !task || !size || attachedRef.current) return;
+      attachedRef.current = true;
+      const ok = await follow(size, task.id);
+      await refresh();
+      if (ok) onChanged?.();
+    });
+    return () => { alive = false; };
+  }, [follow, onChanged, refresh]);
 
   const use = async (size: string) => {
     setNote(null);
@@ -170,7 +192,9 @@ export default function WhisperSizesCard({ onChanged }: { onChanged?: () => void
                     </button>
                   )}
                 </div>
-                {busy && <InstallProgressView progress={install.progress} testId={`local-ai-whisper-progress-${size.id}`} />}
+                {busy && (install.taskId
+                  ? <BackgroundTaskInline taskId={install.taskId} testId={`local-ai-whisper-task-${size.id}`} />
+                  : <InstallProgressView progress={install.progress} testId={`local-ai-whisper-progress-${size.id}`} />)}
               </li>
             );
           })}

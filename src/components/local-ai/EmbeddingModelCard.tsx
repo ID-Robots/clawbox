@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/lib/format-bytes";
 import { useT } from "@/lib/i18n";
+import { findRunningBackgroundTask } from "@/lib/background-task-client";
+import { EMBED_MODEL_DOWNLOAD_KIND } from "@/lib/background-task-kinds";
+import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
 import { CARD, CardHeading, InstallOutcomeView, InstallProgressView, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 import { useStreamedInstall } from "@/components/local-ai/use-streamed-install";
 
@@ -51,12 +54,35 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
   const { t, locale } = useT();
   const [status, setStatus] = useState<EmbedStatus | null>(null);
   const install = useStreamedInstall();
+  const { follow } = install;
 
   useEffect(() => {
     let alive = true;
     void readStatus().then((next) => { if (alive && next) setStatus(next); });
     return () => { alive = false; };
   }, []);
+
+  const settle = useCallback(async (ok: boolean) => {
+    // Keep the last good reading rather than blanking the card.
+    const next = await readStatus();
+    if (next) setStatus(next);
+    if (ok) onChanged?.();
+  }, [onChanged]);
+
+  // RE-ATTACH. The download is a background task of the box: a Settings
+  // reopened while it runs follows it again here, with the same progress and
+  // verdict as the click that started it. Once per mount.
+  const attachedRef = useRef(false);
+  useEffect(() => {
+    if (attachedRef.current) return;
+    let alive = true;
+    void findRunningBackgroundTask([EMBED_MODEL_DOWNLOAD_KIND]).then(async (task) => {
+      if (!alive || !task || attachedRef.current) return;
+      attachedRef.current = true;
+      await settle(await follow("embed", task.id));
+    });
+    return () => { alive = false; };
+  }, [follow, settle]);
 
   const download = async (force: boolean) => {
     const ok = await install.run("embed", (signal) => fetch("/setup-api/embed/install", {
@@ -65,10 +91,7 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
       body: JSON.stringify({ force }),
       signal,
     }));
-    // Keep the last good reading rather than blanking the card.
-    const next = await readStatus();
-    if (next) setStatus(next);
-    if (ok) onChanged?.();
+    await settle(ok);
   };
 
   if (!status) return null;
@@ -97,7 +120,9 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
         </button>
       </div>
       <div className="px-4 pb-4 -mt-2">
-        <InstallProgressView progress={install.progress} testId="local-ai-embed-progress" />
+        {install.taskId
+          ? <BackgroundTaskInline taskId={install.taskId} testId="local-ai-embed-task" />
+          : <InstallProgressView progress={install.progress} testId="local-ai-embed-progress" />}
         <InstallOutcomeView outcome={install.outcome} testId="local-ai-embed-outcome" />
       </div>
     </div>

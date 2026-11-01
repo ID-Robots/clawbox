@@ -22,6 +22,8 @@ const POLL_MS = 3000;
 /** `systemctl start --no-block` returns before the unit leaves "inactive". */
 const START_GRACE_MS = 1000;
 const START_GRACE_POLLS = 2;
+/** systemd unanswered this many polls in a row (a minute): give up asking. */
+const MAX_UNKNOWN_POLLS = 20;
 
 export interface FollowRootStepOptions {
   /** How long the whole step may take before it is reported as timed out. */
@@ -30,6 +32,76 @@ export interface FollowRootStepOptions {
   onStatus: (line: string) => void;
   /** What to call the step in the messages nobody else wrote. */
   label: string;
+  /**
+   * Once, when the unit is first seen running: which run of the step this is.
+   * A background task records it (src/lib/background-tasks.ts), so a web
+   * server that restarts while the unit runs on under systemd can follow the
+   * same run again instead of calling it lost.
+   */
+  onRunning?: (run: RootStepRun) => void;
+}
+
+/** One run of a root step, as a later reader needs it to find that run again. */
+export interface RootStepRun {
+  step: string;
+  /** When the run was dispatched — the journal window's start (root-step-journal.ts). */
+  sinceMs: number;
+  /**
+   * systemd's id for the run, read while the instance is loaded (it is
+   * collected as it exits, see root-step-journal.ts). Null when it was not
+   * read before the follow ended.
+   */
+  invocationId: string | null;
+}
+
+export interface FollowRootStepResult {
+  ok: boolean;
+  error?: string;
+  /**
+   * Only from {@link followRootStepRun}: the run could not be found again — it
+   * was never seen running, or the unit now runs another invocation — so
+   * nothing is known about how it ended.
+   */
+  lost?: boolean;
+}
+
+/**
+ * The unit's invocation while it is loaded. A separate query from
+ * {@link unitState}, asked once per follow, rather than a third property on
+ * every poll.
+ */
+async function unitInvocation(unit: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", unit, "-p", "InvocationID"],
+      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
+    );
+    const id = /^InvocationID=([0-9a-f]{32})$/im.exec(stdout)?.[1];
+    return id ? id.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How systemd itself said a run ended, from its own journal lines for that
+ * invocation (PID 1 tags them `INVOCATION_ID=`), which outlive the instance.
+ * Null when it said nothing that tells: the run cannot be vouched for.
+ */
+async function runEnding(invocationId: string): Promise<"ok" | "failed" | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["--no-pager", "-q", "-o", "cat", `INVOCATION_ID=${invocationId}`],
+      { timeout: 10_000 },
+    );
+    if (/Failed with result|Failed to start|status=\d+\/(?!SUCCESS)\S+/.test(stdout)) return "failed";
+    if (/Deactivated successfully|Succeeded\.|Finished /.test(stdout)) return "ok";
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function unitState(unit: string): Promise<{ active: string; result: string }> {
@@ -184,8 +256,7 @@ function running(active: string): boolean {
   return active === "activating" || active === "active" || active === "reloading";
 }
 
-export async function followRootStep(step: string, opts: FollowRootStepOptions): Promise<{ ok: boolean; error?: string }> {
-  const unit = rootStepUnit(step);
+export async function followRootStep(step: string, opts: FollowRootStepOptions): Promise<FollowRootStepResult> {
   // Before the start, so nothing this run writes falls outside the window the
   // journal reads below are bounded by.
   const startedAt = Date.now();
@@ -195,15 +266,80 @@ export async function followRootStep(step: string, opts: FollowRootStepOptions):
     const line = await lastJournalLine(step, startedAt, 40);
     return { ok: false, error: line || (err instanceof Error ? err.message : `Could not start ${opts.label}.`) };
   }
+  return followLoop({ step, sinceMs: startedAt, invocationId: null }, opts, false);
+}
 
+/**
+ * Follow a run somebody ELSE dispatched — a previous web server process, which
+ * recorded it through `onRunning` — to its end. Starts nothing.
+ *
+ * It only claims an ending it can tie to that run. A unit running ANOTHER
+ * invocation now, or a run that was never seen running (no invocation was
+ * recorded and the unit is not running), answers `lost`: the run may have
+ * ended either way, and the caller says it does not know rather than
+ * guessing. A run that was seen running and is now inactive ended the way
+ * {@link followRootStep} reads every ending — `failed` stays loaded and says
+ * so; a clean exit is collected and reads as inactive.
+ */
+export async function followRootStepRun(
+  run: RootStepRun,
+  opts: Omit<FollowRootStepOptions, "onRunning">,
+): Promise<FollowRootStepResult> {
+  return followLoop(run, opts, true);
+}
+
+async function followLoop(
+  run: RootStepRun,
+  opts: FollowRootStepOptions,
+  adopted: boolean,
+): Promise<FollowRootStepResult> {
+  const { step, sinceMs: startedAt } = run;
+  const unit = rootStepUnit(step);
   const deadline = Date.now() + opts.timeoutMs;
   let lastLine: string | null = null;
-  let sawRunning = false;
+  // An adopted run that carries its invocation WAS seen running by whoever
+  // dispatched it, so an inactive unit now is its ending, not a slow start.
+  let sawRunning = adopted && run.invocationId !== null;
+  let invocationKnown = false;
   let gracePolls = 0;
+  let unknownPolls = 0;
 
   while (Date.now() < deadline) {
     const { active, result } = await unitState(unit);
-    if (running(active)) sawRunning = true;
+    // systemd did not answer (a failed query, a busy bus at boot): that is
+    // not "inactive", and must not count as the run having ended or as a
+    // start that never came. Ask again.
+    if (active === "") {
+      unknownPolls += 1;
+      if (unknownPolls >= MAX_UNKNOWN_POLLS) {
+        return adopted
+          ? { ok: false, lost: true, error: `systemd could not be asked how ${opts.label} is doing.` }
+          : { ok: false, error: lastLine || `systemd could not be asked how ${opts.label} is doing.` };
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      continue;
+    }
+    unknownPolls = 0;
+    if (running(active)) {
+      sawRunning = true;
+      // Once: the first time the unit is seen running is the only moment a new
+      // invocation could have taken its place (a 3 s poll cannot miss a whole
+      // run ending and another starting in between otherwise).
+      if (!invocationKnown) {
+        invocationKnown = true;
+        const current = await unitInvocation(unit);
+        if (adopted && run.invocationId !== null && current !== null && current !== run.invocationId) {
+          return { ok: false, lost: true, error: `${opts.label} was started again since; this run's ending is not known.` };
+        }
+        if (run.invocationId === null && current !== null) {
+          try {
+            opts.onRunning?.({ step, sinceMs: startedAt, invocationId: current });
+          } catch { /* a recorder that broke must not end the follow */ }
+        }
+      }
+    } else if (adopted && !sawRunning) {
+      return { ok: false, lost: true, error: `${opts.label} is not running any more, and how it ended was not recorded.` };
+    }
 
     const line = await lastJournalLine(step, startedAt, 5);
     if (line && line !== lastLine) {
@@ -219,6 +355,17 @@ export async function followRootStep(step: string, opts: FollowRootStepOptions):
     }
 
     if (!running(active)) {
+      // A run somebody else dispatched ends well only on systemd's own word
+      // for THAT invocation: an instance collected as it exited, and one that
+      // never loaded at all, both answer "inactive" with "success".
+      if (adopted) {
+        const said = run.invocationId ? await runEnding(run.invocationId) : null;
+        if (said === "ok") return { ok: true };
+        if (said === "failed") {
+          return { ok: false, error: (await failureLine(step, startedAt)) || `${opts.label} failed` };
+        }
+        return { ok: false, lost: true, error: `${opts.label} is not running any more, and how it ended was not recorded.` };
+      }
       if (sawRunning || gracePolls >= START_GRACE_POLLS) {
         if (result && result !== "success") {
           return { ok: false, error: (await failureLine(step, startedAt)) || `${opts.label} failed (${result})` };
