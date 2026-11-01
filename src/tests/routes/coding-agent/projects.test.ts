@@ -384,6 +384,38 @@ describe("GET projects", () => {
       const { projects } = await body();
       expect(projects).toEqual([]);
     });
+
+    it("never lists a worktree of another project, even one a run worked in: its run is its parent's", async () => {
+      const shop = makeRepo("shop", { commit: "first" });
+      const wt = path.join(projectsDir, "shop-ref-task-7");
+      git(shop, "worktree", "add", "--quiet", "-b", "ref-task-7", wt);
+      const team = path.join(shop, ".clawbox", "worktrees", "t1-1");
+      git(shop, "worktree", "add", "--quiet", "-b", "clawbox/team-abcd1234-t1-1", team);
+      const real = fs.realpathSync(wt);
+      fs.writeFileSync(
+        path.join(root, "data", "coding-agent-runs.json"),
+        JSON.stringify([
+          { id: "run-sibling1", status: "completed", startedAt: 9, completedAt: 10, task: "in the sibling", directory: real, source: "agent" },
+          { id: "run-teamwrk1", status: "completed", startedAt: 5, completedAt: 6, task: "a worker", directory: fs.realpathSync(team), source: "agent" },
+        ]),
+      );
+      vi.resetModules();
+      GET = (await import("@/app/setup-api/coding-agent/projects/route")).GET;
+      const { projects } = await body();
+      expect(projects.map((p: Record<string, unknown>) => p.folder)).toEqual(["shop"]);
+      expect(projects[0].latestRun).toMatchObject({ id: "run-sibling1" });
+    });
+
+    it("groups a run's copy of a project under the project rather than listing it", async () => {
+      const shop = makeRepo("shop", { commit: "first" });
+      git(shop, "remote", "add", "origin", "https://example.com/owner/shop.git");
+      const copy = path.join(projectsDir, "shop-copy-1");
+      fs.cpSync(shop, copy, { recursive: true });
+      git(copy, "checkout", "--quiet", "-b", "clawbox/run-copy1234");
+      const { projects } = await body();
+      expect(projects.map((p: Record<string, unknown>) => p.folder)).toEqual(["shop"]);
+      expect(projects[0].copies).toEqual([{ folder: "shop-copy-1", directory: copy, branch: "clawbox/run-copy1234" }]);
+    });
   });
 });
 
