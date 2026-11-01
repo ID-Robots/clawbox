@@ -352,6 +352,60 @@ export interface PromptOptions {
    * coding_team_run (the per-request override, src/lib/coding-effort.ts).
    */
   ultracode?: boolean;
+  /**
+   * Pictures the owner put in the Create planner (pasted, dropped or picked),
+   * as the ABSOLUTE paths the chat's staging route wrote them to, in the
+   * order the brief numbers them (`[image 1]` is the first). A path only
+   * named in a task is never read by a run, so the prompt tells the assistant
+   * how to hand them over (`referencesSentence`).
+   */
+  references?: readonly string[];
+  /**
+   * "Show me the plan first": the assistant writes the plan it would hand
+   * the coding agent and waits for the owner's OK before starting anything.
+   */
+  planFirst?: boolean;
+}
+
+/**
+ * The lines that name the planner's pictures and say how a run gets them:
+ * `input_files` on coding_agent_run (the run's own copy, the only way a run
+ * reads a file), or — for a team, whose tool takes no input files — a copy in
+ * the project folder that the goal names. Empty for no pictures.
+ */
+export function referencesLines(paths: readonly string[] | undefined, tool: "coding_agent_run" | "coding_team_run"): string[] {
+  const list = (paths ?? []).filter((p) => typeof p === "string" && p.trim());
+  if (list.length === 0) return [];
+  return [
+    "",
+    "Reference images (the brief calls them [image 1], [image 2], …):",
+    ...list.map((p, i) => `- [image ${i + 1}]: ${p.trim()}`),
+    tool === "coding_agent_run"
+      ? `Give them to the run: pass these paths as input_files to coding_agent_run (comma-separated) — a path only written in the task is never read — and keep the [image N] names in the task so the run knows which is which.`
+      : `A team's tool takes no input files: copy these pictures into the project folder (a "design" folder in it) before you start coding_team_run, and name them by their new paths in the goal.`,
+  ];
+}
+
+/** The closing line of a prompt whose "plan first" switch was on. */
+export const PLAN_FIRST_SENTENCE =
+  "Before you start anything, reply with the plan you would hand the coding agent — the tasks, the order, how each is verified — and wait for my OK. Start the work only after I approve it (with any changes I ask for).";
+
+/**
+ * The owner's brief, as the opening of a prompt. One line reads as the end of
+ * the sentence that introduces it (the shape every prompt had before the
+ * planner); a multi-line brief — headings, lists, a checklist — is quoted as a
+ * block under that sentence, so its structure reaches the assistant intact.
+ */
+function briefLines(intro: string, brief: string): string[] {
+  const trimmed = brief.trim();
+  if (!trimmed.includes("\n")) {
+    // One sentence, whatever punctuation the owner typed: strip a trailing
+    // full stop so the description does not end "...timer.." after ours. A
+    // brief that is nothing but periods keeps what the owner typed.
+    const one = trimmed.replace(/[.\s]+$/u, "") || trimmed;
+    return [`${intro}: ${one}.`];
+  }
+  return [`${intro}. The brief:`, "", trimmed, ""];
 }
 
 /**
@@ -378,16 +432,16 @@ const NEW_APP_TEAM_SENTENCE =
  */
 export function buildNewAppPrompt(req: NewAppRequest, opts: PromptOptions = {}): string {
   const name = req.name.trim();
-  // One sentence, whatever punctuation the owner typed: strip a trailing full
-  // stop so the description does not end "...timer.." after ours.
-  const what = req.description.trim().replace(/[.\s]+$/u, "");
+  const tool = opts.team ? "coding_team_run" : "coding_agent_run";
   return [
-    `Create a new ClawBox app called "${name}": ${what}.`,
+    ...briefLines(`Create a new ClawBox app called "${name}"`, req.description),
     SCAFFOLD_SENTENCE[req.template],
     // With the team toggle on the scaffold is still the assistant's; the
     // build itself goes to a team in the folder it made.
     ...(opts.team ? [NEW_APP_TEAM_SENTENCE] : []),
-    ...(opts.ultracode ? [ultracodeSentence(opts.team ? "coding_team_run" : "coding_agent_run")] : []),
+    ...referencesLines(opts.references, tool),
+    ...(opts.ultracode ? [ultracodeSentence(tool)] : []),
+    ...(opts.planFirst ? [PLAN_FIRST_SENTENCE] : []),
   ].join("\n");
 }
 
@@ -437,11 +491,10 @@ export interface ResumeProjectRequest {
  * project — the rebuild that puts the result back on the desktop.
  */
 export function buildResumeProjectPrompt(req: ResumeProjectRequest, opts: PromptOptions = {}): string {
-  const what = req.instructions.trim().replace(/[.\s]+$/u, "");
   const last = req.latestRun;
   const lastTask = last ? last.task.trim().split(/\r?\n/)[0].slice(0, 160) : "";
   const lines = [
-    `Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${what}.`,
+    ...briefLines(`Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}`, req.instructions),
     `Start a coding agent run in that folder (coding_agent_run with directory "${req.directory}") — do not scaffold a new project.`,
     last
       ? `Its last run (${last.id}, ${last.status}) was: "${lastTask}". Read that run's summary and the project's recent commits before changing anything, so this run picks up where it left off.`
@@ -451,7 +504,9 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest, opts: Prompt
       : "When the run is done, tell me what changed, what was verified, and what is left for the next run.",
   ];
   if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
+  lines.push(...referencesLines(opts.references, "coding_agent_run"));
   if (opts.ultracode) lines.push(ultracodeSentence("coding_agent_run"));
+  if (opts.planFirst) lines.push(PLAN_FIRST_SENTENCE);
   return lines.join("\n");
 }
 
@@ -466,11 +521,9 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
   // Trailing periods come off so the sentence reads as one; a goal that is
   // nothing but periods keeps what the owner typed rather than becoming an
   // empty request.
-  const trimmed = req.instructions.trim();
-  const goal = trimmed.replace(/[.\s]+$/u, "") || trimmed;
   const target = req.kind === "codeProject" ? `project_id "${req.folder}"` : `directory "${req.directory}"`;
   return [
-    `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
+    ...briefLines(`Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}`, req.instructions),
     `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
     // How the assistant hears that the team finished differs per edition (a
     // chat line on OpenClaw, the desktop on Hermes: TEAM_SETTLE_WORD in
@@ -479,7 +532,9 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
     // a Hermes box never posts (the assistant would wait on it for ever).
     "Tell me when it is running, and do not poll it — the coding_team_run reply says how you will hear that it finished; then read coding_team_status and summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
+    ...referencesLines(opts.references, "coding_team_run"),
     ...(opts.ultracode ? [ultracodeSentence("coding_team_run")] : []),
+    ...(opts.planFirst ? [PLAN_FIRST_SENTENCE] : []),
   ].join("\n");
 }
 

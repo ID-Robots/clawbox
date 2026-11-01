@@ -9,7 +9,7 @@ import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import WhatsNewCard from "@/components/WhatsNewCard";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, OPEN_CHAT_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail, notifyCodingTeamChanged, handoffCodingTeam, openNewAppCard } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, OPEN_CHAT_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail, notifyCodingTeamChanged, handoffCodingTeam, openNewAppCard, dispatchOpenApp } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { useWhatsNew } from "@/lib/use-whats-new";
@@ -80,6 +80,7 @@ import {
   layoutIcons,
   layoutsEqual,
   moveIcon,
+  slotAt,
   storageGeometry,
   type IconLayout,
   type LayoutGeometry,
@@ -1396,9 +1397,9 @@ function ChromeDesktopInner() {
     window.addEventListener(SKILL_CHANGE_EVENT, handler);
     window.addEventListener(FIX_ERROR_EVENT, handler);
     window.addEventListener(CHAT_MESSAGE_EVENT, handler);
-    // The Coding Agent's "Create app" button: the chat has to be open before
-    // the card inside it can be seen.
-    window.addEventListener(NEW_APP_EVENT, handler);
+    // NOT on NEW_APP_EVENT: the Create planner is a window of its own
+    // (ChatPopup draws it with the conversation closed), and the chat opens
+    // when the planner hands it the message (CHAT_MESSAGE_EVENT, above).
     // "Message in chat" on a run's page: the popup opens and ChatPopup puts
     // the draft in the composer, unsent.
     window.addEventListener(OPEN_CHAT_EVENT, handler);
@@ -1406,7 +1407,6 @@ function ChromeDesktopInner() {
       window.removeEventListener(SKILL_CHANGE_EVENT, handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
       window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
-      window.removeEventListener(NEW_APP_EVENT, handler);
       window.removeEventListener(OPEN_CHAT_EVENT, handler);
     };
   }, []);
@@ -1835,6 +1835,34 @@ function ChromeDesktopInner() {
     if (allIconIds.length === 0) return;
     setIconPositions((prev) => (layoutsEqual(prev, storedIconLayout) ? prev : storedIconLayout));
   }, [storedIconLayout, allIconIds.length]);
+
+  // The "+" tile after the last icon (create an app): the owner's desktop
+  // only — the Create planner composes a message for the owner's assistant.
+  const showCreateTile = ownerApis;
+  // Cells the grid draws: every icon, and the tile.
+  const gridCellCount = allIconIds.length + (showCreateTile ? 1 : 0);
+  // The tile's press: the Create planner — or, until the owner has been
+  // through the Coding Agent's wizard (or while its switch is off), the
+  // Coding Agent app itself, where that is the first thing on screen. The
+  // same gate as the chat's `+` (useNewAppCard); a status the box cannot read
+  // opens the planner, never a dead tile.
+  const openCreatePlanner = useCallback(async () => {
+    try {
+      const res = await fetch("/setup-api/coding-agent/status", { cache: "no-store" });
+      if (res.ok) {
+        const status = (await res.json()) as { setupComplete?: unknown; enabled?: unknown } | null;
+        if (status && (status.setupComplete === false || status.enabled === false)) {
+          // Through the event, like the chat's `+`: the desktop's own
+          // OPEN_APP_EVENT listener opens it.
+          dispatchOpenApp("coding");
+          return;
+        }
+      }
+    } catch {
+      // Unreadable: the planner opens.
+    }
+    openNewAppCard();
+  }, []);
 
   const getIconPosition = useCallback(
     (appId: string) => iconLayout[appId] ?? iconPositions[appId] ?? { row: 0, col: 0 },
@@ -3636,7 +3664,7 @@ function ChromeDesktopInner() {
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
       <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 + kioskIconReserve, overflowY: isMobile ? "auto" : "visible", ...(mainRect ? { left: mainRect.x, top: mainRect.y, width: mainRect.width, height: mainRect.height, right: "auto", bottom: "auto" } : {}) }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
-      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && allIconIds.length > 0 ? `${(Math.floor((allIconIds.length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
+      <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && gridCellCount > 0 ? `${(Math.floor((gridCellCount - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
         {installedAppDefs.map((app) => {
           const pos = getIconPosition(app.id);
           const isBeingDragged = draggingIcon === app.id;
@@ -3764,6 +3792,43 @@ function ChromeDesktopInner() {
             </div>
           );
         })}
+
+        {/* The "+" tile: create an app. Always the cell after the last icon
+            (`slotAt`), never dragged, selected or saved in the layout — it is
+            not an icon but the grid's own way in to the Create planner. Hidden
+            while an icon is dragged, so the drop cell under it stays free. */}
+        {showCreateTile && !draggingIcon && (() => {
+          const pos = slotAt(allIconIds.length, iconGeometry);
+          return (
+            <div
+              data-testid="desktop-create-app-tile"
+              style={{ position: "absolute", left: pos.col * CELL_W, top: pos.row * CELL_H, width: CELL_W, height: CELL_H, transition: "left 0.2s, top 0.2s" }}
+              className="flex items-center justify-center pointer-events-auto"
+            >
+              <button
+                type="button"
+                // Not a drag source and not the start of a marquee.
+                onPointerDown={(e) => e.stopPropagation()}
+                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                onClick={() => { void openCreatePlanner(); }}
+                draggable={false}
+                aria-label={t("codingAgent.planner.desktopTileLabel")}
+                title={t("codingAgent.planner.desktopTileLabel")}
+                className="group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none [-webkit-touch-callout:none] cursor-pointer"
+              >
+                <div
+                  className="w-14 h-14 rounded-2xl flex items-center justify-center transition-all duration-200 group-hover:scale-105 group-active:scale-95"
+                  style={{ background: "rgba(249, 115, 22, 0.16)", border: "1.5px solid rgba(249, 115, 22, 0.55)", boxShadow: "0 4px 14px rgba(0, 0, 0, 0.25)" }}
+                >
+                  <span className="material-symbols-rounded transition-colors" style={{ fontSize: 30, color: "#fb923c" }} aria-hidden="true">add</span>
+                </div>
+                <span className="text-[13px] leading-tight text-white/85 font-semibold text-center line-clamp-2 break-words hyphens-auto max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
+                  {t("codingAgent.planner.desktopTile")}
+                </span>
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Ghost indicator for drop target */}
         {draggingIcon && dragGhost && (() => {

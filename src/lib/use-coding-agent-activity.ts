@@ -170,6 +170,15 @@ export interface CodingAgentActivity {
    * the card offers neither. Set on a start that failed, too.
    */
   announced?: boolean;
+  /**
+   * The model the run answered on (the CLI's own word), every model its usage
+   * was billed to, and the one it was started with — the card's model chip
+   * (`runModelId` in coding-model-names.ts). Absent on an announced start and
+   * on a record from before the fields.
+   */
+  model?: string | null;
+  modelsUsed?: string[];
+  requestedModel?: string | null;
 }
 
 /**
@@ -247,6 +256,9 @@ interface RunPayload {
   transcriptPath?: unknown;
   sessionId?: unknown;
   directory?: unknown;
+  model?: unknown;
+  modelsUsed?: unknown;
+  requestedModel?: unknown;
 }
 
 const TODO_STATUSES: readonly CodingTodoStatus[] = ["pending", "in_progress", "completed"];
@@ -340,6 +352,9 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     pauseReason: parsePauseReason(r.pauseReason),
     startStep: runRecordStartStep({ status: r.status, sessionId: typeof r.sessionId === "string" ? r.sessionId : null, numTurns: r.numTurns }),
     announced: false,
+    model: typeof r.model === "string" && r.model ? r.model : null,
+    modelsUsed: Array.isArray(r.modelsUsed) ? r.modelsUsed.filter((m): m is string => typeof m === "string" && m.length > 0) : [],
+    requestedModel: typeof r.requestedModel === "string" && r.requestedModel ? r.requestedModel : null,
   };
 }
 

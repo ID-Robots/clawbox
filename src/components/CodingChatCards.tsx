@@ -11,6 +11,7 @@ import { pauseReasonText } from "@/lib/coding-pause-reason-copy";
 import CodingAgentActivityPill, { type CodingAgentCardLabels } from "./CodingAgentActivityPill";
 import CodingTeamActivityCard, { type CodingTeamCardLabels } from "./CodingTeamActivityCard";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from "./NewAppWizardCard";
+import PopoutWindow from "./PopoutWindow";
 
 /**
  * The chat's coding cards — ONE host for the mascot popup (ChatPopup) and the
@@ -400,24 +401,34 @@ export function NewAppToggleButton({ card }: { card: NewAppCardState }) {
 }
 
 /**
- * The Create card over the composer, on the composer's own ground and
- * hairline so it reads as part of it, not as a dialog over the chat. Nothing
- * while the card is closed.
+ * The Create PLANNER, in a window of its own (PopoutWindow — dragged,
+ * resized, snapped and maximized like any desktop window) rather than the card
+ * that used to sit over the composer: a plan with sections, lists and
+ * pictures needs the room (2026-11-01). Mounted by the chat because the chat
+ * owns its state, the `+` gate and the hand-off it ends in. Escape is the
+ * planner's own (NewAppWizardCard), so it closes the planner and never the
+ * conversation behind it. Nothing while it is closed.
  */
 export function NewAppCardSlot({ card }: { card: NewAppCardState }) {
+  const { t } = useT();
   if (!card.show) return null;
   return (
-    <div data-testid="chat-new-app" style={{ padding: "10px 14px 0", background: "rgba(0,0,0,0.2)", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-      <NewAppWizardCard
-        key={`${card.options.project ?? ""}|${card.options.team ? "team" : ""}`}
-        initialProject={card.options.project}
-        initialTeam={card.options.team}
-        maxTaskChars={card.maxChars ?? DEFAULT_MAX_TASK_CHARS}
-        onClose={card.close}
-        // In the chat it floats over the composer like a popover, so it
-        // behaves like one: click away (or Escape) and it goes.
-        closeOnOutsideClick
-      />
-    </div>
+    <PopoutWindow
+      title={t("codingAgent.planner.windowTitle")}
+      appId="coding-planner"
+      defaultWidth={1040}
+      defaultHeight={720}
+      onClose={card.close}
+    >
+      <div data-testid="chat-new-app" className="h-full">
+        <NewAppWizardCard
+          key={`${card.options.project ?? ""}|${card.options.team ? "team" : ""}`}
+          initialProject={card.options.project}
+          initialTeam={card.options.team}
+          maxTaskChars={card.maxChars ?? DEFAULT_MAX_TASK_CHARS}
+          onClose={card.close}
+        />
+      </div>
+    </PopoutWindow>
   );
 }

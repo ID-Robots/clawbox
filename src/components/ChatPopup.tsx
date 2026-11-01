@@ -7623,7 +7623,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     e.stopPropagation()
   }, [])
 
-  if (!isOpen) return null
+  // The Create planner is a window of its own (PopoutWindow, portalled to the
+  // body), so it stays up with the conversation closed: the desktop's `+`
+  // tile and the Coding Agent's Create open the planner, not the chat. The
+  // chat opens when the planner hands it the message.
+  if (!isOpen) return <NewAppCardSlot card={newApp} />
 
   // Default position: centred above the mascot when there is room, clamped to
   // an 8px viewport gutter when the mascot is near an edge. This must follow
@@ -8990,8 +8994,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         </div>
       )}
 
-      {/* The New app card, over the composer. Same ground and hairline as the
-          composer so it reads as part of it, not as a dialog over the chat. */}
+      {/* The Create planner — a pop-out window, drawn from here because the
+          chat owns its state and its hand-off. */}
       <NewAppCardSlot card={newApp} />
 
       {/* Desktop keeps the full-width text box over its action/settings row.
