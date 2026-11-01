@@ -41,6 +41,43 @@ describe("PopoutWindow", () => {
     expect(document.activeElement).toBe(dialog);
   });
 
+  it("gives focus back to the opener however it closes, unless something else took it", async () => {
+    function Host({ steal }: { steal: boolean }) {
+      const [open, setOpen] = useState(false);
+      return (
+        <div>
+          <button type="button" data-testid="opener" onClick={() => setOpen(true)}>open</button>
+          <input data-testid="composer" />
+          {open && (
+            <PopoutWindow title="t" appId="restore" onClose={() => setOpen(false)}>
+              <button
+                type="button"
+                data-testid="done"
+                onClick={() => { if (steal) (document.querySelector("[data-testid=composer]") as HTMLElement).focus(); setOpen(false); }}
+              >done</button>
+            </PopoutWindow>
+          )}
+        </div>
+      );
+    }
+    const { unmount } = render(<Host steal={false} />);
+    const opener = screen.getByTestId("opener");
+    opener.focus();
+    fireEvent.click(opener);
+    screen.getByTestId("done").focus();
+    fireEvent.click(screen.getByTestId("done"));
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+    unmount();
+
+    render(<Host steal />);
+    const opener2 = screen.getByTestId("opener");
+    opener2.focus();
+    fireEvent.click(opener2);
+    fireEvent.click(screen.getByTestId("done"));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(document.activeElement).toBe(screen.getByTestId("composer"));
+  });
+
   it("leaves focus where the content put it", () => {
     render(<PopoutWindow title="t" appId="own-focus" onClose={() => {}}><input data-testid="field" autoFocus /></PopoutWindow>);
     expect(document.activeElement).toBe(screen.getByTestId("field"));

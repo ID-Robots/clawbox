@@ -467,6 +467,27 @@ describe("NewAppWizardCard — the planner", () => {
     expect(window.localStorage.getItem(PLANNER_DRAFT_KEY)).toBeNull();
   });
 
+  it("never saves the token of a picture still uploading, and writes the draft as the page goes away", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    render(<NewAppWizardCard onClose={() => {}} />);
+    type("Like this:");
+    fireEvent.change(screen.getByTestId("coding-agent-planner-file"), { target: { files: [new File(["a"], "a.png", { type: "image/png" })] } });
+    expect(brief().value).toBe("Like this: [image 1] ");
+    window.dispatchEvent(new Event("pagehide"));
+    const saved = JSON.parse(window.localStorage.getItem(PLANNER_DRAFT_KEY) ?? "{}") as { brief?: string; images?: unknown[] };
+    expect(saved.brief).toBe("Like this: ");
+    expect(saved.images).toEqual([]);
+  });
+
+  it("writes an undo made after a save, rather than keeping the saved text", async () => {
+    const first = render(<NewAppWizardCard onClose={() => {}} />);
+    type("draft one");
+    await waitFor(() => expect(window.localStorage.getItem(PLANNER_DRAFT_KEY)).toContain("draft one"));
+    type("draft");
+    first.unmount();
+    expect(JSON.parse(window.localStorage.getItem(PLANNER_DRAFT_KEY) ?? "{}").brief).toBe("draft");
+  });
+
   it("asks for the plan first when that switch is on", () => {
     const { heard, stop } = listenToChat();
     try {

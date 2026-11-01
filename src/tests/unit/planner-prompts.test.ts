@@ -30,7 +30,7 @@ describe("the planner's prompts", () => {
     expect(solo).toContain("input_files");
     const team = buildTeamProjectPrompt({ ...PROJECT, instructions: "x" }, { references: paths });
     expect(team).toContain("- [image 2] /m/b.png");
-    expect(team).toContain("copy these pictures into the project folder");
+    expect(team).toContain('copy these pictures into a "design" folder in the project and commit them');
     expect(referencesLines([], "coding_agent_run")).toEqual([]);
   });
 

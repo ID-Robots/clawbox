@@ -118,7 +118,18 @@ export default function PopoutWindow({ title, appId, defaultWidth = 760, default
   useLayoutEffect(() => {
     const el = contentRef.current;
     if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true });
-  }, []);
+    // However it closes — Escape, its X, a Close or Create inside — focus goes
+    // back to the opener when the window took it with it. Deferred past the
+    // DOM removal, and only when focus was left nowhere: a close that hands
+    // focus somewhere on purpose (the chat's composer after Create) keeps it.
+    return () => {
+      setTimeout(() => {
+        const now = document.activeElement;
+        const lost = !now || now === document.body || !now.isConnected;
+        if (lost && opener instanceof HTMLElement && opener.isConnected && opener !== document.body) opener.focus();
+      }, 0);
+    };
+  }, [opener]);
 
   const index = order.indexOf(id);
   const zIndex = Math.min(DESKTOP_LAYERS.popout + Math.max(0, index), MAX_POPOUT_Z);

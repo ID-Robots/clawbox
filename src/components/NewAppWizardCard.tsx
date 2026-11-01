@@ -442,33 +442,49 @@ export default function NewAppWizardCard({
   }, []);
 
   // The draft, kept as the owner types (debounced), and dropped when there is
-  // nothing in it. Uploads in flight are not saved: they have no path yet.
+  // nothing in it. Uploads in flight are not saved — they have no path yet —
+  // and neither are their `[image N]` tokens: a draft restored with a token
+  // and no picture would name something the run never gets. The later
+  // pictures' numbers move down to match what IS saved.
   const stableImages = images.filter((i) => i.path && !i.uploading).map((i) => ({ name: i.name, path: i.path }));
-  const draftJson = JSON.stringify({ mode, name, brief, template, projectDir, images: stableImages });
-  const firstDraftRun = useRef(true);
-  useEffect(() => {
-    if (firstDraftRun.current) { firstDraftRun.current = false; return; }
-    const timer = setTimeout(() => {
-      const d = JSON.parse(draftJson) as PlannerDraft;
-      if (draftIsEmpty(d)) { writeDraft(null); setSavedAt(null); return; }
-      writeDraft(d);
-      setSavedAt(Date.now());
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [draftJson]);
-  // Closed inside the debounce (Escape, Cancel, the window's X): the last
-  // keystrokes are written on the way out — unless Create handed the plan
-  // over, which is the one close that clears the draft.
+  let savedBrief = brief;
+  for (let i = images.length - 1; i >= 0; i -= 1) {
+    if (images[i].uploading || !images[i].path) savedBrief = renumberImageTokens(savedBrief, i + 1);
+  }
+  const draftJson = JSON.stringify({ mode, name, brief: savedBrief, template, projectDir, images: stableImages });
+  // The draft as storage holds it now — what the planner opened with, then
+  // every write. A close writes only when what is on screen differs from it.
+  const writtenRef = useRef<string>(draftJson);
+  const handedRef = useRef(false);
   const latestDraftRef = useRef(draftJson);
   useEffect(() => { latestDraftRef.current = draftJson; }, [draftJson]);
-  const handedRef = useRef(false);
-  // What the planner opened with: nothing changed, nothing to write.
-  const [openedDraft] = useState(draftJson);
-  useEffect(() => () => {
-    if (handedRef.current || latestDraftRef.current === openedDraft) return;
-    const d = JSON.parse(latestDraftRef.current) as PlannerDraft;
-    writeDraft(draftIsEmpty(d) ? null : d);
-  }, [openedDraft]);
+  const persist = useCallback((json: string): boolean => {
+    if (handedRef.current || json === writtenRef.current) return false;
+    const d = JSON.parse(json) as PlannerDraft;
+    const empty = draftIsEmpty(d);
+    writeDraft(empty ? null : d);
+    writtenRef.current = json;
+    return !empty;
+  }, []);
+  useEffect(() => {
+    if (draftJson === writtenRef.current) return;
+    const timer = setTimeout(() => {
+      setSavedAt(persist(draftJson) ? Date.now() : null);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [draftJson, persist]);
+  // Closed inside the debounce (Escape, Cancel, the window's X) or the page
+  // going away (a refresh does not promise React's cleanup): the last
+  // keystrokes are written on the way out — unless Create handed the plan
+  // over, the one close that clears the draft.
+  useEffect(() => {
+    const flush = () => { persist(latestDraftRef.current); };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, [persist]);
 
   // Object URLs pin their Blob until revoked: released when the window goes.
   const imagesRef = useRef(images);

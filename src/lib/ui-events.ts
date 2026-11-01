@@ -384,7 +384,7 @@ export function referencesLines(paths: readonly string[] | undefined, tool: "cod
     ...list.map((p, i) => `- [image ${i + 1}] ${p.trim()}`),
     tool === "coding_agent_run"
       ? `Give them to the run: pass these paths as input_files to coding_agent_run (comma-separated) — a path only written in the task is never read — and keep the [image N] names in the task so the run knows which is which.`
-      : `A team's tool takes no input files: copy these pictures into the project folder (a "design" folder in it) before you start coding_team_run, and name them by their new paths in the goal.`,
+      : `A team's tool takes no input files, and its workers build in their own git worktrees of the team's branch, which only hold what is COMMITTED: copy these pictures into a "design" folder in the project and commit them before you start coding_team_run, then name them by those project paths in the goal.`,
   ];
 }
 

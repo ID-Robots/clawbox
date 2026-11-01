@@ -3663,7 +3663,7 @@ function ChromeDesktopInner() {
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
-      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 + kioskIconReserve, overflowY: isMobile ? "auto" : "visible", ...(mainRect ? { left: mainRect.x, top: mainRect.y, width: mainRect.width, height: mainRect.height, right: "auto", bottom: "auto" } : {}) }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 + kioskIconReserve, overflowY: isMobile || (showCreateTile && allIconIds.length >= GRID_COLS * gridDims.rowsPerColumn) ? "auto" : "visible", ...(mainRect ? { left: mainRect.x, top: mainRect.y, width: mainRect.width, height: mainRect.height, right: "auto", bottom: "auto" } : {}) }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
       <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && gridCellCount > 0 ? `${(Math.floor((gridCellCount - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
         {installedAppDefs.map((app) => {
           const pos = getIconPosition(app.id);
