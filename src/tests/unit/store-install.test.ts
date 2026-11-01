@@ -14,7 +14,8 @@ import { packTarGz, type TarEntry } from "@/lib/tar-gz";
 import { saveEnv } from "@/tests/helpers/env";
 
 const getDefaultDirectory = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/coding-agent", () => ({ getDefaultDirectory }));
+const ensureProjectFolder = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-agent", () => ({ getDefaultDirectory, ensureProjectFolder }));
 const resolveClawaiToken = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken, CLAWBOX_AI_PROXY_URL: "https://clawbox.com/api/ai" }));
 const ensureRepository = vi.hoisted(() => vi.fn());
@@ -97,6 +98,7 @@ beforeEach(() => {
   desk.webapps = path.join(projectsRoot, ".webapps");
   desk.prefs = {};
   getDefaultDirectory.mockResolvedValue(projectsRoot);
+  ensureProjectFolder.mockResolvedValue(projectsRoot);
   resolveClawaiToken.mockResolvedValue("claw_test_0123456789abcdef");
   ensureRepository.mockResolvedValue({ initialized: true, detail: null });
   deployWebapp.mockResolvedValue(undefined);
@@ -312,10 +314,28 @@ describe("installClawboxApp", () => {
     expect(fs.existsSync(path.join(projectsRoot, "hello-app"))).toBe(false);
   });
 
-  it("needs the Coding Agent's project folder", async () => {
-    getDefaultDirectory.mockResolvedValue(null);
-    expect(await installClawboxApp(listing(Buffer.from("x")))).toMatchObject({ ok: false, code: "no_project_folder", status: 409 });
-    expect(fetchMock).not.toHaveBeenCalled();
+  // A fresh or factory-reset box: the owner never chose a project folder, and
+  // a server app used to be refused with "set a project folder first". The
+  // ~/Projects default is made on the spot and the app goes into it.
+  it("installs a server app into ~/Projects on a box whose owner never chose a folder", async () => {
+    const actual = await vi.importActual<typeof import("@/lib/project-folder")>("@/lib/project-folder");
+    const restoreHome = saveEnv("HOME");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "store-install-home-"));
+    process.env.HOME = home;
+    try {
+      ensureProjectFolder.mockImplementation(() => actual.ensureDefaultProjectFolder());
+      getDefaultDirectory.mockImplementation(async () => actual.defaultProjectFolder());
+      const pkg = await packageOf([file("clawbox.json", JSON.stringify({ name: "Server", port: 4230, start: "node server.js" })), file("server.js", "")]);
+      fetchMock.mockResolvedValue(served(pkg));
+      const out = await installClawboxApp(listing(pkg, { kind: "server" }));
+      expect(out).toMatchObject({ ok: true, registered: true, webappUrl: "/apps/hello-app/", directory: path.join(home, "Projects", "hello-app") });
+      expect(fs.statSync(path.join(home, "Projects")).mode & 0o777).toBe(0o755);
+      expect(fs.existsSync(path.join(home, "Projects", "hello-app", "clawbox.json"))).toBe(true);
+      expect(await storeInstalledFolder("hello-app")).toBe(path.join(home, "Projects", "hello-app"));
+    } finally {
+      restoreHome();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("never overwrites a folder of the same name the Store did not make", async () => {

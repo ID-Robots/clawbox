@@ -57,6 +57,7 @@ import { runChild } from "@/lib/child-run";
 import { APP_ID_RE, projectPath, webappPath, writeWebappIndex } from "@/lib/code-projects";
 import { get as configGet } from "@/lib/config-store";
 import { isInside } from "@/lib/file-guard";
+import { PROJECT_FOLDER_CONFIG_KEY, projectFolderFrom } from "@/lib/project-folder";
 import { appProxyPath, type ClawboxManifest, isProxyablePort } from "@/lib/clawbox-manifest";
 import { pushPendingAction } from "@/lib/pending-actions";
 import { registerWebappInPreferences } from "@/lib/webapp-registry";
@@ -230,25 +231,23 @@ async function readMeta(id: string): Promise<StoredMeta | null> {
 }
 
 /**
- * The owner's project folder, read straight from the config store: the same
- * key coding-agent.ts's CODING_AGENT_DIR_CONFIG_KEY names (pinned by the
- * test), read here rather than imported because coding-agent.ts imports
- * THIS module for the settle-time registration.
+ * The owner's project folder's config key: the same key coding-agent.ts's
+ * CODING_AGENT_DIR_CONFIG_KEY names (pinned by the test), from
+ * src/lib/project-folder.ts rather than coding-agent.ts, which imports THIS
+ * module for the settle-time registration.
  */
-export const PROJECT_FOLDER_CONFIG_KEY = "coding_agent_default_directory";
+export { PROJECT_FOLDER_CONFIG_KEY };
 
 /**
  * The folder an app id names when its registration predates the `directory`
- * field: `<project folder>/<id>`, or the code project of that id. Null when
- * neither is a folder.
+ * field: `<project folder>/<id>` — the owner's folder, else the ~/Projects
+ * default, as every reader resolves it — or the code project of that id.
+ * Null when neither is a folder.
  */
 export async function projectFolderFor(id: string): Promise<string | null> {
   if (!APP_ID_RE.test(id)) return null;
-  const root = await configGet(PROJECT_FOLDER_CONFIG_KEY);
-  const candidates = [
-    ...(typeof root === "string" && path.isAbsolute(root) ? [path.join(root, id)] : []),
-    projectPath(id),
-  ];
+  const root = projectFolderFrom(await configGet(PROJECT_FOLDER_CONFIG_KEY));
+  const candidates = [path.join(root, id), projectPath(id)];
   for (const dir of candidates) {
     const stat = await fs.promises.stat(dir).catch(() => null);
     if (stat?.isDirectory()) return dir;

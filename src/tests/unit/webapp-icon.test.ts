@@ -174,6 +174,20 @@ describe("ensureWebappIcon", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  // A Store server app with no listing picture gets one drawn after install.
+  // The nudge used to send the stub page's address, the open window followed
+  // it into a sandboxed frame whose scripted hop to /apps/<id>/ carries no
+  // cookie, and the signed-in owner met the box's login screen inside the app.
+  it("keeps a server app's window on its proxied address when its icon arrives", async () => {
+    fs.writeFileSync(path.join(webappDir("todo-list"), "meta.json"), JSON.stringify({ name: "Todo", port: 4240, directory: "/x" }));
+    mocks.generate.mockResolvedValue(generationOf(PNG));
+
+    await expect(mod.ensureWebappIcon("todo-list", { name: "Todo List" })).resolves.toBe("generated");
+
+    const ring = JSON.parse((mocks.kvSet.mock.calls[0] as [string, string])[1]) as Record<string, unknown>[];
+    expect(ring[0]).toMatchObject({ type: "register_webapp", appId: "todo-list", url: "/apps/todo-list/" });
+  });
+
   it("asks for a desktop icon, not a picture", async () => {
     mocks.generate.mockResolvedValue(generationOf(PNG));
     await mod.ensureWebappIcon("todo-list", { name: "Todo List", color: "#2563eb", description: "A to-do list" });

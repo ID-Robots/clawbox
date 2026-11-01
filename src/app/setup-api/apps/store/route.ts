@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { clawhubSkillUrl, lookupClawhubOwner, pickClawhubMatch } from "@/lib/clawhub-url";
 import { isClawboxListing } from "@/lib/store-categories";
+import { mergeSlugSearch, slugSearch, type SlugSearch } from "@/lib/store-search";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,39 @@ async function proxy(target: string, failMsg: string) {
   } catch (err) {
     console.error("[apps/store] proxy failed:", err);
     return NextResponse.json({ error: failMsg }, { status: 502 });
+  }
+}
+
+// A slug-shaped search ("audiobook-player"), asked as typed, as words and as
+// an exact slug, merged (src/lib/store-search.ts): the portal matches words,
+// so the app's own id found nothing. The query as typed decides success the
+// way `proxy` does; the other two are best-effort and never fail the search.
+async function slugAwareSearch(params: URLSearchParams, search: SlugSearch, limit: number, category: string | null) {
+  const optional = async (target: string): Promise<unknown> => {
+    try {
+      const res = await fetch(target, { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(8000) });
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    }
+  };
+  const asWordsParams = new URLSearchParams(params);
+  asWordsParams.set("q", search.words);
+  const [asWords, exact] = [optional(`${STORE_API}?${asWordsParams}`), optional(`${STORE_API}/${search.slug}`)];
+  try {
+    const res = await fetch(`${STORE_API}?${params}`, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      return NextResponse.json({ error: "Store API error" }, { status: res.status });
+    }
+    const asTyped = await res.json() as Record<string, unknown>;
+    const merged = mergeSlugSearch({ slug: search.slug, limit, category, asTyped, asWords: await asWords, exact: await exact });
+    return NextResponse.json({ ...asTyped, ...merged }, { headers: { "Cache-Control": "public, max-age=300" } });
+  } catch (err) {
+    console.error("[apps/store] proxy failed:", err);
+    return NextResponse.json({ error: "Failed to fetch store" }, { status: 502 });
   }
 }
 
@@ -105,5 +139,7 @@ export async function GET(req: Request) {
   const q = url.searchParams.get("q");
   if (q) params.set("q", q);
 
+  const search = q ? slugSearch(q) : null;
+  if (search) return slugAwareSearch(params, search, limit, category);
   return proxy(`${STORE_API}?${params}`, "Failed to fetch store");
 }

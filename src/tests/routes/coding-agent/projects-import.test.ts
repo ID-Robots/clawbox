@@ -16,8 +16,8 @@ const importGitHubRepo = vi.hoisted(() => vi.fn());
 const listGitHubRepos = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/project-import", () => ({ importFolder, importGitHubRepo, listGitHubRepos }));
 const listProjects = vi.hoisted(() => vi.fn());
-const getDefaultDirectory = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/coding-agent", () => ({ listProjects, getDefaultDirectory }));
+const ensureProjectFolder = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-agent", () => ({ listProjects, ensureProjectFolder }));
 
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
@@ -47,7 +47,7 @@ beforeEach(async () => {
   session = installSessionFixture();
   vi.resetModules();
   vi.clearAllMocks();
-  getDefaultDirectory.mockResolvedValue("/home/clawbox/Projects");
+  ensureProjectFolder.mockResolvedValue("/home/clawbox/Projects");
   listProjects.mockResolvedValue({ directory: "/home/clawbox/Projects", projects: [{ folder: "old-site", directory: "/home/clawbox/Projects/old-site", name: "old-site" }] });
   importFolder.mockResolvedValue({ ok: true, directory: "/home/clawbox/Projects/old-site", folder: "old-site", initialized: true, skipped: ["node_modules"] });
   importGitHubRepo.mockResolvedValue({ ok: true, directory: "/home/clawbox/Projects/old-site", folder: "old-site", initialized: false, skipped: [] });
