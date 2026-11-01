@@ -16,7 +16,7 @@ import {
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
 import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
-import { isNamedChannel, updateWhatsNewPanel } from "@/lib/update-whats-new";
+import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
@@ -133,6 +133,15 @@ function readEffectiveBranch(value: unknown): EffectiveBranch | null {
 }
 
 const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
+
+/** How often a run's poll asks again while the box answers "idle" (each answer reads git on the box). */
+const IDLE_POLL_MS = 10_000;
+/**
+ * "idle" answers, before the run was ever seen, that mean the click started
+ * nothing. The run route marks the run running before it answers, so a run it
+ * started never reads "idle" first.
+ */
+const NOT_STARTED_AFTER_IDLE = 3;
 
 /**
  * A translated sentence with one or more rendered elements inside it.
@@ -318,7 +327,18 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     pollControllerRef.current = controller;
     let serverWentDown = false;
     let failures = 0;
+    let inFlight = false;
+    // "idle" answers: when the last one came, and how many came before this
+    // screen ever saw the run.
+    let idleAt = 0;
+    let idleBeforeRun = 0;
+    let sawRun = false;
     pollRef.current = window.setInterval(async () => {
+      if (inFlight) return;
+      // Each "idle" answer reads git for drift on the box: while that is the
+      // answer, ask less often.
+      if (idleAt && Date.now() - idleAt < IDLE_POLL_MS) return;
+      inFlight = true;
       try {
         const res = await fetch("/setup-api/update/status", { signal: controller.signal });
         if (controller.signal.aborted) return;
@@ -327,13 +347,32 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           if (failures >= 3) serverWentDown = true;
           return;
         }
+        failures = 0;
+        const data = (await res.json()) as UpdateState;
+        if (controller.signal.aborted) return;
+        // "idle" is no verdict on the run this screen is following. A web
+        // server that replaced the one running it answers "idle" until it has
+        // judged that run's lock — a live run, or an interrupted one, which it
+        // then reports as "failed" with the step to resume from. Stopping here
+        // left the screen on "Don't power off" with every step waiting, for
+        // good, over a run nothing was running any more. Keep the progress
+        // last seen and keep asking — and do not reload over it either: the
+        // page that came back would adopt no run and offer "Update everything".
+        // Only a run this screen never saw is one that did not start.
+        if (data.phase === "idle") {
+          idleAt = Date.now();
+          if (!sawRun && ++idleBeforeRun >= NOT_STARTED_AFTER_IDLE) {
+            stopPolling();
+            setUpdateError(tr("update.startFailed", "Failed to start update"));
+          }
+          return;
+        }
+        idleAt = 0;
+        sawRun = true;
         if (serverWentDown) {
           window.location.reload();
           return;
         }
-        failures = 0;
-        const data = (await res.json()) as UpdateState;
-        if (controller.signal.aborted) return;
         setUpdateState(data);
         if (data.phase !== "running") {
           stopPolling();
@@ -349,9 +388,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         if (controller.signal.aborted) return;
         failures++;
         if (failures >= 3) serverWentDown = true;
+      } finally {
+        inFlight = false;
       }
     }, 2000);
-  }, [stopPolling, fetchVersions]);
+  }, [stopPolling, fetchVersions, tr]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -379,6 +420,29 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         setUpdateError(typeof data.error === "string"
           ? data.error
           : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
+        return;
+      }
+      // A 200 can still say the click started nothing: another run holds the
+      // box, or a database compaction does. Show the run if there is one — a
+      // live one to join, or one that has just failed (an interrupted run's
+      // verdict carries its Resume) — and otherwise say the server's reason at
+      // once rather than after the poll gives up on "idle".
+      let started: { started?: unknown; error?: unknown } | null = null;
+      try {
+        started = await res.json();
+      } catch { /* no body to read: the poll says what happened */ }
+      if (started?.started === false) {
+        const live = await fetch("/setup-api/update/status", { cache: "no-store" })
+          .then((r) => (r.ok ? (r.json() as Promise<UpdateState>) : null))
+          .catch(() => null);
+        if (live?.phase === "running" || live?.phase === "failed") {
+          setUpdateState(live);
+          if (live.phase === "running") startPolling();
+          return;
+        }
+        setUpdateError(typeof started.error === "string"
+          ? started.error
+          : tr("update.startFailed", "Failed to start update"));
         return;
       }
       startPolling();
@@ -1240,6 +1304,17 @@ function stepNumber(index: number): string {
 }
 
 /**
+ * A version as the run view's version row writes it: a release always with its
+ * `v` (the device says `v4.3.0`, the notes `4.3.0`, and the two must compare
+ * equal), anything else — a branch build like `beta@a2c1718` — as it is.
+ */
+function runVersion(version: string | null): string | null {
+  if (!version) return null;
+  const release = normalizeVersion(version);
+  return release ? `v${release}` : version;
+}
+
+/**
  * The System Update window while a run is on screen — running, finished or
  * failed.
  *
@@ -1312,9 +1387,16 @@ function UpdateRunView({
   const warnings = state?.warnings ?? [];
   const restarts = steps.some((s) => s.id === RESTART_STEP_ID);
 
-  const current = versions ? cleanVersion(versions.clawbox.current) ?? versions.clawbox.current : null;
-  const target = panel.version
-    ?? (versions?.clawbox.target ? cleanVersion(versions.clawbox.target) ?? versions.clawbox.target : null);
+  const current = versions ? runVersion(cleanVersion(versions.clawbox.current) ?? versions.clawbox.current) : null;
+  const nextBuild = versions?.clawbox.target
+    ? runVersion(cleanVersion(versions.clawbox.target) ?? versions.clawbox.target)
+    : null;
+  // The notes name a package version, and every build a channel like beta
+  // ships carries the one already installed until the next bump. There the
+  // version said nothing — "v4.3.0 → 4.3.0" on a real board — and the build
+  // the box is going to (`beta@a2c1718`) is what is being installed.
+  const notesVersion = runVersion(panel.version);
+  const target = notesVersion && notesVersion !== current ? notesVersion : nextBuild ?? notesVersion;
   const shownChannel = panel.channel ?? channel;
 
   const header = (
