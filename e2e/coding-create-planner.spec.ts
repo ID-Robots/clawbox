@@ -97,5 +97,7 @@ test("the + tile opens the Create planner as a window, and Create hands the plan
   // the picture's path and how the run gets it.
   await expect(chat).toContainText('Create a new ClawBox app called "Invoices"');
   await expect(chat).toContainText("Invoices with PDF export [image 1]");
-  await expect(chat).toContainText("[image 1]: /home/clawbox/.openclaw/media/chat/plan-1.png");
+  // A long message is folded in its bubble; the paths are under "Show more".
+  await chat.getByText("Show more").first().click();
+  await expect(chat).toContainText("[image 1] /home/clawbox/.openclaw/media/chat/plan-1.png");
 });

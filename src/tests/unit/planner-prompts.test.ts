@@ -26,10 +26,10 @@ describe("the planner's prompts", () => {
   it("names the pictures and tells a run to take them as input_files, and a team to copy them in", () => {
     const paths = ["/m/a.png", "/m/b.png"];
     const solo = buildNewAppPrompt({ name: "Shop", description: "x", template: "nextjs" }, { references: paths });
-    expect(solo).toContain("- [image 1]: /m/a.png\n- [image 2]: /m/b.png");
+    expect(solo).toContain("- [image 1] /m/a.png\n- [image 2] /m/b.png");
     expect(solo).toContain("input_files");
     const team = buildTeamProjectPrompt({ ...PROJECT, instructions: "x" }, { references: paths });
-    expect(team).toContain("- [image 2]: /m/b.png");
+    expect(team).toContain("- [image 2] /m/b.png");
     expect(team).toContain("copy these pictures into the project folder");
     expect(referencesLines([], "coding_agent_run")).toEqual([]);
   });

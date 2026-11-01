@@ -379,7 +379,9 @@ export function referencesLines(paths: readonly string[] | undefined, tool: "cod
   return [
     "",
     "Reference images (the brief calls them [image 1], [image 2], …):",
-    ...list.map((p, i) => `- [image ${i + 1}]: ${p.trim()}`),
+    // No colon after the name: `[image 1]: /path` is a Markdown link
+    // definition, and the chat's bubble would draw the line as nothing.
+    ...list.map((p, i) => `- [image ${i + 1}] ${p.trim()}`),
     tool === "coding_agent_run"
       ? `Give them to the run: pass these paths as input_files to coding_agent_run (comma-separated) — a path only written in the task is never read — and keep the [image N] names in the task so the run knows which is which.`
       : `A team's tool takes no input files: copy these pictures into the project folder (a "design" folder in it) before you start coding_team_run, and name them by their new paths in the goal.`,

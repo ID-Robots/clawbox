@@ -411,7 +411,7 @@ describe("NewAppWizardCard — the planner", () => {
       fireEvent.click(screen.getByTestId("coding-agent-new-create"));
       expect(heard).toHaveLength(1);
       expect(heard[0]).toContain("Like this: [image 1]");
-      expect(heard[0]).toContain("- [image 1]: /home/clawbox/.openclaw/media/chat/plan-1.png");
+      expect(heard[0]).toContain("- [image 1] /home/clawbox/.openclaw/media/chat/plan-1.png");
       expect(heard[0]).toContain("input_files");
     } finally {
       stop();
