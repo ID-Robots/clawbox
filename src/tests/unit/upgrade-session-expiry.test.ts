@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
@@ -72,12 +72,22 @@ function mint(exp: number, extra: Record<string, unknown> = {}, gen = 0): string
 
 const nowS = () => Math.floor(Date.now() / 1000);
 
-function writeConfig(gen: number) {
+function writeConfig(gen: number, openclawShared = false) {
   fs.writeFileSync(
     path.join(root, "data", "config.json"),
-    JSON.stringify({ session_generation: gen, clawbox_users: [{ username: USER, sv: USER_SV }] }),
+    JSON.stringify({
+      session_generation: gen,
+      clawbox_users: [{ username: USER, sv: USER_SV }],
+      ...(openclawShared ? { openclaw_shared_with_users: true } : {}),
+    }),
   );
+  // The proxy caches config.json on its mtime, which the kernel stamps at a
+  // jiffy's grain: two writes a few milliseconds apart must still read as two.
+  configWrites += 1;
+  const stamp = new Date(Date.now() + configWrites * 1_000);
+  fs.utimesSync(path.join(root, "data", "config.json"), stamp, stamp);
 }
+let configWrites = 0;
 
 type Dialled = { ws: WebSocket; first: Promise<string>; status?: undefined } | { ws?: undefined; status: number };
 
@@ -329,3 +339,76 @@ describe("the chat socket over HTTPS and a lapsed session", () => {
     expect(await upstreamGone).not.toBeNull();
   });
 });
+
+// The owner's "Share OpenClaw with all users" switch (src/lib/non-owner-scope.ts).
+// A raw pipe to the gateway carries the stand-in's greeting through; the user
+// relay drops it, because it is no gateway frame — so the greeting is how a
+// test tells the two apart.
+describe("another ClawBox user's gateway sockets and the OpenClaw sharing switch", () => {
+  const carol = () => mint(nowS() + 600, { u: USER, sv: USER_SV });
+
+  /** What the socket hears first within `ms`, or null. */
+  async function firstWithin(
+    pathname: string,
+    cookie: string,
+    scheme: "ws" | "wss" = "ws",
+    ms = 1_500,
+  ): Promise<{ ws: WebSocket; first: string | null }> {
+    const result = await dial(pathname, cookie, scheme);
+    if (!result.ws) throw new Error(`upgrade of ${pathname} was refused with ${result.status}`);
+    const first = await Promise.race([result.first, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
+    return { ws: result.ws, first };
+  }
+
+  afterEach(() => writeConfig(0));
+
+  it("relays the user's Control UI socket and their own chat socket while OpenClaw is not shared", async () => {
+    for (const pathname of ["/", "/user-chat-ws"]) {
+      const { ws, first } = await firstWithin(pathname, carol());
+      expect(first, pathname).toBeNull();
+      ws.close();
+    }
+  });
+
+  it("pipes the user's Control UI socket to the gateway like the owner's once OpenClaw is shared — their own chat stays relayed", async () => {
+    writeConfig(0, true);
+    const shared = await firstWithin("/", carol());
+    expect(shared.first).toBe(GREETING);
+    expect(await echoes(shared.ws, "shared control ui")).toBe(true);
+    shared.ws.close();
+    const chat = await firstWithin("/user-chat-ws", carol());
+    expect(chat.first).toBeNull();
+    chat.ws.close();
+  });
+
+  it("closes a shared Control UI socket when the owner switches sharing off", async () => {
+    writeConfig(0, true);
+    const { ws, first } = await firstWithin("/", carol());
+    expect(first).toBe(GREETING);
+    writeConfig(0, false);
+    expect(await closedWithin(ws, RECHECK_MS * 20)).not.toBeNull();
+  });
+
+  it("does the same over HTTPS, where the proxy relays frames itself", async ({ skip }) => {
+    if (tlsPort === 0) skip();
+    const chat = await firstWithin("/", carol(), "wss");
+    expect(chat.first).toBeNull();
+    chat.ws.close();
+    writeConfig(0, true);
+    const shared = await firstWithin("/", carol(), "wss");
+    expect(shared.first).toBe(GREETING);
+    expect(await echoes(shared.ws, "shared over tls")).toBe(true);
+    const own = await firstWithin("/user-chat-ws", carol(), "wss");
+    expect(own.first).toBeNull();
+    own.ws.close();
+    writeConfig(0, false);
+    expect(await closedWithin(shared.ws, RECHECK_MS * 20)).toBe(4401);
+  });
+
+  it("pipes the owner on the user-chat path too, with the prefix stripped", async () => {
+    const ws = await open("/user-chat-ws", mint(nowS() + 600));
+    expect(await echoes(ws, "owner on the user path")).toBe(true);
+    ws.close();
+  });
+});
+

@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from "react";
 import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
+import OpenClawSharingCard from "./OpenClawSharingCard";
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 
 interface UsersListing {
@@ -453,6 +454,9 @@ export default function UsersPanel() {
           </button>
         </form>
       )}
+
+      {/* ── The owner may share OpenClaw (hidden from anyone else) ── */}
+      <OpenClawSharingCard />
 
       {/* ── What another user gets ── */}
       <div className="rounded-xl border border-white/10 p-4">

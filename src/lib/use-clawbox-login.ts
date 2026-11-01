@@ -7,7 +7,7 @@ import {
   normalizeClawboxAiTier,
   type ClawboxAiPlanTier,
 } from "@/lib/clawbox-ai-models";
-import { onProvidersChanged } from "@/lib/ui-events";
+import { notifyClawaiPlanChanged, onProvidersChanged } from "@/lib/ui-events";
 import { monotonicNow } from "@/lib/visible-interval";
 
 // Lightweight client hook for "is the device signed in to a ClawBox AI
@@ -87,6 +87,8 @@ interface AiStatusResponse {
   // "no ClawBox AI account" (false) from "Free user paired"
   // (true, clawaiAccountTier=null).
   clawaiConfigured?: boolean;
+  // Set on the one answer whose poll recorded a CHANGED plan on the box.
+  clawaiPlanChanged?: boolean;
 }
 
 const DEFAULT_INTERVAL_MS = 30_000;
@@ -192,6 +194,8 @@ const poll = {
   missed: false,
   /** Stops listening for the provider signal; held while any hook is mounted. */
   stopSignal: null as (() => void) | null,
+  /** The last plan an answer named, to tell a change another page recorded. */
+  lastPlan: null as ClawboxAiPlanTier | null,
 };
 
 function pageHidden(): boolean {
@@ -236,9 +240,12 @@ async function ask(): Promise<void> {
   poll.inFlight = { seq, startedAt: monotonicNow() };
   poll.missed = false;
   let answer: Answer;
+  let planChangedHere = false;
   try {
     const res = await fetch(STATUS_URL, { cache: "no-store" });
-    answer = res.ok ? readAnswer((await res.json()) as AiStatusResponse) : { ok: false };
+    const data = res.ok ? ((await res.json()) as AiStatusResponse) : null;
+    answer = data ? readAnswer(data) : { ok: false };
+    planChangedHere = data?.clawaiPlanChanged === true;
   } catch {
     answer = { ok: false };
   }
@@ -251,6 +258,14 @@ async function ask(): Promise<void> {
   poll.delivered = seq;
   for (const s of [...poll.subscribers]) {
     if (s.fromSeq === undefined || seq >= s.fromSeq) s.deliver(answer);
+  }
+  // The plan moved: what follows it re-reads now (Settings → Voice). Either
+  // this poll recorded the change, or a known plan differs from the last one
+  // seen here — another page's poll recorded it.
+  if (answer.ok) {
+    const moved = poll.lastPlan !== null && answer.plan !== null && answer.plan !== poll.lastPlan;
+    if (answer.plan !== null) poll.lastPlan = answer.plan;
+    if (planChangedHere || moved) notifyClawaiPlanChanged();
   }
   // Only the newest ask arms the next one, so two asks out at once (a hook
   // that mounted beside a stuck one) still leave ONE timer behind.
@@ -293,6 +308,14 @@ function onProvidersSignal(): void {
   void ask();
 }
 
+/**
+ * Ask the plan now rather than at the next tick — for a surface that has just
+ * opened and depends on it (Settings → Voice). A no-op while no hook polls.
+ */
+export function refreshClawboxPlanNow(): void {
+  onProvidersSignal();
+}
+
 function subscribe(sub: Subscriber): () => void {
   if (poll.subscribers.size === 0) {
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
@@ -319,6 +342,7 @@ function subscribe(sub: Subscriber): () => void {
     poll.timer = null;
     poll.inFlight = null;
     poll.missed = false;
+    poll.lastPlan = null;
     poll.generation += 1;
     poll.stopSignal?.();
     poll.stopSignal = null;

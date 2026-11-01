@@ -55,7 +55,7 @@ import { useDeskScreens } from "@/lib/use-desk-screens";
 import { DESKTOP_CHROME_APP_ID, openDesktopChrome, useDesktopChrome } from "@/lib/desktop-chrome-client";
 import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
-import { OWNER_ONLY_APP_IDS, OWNER_ONLY_NOTICE } from "@/lib/non-owner-scope";
+import { OWNER_ONLY_NOTICE, ownerOnlyAppIds } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
@@ -864,11 +864,14 @@ function ChromeDesktopInner() {
   // their own. The one thing folded in here for them is the harnesses' own
   // consoles (OWNER_ONLY_APP_IDS), which list every conversation on the box,
   // the owner's included; every surface that honours this list — icons,
-  // launcher, shelf, openApp — hides those two. Until /users/me answers the
-  // desktop draws as the owner's, so a single-user box never flickers.
+  // launcher, shelf, openApp — hides those two, or Hermes alone while the
+  // owner shares OpenClaw with every user (`openclawShared`). Until /users/me
+  // answers the desktop draws as the owner's, so a single-user box never
+  // flickers.
   const settledSessionUser = useSettledSessionUser();
   const sessionUser = settledSessionUser ?? null;
   const isOwner = sessionUser?.isOwner !== false;
+  const openclawShared = sessionUser?.openclawShared === true;
   // The chat is the signed-in person's own (src/lib/chat-scope.ts): null for
   // the owner, the username for anyone else.
   const chatUser = sessionUser && !sessionUser.isOwner ? sessionUser.username : null;
@@ -878,9 +881,9 @@ function ChromeDesktopInner() {
       // A kiosk-only app (Web) exists on the laptop's kiosk desktop alone.
       ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
       ...(desktopChrome !== "hidden" ? [] : [DESKTOP_CHROME_APP_ID]),
-      ...(isOwner ? [] : OWNER_ONLY_APP_IDS),
+      ...(isOwner ? [] : ownerOnlyAppIds(openclawShared)),
     ],
-    [activeHarness, isOwner, onKiosk, desktopChrome],
+    [activeHarness, isOwner, openclawShared, onKiosk, desktopChrome],
   );
 
   // ─── Desktop shortcuts for built-in apps ───

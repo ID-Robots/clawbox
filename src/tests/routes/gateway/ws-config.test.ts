@@ -38,7 +38,9 @@ describe("/setup-api/gateway/ws-config", () => {
       const body = await (await GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway/ws-config")))).json();
       expect(body.token).toBe("");
       expect(body.relayed).toBe(true);
-      expect(body.wsUrl).toBe("ws://clawbox.local");
+      // Their own socket path, which the proxy always relays — the root path
+      // is the Control UI's, which the owner may share (non-owner-scope.ts).
+      expect(body.wsUrl).toBe("ws://clawbox.local/user-chat-ws");
       const { getGatewayToken } = await import("@/lib/gateway-proxy");
       expect(getGatewayToken).not.toHaveBeenCalled();
     } finally {
@@ -52,6 +54,7 @@ describe("/setup-api/gateway/ws-config", () => {
       const body = await (await GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway/ws-config")))).json();
       expect(body.token).toBe("test-token");
       expect(body.relayed).toBeUndefined();
+      expect(body.wsUrl).toBe("ws://clawbox.local");
     } finally {
       who.identity = null;
     }

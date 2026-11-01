@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
 import { listUsers } from "@/lib/clawbox-users";
 import { sessionIdentity } from "@/lib/route-auth";
+import { readOpenclawShared } from "@/lib/openclaw-sharing";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 export const dynamic = "force-dynamic";
 
 // Who is signed in on this browser (TASK-1256). The one users route a
 // non-owner reaches (src/lib/non-owner-scope.ts): the desktop asks it once to
-// know whose name to show and whether to offer the owner's apps.
+// know whose name to show and whether to offer the owner's apps — OpenClaw
+// among them while the owner shares it (`openclawShared`, not a secret).
 //
 // Cookie only — the MCP bearer is the agent, not a person, and gets 401.
 // Also the probe a page sends to learn whether its session is still good
@@ -24,8 +26,9 @@ export async function GET(request: Request) {
   } catch {
     multiUser = false;
   }
+  const openclawShared = await readOpenclawShared();
   return NextResponse.json(
-    { username: identity.username, isOwner: identity.isOwner, multiUser },
+    { username: identity.username, isOwner: identity.isOwner, multiUser, openclawShared },
     { headers: { "cache-control": "no-store" } },
   );
 }

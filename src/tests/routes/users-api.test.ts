@@ -197,7 +197,7 @@ describe("/setup-api/users/me", () => {
     vi.mocked(sessionIdentity).mockResolvedValue({ username: "alice", isOwner: false });
     const { GET } = await import("@/app/setup-api/users/me/route");
     const res = await GET(new Request("http://localhost/setup-api/users/me"));
-    expect(await res.json()).toEqual({ username: "alice", isOwner: false, multiUser: true });
+    expect(await res.json()).toEqual({ username: "alice", isOwner: false, multiUser: true, openclawShared: false });
   });
 
   it("answers 401 without a session (the MCP bearer is not a person)", async () => {

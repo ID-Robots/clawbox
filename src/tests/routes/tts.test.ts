@@ -115,6 +115,19 @@ async function route() {
   return await import("@/app/setup-api/tts/route");
 }
 
+// A ClawBox AI plan change still being followed (src/lib/clawai-plan-follow.ts).
+const planFollow = vi.hoisted(() => ({ pending: false, onRecord: vi.fn(async () => {}) }));
+// Who a request's cookie speaks for: nobody (curl, the agent's bearer) unless a test says.
+const identity = vi.hoisted(() => ({ current: null as { username: string; isOwner: boolean } | null }));
+vi.mock("@/lib/route-auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/route-auth")>()),
+  sessionIdentity: vi.fn(async () => identity.current),
+}));
+vi.mock("@/lib/clawai-plan-follow", () => ({
+  clawaiPlanFollowPending: () => planFollow.pending,
+  followClawaiPlanOnRecord: planFollow.onRecord,
+}));
+
 function post(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://box/setup-api/tts", {
     method: "POST",
@@ -143,6 +156,7 @@ beforeEach(() => {
   shortSpokenMock.mockReset().mockResolvedValue(false);
   setShortSpokenMock.mockReset().mockResolvedValue(undefined);
   ownerMock.mockReset().mockResolvedValue(true);
+  planFollow.onRecord.mockClear();
 });
 
 describe("spoken replies", () => {
@@ -775,3 +789,101 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect((await (await GET()).json()).cloudModel).toBe("tts-1-hd");
   });
 });
+
+describe("a ClawBox AI plan that moved while the box runs", () => {
+  it("says the box is still following it, so the panel says so and looks again", async () => {
+    planFollow.pending = true;
+    try {
+      const { GET } = await route();
+      const body = await (await GET()).json();
+      expect(body.cloudPending).toBe(true);
+      // The fact the panel shows beside it is still the box's own reading.
+      expect(body.engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(false);
+    } finally {
+      planFollow.pending = false;
+    }
+  });
+
+  it("says nothing when no change is being followed", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).cloudPending).toBeUndefined();
+  });
+
+  it("reads the cloud voice as available the moment the gateway's boot script has armed it — no restart of the web server", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(false);
+    readConfigMock.mockResolvedValue(config({
+      tts: {
+        provider: LOCAL,
+        providers: {
+          [LOCAL]: { command: "/opt/clawbox-tts.sh" },
+          openai: { apiKey: "claw_84d065b", baseUrl: "https://proxy.example/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+        },
+      },
+    }));
+    expect((await (await GET()).json()).engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(true);
+  });
+
+  /** What the boot script wrote while the plan was Max, at the proxy every box shares. */
+  const armedAtOurProxy = () => config({
+    tts: {
+      provider: "openai",
+      providers: {
+        [LOCAL]: { command: "/opt/clawbox-tts.sh" },
+        openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+      },
+    },
+    models: { providers: { openai: { apiKey: "claw_84d065b" }, deepseek: { apiKey: "claw_84d065b" } } },
+  });
+  const planOnRecord = (plan: string | undefined) =>
+    preferenceMock.mockImplementation(async (key: string) => (key === "clawai_plan_tier" ? plan : undefined));
+  const cloud = (body: { engines: { id: string; configured: boolean }[] }) => body.engines.find((e) => e.id === "cloud");
+
+  it("takes the cloud voice away the moment a plan without it is on record — before the gateway restarts, and never as 'setting up'", async () => {
+    readConfigMock.mockResolvedValue(armedAtOurProxy());
+    const { GET } = await route();
+    // Not on record yet: not knowing is not a downgrade.
+    expect(cloud(await (await GET()).json())?.configured).toBe(true);
+    planOnRecord("free");
+    const body = await (await GET()).json();
+    expect(cloud(body)?.configured).toBe(false);
+    expect(body.cloudPending).toBeUndefined();
+    // And the gateway's own file is brought round to it.
+    expect(planFollow.onRecord).toHaveBeenCalled();
+  });
+
+  it("keeps it on a Max plan, and hands it back when the plan on record is Max again", async () => {
+    readConfigMock.mockResolvedValue(armedAtOurProxy());
+    planOnRecord("flash");
+    const { GET } = await route();
+    expect(cloud(await (await GET()).json())?.configured).toBe(false);
+    planOnRecord("pro");
+    expect(cloud(await (await GET()).json())?.configured).toBe(true);
+  });
+
+  it("brings the gateway round for the owner's read, never for another user's", async () => {
+    const { GET } = await route();
+    const read = new Request("http://box/setup-api/tts");
+    try {
+      identity.current = { username: "alice", isOwner: false };
+      await GET(read);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(planFollow.onRecord).not.toHaveBeenCalled();
+      identity.current = { username: "clawbox", isOwner: true };
+      await GET(read);
+      await vi.waitFor(() => expect(planFollow.onRecord).toHaveBeenCalledTimes(1));
+    } finally {
+      identity.current = null;
+    }
+  });
+
+  it("never hides an owner's own cloud voice, whatever the ClawBox AI plan", async () => {
+    readConfigMock.mockResolvedValue(config({
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "sk-owners-own" } } },
+    }));
+    planOnRecord("free");
+    const { GET } = await route();
+    expect(cloud(await (await GET()).json())?.configured).toBe(true);
+  });
+});
+

@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
+import { CLAWAI_PLAN_CHANGED_EVENT, VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
+import { refreshClawboxPlanNow } from "@/lib/use-clawbox-login";
 import SpokenReplyPlayer from "@/components/SpokenReplyPlayer";
 import type {
   VoiceChoice,
@@ -58,7 +59,13 @@ function isDisclosure(value: unknown): boolean {
  * The tts route's answer: the status, plus the owner's switch for spoken
  * replies and the two switches under it — auto-play, and short spoken answers.
  */
-export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean; autoPlayAll?: boolean; shortSpoken?: boolean };
+export type VoiceStatusAnswer = VoiceOutputStatus & {
+  autoReply?: boolean;
+  autoPlayAll?: boolean;
+  shortSpoken?: boolean;
+  /** The box is still following a plan change (the tts route's `cloudPending`). */
+  cloudPending?: boolean;
+};
 
 export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
   if (!value || typeof value !== "object") return false;
@@ -160,6 +167,13 @@ const REFUSAL_KEYS: Record<string, string> = {
 /** How long a local sample may take before the panel says the voice is warming up. */
 const WARMING_AFTER_SECONDS = 3;
 
+/**
+ * How often the panel looks again while the box follows a plan change. On
+ * OpenClaw that is a gateway restart to arm the cloud voice — 20-50 s on a
+ * board — so a few reads cover it without a stream of them.
+ */
+const PLAN_FOLLOW_RECHECK_MS = 5_000;
+
 const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
 const ROW = "flex items-center justify-between gap-4";
 const SELECT = "min-w-[12rem] max-w-[60%] rounded-lg border border-white/10 bg-[var(--bg-elevated)] px-3 py-2 text-sm text-[var(--text-primary)] disabled:opacity-50";
@@ -233,9 +247,34 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     if (!active) return;
     // The box's reading is external state the panel synchronises to, and
     // `load` sets it only once its fetch has answered — never in this tick.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
+    // And the plan behind it: the cloud voice comes with Max, and an account
+    // upgraded on the portal is seen by the status poll. Asked now, so opening
+    // Voice does not wait out the poll's interval to find the new plan.
+    refreshClawboxPlanNow();
   }, [active, load]);
+
+  /**
+   * Follow the PLAN, not only the switches: when the poll records a new plan
+   * the box starts following it (src/lib/clawai-plan-follow.ts), and while it
+   * does — a gateway restart to arm the cloud voice, on OpenClaw — the box says
+   * so (`cloudPending`) and the panel looks again until it is done. Before,
+   * the panel read the box once per visit, and the cloud voice of a new Max
+   * plan stayed "not available" on screen however long the owner waited.
+   */
+  useEffect(() => {
+    if (!active) return;
+    const onPlanChanged = () => void load();
+    window.addEventListener(CLAWAI_PLAN_CHANGED_EVENT, onPlanChanged);
+    return () => window.removeEventListener(CLAWAI_PLAN_CHANGED_EVENT, onPlanChanged);
+  }, [active, load]);
+
+  const followingPlan = status?.cloudPending === true;
+  useEffect(() => {
+    if (!active || !followingPlan) return;
+    const timer = window.setInterval(() => void load(), PLAN_FOLLOW_RECHECK_MS);
+    return () => window.clearInterval(timer);
+  }, [active, followingPlan, load]);
 
   /**
    * Follow the switch when it is moved somewhere else.
@@ -573,7 +612,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             onChange={(e) => chooseSource(e.target.value as VoiceEngineId)}
           >
             <option value="cloud" disabled={!cloud?.configured}>
-              {optionLabel(cloud, "settings.voice.source.cloud", "settings.voice.source.cloudMissing")}
+              {optionLabel(
+                cloud,
+                "settings.voice.source.cloud",
+                followingPlan ? "settings.voice.source.cloudPending" : "settings.voice.source.cloudMissing",
+              )}
             </option>
             <option value="local" disabled={!local?.configured}>
               {optionLabel(local, "settings.voice.source.local", "settings.voice.source.localMissing")}

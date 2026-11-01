@@ -1,20 +1,31 @@
+import { createRequire } from "module";
 import { describe, expect, it } from "vitest";
 import {
   nonOwnerVerdict,
   NON_OWNER_HOME,
+  OPENCLAW_SHARED_KEY,
   OWNER_ONLY_APP_IDS,
+  openclawSharedFrom,
+  ownerOnlyAppIds,
   requestIntent,
+  USER_CHAT_WS_PATH,
   type RequestIntent,
 } from "@/lib/non-owner-scope";
 import { apps } from "@/lib/desktop-apps";
 
 // A ClawBox user who is not the owner gets the owner's desktop — every app and
-// Settings — with three exceptions: the owner's chat (each user has their
-// own), secrets in clear, and the owner's account itself.
+// Settings — with four exceptions: the owner's chat (each user has their
+// own), secrets in clear, the owner's account itself, and changing the box's
+// AI settings.
 
-function verdict(url: string, method = "GET", intent: RequestIntent = "fetch", username = "alice") {
+function verdict(url: string, method = "GET", intent: RequestIntent = "fetch", username = "alice", openclawShared?: boolean) {
   const u = new URL(url, "http://clawbox.local");
-  return nonOwnerVerdict({ pathname: u.pathname, method, searchParams: u.searchParams, intent, username });
+  return nonOwnerVerdict({ pathname: u.pathname, method, searchParams: u.searchParams, intent, username, openclawShared });
+}
+
+/** The same judge, with the owner's "Share OpenClaw with all users" switch on. */
+function sharedVerdict(url: string, method = "GET", intent: RequestIntent = "fetch") {
+  return verdict(url, method, intent, "alice", true);
 }
 
 describe("nonOwnerVerdict — the owner's desktop for every signed-in user", () => {
@@ -74,6 +85,62 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     ["POST", "/setup-api/setup/reset"],
   ])("the owner's account: refuses %s %s", (method, url) => {
     expect(verdict(url, method)).toBe("deny");
+  });
+
+  it.each([
+    // The model the whole box chats on — a user's first desktop load moved it.
+    ["POST", "/setup-api/chat/model"],
+    ["POST", "/setup-api/ai-models/configure"],
+    ["POST", "/setup-api/ai-models/model-fallback"],
+    ["POST", "/setup-api/ai-models/clawai/start"],
+    ["POST", "/setup-api/ai-models/clawai/poll"],
+    ["POST", "/setup-api/ai-models/oauth/exchange"],
+    ["POST", "/setup-api/providers/default"],
+    ["POST", "/setup-api/providers/enabled"],
+    ["POST", "/setup-api/anthropic/accounts"],
+    ["POST", "/setup-api/harness/swap"],
+    ["POST", "/setup-api/harness/select"],
+    ["POST", "/setup-api/hermes/models"],
+    ["POST", "/setup-api/hermes/provider-key"],
+    ["POST", "/setup-api/hermes/oauth/start"],
+    ["DELETE", "/setup-api/hermes/oauth/cancel"],
+    ["POST", "/setup-api/local-ai"],
+    ["POST", "/setup-api/local-ai/exclusive"],
+    ["POST", "/setup-api/local-models"],
+    ["POST", "/setup-api/ollama/pull"],
+    ["DELETE", "/setup-api/llamacpp/models"],
+    ["POST", "/setup-api/whisper"],
+    ["POST", "/setup-api/ai-cloud-defaults"],
+    ["POST", "/setup-api/tts"],
+    ["POST", "/setup-api/tts/install"],
+    ["POST", "/setup-api/stt"],
+  ])("the box's AI settings: refuses %s %s", (method, url) => {
+    expect(verdict(url, method)).toBe("deny");
+  });
+
+  it("the box's AI settings: every user still READS them, however they are spelled", () => {
+    for (const url of ["/setup-api/chat/model", "/setup-api/ai-models/status", "/setup-api/ai-models/catalog", "/setup-api/providers/status", "/setup-api/tts", "/setup-api/stt", "/setup-api/local-ai/exclusive"]) {
+      expect(verdict(url, "GET")).toBe("allow");
+    }
+    for (const url of ["/setup-api/chat/model/", "/setup-api//chat/model", "/setup-api/Chat/Model", "/setup-api/chat%2Fmodel"]) {
+      expect(verdict(url, "POST")).toBe("deny");
+    }
+  });
+
+  it("the box's AI settings: a user's own chat, its speech and the local engines' inference stay theirs", () => {
+    for (const url of [
+      "/setup-api/chat/tabs",
+      "/setup-api/chat/transcribe",
+      "/setup-api/hermes/chat",
+      "/setup-api/tts/speak",
+      "/setup-api/tts/sample",
+      "/setup-api/tts/warm",
+      "/setup-api/local-ai/llamacpp/v1/chat/completions",
+      "/setup-api/local-ai/ollama/api/chat",
+      "/setup-api/local-ai/embed/v1/embeddings",
+    ]) {
+      expect(verdict(url, "POST")).toBe("allow");
+    }
   });
 
   it("the gateway token: refuses the Control UI page that carries it", () => {
@@ -179,5 +246,72 @@ describe("requestIntent", () => {
   it("calls a request that says nothing unknown", () => {
     expect(intent({})).toBe("unknown");
     expect(intent({ accept: "*/*" })).toBe("unknown");
+  });
+});
+
+describe("nonOwnerVerdict — the owner shares OpenClaw with every user", () => {
+  it("opens OpenClaw's app page, its Control UI pages and the page that carries the token", () => {
+    for (const url of ["/app/openclaw", "/App/OpenClaw", "/chat", "/sessions", "/settings", "/overview"]) {
+      for (const intent of ["navigation", "unknown", "fetch"] as const) {
+        expect(sharedVerdict(url, "GET", intent), `${url} ${intent}`).toBe("allow");
+      }
+    }
+    expect(sharedVerdict("/setup-api/gateway")).toBe("allow");
+    expect(sharedVerdict("/setup-api/gateway/")).toBe("allow");
+  });
+
+  it("opens the gateway's HTTP trees and the Control UI's own files — every method the owner's Control UI uses", () => {
+    for (const url of ["/api/chat", "/api/sessions", "/assets/index.js", "/__openclaw__/plugin-icon/x.png", "/avatar/main", "/control-ui-config.json", "/something.js"]) {
+      expect(sharedVerdict(url), url).toBe("allow");
+    }
+    expect(sharedVerdict("/api/sessions", "POST")).toBe("allow");
+    const owners = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:main")}/1b2c/full`;
+    expect(sharedVerdict(owners)).toBe("allow");
+  });
+
+  it("keeps the Hermes dashboard and the owner's account the owner's", () => {
+    expect(sharedVerdict("/app/hermes", "GET", "navigation")).toBe("redirect-home");
+    expect(sharedVerdict("/app/hermes", "GET", "fetch")).toBe("deny");
+    for (const [method, url] of [
+      ["GET", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials/verify"],
+      ["POST", "/setup-api/setup/reset"],
+    ]) {
+      expect(sharedVerdict(url, method), `${method} ${url}`).toBe("deny");
+    }
+  });
+
+  it("changes nothing while the switch is off or absent — exactly today's table", () => {
+    for (const shared of [undefined, false]) {
+      expect(verdict("/app/openclaw", "GET", "navigation", "alice", shared)).toBe("redirect-home");
+      expect(verdict("/chat", "GET", "navigation", "alice", shared)).toBe("redirect-home");
+      expect(verdict("/setup-api/gateway", "GET", "fetch", "alice", shared)).toBe("deny");
+      expect(verdict("/api/sessions", "GET", "fetch", "alice", shared)).toBe("deny");
+      expect(verdict("/something.js", "GET", "fetch", "alice", shared)).toBe("deny");
+    }
+  });
+
+  it("hides only Hermes from a non-owner's desktop while OpenClaw is shared", () => {
+    expect(ownerOnlyAppIds(false)).toEqual(OWNER_ONLY_APP_IDS);
+    expect(ownerOnlyAppIds(true)).toEqual(["hermes"]);
+  });
+
+  it("shares only on a literal true", () => {
+    expect(openclawSharedFrom(true)).toBe(true);
+    for (const value of [undefined, null, false, "true", 1, {}]) expect(openclawSharedFrom(value), String(value)).toBe(false);
+  });
+
+  it("names the switch and the user-chat socket path exactly as production-server.js reads them", () => {
+    const mirror = createRequire(import.meta.url)("../../../scripts/openclaw-sharing.js") as {
+      OPENCLAW_SHARED_KEY: string;
+      USER_CHAT_WS_PATH: string;
+      openclawSharedFrom: (value: unknown) => boolean;
+    };
+    expect(mirror.OPENCLAW_SHARED_KEY).toBe(OPENCLAW_SHARED_KEY);
+    expect(mirror.USER_CHAT_WS_PATH).toBe(USER_CHAT_WS_PATH);
+    for (const value of [true, false, "true", 1, null]) {
+      expect(mirror.openclawSharedFrom(value), String(value)).toBe(openclawSharedFrom(value));
+    }
   });
 });
