@@ -337,6 +337,134 @@ export async function harvestWorktree(worktreePath: string, message: string): Pr
 }
 
 /**
+ * Commits a run MADE in this worktree and left on a branch of its own — a
+ * branch it made with `git checkout -b fix/…`, or its HEAD detached there —
+ * that `branch`, the one the box gave it, does not hold. Oldest first.
+ *
+ * "Made here" is read off this worktree's own HEAD reflog: the entries that
+ * wrote a commit (a commit, an amend, a cherry-pick, a revert, a rebase's
+ * picks, a merge commit). A commit HEAD merely stood on — a base branch the
+ * run checked out, a sibling worker's commit — is never one, and a commit no
+ * branch holds any more (amended, reset away) was undone by the run itself.
+ * A coding team's or another run's branch is never a source.
+ */
+export async function ownBranchWork(worktreePath: string, branch: string): Promise<Array<{ name: string; commit: string }>> {
+  const ref = `refs/heads/${branch}`;
+  const given = await git(worktreePath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const log = await git(worktreePath, ["reflog", "show", "--format=%H %gs", "HEAD"]);
+  if (!ok(log)) return [];
+  const madeAt = new Map<string, number>();
+  out(log).split("\n").forEach((line, i) => {
+    const [hash, ...rest] = line.trim().split(" ");
+    if (hash && !madeAt.has(hash) && MADE_ENTRY_RE.test(rest.join(" "))) madeAt.set(hash, i);
+  });
+  if (madeAt.size === 0) return [];
+  const tip = ok(given) ? out(given) : null;
+  const held = async (commit: string) => tip !== null && ok(await git(worktreePath, ["merge-base", "--is-ancestor", commit, tip]));
+  const found: Array<{ name: string; commit: string; at: number }> = [];
+  const refs = await git(worktreePath, ["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads"]);
+  for (const line of ok(refs) ? out(refs).split("\n") : []) {
+    const [commit, name] = line.trim().split(" ");
+    if (!commit || !name || name === ref) continue;
+    const short = name.replace(/^refs\/heads\//, "");
+    if (TEAM_BRANCH_RE.test(short) || /^clawbox\/run-/.test(short)) continue;
+    const at = madeAt.get(commit);
+    if (at === undefined || found.some((f) => f.commit === commit) || (await held(commit))) continue;
+    found.push({ name: short, commit, at });
+  }
+  // A HEAD detached at a commit it made, which no branch names.
+  const symbolic = await git(worktreePath, ["symbolic-ref", "--quiet", "HEAD"]);
+  const head = await git(worktreePath, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (!ok(symbolic) && ok(head)) {
+    const commit = out(head);
+    const at = madeAt.get(commit);
+    if (at !== undefined && !found.some((f) => f.commit === commit) && !(await held(commit))) found.push({ name: commit.slice(0, 12), commit, at });
+  }
+  return found.sort((a, b) => b.at - a.at).map(({ name, commit }) => ({ name, commit }));
+}
+
+/** A HEAD reflog subject that wrote a commit (see ownBranchWork). */
+const MADE_ENTRY_RE = /^(?:commit(?: \([a-z ]+\))?|cherry-pick|revert|rebase(?: -i)? \((?:pick|reword|edit|squash|fixup)\)):|^merge .*: Merge made/;
+
+/**
+ * What a run committed on a branch of its OWN (`ownBranchWork`), brought onto
+ * `branch` — the one the box gave it and the one everything after the run
+ * reads. A worker told to commit its work made `fix/…` with
+ * `git checkout -b` and committed there; its given branch stayed where it was
+ * forked, and finished work was rejected as NO CHANGE (team-sso0e0wq,
+ * 2026-10-29).
+ *
+ * Each such branch, oldest first: `branch` is moved forward when it is behind
+ * the work (with `merge --ff-only` when HEAD is on it, so the tree follows;
+ * with `update-ref` when it is not, so the tree does not move), else the work
+ * is merged into it. A merge git cannot do alone is aborted and HEAD put back
+ * where the run left it, so its files are still on disk; the failure says what
+ * was not brought. HEAD ends on `branch` when the run left it elsewhere at a
+ * commit `branch` now holds. `from` names what was adopted, null when nothing
+ * needed to be. The run's own branches are left where they are.
+ */
+export async function adoptOwnBranchWork(worktreePath: string, branch: string): Promise<{ ok: true; from: string | null } | { ok: false; detail: string }> {
+  const ref = `refs/heads/${branch}`;
+  const tipOf = async () => {
+    const r = await git(worktreePath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return ok(r) && out(r) ? out(r) : null;
+  };
+  if (!(await tipOf())) {
+    // Not a repository git can read here: nothing to say, and the caller's
+    // own steps report it. A repository without the branch: said.
+    if (!ok(await git(worktreePath, ["rev-parse", "--git-dir"]))) return { ok: true, from: null };
+    return { ok: false, detail: `${branch}, the branch this work belongs on, is gone from the repository.` };
+  }
+  const symbolic = await git(worktreePath, ["symbolic-ref", "--quiet", "HEAD"]);
+  const headRef = ok(symbolic) && out(symbolic) ? out(symbolic) : null;
+  const headAt = await git(worktreePath, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  const head = ok(headAt) ? out(headAt) : null;
+  // Where the run left HEAD, to put it back if a merge fails.
+  const leftAt = headRef ? headRef.replace(/^refs\/heads\//, "") : head;
+  let onGiven = headRef === ref;
+  const adopted: string[] = [];
+  for (const source of await ownBranchWork(worktreePath, branch)) {
+    const tip = await tipOf();
+    if (!tip) return { ok: false, detail: `${branch} went from the repository while ${source.name} was being brought onto it.` };
+    if (ok(await git(worktreePath, ["merge-base", "--is-ancestor", source.commit, tip]))) continue;
+    if (ok(await git(worktreePath, ["merge-base", "--is-ancestor", tip, source.commit]))) {
+      const moved = onGiven
+        ? await git(worktreePath, ["merge", "--ff-only", "-q", source.commit])
+        : await git(worktreePath, ["update-ref", ref, source.commit, tip]);
+      if (!ok(moved)) return { ok: false, detail: failed(moved, `Bringing ${source.name} onto ${branch}`) };
+      adopted.push(source.name);
+      continue;
+    }
+    // Forked from somewhere else: merged into the given branch, in this worktree.
+    const as = await asBox(worktreePath);
+    if (!as.ok) return { ok: false, detail: as.detail };
+    if (!onGiven) {
+      const back = await git(worktreePath, ["checkout", "-q", branch]);
+      if (!ok(back)) return { ok: false, detail: failed(back, `Checking ${branch} out to bring ${source.name} onto it`) };
+      onGiven = true;
+    }
+    const merged = await git(worktreePath, [...as.args, "merge", "--no-ff", "--no-edit", "-m", `Bring ${source.name} onto ${branch}`, source.commit]);
+    if (!ok(merged)) {
+      await git(worktreePath, ["merge", "--abort"]);
+      if (headRef !== ref && leftAt) await git(worktreePath, ["checkout", "-q", leftAt]);
+      return { ok: false, detail: failed(merged, `Merging ${source.name} into ${branch}`) };
+    }
+    adopted.push(source.name);
+  }
+  if (!onGiven && head) {
+    const tip = await tipOf();
+    if (tip === head) await git(worktreePath, ["symbolic-ref", "HEAD", ref]);
+    else if (tip && ok(await git(worktreePath, ["merge-base", "--is-ancestor", head, tip]))) await git(worktreePath, ["checkout", "-q", branch]);
+  }
+  return { ok: true, from: adopted.length ? adopted.join(", ") : null };
+}
+
+/** What failed, then git's own words on one line: a board note quotes the first line only. */
+function failed(r: ChildResult, what: string): string {
+  return `${what} failed: ${failureDetail(r, what).replace(/\s+/g, " ").trim()}`;
+}
+
+/**
  * Of `files` (relative to the worktree), the ones git could have committed:
  * still there, and not ignored. A scratch file the worker wrote and deleted,
  * or a log the project's .gitignore covers, never reaches a branch whatever
