@@ -160,6 +160,24 @@ describe("POST", () => {
     }
   });
 
+  it("answers the assistant's start on the work of a team the owner stopped 409 with code owner_stopped, and lists no failed start", async () => {
+    const { OwnerStoppedTeamError } = await import("@/lib/coding-agent");
+    const { listCodingStarts, resetCodingStartsForTests } = await import("@/lib/coding-run-starts");
+    resetCodingStartsForTests();
+    team.startTeam.mockRejectedValueOnce(new OwnerStoppedTeamError("team-stop0001", "The owner stopped coding team team-stop0001 on this work."));
+    const res = await POST(req("team", { goal: "Build it", directory: "site" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The owner stopped coding team team-stop0001 on this work.", kind: "busy", code: "owner_stopped" });
+    expect(listCodingStarts()).toEqual([]);
+  });
+
+  it("hands userAskedAgain to startTeam only when the body says true", async () => {
+    await POST(req("team", { goal: "Build it", directory: "site", userAskedAgain: true }));
+    expect(team.startTeam).toHaveBeenLastCalledWith({ goal: "Build it", projectId: null, directory: "site", source: "agent", userAskedAgain: true });
+    await POST(req("team", { goal: "Build it", directory: "site", userAskedAgain: "yes" }));
+    expect(team.startTeam).toHaveBeenLastCalledWith({ goal: "Build it", projectId: null, directory: "site", source: "agent" });
+  });
+
   it("answers 409 not_ready with the role, the provider and why, when a team role's account cannot run", async () => {
     const { CodingAgentError } = await import("@/lib/coding-agent");
     const words = "The team's reviewer runs on Anthropic (anthropic), which cannot run right now: Anthropic is not connected on this ClawBox. Connect it, or choose another provider for the reviewer under Team models in the Coding Agent settings.";

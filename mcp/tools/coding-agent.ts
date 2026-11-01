@@ -184,7 +184,23 @@ const EFFORT_CHOICE_NEXT = `Pass one of ${OFFERED_EFFORT_LEVELS.join(", ")} as e
 const SWITCH_NEXT =
   "Do not retry. Tell the user the coding agent is switched off and that they can turn it on in the Coding Agent app on the ClawBox desktop.";
 
+/**
+ * The box's refusal to start again the work of a team the owner stopped
+ * (coding-team.ts ownerStopRefusal) — first in the run and team rules, ahead
+ * of their `busy`, which it also carries.
+ */
+const OWNER_STOPPED_RULE: ErrorRule = {
+  status: 409,
+  match: /"code":\s*"owner_stopped"/,
+  code: "CONFLICT",
+  message: "The owner stopped a coding team on this work, and a team the owner stopped stays stopped.",
+  next: "Do not start it again, as a team or a run. Tell the user it is stopped and stop. Only if the user asked, in a message after the stop, for this work to start again: call again with user_asked_again true.",
+};
+
+const USER_ASKED_AGAIN_DESCRIPTION = "true ONLY when the user asked, in a message after the owner stopped a team on this work, to start it again.";
+
 const RUN_RULES: ErrorRule[] = [
+  OWNER_STOPPED_RULE,
   {
     status: 409,
     match: /"kind":\s*"disabled"/,
@@ -1147,12 +1163,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
       fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
+      user_asked_again: zBool(false, USER_ASKED_AGAIN_DESCRIPTION),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, effort, deliverable_files, input_files, fix_ci }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, effort, deliverable_files, input_files, fix_ci, user_asked_again }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; effort?: string; deliverable_files?: string;
-      input_files?: string; fix_ci?: boolean;
+      input_files?: string; fix_ci?: boolean; user_asked_again?: boolean;
     }) => {
       if (fix_ci === true && !resume_run_id) {
         throw new ToolError("BAD_ARGUMENT", "fix_ci continues the run whose pull request failed its checks.", "Pass that run's id as resume_run_id with fix_ci.");
@@ -1190,6 +1207,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       if (directory) body.directory = directory;
       if (resume_run_id) body.resumeRunId = resume_run_id;
       if (fix_ci === true) body.fixCi = true;
+      if (user_asked_again === true) body.userAskedAgain = true;
       // Only what the caller actually named travels: sending the resolved
       // default would override the owner's stored choice with this process's
       // idea of it, and silently move a run to another account.
@@ -1521,9 +1539,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         MAX_RUN_MESSAGE_CHARS,
         "Plain text the run reads as it resumes: what it missed, or what the user wants done differently. Not a new task.",
       ),
+      user_asked_again: zBool(false, USER_ASKED_AGAIN_DESCRIPTION),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 2_000 },
-    async ({ run_id, message }: { run_id: string; message?: string }) => {
+    async ({ run_id, message, user_asked_again }: { run_id: string; message?: string; user_asked_again?: boolean }) => {
       const before = await apiGet<{ run?: RunPayload }>("/setup-api/coding-agent/runs", {
         query: { id: run_id },
         timeoutMs: 15_000,
@@ -1576,12 +1595,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       }
       let res: { run?: RunPayload };
       try {
-        res = await apiPost<{ run?: RunPayload }>("/setup-api/coding-agent/resume", { runId: run_id }, {
+        res = await apiPost<{ run?: RunPayload }>("/setup-api/coding-agent/resume", { runId: run_id, ...(user_asked_again === true ? { userAskedAgain: true } : {}) }, {
           // The resume passes the same gates a start does — the switch, the
           // harness, the folder, one run at a time — and may re-create the
           // run's copy of the project from its branch first.
           timeoutMs: 30_000,
           rules: [
+            OWNER_STOPPED_RULE,
             {
               status: 403,
               code: "CONFLICT",
@@ -1943,8 +1963,9 @@ interface TeamPayload {
 const MAX_GOAL_CHARS = 4_000;
 
 // The team's own "busy" first: the run rules carry one too, and the first
-// match wins.
+// match wins — after the owner's stop, which is a `busy` too.
 const TEAM_RULES: ErrorRule[] = [
+  OWNER_STOPPED_RULE,
   {
     status: 409,
     match: /"kind":\s*"busy"/,
@@ -2043,9 +2064,12 @@ export function startedContent(
 }
 
 const TEAM_SETTLE_WORD: Record<Ed, string> = {
-  openclaw: "ClawBox posts in this chat when the team finishes; do not poll it or schedule a watcher.",
+  openclaw: "ClawBox posts in this chat when the team finishes (not when the owner stops it); do not poll it or schedule a watcher.",
   hermes: "ClawBox tells the user on the desktop when the team finishes; do not poll it or schedule a watcher — look again only when they ask.",
 };
+
+/** Only the owner stops a team (coding-team-board.ts setTeamStatus), and it stays stopped. */
+const OWNER_STOPPED_WORD = "The owner stopped this team, and it stays stopped: do not start it again, or another team or run for its goal, unless the user asks for that in a new message. Tell the user it is stopped and what was done before the stop, then stop.";
 
 function describeTeam(team: TeamPayload, withLog: boolean, edition: Ed): string {
   const parts: string[] = [];
@@ -2134,6 +2158,8 @@ function describeTeam(team: TeamPayload, withLog: boolean, edition: Ed): string 
     parts.push("Every task is complete and accepted. Summarise the task results for the user, naming the files.");
   } else if (team.status === "failed") {
     parts.push("The team stopped short. Tell the user what failed; a fresh coding_agent_run on the unfinished part is the way on.");
+  } else if (team.status === "stopped") {
+    parts.push(OWNER_STOPPED_WORD);
   }
   return parts.join("\n");
 }
@@ -2149,12 +2175,14 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
       effort: zEnumOf(OFFERED_EFFORT_LEVELS, TEAM_EFFORT_PARAM_DESCRIPTION).optional(),
+      user_asked_again: zBool(false, USER_ASKED_AGAIN_DESCRIPTION),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ goal, project_id, directory, effort }: { goal: string; project_id?: string; directory?: string; effort?: string }) => {
+    async ({ goal, project_id, directory, effort, user_asked_again }: { goal: string; project_id?: string; directory?: string; effort?: string; user_asked_again?: boolean }) => {
       const body: Record<string, unknown> = { goal };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
+      if (user_asked_again === true) body.userAskedAgain = true;
       // Only a named effort travels (coding_agent_run's rule): omitted, the owner's setting stands.
       if (effort) body.effort = effort;
       let res: { started?: boolean; queued?: boolean; team?: TeamPayload };
@@ -2222,6 +2250,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           complete: t.tasks.filter((x) => x.status === "complete").length,
           tasks_done: t.tasks.filter((x) => x.status === "complete").length,
           alerts: t.alerts,
+          ...(t.status === "stopped" ? { stopped_by: "the owner; do not start it again unless the user asks in a new message" } : {}),
           ...(t.singleRun ? { single_run: true } : t.advice ? { advice: t.advice.reason === "one_task" ? "a single run would have been cheaper: one task" : `a single run would have been cheaper: ${t.advice.overlap}% of the files overlap` } : {}),
         })));
       }

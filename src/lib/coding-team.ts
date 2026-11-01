@@ -82,10 +82,12 @@ import {
   getTeamDynamic,
   harnessStateDir,
   isCodingAgentEnabled,
+  listRuns,
   MAX_TASK_CHARS,
   MAX_TEAM_WORKERS,
   MAX_WAIT_MS,
   noteTeamMessageSent,
+  OwnerStoppedTeamError,
   queueRunMessage,
   readTokenBreakdown,
   resolveWorkingDirectory,
@@ -238,6 +240,12 @@ export interface StartTeamInput {
    * role caps and the read-only clamp still apply. Absent: the owner's setting.
    */
   effort?: unknown;
+  /**
+   * The assistant's word that the user asked, in a message after the owner
+   * stopped a team on this work, for it to start again — the only way past
+   * `ownerStopRefusal` for a start with `source: "agent"`.
+   */
+  userAskedAgain?: boolean;
 }
 
 interface LiveTeam {
@@ -347,6 +355,11 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   }
   const effort = isOfferedEffort(input.effort) ? input.effort : null;
   const { directory, projectId } = await resolveWorkingDirectory({ projectId: input.projectId ?? null, directory: input.directory ?? null });
+  if (input.source === "agent" && input.userAskedAgain !== true) {
+    const held = ownerStopRefusal({ directory, text: goal });
+    if (held) throw held;
+  }
+  const releasesHold = input.source === "agent" && input.userAskedAgain === true;
   // Before anything is made or spawned: a team whose planner, workers or
   // reviewers sit on an account that cannot run would fail at its first run
   // of that role — the reviewer's, minutes in, after the work was paid for.
@@ -369,11 +382,101 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   if (busy || waiting.length) {
     setTeamStatus(board, SYSTEM, "queued", busy ? `Waiting for team ${busy} to finish` : `Waiting behind ${waiting.length} queued team(s)`);
     saveBoard(board);
+    if (releasesHold) releaseOwnerStopHold({ directory, text: goal });
     return snapshot(board);
   }
   saveBoard(board);
+  if (releasesHold) releaseOwnerStopHold({ directory, text: goal });
   launchTeam(board);
   return snapshot(board);
+}
+
+/** A goal or a task compared as words: case and spacing aside. */
+function sameWork(a: string, b: string): boolean {
+  const words = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  return words(a) === words(b);
+}
+
+/** What an assistant's start would work on: its folder, its words, and the run it resumes. */
+export interface OwnerStopWork {
+  directory: string;
+  text: string;
+  runId?: string | null;
+}
+
+/**
+ * Is `work` the work of `board`? Its folder — the team's own, or a worktree or
+ * folder inside it, which is where its workers ran — its goal in other spacing
+ * or case, or one of its own runs resumed.
+ */
+function isTeamsWork(board: TeamBoard, work: OwnerStopWork): boolean {
+  return isInside(work.directory, board.directory)
+    || sameWork(board.goal, work.text)
+    || (!!work.runId && board.runs.some((ref) => ref.id === work.runId));
+}
+
+/** The assistant's teams the owner stopped whose hold is still on, the latest stop first. */
+function heldBoards(work: OwnerStopWork): TeamBoard[] {
+  const stoppedAt = (b: TeamBoard) => b.finishedAt ?? b.updatedAt;
+  return listBoards()
+    .filter((b) => b.source === "agent" && b.status === "stopped" && b.holdReleasedAt === undefined && isTeamsWork(b, work))
+    .sort((a, b) => stoppedAt(b) - stoppedAt(a));
+}
+
+/**
+ * The refusal for a start by the assistant — a team, a run, or a resume —
+ * on the work of a team of ITS OWN that the owner stopped, or null. A team
+ * the owner stopped stays stopped: the assistant starts that work again only
+ * when the user asks for it in a new message, which its tools pass as
+ * `userAskedAgain`, and that start lifts the hold (`releaseOwnerStopHold`).
+ * Nothing else does — not time, not a run the box starts by itself there,
+ * not the owner's own work in that folder. An owner's team holds nothing: the
+ * assistant cannot read it, so it has none of its own to start again, and
+ * the refusal would hand its id and goal to the bearer.
+ */
+export function ownerStopRefusal(work: OwnerStopWork): OwnerStoppedTeamError | null {
+  const [board] = heldBoards(work);
+  if (!board) return null;
+  return new OwnerStoppedTeamError(
+    board.id,
+    `The owner stopped coding team ${board.id} on this work ("${firstLine(board.goal, 120)}"), and a team the owner stopped stays stopped. `
+    + "Start it again only when the user asks for that in a new message.",
+  );
+}
+
+/**
+ * The user asked again: the assistant's start with `userAskedAgain` on this
+ * work has gone through, and the teams the owner stopped on it hold nothing
+ * more. Never throws; a hold that could not be lifted asks once more.
+ */
+export function releaseOwnerStopHold(work: OwnerStopWork): void {
+  try {
+    for (const found of heldBoards(work)) {
+      // The live copy when the team is still winding down, so its own last
+      // save cannot write the hold back.
+      const board = live.get(found.id)?.board ?? found;
+      board.holdReleasedAt = Date.now();
+      saveBoard(board);
+    }
+  } catch (err) {
+    console.error("[coding-team] could not lift an owner's-stop hold:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * The work of a run the assistant asks the run or resume route for, as
+ * `startRun` will place it: the run it resumes (its folder and id), else the
+ * project or folder named, else the owner's default. Null when it cannot be
+ * placed: `startRun` refuses that with its own sentence, and nothing holds it.
+ */
+export async function ownerStopWorkForRun(input: { task: string; projectId: string | null; directory: string | null; resumeRunId: string | null }): Promise<OwnerStopWork | null> {
+  try {
+    const previous = input.resumeRunId ? getRun(input.resumeRunId) : null;
+    const directory = previous?.directory ?? (await resolveWorkingDirectory({ projectId: input.projectId, directory: input.directory })).directory;
+    return { directory, text: input.task, runId: input.resumeRunId };
+  } catch {
+    return null;
+  }
 }
 
 /** "planner", "planner and reviewer", "planner, worker and reviewer". */
@@ -460,8 +563,12 @@ function launchTeam(board: TeamBoard): void {
  * bearer 403 `owner_only` on it), and the line would tell the assistant a
  * board's id, counts and branch and send it to a status it cannot read. A
  * single-run team's run has no `team` and settled the owner's usual way,
- * with its own card, so the team sends only the chat line. Best-effort,
- * like every notice: one that does not arrive changes nothing on the board.
+ * with its own card, so the team sends only the chat line. Never for a team
+ * the owner STOPPED: the line is a turn in the assistant's chat, and handed
+ * a stopped team with its goal unfinished the assistant started the team
+ * again on its own. The owner made the stop and sees it; the assistant reads
+ * it in `coding_team_status` when the user asks. Best-effort, like every
+ * notice: one that does not arrive changes nothing on the board.
  */
 function announceTeamSettled(board: TeamBoard): void {
   if (!board.singleRun) {
@@ -469,7 +576,7 @@ function announceTeamSettled(board: TeamBoard): void {
       console.error("[coding-team] notice failed:", err instanceof Error ? err.message : err);
     });
   }
-  if (board.source !== "agent") return;
+  if (board.source !== "agent" || board.status === "stopped") return;
   void postTeamFinishedToOwnerAgent(board).catch((err: unknown) => {
     console.error(`[coding-team] the chat was not told that ${board.id} finished:`, err instanceof Error ? err.message : err);
   });
@@ -666,7 +773,9 @@ export async function closeOrphanedTeams(): Promise<number> {
         console.error(`[coding-team] could not close ${board.id} after the restart:`, err instanceof Error ? err.message : err);
         const now = loadBoard(board.id);
         if (now && !isSettledStatus(now.status)) {
-          setTeamStatus(now, SYSTEM, "failed", `${RESTARTED} Its worktrees could not be closed: ${firstLine(err instanceof Error ? err.message : String(err), 300)}`);
+          // The owner's stop while the sweep closed it stands, as in closeOrphanedTeam.
+          if (sweeping.get(board.id)?.stopRequested) setTeamStatus(now, OWNER, "stopped", "Stopped by the owner");
+          else setTeamStatus(now, SYSTEM, "failed", `${RESTARTED} Its worktrees could not be closed: ${firstLine(err instanceof Error ? err.message : String(err), 300)}`);
           saveBoard(now);
           announceTeamSettled(now);
         }
