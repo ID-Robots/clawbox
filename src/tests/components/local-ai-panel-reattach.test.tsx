@@ -51,7 +51,7 @@ function runningTask(kind: string, id = "task-1") {
   };
 }
 
-function stubFetch(opts: { tasks?: unknown[]; follow?: () => Response; post?: (url: string) => Response }) {
+function stubFetch(opts: { tasks?: unknown[]; follow?: () => Response; post?: (url: string) => Response; models?: unknown[] }) {
   const calls: { url: string; method: string }[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -60,7 +60,7 @@ function stubFetch(opts: { tasks?: unknown[]; follow?: () => Response; post?: (u
     if (method === "POST") return opts.post?.(url) ?? json({ ok: true });
     if (url.startsWith("/setup-api/background-jobs/tasks/follow")) return opts.follow?.() ?? json({ error: "x" }, 404);
     if (url.startsWith("/setup-api/background-jobs/tasks")) return json({ tasks: opts.tasks ?? [] });
-    if (url.startsWith("/setup-api/local-models")) return json({ models: MODELS, unavailable: [] });
+    if (url.startsWith("/setup-api/local-models")) return json({ models: opts.models ?? MODELS, unavailable: [] });
     if (url.startsWith("/setup-api/providers/status")) return json({ providers: [] });
     if (url.startsWith("/setup-api/tts")) return json({ choice: "auto", engines: [] });
     if (url.startsWith("/setup-api/stt")) return json({ primary: "cloud", engines: { cloud: { configured: true }, local: { installed: false } }, chain: ["cloud"] });
@@ -96,6 +96,38 @@ describe("LocalAiPanel re-attaching to a background install", () => {
     await waitFor(() => expect(screen.queryByTestId("local-model-progress-whisper")).toBeNull());
     expect(screen.queryByTestId("local-model-background-whisper")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("follows the memory model's first download on its row, and leaves an installed one's to the card", async () => {
+    const embeddings = (installed: boolean) => model({
+      id: "embeddings", name: "Memory search", kind: "embedding", runtime: "llama.cpp", installed,
+      running: installed ? "on-demand" : "not-installed", control: "system-unit", detail: installed ? "Ready." : "Not installed.",
+    });
+    const stream = controlledStream();
+    const calls = stubFetch({ models: [...MODELS, embeddings(false)], tasks: [runningTask("embed-model-download")], follow: () => stream.response });
+    renderPanel();
+
+    stream.send({ taskId: "task-1", kind: "embed-model-download", status: "Fetching the memory-search model…" });
+    expect(await screen.findByTestId("local-model-progress-embeddings")).toHaveTextContent("Fetching the memory-search model…");
+    expect(calls.some((c) => c.url === "/setup-api/background-jobs/tasks/follow?id=task-1")).toBe(true);
+    stream.send({ success: true, taskId: "task-1" });
+    stream.close();
+    await waitFor(() => expect(screen.queryByTestId("local-model-progress-embeddings")).toBeNull());
+  });
+
+  it("does not follow an installed memory model's download on the row: its card does", async () => {
+    const installed = model({
+      id: "embeddings", name: "Memory search", kind: "embedding", runtime: "llama.cpp", installed: true,
+      running: "on-demand", control: "system-unit", detail: "Ready.",
+    });
+    const calls = stubFetch({ models: [...MODELS, installed], tasks: [runningTask("embed-model-download")] });
+    renderPanel();
+    await screen.findByText("Memory search");
+    await waitFor(() => expect(calls.some((c) => c.url === "/setup-api/background-jobs/tasks")).toBe(true));
+    // One follower — the card under the row — never the row as well.
+    await waitFor(() => expect(calls.filter((c) => c.url === "/setup-api/background-jobs/tasks/follow?id=task-1")).toHaveLength(1));
+    expect(screen.queryByTestId("local-model-progress-embeddings")).toBeNull();
+    expect(screen.queryByTestId("local-model-background-embeddings")).toBeNull();
   });
 
   it("shows the verdict of a re-attached install that failed", async () => {

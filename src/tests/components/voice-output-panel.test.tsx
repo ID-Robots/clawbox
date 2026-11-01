@@ -738,6 +738,46 @@ describe("channel voice notes", () => {
     await waitFor(() => expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull());
   });
 
+  it("follows a repair already running again when the tab reopens, instead of offering it as idle", async () => {
+    // The install is a background task of the box: closing Settings left it
+    // running, and pressing the button again would only have followed it.
+    let ended = false;
+    let finish!: () => void;
+    const follow = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"taskId":"k1","kind":"voice-kokoro-install","status":"Installing…"}\n'));
+        finish = () => {
+          ended = true;
+          controller.enqueue(new TextEncoder().encode('{"success":true,"taskId":"k1"}\n'));
+          controller.close();
+        };
+      },
+    });
+    const running = {
+      id: "k1", kind: "voice-kokoro-install", group: "g", title: "Installing the voice", meta: null, state: "running",
+      steps: [{ id: "install", label: "Install Kokoro and register the voice", state: "running", weight: 1 }],
+      status: "  Installing Kokoro TTS...", completed: null, total: null, startedAt: 1, updatedAt: 2, stepStartedAt: 1,
+      finishedAt: null, error: null, result: null, log: [], logCount: 0, runner: "r", dismissed: false,
+      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, percent: null, etaSeconds: null,
+    };
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === "/setup-api/background-jobs/tasks") return json({ tasks: [running] });
+      if (url === "/setup-api/background-jobs/tasks/follow?id=k1") return new Response(follow, { status: 200 });
+      if (url === "/setup-api/background-jobs/tasks?id=k1") return json({ task: running });
+      if (init?.method === "POST") throw new Error(`no POST expected: ${url}`);
+      return json(status({ ...channels(ended), autoReply: true }));
+    }));
+    render(<VoiceOutputPanel active />);
+
+    const button = await screen.findByTestId("voice-channel-voice-notes-fix");
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(await screen.findByTestId("voice-channel-voice-notes-task")).toHaveTextContent("Installing Kokoro TTS...");
+    finish();
+    await waitFor(() => expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull());
+  });
+
   it("says the repair did not finish, rather than clearing the warning it did not fix", async () => {
     mockFetch(status({ ...channels(false), autoReply: true }), {
       install: '{"error":"The voice install did not finish."}\n',

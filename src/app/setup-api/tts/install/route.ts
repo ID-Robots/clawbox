@@ -13,7 +13,6 @@ import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { uninstallKokoro } from "@/lib/kokoro-uninstall";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { followRootStep } from "@/lib/root-step-follow";
 import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
 
 /**
@@ -84,10 +83,12 @@ export async function POST(req: Request) {
     steps: [{ id: "install", label: "Install Kokoro and register the voice" }],
     async run(task) {
       task.step("install");
-      const result = await followRootStep("voice_kokoro_install", {
+      // Through the task, so a web server that restarts mid-install follows
+      // the same unit again; the unit is the whole install.
+      const result = await task.rootStep("voice_kokoro_install", {
         timeoutMs: INSTALL_TIMEOUT_MS,
         label: "the voice install",
-        onStatus: (line) => task.status(line),
+        finishes: { status: "The voice on this box is installed." },
       });
       if (!result.ok) throw new BackgroundTaskFailure(result.error || "The voice install did not finish.");
       return { status: "The voice on this box is installed." };

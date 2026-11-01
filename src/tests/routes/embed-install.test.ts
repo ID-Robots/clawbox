@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { resetBackgroundTasksForTests } from "@/lib/background-tasks";
 
 /**
  * /setup-api/embed/install — the memory-search model's own two verbs.
@@ -45,11 +46,23 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-embed-"));
   modelPath = path.join(dir, "qwen3-embedding.gguf");
   owner.value = true;
-  followed.mockClear().mockResolvedValue({ ok: true, error: undefined });
+  followed.mockReset().mockResolvedValue({ ok: true, error: undefined });
   stopped.mockClear();
+  resetBackgroundTasksForTests();
 });
 
-afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  resetBackgroundTasksForTests();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+const post = (body?: unknown) => new Request("http://localhost/x", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: body === undefined ? undefined : JSON.stringify(body),
+});
+/** Where "Download again" keeps the old copy: beside the models directory. */
+const aside = () => path.join(path.dirname(path.dirname(modelPath)), `${path.basename(modelPath)}.previous`);
 
 describe("POST", () => {
   it("does not spend a root unit on a model that is already here", async () => {
@@ -79,6 +92,96 @@ describe("POST", () => {
     await readStream(await POST(new Request("http://localhost/x", { method: "POST" })));
     expect(followed).toHaveBeenCalledWith("embed_model", expect.anything());
   });
+
+  it("does not call a step that left no model a success", async () => {
+    // install.sh's step exits 0 when the Hugging Face CLI is missing; the
+    // stream used to close {success} over a box with no model.
+    const { POST } = await load();
+    const lines = await readStream(await POST(post()));
+    expect(lines.at(-1)).toMatchObject({ error: expect.stringContaining("not on this box") });
+    expect(lines.at(-1)?.success).toBeUndefined();
+  });
+
+  it("closes {success} once the step has put the model on the box, and names the task first", async () => {
+    followed.mockImplementation(async () => {
+      fs.writeFileSync(modelPath, "weights");
+      return { ok: true, error: undefined };
+    });
+    const { POST } = await load();
+    const lines = await readStream(await POST(post()));
+    expect(lines[0]).toMatchObject({ taskId: expect.any(String), kind: "embed-model-download" });
+    expect(lines.at(-1)).toMatchObject({ success: true, status: "The memory-search model is on this box." });
+  });
+
+  it("moves the old copy aside for Download again, and puts it back when the new one never arrives", async () => {
+    fs.writeFileSync(modelPath, "truncated");
+    let sawAside = false;
+    followed.mockImplementation(async () => {
+      // The step answers "already cached" for any file at the path: it must not see one.
+      sawAside = !fs.existsSync(modelPath) && fs.existsSync(aside());
+      return { ok: false, error: "Error: failed to download the memory-search model" };
+    });
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ force: true })));
+
+    expect(sawAside).toBe(true);
+    expect(lines.at(-1)).toMatchObject({ error: "Error: failed to download the memory-search model" });
+    expect(fs.readFileSync(modelPath, "utf-8")).toBe("truncated");
+    expect(fs.existsSync(aside())).toBe(false);
+    expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("replaces the copy on Download again, drops the old one and stops the embedder holding it", async () => {
+    fs.writeFileSync(modelPath, "truncated");
+    followed.mockImplementation(async () => {
+      fs.writeFileSync(modelPath, "fresh weights");
+      return { ok: true, error: undefined };
+    });
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ force: true })));
+
+    expect(lines.at(-1)).toMatchObject({ success: true });
+    expect(fs.readFileSync(modelPath, "utf-8")).toBe("fresh weights");
+    expect(fs.existsSync(aside())).toBe(false);
+    expect(stopped).toHaveBeenCalledWith("embed");
+  });
+
+  it("puts back a copy a download that died left aside, before deciding anything", async () => {
+    fs.writeFileSync(aside(), "the old copy");
+    followed.mockImplementation(async () => ({ ok: true, error: undefined }));
+    const { POST } = await load();
+    const lines = await readStream(await POST(post()));
+    expect(fs.readFileSync(modelPath, "utf-8")).toBe("the old copy");
+    expect(lines.at(-1)).toMatchObject({ success: true });
+  });
+
+  it("runs on when the stream that started it goes, and a second POST follows the same download", async () => {
+    let release!: () => void;
+    followed.mockImplementation(() => new Promise((resolve) => {
+      release = () => {
+        fs.writeFileSync(modelPath, "weights");
+        resolve({ ok: true, error: undefined });
+      };
+    }));
+    const { POST, DELETE } = await load();
+    const first = await POST(post());
+    const reader = first.body!.getReader();
+    const firstLine = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await reader.cancel();
+    await new Promise((r) => setImmediate(r));
+
+    const busy = await DELETE(new Request("http://localhost/setup-api/embed/install", { method: "DELETE" }));
+    expect(busy.status).toBe(409);
+    expect(await busy.json()).toMatchObject({ code: "busy", taskId: firstLine.taskId });
+
+    const second = await POST(post());
+    await vi.waitFor(() => expect(followed).toHaveBeenCalled());
+    release();
+    const lines = await readStream(second);
+    expect(lines[0].taskId).toBe(firstLine.taskId);
+    expect(lines.at(-1)).toMatchObject({ success: true, taskId: firstLine.taskId });
+    expect(followed).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("DELETE", () => {
@@ -97,6 +200,14 @@ describe("DELETE", () => {
     expect(body.installed).toBe(false);
     expect(stopped).toHaveBeenCalledWith("embed");
     expect(fs.existsSync(modelPath)).toBe(false);
+  });
+
+  it("drops a copy a dead Download again left aside, so it is not put back later", async () => {
+    fs.writeFileSync(modelPath, "weights");
+    fs.writeFileSync(aside(), "old");
+    const { DELETE } = await load();
+    expect((await DELETE(del())).status).toBe(200);
+    expect(fs.existsSync(aside())).toBe(false);
   });
 
   it("answers 404 when there is nothing to remove, and touches the engine either way not at all", async () => {

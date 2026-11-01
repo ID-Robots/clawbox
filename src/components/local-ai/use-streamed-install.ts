@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/lib/format-bytes";
 import { useT } from "@/lib/i18n";
-import { readInstallStream, type InstallOutcome, type InstallProgress } from "@/lib/install-stream";
+import { followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
+import type { InstallOutcome, InstallProgress } from "@/lib/install-stream";
 
 type Translate = ReturnType<typeof useT>["t"];
 
@@ -55,10 +56,24 @@ export interface StreamedInstall {
   busy: string | null;
   progress: InstallProgress | null;
   outcome: InstallOutcome | null;
+  /**
+   * The background task (src/lib/background-tasks.ts) the stream in flight
+   * follows, once its first line named it — what the card draws its steps,
+   * time left, log and Cancel from. Null for a route that answered without one.
+   */
+  taskId: string | null;
   /** Clear the last verdict — what a card does when the owner changes the subject. */
   reset: () => void;
   run: (key: string, request: (signal: AbortSignal) => Promise<Response>) => Promise<boolean>;
-  /** Stop the stream in flight. The box is told by the request being dropped. */
+  /**
+   * Re-attach to a task already running — a Settings reopened mid-download —
+   * through the same reader, spinner and verdict as the click that started it.
+   */
+  follow: (key: string, taskId: string) => Promise<boolean>;
+  /**
+   * Stop READING the stream in flight. The work is a background task of the
+   * box and goes on; stopping it is the task's own Cancel.
+   */
   cancel: () => void;
 }
 
@@ -67,7 +82,12 @@ export function useStreamedInstall(): StreamedInstall {
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<InstallProgress | null>(null);
   const [outcome, setOutcome] = useState<InstallOutcome | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Which run is the current one: a run that settles after a newer one began
+  // (a click in the moment before a re-attach answered) must not clear the
+  // newer one's spinner, task or verdict.
+  const runRef = useRef(0);
 
   const reset = useCallback(() => {
     setProgress(null);
@@ -78,12 +98,23 @@ export function useStreamedInstall(): StreamedInstall {
     abortRef.current?.abort();
   }, []);
 
+  // A card that unmounts (Settings closed) stops reading. Every install these
+  // cards start is a background task of the box, which the stream only
+  // follows: the work runs on, the corner card keeps drawing it, and the card
+  // follows it again when Settings reopens.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const refusalText = useCallback(
     (data: Record<string, unknown>) => describeRefusal(t, locale, data),
     [locale, t],
   );
 
   const run = useCallback(async (key: string, request: (signal: AbortSignal) => Promise<Response>) => {
+    // One reader at a time; the work behind an older one is the box's and
+    // goes on.
+    abortRef.current?.abort();
+    const mine = ++runRef.current;
+    const current = () => runRef.current === mine;
     const controller = new AbortController();
     abortRef.current = controller;
     setBusy(key);
@@ -93,24 +124,42 @@ export function useStreamedInstall(): StreamedInstall {
       const res = await request(controller.signal);
       if (!res.ok) {
         const data = await res.json().catch(() => ({} as Record<string, unknown>));
-        setOutcome({ ok: false, error: refusalText(data as Record<string, unknown>) });
+        if (current()) setOutcome({ ok: false, error: refusalText(data as Record<string, unknown>) });
         return false;
       }
-      const settled = await readInstallStream(res, setProgress);
-      setOutcome(settled.ok ? { ok: true } : { ok: false, error: settled.error ?? t("localModels.error.changeFailed") });
+      const settled = await readTaskStream(res, (p) => { if (current()) setProgress(p); }, (id) => {
+        if (current()) setTaskId(id);
+        // The desktop's corner card asks at once rather than at its next poll.
+        notifyBackgroundTaskStarted(id);
+      }, controller.signal);
+      if (!current()) return settled.ok;
+      setOutcome(settled.ok
+        ? { ok: true }
+        : settled.cancelled
+          ? { ok: false, cancelled: true }
+          : { ok: false, error: settled.error ?? t("localModels.error.changeFailed") });
       return settled.ok;
     } catch {
       // A stream the owner cancelled is not a failure to report: the request
       // was dropped on purpose and the row goes back to idle.
+      if (!current()) return false;
       if (controller.signal.aborted) setOutcome(null);
       else setOutcome({ ok: false, error: t("localModels.error.unreachable") });
       return false;
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      setBusy(null);
-      setProgress(null);
+      if (current()) {
+        setBusy(null);
+        setProgress(null);
+        setTaskId(null);
+      }
     }
   }, [refusalText, t]);
 
-  return { busy, progress, outcome, reset, run, cancel };
+  const follow = useCallback(
+    (key: string, id: string) => run(key, (signal) => followBackgroundTask(id, signal)),
+    [run],
+  );
+
+  return { busy, progress, outcome, taskId, reset, run, follow, cancel };
 }
