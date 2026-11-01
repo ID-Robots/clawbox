@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
+import { ownerOnlyResponse, sessionIdentity } from "@/lib/route-auth";
 import {
   gatewayIsAbsent,
   inferConfiguredLocalModel,
@@ -1183,6 +1184,13 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // The model the WHOLE box chats on is the owner's to change. Middleware
+  // refuses a signed-in user's write already (src/lib/non-owner-scope.ts);
+  // asked here as well because a user's first desktop load is what moved it.
+  // Only a person's cookie is asked about: the box's own in-process switches
+  // (src/lib/automatic-model-switch.ts) carry none.
+  const who = await sessionIdentity(request);
+  if (who && !who.isOwner) return ownerOnlyResponse();
   // The write half of the same store. A switch here spends `openclaw config
   // set` on a key the Hermes agent never reads, and answered 200 for it.
   if (!(await chatModelLivesHere())) {

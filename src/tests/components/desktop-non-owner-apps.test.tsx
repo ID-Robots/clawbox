@@ -176,6 +176,16 @@ describe("the desktop's installed apps — every signed-in person's", () => {
     expect(launcher.textContent ?? "").not.toContain("OpenClaw");
     await drainOwnerWrites();
   });
+
+  it("offers a second ClawBox user OpenClaw too while the owner shares it with every user", async () => {
+    me = { ...ALICE, openclawShared: true };
+    render(<ChromeDesktop />);
+    expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+    await openLauncher();
+    const launcher = await screen.findByTestId("app-launcher");
+    await waitFor(() => expect(launcher.textContent ?? "").toContain("OpenClaw"));
+    await drainOwnerWrites();
+  });
 });
 
 describe("the desktop's requests — only what the signed-in user may ask", () => {
