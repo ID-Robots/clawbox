@@ -41,10 +41,12 @@ import {
   type UpdateLockHolder,
 } from "./update-lock";
 import {
+  desktopCoreStepIsNoop,
   hasX64DesktopIntegration,
   hasX64Install,
   X64_DESKTOP_CORE_STEP_TIMEOUT_MS,
   X64_DESKTOP_GATEWAY_READY_WAIT_MS,
+  type DesktopCoreStepCheck,
 } from "./x64-integration";
 import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
 import {
@@ -4165,6 +4167,29 @@ async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number):
 }
 
 /**
+ * The x64 desktop's counterpart of `rootStepTookFastPath`: true when its core
+ * step would change nothing (`desktopCoreStepIsNoop` says what that takes), so
+ * the update leaves the owner's gateway and its running agents alone instead
+ * of asking the root adapter, which stops the gateway before it looks. A check
+ * that cannot answer runs the adapter's step exactly as before.
+ */
+function desktopCoreStepNotNeeded(): boolean {
+  let check: DesktopCoreStepCheck;
+  try {
+    check = desktopCoreStepIsNoop();
+  } catch (err) {
+    console.warn(`[Updater] openclaw_install: the desktop core check could not answer (${err instanceof Error ? err.message : String(err)}) — running the core step`);
+    return false;
+  }
+  if (!check.noop) {
+    console.log(`[Updater] openclaw_install: running the desktop core step (${check.reason})`);
+    return false;
+  }
+  console.log(`[Updater] openclaw_install: OpenClaw ${check.version} is already installed and nothing needs recovery — gateway left running, desktop core step not run`);
+  return true;
+}
+
+/**
  * install.sh's own line for a fast path that ran, as the journal carries it.
  * ANCHORED to the start of the line: the fast-only step prints no doctor or npm
  * transcript, but a line that merely quotes this one is not this box taking it.
@@ -6147,6 +6172,8 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         if (step.fastPathStep && !desktopIntegration && !gatewayIsAbsent()
           && await rootStepTookFastPath(step.fastPathStep, timeoutMs)) {
           // Done, with the gateway never stopped: nothing to recover.
+        } else if (desktopIntegration && step.id === "openclaw_install" && desktopCoreStepNotNeeded()) {
+          // The desktop adapter would have stopped the gateway for nothing.
         } else if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {
