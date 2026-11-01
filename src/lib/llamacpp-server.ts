@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import path from "./runtime-path";
 import { CONFIG_ROOT, DATA_DIR, getAll } from "./config-store";
+import type { Harness } from "./harness";
 import {
   getDefaultLlamaCppFile,
   getDefaultLlamaCppModel,
@@ -98,7 +99,12 @@ export function getConfiguredLlamaCppModelAlias(config: OpenClawConfig): string 
   return null;
 }
 
-export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel()): LlamaCppLaunchSpec {
+/**
+ * How llama-server is launched. `harness` only sizes the window
+ * (getLlamaCppServerContextSize): the two places that spawn the server pass the
+ * active one, and every caller that only reads the spec's paths or URL leaves it.
+ */
+export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel(), harness?: Harness): LlamaCppLaunchSpec {
   const baseUrl = getLlamaCppBaseUrl();
   const url = new URL(baseUrl);
   const hfRepo = getDefaultLlamaCppRepo();
@@ -127,7 +133,7 @@ export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel()): LlamaC
     logPath: LLAMACPP_LOG_PATH,
     modelDir: path.join(LLAMACPP_RUNTIME_DIR, "models"),
     modelPath: path.join(LLAMACPP_RUNTIME_DIR, "models", hfFile),
-    contextWindow: getLlamaCppServerContextSize(),
+    contextWindow: getLlamaCppServerContextSize(harness),
     startupTimeoutMs: Number(process.env.LLAMACPP_STARTUP_TIMEOUT_MS || DEFAULT_STARTUP_TIMEOUT_MS),
   };
 }
@@ -221,5 +227,28 @@ export async function queryLlamaCppModels(baseUrl: string): Promise<string[]> {
       : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * The window the running llama-server serves (`meta.n_ctx` of its `/v1/models`
+ * entry — the number Hermes reads to decide whether it may run), or null when
+ * no server answers or it does not say. Null is "unknown", never "too small".
+ */
+export async function queryLlamaCppServedContext(baseUrl: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${baseUrl}/models`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    const served = Array.isArray(data?.data)
+      ? data.data.map((model: { meta?: { n_ctx?: unknown } }) => model?.meta?.n_ctx)
+      : [];
+    const window = served.find((n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n > 0);
+    return window ?? null;
+  } catch {
+    return null;
   }
 }

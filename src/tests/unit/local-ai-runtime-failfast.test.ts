@@ -24,6 +24,8 @@ vi.mock("@/lib/llamacpp", () => ({
 const queryLlamaCppModelsMock = vi.fn();
 const getLlamaCppProvisioningStatusMock = vi.fn();
 vi.mock("@/lib/llamacpp-server", () => ({
+  // The wake asks the running server its window (local-ai-runtime.ts); unknown here.
+  queryLlamaCppServedContext: async () => null,
   getLlamaCppLaunchSpec: () => ({
     baseUrl: "http://127.0.0.1:8080/v1",
     startupTimeoutMs: 1_200_000,

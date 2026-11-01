@@ -45,6 +45,12 @@ vi.mock("@/lib/gateway-hot-apply", () => ({
   waitForGatewayBack: vi.fn(async () => true),
 }));
 
+// The window the server starts with follows the runtime (Hermes has a floor).
+const mockGetActiveHarness = vi.fn(async () => "openclaw");
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: () => mockGetActiveHarness(),
+}));
+
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fsp);
@@ -379,6 +385,22 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("Returning it to standby");
     expect(text).toContain("will wake automatically");
     expect(mockStopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
+  });
+
+  it("starts llama-server with Hermes' window floor on a Hermes box", async () => {
+    // Hermes refuses a session on a window under 64,000 tokens, which it reads
+    // off the running server, so the 32k OpenClaw default cannot serve it.
+    mockGetActiveHarness.mockResolvedValueOnce("hermes");
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) }));
+    mockSpawn.mockReturnValue(createSpawnedProcess());
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    await readStream(res);
+
+    expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("65536");
+    expect(mockConfigureAiModel).toHaveBeenCalled();
   });
 
   it("forwards local scope to the configure route during llama.cpp install", async () => {
