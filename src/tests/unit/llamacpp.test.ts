@@ -85,6 +85,30 @@ describe("llamacpp config helpers", () => {
     expect(mod.getLlamaCppMaxTokens()).toBe(12000);
   });
 
+  it("starts the server at Hermes' floor while Hermes is the runtime, and tells OpenClaw nothing new", async () => {
+    const mod = await import("@/lib/llamacpp");
+    const { HERMES_MINIMUM_CONTEXT_TOKENS } = await import("@/lib/ollama-model-context");
+
+    // Hermes refuses a session under 64,000 tokens, read off the running server.
+    expect(mod.HERMES_LLAMACPP_CONTEXT_WINDOW).toBeGreaterThanOrEqual(HERMES_MINIMUM_CONTEXT_TOKENS);
+    expect(mod.getLlamaCppServerContextSize("hermes")).toBe(65536);
+    expect(mod.getLlamaCppServerContextSize("openclaw")).toBe(32768);
+    // OpenClaw's row keeps the configured window whatever the runtime is.
+    expect(mod.getLlamaCppContextWindow()).toBe(32768);
+  });
+
+  it("keeps an owner's larger window on Hermes and raises a smaller one to the floor", async () => {
+    process.env.LLAMACPP_CONTEXT_WINDOW = "131072";
+    let mod = await import("@/lib/llamacpp");
+    expect(mod.getLlamaCppServerContextSize("hermes")).toBe(131072);
+
+    vi.resetModules();
+    process.env.LLAMACPP_CONTEXT_WINDOW = "16384";
+    mod = await import("@/lib/llamacpp");
+    expect(mod.getLlamaCppServerContextSize("hermes")).toBe(65536);
+    expect(mod.getLlamaCppServerContextSize("openclaw")).toBe(16384);
+  });
+
   it("never lets the answer budget outgrow the window, and falls back on junk", async () => {
     process.env.LLAMACPP_CONTEXT_WINDOW = "16384";
     process.env.LLAMACPP_MAX_TOKENS = "131072";

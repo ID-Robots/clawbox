@@ -41,6 +41,8 @@ vi.mock("@/lib/llamacpp", () => ({
   getDefaultLlamaCppModel: () => "gemma",
 }));
 vi.mock("@/lib/llamacpp-server", () => ({
+  // The wake asks the running server its window (local-ai-runtime.ts); unknown here.
+  queryLlamaCppServedContext: async () => null,
   getLlamaCppProvisioningStatus: async () => ({ installed: false }),
   resolveConfiguredLlamaCppAlias: async () => null,
 }));

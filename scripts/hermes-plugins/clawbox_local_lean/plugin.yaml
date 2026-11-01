@@ -1,0 +1,10 @@
+name: clawbox_local_lean
+version: 1.0.0
+description: "Gives model calls on the box's own llama.cpp model a short system prompt, six tools and thinking off unless asked, instead of Hermes' full prompt and tool list."
+author: ID-Robots
+kind: standalone
+# `hermes plugins doctor` compares this against what register() adds, as it
+# does `provides_hooks` (hermes_cli/plugin_validate.py).
+provides_middleware:
+  - llm_request
+  - llm_execution
