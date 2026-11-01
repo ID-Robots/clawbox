@@ -38,6 +38,10 @@ export const ja: Record<string, string> = {
   "settings.providers.switchedOff": "オフ",
   "settings.providers.makeDefault": "既定にする",
   "settings.providers.lockedHint": "先に別のプロバイダーを既定にしてください。",
+  "settings.providers.signOut": "ClawBox AI からサインアウト",
+  "settings.providers.signOutConfirm": "サインアウト — もう一度タップ",
+  "settings.providers.signOutFailed": "ClawBox AI からサインアウトできませんでした。",
+  "settings.providers.signedOut": "ClawBox AI からサインアウトしました。使うには下で再度サインインしてください。",
   "settings.providers.empty": "まだプロバイダーが接続されていません。下から接続してください。",
 
   // === System password card ===

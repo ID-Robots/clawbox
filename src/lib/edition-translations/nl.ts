@@ -36,6 +36,10 @@ export const nl: Record<string, string> = {
   "settings.providers.switchedOff": "Uitgeschakeld",
   "settings.providers.makeDefault": "Als standaard instellen",
   "settings.providers.lockedHint": "Maak eerst een andere provider de standaard.",
+  "settings.providers.signOut": "Afmelden bij ClawBox AI",
+  "settings.providers.signOutConfirm": "Afmelden — tik nogmaals",
+  "settings.providers.signOutFailed": "Afmelden bij ClawBox AI is mislukt.",
+  "settings.providers.signedOut": "Afgemeld bij ClawBox AI. Meld je hieronder opnieuw aan om het te gebruiken.",
   "settings.providers.empty": "Er is nog geen provider verbonden — verbind er hieronder een.",
 
   // === System password card ===
