@@ -4,12 +4,13 @@ import { spawn } from "child_process";
 import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import {
+  BackgroundTaskCancelled,
   BackgroundTaskFailure,
   backgroundTaskResponse,
   runningBackgroundTask,
   startBackgroundTask,
 } from "@/lib/background-tasks";
-import { WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
+import { WHISPER_ENGINE_INSTALL_KIND, WHISPER_SIZE_DOWNLOAD_KIND } from "@/lib/background-task-kinds";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { checkInstallDisk, checkInstallDisks, dirBytes, diskRefusal } from "@/lib/install-disk";
@@ -17,7 +18,6 @@ import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/op
 import { safeWhisperSize, whisperSize } from "@/lib/local-install";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
-import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { reconcileChannelAudio, syncChannelAudio } from "@/lib/stt-channel";
 import { withWhisperLibraryPath } from "@/lib/stt-local";
@@ -60,20 +60,43 @@ import {
  * says so.
  */
 
-const encoder = new TextEncoder();
 /** A `medium` fetch on a slow link is tens of minutes; the client may leave, the child may not be killed for it. */
 const FETCH_TIMEOUT_MS = 60 * 60 * 1000;
 /** How often the cache directory is re-measured for the bar. */
 const PROGRESS_POLL_MS = 1500;
+/** After a Cancel's SIGTERM, how long the fetcher's group has before SIGKILL. */
+const CANCEL_GRACE_MS = 3000;
 
-function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
-  // A cancelled stream refuses further writes; the download itself goes on and
-  // the in-flight flag still has to be released by the end of the run.
-  try { controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`)); } catch { /* client gone */ }
+/**
+ * One fetch at a time: two would write the same Hub cache entry. Held for the
+ * whole size task (src/lib/background-tasks.ts), not only its start.
+ */
+let inFlight = false;
+/** The size fetch's background-task group. */
+const WHISPER_SIZE_GROUP = "whisper-size";
+
+/**
+ * Anything writing speech's files right now: this module's flags, or a task.
+ * A task counts on its own because a web server that restarted mid-install
+ * ADOPTS the engine's root step (src/lib/background-tasks.ts) with none of
+ * this module's flags set — its removal must still refuse.
+ */
+function speechBusy(): boolean {
+  return inFlight || engineInFlight
+    || runningBackgroundTask(WHISPER_ENGINE_GROUP) !== null
+    || runningBackgroundTask(WHISPER_SIZE_GROUP) !== null;
 }
 
-/** One fetch at a time: two would write the same Hub cache entry. */
-let inFlight = false;
+/** A size download already running: followed for the same size, refused (naming it) for another. */
+function followOrRefuseSize(size: string): Response | null {
+  const running = runningBackgroundTask(WHISPER_SIZE_GROUP);
+  if (!running) return null;
+  if (running.meta?.size === size) return backgroundTaskResponse(running.id);
+  return NextResponse.json(
+    { error: "A speech model is already being fetched.", code: "busy", taskId: running.id },
+    { status: 409 },
+  );
+}
 /**
  * One engine install at a time: two would fight over pip and the CTranslate2
  * build tree. Held for the whole install task, not only its start, so the size
@@ -167,6 +190,10 @@ export async function POST(req: Request) {
   if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }
+  // Before the disk check: the running download has used part of the space
+  // that check would measure it against, and this request only follows it.
+  const following = followOrRefuseSize(size);
+  if (following) return following;
 
   const state = await readWhisperState();
   if (!state.installed) {
@@ -185,51 +212,74 @@ export async function POST(req: Request) {
     if (!disk.ok) return diskRefusal(disk);
   }
 
-  if (inFlight || engineInFlight) {
+  // Again after the awaits above: one may have started meanwhile. Another
+  // size is a second writer into the Hub cache and the unit.
+  const startedMeanwhile = followOrRefuseSize(size);
+  if (startedMeanwhile) return startedMeanwhile;
+  if (speechBusy()) {
     return NextResponse.json({ error: "A speech model is already being fetched.", code: "busy" }, { status: 409 });
   }
   inFlight = true;
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+  const total = whisperSize(size)?.bytes ?? 0;
+  const start = startBackgroundTask({
+    kind: WHISPER_SIZE_DOWNLOAD_KIND,
+    group: WHISPER_SIZE_GROUP,
+    title: `Downloading the ${size} speech model`,
+    meta: { size },
+    status: already ? "Pointing speech on this box at the new model…" : `Fetching the ${size} speech model…`,
+    // Stopping a fetch is safe: the unit is not touched until the weights are
+    // whole. Once they are, the switch is seconds and is not offered a stop.
+    cancellable: !already,
+    steps: already
+      ? [{ id: "switch", label: "Switch speech to it" }]
+      : [
+        { id: "fetch", label: `Download the ${size} model`, weight: 9 },
+        { id: "switch", label: "Switch speech to it", weight: 1 },
+      ],
+    async run(task) {
       let timer: ReturnType<typeof setInterval> | null = null;
       try {
         if (!already) {
-          const total = whisperSize(size)?.bytes ?? 0;
-          emit(controller, { status: `Fetching the ${size} speech model…`, completed: 0, total });
+          task.step("fetch");
+          if (total > 0) task.progress(0, total);
           const dir = whisperCacheDir(size);
           timer = setInterval(() => {
             void dirBytes(dir).then((bytes) => {
-              if (bytes !== null) emit(controller, { completed: bytes, total });
+              if (bytes !== null && total > 0) task.progress(Math.min(bytes, total), total);
             });
           }, PROGRESS_POLL_MS);
-          const fetched = await runFetch(size, (line) => emit(controller, { status: line }));
-          if (timer) { clearInterval(timer); timer = null; }
+          const fetched = await runFetch(size, (line) => task.status(line), task.signal);
+          clearInterval(timer);
+          timer = null;
+          if (fetched.cancelled) {
+            // A size that was not here before the click: what the fetcher left
+            // is half a snapshot nothing can use, and the disk is the owner's.
+            await removeWhisperSize(size).catch(() => null);
+            throw new BackgroundTaskCancelled("The download was cancelled.");
+          }
           if (!fetched.ok) {
             // The unit is untouched, so the box still transcribes with whatever
             // it did before this click. Nothing to undo.
-            emit(controller, { error: fetched.error });
-            return;
+            throw new BackgroundTaskFailure(fetched.error ?? "The speech model download failed.");
           }
           // Re-measured rather than assumed: a download that exits 0 with an
           // incomplete snapshot is exactly the shape install-voice.sh's own
           // cache check exists to catch.
           const after = await readWhisperState();
           if (after.sizes.find((s) => s.id === size)?.cached !== true) {
-            emit(controller, { error: "The download finished but the model is not complete on this box." });
-            return;
+            throw new BackgroundTaskFailure("The download finished but the model is not complete on this box.");
           }
         }
 
-        emit(controller, { status: "Pointing speech on this box at the new model…" });
+        // Seconds, and not to be stopped half-way: a failure here is said as
+        // what it is, never as the owner's Cancel.
+        task.cancellable(false);
+        task.step("switch", "Pointing speech on this box at the new model…");
         const pointed = await setActiveWhisperSize(size);
-        if (!pointed.ok) {
-          emit(controller, { error: pointed.error ?? "Could not switch to that speech model." });
-          return;
-        }
+        if (!pointed.ok) throw new BackgroundTaskFailure(pointed.error ?? "Could not switch to that speech model.");
         const restarted = await restartWhisper();
-        emit(controller, {
-          success: true,
+        return {
           size,
           restarted: restarted.ok,
           // Not an error: the weights are here and the unit names them. The
@@ -238,20 +288,20 @@ export async function POST(req: Request) {
           status: restarted.ok
             ? `Speech on this box now uses the ${size} model.`
             : `Speech on this box will use the ${size} model after the next restart.`,
-        });
-      } catch (err) {
-        emit(controller, { error: err instanceof Error ? err.message : "The speech model change failed." });
+        };
       } finally {
         if (timer) clearInterval(timer);
         inFlight = false;
-        try { controller.close(); } catch { /* already closed */ }
       }
     },
   });
-
-  return new Response(stream, {
-    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
-  });
+  if (!start.started) {
+    // Not reachable while the flag above is held, but a task that never ran
+    // would never give it back.
+    inFlight = false;
+    return backgroundTaskResponse(start.running.id);
+  }
+  return backgroundTaskResponse(start.task.id);
 }
 
 /**
@@ -276,7 +326,7 @@ async function installEngine(): Promise<Response> {
   // start two pip installs and two CTranslate2 builds in the same paths. Every
   // early answer below gives the reservation back; the stream's own `finally`
   // gives it back once an install has started.
-  if (engineInFlight || inFlight) {
+  if (speechBusy()) {
     return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
   }
   engineInFlight = true;
@@ -315,10 +365,14 @@ async function installEngine(): Promise<Response> {
     async run(task) {
       try {
         task.step("install");
-        const result = await followRootStep("voice_whisper_install", {
+        // Through the task, so a web server that restarts mid-build follows
+        // the same unit again. What it then cannot do is the wiring below —
+        // which the next start's channel-audio pass does anyway, the same
+        // promise the line below makes when the wiring fails.
+        const result = await task.rootStep("voice_whisper_install", {
           timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
           label: "the speech install",
-          onStatus: (line) => task.status(line),
+          finishes: { status: "Speech on this box is installed. Voice notes switch to it at the next restart." },
         });
         if (!result.ok) throw new BackgroundTaskFailure(result.error || "The speech install did not finish.");
         task.step("wire");
@@ -352,7 +406,7 @@ export async function DELETE(req: Request) {
     // stream would then point the unit at weights that are gone — and while
     // the ENGINE is being installed, whose own pre-download is the second
     // writer into that cache.
-    if (inFlight || engineInFlight) {
+    if (speechBusy()) {
       return NextResponse.json({ error: "Speech on this box is being installed, or a model is being fetched, right now.", code: "busy" }, { status: 409 });
     }
     // The same reservation as the install, for the whole removal: an install
@@ -388,7 +442,7 @@ export async function DELETE(req: Request) {
   // measurement through the re-read: the engine install pre-downloads `base`
   // and the engine removal measures and deletes every size, and a size removal
   // interleaved with either would measure or delete a cache under them.
-  if (inFlight || engineInFlight) {
+  if (speechBusy()) {
     return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
   }
   engineInFlight = true;
@@ -421,7 +475,11 @@ export async function DELETE(req: Request) {
  * box whose engine is install-voice.sh's CUDA build — every Jetson (see
  * `withWhisperLibraryPath`).
  */
-function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok: boolean; error?: string }> {
+function runFetch(
+  size: string,
+  onStatus: (line: string) => void,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; error?: string; cancelled?: boolean }> {
   return new Promise((resolve) => {
     const child = spawn("/usr/bin/python3", [whisperFetchScript(CONFIG_ROOT), size], {
       cwd: path.dirname(whisperFetchScript(CONFIG_ROOT)),
@@ -431,16 +489,34 @@ function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok:
     });
     let settled = false;
     let stderr = "";
-    const finish = (outcome: { ok: boolean; error?: string }) => {
+    let cancelled = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    const killGroup = (sig: NodeJS.Signals) => {
+      try { if (child.pid) process.kill(-child.pid, sig); } catch { /* already gone */ }
+    };
+    const finish = (outcome: { ok: boolean; error?: string; cancelled?: boolean }) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
+      if (killTimer) clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
       resolve(outcome);
     };
     const deadline = setTimeout(() => {
-      try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+      killGroup("SIGKILL");
       finish({ ok: false, error: "The speech model download took too long and was stopped." });
     }, FETCH_TIMEOUT_MS);
+    // The owner's Cancel. Settled only once the group has really exited (its
+    // `close`), so the caller's cleanup never races a fetcher still writing
+    // into the cache; SIGKILL if it has not gone after the grace.
+    function onAbort() {
+      if (settled) return;
+      cancelled = true;
+      killGroup("SIGTERM");
+      killTimer = setTimeout(() => killGroup("SIGKILL"), CANCEL_GRACE_MS);
+    }
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout?.setEncoding("utf-8");
     child.stdout?.on("data", (chunk: string) => {
@@ -453,8 +529,9 @@ function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok:
     child.stderr?.on("data", (chunk: string) => {
       stderr = `${stderr}${chunk}`.slice(-4000);
     });
-    child.on("error", () => finish({ ok: false, error: "Could not start the speech model download." }));
+    child.on("error", () => finish({ ok: false, error: "Could not start the speech model download.", cancelled }));
     child.on("close", (code) => {
+      if (cancelled) return finish({ ok: false, cancelled: true, error: "The download was cancelled." });
       if (code === 0) return finish({ ok: true });
       const lines = stderr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       finish({ ok: false, error: lines.at(-1) || `The speech model download failed (exit ${code}).` });

@@ -6,6 +6,7 @@
  * so nothing of the server module reaches the bundle.
  */
 import type { BackgroundTaskView } from "@/lib/background-tasks";
+import { readInstallStream, type InstallOutcome, type InstallProgress } from "@/lib/install-stream";
 
 export type { BackgroundTaskView } from "@/lib/background-tasks";
 
@@ -48,6 +49,69 @@ export function followBackgroundTask(id: string, signal?: AbortSignal): Promise<
   return fetch(`${BACKGROUND_TASKS_URL}/follow?id=${encodeURIComponent(id)}`, { cache: "no-store", signal });
 }
 
+/**
+ * How long a reader keeps following a task whose stream was cut short: the
+ * web server restarting mid-install (a Jetson's takes a minute or two, and it
+ * is exactly when a root step's task is adopted), or a dropped tunnel.
+ */
+const REFOLLOW_DELAYS_MS = [1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 15_000, 20_000, 30_000, 30_000, 30_000];
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+/**
+ * Read an install route's stream to its verdict — following the TASK again
+ * when the stream is cut short after naming it, instead of calling an install
+ * that is still running (or that a restarted server adopted) a failure. A
+ * stream that never named a task is read as before. Gives up — the cut-short
+ * outcome — once the box no longer knows the task, or after about two and a
+ * half minutes without an answer.
+ */
+export async function readTaskStream(
+  res: Response,
+  onProgress: (progress: InstallProgress) => void,
+  onTask?: (taskId: string) => void,
+  signal?: AbortSignal,
+): Promise<InstallOutcome> {
+  let taskId: string | null = null;
+  const named = (id: string) => {
+    taskId = id;
+    onTask?.(id);
+  };
+  let current = res;
+  let tries = 0;
+  for (;;) {
+    let outcome: InstallOutcome;
+    try {
+      outcome = await readInstallStream(current, onProgress, named);
+    } catch (err) {
+      if (signal?.aborted || taskId === null) throw err;
+      outcome = { ok: false, lost: true };
+    }
+    if (!outcome.lost || taskId === null) return outcome;
+    let next: Response | null = null;
+    while (next === null) {
+      if (signal?.aborted || tries >= REFOLLOW_DELAYS_MS.length) return outcome;
+      await pause(REFOLLOW_DELAYS_MS[tries], signal);
+      tries += 1;
+      if (signal?.aborted) return outcome;
+      try {
+        const answer = await followBackgroundTask(taskId, signal);
+        if (answer.ok) next = answer;
+        // The box answered, and does not know it: nothing left to follow.
+        else if (answer.status === 404) return outcome;
+      } catch {
+        // Not back yet.
+      }
+    }
+    current = next;
+  }
+}
+
 export async function dismissBackgroundTaskCard(id: string): Promise<void> {
   try {
     await fetch(BACKGROUND_TASKS_URL, {
@@ -59,6 +123,41 @@ export async function dismissBackgroundTaskCard(id: string): Promise<void> {
     // The card is already gone locally; the next poll shows it again if the
     // server did not hear, which is the honest outcome.
   }
+}
+
+/**
+ * Ask the box to stop a running task. True when it took the request — the
+ * work then stops and the task ends `cancelled`; the caller keeps reading the
+ * task for that ending rather than assuming it.
+ */
+export async function cancelBackgroundTask(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(BACKGROUND_TASKS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action: "cancel" }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** One task with its whole log ring, or null when the box does not know it (or did not answer). */
+export async function fetchBackgroundTask(id: string): Promise<BackgroundTaskView | null> {
+  try {
+    const res = await fetch(`${BACKGROUND_TASKS_URL}?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { task?: unknown };
+    return body.task && typeof body.task === "object" ? (body.task as BackgroundTaskView) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the owner can still stop it: running, stoppable, and not already stopping. */
+export function canCancelBackgroundTask(task: Pick<BackgroundTaskView, "state" | "cancellable" | "cancelRequested">): boolean {
+  return task.state === "running" && task.cancellable === true && task.cancelRequested !== true;
 }
 
 /** Seconds as the card says them: "<1 min", "12 min", "1 h 05 min". Null for no figure. */
@@ -75,14 +174,19 @@ export const SUCCESS_STALE_MS = 10 * 60 * 1000;
 
 /**
  * Which tasks the corner card draws: every running one; an ended one until it
- * is dismissed — a success only while it is fresh, a failure or an interruption
- * until the owner has seen it.
+ * is dismissed — a success (or a stop the owner asked for) only while it is
+ * fresh, a failure or an interruption until the owner has seen it.
  */
 export function visibleBackgroundTasks(tasks: readonly BackgroundTaskView[], now: number): BackgroundTaskView[] {
   return tasks.filter((task) => {
     if (task.state === "running") return true;
     if (task.dismissed) return false;
-    if (task.state === "succeeded") return now - (task.finishedAt ?? task.updatedAt) < SUCCESS_STALE_MS;
+    if (endsQuietly(task)) return now - (task.finishedAt ?? task.updatedAt) < SUCCESS_STALE_MS;
     return true;
   });
+}
+
+/** An ending that is not news to keep on screen: a success, or the owner's own Cancel. */
+export function endsQuietly(task: Pick<BackgroundTaskView, "state">): boolean {
+  return task.state === "succeeded" || task.state === "cancelled";
 }

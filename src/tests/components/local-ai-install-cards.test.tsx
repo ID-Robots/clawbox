@@ -179,3 +179,109 @@ describe("EmbeddingModelCard", () => {
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 });
+
+/**
+ * Both downloads are background tasks of the box now: a Settings reopened
+ * while one runs follows it again on its own row — steps, bar, time left, log
+ * and, for the size download, Cancel — rather than drawing an idle button
+ * over work that is still going.
+ */
+describe("re-attaching to a download that is already running", () => {
+  /** A follow stream the test ends when it wants to. */
+  function heldStream(first: unknown) {
+    let end!: (last: unknown) => void;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`${JSON.stringify(first)}\n`));
+        end = (last) => {
+          controller.enqueue(new TextEncoder().encode(`${JSON.stringify(last)}\n`));
+          controller.close();
+        };
+      },
+    });
+    return { response: new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson" } }), end: (last: unknown) => end(last) };
+  }
+
+  function taskView(over: Record<string, unknown>) {
+    return {
+      id: "t9", group: "g", title: "Downloading", meta: null, state: "running",
+      steps: [{ id: "fetch", label: "Download the small model", state: "running", weight: 9 }, { id: "switch", label: "Switch speech to it", state: "pending", weight: 1 }],
+      status: "Fetching the small speech model…", completed: 100 * 1024 * 1024, total: 500 * 1024 * 1024,
+      startedAt: 1, updatedAt: 2, stepStartedAt: 1, finishedAt: null, error: null, result: null,
+      log: ["Fetching the small speech model…"], logCount: 1, runner: "r", dismissed: false,
+      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, percent: 18, etaSeconds: 240,
+      ...over,
+    };
+  }
+
+  it("follows a size download on its row, offers Cancel, and says Cancelled when it stops", async () => {
+    const task = taskView({ kind: "whisper-size-download", meta: { size: "small" }, cancellable: true });
+    const follow = heldStream({ taskId: "t9", kind: "whisper-size-download", status: "Fetching the small speech model…" });
+    stub((url, init) => {
+      if (url === "/setup-api/background-jobs/tasks") {
+        return init?.method === "POST" ? json({ ok: true, task: { ...task, cancelRequested: true } }) : json({ tasks: [task] });
+      }
+      if (url === "/setup-api/background-jobs/tasks/follow?id=t9") return follow.response;
+      if (url === "/setup-api/background-jobs/tasks?id=t9") return json({ task });
+      return json(WHISPER);
+    });
+    render(<I18nProvider><WhisperSizesCard /></I18nProvider>);
+
+    const inline = await screen.findByTestId("local-ai-whisper-task-small");
+    expect(inline).toHaveTextContent("Fetching the small speech model…");
+    expect(screen.getByTestId("local-ai-whisper-task-small-steps")).toHaveTextContent("Download the small model");
+    // Every size is held while one downloads.
+    expect(screen.getByTestId("local-ai-whisper-use-medium")).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("local-ai-whisper-task-small-cancel"));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && (c.body as { action?: string })?.action === "cancel")).toBe(true));
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ id: "t9", action: "cancel" });
+
+    follow.end({ status: "Cancelled.", error: "Cancelled.", code: "cancelled", cancelled: true, taskId: "t9" });
+    const outcome = await screen.findByTestId("local-ai-whisper-outcome");
+    await waitFor(() => expect(outcome).toHaveTextContent("Cancelled."));
+    expect(outcome.getAttribute("role")).toBe("status");
+    expect(screen.queryByTestId("local-ai-whisper-task-small")).toBeNull();
+  });
+
+  it("follows the memory-model download in its card, and reads its verdict when it lands", async () => {
+    const task = taskView({ kind: "embed-model-download", steps: [], status: "Fetching the memory-search model…", total: 639_000_000, completed: 300_000_000, percent: 47 });
+    const follow = heldStream({ taskId: "t9", kind: "embed-model-download", status: "Fetching the memory-search model…" });
+    let present = false;
+    stub((url) => {
+      if (url === "/setup-api/embed/status") {
+        return json({ installed: present, binaryAvailable: true, modelAvailable: present, modelBytes: present ? 639_000_000 : null, model: "qwen3-embedding-0.6b", engine: "llama.cpp" });
+      }
+      if (url === "/setup-api/background-jobs/tasks") return json({ tasks: [task] });
+      if (url === "/setup-api/background-jobs/tasks/follow?id=t9") return follow.response;
+      if (url === "/setup-api/background-jobs/tasks?id=t9") return json({ task });
+      return json({});
+    });
+    render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+
+    const inline = await screen.findByTestId("local-ai-embed-task");
+    expect(screen.getByTestId("local-ai-embed-task-percent")).toHaveTextContent("47%");
+    expect(screen.getByTestId("local-ai-embed-download")).toBeDisabled();
+    // A root step cannot be stopped half-way: no Cancel is offered.
+    expect(screen.queryByTestId("local-ai-embed-task-cancel")).toBeNull();
+    expect(inline).toBeInTheDocument();
+
+    present = true;
+    follow.end({ status: "The memory-search model is on this box.", success: true, taskId: "t9" });
+    await waitFor(() => expect(screen.queryByTestId("local-ai-embed-task")).toBeNull());
+    expect(await screen.findByTestId("local-ai-embed-outcome")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("local-ai-embed-download")).not.toBeDisabled());
+  });
+
+  it("does not follow anything when nothing of its kind is running", async () => {
+    stub((url) => {
+      if (url === "/setup-api/background-jobs/tasks") return json({ tasks: [taskView({ kind: "voice-kokoro-install" })] });
+      return json(WHISPER);
+    });
+    render(<I18nProvider><WhisperSizesCard /></I18nProvider>);
+    await screen.findByTestId("local-ai-whisper-small");
+    await waitFor(() => expect(calls.some((c) => c.url === "/setup-api/background-jobs/tasks")).toBe(true));
+    expect(calls.some((c) => c.url.includes("/follow"))).toBe(false);
+    expect(screen.getByTestId("local-ai-whisper-use-small")).not.toBeDisabled();
+  });
+});

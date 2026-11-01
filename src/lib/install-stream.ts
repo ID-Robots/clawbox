@@ -28,6 +28,17 @@ export interface InstallProgress {
 export interface InstallOutcome {
   ok: boolean;
   error?: string;
+  /**
+   * The owner stopped it (a background task's Cancel): not a success, and not
+   * a failure to paint red either.
+   */
+  cancelled?: boolean;
+  /**
+   * The stream ended with no verdict at all: the server went away mid-way.
+   * For a background task that is not the work's ending (see
+   * `readTaskStream`), only this stream's.
+   */
+  lost?: boolean;
 }
 
 /** `completed`/`total` as a whole percentage, or null when there is no bar to draw. */
@@ -71,6 +82,7 @@ function consume(
   if (status !== undefined || completed !== undefined || total !== undefined) {
     onProgress({ status, completed, total });
   }
+  if (payload.cancelled === true) return { ok: false, cancelled: true, error: typeof payload.error === "string" ? payload.error : undefined };
   if (typeof payload.error === "string") return { ok: false, error: payload.error };
   if (payload.success === true) return { ok: true };
   return null;
@@ -107,5 +119,5 @@ export async function readInstallStream(
   }
   // The closing line may arrive without its newline; it still decides the
   // outcome — dropping it turned a finished multi-minute install into an error.
-  return consume(buffer.trim(), onProgress, onTask) ?? { ok: false };
+  return consume(buffer.trim(), onProgress, onTask) ?? { ok: false, lost: true };
 }
