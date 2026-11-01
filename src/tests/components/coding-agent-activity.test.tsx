@@ -1332,3 +1332,36 @@ describe("the card's Pause and Resume (the owner's ask of 2026-10-30)", () => {
     expect(screen.getByTestId("coding-agent-activity-pause")).toBeInTheDocument();
   });
 });
+
+describe("the model the run runs on (the owner, 2026-11-01)", () => {
+  const base = {
+    id: "run-model001", projectId: "timer", task: "Build a countdown timer",
+    startedAt: NOW - 30_000, completedAt: null as number | null,
+    status: "running" as const, source: "agent" as const,
+    subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+    tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
+    progress: [], screenshots: [], todos: [],
+    transcriptPath: null, sessionId: null, directory: null,
+  };
+
+  it("names what answered on the card, short, with the full id as its tooltip", () => {
+    render(<CodingAgentActivityPill run={{ ...base, model: "gpt-5.6-sol", requestedModel: "gpt-6-astra" }} labels={LABELS} openLabel={OPEN} />);
+    const chip = screen.getByTestId("coding-agent-activity-model");
+    expect(chip).toHaveTextContent(/^GPT 5\.6 Sol$/);
+    expect(chip).toHaveAttribute("title", "gpt-5.6-sol");
+  });
+
+  it("falls back to what the run was started with, and draws nothing when nothing is known", () => {
+    const { rerender } = render(<CodingAgentActivityPill run={{ ...base, requestedModel: "claude-opus-5-5" }} labels={LABELS} openLabel={OPEN} />);
+    expect(screen.getByTestId("coding-agent-activity-model")).toHaveTextContent("Opus 5.5");
+    rerender(<CodingAgentActivityPill run={base} labels={LABELS} openLabel={OPEN} />);
+    expect(screen.queryByTestId("coding-agent-activity-model")).toBeNull();
+  });
+
+  it("carries the model fields from the runs route to the card", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => runsResponse([{ ...RUNNING, model: "claude-opus-5-5", modelsUsed: ["claude-opus-5-5", 7], requestedModel: "claude-opus-5-5" }])));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+    expect(result.current.runs[0]).toMatchObject({ model: "claude-opus-5-5", modelsUsed: ["claude-opus-5-5"], requestedModel: "claude-opus-5-5" });
+  });
+});

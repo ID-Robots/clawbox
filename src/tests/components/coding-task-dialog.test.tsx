@@ -1,11 +1,12 @@
 /**
  * The whole-task dialog (src/components/CodingTaskDialog.tsx): the rest of a
  * run's task, opened from the run page's "Show the whole task" and rendered as
- * Markdown in a modal of its own.
+ * Markdown in a window of its own — since 2026-11-01 a desktop window
+ * (PopoutWindow): dragged, resized, snapped, maximized, nothing dimmed behind.
  *
  * It replaced a `<details>` that unfolded raw text into the header card. What
  * is pinned: the task is drawn as elements (a heading, a list), not as one
- * pre-wrapped string; Escape, the X and the backdrop all close it; Copy puts
+ * pre-wrapped string; Escape, the title bar's X and Close all close it; Copy puts
  * the task text — not the rendered page — on the clipboard.
  *
  * Since 2026-10-30 the dialog also lists the files the run was GIVEN (the
@@ -44,8 +45,13 @@ describe("CodingTaskDialog", () => {
   it("draws the task as Markdown under the run's title, in a dialog named by it", () => {
     render(<CodingTaskDialog title="Add a dark mode toggle" task={TASK} runId="run-k3x9q2ab" onClose={onClose} />);
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveAttribute("aria-modal", "true");
+    // A window, not a modal: nothing behind it is made inert.
+    expect(dialog).not.toHaveAttribute("aria-modal");
     expect(dialog).toHaveAccessibleName("Add a dark mode toggle");
+    // The desktop's own window chrome, without a Minimize it could not come back from.
+    const win = screen.getByTestId("chrome-window-coding-task");
+    expect(within(win).getByLabelText(t("window.maximize"))).toBeInTheDocument();
+    expect(within(win).queryByLabelText(t("window.minimize"))).toBeNull();
     expect(screen.getByText(t("codingAgent.taskDialogTitle"))).toBeInTheDocument();
     expect(screen.getByText("run-k3x9q2ab")).toBeInTheDocument();
     const body = screen.getByTestId("coding-agent-task-dialog-body");
@@ -59,17 +65,24 @@ describe("CodingTaskDialog", () => {
     expect(body.querySelector("code")?.textContent).toBe("prefers-color-scheme");
   });
 
-  it("closes on the X, on the backdrop and on Escape", () => {
-    render(<CodingTaskDialog title="t" task={TASK} runId="run-1" onClose={onClose} />);
-    fireEvent.click(screen.getByTestId("coding-agent-task-dialog-close"));
-    expect(onClose).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId("coding-agent-task-dialog"));
-    expect(onClose).toHaveBeenCalledTimes(2);
-    // A click inside the panel is not a dismissal.
-    fireEvent.click(screen.getByTestId("coding-agent-task-dialog-body"));
-    expect(onClose).toHaveBeenCalledTimes(2);
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(3);
+  it("closes on Close, on the title bar's X and on Escape — and never on a press beside it", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<CodingTaskDialog title="t" task={TASK} runId="run-1" onClose={onClose} />);
+      fireEvent.click(screen.getByTestId("coding-agent-task-dialog-close"));
+      expect(onClose).toHaveBeenCalledTimes(1);
+      // The window's X closes after its closing animation.
+      fireEvent.click(within(screen.getByTestId("chrome-window-coding-task")).getByLabelText(t("window.close")));
+      vi.advanceTimersByTime(200);
+      expect(onClose).toHaveBeenCalledTimes(2);
+      // A press inside is not a dismissal, and there is no backdrop to press.
+      fireEvent.click(screen.getByTestId("coding-agent-task-dialog-body"));
+      expect(onClose).toHaveBeenCalledTimes(2);
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      expect(onClose).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists what the run was given and names both folders", () => {

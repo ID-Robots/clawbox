@@ -147,3 +147,23 @@ describe("CodingTeamActivityCard", () => {
     expect(screen.getByTestId("coding-team-activity")).toHaveClass("coding-agent-autohide");
   });
 });
+
+describe("the models a team runs on (the owner, 2026-11-01)", () => {
+  it("names the distinct models on the phase line, the workers' first, at most two then +N", () => {
+    const team: TeamActivity = { ...TEAM, agents: [
+      { role: "planner", runId: "run-00000001", state: "done", model: "claude-opus-5-5" },
+      { role: "worker", runId: "run-00000002", state: "done", model: "gpt-5.6-sol" },
+      { role: "reviewer", runId: "run-00000004", state: "done", model: "claude-sonnet-5" },
+      { role: "worker", runId: "run-00000003", state: "active", model: "gpt-5.6-sol" },
+    ] };
+    render(<CodingTeamActivityCard team={team} labels={LABELS} openLabel={OPEN} />);
+    const chip = screen.getByTestId("coding-team-activity-model");
+    expect(chip).toHaveTextContent(/^GPT 5\.6 Sol · Opus 5\.5 \+1$/);
+    expect(chip).toHaveAttribute("title", "gpt-5.6-sol, claude-opus-5-5, claude-sonnet-5");
+  });
+
+  it("draws no model when the board names none", () => {
+    render(<CodingTeamActivityCard team={TEAM} labels={LABELS} openLabel={OPEN} />);
+    expect(screen.queryByTestId("coding-team-activity-model")).toBeNull();
+  });
+});

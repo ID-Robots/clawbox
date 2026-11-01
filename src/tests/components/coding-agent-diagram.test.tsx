@@ -552,6 +552,71 @@ describe("home: the agents first", () => {
   });
 });
 
+describe("the model each agent runs on (the owner, 2026-11-01)", () => {
+  const model = (key: string) => node(key).querySelector('[data-testid="coding-agent-node-model"]');
+
+  it("names a team member's model on its node: the run's answer first, then the cast list's, then what it was started with — and nothing for a placeholder or an agent nothing names", () => {
+    const runs: Record<string, DiagramRun> = {
+      ...RUNS,
+      // What answered beats what the cast list says it started with.
+      "run-work0001": { ...RUNS["run-work0001"], model: "gpt-5.6-sol" },
+      "run-plan0001": { ...RUNS["run-plan0001"], requestedModel: "claude-opus-5-5" },
+    };
+    const geometryBefore = (() => {
+      const { unmount } = renderTeam();
+      const box = screen.getByTestId("coding-agent-diagram-graph");
+      const size = [box.style.width, box.style.height];
+      unmount();
+      return size;
+    })();
+    renderTeam({ runOf: (id) => runs[id] });
+    expect(model("run-work0001")).toHaveTextContent("GPT 5.6 Sol");
+    expect(model("run-work0001")).toHaveAttribute("title", "gpt-5.6-sol");
+    expect(model("run-plan0001")).toHaveTextContent("Opus 5.5");
+    // The cast list's model, with no answer on the run record.
+    expect(model("run-work0002")).toHaveTextContent("Sonnet 5");
+    expect(node("run-work0002")).toHaveAccessibleName(/Sonnet 5/);
+    // Nothing known: nothing drawn, never an invented name.
+    expect(model("run-revw0001")).toBeNull();
+    expect(model("task:t3")).toBeNull();
+    // The node's line is kept whether or not a model is named: the chart is the same size.
+    const box = screen.getByTestId("coding-agent-diagram-graph");
+    expect([box.style.width, box.style.height]).toEqual(geometryBefore);
+  });
+
+  it("names a solo run's model on its node, short, with the full id as the tooltip, and none on its helpers", () => {
+    const solo = run("run-solo0003", {
+      status: "running",
+      completedAt: null,
+      model: "claude-opus-5-5[1m]",
+      requestedModel: "claude-sonnet-5",
+      activeSubagents: [{ type: "Explore", description: "Map the folder", startedAt: NOW - 30_000 }],
+    });
+    render(<CodingAgentDiagram source={{ kind: "run", run: solo }} onOpenRun={vi.fn()} />);
+    const chip = model("run-solo0003");
+    expect(chip).toHaveTextContent(/^Opus 5\.5$/);
+    expect(chip).toHaveAttribute("title", "claude-opus-5-5[1m]");
+    const helper = screen.getAllByTestId("coding-agent-node").find((n) => n.getAttribute("data-role") === "helper")!;
+    expect(helper.querySelector('[data-testid="coding-agent-node-model"]')).toBeNull();
+  });
+
+  it("names the model on home's plain rows: a run's, and a team's distinct ones", () => {
+    const solo = run("run-solo0004", { status: "running", completedAt: null, task: "Fix the login form", requestedModel: "gpt-6-astra" });
+    render(<CodingAgentLiveAgents runs={[solo]} teams={[]} onOpenRun={vi.fn()} onOpenTeam={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-live-model-run-solo0004")).toHaveTextContent("GPT 6 Astra");
+  });
+
+  it("names a settled team's models on its row, the workers' first", () => {
+    const settled: TeamView = { ...TEAM, status: "done", runs: [
+      { id: "run-plan0001", role: "planner", taskId: null, model: "claude-opus-5-5" },
+      { id: "run-work0001", role: "worker", taskId: "t1", model: "claude-sonnet-5" },
+      { id: "run-work0002", role: "worker", taskId: "t2", model: "claude-sonnet-5" },
+    ] };
+    render(<CodingAgentLiveAgents runs={[]} teams={[settled]} onOpenRun={vi.fn()} onOpenTeam={vi.fn()} />);
+    expect(screen.getByTestId(`coding-agent-live-model-${TEAM.id}`)).toHaveTextContent("Sonnet 5 · Opus 5.5");
+  });
+});
+
 describe("Details", () => {
   it("folds the words under the chart, closed until asked", async () => {
     render(<DiagramDetails><p>The board</p></DiagramDetails>);

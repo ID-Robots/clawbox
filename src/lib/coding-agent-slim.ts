@@ -207,6 +207,8 @@ export interface TeamCardAgent {
   role: "planner" | "worker" | "reviewer" | "lead";
   runId: string;
   state: "active" | "done";
+  /** The model it runs on, from the cast list (`TeamRunRef.model`); absent when the board names none. */
+  model?: string;
 }
 
 /** What the chat's team card and Home's Now section draw without the board. */
@@ -242,7 +244,7 @@ type CardableTask = {
 type CardableTeam = {
   status: string;
   tasks: readonly CardableTask[];
-  runs?: readonly { id: string; role: TeamCardAgent["role"]; taskId: string | null }[];
+  runs?: readonly { id: string; role: TeamCardAgent["role"]; taskId: string | null; model?: string | null }[];
   pr?: { number: number } | null;
   finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
   error?: string | null;
@@ -268,7 +270,9 @@ export function teamCard(team: CardableTeam): TeamCard {
     else if (run.role === "worker") active = !!task && task.status === "in_progress" && task.assigned_to === run.id;
     else if (run.role === "reviewer") active = !!task && task.status === "complete" && !task.review && task.reviewRunId === run.id;
     const settled = team.status === "done" || team.status === "failed" || team.status === "stopped";
-    return { role: run.role, runId: run.id, state: active && !settled ? "active" : "done" };
+    const agent: TeamCardAgent = { role: run.role, runId: run.id, state: active && !settled ? "active" : "done" };
+    if (typeof run.model === "string" && run.model) agent.model = run.model;
+    return agent;
   });
   return {
     phase: team.status,

@@ -148,6 +148,23 @@ export function assignSlots(sequence: readonly string[], geometry: LayoutGeometr
 }
 
 /**
+ * The cell the `index`-th icon of a dense layout stands in — what
+ * `assignSlots` would give it. The desktop's `+` tile (create an app) asks for
+ * the cell after the last icon, so it always closes the grid wherever the
+ * icons have been dragged.
+ */
+export function slotAt(index: number, geometry: LayoutGeometry): IconSlot {
+  const cols = Math.max(1, Math.floor(geometry.cols) || 1);
+  const rowsPerColumn = Math.max(1, Math.floor(geometry.rowsPerColumn) || 1);
+  const i = Math.max(0, Math.floor(index) || 0);
+  if (geometry.flow === "column") {
+    const col = Math.min(Math.floor(i / rowsPerColumn), cols - 1);
+    return { row: i - col * rowsPerColumn, col };
+  }
+  return { row: Math.floor(i / cols), col: i % cols };
+}
+
+/**
  * The dense layout for `ids`, honouring the order implied by `saved`.
  *
  * This is the only function the desktop needs: it repairs holes, drops slots

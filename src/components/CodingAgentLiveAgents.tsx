@@ -36,6 +36,8 @@ import CodingAgentDiagram, { DiagramFigures, type DiagramRun } from "./CodingAge
 import { describeStep } from "./CodingRunTimeline";
 import { TEAM_STATUS_TONE, isTeamActive, type TeamView } from "./CodingTeamPage";
 import { RUN_TONE } from "./RunProgressBar";
+import { RunModelChip, TeamModelChip } from "./CodingModelChip";
+import { teamMemberModels } from "@/lib/coding-model-names";
 import { BTN_PRIMARY_WIDE, CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 
 /** A run as home reads it: the diagram's run, the team it belongs to, its place in the queue. */
@@ -187,6 +189,10 @@ export default function CodingAgentLiveAgents({ runs, teams, starts = [], now, o
     const p = taskProgress(team);
     return p.total > 0 ? <span className="shrink-0 text-[11px] text-[var(--text-muted)]">{t("codingAgent.teamTasksDone", { done: p.accepted, total: p.total })}</span> : null;
   };
+  // What a row runs on ("Opus 5.5" — the owner, 2026-11-01), beside its
+  // title. Only on the ROWS: a card's chart names the model on every node.
+  const runModel = (run: LiveRun) => <RunModelChip run={run} testId={`coding-agent-live-model-${run.id}`} style={{ maxWidth: 120 }} />;
+  const teamModel = (team: TeamView) => <TeamModelChip members={teamMemberModels(team, runOf)} testId={`coding-agent-live-model-${team.id}`} style={{ maxWidth: 160 }} />;
   // Literal keys, one per step: the catalogue sweep reads them where they are used.
   const runStepWord: Record<RunCardStartStep, string> = {
     checking: t("codingAgent.start.step.checking"),
@@ -268,7 +274,7 @@ export default function CodingAgentLiveAgents({ runs, teams, starts = [], now, o
     const startStep = runRecordStartStep(run);
     return (
       <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-run-${run.id}`} data-plain="true" onClick={cardOpen(() => onOpenRun(run.id))}>
-        <Heading icon="smart_toy" chip={runChip(run)} title={firstLine(run.task)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
+        <Heading icon="smart_toy" chip={runChip(run)} title={firstLine(run.task)} extra={runModel(run)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
         {last && (
           <p className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]" data-testid={`coding-agent-live-now-${run.id}`}>
             {t("codingAgent.rowNow", { step: describeStep(t, last).label })}
@@ -282,7 +288,7 @@ export default function CodingAgentLiveAgents({ runs, teams, starts = [], now, o
   /** The newest settled team: one row — the chart is on its page. */
   const teamRow = (team: TeamView) => (
     <div key={team.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-team-${team.id}`} data-kind="team" data-plain="true" onClick={cardOpen(() => onOpenTeam(team))}>
-      <Heading icon="groups" chip={teamChip(team)} title={firstLine(team.goal)} extra={tasksCount(team)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
+      <Heading icon="groups" chip={teamChip(team)} title={firstLine(team.goal)} extra={<>{teamModel(team)}{tasksCount(team)}</>} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
     </div>
   );
   /** Something waiting its turn: the same row, with its place in line. */
@@ -294,12 +300,12 @@ export default function CodingAgentLiveAgents({ runs, teams, starts = [], now, o
   );
   const queuedTeamRow = (team: TeamView) => (
     <div key={team.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-team-${team.id}`} data-kind="team" data-queued="true" onClick={cardOpen(() => onOpenTeam(team))}>
-      <Heading icon="groups" chip={queuedChip(team.queuePosition)} title={firstLine(team.goal)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
+      <Heading icon="groups" chip={queuedChip(team.queuePosition)} title={firstLine(team.goal)} extra={teamModel(team)} onOpen={() => onOpenTeam(team)} testId={`coding-agent-live-open-team-${team.id}`} />
     </div>
   );
   const queuedRunRow = (run: LiveRun) => (
     <div key={run.id} className={`mt-2 ${CARD_SURFACE} px-3 py-2 cursor-pointer`} data-testid={`coding-agent-live-run-${run.id}`} data-queued="true" onClick={cardOpen(() => onOpenRun(run.id))}>
-      <Heading icon="smart_toy" chip={queuedChip(run.queued?.position)} title={firstLine(run.task)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
+      <Heading icon="smart_toy" chip={queuedChip(run.queued?.position)} title={firstLine(run.task)} extra={runModel(run)} onOpen={() => onOpenRun(run.id)} testId={`coding-agent-live-open-run-${run.id}`} />
     </div>
   );
 

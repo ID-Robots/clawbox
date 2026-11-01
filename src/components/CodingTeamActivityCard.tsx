@@ -6,6 +6,8 @@ import type { TeamStatus } from "@/lib/coding-team-status";
 import type { TeamStartStep } from "@/lib/coding-start-phase";
 import { isSettledTeamStatus } from "@/lib/coding-team-status";
 import { taskTitle } from "@/lib/task-title";
+import { teamModelsLabel } from "@/lib/coding-model-names";
+import CodingModelChip from "./CodingModelChip";
 
 /**
  * One coding TEAM, as a card in the chat — the run card's sibling
@@ -155,6 +157,10 @@ export default function CodingTeamActivityCard(
   const phaseParts: string[] = [statusWord];
   if (total > 0) phaseParts.push(labels.tasks.replaceAll("{done}", String(done)).replaceAll("{total}", String(total)));
   if (team.prNumber != null) phaseParts.push(labels.pr.replaceAll("{n}", String(team.prNumber)));
+
+  // What the team runs on ("Sonnet 5 · Opus 5.5" — the owner, 2026-11-01):
+  // the workers' model first, at most two names then "+N".
+  const models = teamModelsLabel(team.agents);
 
   const counters: string[] = [];
   if (team.agents.length > 0 && labels.agents) counters.push(labels.agents.replaceAll("{n}", String(team.agents.length)));
@@ -306,6 +312,12 @@ export default function CodingTeamActivityCard(
             <span style={i === 0 ? { color: statusColor } : undefined}>{part}</span>
           </span>
         ))}
+        {models ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            {(phaseParts.length > 0 || team.projectId) ? <span aria-hidden="true">·</span> : null}
+            <CodingModelChip label={models.label} title={models.ids.join(", ")} testId="coding-team-activity-model" style={{ maxWidth: 180 }} />
+          </span>
+        ) : null}
         {!settled ? <span aria-hidden="true">·</span> : null}
         {!settled ? <span aria-hidden="true">{took}</span> : null}
       </div>
