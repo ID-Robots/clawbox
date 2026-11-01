@@ -53,6 +53,10 @@ const RENDERED = [
   "settings.providers.makeDefault",
   "settings.providers.lockedHint",
   "settings.providers.empty",
+  "settings.providers.signOut",
+  "settings.providers.signOutConfirm",
+  "settings.providers.signOutFailed",
+  "settings.providers.signedOut",
 ];
 
 describe("the cloud-provider list is translated everywhere", () => {

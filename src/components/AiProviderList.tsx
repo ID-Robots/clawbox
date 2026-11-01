@@ -28,6 +28,9 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
  * component only reflects them.
  */
 
+/** How long the armed "Sign out — tap again" waits for the second tap. */
+const SIGN_OUT_CONFIRM_MS = 5_000;
+
 interface AiProviderListProps {
   /**
    * A deep link asked to see the Anthropic accounts — the coding agent's
@@ -70,6 +73,60 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
    */
   const [revealRequest, setRevealRequest] = useState(0);
   const anthropicRowRef = useRef<HTMLLIElement | null>(null);
+  /**
+   * Signing out of ClawBox AI (POST /setup-api/ai-models/clawai/sign-out):
+   * the first tap arms the button for a few seconds and the second signs out,
+   * the same two-tap shape as the coding agent's ChatGPT sign-out. The list
+   * then re-reads the box, and every other surface hears it through
+   * `notifyProvidersChanged` — the row drops to its signed-out state from the
+   * box's own answer, never an optimistic one.
+   */
+  const [signOutArmed, setSignOutArmed] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutNote, setSignOutNote] = useState<string | null>(null);
+  const signOutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmSignOut = useCallback(() => {
+    if (signOutTimer.current) clearTimeout(signOutTimer.current);
+    signOutTimer.current = null;
+    setSignOutArmed(false);
+  }, []);
+  useEffect(() => () => { if (signOutTimer.current) clearTimeout(signOutTimer.current); }, []);
+
+  const signOutOfClawai = useCallback(async () => {
+    disarmSignOut();
+    setSigningOut(true);
+    setToggleError(null);
+    setSignOutNote(null);
+    try {
+      const res = await fetch("/setup-api/ai-models/clawai/sign-out", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as { error?: unknown };
+      if (!res.ok) {
+        throw new Error(typeof data.error === "string" && data.error ? data.error : t("settings.providers.signOutFailed"));
+      }
+      setSignOutNote(t("settings.providers.signedOut"));
+    } catch (e) {
+      setToggleError(e instanceof Error && e.message ? e.message : t("settings.providers.signOutFailed"));
+    } finally {
+      // Re-read either way: a refusal can come after part of the sign-in was
+      // removed, and the rows are the box's answer, not this click's.
+      refresh();
+      notifyProvidersChanged();
+      setSigningOut(false);
+    }
+  }, [disarmSignOut, refresh, t]);
+
+  const onSignOutClick = useCallback(() => {
+    if (signOutArmed) {
+      void signOutOfClawai();
+      return;
+    }
+    if (signOutTimer.current) clearTimeout(signOutTimer.current);
+    signOutTimer.current = setTimeout(() => {
+      signOutTimer.current = null;
+      setSignOutArmed(false);
+    }, SIGN_OUT_CONFIRM_MS);
+    setSignOutArmed(true);
+  }, [signOutArmed, signOutOfClawai]);
 
   const setEnabled = useCallback(async (row: ProviderStatusRow, enabled: boolean) => {
     setToggling(row.id);
@@ -122,6 +179,12 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // (TASK-663). Only while the list would be EMPTY, though: ClawBox AI's link
   // is read from our own store and needs no dashboard, so a row we already
   // know about is shown rather than hidden behind everyone else's spinner.
+  // Said once the box's own answer shows ClawBox AI signed out, and gone again
+  // once a sign-in has connected it.
+  const signedOutNote = signOutNote && !rows.some((row) => row.id === "clawai" && row.state === "connected")
+    ? signOutNote
+    : null;
+
   const awaitingProbe = rows.length === 0
     && (summary?.providers ?? []).some((row) => row.state === "checking");
 
@@ -191,6 +254,18 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
           insertion, which assistive tech may drop entirely — and this sentence
           is the only thing on screen saying the change landed at all. The
           chrome is what is conditional, not the node. */}
+      {/* The sign-out's outcome, in a region mounted in every state for the
+          reason the warning below is. */}
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="ai-provider-sign-out-note"
+        className={signedOutNote
+          ? "mb-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] text-[var(--text-secondary)]"
+          : ""}
+      >
+        {signedOutNote ?? ""}
+      </div>
       <div
         role="status"
         aria-live="polite"
@@ -263,6 +338,10 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // takes Anthropic out of the CHAT's routing, and coding runs go on
             // drawing on this pool with it off.
             const hasAccounts = row.id === "anthropic";
+            // ClawBox AI's sign-out, on the row of a sign-in the box holds —
+            // the default's too: that is the account the box was otherwise
+            // left with no way out of. OpenClaw only (the route's rule).
+            const canSignOut = row.id === "clawai" && row.state === "connected" && summary?.harness === "openclaw";
             return (
               <Fragment key={row.id}>
               {/* Stacked below `sm:`, one line above it. At 390 px the row had
@@ -365,6 +444,22 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                       variant="inline"
                       testId="anthropic-accounts-toggle"
                     />
+                  )}
+
+                  {canSignOut && (
+                    <button
+                      type="button"
+                      onClick={onSignOutClick}
+                      onBlur={disarmSignOut}
+                      disabled={signingOut || busy}
+                      aria-busy={signingOut}
+                      data-testid="ai-provider-sign-out-clawai"
+                      className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 shrink-0 ${
+                        signOutArmed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                      }`}
+                    >
+                      {signOutArmed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut")}
+                    </button>
                   )}
 
                   {canMakeDefault && (

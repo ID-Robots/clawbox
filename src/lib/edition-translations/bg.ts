@@ -23,6 +23,10 @@ export const bg: Record<string, string> = {
   "settings.providers.switchedOff": "Изключен",
   "settings.providers.makeDefault": "Направи по подразбиране",
   "settings.providers.lockedHint": "Първо направете друг доставчик по подразбиране.",
+  "settings.providers.signOut": "Изход от ClawBox AI",
+  "settings.providers.signOutConfirm": "Изход — докоснете отново",
+  "settings.providers.signOutFailed": "Изходът от ClawBox AI не бе успешен.",
+  "settings.providers.signedOut": "Излязохте от ClawBox AI. Влезте отново по-долу, за да го използвате.",
   "settings.providers.empty": "Все още няма свързан доставчик — свържете един по-долу.",
 
   // === System password card ===
