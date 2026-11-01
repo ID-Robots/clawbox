@@ -47,6 +47,10 @@ export const zh: Record<string, string> = {
   "settings.providers.switchedOff": "已关闭",
   "settings.providers.makeDefault": "设为默认",
   "settings.providers.lockedHint": "请先将另一个提供商设为默认。",
+  "settings.providers.signOut": "退出 ClawBox AI",
+  "settings.providers.signOutConfirm": "退出 — 再点一次",
+  "settings.providers.signOutFailed": "无法退出 ClawBox AI。",
+  "settings.providers.signedOut": "已退出 ClawBox AI。如需使用，请在下方重新登录。",
   "settings.providers.empty": "尚未连接任何提供商 — 请在下方连接一个。",
 
   // === System password card ===

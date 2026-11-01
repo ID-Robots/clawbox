@@ -36,6 +36,10 @@ export const settingsSecurityEn: Record<string, string> = {
   "settings.providers.switchedOff": "Switched off",
   "settings.providers.makeDefault": "Make default",
   "settings.providers.lockedHint": "Make another provider the default first.",
+  "settings.providers.signOut": "Sign out of ClawBox AI",
+  "settings.providers.signOutConfirm": "Sign out — tap again",
+  "settings.providers.signOutFailed": "Could not sign out of ClawBox AI.",
+  "settings.providers.signedOut": "Signed out of ClawBox AI. Sign in again below to use it.",
   "settings.providers.empty": "No provider is connected yet — connect one below.",
 
   // === System password card ===

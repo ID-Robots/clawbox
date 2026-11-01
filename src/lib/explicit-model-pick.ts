@@ -282,6 +282,32 @@ export async function forgetClawboxAiPickIfMovedOff(model: string): Promise<void
 }
 
 /**
+ * Forget the owner's ClawBox AI pick, whatever it is: the box has signed out
+ * of the account it was made on (src/lib/clawai-sign-out.ts), and the next
+ * account must not inherit it (TASK-713's rule for a re-link). Serialised with
+ * the other writers; fail-soft like them, but it answers whether the map is
+ * known to be without one.
+ */
+export async function forgetClawboxAiPick(): Promise<boolean> {
+  let cleared = false;
+  await serialise(async () => {
+    try {
+      const { value, known } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+      if (!known) return;
+      const next = picksWithoutProvider(explicitPicksFrom(value), "clawai");
+      if (next) await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: next });
+      cleared = true;
+    } catch (err) {
+      console.warn(
+        "[explicit-model-pick] could not clear the ClawBox AI pick of a signed-out account:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
+  return cleared;
+}
+
+/**
  * Forget the owner's pick for `ref`'s provider when the pick IS `ref` — the box
  * has just proven this account cannot run that model (a limit of zero, a model
  * the provider no longer serves; src/lib/provider-model-fallback.ts) and moved

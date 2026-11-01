@@ -13,6 +13,7 @@ vi.mock("@/lib/clawai-connect", () => ({
   createClawAiUserCode: vi.fn(() => "ABCD-1234"),
   createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
   CLAWAI_USER_CODE_LENGTH: 8,
+  CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
   writeClawAiSession: vi.fn(),
   readClawAiSession: vi.fn(),
   clearClawAiSession: vi.fn(),
@@ -39,6 +40,8 @@ describe("ClawBox AI device-auth routes", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    // A session a case left standing for every read is not the next case's.
+    mockReadClawAiSession.mockReset();
     mockIsClawAiSessionExpired.mockReturnValue(false);
   });
 
@@ -135,8 +138,35 @@ describe("ClawBox AI device-auth routes", () => {
     vi.unstubAllGlobals();
   });
 
+  it("signs nothing in when the session was ended while the portal answered — a sign-out cleared it", async () => {
+    mockReadClawAiSession
+      .mockResolvedValueOnce({
+        device_id: "device-id-xyz",
+        user_code: "ABCD-1234",
+        interval: 5,
+        createdAt: Date.now(),
+        status: "pending",
+        provider: "clawai",
+        scope: "primary",
+        tier: "pro",
+        error: null,
+      })
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: "portal-token-123" }), { status: 200 })));
+
+    const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    const response = await mod.POST();
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({ status: "error", error: expect.stringMatching(/cancelled/) });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(mockConfigurePost).not.toHaveBeenCalled();
+    expect(mockWriteClawAiSession).not.toHaveBeenCalled();
+  });
+
   it("acknowledges the poll with `configuring` and runs configure off the request lifecycle", async () => {
-    mockReadClawAiSession.mockResolvedValueOnce({
+    // The session stays on disk while the poll asks the portal: it reads it
+    // again before it acts on the token.
+    mockReadClawAiSession.mockResolvedValue({
       device_id: "device-id-xyz",
       user_code: "ABCD-1234",
       interval: 5,

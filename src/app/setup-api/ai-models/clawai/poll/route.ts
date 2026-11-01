@@ -6,6 +6,7 @@ import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
+  CLAWAI_CONFIGURING_TIMEOUT_MS,
   type ClawAiConnectSession,
   clearClawAiSession,
   isClawAiSessionExpired,
@@ -20,10 +21,8 @@ const CLAWBOX_AI_DEVICE_POLL_URL =
   process.env.CLAWBOX_AI_DEVICE_POLL_URL?.trim()
   || "https://clawbox.com/api/clawbox-ai/device-poll";
 
-// Max time a session may sit in `configuring` before the poll route gives up
-// on the background configure and surfaces a retryable error. A gateway
-// restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
-const CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
+// Max time a session may sit in `configuring` (clawai-connect.ts).
+const CONFIGURING_TIMEOUT_MS = CLAWAI_CONFIGURING_TIMEOUT_MS;
 
 // How long the background configure follows the gateway restart a sign-in
 // ends in before it calls the session complete anyway — and never past what is
@@ -344,6 +343,17 @@ export async function POST() {
     }
     // Unknown payload — keep polling rather than aborting.
     return NextResponse.json({ status: "pending" });
+  }
+
+  // The session this poll read may have ended while the portal answered: a
+  // sign-out clears it (src/lib/clawai-sign-out.ts), and the token in hand
+  // must not sign the box back in to the account it just left.
+  const current = await readClawAiSession();
+  if (!current || current.device_id !== session.device_id) {
+    return NextResponse.json(
+      { status: "error", error: "This ClawBox AI sign-in was cancelled. Request a new code to sign in." },
+      { status: 410 },
+    );
   }
 
   // Upstream issued a token. Mark the session as `configuring` first so
