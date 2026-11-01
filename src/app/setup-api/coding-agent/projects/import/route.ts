@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { hasPersonSession } from "@/lib/owner-session";
 import { verifyMcpBearer } from "@/lib/mcp-token";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { getDefaultDirectory, listProjects } from "@/lib/coding-agent";
+import { ensureProjectFolder, listProjects } from "@/lib/coding-agent";
 import { importFolder, importGitHubRepo, type ImportOutcome, type ImportReason } from "@/lib/project-import";
 
 export const dynamic = "force-dynamic";
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
   const b = typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 
   let out: ImportOutcome;
-  const projectsRoot = await getDefaultDirectory();
+  const projectsRoot = await ensureProjectFolder();
   if (b.source === "github") {
     if (typeof b.repo !== "string") return NextResponse.json({ error: "Name the repository as owner/name.", kind: "invalid" }, { status: 400 });
     out = await importGitHubRepo({ fullName: b.repo, projectsRoot });
