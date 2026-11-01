@@ -42,7 +42,8 @@ interface ChromeWindowProps {
   zIndex: number;
   onClose: () => void;
   onFocus: () => void;
-  onMinimize: () => void;
+  /** Absent: the window has no shelf entry to minimize to, and draws no Minimize button (PopoutWindow). */
+  onMinimize?: () => void;
   onGeometryChange?: (geo: { x: number; y: number; width: number; height: number }) => void;
   minimized?: boolean;
   rightInset?: number;
@@ -778,7 +779,7 @@ function ChromeWindow({
     setMinimizing(true);
     setTimeout(() => {
       setMinimizing(false);
-      onMinimize();
+      onMinimize?.();
     }, 250);
   }, [onMinimize]);
 
@@ -859,15 +860,17 @@ function ChromeWindow({
 
         {/* Right: window controls — ChromeOS circular buttons */}
         <div className="flex items-center gap-1.5 ml-2">
-          {/* Minimize */}
-          <button
-            onClick={handleMinimize}
-            className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
-            title={t("window.minimize")}
-            aria-label={t("window.minimize")}
-          >
-            <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>minimize</span>
-          </button>
+          {/* Minimize — only for a window the shelf can bring back. */}
+          {onMinimize && (
+            <button
+              onClick={handleMinimize}
+              className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
+              title={t("window.minimize")}
+              aria-label={t("window.minimize")}
+            >
+              <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>minimize</span>
+            </button>
+          )}
 
           {/* Maximize */}
           <button

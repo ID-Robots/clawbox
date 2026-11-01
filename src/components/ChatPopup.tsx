@@ -1551,8 +1551,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // host's (src/components/CodingChatCards.tsx), so the full-page chat has
   // the same card.
   const newApp = useNewAppCard(openFromChat)
-  const showNewApp = newApp.show
-  const closeNewApp = newApp.close
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -1591,7 +1589,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   useEffect(() => {
     burstTakenByDragRef.current = false
     if (isOpen) { setPos(null); setPreview(null) }
-    else { setGeneratingImage(false); closeNewApp() }
+    // The Create planner is NOT closed with the chat: it is a window of its own.
+    else setGeneratingImage(false)
   }, [isOpen])
 
   // Provider id for the header model dropdown. Memoised on the active
@@ -7393,8 +7392,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // Escape closes the innermost thing first. Every surface that opens over the
   // chat stops the key before it reaches here: an image preview at the
   // document's capture phase (useModalDialog), a pill menu the same way
-  // (HeaderDropdown), and the New app card at the document's bubble phase
-  // (NewAppWizardCard). Reading `showNewApp` here was no substitute for the
+  // (HeaderDropdown), and a pop-out window — the Create planner — at the
+  // document's bubble phase (PopoutWindow). Reading "is the card open" here was no substitute for the
   // last one: the browser flushes the card's close between the card's listener
   // and this one, so this listener was re-registered with the card already
   // gone before the key arrived, and one Escape dismissed the card AND the
@@ -7623,7 +7622,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     e.stopPropagation()
   }, [])
 
-  if (!isOpen) return null
+  // The Create planner is a window of its own (PopoutWindow, portalled to the
+  // body), so it stays up with the conversation closed: the desktop's `+`
+  // tile and the Coding Agent's Create open the planner, not the chat. The
+  // chat opens when the planner hands it the message.
+  // The SAME element at the same place in both returns (the first child of a
+  // fragment), so opening or closing the chat never remounts the planner and
+  // never throws away what is being typed in it.
+  if (!isOpen) return <><NewAppCardSlot card={newApp} /></>
 
   // Default position: centred above the mascot when there is room, clamped to
   // an 8px viewport gutter when the mascot is near an edge. This must follow
@@ -7909,6 +7915,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   }
 
   return (
+    <>
+    <NewAppCardSlot card={newApp} />
     <div
       data-testid="chat-popup"
       // Hook for the phone-sized touch targets in globals.css (.chat-mobile).
@@ -8990,9 +8998,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         </div>
       )}
 
-      {/* The New app card, over the composer. Same ground and hairline as the
-          composer so it reads as part of it, not as a dialog over the chat. */}
-      <NewAppCardSlot card={newApp} />
 
       {/* Desktop keeps the full-width text box over its action/settings row.
           Phones put attachment and mic/send beside the text, settings below. */}
@@ -9001,7 +9006,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         className="chat-composer"
         style={{
         padding: mobile ? '10px 12px 10px' : '10px 14px 10px',
-        borderTop: (attachments.length > 0 || showNewApp) ? 'none' : '1px solid rgba(255,255,255,0.06)',
+        borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
@@ -9567,6 +9572,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         document.body,
       )}
     </div>
+    </>
   )
 }
 

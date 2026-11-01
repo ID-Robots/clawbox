@@ -185,7 +185,7 @@ describe("coding_team_status", () => {
     for (const status of ["queued", "working"]) {
       apiGet.mockResolvedValueOnce({ team: { ...TEAM, status } });
       const openclaw = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
-      expect(openclaw).toMatch(/ClawBox posts in this chat when the team finishes; do not poll it or schedule a watcher\./);
+      expect(openclaw).toMatch(/ClawBox posts in this chat when the team finishes \(not when the owner stops it\); do not poll it or schedule a watcher\./);
       expect(openclaw).not.toMatch(/check again/);
       apiGet.mockResolvedValueOnce({ team: { ...TEAM, status } });
       const hermes = await ok("coding_team_status", { team_id: TEAM.id, log: 0 }, "hermes");
@@ -215,6 +215,41 @@ describe("coding_team_stop", () => {
     const text = await ok("coding_team_stop", { team_id: TEAM.id });
     expect(apiPost).toHaveBeenCalledWith("/setup-api/coding-agent/team/stop", { id: TEAM.id }, expect.anything());
     expect(text).toContain("Team team-k3x9q2ab is stopped.");
+  });
+});
+
+describe("a team the owner stopped", () => {
+  it("is answered as stopped by the owner, for good — no fresh run, no new team, unless the user asks again", async () => {
+    apiGet.mockResolvedValueOnce({ team: { ...TEAM, status: "stopped" } });
+    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 0, wait_seconds: 0 });
+    expect(text).toContain("The owner stopped this team, and it stays stopped: do not start it again, or another team or run for its goal, unless the user asks for that in a new message.");
+    expect(text).not.toMatch(/fresh coding_agent_run/);
+    // The list says who stopped it, too.
+    apiGet.mockResolvedValueOnce({ teams: [{ ...TEAM, status: "stopped" }] });
+    const list = JSON.parse(await ok("coding_team_status", { log: 0, wait_seconds: 0 })) as Array<Record<string, unknown>>;
+    expect(list[0]).toMatchObject({ status: "stopped", stopped_by: expect.stringMatching(/^the owner; do not start it again/) });
+    // The settle word no longer promises a post for the owner's stop.
+    apiPost.mockResolvedValueOnce({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    expect(await ok("coding_team_run", { goal: "Build the invoice app", directory: "invoice" })).toContain("ClawBox posts in this chat when the team finishes (not when the owner stops it)");
+  });
+
+  it("turns the box's owner_stopped refusal into CONFLICT: tell the user and stop, user_asked_again only on a new ask", async () => {
+    apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "The owner stopped coding team team-k3x9q2ab on this work.", kind: "busy", code: "owner_stopped" })));
+    const err = await refused("coding_team_run", { goal: "Build the invoice app", directory: "invoice" });
+    expect(err).toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/owner stopped a coding team on this work/) });
+    expect(err.next).toMatch(/Do not start it again/);
+    expect(err.next).toMatch(/user_asked_again true/);
+    // A plain busy is still the queue's.
+    apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "full", kind: "busy" })));
+    expect(await refused("coding_team_run", { goal: "g", directory: "invoice" })).toMatchObject({ message: expect.stringMatching(/as many coding teams waiting/) });
+  });
+
+  it("sends userAskedAgain only when user_asked_again is true", async () => {
+    apiPost.mockResolvedValue({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    await ok("coding_team_run", { goal: "Build the invoice app", directory: "invoice", user_asked_again: true });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/team", { goal: "Build the invoice app", directory: "invoice", userAskedAgain: true }, expect.anything());
+    await ok("coding_team_run", { goal: "Build the invoice app", directory: "invoice", user_asked_again: false });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/team", { goal: "Build the invoice app", directory: "invoice" }, expect.anything());
   });
 });
 

@@ -92,6 +92,14 @@ describe("teamCard", () => {
     expect(teamCard({ ...team, status: "done" }).agents.every((a) => a.state === "done")).toBe(true);
   });
 
+  it("carries each agent's model from the cast list, and none it does not name", () => {
+    const runs = [{ ...team.runs[0], model: "claude-opus-5-5" }, { ...team.runs[1], model: null }];
+    expect(teamCard({ ...team, runs }).agents).toEqual([
+      { role: "planner", runId: "run-00000001", state: "done", model: "claude-opus-5-5" },
+      { role: "worker", runId: "run-00000002", state: "done" },
+    ]);
+  });
+
   it("answers the final review's first sentence when the team has one, else why it stopped, and caps the task list", () => {
     expect(teamCard({ ...team, status: "done", finalReview: { verdict: "accepted", notes: "Every task landed. Nothing left." } }).resultLine).toBe("Every task landed.");
     expect(teamCard({ ...team, status: "failed", error: "The planner gave no plan.\nmore" }).resultLine).toBe("The planner gave no plan.");

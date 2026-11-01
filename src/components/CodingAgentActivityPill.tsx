@@ -6,8 +6,10 @@ import type { CodingRunStatus } from "@/lib/coding-agent-status";
 import type { RunCardStartStep } from "@/lib/coding-start-phase";
 import { describeProgressLine, estimateRunProgress, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { taskTitle } from "@/lib/task-title";
+import { runModelId } from "@/lib/coding-model-names";
 import { notifyCodingRunStarted } from "@/lib/ui-events";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
+import { RunModelChip } from "./CodingModelChip";
 
 /**
  * One delegated coding run, as a card in the chat.
@@ -479,6 +481,12 @@ export default function CodingAgentActivityPill(
       ) : null}
     </span>,
   ];
+  // The model it runs on ("Opus 5.5", "GPT 5.6 Sol" — the owner, 2026-11-01):
+  // what answered, else what it was started with; nothing when neither is
+  // known (an announced start, a record from before the fields).
+  if (runModelId(run)) {
+    meta.push(<RunModelChip key="model" run={run} testId="coding-agent-activity-model" style={{ maxWidth: 140 }} />);
+  }
   if (run.projectId) meta.push(<span key="project">{run.projectId}</span>);
   if (settled && labels.files && (run.filesTouched ?? 0) > 0) {
     meta.push(<span key="files">{labels.files.replaceAll("{n}", String(run.filesTouched ?? 0))}</span>);

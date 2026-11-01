@@ -53,7 +53,8 @@ import {
 } from "@/lib/coding-agent-graph";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
-import { codingModelName } from "@/lib/coding-model-names";
+import { codingModelName, memberModelFields, runModelId } from "@/lib/coding-model-names";
+import CodingModelChip from "./CodingModelChip";
 import type { TeamTaskView, TeamView } from "./CodingTeamPage";
 import { useSteppedFlow } from "@/lib/coding-agent-flow";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
@@ -73,6 +74,10 @@ export interface DiagramRun extends GraphRun {
   summary?: string | null;
   error?: string | null;
   messages?: RunMessage[];
+  /** What answered, every model billed, and what it was started with — the node's model chip (`nodeModelId`). */
+  model?: string | null;
+  modelsUsed?: string[];
+  requestedModel?: string | null;
 }
 
 export type DiagramSource =
@@ -231,6 +236,18 @@ export function fullName(t: Translate, n: AgentNode, run?: Pick<DiagramRun, "tas
         ? t("codingAgent.diagram.name.attempt", { name: t("codingAgent.team.roleWorker", { task }), n: n.attempt })
         : t("codingAgent.team.roleWorker", { task });
   }
+}
+
+/**
+ * The model a node runs on, for the chip under its label: what its run
+ * answered on, else the team's cast list's model (what it started with,
+ * brought up to what answered once it settled), else what the run was started
+ * with. Null for a placeholder, a helper (which lives inside its run and may
+ * run on another model) and anything nothing names.
+ */
+export function nodeModelId(n: AgentNode, run: Pick<DiagramRun, "model" | "modelsUsed" | "requestedModel"> | undefined, cast: { model?: string | null } | undefined): string | null {
+  if (n.placeholder || n.role === "helper") return null;
+  return runModelId(memberModelFields(cast, run));
 }
 
 function firstLine(text: string, max = 80): string {
@@ -466,7 +483,9 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
               const isCurrent = n.key === current;
               const run = n.runId ? lookup(n.runId) : n.role === "run" && source.kind === "run" ? source.run : undefined;
               const label = shortLabel(t, n);
-              const named = [label, fullName(t, n, run), t(`codingAgent.diagram.state.${n.state}`), isCurrent ? t("codingAgent.diagram.name.thisRun") : null].filter(Boolean).join(" — ");
+              const modelId = nodeModelId(n, run, n.runId ? team?.runs?.find((r) => r.id === n.runId) : undefined);
+              const modelName = modelId ? codingModelName(modelId) : null;
+              const named = [label, fullName(t, n, run), t(`codingAgent.diagram.state.${n.state}`), modelName, isCurrent ? t("codingAgent.diagram.name.thisRun") : null].filter(Boolean).join(" — ");
               return (
                 <button
                   key={n.key}
@@ -518,6 +537,15 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
                     </span>
                   </span>
                   <span className={`max-w-full truncate text-[10px] leading-3 font-medium ${isOpen ? "text-[var(--text-primary)]" : "text-[var(--text-secondary)]"}`} aria-hidden="true">{label}</span>
+                  {/* The model it runs on ("Opus 5.5"), in the line the
+                      geometry keeps for it (`modelLine`), so a model that
+                      becomes known mid-run moves nothing. Named in the
+                      button's label already, so hidden from assistive tech. */}
+                  {modelName && (
+                    <span className="-mt-1 flex max-w-full justify-center" aria-hidden="true">
+                      <CodingModelChip label={modelName} title={modelId} size="xs" testId="coding-agent-node-model" />
+                    </span>
+                  )}
                 </button>
               );
             })}

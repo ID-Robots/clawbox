@@ -31,6 +31,8 @@ import type { ModelRole } from "@/lib/coding-role-models";
 import { BTN_BASE, BTN_DANGER, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import CodingAgentDiagram, { DiagramDetails, type DiagramRun } from "./CodingAgentDiagram";
 import CodingTaskDialog from "./CodingTaskDialog";
+import CodingModelChip, { TeamModelChip } from "./CodingModelChip";
+import { codingModelName, memberModelFields, runModelId, teamMemberModels } from "@/lib/coding-model-names";
 import { timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
@@ -476,6 +478,8 @@ export default function CodingTeamPage({ teamId, team: known, runs, onOpenRun, o
               {t("codingAgent.team.queuePosition", { n: team.queuePosition })}
             </span>
           )}
+          {/* What the team runs on ("Sonnet 5 · Opus 5.5" — the owner, 2026-11-01): the workers' model first. */}
+          <TeamModelChip members={teamMemberModels(team, runOf)} testId="coding-team-model" style={{ maxWidth: 200 }} />
           {team.pr && (
             <a href={team.pr.url} target="_blank" rel="noreferrer" className={`${chip} text-violet-300 border-violet-400/40 hover:bg-violet-400/10`} data-testid="coding-team-pr-chip">
               {t("codingAgent.viewPr", { n: team.pr.number })}
@@ -570,6 +574,10 @@ export default function CodingTeamPage({ teamId, team: known, runs, onOpenRun, o
               const target = activeRunOf(task);
               const waits = waitingFor(task, team.tasks);
               const reviewer = reviewerState(task);
+              // The model its worker runs on — the current attempt's.
+              const workerModel = task.assigned_to
+                ? runModelId(memberModelFields(team.runs?.find((r) => r.id === task.assigned_to), runOf(task.assigned_to)))
+                : null;
               const second = [
                 t("codingAgent.team.taskWorker", { state: workerState(task) }),
                 reviewer ? t("codingAgent.team.taskReviewer", { state: reviewer }) : null,
@@ -587,7 +595,10 @@ export default function CodingTeamPage({ teamId, team: known, runs, onOpenRun, o
                       <span className="font-mono text-[11px] text-[var(--text-muted)] mr-1.5">{task.task_id}</span>
                       {task.task_description ? firstLine(task.task_description, 120) : ""}
                     </span>
-                    <span className="block text-[11px] text-[var(--text-muted)] mt-0.5 break-words" data-testid={`coding-team-task-state-${task.task_id}`}>{second}</span>
+                    <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <span className="text-[11px] text-[var(--text-muted)] break-words" data-testid={`coding-team-task-state-${task.task_id}`}>{second}</span>
+                      <CodingModelChip label={workerModel ? codingModelName(workerModel) : null} title={workerModel} testId={`coding-team-task-model-${task.task_id}`} style={{ maxWidth: 140 }} />
+                    </span>
                     {task.review?.notes && task.review.verdict === "rejected" && (
                       <span className="block text-[11px] text-red-300 mt-0.5 break-words">{task.review.notes}</span>
                     )}

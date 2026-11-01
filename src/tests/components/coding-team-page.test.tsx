@@ -281,3 +281,29 @@ describe("the Team page", () => {
     expect(screen.getByTestId("coding-agent-team-page")).toHaveAttribute("data-team-id", "team-older0001");
   });
 });
+
+describe("the models the team runs on (the owner, 2026-11-01)", () => {
+  it("names the team's models in its status block and each task's worker model on its row", () => {
+    const team: TeamView = { ...WORKING, runs: [
+      { id: "run-00000001", role: "planner", taskId: null, model: "claude-opus-5-5" },
+      { id: "run-00000002", role: "worker", taskId: "t1", model: "claude-sonnet-5" },
+      { id: "run-00000004", role: "reviewer", taskId: "t1" },
+      { id: "run-00000003", role: "worker", taskId: "t2", model: "claude-sonnet-5" },
+    ] };
+    // The run record's answer beats the cast list's.
+    const runs = RUNS.map((r) => (r.id === "run-00000003" ? { ...r, model: "gpt-5.6-sol" } : r));
+    render(<Page team={team} runs={runs} />);
+    expect(screen.getByTestId("coding-team-model")).toHaveTextContent("Sonnet 5 · GPT 5.6 Sol +1");
+    expect(screen.getByTestId("coding-team-task-model-t1")).toHaveTextContent("Sonnet 5");
+    expect(screen.getByTestId("coding-team-task-model-t2")).toHaveTextContent("GPT 5.6 Sol");
+    expect(screen.getByTestId("coding-team-task-model-t2")).toHaveAttribute("title", "gpt-5.6-sol");
+    // No worker yet: no model.
+    expect(screen.queryByTestId("coding-team-task-model-t3")).toBeNull();
+  });
+
+  it("names nothing on a board from before the models were kept", () => {
+    render(<Page team={WORKING} />);
+    expect(screen.queryByTestId("coding-team-model")).toBeNull();
+    expect(screen.queryByTestId("coding-team-task-model-t1")).toBeNull();
+  });
+});

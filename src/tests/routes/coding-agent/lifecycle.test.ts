@@ -19,6 +19,11 @@ vi.mock("@/lib/coding-agent", async () => {
   return { ...actual, getRun, pauseRun, resumeRun, startDraftRun, deleteDraftRun };
 });
 
+// The owner's-stop hold the resume route asks (coding-team.ts, tested there):
+// nothing held unless a case says so.
+const hold = vi.hoisted(() => ({ ownerStopRefusal: vi.fn(), releaseOwnerStopHold: vi.fn() }));
+vi.mock("@/lib/coding-team", () => hold);
+
 const RUN = { id: "run-k3x9q2ab", status: "running", source: "agent" };
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
@@ -39,6 +44,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   getRun.mockReturnValue(RUN);
+  hold.ownerStopRefusal.mockReturnValue(null);
   pauseRun.mockReturnValue({ ...RUN, status: "paused" });
   resumeRun.mockResolvedValue({ ...RUN, status: "running" });
   startDraftRun.mockResolvedValue({ ...RUN, status: "running" });
@@ -151,5 +157,31 @@ describe("the shared shape", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(deleteDraftRun).toHaveBeenCalledWith(RUN.id);
+  });
+});
+
+describe("resume, on the work of a team the owner stopped", () => {
+  const WORKER = { ...RUN, status: "gave_up", task: "Wire app.js", directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t2-1" };
+
+  it("refuses the agent's resume 409 owner_stopped, and resumes nothing", async () => {
+    const { OwnerStoppedTeamError } = await import("@/lib/coding-agent");
+    getRun.mockReturnValue(WORKER);
+    hold.ownerStopRefusal.mockReturnValueOnce(new OwnerStoppedTeamError("team-stop0001", "The owner stopped coding team team-stop0001 on this work."));
+    const res = await post(resume, { runId: WORKER.id }, "bearer");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The owner stopped coding team team-stop0001 on this work.", kind: "busy", code: "owner_stopped" });
+    expect(hold.ownerStopRefusal).toHaveBeenCalledWith({ directory: WORKER.directory, text: "Wire app.js", runId: WORKER.id });
+    expect(resumeRun).not.toHaveBeenCalled();
+  });
+
+  it("resumes once the user asked again, lifting the hold — and never asks for the owner's cookie", async () => {
+    getRun.mockReturnValue(WORKER);
+    expect((await post(resume, { runId: WORKER.id, userAskedAgain: true }, "bearer")).status).toBe(202);
+    expect(hold.ownerStopRefusal).not.toHaveBeenCalled();
+    expect(hold.releaseOwnerStopHold).toHaveBeenCalledWith({ directory: WORKER.directory, text: "Wire app.js", runId: WORKER.id });
+    hold.releaseOwnerStopHold.mockClear();
+    expect((await post(resume, { runId: WORKER.id }, "cookie")).status).toBe(202);
+    expect(hold.ownerStopRefusal).not.toHaveBeenCalled();
+    expect(hold.releaseOwnerStopHold).not.toHaveBeenCalled();
   });
 });

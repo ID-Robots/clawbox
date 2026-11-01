@@ -115,8 +115,11 @@ const testScriptSays = () => execFileSync("sh", [path.join(repo, "test.sh")], { 
  * run on t1, whichever team), `review:t1#1`, `run#1` (an ordinary run).
  * `writes` are written in the run's folder and committed there, as the runner
  * commits a worker's work; `when` holds the run open until it is true.
+ * `ownBranch` is a branch the worker makes itself (`git checkout -b`, from
+ * `ownBranchFrom` when given) before it writes, and `backAfter` checks its
+ * given branch out again once it has committed there.
  */
-type Outcome = Partial<{ status: string; summary: string; error: string; writes: Record<string, string>; permissionDenials: number; deniedActions: string[]; when: () => boolean }>;
+type Outcome = Partial<{ status: string; summary: string; error: string; writes: Record<string, string>; permissionDenials: number; deniedActions: string[]; when: () => boolean; ownBranch: string; ownBranchFrom: string; backAfter: boolean }>;
 let script: Record<string, Outcome>;
 let runs: Map<string, Record<string, unknown>>;
 let starts: Array<Record<string, unknown> & { key: string }>;
@@ -151,10 +154,12 @@ const ACCEPT = JSON.stringify({ verdict: "accepted", notes: "" });
 function settleRun(run: Record<string, unknown>): void {
   const key = String(run.key);
   const outcome = script[key] ?? (key.startsWith("review:") ? { summary: ACCEPT } : { summary: "done" });
-  const { writes, ...rest } = outcome;
+  const { writes, ownBranch, ownBranchFrom, backAfter, ...rest } = outcome;
   delete rest.when;
   const dir = String(run.directory);
   const files = Object.keys(writes ?? {});
+  const given = ownBranch ? git(dir, "rev-parse", "--abbrev-ref", "HEAD") : null;
+  if (ownBranch) git(dir, "checkout", "-q", "-b", ownBranch, ...(ownBranchFrom ? [ownBranchFrom] : []));
   for (const [file, content] of Object.entries(writes ?? {})) {
     fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
     fs.writeFileSync(path.join(dir, file), content);
@@ -164,6 +169,7 @@ function settleRun(run: Record<string, unknown>): void {
     git(dir, "add", "-A");
     git(dir, "commit", "-q", "-m", `Coding agent: ${key}`);
   }
+  if (given && backAfter) git(dir, "checkout", "-q", given);
   Object.assign(run, { status: "completed", completedAt: Date.now(), filesTouched: files }, rest);
 }
 
@@ -451,5 +457,64 @@ describe("D4: a plan whose tasks touch the same files", () => {
       ["t1", "complete", "run-00000002", "accepted"],
       ["t2", "complete", "run-00000002", "accepted"],
     ]);
+  });
+});
+
+describe("D5: a worker that commits on a branch of its own", () => {
+  // Two tasks on different files: a real team, a worktree per worker.
+  const PLAN = [
+    { task_description: "Make ↑ fly forward in the keyboard flight", files_hint: ["src/keyboard.js"] },
+    { task_description: "Note the new sign in the README", files_hint: ["README.md"] },
+  ];
+
+  it("has its commits merged — not rejected as NO CHANGE — when it made the branch with `git checkout -b` and stayed on it", async () => {
+    script = {
+      "planner#1": plan(PLAN),
+      "t1#1": { summary: "↑ flies forward, committed on fix/arrow-up", ownBranch: "fix/arrow-up", writes: { "src/keyboard.js": "export const up = 1;\n" } },
+      "t2#1": { summary: "README notes the sign", writes: { "README.md": "# skyhub (simulated)\n\n↑ flies forward.\n" } },
+    };
+    const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard and say so", source: "agent" })).id);
+    const said = messages(done);
+    expect(said.some((m) => m.includes("NO CHANGE"))).toBe(false);
+    expect(done.status).toBe("done");
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.review?.verdict])).toEqual([["t1", "complete", 1, "accepted"], ["t2", "complete", 1, "accepted"]]);
+    // On the team branch, merged: the checkout is on it.
+    expect(fs.readFileSync(path.join(repo, "src", "keyboard.js"), "utf8")).toBe("export const up = 1;\n");
+    expect(said.some((m) => /committed on a branch of its own \(fix\/arrow-up\)/.test(m))).toBe(true);
+    // The reviewer was shown the file, as for any worker.
+    expect(String(starts.find((s) => s.key === "review:t1#1")?.task)).toContain("src/keyboard.js");
+  });
+
+  it("has its commits merged when it committed on its own branch and then checked its given branch out again", async () => {
+    script = {
+      "planner#1": plan(PLAN),
+      "t1#1": { summary: "↑ flies forward", ownBranch: "fix/arrow-back", backAfter: true, writes: { "src/keyboard.js": "export const up = 1;\n" } },
+      "t2#1": { summary: "README notes the sign", writes: { "README.md": "# skyhub (simulated)\n\n↑ flies forward.\n" } },
+    };
+    const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard and say so", source: "agent" })).id);
+    expect(messages(done).some((m) => m.includes("NO CHANGE"))).toBe(false);
+    expect(done.status).toBe("done");
+    expect(done.tasks.every((t) => t.status === "complete" && t.attempts === 1)).toBe(true);
+    expect(fs.readFileSync(path.join(repo, "src", "keyboard.js"), "utf8")).toBe("export const up = 1;\n");
+  });
+
+  it("rejects the task and offers it once more when its own branch cannot be brought home — never judged as an empty branch", async () => {
+    script = {
+      "planner#1": plan([PLAN[0], { ...PLAN[1], depends_on: ["t1"] }]),
+      "t1#1": { summary: "↑ flies forward", writes: { "src/keyboard.js": "export const up = 1;\n" } },
+      // Forked from develop, where ↑ still says -1: the same line, a real conflict.
+      "t2#1": { summary: "README notes the sign", ownBranch: "fix/from-develop", ownBranchFrom: "develop", writes: { "src/keyboard.js": "export const up = 2;\n", "README.md": "# skyhub (simulated)\n\n↑ flies forward.\n" } },
+      "t2#2": { summary: "README notes the sign", writes: { "README.md": "# skyhub (simulated)\n\n↑ flies forward.\n" } },
+    };
+    const done = await finished((await team.startTeam({ goal: "Fix ↑ on the keyboard and say so", source: "agent" })).id);
+    const said = messages(done);
+    expect(said.filter((m) => /Merge failed for t2 \(run-\d+\): its own branch could not be brought onto clawbox\/team-[a-z0-9]{8}-t2-1/.test(m))).toHaveLength(1);
+    expect(said.some((m) => /changed no files/.test(m))).toBe(false);
+    expect(said.some((m) => m.includes("NO CHANGE"))).toBe(false);
+    expect(done.status).toBe("done");
+    // Not counted: offered once more, like a merge conflict.
+    expect(done.error ?? null).toBeNull();
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.review?.verdict])).toEqual([["t1", "complete", 1, "accepted"], ["t2", "complete", 2, "accepted"]]);
+    expect(fs.readFileSync(path.join(repo, "src", "keyboard.js"), "utf8")).toBe("export const up = 1;\n");
   });
 });

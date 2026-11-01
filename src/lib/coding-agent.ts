@@ -309,6 +309,7 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
+import { adoptOwnBranchWork, ownBranchWork } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
@@ -2690,6 +2691,19 @@ export class SlotsFullError extends CodingAgentError {
   constructor(message: string) {
     super("busy", message);
     this.name = "SlotsFullError";
+  }
+}
+
+/**
+ * A start by the assistant refused because the owner stopped a team of its
+ * own on that work (coding-team.ts `ownerStopRefusal`): a 409 whose `code`
+ * the MCP tools turn into "tell the user and stop".
+ */
+export class OwnerStoppedTeamError extends CodingAgentError {
+  readonly code = "owner_stopped";
+  constructor(readonly teamId: string, message: string) {
+    super("busy", message);
+    this.name = "OwnerStoppedTeamError";
   }
 }
 
@@ -8965,6 +8979,34 @@ export function isTransientFailure(error: string | null): boolean {
 }
 
 /**
+ * What a run with a worktree of its own committed on a branch it made itself
+ * (`git checkout -b fix/…`), brought onto the branch the box gave it — before
+ * the commit, the pull request and the merge home, which all read that one.
+ * Without it the run's branch counted as empty: the copy was removed, the
+ * branch deleted, and the run said "completed" with nothing merged home — the
+ * single-run side of a team worker rejected as NO CHANGE for the same move
+ * (team-sso0e0wq, 2026-10-29). See adoptOwnBranchWork. Never throws.
+ */
+async function adoptRunBranchWork(run: CodingRun): Promise<void> {
+  const wt = run.worktree;
+  if (!wt || wt.removed || run.readOnly || !fs.existsSync(wt.path)) return;
+  try {
+    const adopted = await adoptOwnBranchWork(wt.path, wt.branch);
+    if (!adopted.ok) {
+      // Said on the run, and the copy is kept by settleRunWorktree while
+      // the work is on a branch its own does not hold (`ownBranchWork`).
+      pushProgress(run, RUNNER_STEP.notCommitted(`the run committed on a branch of its own, which could not be brought onto ${wt.branch}: ${adopted.detail}`));
+      persist(true);
+      console.error(`[coding-agent] ${run.id} committed on a branch of its own, not brought onto ${wt.branch}: ${adopted.detail}`);
+    } else if (adopted.from) {
+      console.error(`[coding-agent] ${run.id} committed on ${adopted.from}; brought onto ${wt.branch}`);
+    }
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} own branch:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Commit what the run changed, in its own folder.
  *
  * Never throws: a run that did its work is finished whether or not the
@@ -11767,6 +11809,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   store.unannounced.add(run.id);
   trackSettleWork((async () => {
     try {
+      await adoptRunBranchWork(run);
       await recordRunWork(run);
       // The lessons the run proposed for its project's notes
       // (src/lib/coding-run-notes.ts), vetted and merged before anyone waiting
@@ -12788,7 +12831,11 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       if (run.commitError) return "the run's commit failed, so it may hold work its branch does not";
       const changed = await worktreeHasChanges(wt.path);
       if (changed === null) return "git could not say whether it holds uncommitted changes";
-      return changed ? "it holds changes that are not committed to its branch" : null;
+      if (changed) return "it holds changes that are not committed to its branch";
+      // Committed on a branch of its own that could not be brought onto its
+      // branch (adoptRunBranchWork): the copy and the branch are kept.
+      const own = await ownBranchWork(wt.path, wt.branch);
+      return own.length ? `the run committed on ${own.map((o) => o.name).join(", ")}, which ${wt.branch} does not hold` : null;
     };
     if (ahead === 0) {
       const unsaved = (await unsavedWork()) ?? inUse;
