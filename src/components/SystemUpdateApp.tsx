@@ -28,6 +28,26 @@ import {
   readHarnessDowngradeDetail,
   type HarnessDowngradeDetail,
 } from "@/lib/harness-downgrade";
+import { UPDATE_IGNORE_BUSY_FLAG } from "@/lib/update-busy";
+import UpdateBusyNotice from "@/components/UpdateBusyNotice";
+
+/** How often "Wait until done" asks the box again whether its agent runs have finished. */
+const BUSY_RETRY_MS = 15_000;
+
+/** The run total of a busy `update/run` refusal (issue #1269); 1 when it does not say. */
+function busyTotal(data: unknown): number {
+  const total = (data as { counts?: { total?: unknown } } | null)?.counts?.total;
+  return typeof total === "number" && total > 0 ? total : 1;
+}
+
+/** The `update/run` body: the downgrade override and "Update anyway" only ever as a literal `true`. */
+function updateRunBody(allowDowngrade: boolean, ignoreBusy: boolean): string {
+  return JSON.stringify({
+    force: true,
+    ...(allowDowngrade ? { [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : {}),
+    ...(ignoreBusy ? { [UPDATE_IGNORE_BUSY_FLAG]: true } : {}),
+  });
+}
 
 export interface ComponentVersion {
   current: string | null;
@@ -218,6 +238,12 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [branchDowngrade, setBranchDowngrade] = useState<{ branch: string | null; detail: HarnessDowngradeDetail } | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [forceConfirm, setForceConfirm] = useState(false);
+  // An update the server would not start because agent runs are active (issue
+  // #1269): it stops the assistant, which ends them. `waiting` is the owner's
+  // "Wait until done" — the page asks again until they have finished and the
+  // update starts by itself. `allowDowngrade` is carried so the answer starts
+  // the update the owner actually asked for.
+  const [busy, setBusy] = useState<{ active: number; waiting: boolean; allowDowngrade: boolean } | null>(null);
 
   // Fetched once on mount, from the same endpoint the About screen uses, so
   // the two surfaces cannot disagree about whether this box is running its own
@@ -363,7 +389,10 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   //
   // `allowDowngrade` is the owner's "Back up and update anyway", offered only on
   // a run the server refused for installing an older harness.
-  const triggerUpdate = useCallback(async (allowDowngrade = false) => {
+  //
+  // `ignoreBusy` is the owner's "Update anyway" over active agent runs, offered
+  // only once the server has refused for them.
+  const triggerUpdate = useCallback(async (allowDowngrade = false, ignoreBusy = false) => {
     setUpdateStarted(true);
     setUpdateError(null);
     setUpdateState(null);
@@ -371,21 +400,71 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // `=== true`: a handler that passes its click event must never be the override.
-        body: JSON.stringify(allowDowngrade === true ? { force: true, [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : { force: true }),
+        // `=== true`: a handler that passes its click event must never be an override.
+        body: updateRunBody(allowDowngrade === true, ignoreBusy === true),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (res.status === 409 && data?.busy === true) {
+          setUpdateStarted(false);
+          setBusy((prev) => ({ active: busyTotal(data), waiting: prev?.waiting ?? false, allowDowngrade: allowDowngrade === true }));
+          return;
+        }
+        setBusy(null);
         setUpdateError(typeof data.error === "string"
           ? data.error
           : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
         return;
       }
+      setBusy(null);
       startPolling();
     } catch (err) {
+      setBusy(null);
       setUpdateError(err instanceof Error ? err.message : tr("update.startFailed", "Failed to start update"));
     }
   }, [startPolling, tr]);
+
+  // "Wait until done": ask again, quietly, until the box has no agent run left
+  // and the update starts — the screen stays on the notice, never flickering
+  // into "updating" for a refusal. Anything but another busy refusal ends the
+  // wait the way a click would have.
+  const busyWaiting = busy?.waiting === true;
+  const busyAllowDowngrade = busy?.allowDowngrade === true;
+  useEffect(() => {
+    if (!busyWaiting) return;
+    let stopped = false;
+    const id = window.setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch("/setup-api/update/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: updateRunBody(busyAllowDowngrade, false),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (stopped) return;
+          if (res.status === 409 && data?.busy === true) {
+            setBusy((prev) => (prev ? { ...prev, active: busyTotal(data) } : prev));
+            return;
+          }
+          setBusy(null);
+          setUpdateState(null);
+          setUpdateStarted(true);
+          if (!res.ok) {
+            setUpdateError(typeof data.error === "string"
+              ? data.error
+              : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
+            return;
+          }
+          setUpdateError(null);
+          startPolling();
+        } catch {
+          /* the box did not answer: keep waiting */
+        }
+      })();
+    }, BUSY_RETRY_MS);
+    return () => { stopped = true; window.clearInterval(id); };
+  }, [busyWaiting, busyAllowDowngrade, startPolling, tr]);
 
   const dismissResult = useCallback(() => {
     setUpdateStarted(false);
@@ -673,7 +752,17 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               {hero.subhead}
             </p>
 
-            {(status === "available" || status === "up-to-date" || status === "drift") && (
+            {busy && status !== "updating" ? (
+              <div className="mt-6 w-full max-w-md">
+                <UpdateBusyNotice
+                  active={busy.active}
+                  mode={busy.waiting ? "waiting" : "ask"}
+                  hint={tr("update.busy.waitingHint", "The update starts by itself once that work is done.")}
+                  onWait={() => setBusy((prev) => (prev ? { ...prev, waiting: true } : prev))}
+                  onUpdateAnyway={() => void triggerUpdate(busy.allowDowngrade, true)}
+                />
+              </div>
+            ) : (status === "available" || status === "up-to-date" || status === "drift") && (
               <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
                 {(status === "available" || status === "drift") && (
                   <button

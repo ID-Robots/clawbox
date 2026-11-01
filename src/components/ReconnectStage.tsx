@@ -45,6 +45,12 @@ export interface ReconnectStageProps {
    * read first. Absent, the overlay renders exactly as it always has.
    */
   aside?: ReactNode;
+  /**
+   * Optional interactive notice under the callouts — /updating's "N agent runs
+   * are active: wait for them / update anyway" (issue #1269). Absent, the
+   * overlay renders exactly as it always has.
+   */
+  notice?: ReactNode;
 }
 
 /** Nothing ever changes: the store only tells a hydrating render from a live one. */
@@ -69,6 +75,7 @@ export default function ReconnectStage({
   hermes = false,
   doneTone = "emerald",
   aside,
+  notice,
 }: ReconnectStageProps) {
   // A portal has no server rendering, so the server sends nothing here — and
   // the client's HYDRATING render has to send nothing too. `typeof document`
@@ -114,6 +121,8 @@ export default function ReconnectStage({
           {secondaryInstruction}
         </div>
       )}
+
+      {notice && <div className="w-full max-w-[360px] reconnect-fade-in">{notice}</div>}
 
       <div className="w-full max-w-[300px] space-y-2.5 mt-1 text-left">
         {steps.map((step, index) => (
