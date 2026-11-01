@@ -1184,6 +1184,7 @@ export const bg: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "Работата е в клона {branch}, не в проекта: проектът е на друг клон, а не на {base}.",
   "codingAgent.worktreeUnmergedConflict": "Работата е в клона {branch}, не в проекта: тя е в конфликт със собствените промени на проекта.",
   "codingAgent.worktreeUnmergedFailed": "Работата е в клона {branch}, не в проекта: git отказа сливането.",
+  "codingAgent.worktreeUnmergedStopped": "Работата е в клона {branch}, не в проекта: изпълнението беше спряно преди да завърши, затова нищо не беше слято. Слейте го сами, ако го искате.",
   "codingAgent.worktreeOnDisk": "Собственото му копие на проекта все още е на диска.",
   "codingAgent.worktreeMergedInto": "Слята в {base}.",
 

@@ -446,6 +446,16 @@ export async function register() {
     // agent's next status question is not answered with "still running".
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const codingAgent = require('./lib/coding-agent')
+    // The teams the restart interrupted are CLAIMED first, synchronously,
+    // before anything below awaits: until they are picked back up, a read of
+    // one from the app's poll must not settle it failed. Its own try: a team
+    // that cannot be claimed must not stop the runs being reconciled.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('./lib/coding-team').claimOrphanedTeams()
+    } catch (err) {
+      console.error('[instrumentation] Could not claim the interrupted coding teams:', err instanceof Error ? err.message : err)
+    }
     // Asynchronous since runs got scopes of their own: a run may have SURVIVED
     // this restart, and only systemd can say which did. Chained rather than
     // raced with the watches below, which read the records this settles.
@@ -490,20 +500,20 @@ export async function register() {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const codingTeam = require('./lib/coding-team')
-          // The teams the restart interrupted are CLOSED first: their workers
-          // that survived in their scopes are waited for (never killed), each
-          // finished worker's branch is merged into the team branch, the
-          // worktrees go and the board settles with the branches named — a
-          // board used to be failed on its next read while its workers went on
-          // for an hour and their worktrees were stranded. Chained before the
-          // queue pump, since those workers still hold the box.
+          // The team the restart interrupted is PICKED BACK UP where it was:
+          // its member runs that survived in their scopes were reattached
+          // above, and the team goes on with them — merging and reviewing
+          // what they finish, working the rest of its plan — rather than
+          // failing while they finish with nobody to take their work back.
+          // Any other interrupted board is closed with its branches named.
+          // Chained before the queue pump: the team holds the box.
           codingTeam
-            .closeOrphanedTeams()
-            .then((closed: number) => {
-              if (closed > 0) console.log(`[instrumentation] ${closed} coding team(s) the previous server was running were closed`)
+            .resumeOrphanedTeams()
+            .then((resumed: number) => {
+              if (resumed > 0) console.log(`[instrumentation] ${resumed} coding team(s) the previous server was running were picked back up`)
             })
             .catch((err: unknown) => {
-              console.error('[instrumentation] Could not close the interrupted coding teams:', err instanceof Error ? err.message : err)
+              console.error('[instrumentation] Could not pick up the interrupted coding teams:', err instanceof Error ? err.message : err)
             })
             .finally(() => {
               codingTeam.startNextQueuedTeam().catch((err: unknown) => {

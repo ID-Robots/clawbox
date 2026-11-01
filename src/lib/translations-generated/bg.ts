@@ -1935,6 +1935,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "Работата е в клона {branch}, не в проекта: папката на проекта има некомитнати промени.",
   "codingAgent.worktreeUnmergedFailed": "Работата е в клона {branch}, не в проекта: git отказа сливането.",
   "codingAgent.worktreeUnmergedNotOnBase": "Работата е в клона {branch}, не в проекта: проектът е на друг клон, а не на {base}.",
+  "codingAgent.worktreeUnmergedStopped": "Работата е в клона {branch}, не в проекта: изпълнението беше спряно преди да завърши, затова нищо не беше слято. Слейте го сами, ако го искате.",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "Потвърди",
   "connected": "Свързано!",

@@ -451,7 +451,7 @@ describe("D3: a plan run as one run judges each task on the files it names", () 
       ["t2", "complete", "accepted"],
       ["t3", "complete", "accepted"],
     ]);
-    expect(done.tasks[1].review?.notes).toMatch(/^Ran as a single run, and the files it names are present \(src\/core\.ts, src\/types\.ts\) or removed by the run \(src\/legacy\.ts\): /);
+    expect(done.tasks[1].review?.notes).toMatch(/^Ran as a single run, and the files it names are present \(src\/core\.ts, src\/types\.ts\) or removed by the run \(src\/legacy\.ts\) in the project folder: /);
     expect(done.status).toBe("done");
   });
 });

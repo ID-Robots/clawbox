@@ -173,7 +173,10 @@ fi
 # shellcheck disable=SC2016  # expanded on the board
 LEFT=$(board 'git -C "$1" rev-parse --abbrev-ref HEAD' "$PROJECT_DIR")
 note "the checkout is on $LEFT after the first team"
-GOAL="Two independent tasks that can run side by side: 1. create docs/a.md holding the line A. 2. create docs/b.md holding the line B. Change nothing else."
+# This test stops the second team, and a team the owner stopped holds its
+# goal (coding-team.ts ownerStopRefusal): the run id keeps the next run of
+# this test on the same board from being refused as that work.
+GOAL="Two independent tasks that can run side by side: 1. create docs/a.md holding the line A. 2. create docs/b.md holding the line B. Change nothing else. (nano-ci $NANO_RUN_ID)"
 if ! start_coding_team "$GOAL"; then
   not_ok "the second team did not start: $(api_error)"
   finish

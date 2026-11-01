@@ -45,6 +45,7 @@ const REASON_KEY: Record<MergeHomeBlocker, string> = {
   not_on_base: "codingAgent.worktreeUnmergedNotOnBase",
   conflict: "codingAgent.worktreeUnmergedConflict",
   failed: "codingAgent.worktreeUnmergedFailed",
+  stopped: "codingAgent.worktreeUnmergedStopped",
 };
 
 /** Enough of a sha to recognise the commit by, which is all the line claims. */

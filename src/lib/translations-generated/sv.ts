@@ -1935,6 +1935,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "Arbetet finns på {branch}, inte i projektet: projektmappen har ocommittade ändringar.",
   "codingAgent.worktreeUnmergedFailed": "Arbetet finns på {branch}, inte i projektet: git vägrade sammanslagningen.",
   "codingAgent.worktreeUnmergedNotOnBase": "Arbetet finns på {branch}, inte i projektet: projektet står på en annan gren än {base}.",
+  "codingAgent.worktreeUnmergedStopped": "Arbetet finns på {branch}, inte i projektet: körningen stoppades innan den var klar, så inget slogs samman. Slå samman det själv om du vill ha det.",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "Bekräfta",
   "connected": "Ansluten!",

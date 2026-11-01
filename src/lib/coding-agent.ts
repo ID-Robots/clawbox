@@ -365,9 +365,12 @@ import {
   CODING_AGENT_GIT_NAME_CONFIG_KEY,
   CODING_GIT_EMAIL_REFUSAL,
   CODING_GIT_NAME_REFUSAL,
+  CODING_GIT_PLACEHOLDER,
   MAX_GIT_IDENTITY_CHARS,
   normalizeCodingGitEmail,
   normalizeCodingGitName,
+  resolveCodingGitIdentity,
+  type CodingGitIdentity,
 } from "@/lib/coding-git-identity";
 import {
   EXPERIENCE_BLOCK_MAX_CHARS,
@@ -381,6 +384,7 @@ import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
 import {
+  findRunScopeUnit,
   isRunScopeUnit,
   noteScopeRefused,
   noteScopeWorked,
@@ -4712,7 +4716,7 @@ function parseRunWorktree(raw: unknown): RunWorktree | null {
 }
 
 /** Every blocker this box words a next step for; anything else off disk is not one. */
-const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed"];
+const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed", "stopped"];
 
 /**
  * The merge verdict off disk, or null.
@@ -5173,11 +5177,17 @@ interface RunStore {
   runMcpPlan: Map<string, RunMcpPlan>;
   /** An `openai` run's API key — see runOpenAIKey. Optional: a store from an older module. */
   runOpenAIKey?: Map<string, string>;
+  /** Who a run's own `git commit` is authored as — see runGitIdentity. */
+  runGitIdentity?: Map<string, CodingGitIdentity>;
   /** The runs whose pull request or review is already being watched. */
   prWatchers: Set<string>;
   reviewWatchers: Set<string>;
   /** Settle chains a test can wait on — see trackSettleWork. */
   settling: Set<Promise<void>>;
+  /** Each run's own settle chain while it is in flight — see waitForRunSettled. */
+  settleChains?: Map<string, Promise<void>>;
+  /** Runs settled lost at boot whose scope nobody could ask about: their worktree is kept as it is (settleRunWorktree). */
+  keepTrees: Set<string>;
   /** Runs whose record says settled while their commit is still being made — see waitForRun. */
   unannounced: Set<string>;
   /** One lifecycle change at a time per run — see transitions. */
@@ -5222,6 +5232,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   prWatchers: new Set<string>(),
   reviewWatchers: new Set<string>(),
   settling: new Set<Promise<void>>(),
+  keepTrees: new Set<string>(),
   unannounced: new Set<string>(),
   transitions: new Map<string, Promise<CodingRun>>(),
   startingRuns: 0,
@@ -5265,8 +5276,16 @@ const LOST_TO_RESTART = "The box restarted while the run was live, so it did not
  *    finished while nobody was watching, and it settles as what it said it was.
  *  - anything else: the box restarted while it was live, and it says so.
  *
- * A record with no unit at all — a plain child of the old server, or a run from
- * before this existed — can only ever be the third.
+ * A live record with no unit — written "running" before its spawn, by a server
+ * that went before the unit reached the disk — is looked for by NAME
+ * (`findRunScopeUnit`) and reattached when systemd has its scope up. Only a
+ * record with no unit and no such scope, a plain child of the old server or a
+ * run from before scopes existed, is the third outright.
+ *
+ * "systemd could not be asked" is asked again a few times, and a live record
+ * it still cannot answer for is REATTACHED rather than settled: the watch asks
+ * on, with the process group as its second opinion. Settling it here merged
+ * and removed the worktree of a run still working in it.
  */
 export async function reconcileAfterRestart(): Promise<number> {
   // What a server that died mid-run left of its runs' MCP config files: each
@@ -5284,16 +5303,27 @@ export async function reconcileAfterRestart(): Promise<number> {
     const orphaned = run.status === "running" && !live.has(run.id);
     // Only a run that HAS a unit is asked about, which on a settled record means
     // only one that recorded a leftover (every other settle forgets its unit),
-    // so this is a handful of systemctl calls at boot and usually none.
+    // so this is a handful of systemctl calls at boot and usually none. A live
+    // record without one is looked for by name first.
     //
-    // A `null` answer — systemd could not be asked — counts as gone HERE, and
-    // deliberately not in the reattach watch. The difference is what else can be
-    // trusted: this process has held no handle on the run, so the recorded pid
-    // may since have been given to a stranger and cannot second the answer,
-    // while a reattach has already seen the scope alive with that pid in it. A
-    // record left "running" that nothing will ever settle is the worse outcome.
-    const unitStillUp = run.unit !== null && (await unitActive(run.unit)) === true;
-    if (orphaned && unitStillUp) {
+    // A `null` answer — systemd could not be asked, even after a few tries — on
+    // a LIVE record is reattached, not settled: settling is what merges and
+    // removes its worktree, and "could not look" is not "gone". The reattach
+    // watch keeps asking and has the process group as its second opinion, so
+    // the record is still settled once the run is over. A settled record's null
+    // is read as gone, as before: nothing is lost if its leftover goes unseen.
+    let scopeUnknown = false;
+    if (orphaned && run.unit === null) {
+      const found = await findRunScopeAtBoot(run.id);
+      if (found === undefined) scopeUnknown = true;
+      else if (found) {
+        run.unit = found;
+        changed = true;
+      }
+    }
+    const answer = run.unit !== null ? await unitActiveAtBoot(run.unit, orphaned) : false;
+    const unitStillUp = answer === true;
+    if (orphaned && (unitStillUp || (answer === null && run.unit !== null))) {
       // ALIVE. Its pgid and its unit are still the real handles on it, so
       // neither is forgotten below.
       reattach(run, tools);
@@ -5329,6 +5359,10 @@ export async function reconcileAfterRestart(): Promise<number> {
       changed = true;
     }
     if (orphaned) {
+      // Nobody could say whether its scope is still up: settled — there is no
+      // handle to watch it by — but its worktree is left exactly as it is,
+      // never merged or removed under a run that may still be working in it.
+      if (scopeUnknown) store.keepTrees.add(run.id);
       settleLostRun(run, tools);
       repaired += 1;
       changed = true;
@@ -5342,6 +5376,33 @@ export async function reconcileAfterRestart(): Promise<number> {
     }
   }
   return repaired;
+}
+
+/** How many times, and how far apart, the boot sweep asks again about a live run's scope systemd did not answer for. */
+const BOOT_UNIT_ASKS = 3;
+const BOOT_UNIT_RETRY_MS = 1_000;
+
+/**
+ * `unitActive` for the boot sweep: a LIVE record's unanswered question is asked
+ * again a few times before it counts as unanswered, since the user bus can be
+ * busy for a moment at boot. A settled record's is asked once — nothing is
+ * lost if its leftover goes unnoticed.
+ */
+async function unitActiveAtBoot(unit: string, live: boolean): Promise<boolean | null> {
+  for (let ask = 1; ; ask++) {
+    const answer = await unitActive(unit);
+    if (answer !== null || !live || ask >= BOOT_UNIT_ASKS) return answer;
+    await new Promise<void>((resolve) => setTimeout(resolve, BOOT_UNIT_RETRY_MS));
+  }
+}
+
+/** `findRunScopeUnit` for the boot sweep: an unanswered look is made again a few times, like `unitActiveAtBoot`. */
+async function findRunScopeAtBoot(runId: string): Promise<string | null | undefined> {
+  for (let ask = 1; ; ask++) {
+    const found = await findRunScopeUnit(runId);
+    if (found !== undefined || ask >= BOOT_UNIT_ASKS) return found;
+    await new Promise<void>((resolve) => setTimeout(resolve, BOOT_UNIT_RETRY_MS));
+  }
 }
 
 /** setpriv and systemd-run for the boot sweep — best effort, never a reason to refuse it. */
@@ -5475,8 +5536,11 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
       const active = run.unit ? await unitActive(run.unit) : false;
       if (active === true) return;
       // "Could not be asked" is not "gone": the process group is the second
-      // opinion, so a wedged user bus cannot settle a working run as lost.
-      if (active === null && groupAlive(state.pgid)) return;
+      // opinion, so a wedged user bus cannot settle a working run as lost. A
+      // run with no group on record (one found by its scope's name) has no
+      // second opinion and waits for the next answer — bounded by the idle
+      // watchdog, which ends it the honest way.
+      if (active === null && (groupAlive(state.pgid) || (state.pgid === null && !state.timedOut))) return;
       settle();
     })().catch(() => {});
   }, UNIT_POLL_MS);
@@ -7116,6 +7180,8 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
   // …and the project's MCP servers, whose credentials the table below must
   // know before the child that holds them exists.
   await prepareRunMcp(run, project);
+  // …and who its own commits are authored as.
+  await prepareRunGitIdentity(run);
   registerRunRedaction(run.id);
   run.secretNames = resolved.names;
   if (resolved.names.length > 0) pushProgress(run, RUNNER_STEP.secretsInjected(resolved.names));
@@ -7147,6 +7213,31 @@ const runAnthropicCredential: Map<string, RunAnthropicCredential> =
  */
 const runOpenAIKey: Map<string, string> =
   store.runOpenAIKey ?? (store.runOpenAIKey = new Map<string, string>());
+
+/**
+ * Who the HARNESS's own commits are authored as, resolved on the async path
+ * before each spawn (`prepareRunGitIdentity`) the way the box's own commits
+ * are: the project's git identity, else the owner's setting, else the
+ * placeholder. Without it a box with no global identity — every flashed board,
+ * once the factory one is cleared — answered the agent's `git commit` in its
+ * worktree with "Author identity unknown", and the agent made one up:
+ * `-c user.name="Claude Code" -c user.email=noreply@anthropic.com`.
+ */
+const runGitIdentity: Map<string, CodingGitIdentity> =
+  store.runGitIdentity ?? (store.runGitIdentity = new Map<string, CodingGitIdentity>());
+
+async function prepareRunGitIdentity(run: CodingRun): Promise<void> {
+  const found = await resolveCodingGitIdentity(run.directory).catch(() => null);
+  // A look git could not make leaves the placeholder (`gitIdentityFor`) rather
+  // than a name guessed from half an answer.
+  if (found?.ok) runGitIdentity.set(run.id, { name: found.identity.name, email: found.identity.email });
+  else runGitIdentity.delete(run.id);
+}
+
+/** The identity a spawn of this run commits as: resolved, or the box's placeholder. */
+function gitIdentityFor(runId: string): CodingGitIdentity {
+  return runGitIdentity.get(runId) ?? CODING_GIT_PLACEHOLDER;
+}
 
 /**
  * The MCP servers a run's project opted into (src/lib/project-mcp-servers.ts),
@@ -7320,7 +7411,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string> } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -7382,6 +7473,17 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // `--maxWorkers` and `-j`. A CLAWBOX_ name, so no stored secret can raise it.
   if (typeof opts.cpuBudget === "number" && Number.isInteger(opts.cpuBudget) && opts.cpuBudget >= 1) {
     env[RUN_CPU_BUDGET_ENV] = String(opts.cpuBudget);
+  }
+  // Who the run's own `git commit` is authored as (runGitIdentity). The
+  // environment rather than a written config: it reaches every git the harness
+  // starts, in its worktree or a worker's, and leaves nothing in the owner's
+  // repository. Set ahead of the secrets, so no stored entry can sign a run's
+  // commits as somebody else, and over any `-c user.name=` the agent passes.
+  if (opts.gitIdentity) {
+    env.GIT_AUTHOR_NAME = opts.gitIdentity.name;
+    env.GIT_AUTHOR_EMAIL = opts.gitIdentity.email;
+    env.GIT_COMMITTER_NAME = opts.gitIdentity.name;
+    env.GIT_COMMITTER_EMAIL = opts.gitIdentity.email;
   }
   // The owner's secrets, LAST and never over the top of anything above.
   //
@@ -10725,8 +10827,9 @@ function endedAfterAnswer(exitCode: number | null, tokens: number, tail: string)
  * `runWatcherPoll`.
  */
 const settling = store.settling;
+const settleChains: Map<string, Promise<void>> = store.settleChains ?? (store.settleChains = new Map<string, Promise<void>>());
 
-function trackSettleWork(work: Promise<unknown>): void {
+function trackSettleWork(work: Promise<unknown>, runId?: string): void {
   // Neutralised first: the tracked promise must never be the one that rejects,
   // or a caller that does not wait for it turns into an unhandled rejection.
   // The arm still says so, because `void`ing this at least surfaced a future
@@ -10736,6 +10839,71 @@ function trackSettleWork(work: Promise<unknown>): void {
   });
   settling.add(done);
   void done.finally(() => settling.delete(done));
+  if (runId) {
+    // After any chain of the same run still going (a Stop of a paused run lands
+    // during the pause's own settle): a wait is for ALL of them.
+    const before = settleChains.get(runId);
+    const all = before ? Promise.all([before, done]).then(() => undefined) : done;
+    settleChains.set(runId, all);
+    void all.finally(() => {
+      if (settleChains.get(runId) === all) settleChains.delete(runId);
+    });
+  }
+}
+
+/**
+ * The record that last decided what became of a run's worktree, once its
+ * chain has ended: the run itself — or the automatic review pass that carried
+ * on in its tree (`reviewOf`), whose OWN settle merges the branch home and
+ * records it on the pass's record, not the reviewed run's. Waited for in turn,
+ * all within `timeoutMs`. Null when the run has no record.
+ */
+export async function waitForRunHome(runId: string, timeoutMs: number = RUN_SETTLE_WAIT_MS): Promise<CodingRun | null> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const left = () => Math.max(0, deadline - Date.now());
+  let id = runId;
+  for (let hop = 0; hop < 4; hop++) {
+    await waitForRunSettled(id, left());
+    const pass = loadRuns().filter((r) => r.reviewOf === id).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (!pass) break;
+    while (isLive(pass.status) && left() > 0) await waitForRun(pass.id, Math.min(left(), 60_000));
+    id = pass.id;
+  }
+  const record = loadRuns().find((r) => r.id === id);
+  return record ? cloneRun(record) : null;
+}
+
+/** How long a caller waits for a run's settle chain by default before it goes on without it. */
+const RUN_SETTLE_WAIT_MS = 5 * 60_000;
+
+/**
+ * Wait for the END of a settled run's settle chain — its commit, review pass,
+ * pull request and, last, what became of its worktree (`settleRunWorktree`) —
+ * not just for the status `waitForRun` answers on, which is set before any of
+ * it. True when the chain is over (or there was none), false when `timeoutMs`
+ * passed first.
+ *
+ * What it is for: a team that judged a single run's work by its status found
+ * the files "present" on the run's branch while the merge home was still to be
+ * refused, and went done with nothing in the project; a Resume that started
+ * inside a Stop's settle had its folder removed under it ("The current working
+ * directory was deleted"). Never awaited from inside the chain it waits for.
+ */
+export async function waitForRunSettled(runId: string, timeoutMs: number = RUN_SETTLE_WAIT_MS): Promise<boolean> {
+  const chain = settleChains.get(runId);
+  if (!chain) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      chain.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** A plain wait. NOT `unref`ed: the point of this path is that a caller can
@@ -11689,9 +11857,14 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // very record back to work, and that attempt is still its one run. A
       // pause, or a record back at work, keeps them; that attempt's own settle
       // comes back through here.
-      if (!isRunGoing(run.id)) endRunSecrets(run);
+      if (!isRunGoing(run.id)) {
+        endRunSecrets(run);
+        // Kept until here, not dropped with the secrets: the transient retry
+        // respawns before this chain and commits as the same identity.
+        runGitIdentity.delete(run.id);
+      }
     }
-  })());
+  })(), run.id);
   // A pause is the owner's own gesture — no finish notice for it.
   //
   // And neither is a run whose deliverable has not been looked at yet: "Coding
@@ -12050,7 +12223,7 @@ function spawnRun(
   // from a `close` handler and cannot read the disk (restoreRunSecrets).
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id) });
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id) });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
@@ -12198,6 +12371,13 @@ function spawnRun(
   // this server never spawned, and a recycled pid is no handle at all.
   run.pgid = state.pgid;
   run.unit = unit;
+  // On disk AT ONCE, not with the next stream flush: the unit is the only
+  // handle the next web server has on this run (reconcileAfterRestart). Left
+  // to the 5 s streaming cadence, a restart a few seconds into a run found
+  // "running" with no unit, settled a run still alive in its scope as lost,
+  // and merged and removed the worktree it was working in (s8-restart-mid-run,
+  // 3 of 3 boards, after the cadence moved to STREAM_FLUSH_MS).
+  persist(true);
   followStream(run, state);
   installExitHook();
 
@@ -12557,6 +12737,9 @@ async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> 
   return { ...wt, removed: !back, branchRemoved: back ? false : wt.branchRemoved, result: null };
 }
 
+/** Why a stopped run's work is on its branch and not in the project — the record's, the feed's and the assistant's words. */
+const STOPPED_UNMERGED = "the run was stopped before it finished, so its work stays on its branch, unmerged; the owner decides whether to merge it";
+
 /** Every live run working in this exact folder — the question "is anybody still in there?". */
 function liveRunsIn(directory: string): CodingRun[] {
   return loadRuns().filter((r) => isLive(r.status) && r.directory === directory);
@@ -12580,8 +12763,15 @@ function liveRunsIn(directory: string): CodingRun[] {
  * In order:
  *   - somebody is still working in it (the automatic review pass, another go
  *     at the deliverable, the owner's own Resume) — leave it alone;
+ *   - the run is PAUSED — its chain is not over: the tree stays as it is for
+ *     the Resume that carries on in it, and nothing is merged;
  *   - the branch holds nothing — remove the tree AND the branch, which is
  *     the common ending for a run that investigated and changed nothing;
+ *   - the owner STOPPED it — remove the tree, keep the branch, merge nothing:
+ *     the work is half-finished, and half-finished work never lands in the
+ *     owner's base branch on its own (a run stopped at 75 s was merged into
+ *     main). It is recorded `unmerged` / `stopped`, so the page says where the
+ *     work is; a Resume restores the tree from the branch;
  *   - a pull request owns the branch — remove the tree, keep the branch: the
  *     work goes home through the request, and a local merge would take the
  *     commits away from it;
@@ -12609,6 +12799,21 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
+    if (run.status === "paused") {
+      pushProgress(run, RUNNER_STEP.worktreeKept("the run is paused, and Resume carries on in it"));
+      persist(true);
+      return;
+    }
+    // Settled lost at boot while nobody could say whether its scope was still
+    // up (reconcileAfterRestart): the tree is not this settle's to touch.
+    if (store.keepTrees.delete(run.id)) {
+      pushProgress(run, RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
+      persist(true);
+      return;
+    }
+    // Something the run started is still running in the tree (a server it
+    // left, `leftover`): the work may go home, but the folder stays under it.
+    const inUse = run.leftover === true ? "something the run started is still running in it" : null;
     const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
     if (ahead === null) {
       // No answer is not permission to delete: keep it and say so.
@@ -12633,7 +12838,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return own.length ? `the run committed on ${own.map((o) => o.name).join(", ")}, which ${wt.branch} does not hold` : null;
     };
     if (ahead === 0) {
-      const unsaved = await unsavedWork();
+      const unsaved = (await unsavedWork()) ?? inUse;
       if (unsaved) {
         pushProgress(run, RUNNER_STEP.worktreeKept(unsaved));
         persist(true);
@@ -12661,7 +12866,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     // the SENTENCE differs. Recorded only if they are actually gone (see the
     // `ahead === 0` branch above).
     const park = async (reason: string): Promise<void> => {
-      const unsaved = await unsavedWork();
+      const unsaved = (await unsavedWork()) ?? inUse;
       if (unsaved) {
         pushProgress(run, RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
         persist(true);
@@ -12676,7 +12881,17 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       pushProgress(run, RUNNER_STEP.worktreeParked(wt.branch, reason));
       persist(true);
     };
-    if (run.pr && run.pr.phase !== "failed") {
+    if (run.status === "stopped") {
+      wt.result = { kind: "unmerged", reason: "stopped", detail: STOPPED_UNMERGED, base: null, commit: null };
+      await park(STOPPED_UNMERGED);
+      return;
+    }
+    // The pull request may be the ORIGIN's: a review pass or a review-loop
+    // turn carries on in the same tree with no `pr` of its own, and merging
+    // from there took the branch away from the request it is open for.
+    const origin = run.reviewOf ?? run.reviewLoopOf;
+    const pr = run.pr ?? (origin ? loadRuns().find((r) => r.id === origin)?.pr ?? null : null);
+    if (pr && pr.phase !== "failed") {
       await park("it is open as a pull request");
       return;
     }
@@ -12695,7 +12910,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
     // The merge took the branch home, not what the tree holds beside it.
-    const unsaved = await unsavedWork();
+    const unsaved = (await unsavedWork()) ?? inUse;
     if (unsaved) {
       pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
       persist(true);
@@ -12843,6 +13058,14 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let inheritedWorktree: RunWorktree | null = null;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
+  // A continuation of a run whose settle is still going — the commit after a
+  // Stop, its merge or parking, the worktree's removal — waits for that settle
+  // to END before it looks at the folder. Started inside it, a resume found the
+  // tree still there, was handed its path, and had it removed under it a moment
+  // later ("The current working directory was deleted", 0 s in). Not the
+  // automatic review pass nor a review-loop turn: those are started BY that
+  // settle, and waiting on it from inside would wait on itself.
+  if (resumeRunId && input.reviewOf == null && input.reviewLoopOf == null) await waitForRunSettled(resumeRunId);
   const previous = resumeRunId ? loadRuns().find((r) => r.id === resumeRunId) ?? null : null;
 
   // WHICH ACCOUNT THIS RUN WILL USE, worked out before the spawn gate rather
@@ -13659,6 +13882,9 @@ export function stopRun(id: string): CodingRun {
     endReviewLoopFor(run, "The review round was stopped while it was paused, so the pull request is still open.");
     persist(true);
     wakeWaiters(id);
+    // The pause kept the worktree for its Resume; the stop is where its work
+    // is parked on the branch, unmerged, like any stopped run's.
+    trackSettleWork(settleRunWorktree(run), run.id);
     return cloneRun(run);
   }
   if (run.status !== "running") return cloneRun(run);
@@ -13832,6 +14058,9 @@ export function resumeRun(id: string, opts: { automatic?: boolean } = {}): Promi
  * rather than that somebody resumed it.
  */
 async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> {
+  // The pause's own settle first — its commit and what it decides about the
+  // worktree — for the reason `startRun` waits for a resumed run's (see there).
+  await waitForRunSettled(id);
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
@@ -14661,7 +14890,7 @@ function spawnOrSettle(
     // …and neither does the aftermath run, which is where a run's copy of the
     // project is normally decided. A run that never started left nothing on
     // its branch, so this removes both.
-    trackSettleWork(settleRunWorktree(run));
+    trackSettleWork(settleRunWorktree(run), run.id);
     // The branch made for its pull request is already on the record. Nothing
     // settles the run through finishRun on this path, so the pull request is
     // ended here too, or it stays "opening" — pending — for good.
@@ -14707,6 +14936,7 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   liveHarnessFault = null;
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
+  store.keepTrees.clear();
   store.startingRuns = 0;
   store.startingTeams?.clear();
   if (store.queueRetry) clearTimeout(store.queueRetry);

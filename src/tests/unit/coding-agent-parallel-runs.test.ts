@@ -21,7 +21,12 @@ vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun: vi.fn(async () => 0) }));
-vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
+// Only the drawing is stubbed: a merge home reads the real BOX_FAVICONS
+// (readCheckout in coding-team-worktree.ts) to tell the box's files from the owner's.
+vi.mock("@/lib/project-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/project-icon")>()),
+  ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
+}));
 // A roomy box for a team's second run: the memory guard reads MemAvailable,
 // and the host's own is neither the fixture nor the same on every runner.
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));

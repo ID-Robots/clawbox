@@ -171,10 +171,54 @@ export function ciFixNotes(failure: CiFailure, opts: { push: boolean; excerptCha
   return lines.join("\n\n");
 }
 
+/**
+ * A pull request that already EXISTS, named by its number or its link — "(PR
+ * #14)", "sent in PR #14", "see pull request 12", ".../pull/12". Never the one
+ * a goal asks for, so it is taken out before the goal is read: a live team's
+ * "a pagination helper an outside contributor sent in (PR #14)" was read as
+ * asking for a pull request, and finished work failed for want of a remote.
+ */
+const PR_REFERENCE = /\bhttps?:\/\/\S+\/pulls?\/\d+\S*|\b(?:pull[\s-]?requests?|PRs?)\s*(?:#\s*\d+|\d+\b)/gi;
+
+function withoutPullRequestReferences(goal: string): string {
+  // A word of its own rather than nothing, so "…and merge PR #14" does not end
+  // in a bare "and merge" that reads as an ask.
+  return goal.replace(PR_REFERENCE, " §ref ");
+}
+
 /** Does the goal name a pull request at all — "pull request", "PR", "PRs"? */
 function mentionsPullRequest(goal: string): boolean {
-  return /\bpull[\s-]?requests?\b/i.test(goal) || /\bPRs?\b/.test(goal);
+  const text = withoutPullRequestReferences(goal);
+  return /\bpull[\s-]?requests?\b/i.test(text) || /\bPRs?\b/.test(text);
 }
+
+// Never the noun of another thing: "the PR template", "a PR description".
+const PR_NOUN = String.raw`(?:pull[\s-]?requests?\b|PRs?\b)(?!\s+(?:templates?|descriptions?|body|bodies|checklists?|titles?|comments?|labels?)\b)`;
+const PR_KIND = String.raw`(?:(?:new|draft|single|separate|proper|github)\s+)?`;
+
+/**
+ * The ways a goal ASKS for a pull request — a verb in the present ("open",
+ * "create", "send", "raise", "submit"…) followed by one, or a wish for one
+ * ("as a PR", "I need a pull request"). A past tense ("sent", "opened") is a
+ * story about some other pull request, and a bare noun ("the open PRs") asks
+ * for nothing.
+ */
+const PULL_REQUEST_ASKS: readonly RegExp[] = [
+  // "open a PR", "send me a pull request", "submit the work as a draft PR", "put it in a PR"
+  new RegExp(
+    String.raw`\b(?:open|create|send|raise|make|submit|file|put(?:\s+up)?|prepare|propose|draft|deliver|ship|push)\b` +
+      String.raw`(?:\s+(?:me|us|it|this|that|them|everything|the\s+(?:work|changes?|result|fix(?:es)?|code|branch)))?` +
+      String.raw`(?:\s+(?:as|in|into|via|through|with|up))?` +
+      String.raw`\s+(?:a|an|one|the|your|my)\s+` + PR_KIND + PR_NOUN,
+    "i",
+  ),
+  // "Open PRs for each fix", "…, then open pull requests": an imperative at the start of its clause.
+  new RegExp(String.raw`(?:^|[.;:!?,(]\s*|\b(?:and|then|also|please)\s+)(?:open|create|send|raise|submit|file)\s+` + PR_KIND + PR_NOUN, "i"),
+  // "as a PR", "via a pull request", "with a PR"
+  new RegExp(String.raw`\b(?:as|via|through|with)\s+(?:a|an)\s+` + PR_KIND + PR_NOUN, "i"),
+  // "I want a PR", "this needs a pull request"
+  new RegExp(String.raw`\b(?:want|wants|need|needs|would\s+like|expect|require|requires)\b[^.;\n]{0,24}?\b(?:a|an)\s+` + PR_KIND + PR_NOUN, "i"),
+];
 
 /**
  * Does a team's goal (or a run's task) REFUSE a pull request — "do not open a
@@ -185,12 +229,15 @@ function mentionsPullRequest(goal: string): boolean {
  */
 export function goalRefusesPullRequest(goal: string): boolean {
   if (!mentionsPullRequest(goal)) return false;
-  return /\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(goal);
+  // The negator's own clause only: "Don't merge it, but open a PR" asks for one.
+  return /\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b(?:(?!\bbut\b|,\s*(?:and|then|but)\b)[^.;\n])*\b(?:pull[\s-]?requests?|PRs?)\b/i.test(withoutPullRequestReferences(goal));
 }
 
 /**
- * Does a team's goal ask for a pull request? Its words, not a guess: "open a
- * PR", "a pull request", or a merge — which needs one. A team whose goal says
+ * Does a team's goal ask for a pull request? Its words, not a guess: an ask to
+ * open, create or send one (`PULL_REQUEST_ASKS`), or a merge — which needs one.
+ * A MENTION is not an ask: "sent in (PR #14)" or "see pull request 12" names a
+ * pull request that already exists (`PR_REFERENCE`). A team whose goal says
  * nothing of it leaves its work on the team's branch, as every team did —
  * and so does one whose goal REFUSES it (`goalRefusesPullRequest`, the one
  * reading of a refusal): "do not open a PR", "no pull request", read
@@ -199,7 +246,9 @@ export function goalRefusesPullRequest(goal: string): boolean {
  */
 export function goalWantsPullRequest(goal: string): boolean {
   if (goalWantsMerge(goal)) return true;
-  return mentionsPullRequest(goal) && !goalRefusesPullRequest(goal);
+  if (goalRefusesPullRequest(goal)) return false;
+  const text = withoutPullRequestReferences(goal);
+  return PULL_REQUEST_ASKS.some((re) => re.test(text));
 }
 
 /**
@@ -209,7 +258,9 @@ export function goalWantsPullRequest(goal: string): boolean {
  * only once every task is accepted, the suite is green, the final review
  * passed and every check on the pull request passes.
  */
-export function goalWantsMerge(goal: string): boolean {
+export function goalWantsMerge(input: string): boolean {
+  // "merge PR #14" is somebody else's pull request, never the team's to open.
+  const goal = withoutPullRequestReferences(input);
   if (!/\bmerg(?:e|es|ed|ing)\b|\bauto-?merge\b/i.test(goal)) return false;
   // Fail-closed: any negator earlier in the same clause as the merge — "do not
   // under any circumstances merge it" — is a refusal.

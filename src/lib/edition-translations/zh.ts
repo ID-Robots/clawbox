@@ -1208,6 +1208,7 @@ export const zh: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "工作在分支 {branch} 上，而不在项目里：项目当前所在的分支不是 {base}。",
   "codingAgent.worktreeUnmergedConflict": "工作在分支 {branch} 上，而不在项目里：它与项目自身的更改有冲突。",
   "codingAgent.worktreeUnmergedFailed": "工作在分支 {branch} 上，而不在项目里：git 拒绝了合并。",
+  "codingAgent.worktreeUnmergedStopped": "工作在分支 {branch} 上，而不在项目里：运行在完成前被停止，因此没有合并任何内容。如需要，请自行合并。",
   "codingAgent.worktreeOnDisk": "它的项目副本还在磁盘上。",
   "codingAgent.worktreeMergedInto": "已合并到 {base}。",
 

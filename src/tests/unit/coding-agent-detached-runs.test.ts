@@ -398,6 +398,24 @@ describe("readiness", () => {
 });
 
 describe("spawning", () => {
+  it("writes the unit to disk the moment the run spawns, not with the next stream flush", async () => {
+    // The stream path flushes the runs file every 5 s. A restart inside that
+    // window found "running" with no unit, and settled a run that was alive in
+    // its scope as lost (s8-restart-mid-run restarts 5 s into a run).
+    installSystemdRun();
+    installSystemctl("active");
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
+    const flag = path.join(base, "go");
+    // Prints nothing until told, so no stream line can flush the record.
+    installWrapper(`while [ ! -f ${JSON.stringify(flag)} ]; do sleep 0.05; done\necho '${RESULT}'\nexit 0`);
+    const started = await lib.startRun({ task: "Build it", directory: path.join(home, "Projects", "site"), source: "owner" });
+    const onDisk = (JSON.parse(fs.readFileSync(runsFile(), "utf-8")) as Array<{ id: string; status: string; unit: string | null }>).find((r) => r.id === started.id);
+    expect(onDisk?.status).toBe("running");
+    expect(onDisk?.unit).toMatch(new RegExp(`^clawbox-run-${started.id}-[a-z0-9]+\\.scope$`));
+    fs.writeFileSync(flag, "go");
+    expect((await lib.waitForRun(started.id, 25_000))?.status).toBe("completed");
+  });
+
   it("puts the run in a scope of its own and records the unit while it works", async () => {
     const units: UnitLib = await import("@/lib/coding-run-unit");
     installSystemdRun();
@@ -707,8 +725,91 @@ describe("after a restart", () => {
 
     expect(await lib.reconcileAfterRestart()).toBe(1);
     expect(lib.getRun("run-detach01")?.status).toBe("failed");
-    // No unit to ask about, so systemd was never asked.
-    expect(shimCalls(systemctlLog())).toHaveLength(0);
+    // No unit to ask about: systemd was only asked for a scope by the run's
+    // NAME, had none, and nothing was asked about any unit.
+    const asked = shimCalls(systemctlLog());
+    expect(asked).toEqual([expect.stringContaining("--user list-units --all --plain --no-legend --no-pager clawbox-run-run-detach01-*.scope")]);
+  });
+
+  it("reattaches a live run whose unit never reached the disk, found by its name, and settles nothing", async () => {
+    // The record is written "running" before its spawn, and the unit after it:
+    // a web server that went in between — a restart a few seconds into a run —
+    // left a run alive in its scope with no unit on record. Read as "no unit,
+    // so lost", it was settled failed and its worktree merged and removed
+    // while it went on working.
+    installSystemdRun();
+    fs.writeFileSync(activeState(), "active", "utf-8");
+    fs.writeFileSync(
+      path.join(shimDir, "systemctl"),
+      [
+        "#!/usr/bin/env bash",
+        `printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog())}`,
+        'for a in "$@"; do',
+        '  if [ "$a" = "list-units" ]; then echo "clawbox-run-run-detach01-mh0a1b2c.scope loaded active running /usr/bin/claude-ds"; echo "clawbox-run-run-detach01-mh09zzzz.scope loaded inactive dead old"; exit 0; fi',
+        `  if [ "$a" = "is-active" ]; then cat ${JSON.stringify(activeState())}; exit 0; fi`,
+        "done",
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({ unit: null })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-detach01");
+    expect(run?.status).toBe("running");
+    expect(run?.unit).toBe("clawbox-run-run-detach01-mh0a1b2c.scope");
+    expect(run?.progress.join(" ")).toMatch(/picked back up/i);
+  });
+
+  it("reattaches a live run whose scope systemd cannot answer for, rather than settle it as lost", async () => {
+    // "Could not be asked" is not "gone": settled here, the run's worktree was
+    // merged home and removed while it still worked in it. Asked again, then
+    // reattached — the watch goes on asking.
+    installSystemdRun();
+    fs.writeFileSync(
+      path.join(shimDir, "systemctl"),
+      ["#!/usr/bin/env bash", `printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog())}`, "echo 'Failed to connect to bus: No such file or directory' >&2", "exit 1"].join("\n"),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord()]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-detach01");
+    expect(run?.status).toBe("running");
+    expect(run?.error).toBeNull();
+    // Asked more than once before it counted as unanswered.
+    expect(shimCalls(systemctlLog()).filter((l) => l.includes("is-active")).length).toBeGreaterThan(1);
+    // And the watch does not read its own unanswered polls as "gone" either,
+    // with no process group on record to second them.
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    expect(lib.getRun("run-detach01")?.status).toBe("running");
+  });
+
+  it("settles a unit-less live run as lost when systemd cannot be asked for its scope, but leaves its worktree alone", async () => {
+    installSystemdRun();
+    fs.writeFileSync(
+      path.join(shimDir, "systemctl"),
+      ["#!/usr/bin/env bash", `printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog())}`, "echo 'Failed to connect to bus: No such file or directory' >&2", "exit 1"].join("\n"),
+      { mode: 0o755 },
+    );
+    const tree = path.join(home, "Projects", "site", ".clawbox", "worktrees", "run-detach01");
+    fs.mkdirSync(tree, { recursive: true });
+    const worktree = { path: tree, branch: "clawbox/run-detach01", base: "main", project: path.join(home, "Projects", "site"), removed: false };
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({ unit: null, directory: tree, worktree })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(1);
+    expect(lib.getRun("run-detach01")?.status).toBe("failed");
+    // Looked for by name more than once before it counted as unanswered.
+    expect(shimCalls(systemctlLog()).filter((l) => l.includes("list-units")).length).toBeGreaterThan(1);
+    await vi.waitFor(() => expect(lib.getRun("run-detach01")?.progress.join("\n")).toMatch(/could not tell whether the run was still working in it/), { timeout: 10_000 });
+    expect(fs.existsSync(tree)).toBe(true);
+    expect(lib.getRun("run-detach01")?.worktree?.removed).toBe(false);
   });
 });
 

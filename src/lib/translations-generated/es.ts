@@ -1935,6 +1935,7 @@ const table: Record<string, string> = {
   "codingAgent.worktreeUnmergedDirty": "El trabajo está en {branch}, no en el proyecto: la carpeta del proyecto tiene cambios sin confirmar.",
   "codingAgent.worktreeUnmergedFailed": "El trabajo está en {branch}, no en el proyecto: git rechazó la fusión.",
   "codingAgent.worktreeUnmergedNotOnBase": "El trabajo está en {branch}, no en el proyecto: el proyecto está en una rama distinta de {base}.",
+  "codingAgent.worktreeUnmergedStopped": "El trabajo está en {branch}, no en el proyecto: la ejecución se detuvo antes de terminar, así que no se fusionó nada. Fusiónalo tú si lo quieres.",
   "codingAgent.wrapper": "claude-ds",
   "confirm": "Confirmar",
   "connected": "¡Conectado!",

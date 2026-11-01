@@ -1194,6 +1194,7 @@ export const sv: Record<string, string> = {
   "codingAgent.worktreeUnmergedNotOnBase": "Arbetet finns på {branch}, inte i projektet: projektet står på en annan gren än {base}.",
   "codingAgent.worktreeUnmergedConflict": "Arbetet finns på {branch}, inte i projektet: det krockar med projektets egna ändringar.",
   "codingAgent.worktreeUnmergedFailed": "Arbetet finns på {branch}, inte i projektet: git vägrade sammanslagningen.",
+  "codingAgent.worktreeUnmergedStopped": "Arbetet finns på {branch}, inte i projektet: körningen stoppades innan den var klar, så inget slogs samman. Slå samman det själv om du vill ha det.",
   "codingAgent.worktreeOnDisk": "Dess kopia av projektet ligger kvar på disken.",
   "codingAgent.worktreeMergedInto": "Sammanslagen i {base}.",
 
