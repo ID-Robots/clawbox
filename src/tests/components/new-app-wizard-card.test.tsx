@@ -7,14 +7,18 @@
  * and the messages they hand the chat, the switches, and the planner's own
  * editing — lists, sections, the plan check, pictures and the draft.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import NewAppWizardCard, { lastRunLabel, lastRunSummary, PLANNER_DRAFT_KEY } from "@/components/NewAppWizardCard";
 import { translations } from "@/lib/translations";
 import { buildNewAppPrompt, buildResumeProjectPrompt, buildTeamProjectPrompt, CHAT_MESSAGE_EVENT, PLAN_FIRST_SENTENCE, ultracodeSentence } from "@/lib/ui-events";
 
-// The switches and the draft are remembered per browser; no case may inherit another's.
-afterEach(() => { try { window.localStorage.clear(); } catch { /* unavailable */ } });
+// The switches and the draft are remembered per browser; no case may inherit
+// another's. Before each case too: the planner writes its draft as it unmounts,
+// and the render cleanup can run after this file's afterEach.
+const clearStorage = () => { try { window.localStorage.clear(); } catch { /* unavailable */ } };
+beforeEach(clearStorage);
+afterEach(clearStorage);
 
 function listenToChat(): { heard: string[]; stop: () => void } {
   const heard: string[] = [];
@@ -435,6 +439,32 @@ describe("NewAppWizardCard — the planner", () => {
     await waitFor(() => expect(screen.queryByTestId("coding-agent-planner-image")).toBeNull());
     expect(screen.getByTestId("coding-agent-new-error").textContent).toBe("codingAgent.planner.imageFailed");
     expect(brief().value).toBe("");
+  });
+
+  it("refuses a picture too big to stage before it makes a thumbnail or a token", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<NewAppWizardCard onClose={() => {}} />);
+    const huge = new File(["x"], "huge.png", { type: "image/png" });
+    Object.defineProperty(huge, "size", { value: 26 * 1024 * 1024 });
+    fireEvent.change(screen.getByTestId("coding-agent-planner-file"), { target: { files: [huge] } });
+    expect(screen.queryByTestId("coding-agent-planner-image")).toBeNull();
+    expect(brief().value).toBe("");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("coding-agent-new-error").textContent).toBe("codingAgent.planner.imageFailed");
+    expect(screen.getByTestId("coding-agent-new-create")).not.toBeDisabled();
+  });
+
+  it("writes the last keystrokes on the way out, even inside the draft's debounce", () => {
+    const first = render(<NewAppWizardCard onClose={() => {}} />);
+    fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Quick" } });
+    type("typed and closed at once");
+    first.unmount();
+    expect(window.localStorage.getItem(PLANNER_DRAFT_KEY)).toContain("typed and closed at once");
+    // Opened and closed with nothing changed: nothing is written.
+    window.localStorage.clear();
+    render(<NewAppWizardCard onClose={() => {}} />).unmount();
+    expect(window.localStorage.getItem(PLANNER_DRAFT_KEY)).toBeNull();
   });
 
   it("asks for the plan first when that switch is on", () => {

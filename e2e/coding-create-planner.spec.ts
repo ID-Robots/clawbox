@@ -91,5 +91,11 @@ test("the + tile opens the Create planner as a window, and Create hands the plan
 
   await win.getByTestId("coding-agent-new-create").click();
   await expect(win).toHaveCount(0);
-  await expect(page.getByTestId("chat-popup")).toBeVisible();
+  const chat = page.getByTestId("chat-popup");
+  await expect(chat).toBeVisible();
+  // The one message the planner composed, in the conversation: the brief,
+  // the picture's path and how the run gets it.
+  await expect(chat).toContainText('Create a new ClawBox app called "Invoices"');
+  await expect(chat).toContainText("Invoices with PDF export [image 1]");
+  await expect(chat).toContainText("[image 1]: /home/clawbox/.openclaw/media/chat/plan-1.png");
 });

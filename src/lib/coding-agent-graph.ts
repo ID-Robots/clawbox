@@ -575,7 +575,8 @@ export function layoutGraph(graph: AgentGraph, geometry: Geometry = GEOMETRY): G
   });
   const guideX = (parent: string) => (parent === rootNode.key ? px : lanes[parent].x + 10);
   // The root's line starts under its label, never through it.
-  const guideTop = (parent: string) => (parent === rootNode.key ? rootPos.y + R + 18 : lanes[parent].y + g.chipHeight / 2);
+  // Below the root's label AND its model line: the trunk never runs through the chip.
+  const guideTop = (parent: string) => (parent === rootNode.key ? rootPos.y + R + 18 + g.modelLine : lanes[parent].y + g.chipHeight / 2);
   for (const [parent, rows] of hangers) {
     if (!team && parent !== rootNode.key) continue;
     const last = rowY(Math.max(...rows) + 1);

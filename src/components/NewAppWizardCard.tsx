@@ -456,6 +456,19 @@ export default function NewAppWizardCard({
     }, 400);
     return () => clearTimeout(timer);
   }, [draftJson]);
+  // Closed inside the debounce (Escape, Cancel, the window's X): the last
+  // keystrokes are written on the way out — unless Create handed the plan
+  // over, which is the one close that clears the draft.
+  const latestDraftRef = useRef(draftJson);
+  useEffect(() => { latestDraftRef.current = draftJson; }, [draftJson]);
+  const handedRef = useRef(false);
+  // What the planner opened with: nothing changed, nothing to write.
+  const [openedDraft] = useState(draftJson);
+  useEffect(() => () => {
+    if (handedRef.current || latestDraftRef.current === openedDraft) return;
+    const d = JSON.parse(latestDraftRef.current) as PlannerDraft;
+    writeDraft(draftIsEmpty(d) ? null : d);
+  }, [openedDraft]);
 
   // Object URLs pin their Blob until revoked: released when the window goes.
   const imagesRef = useRef(images);
@@ -489,16 +502,24 @@ export default function NewAppWizardCard({
 
   // ── Pictures ──
   const addImages = (files: File[]) => {
-    const pictures = files.filter((f) => typeof f.type === "string" && f.type.startsWith("image/"));
+    let pictures = files.filter((f) => typeof f.type === "string" && f.type.startsWith("image/"));
     if (pictures.length === 0) {
       if (files.length > 0) setError(t("codingAgent.planner.imageOnly"));
       return;
+    }
+    // Too big for the staging route: refused here, before a thumbnail or a
+    // token is made for a picture that could never arrive.
+    const tooBig = pictures.filter((f) => f.size > CHAT_ATTACHMENT_MAX_BYTES);
+    if (tooBig.length > 0) {
+      setError(t("codingAgent.planner.imageFailed", { name: tooBig[0].name || "image" }));
+      pictures = pictures.filter((f) => f.size <= CHAT_ATTACHMENT_MAX_BYTES);
+      if (pictures.length === 0) return;
     }
     const room = PLANNER_MAX_IMAGES - images.length;
     if (room <= 0) { setError(t("codingAgent.planner.imageTooMany", { max: PLANNER_MAX_IMAGES })); return; }
     const taken = pictures.slice(0, room);
     if (pictures.length > room) setError(t("codingAgent.planner.imageTooMany", { max: PLANNER_MAX_IMAGES }));
-    else setError(null);
+    else if (tooBig.length === 0) setError(null);
     const entries: PlannerImage[] = stagedNames(taken).map((name, idx) => (
       { key: nextImageKey(), name, path: "", previewUrl: createPreviewUrl(taken[idx]), uploading: true }
     ));
@@ -532,7 +553,6 @@ export default function NewAppWizardCard({
       }
       revokePreviews([entry]);
     };
-    if (file.size > CHAT_ATTACHMENT_MAX_BYTES) { fail(); return; }
     try {
       const form = new FormData();
       form.append("file", file, entry.name);
@@ -618,6 +638,7 @@ export default function NewAppWizardCard({
     }
     setError(null);
     // Handed over: the draft has done its job.
+    handedRef.current = true;
     writeDraft(null);
     onClose();
     onHanded?.();

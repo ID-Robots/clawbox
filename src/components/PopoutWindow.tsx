@@ -70,10 +70,16 @@ export interface PopoutWindowProps {
   defaultWidth?: number;
   defaultHeight?: number;
   onClose: () => void;
+  /**
+   * The id of the element inside that names the window, when the content has
+   * a better name than the title bar's (the run's own title); otherwise the
+   * window is named by `title`.
+   */
+  labelledBy?: string;
   children: ReactNode;
 }
 
-export default function PopoutWindow({ title, appId, defaultWidth = 760, defaultHeight = 560, onClose, children }: PopoutWindowProps) {
+export default function PopoutWindow({ title, appId, defaultWidth = 760, defaultHeight = 560, onClose, labelledBy, children }: PopoutWindowProps) {
   const id = useId();
   const order = useSyncExternalStore(subscribe, snapshot, snapshot);
   const [phone] = useState(isPhoneWidth);
@@ -105,6 +111,15 @@ export default function PopoutWindow({ title, appId, defaultWidth = 760, default
     };
   }, [id, opener]);
 
+  // Focus goes INTO the window when it opens, unless the content already took
+  // it (a parent's layout effect runs after its children's, so the planner's
+  // own field wins): a window opened from a button must not leave the
+  // keyboard on that button, a whole document away from what it opened.
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true });
+  }, []);
+
   const index = order.indexOf(id);
   const zIndex = Math.min(DESKTOP_LAYERS.popout + Math.max(0, index), MAX_POPOUT_Z);
   const isActive = index !== -1 && index === order.length - 1;
@@ -123,7 +138,16 @@ export default function PopoutWindow({ title, appId, defaultWidth = 760, default
       onFocus={focus}
       initialMaximized={phone}
     >
-      <div ref={contentRef} className="h-full" onPointerDownCapture={focus}>
+      {/* A NON-modal dialog: named, focusable, nothing behind it made inert. */}
+      <div
+        ref={contentRef}
+        role="dialog"
+        aria-label={labelledBy ? undefined : title}
+        aria-labelledby={labelledBy}
+        tabIndex={-1}
+        className="h-full outline-none"
+        onPointerDownCapture={focus}
+      >
         {children}
       </div>
     </ChromeWindow>,

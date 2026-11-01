@@ -40,7 +40,8 @@ function word(part: string): string {
  * → "GPT 5.7 Sol", "claude-haiku-5-2" → "Haiku 5.2". Null for any other shape.
  */
 function prettify(base: string): string | null {
-  const gpt = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z0-9]+)*)$/i.exec(base);
+  // Alphabetic tail words only: a dated snapshot (gpt-5-2025-08-07) keeps its id.
+  const gpt = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z]+)*)$/i.exec(base);
   if (gpt) {
     const rest = gpt[2].split("-").filter(Boolean).map(word);
     return ["GPT", gpt[1], ...rest].join(" ");

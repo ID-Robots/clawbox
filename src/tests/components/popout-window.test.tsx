@@ -29,6 +29,23 @@ describe("PopoutWindow", () => {
     expect(zOf("one")).toBeLessThan(DESKTOP_LAYERS.overlay);
   });
 
+  it("is a named, non-modal dialog that takes focus when nothing inside did", () => {
+    render(
+      <div>
+        <button type="button" data-testid="opener">open</button>
+        <PopoutWindow title="Task · Fix it" appId="named" onClose={() => {}}><p>body</p></PopoutWindow>
+      </div>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Task · Fix it" });
+    expect(dialog).not.toHaveAttribute("aria-modal");
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it("leaves focus where the content put it", () => {
+    render(<PopoutWindow title="t" appId="own-focus" onClose={() => {}}><input data-testid="field" autoFocus /></PopoutWindow>);
+    expect(document.activeElement).toBe(screen.getByTestId("field"));
+  });
+
   it("puts the one pressed last in front, and Escape closes only that one", () => {
     const closeA = vi.fn();
     const closeB = vi.fn();

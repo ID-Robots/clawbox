@@ -91,14 +91,12 @@ export default function CodingTaskDialog({ title, task, runId, inputs = null, on
       defaultWidth={760}
       defaultHeight={600}
       onClose={onClose}
+      labelledBy={titleId}
     >
         {/* A window, not a modal (2026-11-01): it moves, resizes, snaps and
             maximizes like every other one, and the desktop behind stays live.
-            The role stays — a non-modal dialog — so the window is still named
-            by the run's title. */}
+            The window is the (non-modal) dialog, named by the run's title. */}
         <div
-          role="dialog"
-          aria-labelledby={titleId}
           data-testid="coding-agent-task-dialog"
           className="h-full flex flex-col bg-[var(--surface-1,#16171b)]"
         >
