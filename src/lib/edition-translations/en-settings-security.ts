@@ -21,9 +21,10 @@ export const settingsSecurityEn: Record<string, string> = {
   "settings.codingAgentHint": "Let the assistant hand whole coding tasks to a Claude Code run on this box, and set how far a run may go.",
 
   // === Settings → AI: the cloud-provider list (AiProviderList) ===
-  // One row per connected provider with a switch each. The locked-switch hint
-  // is the way out of the one thing the switch refuses (turning off the
-  // default); the empty line points at the connect panel below the list.
+  // One row per connected provider with a switch and a sign-out each, the
+  // sign-out naming the row's own provider ({name}). The locked hint is the
+  // way out of the one thing both refuse (the default, except ClawBox AI's
+  // sign-out); the empty line points at the connect panel below the list.
   // The "Default" badge itself is deliberately NOT here: desktop-translations
   // already carries `settings.providers.default` for ProviderDefaultHero, and
   // this catalogue merges LAST in translations.ts, so a second copy would
@@ -36,10 +37,10 @@ export const settingsSecurityEn: Record<string, string> = {
   "settings.providers.switchedOff": "Switched off",
   "settings.providers.makeDefault": "Make default",
   "settings.providers.lockedHint": "Make another provider the default first.",
-  "settings.providers.signOut": "Sign out of ClawBox AI",
+  "settings.providers.signOut": "Sign out of {name}",
   "settings.providers.signOutConfirm": "Sign out — tap again",
-  "settings.providers.signOutFailed": "Could not sign out of ClawBox AI.",
-  "settings.providers.signedOut": "Signed out of ClawBox AI. Sign in again below to use it.",
+  "settings.providers.signOutFailed": "Could not sign out of {name}.",
+  "settings.providers.signedOut": "Signed out of {name}. Sign in again below to use it.",
   "settings.providers.empty": "No provider is connected yet — connect one below.",
 
   // === System password card ===

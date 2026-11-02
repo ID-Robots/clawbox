@@ -1,26 +1,25 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { signOutOfClawboxAi } from "@/lib/clawai-sign-out";
 import { hasPersonSession } from "@/lib/owner-session";
+import { CLAWAI_ROW, signOutOfProvider } from "@/lib/provider-sign-out";
 
 /**
- * "Sign out of ClawBox AI" — Settings → AI, the ClawBox AI row.
+ * "Sign out of ClawBox AI" — the ClawBox AI row's sign-out as PR #1369 shipped
+ * it, kept for anything that already calls it. Settings → AI now signs every
+ * row out through POST /setup-api/providers/sign-out, and this is that same
+ * call for ClawBox AI (src/lib/provider-sign-out.ts), on either harness.
  *
  * POST → 200 { signedOut: true, changed, gatewayRestarting } once the box
- * holds no ClawBox AI credential and no record of the account behind it
- * (src/lib/clawai-sign-out.ts, which reads that back). `changed: false` is a
- * box that was already signed out — the same answer, nothing done.
+ * holds no ClawBox AI credential and no record of the account behind it.
+ * `changed: false` is a box that was already signed out.
  *
  * Refusals, with `kind`:
- * - 403 `owner_only`: OWNER ONLY. Middleware admits every /setup-api/* call
- *   on the MCP bearer, and the agent holds that bearer; signing the box out
- *   of its AI account is the owner's, the same rule as providers/enabled.
- * - 409 `not_supported`: the Hermes edition, whose sign-out is not built.
+ * - 403 `owner_only`: OWNER ONLY, the rule of providers/enabled.
  * - 409 `sign_in_in_progress`: a device login is writing its token right now.
  * - 500 `still_signed_in`: something of the credential is still on the box,
  *   or a store could not be read to say it is gone.
- * - 502 `restart_refused`: the box is signed out on disk, but the gateway
+ * - 502 `restart_refused`: the box is signed out on disk, but the harness
  *   could not be restarted to let go of the sign-in it is running with.
  */
 export async function POST(request: Request) {
@@ -30,7 +29,7 @@ export async function POST(request: Request) {
       { status: 403 },
     );
   }
-  const result = await signOutOfClawboxAi();
+  const result = await signOutOfProvider(CLAWAI_ROW);
   if (!result.ok) {
     return NextResponse.json(
       { error: result.error, kind: result.kind },

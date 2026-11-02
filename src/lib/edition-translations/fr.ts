@@ -36,10 +36,10 @@ export const fr: Record<string, string> = {
   "settings.providers.switchedOff": "Désactivé",
   "settings.providers.makeDefault": "Définir par défaut",
   "settings.providers.lockedHint": "Définissez d'abord un autre fournisseur par défaut.",
-  "settings.providers.signOut": "Se déconnecter de ClawBox AI",
+  "settings.providers.signOut": "Se déconnecter de {name}",
   "settings.providers.signOutConfirm": "Se déconnecter — touchez à nouveau",
-  "settings.providers.signOutFailed": "Impossible de se déconnecter de ClawBox AI.",
-  "settings.providers.signedOut": "Déconnecté de ClawBox AI. Reconnectez-vous ci-dessous pour l'utiliser.",
+  "settings.providers.signOutFailed": "Impossible de se déconnecter de {name}.",
+  "settings.providers.signedOut": "Déconnecté de {name}. Reconnectez-vous ci-dessous pour l'utiliser.",
   "settings.providers.empty": "Aucun fournisseur n'est encore connecté — connectez-en un ci-dessous.",
 
   // === System password card ===

@@ -59,6 +59,13 @@ const RENDERED = [
   "settings.providers.signedOut",
 ];
 
+/** The sign-out strings that name the row they are on. */
+const NAMED_SIGN_OUT = [
+  "settings.providers.signOut",
+  "settings.providers.signOutFailed",
+  "settings.providers.signedOut",
+] as const;
+
 describe("the cloud-provider list is translated everywhere", () => {
   it("English defines every key the component renders, in the Settings module", () => {
     for (const key of RENDERED) {
@@ -72,6 +79,15 @@ describe("the cloud-provider list is translated everywhere", () => {
     expect(editionEn["settings.providers.enable"]).toContain("{name}");
   });
 
+  // Every connected row has its own sign-out (TASK-2114): the button, its
+  // failure and its note name THAT row's provider, never ClawBox AI's alone.
+  it("the sign-out names the row's own provider", () => {
+    for (const key of NAMED_SIGN_OUT) {
+      expect(editionEn[key], key).toContain("{name}");
+      expect(editionEn[key], key).not.toContain("ClawBox AI");
+    }
+  });
+
   for (const locale of NON_EN) {
     it(`'${locale}' translates every key, in its own words`, () => {
       const table = OVERRIDES[locale];
@@ -83,6 +99,10 @@ describe("the cloud-provider list is translated everywhere", () => {
 
     it(`'${locale}' keeps the {name} placeholder`, () => {
       expect(OVERRIDES[locale]["settings.providers.enable"]).toContain("{name}");
+      for (const key of NAMED_SIGN_OUT) {
+        expect(OVERRIDES[locale][key], key).toContain("{name}");
+        expect(OVERRIDES[locale][key], key).not.toContain("ClawBox AI");
+      }
     });
   }
 

@@ -251,6 +251,20 @@ function sectionFor(id: string): "ai" | "localAi" {
   return LOCAL_PROVIDER_IDS.has(id) ? "localAi" : "ai";
 }
 
+/** Is this row one of the on-device engines (Settings → Local AI), not a cloud sign-in? */
+export function isLocalProviderRow(id: string): boolean {
+  return LOCAL_PROVIDER_IDS.has(id);
+}
+
+/**
+ * The name a row is shown under, for a server sentence about it (the
+ * provider sign-out's refusals) — the same label the rows themselves carry.
+ */
+export function providerRowLabel(harness: Harness, id: string): string {
+  if (harness === "hermes") return hermesProviderLabel(id);
+  return OPENCLAW_PANEL_PROVIDERS.find((p) => p.id === id)?.label ?? LOCAL_PROVIDER_LABELS[id] ?? id;
+}
+
 /** A row before the owner's switch is stamped on it; see `readProviderStatus`. */
 type UnstampedRow = Omit<ProviderStatusRow, "enabled">;
 interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers" | "unrunnable"> {
@@ -607,6 +621,15 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
  */
 let clawaiKeyProbe: { at: number; value: boolean | null } | null = null;
 const CLAWAI_KEY_PROBE_TTL_MS = 30_000;
+
+/**
+ * Drop the remembered answer: the provider sign-out has just taken the key
+ * out of Hermes' config, and the row must not read "Connected" for another
+ * 30 s over a key that is gone.
+ */
+export function forgetClawaiKeyProbe(): void {
+  clawaiKeyProbe = null;
+}
 async function clawaiKeyInHarnessStore(): Promise<boolean | null> {
   if (clawaiKeyProbe && Date.now() - clawaiKeyProbe.at < CLAWAI_KEY_PROBE_TTL_MS) return clawaiKeyProbe.value;
   let value: boolean | null;

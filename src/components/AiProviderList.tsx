@@ -19,13 +19,15 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
  * listed; connecting one is the panel below this list, and the on-device
  * engines have their own tab (Settings → Local AI).
  *
- * WHY A SWITCH AND NOT "DISCONNECT": a disabled provider keeps its key (or its
- * OAuth grant, which has no re-auth path in this UI) and simply stops being
- * offered to the chat and the fallback chain. The one thing it can never do is
- * disable the provider that is currently the default — the switch is locked
- * with a hint instead, so nothing here re-routes the chat behind the owner's
- * back. Both rules live in the route (`/setup-api/providers/enabled`); this
- * component only reflects them.
+ * A SWITCH AND A SIGN-OUT, for two different asks. A disabled provider keeps
+ * its key (or its OAuth grant) and simply stops being offered to the chat and
+ * the fallback chain; "Sign out of <Provider>" removes the credential from the
+ * box (`/setup-api/providers/sign-out`). Neither may re-route the chat behind
+ * the owner's back, so on the DEFAULT row both are locked with the same "make
+ * another provider the default first" hint — except ClawBox AI's sign-out,
+ * which stays offered there (#1369: the box's own provider, the one a box with
+ * nothing else has no other way out of; its row then reads "Sign in again").
+ * The rules live in the routes; this component only reflects them.
  */
 
 /** How long the armed "Sign out — tap again" waits for the second tap. */
@@ -74,59 +76,66 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   const [revealRequest, setRevealRequest] = useState(0);
   const anthropicRowRef = useRef<HTMLLIElement | null>(null);
   /**
-   * Signing out of ClawBox AI (POST /setup-api/ai-models/clawai/sign-out):
-   * the first tap arms the button for a few seconds and the second signs out,
-   * the same two-tap shape as the coding agent's ChatGPT sign-out. The list
-   * then re-reads the box, and every other surface hears it through
-   * `notifyProvidersChanged` — the row drops to its signed-out state from the
-   * box's own answer, never an optimistic one.
+   * Signing out of a provider (POST /setup-api/providers/sign-out): the first
+   * tap arms THAT row's button for a few seconds and the second signs out,
+   * the same two-tap shape as the coding agent's ChatGPT sign-out. One row is
+   * armed at a time — arming another disarms the first — and one sign-out runs
+   * at a time. The list then re-reads the box, and every other surface hears
+   * it through `notifyProvidersChanged` — the row drops to its signed-out
+   * state from the box's own answer, never an optimistic one.
    */
-  const [signOutArmed, setSignOutArmed] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
-  const [signOutNote, setSignOutNote] = useState<string | null>(null);
+  const [signOutArmed, setSignOutArmed] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState<string | null>(null);
+  /** The provider just signed out of, for the note below — said in the reader's language at render. */
+  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string } | null>(null);
   const signOutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disarmSignOut = useCallback(() => {
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
     signOutTimer.current = null;
-    setSignOutArmed(false);
+    setSignOutArmed(null);
   }, []);
   useEffect(() => () => { if (signOutTimer.current) clearTimeout(signOutTimer.current); }, []);
 
-  const signOutOfClawai = useCallback(async () => {
+  const signOutOf = useCallback(async (row: ProviderStatusRow) => {
     disarmSignOut();
-    setSigningOut(true);
+    setSigningOut(row.id);
     setToggleError(null);
     setSignOutNote(null);
+    const failed = t("settings.providers.signOutFailed", { name: row.label });
     try {
-      const res = await fetch("/setup-api/ai-models/clawai/sign-out", { method: "POST" });
+      const res = await fetch("/setup-api/providers/sign-out", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: row.id }),
+      });
       const data = (await res.json().catch(() => ({}))) as { error?: unknown };
       if (!res.ok) {
-        throw new Error(typeof data.error === "string" && data.error ? data.error : t("settings.providers.signOutFailed"));
+        throw new Error(typeof data.error === "string" && data.error ? data.error : failed);
       }
-      setSignOutNote(t("settings.providers.signedOut"));
+      setSignOutNote({ id: row.id, label: row.label });
     } catch (e) {
-      setToggleError(e instanceof Error && e.message ? e.message : t("settings.providers.signOutFailed"));
+      setToggleError(e instanceof Error && e.message ? e.message : failed);
     } finally {
       // Re-read either way: a refusal can come after part of the sign-in was
       // removed, and the rows are the box's answer, not this click's.
       refresh();
       notifyProvidersChanged();
-      setSigningOut(false);
+      setSigningOut(null);
     }
   }, [disarmSignOut, refresh, t]);
 
-  const onSignOutClick = useCallback(() => {
-    if (signOutArmed) {
-      void signOutOfClawai();
+  const onSignOutClick = useCallback((row: ProviderStatusRow) => {
+    if (signOutArmed === row.id) {
+      void signOutOf(row);
       return;
     }
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
     signOutTimer.current = setTimeout(() => {
       signOutTimer.current = null;
-      setSignOutArmed(false);
+      setSignOutArmed(null);
     }, SIGN_OUT_CONFIRM_MS);
-    setSignOutArmed(true);
-  }, [signOutArmed, signOutOfClawai]);
+    setSignOutArmed(row.id);
+  }, [signOutArmed, signOutOf]);
 
   const setEnabled = useCallback(async (row: ProviderStatusRow, enabled: boolean) => {
     setToggling(row.id);
@@ -179,10 +188,10 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // (TASK-663). Only while the list would be EMPTY, though: ClawBox AI's link
   // is read from our own store and needs no dashboard, so a row we already
   // know about is shown rather than hidden behind everyone else's spinner.
-  // Said once the box's own answer shows ClawBox AI signed out, and gone again
-  // once a sign-in has connected it.
-  const signedOutNote = signOutNote && !rows.some((row) => row.id === "clawai" && row.state === "connected")
-    ? signOutNote
+  // Said once the box's own answer shows the provider signed out, and gone
+  // again once a sign-in has connected it.
+  const signedOutNote = signOutNote && !rows.some((row) => row.id === signOutNote.id && row.state === "connected")
+    ? t("settings.providers.signedOut", { name: signOutNote.label })
     : null;
 
   const awaitingProbe = rows.length === 0
@@ -338,10 +347,14 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // takes Anthropic out of the CHAT's routing, and coding runs go on
             // drawing on this pool with it off.
             const hasAccounts = row.id === "anthropic";
-            // ClawBox AI's sign-out, on the row of a sign-in the box holds —
-            // the default's too: that is the account the box was otherwise
-            // left with no way out of. OpenClaw only (the route's rule).
-            const canSignOut = row.id === "clawai" && row.state === "connected" && summary?.harness === "openclaw";
+            // The sign-out, on the row of every sign-in the box holds, on
+            // either harness. On the default it is LOCKED, like the switch —
+            // signing the chat's own provider out would leave it answering on
+            // nothing — except for ClawBox AI, the account a box with nothing
+            // else had no way out of (#1369). The route holds the same rule.
+            const canSignOut = row.state === "connected";
+            const signOutLocked = row.isDefault && row.id !== "clawai";
+            const armed = signOutArmed === row.id;
             return (
               <Fragment key={row.id}>
               {/* Stacked below `sm:`, one line above it. At 390 px the row had
@@ -449,16 +462,18 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                   {canSignOut && (
                     <button
                       type="button"
-                      onClick={onSignOutClick}
-                      onBlur={disarmSignOut}
-                      disabled={signingOut || busy}
-                      aria-busy={signingOut}
-                      data-testid="ai-provider-sign-out-clawai"
-                      className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 shrink-0 ${
-                        signOutArmed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                      onClick={() => onSignOutClick(row)}
+                      onBlur={armed ? disarmSignOut : undefined}
+                      disabled={signingOut !== null || busy || signOutLocked}
+                      aria-busy={signingOut === row.id}
+                      aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
+                      title={signOutLocked ? t("settings.providers.lockedHint") : undefined}
+                      data-testid={`ai-provider-sign-out-${row.id}`}
+                      className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+                        armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
                       }`}
                     >
-                      {signOutArmed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut")}
+                      {armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut", { name: row.label })}
                     </button>
                   )}
 
