@@ -17,7 +17,10 @@ export async function POST(request: Request) {
   // posts here. `requireSession` (not `hasPersonSession`) because it honours
   // CLAWBOX_TEST_MODE, which the e2e-install harness — driving the wizard with
   // no cookie jar, and later posting here to harvest a fresh session — relies on.
-  const unauthorized = await requireSession(request);
+  // `ownerOnly` because the cookie below carries no user, and a cookie without
+  // one is the owner's: a user the owner added, or the agent's bearer, would
+  // otherwise walk out of here as the owner (4.3 bug 1).
+  const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) return unauthorized;
 
   try {
