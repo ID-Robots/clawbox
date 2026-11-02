@@ -18,6 +18,8 @@ const configStoreGet = vi.fn();
 const configStoreSet = vi.fn();
 
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: () => readConfig() }));
+const edition = vi.hoisted(() => ({ name: "openclaw" as "openclaw" | "hermes" | "dual" }));
+vi.mock("@/lib/edition-source", () => ({ readEdition: () => edition.name }));
 vi.mock("@/lib/config-store", () => ({
   get: (key: string) => configStoreGet(key),
   // The persisted half of a refusal is written through this — see
@@ -88,10 +90,29 @@ describe("resolveClawaiToken", () => {
     expect(await resolve()).toBe(HERMES_TOKEN);
   });
 
+  it("on the Hermes edition, never answers from the openclaw.json a swap left behind", async () => {
+    // A box swapped from OpenClaw keeps ~/.openclaw, and its openclaw.json
+    // names the account from before the swap — one the owner may have signed
+    // out of on Hermes since (TASK-2114, seen on a lab board).
+    edition.name = "hermes";
+    try {
+      readConfig.mockResolvedValue(openclawConfigWith(OPENCLAW_TOKEN));
+      configStoreGet.mockResolvedValue(undefined);
+      expect(await resolve()).toBeNull();
+      configStoreGet.mockResolvedValue(HERMES_TOKEN);
+      expect(await resolve()).toBe(HERMES_TOKEN);
+      expect(readConfig).not.toHaveBeenCalled();
+    } finally {
+      edition.name = "openclaw";
+    }
+  });
+
   it("prefers the OpenClaw store on a dual box, where both hold the same token", async () => {
+    edition.name = "dual";
     readConfig.mockResolvedValue(openclawConfigWith(OPENCLAW_TOKEN));
     configStoreGet.mockResolvedValue(HERMES_TOKEN);
     expect(await resolve()).toBe(OPENCLAW_TOKEN);
+    edition.name = "openclaw";
   });
 
   it("reports nothing rather than an empty string when the box is unlinked", async () => {
