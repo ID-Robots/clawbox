@@ -88,6 +88,24 @@ describe("the app proxy", () => {
     expect(seen[0].headers["x-forwarded-prefix"]).toBe("/apps/site");
   });
 
+  it("never lets the app write the box's cookie jar — clawbox_session least of all", async () => {
+    // A page the window reopens goes out WITH the owner's session and is
+    // same-site, so a Set-Cookie on its answer would be stored for the box's
+    // origin: an app could sign the owner out, or shadow their cookie on its
+    // own path. No app cookie ever comes back through this proxy anyway.
+    meta("site");
+    handler = (_r, res) => {
+      res.setHeader("set-cookie", ["clawbox_session=evil; Path=/; HttpOnly; SameSite=Lax", "clawbox_session=shadow; Path=/apps/site/", "theme=dark; Path=/apps/site/"]);
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<p>page</p>");
+    };
+    const res = await routes.GET(req("/apps/site/", { headers: { accept: "text/html" }, cookie: "clawbox_session=owner" }), ctx("site"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(await res.text()).toBe("<p>page</p>");
+  });
+
   it("strips the base path when the manifest asks", async () => {
     meta("site", { stripBasePath: true });
     await routes.GET(req("/apps/site/"), ctx("site"));

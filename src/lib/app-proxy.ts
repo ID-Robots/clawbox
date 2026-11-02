@@ -103,8 +103,9 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
  * it needs no CORS; what is new is the read, and — through the preflight the
  * proxy answers for this tree — the writes a form cannot send: a JSON body,
  * PUT, PATCH and DELETE. The listener check above keeps all of it to the
- * app's own process. The App Router's own fetches are the other exception,
- * on the same terms — see NEXT_ROUTER_REQUEST_HEADERS.
+ * app's own process. The App Router's own fetches are the other exception —
+ * on every path, which is wider than this tree: see NEXT_ROUTER_REQUEST_HEADERS
+ * for what that opens and why it is taken.
  */
 const CORS_READABLE_TYPES = [
   "text/css",
@@ -185,11 +186,19 @@ export const APP_API_PREFLIGHT_MAX_AGE_S = 600;
  * cookie: clicking any link in a Next app's window showed the box's login.
  *
  * So the proxy answers the App Router the way it answers the app's `/api`
- * tree: the preflight, and `null` on the answer, without credentials. What
- * that opens is the same as the API grant (see appProxyAllowOrigin): a page's
- * RSC payload carries what its HTML carries, readable by an opaque origin
- * that can reach the box. These headers are the App Router's own; a plain
- * page load sends none of them and stays unreadable as before.
+ * tree: the preflight, and `null` on the answer, without credentials — but
+ * on any path, because a navigation can go to any page. That is WIDER than
+ * the API grant (see appProxyAllowOrigin): a page's RSC payload carries what
+ * its HTML carries, and any opaque origin that can reach the box — another
+ * app's window, or a sandboxed frame some other site puts on screen — can
+ * send these headers, read that payload and call a server action. Taken
+ * anyway, because none of it is new to anyone but a browser: apps on the box
+ * already reach each other's ports directly (one user runs them all), and a
+ * request without a page's Accept header has always passed the middleware
+ * without a session (step 2b), so through the tunnel the same payload is one
+ * curl away. Without the grant a Next app's every <Link> is a full page load
+ * and no server action can run in the window. A plain page load sends none
+ * of these headers and its HTML stays unreadable as before.
  */
 export const NEXT_ROUTER_REQUEST_HEADERS = ["rsc", "next-action", "next-router-state-tree"] as const;
 /** What a preflight for the App Router is answered with: navigations and prefetches are GETs, server actions POSTs. */

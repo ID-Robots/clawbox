@@ -272,7 +272,7 @@ BASE=$(body_of "$(call GET /setup-api/coding-agent/status)" | python3 -c "import
 [ -n "$BASE" ] || BASE=$HOME/Projects
 APP="nano-ci-$(printf "%s" "$1" | tr -c "A-Za-z0-9-" "-" | cut -c1-40)-window"
 DIR=$BASE/$APP
-case "$DIR" in /home/clawbox/?*/nano-ci-*) ;; *) say "not ok - refusing to make $DIR"; exit 0 ;; esac
+case "$DIR" in *"/../"* | *"/./"* | *"//"*) say "not ok - refusing to make $DIR"; exit 0 ;; /home/clawbox/?*/nano-ci-*) ;; *) say "not ok - refusing to make $DIR"; exit 0 ;; esac
 PORT=$(node -e "const s = require(\"net\").createServer(); s.listen(0, \"127.0.0.1\", () => { console.log(s.address().port); s.close(); });")
 cleanup() {
   [ -f "$DIR/.nano-pid" ] && kill -- "-$(cat "$DIR/.nano-pid")" 2>/dev/null

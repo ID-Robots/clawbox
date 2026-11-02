@@ -147,6 +147,12 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
     // Framed by the desktop on purpose; the app's own refusal to be framed
     // would blank the window.
     if (key === "x-frame-options") return;
+    // No cookie of the app's comes back here (every Cookie header is stripped
+    // on the way in), so a Set-Cookie could only write the BOX's cookie jar —
+    // `clawbox_session` included: one answer to a page the window reopened
+    // with the owner's session could sign the owner out, or sit a cookie of
+    // that name beside theirs. None go out.
+    if (key === "set-cookie") return;
     // Both describe bytes that no longer exist once fetch has unwrapped them.
     // An encoding it did NOT unwrap keeps both: those bytes are still the
     // upstream's, the length is still true, and dropping it would take the

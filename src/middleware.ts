@@ -378,8 +378,12 @@ function isDocumentRequest(headers: Headers): boolean {
  * Sec-Fetch-Dest, so without this a server app's own form post (and an
  * `Accept: text/html` fetch) read as a page and met the session gate. It is
  * let through like the app's other requests (step 2b) — exactly what a POST
- * without that Accept header already was — and never on a top-level
- * navigation, which still asks a visitor to sign in.
+ * without that Accept header, or the same POST sent with fetch(), already
+ * was. Never when the request says it is a top-level navigation
+ * (`Sec-Fetch-Dest: document`, through the tunnel); over plain HTTP nothing
+ * says so, and a top-level POST from a sandboxed popup passes too — still
+ * nothing the fetch() form of it did not already reach. A visitor's GET, the
+ * only thing typing an address sends, still asks them to sign in.
  */
 function isOpaqueFrameRequest(headers: Headers): boolean {
   return headers.get("origin") === "null" && headers.get("sec-fetch-dest") !== "document";
