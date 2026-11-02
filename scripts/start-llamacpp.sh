@@ -73,6 +73,47 @@ case "$LLAMACPP_REASONING" in
     ;;
 esac
 echo "[llamacpp] reasoning=${LLAMACPP_REASONING}"
+
+# Speculative decoding, off unless .env asks. A model with its own
+# multi-token-prediction head (the -MTP GGUFs) drafts for itself with
+# `draft-mtp`; an EAGLE-3 or plain draft model is a second GGUF in the same
+# model directory, named by LLAMACPP_SPEC_DRAFT_FILE. Measured on a DGX Spark:
+# Qwen3.6-35B-A3B from 66.9 to 94.4 tok/s with draft-mtp and a draft length of
+# 2. Anything llama-server would refuse starts the model WITHOUT speculation,
+# never not at all: a typo in .env must not cost the box its local model.
+SPEC_ARGS=()
+LLAMACPP_SPEC_TYPE="${LLAMACPP_SPEC_TYPE:-none}"
+case "$LLAMACPP_SPEC_TYPE" in
+  none|"") ;;
+  draft-mtp)
+    SPEC_ARGS=(--spec-type draft-mtp)
+    ;;
+  draft-eagle3|draft-simple)
+    SPEC_DRAFT_FILE="${LLAMACPP_SPEC_DRAFT_FILE:-}"
+    # One path segment, so the draft can only come from the model directory.
+    if [ -n "$SPEC_DRAFT_FILE" ] && [ "$SPEC_DRAFT_FILE" = "${SPEC_DRAFT_FILE##*/}" ] \
+      && [ "$SPEC_DRAFT_FILE" != "." ] && [ "$SPEC_DRAFT_FILE" != ".." ] \
+      && [ -f "${MODEL_DIR}/${SPEC_DRAFT_FILE}" ]; then
+      SPEC_ARGS=(--spec-type "$LLAMACPP_SPEC_TYPE" --spec-draft-model "${MODEL_DIR}/${SPEC_DRAFT_FILE}")
+    else
+      echo "[llamacpp] LLAMACPP_SPEC_TYPE=${LLAMACPP_SPEC_TYPE} needs LLAMACPP_SPEC_DRAFT_FILE, a GGUF in ${MODEL_DIR}; starting without speculative decoding"
+    fi
+    ;;
+  *)
+    echo "[llamacpp] Invalid LLAMACPP_SPEC_TYPE='${LLAMACPP_SPEC_TYPE}' (expected none|draft-mtp|draft-eagle3|draft-simple); starting without speculative decoding"
+    ;;
+esac
+if [ "${#SPEC_ARGS[@]}" -gt 0 ] && [ -n "${LLAMACPP_SPEC_DRAFT_N_MAX:-}" ]; then
+  if [[ "$LLAMACPP_SPEC_DRAFT_N_MAX" =~ ^[0-9]+$ ]] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -ge 1 ] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -le 16 ]; then
+    SPEC_ARGS+=(--spec-draft-n-max "$LLAMACPP_SPEC_DRAFT_N_MAX")
+  else
+    echo "[llamacpp] Invalid LLAMACPP_SPEC_DRAFT_N_MAX='${LLAMACPP_SPEC_DRAFT_N_MAX}' (expected 1-16); using llama-server's default"
+  fi
+fi
+if [ "${#SPEC_ARGS[@]}" -gt 0 ]; then
+  echo "[llamacpp] speculative decoding: ${SPEC_ARGS[*]}"
+fi
+
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
@@ -84,4 +125,5 @@ exec "$BIN_PATH" \
   --ctx-size "$CTX_SIZE" \
   --n-gpu-layers "$N_GPU_LAYERS" \
   --reasoning "$LLAMACPP_REASONING" \
-  --jinja
+  --jinja \
+  "${SPEC_ARGS[@]}"
