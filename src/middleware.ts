@@ -21,6 +21,7 @@ import {
   requestIntent,
 } from "@/lib/non-owner-scope";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
+import { APP_REOPEN_PAGE_CSP, appReopenPage } from "@/lib/app-window";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -370,6 +371,48 @@ function isDocumentRequest(headers: Headers): boolean {
   return (headers.get("accept") ?? "").includes("text/html");
 }
 
+/**
+ * A request a sandboxed document sent itself, and not a top-level navigation:
+ * `Origin: null` is what an opaque origin sends on a form post and a fetch,
+ * and a GET navigation sends no Origin at all. Over plain HTTP there is no
+ * Sec-Fetch-Dest, so without this a server app's own form post (and an
+ * `Accept: text/html` fetch) read as a page and met the session gate. It is
+ * let through like the app's other requests (step 2b) — exactly what a POST
+ * without that Accept header already was — and never on a top-level
+ * navigation, which still asks a visitor to sign in.
+ */
+function isOpaqueFrameRequest(headers: Headers): boolean {
+  return headers.get("origin") === "null" && headers.get("sec-fetch-dest") !== "document";
+}
+
+/**
+ * A server app's window navigated itself to a page under `/apps/<id>/`
+ * (src/lib/app-window.ts): a document request with no session that is not a
+ * top-level navigation — or over plain HTTP, where none says which it is.
+ * Answered with the page that asks the desktop around it to open that
+ * address again, which carries the owner's cookie. A visitor's tab has no
+ * desktop around it and goes on to /login; a top-level navigation through
+ * the tunnel (`Sec-Fetch-Dest: document`) gets the plain redirect below.
+ * A request that DID carry a session cookie is the desktop's own navigation
+ * coming back signed out, so that page goes to /login without asking again.
+ */
+function appWindowReopen(request: NextRequest, loginUrl: URL, hadSessionCookie: boolean): NextResponse | null {
+  if (!isAppProxyPath(request.nextUrl.pathname) || !isDocumentRequest(request.headers)) return null;
+  if (request.headers.get("sec-fetch-dest") === "document") return null;
+  if (request.method !== "GET" && request.method !== "HEAD") return null;
+  const login = `${loginUrl.pathname}${loginUrl.search}`;
+  return new NextResponse(request.method === "HEAD" ? null : appReopenPage(login, !hadSessionCookie), {
+    status: 401,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": APP_REOPEN_PAGE_CSP,
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
 function isPublicPath(pathname: string, method: string): boolean {
   // Every entry in PUBLIC_EXACT is something a browser READS — a manifest, a
   // service worker, an icon, one public page — so the opening is GET/HEAD, the
@@ -617,8 +660,11 @@ export async function middleware(request: NextRequest) {
   // at all, and a cookie gate on those would break every proxied app. They
   // pass, which exposes the app's routes to whoever has the address the way
   // its port on 0.0.0.0 is exposed on the LAN today — and nothing of the
-  // box's: the proxy reaches the app's port and nothing else.
-  if (isAppProxyPath(request.nextUrl.pathname) && !isDocumentRequest(request.headers)) {
+  // box's: the proxy reaches the app's port and nothing else. A form the
+  // document posts is one of those requests too (isOpaqueFrameRequest); a
+  // page it navigates to is not, and is reopened by the desktop instead
+  // (appWindowReopen, step 5).
+  if (isAppProxyPath(request.nextUrl.pathname) && (!isDocumentRequest(request.headers) || isOpaqueFrameRequest(request.headers))) {
     return NextResponse.next();
   }
 
@@ -812,6 +858,14 @@ export async function middleware(request: NextRequest) {
   // The 401 is MARKED as the session gate's (src/lib/session-expiry.ts): a few
   // routes answer 401 for a wrong current password or a refused key, and only
   // this one means the page is signed out and must go to /login.
+  const loginUrl = new URL("/login", request.url);
+  loginUrl.searchParams.set("redirect", request.nextUrl.pathname);
+
+  // 5a. A server app's window navigating itself has no cookie to send — the
+  // desktop around it reopens the page with its own (src/lib/app-window.ts).
+  const reopen = appWindowReopen(request, loginUrl, !!sessionCookie);
+  if (reopen) return reopen;
+
   const accept = request.headers.get("accept") || "";
   if (
     isSetupApiPath(pathname) ||
@@ -821,8 +875,6 @@ export async function middleware(request: NextRequest) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
   }
 
-  const loginUrl = new URL("/login", request.url);
-  loginUrl.searchParams.set("redirect", request.nextUrl.pathname);
   return NextResponse.redirect(loginUrl);
 }
 

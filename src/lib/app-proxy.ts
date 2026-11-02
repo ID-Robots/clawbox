@@ -42,6 +42,8 @@
  * are let through by the middleware WITHOUT a cookie for that reason (a
  * document navigation still needs one), which exposes the app's routes to
  * whoever has the address — the reason the listener check above exists.
+ * A page the document navigates to ITSELF arrives without the cookie too;
+ * the desktop opens it again with its own (src/lib/app-window.ts).
  *
  * THE BASE PATH
  *
@@ -101,7 +103,8 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
  * it needs no CORS; what is new is the read, and — through the preflight the
  * proxy answers for this tree — the writes a form cannot send: a JSON body,
  * PUT, PATCH and DELETE. The listener check above keeps all of it to the
- * app's own process.
+ * app's own process. The App Router's own fetches are the other exception,
+ * on the same terms — see NEXT_ROUTER_REQUEST_HEADERS.
  */
 const CORS_READABLE_TYPES = [
   "text/css",
@@ -132,12 +135,12 @@ export function appProxyAllowOrigin(
   requestOrigin: string | null,
   upstreamAllowOrigin: string | null,
   contentType: string | null,
-  /** Is this the app's own `/api` tree (see isAppApiPath)? Answered whatever its type. */
-  apiPath = false,
+  /** Is this the app's own `/api` tree (see isAppApiPath) or an App Router fetch (isNextRouterRequest)? Answered whatever its type. */
+  anyType = false,
 ): string | null {
   if (upstreamAllowOrigin) return null;
   if (requestOrigin !== "null") return null;
-  if (apiPath) return "null";
+  if (anyType) return "null";
   const type = (contentType ?? "").split(";")[0].trim().toLowerCase();
   if (!type) return null;
   return CORS_READABLE_TYPES.some((allowed) => (allowed.endsWith("/") || allowed.endsWith("-") ? type.startsWith(allowed) : type === allowed))
@@ -171,6 +174,50 @@ export function mergeExposedHeaders(existing: string | null): string {
 /** The methods and headers a preflight for the app's API is answered with. */
 export const APP_API_PREFLIGHT_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
 export const APP_API_PREFLIGHT_MAX_AGE_S = 600;
+
+/**
+ * The request headers only Next.js's App Router sends: `RSC` on the fetch
+ * that IS a client-side navigation (and its prefetches), `Next-Action` on a
+ * server action. They are not CORS-safelisted, so from the sandboxed document
+ * every such fetch preflights — and a preflight for a page path went to the
+ * app, which never answers one. The fetch failed, Next fell back to a full
+ * page load, and that navigation, made by the frame itself, carried no
+ * cookie: clicking any link in a Next app's window showed the box's login.
+ *
+ * So the proxy answers the App Router the way it answers the app's `/api`
+ * tree: the preflight, and `null` on the answer, without credentials. What
+ * that opens is the same as the API grant (see appProxyAllowOrigin): a page's
+ * RSC payload carries what its HTML carries, readable by an opaque origin
+ * that can reach the box. These headers are the App Router's own; a plain
+ * page load sends none of them and stays unreadable as before.
+ */
+export const NEXT_ROUTER_REQUEST_HEADERS = ["rsc", "next-action", "next-router-state-tree"] as const;
+/** What a preflight for the App Router is answered with: navigations and prefetches are GETs, server actions POSTs. */
+export const NEXT_ROUTER_PREFLIGHT_METHODS = "GET, HEAD, POST, OPTIONS";
+
+/** Is this one of the App Router's own fetches (a navigation, a prefetch, a server action)? */
+export function isNextRouterRequest(headers: Headers): boolean {
+  return NEXT_ROUTER_REQUEST_HEADERS.some((name) => headers.has(name));
+}
+
+/** Does this preflight ask for the App Router's headers? */
+export function isNextRouterPreflight(headers: Headers): boolean {
+  const asked = (headers.get("access-control-request-headers") ?? "").split(",").map((h) => h.trim().toLowerCase());
+  return NEXT_ROUTER_REQUEST_HEADERS.some((name) => asked.includes(name));
+}
+
+/**
+ * The `Access-Control-Expose-Headers` an App Router answer goes out with: the
+ * app's own entries kept and `*` added. The router reads its own headers off
+ * the answer (`Vary`, `x-nextjs-postponed`, `x-action-redirect`, `x-action-
+ * revalidated`, …) and a CORS answer exposes none of them by default. `*` is
+ * honoured because these requests never carry credentials.
+ */
+export function exposeAllHeaders(existing: string | null): string {
+  const have = (existing ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  if (!have.includes("*")) have.push("*");
+  return have.join(", ");
+}
 
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
 export const LISTENER_CHECK_TTL_MS = 30_000;
