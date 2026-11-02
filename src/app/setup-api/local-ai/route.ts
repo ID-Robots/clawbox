@@ -7,8 +7,30 @@ import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, runOpencla
 import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
 import { getActiveHarness } from "@/lib/harness";
 import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
+import { CLAWBOX_AI_DEFAULT_TIER, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
+import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+
+/** A llama.cpp or Ollama model ref — the provider rule `inferConfiguredLocalModel` reads. */
+function isLocalModelRef(ref: unknown): boolean {
+  if (typeof ref !== "string") return false;
+  const provider = ref.split("/")[0].trim().toLowerCase();
+  return provider.startsWith("llamacpp") || provider.startsWith("ollama");
+}
+
+/**
+ * The fallback the configure route writes when there is no local model to use
+ * (`ensureFallbackModel`): ClawBox AI, on a box signed in to it, unless the
+ * owner switched it off. Turning Local AI on replaced it with the local model,
+ * so turning it off puts it back rather than leave the box with no backup.
+ */
+async function clawboxAiFallback(config: Awaited<ReturnType<typeof readOpenClawConfig>>): Promise<string | null> {
+  const apiKey = config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
+  if (typeof apiKey !== "string" || !apiKey.startsWith("claw_")) return null;
+  if (parseDisabledProviders(await get(DISABLED_PROVIDERS_KEY)).has("clawai")) return null;
+  return CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
+}
 
 export async function POST(request: Request) {
   let body: { action?: string };
@@ -76,9 +98,19 @@ export async function POST(request: Request) {
     let hermesUnregisterFailed = false;
     const openclawPresent = !openclawIsAbsent();
     const gatewayBaseline = openclawPresent ? await readGatewayConfigBaseline() : null;
-    if (openclawPresent) {
+    // Only the local models leave the list. Writing `[]` here took every other
+    // backup with them, so a primary that then failed (a limit, an outage)
+    // failed the chat instead of falling back.
+    const listedFallbacks = config.agents?.defaults?.model?.fallbacks;
+    const fallbacks = Array.isArray(listedFallbacks) ? listedFallbacks : [];
+    if (openclawPresent && fallbacks.some(isLocalModelRef)) {
+      const kept = fallbacks.filter((ref) => !isLocalModelRef(ref));
+      if (kept.length === 0) {
+        const clawboxAi = await clawboxAiFallback(config);
+        if (clawboxAi) kept.push(clawboxAi);
+      }
       const cleared = await runOpenclawConfigSet(
-        ["agents.defaults.model.fallbacks", JSON.stringify([]), "--json"],
+        ["agents.defaults.model.fallbacks", JSON.stringify(kept), "--json"],
         { cwd: CLAWBOX_HOME_DIR, env: { ...process.env, HOME: CLAWBOX_HOME_DIR } },
       ).then(
         () => true,
@@ -88,9 +120,8 @@ export async function POST(request: Request) {
         },
       );
       if (!cleared) {
-        // Says what did not happen, not what the list contains: the route never
-        // checked whether the local model was IN `fallbacks`, and a box running
-        // it as primary with an already-empty list would be told about an entry
+        // Only reached when the list does name a local model, so a box running
+        // one as primary with no local fallback is never told about an entry
         // that was never there.
         warning = "Local AI is stopped, but clearing OpenClaw's fallback model list failed. Turn it off again to finish.";
       }
