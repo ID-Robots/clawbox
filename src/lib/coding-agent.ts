@@ -14188,7 +14188,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // been flipped to running. Checked here, before that flip, the way a draft
     // start checks it.
     // A run with a copy of its own may have had it removed at settle (it left
-    // nothing on its branch) or by the weekly sweep. The BRANCH survived both,
+    // nothing on its branch) or by the folder janitor. The BRANCH survived both,
     // so the tree is made again from it and the resume carries on in the folder
     // the session was opened in — which is what `--resume` needs.
     if (run.worktree) run.worktree = await reopenWorktree(run);

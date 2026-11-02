@@ -1,8 +1,9 @@
 /**
  * A run's own git plumbing against a REAL repository in a temp folder: the
  * worktree and its branch, the shared node_modules link, the three folders
- * that keep the old in-place behaviour, the restore a resume needs, and the
- * sweep's two rules (old enough, and merged or gone).
+ * that keep the old in-place behaviour and the restore a resume needs. What
+ * removes an old run worktree is the folder janitor, and its keep rules are
+ * pinned in coding-folder-janitor.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "child_process";

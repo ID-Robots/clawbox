@@ -415,6 +415,65 @@ describe("what is kept, and why", () => {
     expect(await keptFor(copy)).toMatchObject({ kind: "copy", action: "keep", reason: "unmerged" });
   });
 
+  // A branch with nothing on it counts as merged, but the settle keeps such a
+  // run's copy exactly because its files are the only copy (coding-agent.ts
+  // `unsavedWork`), and tells the owner so. The weekly sweep this janitor
+  // replaced asked only "merged, and old?" and forced those files away a
+  // fortnight later (4.3 bug 3); here they stay, however old.
+  describe("a run's copy the settle kept for its unsaved work (4.3 bug 3)", () => {
+    /** A run's worktree made the way a run makes it (coding-run-worktree.ts), and the settled run that left it. */
+    async function runTree(project: string, runId: string) {
+      const { addRunWorktree } = await import("@/lib/coding-run-worktree");
+      const made = await addRunWorktree({ projectDir: project, runId, protectedRoot: "/nowhere/clawbox-checkout" });
+      if (!made.ok) throw new Error(made.detail);
+      stores.runs = [{ id: runId, status: "completed", directory: made.path, worktree: { path: made.path, branch: made.branch, base: made.base, project, removed: false } }];
+      return made;
+    }
+
+    it("keeps an old copy that holds uncommitted work, though its branch counts as merged", async () => {
+      const { branchExists, branchIsMerged } = await import("@/lib/coding-run-worktree");
+      const alpha = makeRepo("alpha");
+      commit(alpha, "index.html", "<h1>Hello</h1>\n");
+      const made = await runTree(alpha, "run-dirty000");
+      fs.writeFileSync(path.join(made.path, "index.html"), "<h1>Unsaved edit</h1>\n");
+      fs.writeFileSync(path.join(made.path, "out.html"), "new page\n");
+      age(made.path, 30);
+      expect(await branchIsMerged(alpha, made.branch, "master")).toBe(true);
+
+      expect(await keptFor(made.path)).toMatchObject({ kind: "worktree", action: "keep", reason: "dirty", branch: made.branch });
+      expect(fs.readFileSync(path.join(made.path, "index.html"), "utf8")).toBe("<h1>Unsaved edit</h1>\n");
+      expect(fs.readFileSync(path.join(made.path, "out.html"), "utf8")).toBe("new page\n");
+      expect(await branchExists(alpha, made.branch)).toBe(true);
+      expect(stores.marked).toEqual([]);
+    });
+
+    it("keeps an old copy whose HEAD is detached at a commit the run made and no branch names", async () => {
+      const alpha = makeRepo("alpha");
+      const made = await runTree(alpha, "run-detach00");
+      git(made.path, "checkout", "-q", "--detach");
+      commit(made.path, "work.js", "only here\n");
+      age(made.path, 30);
+
+      expect(await keptFor(made.path)).toMatchObject({ kind: "worktree", action: "keep", reason: "unmerged", branch: null });
+      expect(fs.readFileSync(path.join(made.path, "work.js"), "utf8")).toBe("only here\n");
+      expect(stores.marked).toEqual([]);
+    });
+
+    it("keeps a pushed copy of a run's project that holds uncommitted work", async () => {
+      const alpha = makeRepo("alpha", { remote: true });
+      const copy = path.join(projects, "alpha-copy-dirty");
+      fs.cpSync(alpha, copy, { recursive: true });
+      git(copy, "checkout", "-q", "-b", "clawbox/run-copydrty");
+      git(copy, "push", "-q", "-u", "origin", "clawbox/run-copydrty");
+      fs.writeFileSync(path.join(copy, "draft.md"), "not committed\n");
+      age(copy, 30);
+      age(alpha, 30);
+
+      expect(await keptFor(copy)).toMatchObject({ kind: "copy", action: "keep", reason: "dirty" });
+      expect(fs.readFileSync(path.join(copy, "draft.md"), "utf8")).toBe("not committed\n");
+    });
+  });
+
   it("keeps a tree with ignored files that are not build output, and lets build output go", async () => {
     const alpha = makeRepo("alpha");
     fs.writeFileSync(path.join(alpha, ".gitignore"), ".env\ndist/\n");
