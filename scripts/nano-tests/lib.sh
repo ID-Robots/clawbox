@@ -52,7 +52,7 @@ note()   { printf '# %s\n' "$*"; }
 finish() { exit "$NANO_TEST_FAILED"; }
 
 # Prepended to every script `board` runs: the clawbox user's environment as a
-# non-interactive ssh does not give it, and the one authenticated HTTP helper.
+# non-interactive ssh does not give it, and the authenticated HTTP helpers.
 # shellcheck disable=SC2016  # expanded on the board, not here
 BOARD_PRELUDE='
 set -uo pipefail
@@ -81,6 +81,34 @@ api() {
   [ -n "$body" ] && extra=(-H "Content-Type: application/json" --data-binary "$body")
   out=$(mktemp)
   code=$(printf "header = \"Authorization: Bearer %s\"\n" "$token" \
+    | curl -sS -o "$out" -w "%{http_code}" -X "$method" --max-time "${API_MAX_TIME:-150}" \
+        "${extra[@]}" -K - "$DASHBOARD$path" 2>/dev/null)
+  printf "%s\n" "${code:-000}"
+  cat "$out"
+  rm -f "$out"
+}
+
+# owner_api METHOD PATH [JSON_BODY] -> as api, but as the OWNER, for a route
+# that answers the bearer with a question to the owner instead of acting
+# (update/run). The session cookie is minted HERE from data/.session-secret and,
+# like the bearer, reaches curl on its stdin only and never leaves the board.
+owner_api() {
+  local method=$1 path=$2 body=${3:-} out code cookie
+  local extra=()
+  cookie=$(node -e "const fs = require(\"fs\"), crypto = require(\"crypto\");
+    const secret = fs.readFileSync(process.argv[1], \"utf8\").trim();
+    let gen = 0;
+    try { const c = JSON.parse(fs.readFileSync(process.argv[2], \"utf8\")); if (Number.isFinite(c.session_generation)) gen = c.session_generation; } catch {}
+    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 1200, gen })).toString(\"base64url\");
+    process.stdout.write(payload + \".\" + crypto.createHmac(\"sha256\", secret).update(payload).digest(\"hex\"));
+  " "$REPO/data/.session-secret" "$REPO/data/config.json" 2>/dev/null)
+  if [ -z "$cookie" ]; then
+    printf "000\n{\"error\":\"no owner session could be minted from %s\"}\n" "$REPO/data/.session-secret"
+    return 0
+  fi
+  [ -n "$body" ] && extra=(-H "Content-Type: application/json" --data-binary "$body")
+  out=$(mktemp)
+  code=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$cookie" \
     | curl -sS -o "$out" -w "%{http_code}" -X "$method" --max-time "${API_MAX_TIME:-150}" \
         "${extra[@]}" -K - "$DASHBOARD$path" 2>/dev/null)
   printf "%s\n" "${code:-000}"
@@ -122,6 +150,17 @@ board_api() {
   local out
   # shellcheck disable=SC2016  # $@ is the board's positional list
   out=$(board 'api "$@"' "$@")
+  API_STATUS=$(printf '%s\n' "$out" | head -n1)
+  API_BODY=$(printf '%s\n' "$out" | tail -n +2)
+  case "$API_STATUS" in [0-9][0-9][0-9]) ;; *) API_STATUS=000 ;; esac
+}
+
+# board_owner_api METHOD PATH [JSON_BODY] — board_api as the owner (see
+# `owner_api` above). Sets API_STATUS and API_BODY the same way.
+board_owner_api() {
+  local out
+  # shellcheck disable=SC2016  # $@ is the board's positional list
+  out=$(board 'owner_api "$@"' "$@")
   API_STATUS=$(printf '%s\n' "$out" | head -n1)
   API_BODY=$(printf '%s\n' "$out" | tail -n +2)
   case "$API_STATUS" in [0-9][0-9][0-9]) ;; *) API_STATUS=000 ;; esac
@@ -529,11 +568,13 @@ rebuild_to_release() {
 
 # start_app_update BRANCH — what an owner does in Settings: pin the update
 # branch, then "Update now" (POST /setup-api/update/run, force). Returns
-# non-zero when the update did not start; API_STATUS/API_BODY say why.
+# non-zero when the update did not start; API_STATUS/API_BODY say why. The
+# click is the owner's: update/run answers the agent's bearer with a question
+# to the owner (202 pendingApproval) and starts nothing.
 start_app_update() {
   board_api POST /setup-api/system/update-branch "$(jq -cn --arg b "$1" '{branch: $b}')"
   [ "$API_STATUS" = 200 ] || return 1
-  board_api POST /setup-api/update/run '{"force":true}'
+  board_owner_api POST /setup-api/update/run '{"force":true}'
   [ "$API_STATUS" = 200 ] && [ "$(api_json '.started // empty')" = true ]
 }
 
