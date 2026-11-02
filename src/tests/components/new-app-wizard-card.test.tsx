@@ -384,6 +384,54 @@ describe("NewAppWizardCard — the planner", () => {
     expect(screen.getByTestId("coding-agent-planner-score").textContent).toBe("3/3");
   });
 
+  // The plan check is for a new app's brief only: on an existing project it
+  // goes away whole, and the switches move up to the top of the side panel.
+  const PROJECTS = [
+    { folder: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder", name: "shop", lastCommit: null, onDesktop: false, latestRun: null },
+  ];
+  const stubProjects = () => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+  const CHECK_IDS = ["goal", "features", "done", "references"];
+  const expectNoPlanCheck = () => {
+    expect(screen.queryByTestId("coding-agent-planner-checks")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-planner-score")).toBeNull();
+    for (const id of CHECK_IDS) expect(screen.queryByTestId(`coding-agent-planner-check-${id}`)).toBeNull();
+    expect(screen.queryByText("codingAgent.planner.checksTitle")).toBeNull();
+    expect(screen.queryByText("codingAgent.planner.checksHint")).toBeNull();
+    const toggles = screen.getByTestId("coding-agent-new-toggles");
+    expect(toggles.parentElement?.firstElementChild).toBe(toggles);
+  };
+
+  it("shows the plan check for a new app, hides it on an existing project, and brings it back on a new app", async () => {
+    stubProjects();
+    render(<NewAppWizardCard onClose={() => {}} />);
+    const panel = screen.getByTestId("coding-agent-planner-checks");
+    expect(panel.parentElement?.firstElementChild).toBe(panel);
+    for (const id of CHECK_IDS) expect(within(panel).getByTestId(`coding-agent-planner-check-${id}`)).toBeInTheDocument();
+    type("An invoice generator for a small shop that keeps its customers.");
+    expect(screen.getByTestId("coding-agent-planner-score").textContent).toBe("1/3");
+
+    fireEvent.click(screen.getByTestId("coding-agent-new-mode-existing"));
+    await screen.findByTestId("coding-agent-new-project");
+    expectNoPlanCheck();
+    expect(screen.getByTestId("coding-agent-new-team")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("coding-agent-new-mode-new"));
+    expect(screen.getByTestId("coding-agent-planner-checks")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-planner-score").textContent).toBe("1/3");
+    expect(screen.getByTestId("coding-agent-planner-check-goal")).toHaveAttribute("data-ok", "true");
+    expect(screen.getByTestId("coding-agent-new-template")).toBeInTheDocument();
+  });
+
+  it("never shows the plan check on a card opened on a project", async () => {
+    stubProjects();
+    render(<NewAppWizardCard onClose={() => {}} initialProject="/home/clawbox/Projects/shop" />);
+    const select = await screen.findByTestId("coding-agent-new-project");
+    await waitFor(() => expect(select).not.toBeDisabled());
+    expectNoPlanCheck();
+    fireEvent.change(screen.getByTestId("coding-agent-new-next"), { target: { value: "An invoice generator.\n\n## Features\n- PDF\n- CSV" } });
+    expect(screen.queryByTestId("coding-agent-planner-checks")).toBeNull();
+  });
+
   it("previews the brief as Markdown", () => {
     render(<NewAppWizardCard onClose={() => {}} />);
     type("## Features\n- Search");
