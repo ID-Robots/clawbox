@@ -174,4 +174,40 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
       expect(step).not.toMatch(/if command -v nvcc/);
     });
   });
+
+  describe("the Wi-Fi interface the app is pointed at", () => {
+    // src/lib/network.ts defaults NETWORK_INTERFACE to the Jetson's wlP1p1s0
+    // and, finding no such device, reports `interface_mismatch` — "the fix is
+    // to point NETWORK_INTERFACE at one of them". install-x64.sh never did, so
+    // every Wi-Fi PC (wlP9s9 on a DGX Spark, wlp2s0 on a laptop) carried the
+    // error into Settings and the agent's wifi_status tool.
+    function seed(nmcliOut: string, envBody = "") {
+      stub("nmcli", `printf '%s\\n' ${nmcliOut.split("\n").map((l) => `'${l}'`).join(" ")}`);
+      const envFile = path.join(dir, ".env");
+      writeFileSync(envFile, envBody);
+      const r = runBash([
+        sliceFunction("ensure_env_setting"),
+        sliceFunction("seed_network_interface"),
+        `seed_network_interface "${envFile}"`,
+      ].join("\n"));
+      return { r, env: readFileSync(envFile, "utf8") };
+    }
+
+    it("names the machine's own Wi-Fi device", () => {
+      const { env } = seed("enP7s7:ethernet\nwlP9s9:wifi\np2p-dev-wlP9s9:wifi-p2p\nlo:loopback");
+      expect(env).toMatch(/^NETWORK_INTERFACE=wlP9s9$/m);
+    });
+
+    it("leaves .env alone on a machine with no Wi-Fi, and keeps an operator's choice", () => {
+      expect(seed("eth0:ethernet\nlo:loopback").env).not.toContain("NETWORK_INTERFACE");
+      const kept = seed("wlP9s9:wifi", "NETWORK_INTERFACE=wlan7\n").env;
+      expect(kept).toMatch(/^NETWORK_INTERFACE=wlan7$/m);
+      expect(kept).not.toContain("wlP9s9");
+    });
+
+    it("is part of the .env seeding", () => {
+      expect(sliceFunction("step_directories_permissions")).toContain('seed_network_interface "$ENV_FILE"');
+    });
+  });
 });
+
