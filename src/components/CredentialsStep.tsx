@@ -380,6 +380,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       newSetupUrl.port === window.location.port &&
       newSetupUrl.hostname === newHost &&
       /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(newSetupUrl.hostname);
+    // True from the password request until the box has answered it. A dropped
+    // connection there is not the hotspot restart — that request is still to
+    // come — so the password was not saved and the owner must not move on.
+    let passwordInFlight = false;
     try {
       // Save hostname (applies live; mDNS update is non-fatal on failure).
       // Only a RENAME restarts anything: the route leaves the gateway alone for
@@ -402,6 +406,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       // Save system password if provided
       if (submission.password && submission.password !== savedPasswordRef.current) {
         setProgressKey("credentials.progressPassword");
+        passwordInFlight = true;
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -412,6 +417,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
           ),
           signal: controller.signal,
         });
+        passwordInFlight = false;
         if (controller.signal.aborted) return;
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
@@ -514,6 +520,14 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
         const currentHost = window.location.hostname.toLowerCase();
         const hostnameChanged =
           currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
+        // On this origin the overlay continues to step 4, which needs the
+        // password (and the session its answer carries). A rename still hands
+        // off: the old name may be what stopped answering, and the wizard at
+        // the new one reopens this step, since no password was configured.
+        if (passwordInFlight && !hostnameChanged) {
+          setStatus({ type: "error", message: t("credentials.failedSetPassword") });
+          return;
+        }
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         setHandoff({
           targetUrl: hostnameChanged
