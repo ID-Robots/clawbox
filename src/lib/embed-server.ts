@@ -20,6 +20,7 @@
  * SERVER ONLY.
  */
 
+import os from "os";
 import fs from "fs/promises";
 import path from "./runtime-path";
 import { DATA_DIR } from "./config-store";
@@ -40,7 +41,11 @@ const EMBED_RUNTIME_DIR = path.join(DATA_DIR, EMBED_RUNTIME_SUBDIR);
 const EMBED_MODEL_DIR = path.join(EMBED_RUNTIME_DIR, "models");
 const EMBED_LOG_PATH = path.join(EMBED_RUNTIME_DIR, "server.log");
 const DEFAULT_LLAMACPP_BIN = "/usr/local/bin/llama-server";
-const DEFAULT_HF_BIN = "/home/clawbox/.local/bin/hf";
+// The running user's own: pipx puts `hf` in ~/.local/bin, and on a PC
+// (install-x64.sh) that user is the machine's owner, not `clawbox`.
+function defaultHfBin(): string {
+  return path.join(os.homedir(), ".local", "bin", "hf");
+}
 /** A first start with no GGUF on disk downloads ~640 MB inside the unit. */
 const DEFAULT_STARTUP_TIMEOUT_MS = 20 * 60 * 1000;
 
@@ -105,7 +110,7 @@ export function getEmbedLaunchSpec(): EmbedLaunchSpec {
     hfRepo: process.env.EMBED_HF_REPO?.trim() || EMBED_HF_REPO,
     hfFile,
     binPath: process.env.LLAMACPP_BIN?.trim() || DEFAULT_LLAMACPP_BIN,
-    hfBinPath: process.env.HF_BIN?.trim() || DEFAULT_HF_BIN,
+    hfBinPath: process.env.HF_BIN?.trim() || defaultHfBin(),
     modelDir: EMBED_MODEL_DIR,
     modelPath: path.join(EMBED_MODEL_DIR, hfFile),
     logPath: EMBED_LOG_PATH,
