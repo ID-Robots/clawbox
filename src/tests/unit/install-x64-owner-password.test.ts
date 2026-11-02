@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writ
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
 
 // Runs bash and python3: vitest's 5 s default is not enough on a loaded CI
 // runner (src/tests/unit/test-timeout-hygiene.test.ts).
@@ -103,6 +104,18 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     record("P", 0);
     expect(existsSync(config)).toBe(false);
     expect(readFileSync(path.join(dir, "chkpwd-stdin"), "utf8")).toBe("clawbox\0");
+  });
+
+  it("checks the default against the app's own constant", () => {
+    expect(SOURCE).toContain(`printf '${FACTORY_DEFAULT_PASSWORD}\\0' | as_user unix_chkpwd`);
+  });
+
+  it("reads the flag before checking any password, so a re-run logs no failed check", () => {
+    // The app reads the flag first for the same reason (system-password.ts):
+    // auth.log must not carry a failed check nobody made.
+    writeFileSync(config, JSON.stringify({ password_configured: true }, null, 2));
+    record("P");
+    expect(existsSync(path.join(dir, "chkpwd-stdin"))).toBe(false);
   });
 
   it("records the owner when the default check cannot run, failing closed as the app does", () => {
