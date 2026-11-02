@@ -13,6 +13,7 @@ import {
   mergeExposedHeaders,
   resolveAppProxyTarget,
 } from "@/lib/app-proxy";
+import { APP_PROXY_NEXT_URL_HEADER } from "@/lib/app-window";
 
 export const dynamic = "force-dynamic";
 
@@ -89,6 +90,12 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
     // The owner's session never reaches the app: it is the desktop's, and a
     // document served here has an opaque origin that could not use one anyway.
     if (key === "cookie") return;
+    // The App Router's Next-Url, which the box's Next.js deleted before this
+    // handler ran: back under its own name (src/lib/app-window.ts).
+    if (key === APP_PROXY_NEXT_URL_HEADER) {
+      if (!request.headers.has("next-url")) headers.set("next-url", value);
+      return;
+    }
     headers.set(key, value);
   });
   headers.set("host", `127.0.0.1:${target.port}`);

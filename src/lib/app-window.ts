@@ -47,6 +47,21 @@
  * component all import it.
  */
 
+/**
+ * The App Router's `Next-Url` header, carried past the box's own Next.js.
+ *
+ * A client-side navigation in a Next app sends `Next-Url` and hashes it into
+ * the `_rsc` search param; the app's server recomputes that hash and answers
+ * a mismatch with a 307 to the "right" URL. The box's own Next.js deletes
+ * `Next-Url` from a request before a route handler sees it (it has no
+ * interception routes, so it has no use for it), so the proxy forwarded
+ * every navigation without it: the app redirected, the router gave up on the
+ * fetch and loaded the page in full instead. The middleware, which runs
+ * before that deletion, copies it into this header; the proxy turns it back
+ * into `Next-Url` for the app and forwards nothing else of it.
+ */
+export const APP_PROXY_NEXT_URL_HEADER = "x-clawbox-next-url";
+
 /** The message the reopen page posts to its parent. */
 export const APP_REOPEN_MESSAGE = "clawboxAppReopen";
 /** The parent's answer: "I am opening it", so the page stops waiting. */

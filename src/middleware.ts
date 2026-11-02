@@ -21,7 +21,7 @@ import {
   requestIntent,
 } from "@/lib/non-owner-scope";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
-import { APP_REOPEN_PAGE_CSP, appReopenPage } from "@/lib/app-window";
+import { APP_PROXY_NEXT_URL_HEADER, APP_REOPEN_PAGE_CSP, appReopenPage } from "@/lib/app-window";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -386,6 +386,19 @@ function isOpaqueFrameRequest(headers: Headers): boolean {
 }
 
 /**
+ * Let a request through to the app proxy with its `Next-Url` kept: Next.js
+ * deletes that header before the route handler runs, and the app needs it
+ * (APP_PROXY_NEXT_URL_HEADER, src/lib/app-window.ts).
+ */
+function passToAppProxy(request: NextRequest): NextResponse {
+  const nextUrl = request.headers.get("next-url");
+  if (nextUrl === null) return NextResponse.next();
+  const headers = new Headers(request.headers);
+  headers.set(APP_PROXY_NEXT_URL_HEADER, nextUrl);
+  return NextResponse.next({ request: { headers } });
+}
+
+/**
  * A server app's window navigated itself to a page under `/apps/<id>/`
  * (src/lib/app-window.ts): a document request with no session that is not a
  * top-level navigation — or over plain HTTP, where none says which it is.
@@ -665,7 +678,7 @@ export async function middleware(request: NextRequest) {
   // page it navigates to is not, and is reopened by the desktop instead
   // (appWindowReopen, step 5).
   if (isAppProxyPath(request.nextUrl.pathname) && (!isDocumentRequest(request.headers) || isOpaqueFrameRequest(request.headers))) {
-    return NextResponse.next();
+    return passToAppProxy(request);
   }
 
   // 2a. The Control UI's own static files — /assets, /themes, /fonts,

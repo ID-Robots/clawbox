@@ -282,6 +282,13 @@ describe("the app proxy", () => {
     expect(seen.at(-1)?.headers.origin).toBe("null");
     expect(seen.at(-1)?.headers.cookie).toBeUndefined();
 
+    // The box's own Next.js deletes Next-Url before this handler runs; the
+    // middleware carries it under x-clawbox-next-url and it reaches the app
+    // under its own name again — the app hashes it into `_rsc`.
+    await routes.GET(req("/apps/site/books/2?_rsc=abc", { headers: { origin: "null", rsc: "1", "x-clawbox-next-url": "/books" } }), ctx("site", ["books", "2"]));
+    expect(seen.at(-1)?.headers["next-url"]).toBe("/books");
+    expect(seen.at(-1)?.headers["x-clawbox-next-url"]).toBeUndefined();
+
     // A server action: a POST with Next-Action to the page's own path.
     const actionPreflight = await routes.OPTIONS(req("/apps/site/books/new", {
       method: "OPTIONS",

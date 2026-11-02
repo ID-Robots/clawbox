@@ -1354,6 +1354,23 @@ describe("middleware", () => {
       expect(foreign.status).toBe(307);
     });
 
+    it("carries the App Router's Next-Url past the box's own Next.js, which deletes it before the proxy runs", async () => {
+      // Without it the app's server recomputes the `_rsc` hash without it,
+      // answers 307, and every client navigation turns into a full page load.
+      const mw = await load();
+      const nav = await mw(request("/apps/notes/books/2?_rsc=sx22p", { headers: { origin: "null", rsc: "1", "next-router-state-tree": "%5B%5D", "next-url": "/books" } }));
+      expect(nav.headers.get("x-middleware-next")).toBe("1");
+      expect(nav.headers.get("x-middleware-request-x-clawbox-next-url")).toBe("/books");
+      expect(nav.headers.get("x-middleware-override-headers")).toContain("x-clawbox-next-url");
+      // Everything else passes untouched.
+      const asset = await mw(request("/apps/notes/_next/static/chunks/a.js", { headers: { accept: "*/*" } }));
+      expect(asset.headers.get("x-middleware-next")).toBe("1");
+      expect(asset.headers.get("x-middleware-override-headers")).toBeNull();
+      // And it is never a way past the session gate for anything else.
+      const elsewhere = await mw(request("/setup-api/system/version", { headers: { rsc: "1", "next-url": "/x" } }));
+      expect(elsewhere.status).toBe(401);
+    });
+
     it("keeps the box's own API and pages closed to the frame: no session, no reopen page", async () => {
       const mw = await load();
       for (const pathname of ["/setup-api/system/version", "/setup-api/webapps?app=notes", "/api/sessions"]) {
