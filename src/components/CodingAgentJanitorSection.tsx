@@ -75,6 +75,24 @@ const REASON_KEY: Record<string, string> = {
   limit: "codingAgent.janitorReason.limit",
 };
 
+/**
+ * The route's answer, or null when it is not one: an older server, a proxy's
+ * error page or a stub answering `{}` must leave the section empty, never
+ * take the settings panel down with it.
+ */
+function asView(data: unknown): JanitorView | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Partial<JanitorView>;
+  const settings = d.settings;
+  if (!settings || typeof settings.enabled !== "boolean" || typeof settings.retentionDays !== "number") return null;
+  const limits = d.limits && typeof d.limits.minRetentionDays === "number" && typeof d.limits.maxRetentionDays === "number"
+    ? d.limits
+    : { minRetentionDays: 1, maxRetentionDays: 365 };
+  const plan = d.plan && typeof d.plan.projectFolder === "string" && Array.isArray(d.plan.entries) ? d.plan : undefined;
+  const lastPass = d.lastPass && typeof d.lastPass.at === "number" ? d.lastPass : null;
+  return { settings, limits, lastPass, running: d.running === true, ...(plan ? { plan } : {}) };
+}
+
 /** A path inside the project folder said from there; anything else in full. */
 function shortPath(p: string, folder: string): string {
   return folder && p.startsWith(`${folder}/`) ? p.slice(folder.length + 1) : p;
@@ -94,7 +112,8 @@ export default function CodingAgentJanitorSection() {
   const load = useCallback(async (withPlan: boolean) => {
     const res = await fetch(withPlan ? `${ROUTE}?plan=1` : ROUTE, { cache: "no-store" });
     if (!res.ok) throw new Error(String(res.status));
-    const data = (await res.json()) as JanitorView;
+    const data = asView(await res.json());
+    if (!data) throw new Error("not a clean-up answer");
     setView(data);
     setDays(String(data.settings.retentionDays));
     if (withPlan) setPlan(data.plan ?? null);
@@ -104,8 +123,9 @@ export default function CodingAgentJanitorSection() {
   useEffect(() => {
     let cancelled = false;
     fetch(ROUTE, { cache: "no-store" })
-      .then((res) => (res.ok ? (res.json() as Promise<JanitorView>) : null))
-      .then((data) => {
+      .then((res) => (res.ok ? res.json() : null))
+      .then((raw: unknown) => {
+        const data = asView(raw);
         if (cancelled || !data) return;
         setView(data);
         setDays(String(data.settings.retentionDays));
@@ -121,9 +141,9 @@ export default function CodingAgentJanitorSection() {
     setError(null);
     try {
       const res = await fetch(ROUTE, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
-      const data = (await res.json().catch(() => ({}))) as { settings?: JanitorView["settings"] };
-      if (!res.ok || !data.settings) throw new Error(String(res.status));
-      const settings = data.settings;
+      const data = (await res.json().catch(() => ({}))) as { settings?: unknown };
+      const settings = asView({ settings: data.settings })?.settings;
+      if (!res.ok || !settings) throw new Error(String(res.status));
       setView((v) => (v ? { ...v, settings } : v));
       setDays(String(settings.retentionDays));
     } catch {
@@ -168,7 +188,7 @@ export default function CodingAgentJanitorSection() {
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { result?: PassSummary };
-      if (!res.ok || !data.result) throw new Error(String(res.status));
+      if (!res.ok || !data.result || typeof data.result.removed !== "number") throw new Error(String(res.status));
       setResult(data.result);
       await load(plan !== null).catch(() => {});
     } catch {

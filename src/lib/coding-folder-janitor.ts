@@ -445,16 +445,25 @@ function readLeases(): { leases: string[]; leasesComplete: boolean } {
       complete = false;
       return;
     }
+    // One descriptor for the look and the read: what is read is what was
+    // looked at. Non-blocking, so a FIFO put where a lease file goes cannot
+    // hang the pass.
+    let fd: number | null = null;
     try {
-      const st = fs.statSync(file);
+      fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+      const st = fs.fstatSync(fd);
       if (!st.isFile()) return;
       if (st.size > MAX_LEASE_BYTES) {
         complete = false;
         return;
       }
-      texts.push(fs.readFileSync(file, "utf8"));
+      const buf = Buffer.alloc(st.size);
+      const n = fs.readSync(fd, buf, 0, st.size, 0);
+      texts.push(buf.subarray(0, n).toString("utf8"));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") complete = false;
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
     }
   };
   for (const entry of leaseFiles()) {

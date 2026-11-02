@@ -114,6 +114,17 @@ describe("CodingAgentJanitorSection", () => {
     expect(posts).toContainEqual({ action: "clean" });
   });
 
+  it("stays quiet, and never throws, when the route answers something else", async () => {
+    // The e2e stubs answer every unknown route with `{}`; an older server
+    // answers 404. Neither may take the settings panel down.
+    fetchMock.mockImplementation(async () => json({}));
+    render(<CodingAgentJanitorSection />);
+    const toggle = await screen.findByTestId("coding-agent-janitor-enabled");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    expect(((await screen.findByTestId("coding-agent-janitor-preview")) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("says so when a clean-up is already running", async () => {
     fetchMock.mockImplementation(async (_url: string, init?: RequestInit) =>
       init?.method === "POST" ? json({ error: "busy", kind: "busy" }, 409) : json(VIEW));
