@@ -12987,7 +12987,8 @@ export const WORKTREE_SWEEP_AT_KEY = "coding_agent_worktree_swept_at";
  * WHY IT IS NEEDED at all, when the settle already tidies up: a run whose
  * merge conflicted, a box that restarted mid-settle, a project the owner
  * rebased by hand — each leaves a tree the settle never got to. Fourteen days
- * of no-one-touched-it plus a merged-or-gone branch is the point at which the
+ * of no-one-touched-it plus a merged-or-gone branch, in a tree that holds no
+ * uncommitted changes and no commits of its own, is the point at which the
  * files are certainly recoverable from git.
  *
  * At most weekly (`WORKTREE_SWEEP_AT_KEY` in the config store), because the

@@ -212,6 +212,40 @@ describe("a run's worktree", () => {
     expect(await branchExists(dir, unmerged.branch)).toBe(true);
   });
 
+  // A branch with nothing on it counts as merged, but the settle keeps such a
+  // copy exactly because its files are the only copy (coding-agent.ts
+  // `unsavedWork`), and tells the owner so. The sweep must not force them
+  // away a fortnight later (4.3 bug 3).
+  it("keeps an old copy that holds uncommitted work, though its branch counts as merged", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-dirty000", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    fs.writeFileSync(path.join(made.path, "index.html"), "<h1>Unsaved edit</h1>\n");
+    fs.writeFileSync(path.join(made.path, "out.html"), "new page\n");
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60_000);
+    fs.utimesSync(made.path, old, old);
+    expect(await branchIsMerged(dir, made.branch, "master")).toBe(true);
+
+    const outcome = await sweepRunWorktrees(dir);
+    expect(outcome).toEqual({ removed: [], kept: [made.path] });
+    expect(fs.readFileSync(path.join(made.path, "out.html"), "utf8")).toBe("new page\n");
+    expect(await branchExists(dir, made.branch)).toBe(true);
+  });
+
+  it("keeps an old copy whose HEAD is detached at a commit the run made and no branch names", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-detach00", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    git(made.path, "checkout", "-q", "--detach");
+    fs.writeFileSync(path.join(made.path, "work.js"), "only here\n");
+    git(made.path, "add", "-A");
+    git(made.path, "commit", "-q", "-m", "work on a detached HEAD");
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60_000);
+    fs.utimesSync(made.path, old, old);
+
+    const outcome = await sweepRunWorktrees(dir);
+    expect(outcome).toEqual({ removed: [], kept: [made.path] });
+    expect(fs.existsSync(path.join(made.path, "work.js"))).toBe(true);
+  });
+
   it("prunes a worktree whose files somebody deleted by hand", async () => {
     const made = await addRunWorktree({ projectDir: dir, runId: "run-handgone", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);

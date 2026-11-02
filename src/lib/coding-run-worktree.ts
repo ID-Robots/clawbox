@@ -39,7 +39,7 @@
 import fs from "fs";
 import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
-import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { excludeWorktrees, forkBase, gitIn, ownBranchWork, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
 
@@ -466,7 +466,8 @@ export interface SweepOutcome {
 
 /**
  * Prune the run worktrees this project has accumulated: older than
- * `olderThanMs`, and only where the branch is merged or gone.
+ * `olderThanMs`, and only where the branch is merged or gone and the tree
+ * holds nothing its branch does not (uncommitted changes, own-branch commits).
  *
  * The age is the WORKTREE's own mtime, not the run record's: records are
  * trimmed to thirty and a worktree can outlive the run that made it, so the
@@ -514,6 +515,15 @@ export async function sweepRunWorktrees(projectDir: string, options: {
         outcome.kept.push(resolved);
         continue;
       }
+    }
+    // What the settle asks before every removal (coding-agent.ts
+    // `unsavedWork`): a merged branch says nothing about the tree's own files,
+    // and `removeRunWorktree` forces. Uncommitted changes, or a commit the run
+    // made on a branch of its own or a detached HEAD, keep the copy however old
+    // it is — and so does a git that cannot say (4.3 bug 3).
+    if ((await worktreeHasChanges(resolved)) !== false || (await ownBranchWork(resolved, tree.branch ?? "")).length > 0) {
+      outcome.kept.push(resolved);
+      continue;
     }
     if (!(await removeRunWorktree(dir, resolved))) {
       outcome.kept.push(resolved);
