@@ -54,6 +54,14 @@ function stub(name: string, body: string) {
   chmodSync(file, 0o755);
 }
 
+/**
+ * nvidia-smi as the gate asks it: `--query-gpu=memory.total` answers MiB on a
+ * card with its own memory and `[N/A]` on GB10, whose GPU reads system memory.
+ */
+function gpu(memoryTotal: string) {
+  stub("nvidia-smi", `case "$*" in *memory.total*) echo '${memoryTotal}' ;; *) echo 'GPU 0: NVIDIA (UUID: GPU-x)' ;; esac`);
+}
+
 function meminfo(gib: number): string {
   const file = path.join(dir, `meminfo-${gib}`);
   writeFileSync(file, `MemTotal:       ${gib * 1024 * 1024} kB\nMemFree:        1000 kB\n`);
@@ -95,15 +103,29 @@ function seed(envFile: string, gib: number) {
 describe("install-x64.sh: the local model a workstation gets", () => {
   it("counts a host as a workstation only with a CUDA GPU and the memory for it", () => {
     const fn = [sliceConstants(), sliceFunction("llamacpp_workstation_host")].join("\n");
-    stub("nvidia-smi", "echo 'GPU 0: NVIDIA GB10 (UUID: GPU-x)'");
-    expect(run(`${fn}\nllamacpp_workstation_host "${meminfo(128)}"; echo rc=$?`).out).toContain("rc=0");
-    expect(run(`${fn}\nllamacpp_workstation_host "${meminfo(16)}"; echo rc=$?`).out).toContain("rc=1");
+    const is = (gib: number) => run(`${fn}\nllamacpp_workstation_host "${meminfo(gib)}"; echo rc=$?`).out;
+    gpu("[N/A]");
+    expect(is(128)).toContain("rc=0");
+    expect(is(16)).toContain("rc=1");
     stub("nvidia-smi", "exit 9");
-    expect(run(`${fn}\nllamacpp_workstation_host "${meminfo(128)}"; echo rc=$?`).out).toContain("rc=1");
+    expect(is(128)).toContain("rc=1");
+  });
+
+  it("asks what the GPU can hold, not only what the machine has", () => {
+    // 128 GB of RAM beside a 12 GB card: the 22 GB model with --n-gpu-layers
+    // 99 would not load on that GPU, so the local model would never start.
+    const fn = [sliceConstants(), sliceFunction("llamacpp_workstation_host")].join("\n");
+    const is = () => run(`${fn}\nllamacpp_workstation_host "${meminfo(128)}"; echo rc=$?`).out;
+    gpu("12282");
+    expect(is()).toContain("rc=1");
+    gpu("49140");
+    expect(is()).toContain("rc=0");
+    gpu("[N/A]"); // GB10: unified memory, the GPU reads the machine's 128 GB
+    expect(is()).toContain("rc=0");
   });
 
   it("seeds the MTP model, its window and its own drafting on a fresh workstation install", () => {
-    stub("nvidia-smi", "echo 'GPU 0: NVIDIA GB10'");
+    gpu("[N/A]");
     const envFile = path.join(dir, ".env");
     writeFileSync(envFile, "");
     const r = seed(envFile, 128);
@@ -121,7 +143,7 @@ describe("install-x64.sh: the local model a workstation gets", () => {
   });
 
   it("seeds Gemma on a host without the memory, exactly as before", () => {
-    stub("nvidia-smi", "echo 'GPU 0: NVIDIA GeForce RTX 4070'");
+    gpu("12282");
     const envFile = path.join(dir, ".env");
     writeFileSync(envFile, "");
     seed(envFile, 32);
@@ -133,7 +155,7 @@ describe("install-x64.sh: the local model a workstation gets", () => {
   });
 
   it("never swaps the model of a box that already has one", () => {
-    stub("nvidia-smi", "echo 'GPU 0: NVIDIA GB10'");
+    gpu("[N/A]");
     const envFile = path.join(dir, ".env");
     writeFileSync(envFile, [
       "LLAMACPP_MODEL=gemma4-e2b-it-q4_0",

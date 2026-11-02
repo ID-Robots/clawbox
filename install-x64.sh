@@ -1137,8 +1137,9 @@ step_ollama_install() {
 
 # ── Local AI on a workstation ───────────────────────────────────────────────
 # The shipped local model is Gemma 4 E2B, sized for an 8 GB Jetson: 3 GB on a
-# host whose GPU can hold forty times that. A host with a CUDA GPU and at least
-# 96 GiB of memory (a DGX Spark has 128 GB, 121 GiB usable) is seeded with
+# host whose GPU can hold forty times that. A host with at least 96 GiB of
+# memory and a GPU that can hold the model (a DGX Spark has 128 GB, 121 GiB
+# usable, shared with its GPU) is seeded with
 # Qwen3.6-35B-A3B instead: a mixture-of-experts with 3B active parameters, from
 # unsloth's MTP GGUF, so its own multi-token-prediction head drafts for it
 # (start-llamacpp.sh, LLAMACPP_SPEC_TYPE). NVIDIA's DGX Spark llama.cpp
@@ -1152,12 +1153,23 @@ LLAMACPP_WORKSTATION_HF_FILE="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 LLAMACPP_WORKSTATION_CONTEXT_WINDOW=65536
 LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX=2
 
+# The GPU must hold the model too, not only the machine: the launcher passes
+# --n-gpu-layers 99, and a 22 GB model on a 12 GB card never loads. GB10 shares
+# the machine's memory with its GPU and reports memory.total as [N/A]; a card
+# with its own memory needs 30 GiB, the model and its 64K-token cache.
+LLAMACPP_WORKSTATION_MIN_GPU_MIB=30720
+
 llamacpp_workstation_host() {
-  local meminfo="${1:-/proc/meminfo}" mem_kib
+  local meminfo="${1:-/proc/meminfo}" mem_kib gpu_mib
   mem_kib="$(awk '/^MemTotal:/ { print $2; exit }' "$meminfo" 2>/dev/null || true)"
   [[ "$mem_kib" =~ ^[0-9]+$ ]] || return 1
   [ "$mem_kib" -ge "$LLAMACPP_WORKSTATION_MIN_MEM_KIB" ] || return 1
-  nvidia-smi -L >/dev/null 2>&1 || return 1
+  gpu_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d ' \r' || true)"
+  case "$gpu_mib" in
+    "[N/A]") return 0 ;;
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  [ "$gpu_mib" -ge "$LLAMACPP_WORKSTATION_MIN_GPU_MIB" ] || return 1
 }
 
 # Where NVIDIA's CUDA packages (and DGX OS) put the compiler. It is on no PATH a
