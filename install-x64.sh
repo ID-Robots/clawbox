@@ -39,10 +39,28 @@ fi
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
 REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
-if [ "$(uname -m)" != "x86_64" ]; then
-  echo "Error: install-x64.sh only supports x86_64 hosts (found $(uname -m))." >&2
-  exit 1
-fi
+# This installer serves PCs: an Ubuntu host with its own login user. That is any
+# x86_64 desktop, and the arm64 workstations NVIDIA ships (DGX Spark and its
+# partner builds, such as Gigabyte's AI TOP Atom). A Jetson is arm64 too, but it
+# is an appliance and install.sh owns it.
+host_arch_or_refuse() {
+  local machine="$1" tegra_release="$2"
+  case "$machine" in
+    x86_64|amd64) echo x86_64 ;;
+    aarch64|arm64)
+      if [ -e "$tegra_release" ]; then
+        echo "Error: this is a Jetson; install it with install.sh, not install-x64.sh." >&2
+        return 1
+      fi
+      echo aarch64
+      ;;
+    *)
+      echo "Error: install-x64.sh supports x86_64 hosts and arm64 hosts that are not a Jetson (found $machine)." >&2
+      return 1
+      ;;
+  esac
+}
+HOST_ARCH="$(host_arch_or_refuse "$(uname -m)" /etc/nv_tegra_release)" || exit 1
 
 # `logname` fails in containers and remote shells, while SUDO_USER is unset
 # when root invokes the installer directly. Resolve without tripping `set -u`.
@@ -163,6 +181,14 @@ activate_node_runtime() {
   hash -r
 }
 
+# nodejs.org's name for a Linux tarball's architecture.
+node_dist_arch() {
+  case "$1" in
+    aarch64) echo arm64 ;;
+    *) echo x64 ;;
+  esac
+}
+
 ensure_openclaw_node_engine() {
   if node_satisfies_openclaw_engine; then
     activate_node_runtime
@@ -194,8 +220,10 @@ ensure_openclaw_node_engine() {
   # Some Ubuntu desktops pin the distro nodejs package above NodeSource, and
   # /usr/local/bin may hold an unrelated older manual install. Keep ClawBox's
   # runtime isolated instead of replacing either machine-wide installation.
-  echo "  APT still exposes $(node --version 2>/dev/null || echo no-node); installing verified Node $NODE_DIST_VERSION x64 under /opt/clawbox..."
-  local archive="node-v${NODE_DIST_VERSION}-linux-x64.tar.xz"
+  local node_arch
+  node_arch="$(node_dist_arch "$HOST_ARCH")"
+  echo "  APT still exposes $(node --version 2>/dev/null || echo no-node); installing verified Node $NODE_DIST_VERSION $node_arch under /opt/clawbox..."
+  local archive="node-v${NODE_DIST_VERSION}-linux-${node_arch}.tar.xz"
   local tmp_dir
   tmp_dir=$(mktemp -d)
   curl -fsSLO --output-dir "$tmp_dir" "https://nodejs.org/dist/v${NODE_DIST_VERSION}/$archive"
@@ -207,9 +235,9 @@ ensure_openclaw_node_engine() {
     echo "Error: $NODE_DIST_ROOT exists and is not a symlink; move it aside and rerun." >&2
     exit 1
   fi
-  rm -rf "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64"
+  rm -rf "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-${node_arch}"
   tar -xJf "$tmp_dir/$archive" -C /opt/clawbox
-  ln -sfn "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64" "$NODE_DIST_ROOT"
+  ln -sfn "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-${node_arch}" "$NODE_DIST_ROOT"
   rm -rf "$tmp_dir"
   hash -r
   if ! node_satisfies_openclaw_engine; then
@@ -1006,13 +1034,43 @@ step_ollama_install() {
   echo "  Ollama installed and running"
 }
 
+# Where NVIDIA's CUDA packages (and DGX OS) put the compiler. It is on no PATH a
+# root shell or a systemd unit gets, so `command -v nvcc` alone built a CPU-only
+# llama-server on a GPU machine — install.sh::step_llamacpp_install learned the
+# same thing on Jetson.
+LLAMACPP_NVCC_CANDIDATES=(/usr/local/cuda/bin/nvcc)
+
+# The cmake arguments for this host's llama.cpp: CUDA when a compiler exists,
+# named by path so the build does not depend on the install user's PATH either.
+# GB10 (DGX Spark, compute capability 12.1) is built for its own arch-specific
+# target, as NVIDIA's DGX Spark llama.cpp playbook does; every other GPU keeps
+# llama.cpp's own architecture list.
+llamacpp_cmake_args() {
+  local args="-DCMAKE_BUILD_TYPE=Release" nvcc="" candidate cap
+  nvcc="$(command -v nvcc 2>/dev/null || true)"
+  if [ -z "$nvcc" ]; then
+    for candidate in "${LLAMACPP_NVCC_CANDIDATES[@]}"; do
+      if [ -x "$candidate" ]; then
+        nvcc="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -n "$nvcc" ]; then
+    args="$args -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=$nvcc"
+    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' \r' || true)"
+    if [ "$cap" = "12.1" ]; then
+      args="$args -DCMAKE_CUDA_ARCHITECTURES=121a-real"
+    fi
+  fi
+  echo "$args"
+}
+
 step_llamacpp_install() {
   local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
-  local CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
-
-  if command -v nvcc &>/dev/null; then
-    CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA=ON"
-  fi
+  local CMAKE_ARGS
+  CMAKE_ARGS="$(llamacpp_cmake_args)"
+  echo "  llama.cpp build: $CMAKE_ARGS"
 
   if ! command -v cmake &>/dev/null || ! command -v git &>/dev/null || ! command -v python3 &>/dev/null; then
     echo "  Installing llama.cpp build prerequisites..."
@@ -1099,9 +1157,9 @@ step_chromium_install() {
 # Google Chrome stable — the real thing, not Chromium — for Monitor Mode's
 # "Google Chrome" desktop icon (src/lib/desktop-chrome.ts). The device
 # installer's twin, kept line for line with install.sh::step_google_chrome_install;
-# read the reasons there. What differs: no architecture check, because this
-# installer refuses anything but x86_64 before it does anything else, and no
-# test mode, because it has none.
+# read the reasons there, including the architecture check: Google builds Chrome
+# for Linux on amd64 only, and this installer also serves arm64 workstations
+# (DGX Spark). What differs: no test mode, because this installer has none.
 #
 # From Google's own apt repo, trusted through a keyring of its own under
 # /etc/apt/keyrings that the one source line names with `signed-by`. The
@@ -1127,6 +1185,13 @@ google_chrome_installed() {
 }
 
 step_google_chrome_install() {
+  case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *)
+      echo "  Google Chrome has no Linux build for $(uname -m) — skipping (amd64 only)"
+      return 0
+      ;;
+  esac
   if google_chrome_installed; then
     echo "  Google Chrome already installed"
     return 0
@@ -1188,8 +1253,8 @@ step_google_chrome_install() {
 # host and the fleet cannot end up on two different builds — same vendor
 # installer, the same refusal to run a script whose digest is not the pinned
 # one, and the same order: install the native binary, prove it, and only then
-# take the npm copy away. The installer resolves x86_64-unknown-linux-musl here
-# on its own.
+# take the npm copy away. The vendor installer picks the host's own musl build
+# (x86_64 or aarch64) by itself.
 CODEX_NATIVE_BIN="$CLAWBOX_HOME/.local/bin/codex"
 # NOT the installer's default package root ($CODEX_HOME, ~/.codex): that
 # directory is the CLI's auth and state. Kept identical to install.sh, where a
