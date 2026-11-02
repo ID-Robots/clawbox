@@ -3,6 +3,9 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { startUpdate, isUpdateCompleted } from "@/lib/updater";
 import { requireSession } from "@/lib/route-auth";
+import { hasPersonSession } from "@/lib/owner-session";
+import { verifyMcpBearer } from "@/lib/mcp-token";
+import { PowerApprovalConflict, requestPowerApproval } from "@/lib/power-approval";
 import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 import { HARNESS_DOWNGRADE_OVERRIDE_FLAG } from "@/lib/harness-downgrade";
 
@@ -14,6 +17,21 @@ export async function POST(request: Request) {
   // longer start a root-privileged git-pull-and-rebuild. TASK-443/445.
   const unauthorized = await requireSession(request, { allowBootstrap: true });
   if (unauthorized) return unauthorized;
+
+  // The agent's MCP bearer is not a person: like update/request (the chat
+  // path) it never starts the update, it asks the owner, and the update runs
+  // only when they tap Confirm (4.3 bug 2).
+  const authHeader = request.headers.get("authorization");
+  if (authHeader && verifyMcpBearer(authHeader) && !(await hasPersonSession(request))) {
+    try {
+      const prompt = await requestPowerApproval("update", "Requested in chat");
+      return NextResponse.json({ pendingApproval: true, action: "update", id: prompt.id,
+        expiresAt: prompt.expiresAt, telegramPromptSent: prompt.messages.length > 0 }, { status: 202 });
+    } catch (err) {
+      if (err instanceof PowerApprovalConflict) return NextResponse.json({ error: err.message }, { status: 409 });
+      return NextResponse.json({ error: err instanceof Error ? err.message : "Failed to start update" }, { status: 500 });
+    }
+  }
 
   try {
     let force = false;
