@@ -336,6 +336,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  // Why update/run answered 200 without starting anything (the server's own
+  // sentence, "" when it gave none); null when no start was refused.
+  const [startRefusal, setStartRefusal] = useState<string | null>(null);
   // Bumped by the fetchError-branch "Retry" to re-run the status GET below.
   // Retry must only re-check status — never kick off a full update+reboot.
   const [statusReloadCount, setStatusReloadCount] = useState(0);
@@ -454,12 +457,34 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     actionControllerRef.current = controller;
     setStarting(true);
     setFetchError(false);
+    setStartRefusal(null);
     try {
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`Start update failed (${res.status})`);
+      // A 200 can still say the click started nothing: another run holds the
+      // box, a database compaction does, or the update is already done. The
+      // poll would see "idle" and stop with `starting` still set, leaving the
+      // step on "Preparing update" with no way out. Join the run if there is
+      // one, otherwise say the server's reason (System Update reads it alike).
+      const body: { started?: unknown; error?: unknown } | null = await res.json().catch(() => null);
+      if (body?.started === false) {
+        const live: UpdateState | null = await fetch("/setup-api/update/status", { signal: controller.signal })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (controller.signal.aborted) return;
+        if (live && live.phase !== "idle") {
+          setState(live);
+          if (live.phase === "running") startPolling();
+          return;
+        }
+        setStartRefusal(typeof body.error === "string" ? body.error : "");
+        setFetchError(true);
+        setStarting(false);
+        return;
+      }
       startPolling();
     } catch {
       // Same rule as the status read: a cancelled request is not a failure, and
@@ -552,7 +577,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
           {t("update.title")}
         </h1>
         <p className="text-red-400 mb-[var(--s-6)]" style={T_LEDE}>
-          {t("update.failedToCheck")}
+          {startRefusal !== null ? t("update.startFailed") : t("update.failedToCheck")}
         </p>
         {/* Server-authored, in the owner's words rather than git's — the same
             sentence the System Update screen shows. Rendered only when the
@@ -562,10 +587,18 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             {versions.remote.reason}
           </p>
         )}
+        {fetchError && startRefusal && (
+          <p className="text-[var(--text-secondary)] mb-[var(--s-6)]" style={T_LEDE}>
+            {startRefusal}
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row sm:items-center gap-[var(--s-3)]">
           <button
             type="button"
-            onClick={() => setStatusReloadCount((c) => c + 1)}
+            onClick={() => {
+              setStartRefusal(null);
+              setStatusReloadCount((c) => c + 1);
+            }}
             className={BTN_PRIMARY}
             style={T_BTN}
           >
