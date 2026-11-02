@@ -27,9 +27,32 @@ vi.mock("child_process", () => ({
   },
 }));
 
+// A TCP connect to 1.1.1.1:443 — the fallback where ICMP is dropped. Each test
+// says how the connect ends.
+let tcp: "connect" | "error" | "timeout" = "error";
+vi.mock("net", () => {
+  const connect = (opts: { host: string; port: number }) => {
+    calls.push(`tcp ${opts.host}:${opts.port}`);
+    const handlers: Record<string, () => void> = {};
+    let onTimeout: (() => void) | null = null;
+    const socket = {
+      once: (event: string, fn: () => void) => { handlers[event] = fn; return socket; },
+      setTimeout: (_ms: number, fn: () => void) => { onTimeout = fn; return socket; },
+      destroy: () => socket,
+    };
+    queueMicrotask(() => {
+      if (tcp === "timeout") onTimeout?.();
+      else handlers[tcp]?.();
+    });
+    return socket;
+  };
+  return { default: { connect }, connect };
+});
+
 beforeEach(() => {
   calls.length = 0;
   outcomes = {};
+  tcp = "error";
   vi.resetModules();
 });
 afterEach(() => vi.useRealTimers());
@@ -46,19 +69,22 @@ describe("internetReachable", () => {
     expect(calls.filter((c) => c.startsWith("ping"))).toHaveLength(1);
   });
 
-  it("asks NetworkManager when ping is blocked, and believes a full connection", async () => {
+  it("asks with a fresh TCP connection when ping is blocked", async () => {
+    // Many office networks drop outbound ICMP. A fresh connect, not a cached
+    // verdict: the tray's online dot reads this too and must go offline when
+    // the internet does.
     outcomes.ping = async () => ({ error: new Error("100% packet loss") });
-    outcomes.nmcli = async () => ({ stdout: "full\n" });
+    tcp = "connect";
     const { internetReachable } = await import("@/lib/internet-reachable");
     expect(await internetReachable()).toBe(true);
-    expect(calls).toContain("nmcli -t networking connectivity");
+    expect(calls).toContain("tcp 1.1.1.1:443");
   });
 
-  it("stays offline when NetworkManager reports no full connection, as on a box broadcasting its setup hotspot", async () => {
-    for (const state of ["limited", "none", "portal", "unknown"]) {
+  it("stays offline when neither gets through, as on a box broadcasting its setup hotspot", async () => {
+    for (const outcome of ["error", "timeout"] as const) {
       vi.resetModules();
       outcomes.ping = async () => ({ error: new Error("unreachable") });
-      outcomes.nmcli = async () => ({ stdout: `${state}\n` });
+      tcp = outcome;
       const { internetReachable } = await import("@/lib/internet-reachable");
       expect(await internetReachable()).toBe(false);
     }
