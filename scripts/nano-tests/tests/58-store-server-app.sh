@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 1500
+# timeout: 900
 # covers: src/lib/project-folder.ts src/lib/store-install.ts src/lib/store-install-receipt.ts src/lib/store-search.ts
 # covers: src/lib/app-proxy.ts src/lib/app-server-start.ts src/lib/webapp-icon.ts scripts/app-port.js
 # covers: src/app/setup-api/apps/* src/app/setup-api/webapps/* src/app/apps/*
@@ -26,7 +26,7 @@
 #      own fetches are answered for the sandbox's opaque origin, and the box's
 #      API answers that origin 401.
 #
-# Then a multi-page Next.js app of the test's own (WINDOW_FLOW), built on the
+# First, a multi-page Next.js app of the test's own (WINDOW_FLOW), built on the
 # board with the box's own Next and React versions and put on the desktop from
 # its project folder, clicked through in a real headless Chromium inside its
 # window (/app/installed-<id>, the same frame as the desktop's) over the
@@ -35,7 +35,10 @@
 # own API, an image, a form post, a server action, none of which may show the
 # login screen; from inside it /setup-api gets no owner session and the window
 # will not open the box's API for it; a visitor without a session gets the
-# login. Skipped when the board has no Chromium for Playwright.
+# login. Skipped when the board has no Chromium for Playwright. It has 240 s
+# of the test's 900 (about 40 s on a Nano with the npm cache warm), and the
+# Store flow's deadlines count from the start of the test, so the two
+# together stay inside it.
 #
 # NOT `parallel:` — it changes config.json and installs an app. The owner's own
 # project folder, if the board has one, is put back on the way out, and the
@@ -133,7 +136,8 @@ os.replace(t, p)
 uninstall() { call POST /setup-api/apps/uninstall "{\"appId\":\"$APP\"}" 60; }
 # install MAX_SECONDS
 install() { call POST /setup-api/apps/install "{\"appId\":\"$APP\",\"source\":\"clawbox\"}" "$1"; }
-T0=$(date +%s)
+# $1: the seconds the window flow already took of the test's deadline.
+T0=$(( $(date +%s) - ${1:-0} ))
 left() { local n=$(( T0 + $1 - $(date +%s) )); [ "$n" -lt 30 ] && n=30; echo "$n"; }
 
 # wait_open UNTIL — poll the desktop address until /apps/<id>/ answers 200 (the
@@ -267,6 +271,9 @@ EXE=$(find "$HOME/.cache/ms-playwright" -maxdepth 4 -type f \( -name headless_sh
 if [ -z "$EXE" ] || [ ! -d "$REPO/node_modules/playwright" ]; then say "skip no Chromium for Playwright on the board: the window click-through needs one"; exit 0; fi
 if [ ! -r "$SECRET_FILE" ]; then say "not ok - $SECRET_FILE is not readable as the box account"; exit 0; fi
 COOKIE=$(owner_cookie)
+# This flow's share of the test's deadline (see the header).
+END=$(( $(date +%s) + 240 ))
+left() { local n=$(( END - $(date +%s) )); [ "$n" -lt 10 ] && n=10; echo "$n"; }
 
 BASE=$(body_of "$(call GET /setup-api/coding-agent/status)" | python3 -c "import json,sys; print(json.load(sys.stdin).get(\"defaultDirectory\") or \"\")" 2>/dev/null)
 [ -n "$BASE" ] || BASE=$HOME/Projects
@@ -383,11 +390,11 @@ EOF
 find "$DIR/app" -type f -exec sed -i "s/__APP__/$APP/g" {} +
 printf "node_modules\n.next\n.nano-pid\n" > "$DIR/.gitignore"
 cd "$DIR" || exit 0
-if ! timeout 420 npm install --no-audit --no-fund --prefer-offline > "$DIR/.install.log" 2>&1; then say "not ok - window: npm install of the test app failed: $(tail -n 3 "$DIR/.install.log" | tr "\n" " " | head -c 300)"; exit 0; fi
-if ! timeout 420 npx next build > "$DIR/.build.log" 2>&1; then say "not ok - window: the test app did not build: $(tail -n 5 "$DIR/.build.log" | tr "\n" " " | head -c 300)"; exit 0; fi
+if ! timeout "$(left)" npm install --no-audit --no-fund --prefer-offline > "$DIR/.install.log" 2>&1; then say "not ok - window: npm install of the test app failed: $(tail -n 3 "$DIR/.install.log" | tr "\n" " " | head -c 300)"; exit 0; fi
+if ! timeout "$(left)" npx next build > "$DIR/.build.log" 2>&1; then say "not ok - window: the test app did not build: $(tail -n 5 "$DIR/.build.log" | tr "\n" " " | head -c 300)"; exit 0; fi
 git init -q && git add -A && git -c user.name=nano-ci -c user.email=nano-ci@example.invalid commit -qm "test app" || { say "not ok - window: git init of the test app failed"; exit 0; }
 setsid bash -c "echo \$\$ > \"$DIR/.nano-pid\"; exec npx next start -p $PORT" > "$DIR/.server.log" 2>&1 < /dev/null &
-for _ in $(seq 1 60); do curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/apps/$APP/" && break; sleep 1; done
+until curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/apps/$APP/" || [ "$(date +%s)" -ge "$END" ]; do sleep 1; done
 r=$(call POST /setup-api/coding-agent/projects/desktop "{\"directory\":\"$DIR\"}")
 if [ "$(status_of "$r")" != 200 ]; then say "not ok - window: the test app could not be put on the desktop: HTTP $(status_of "$r") $(body_of "$r" | head -c 200)"; exit 0; fi
 say "ok - window: a multi-page Next.js app ($V_NEXT) is on the desktop at /apps/$APP/"
@@ -474,7 +481,7 @@ const say = (line) => process.stdout.write("RESULT " + line + "\n");
   }
 })().catch((e) => say("not ok - window: the browser check failed: " + String((e && e.message) || e).split("\n")[0].slice(0, 200)));
 EOF
-OWNER_COOKIE="$COOKIE" NODE_PATH="$REPO/node_modules" timeout 600 node "$DIR/.click.cjs" "$SITE" "$APP" "Nano Window" "$EXE" 2>&1 | grep "^RESULT " | sed "s/^RESULT //" | while IFS= read -r line; do printf "RESULT %s\n" "$line"; done
+OWNER_COOKIE="$COOKIE" NODE_PATH="$REPO/node_modules" timeout "$(left)" node "$DIR/.click.cjs" "$SITE" "$APP" "Nano Window" "$EXE" 2>&1 | grep "^RESULT " | sed "s/^RESULT //" | while IFS= read -r line; do printf "RESULT %s\n" "$line"; done
 '
 
 # report OUT LABEL — the RESULT lines a flow printed, as TAP; its tail when it printed none.
@@ -497,6 +504,7 @@ report() {
   if printf '%s\n' "$results" | grep -q '^not ok - '; then NANO_TEST_FAILED=1; fi
 }
 
-report "$(board "$FLOW")" "Store server-app flow"
+W0=$(date +%s)
 report "$(board "$WINDOW_FLOW" "$NANO_RUN_ID")" "app window click-through"
+report "$(board "$FLOW" "$(( $(date +%s) - W0 ))")" "Store server-app flow"
 finish
