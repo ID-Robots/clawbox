@@ -934,47 +934,49 @@ export default function NewAppWizardCard({
           </div>
         </div>
 
-        {/* ── Side panel: the plan check, the starter, the switches ── */}
+        {/* ── Side panel: the plan check and the starter (new app only), the switches ── */}
         <aside className="shrink-0 @3xl:w-72 @3xl:overflow-y-auto border-t @3xl:border-t-0 @3xl:border-l border-white/[0.06] px-4 py-4 space-y-5">
-          <section data-testid="coding-agent-planner-checks">
-            <div className="flex items-center justify-between">
-              <p className={SIDE_LABEL}>{t("codingAgent.planner.checksTitle")}</p>
-              <span className="text-[11px] tabular-nums text-[var(--text-muted)]" data-testid="coding-agent-planner-score">{score}/3</span>
-            </div>
-            <div className="mt-2 h-1 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
-              <div className="h-full rounded-full bg-[var(--coral-bright)] transition-[width] duration-300" style={{ width: `${(score / 3) * 100}%` }} />
-            </div>
-            <ul className="mt-2.5 space-y-1">
-              {CHECK_ROWS.map((row) => {
-                const ok = checks[row.id];
-                const act = row.section
-                  ? () => addSection(row.section as PlanSection)
-                  : () => fileInputRef.current?.click();
-                return (
-                  <li key={row.id}>
-                    <button
-                      type="button"
-                      onClick={ok ? undefined : act}
-                      disabled={ok}
-                      data-testid={`coding-agent-planner-check-${row.id}`}
-                      data-ok={ok ? "true" : "false"}
-                      className={`w-full flex items-start gap-2 rounded-md px-1.5 py-1 text-left text-xs ${ok ? "text-[var(--text-secondary)] cursor-default" : "text-[var(--text-muted)] hover:bg-white/[0.04] hover:text-[var(--text-secondary)] cursor-pointer"}`}
-                    >
-                      <span
-                        className={`material-symbols-rounded shrink-0 ${ok ? "text-emerald-400" : "text-[var(--text-muted)]"}`}
-                        style={{ fontSize: 16 }}
-                        aria-hidden="true"
+          {mode === "new" && (
+            <section data-testid="coding-agent-planner-checks">
+              <div className="flex items-center justify-between">
+                <p className={SIDE_LABEL}>{t("codingAgent.planner.checksTitle")}</p>
+                <span className="text-[11px] tabular-nums text-[var(--text-muted)]" data-testid="coding-agent-planner-score">{score}/3</span>
+              </div>
+              <div className="mt-2 h-1 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
+                <div className="h-full rounded-full bg-[var(--coral-bright)] transition-[width] duration-300" style={{ width: `${(score / 3) * 100}%` }} />
+              </div>
+              <ul className="mt-2.5 space-y-1">
+                {CHECK_ROWS.map((row) => {
+                  const ok = checks[row.id];
+                  const act = row.section
+                    ? () => addSection(row.section as PlanSection)
+                    : () => fileInputRef.current?.click();
+                  return (
+                    <li key={row.id}>
+                      <button
+                        type="button"
+                        onClick={ok ? undefined : act}
+                        disabled={ok}
+                        data-testid={`coding-agent-planner-check-${row.id}`}
+                        data-ok={ok ? "true" : "false"}
+                        className={`w-full flex items-start gap-2 rounded-md px-1.5 py-1 text-left text-xs ${ok ? "text-[var(--text-secondary)] cursor-default" : "text-[var(--text-muted)] hover:bg-white/[0.04] hover:text-[var(--text-secondary)] cursor-pointer"}`}
                       >
-                        {ok ? "check_circle" : "radio_button_unchecked"}
-                      </span>
-                      <span>{row.label}</span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-            <p className="mt-1.5 text-[11px] leading-snug text-[var(--text-muted)] opacity-80">{t("codingAgent.planner.checksHint")}</p>
-          </section>
+                        <span
+                          className={`material-symbols-rounded shrink-0 ${ok ? "text-emerald-400" : "text-[var(--text-muted)]"}`}
+                          style={{ fontSize: 16 }}
+                          aria-hidden="true"
+                        >
+                          {ok ? "check_circle" : "radio_button_unchecked"}
+                        </span>
+                        <span>{row.label}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+              <p className="mt-1.5 text-[11px] leading-snug text-[var(--text-muted)] opacity-80">{t("codingAgent.planner.checksHint")}</p>
+            </section>
+          )}
 
           {mode === "new" && (
             <section>
