@@ -25,6 +25,7 @@ customer can see. :func:`assert_archive_matches_device` is what stops that.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -92,13 +93,27 @@ def read_edition() -> str:
     return AGENT_OPENCLAW
 
 
+def _chosen_harness() -> str | None:
+    """The harness the owner switched a dual box to: `active_harness` in
+    `<CLAWBOX_ROOT>/data/config.json`, the key `setActiveHarness` in
+    `src/lib/harness.ts` writes. `None` when it is absent or unreadable."""
+    root = os.environ.get("CLAWBOX_ROOT") or "/home/clawbox/clawbox"
+    try:
+        data = json.loads(Path(root, "data", "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("active_harness") if isinstance(data, dict) else None
+    return value if value in (AGENT_HERMES, AGENT_OPENCLAW) else None
+
+
 def device_agent() -> str:
     """Which agent's state a backup on this device should capture.
 
     A single-harness edition answers itself. `"dual"` — both runtimes
-    installed, switcher licensed — answers by what is actually on disk, and
-    prefers OpenClaw when both are, because that is the harness a dual box
-    defaults to (`DEFAULT_HARNESS` in `src/lib/harness.ts`).
+    installed, switcher licensed — answers with the harness the owner switched
+    it to (:func:`_chosen_harness`); a box nobody switched answers by what is
+    actually on disk, and prefers OpenClaw when both are, because that is the
+    harness a dual box defaults to (`DEFAULT_HARNESS` in `src/lib/harness.ts`).
 
     Note what this does NOT do: it does not fall back to "whatever directory
     exists" on a single-harness box. A Hermes box that was converted from
@@ -111,6 +126,9 @@ def device_agent() -> str:
     if edition in (AGENT_HERMES, AGENT_OPENCLAW):
         return edition
     # dual
+    chosen = _chosen_harness()
+    if chosen is not None:
+        return chosen
     if Path(os.environ.get("HOME", "/home/clawbox"), ".openclaw").exists():
         return AGENT_OPENCLAW
     return AGENT_HERMES if hermes.hermes_home().exists() else AGENT_OPENCLAW

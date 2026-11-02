@@ -42,6 +42,9 @@ def edition_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     p = tmp_path / "edition.env"
     monkeypatch.setattr(agent, "EDITION_FILE", str(p))
     monkeypatch.delenv("CLAWBOX_EDITION", raising=False)
+    # A dual box reads the owner's choice from `<CLAWBOX_ROOT>/data/config.json`;
+    # never let a test see the machine's real one.
+    monkeypatch.setenv("CLAWBOX_ROOT", str(tmp_path / "clawbox"))
     return p
 
 
@@ -95,6 +98,42 @@ def test_dual_prefers_openclaw_because_that_is_the_default_harness(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     (tmp_path / ".openclaw").mkdir()
     (tmp_path / ".hermes").mkdir()
+    assert agent.device_agent() == "openclaw"
+
+
+def test_dual_box_running_hermes_backs_up_hermes(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dual box the owner switched to Hermes still has `~/.openclaw`. The
+    switch is stored as `active_harness` in data/config.json (what
+    harness/select writes); that, not which folder exists, is the agent the
+    box runs and the one its backup must capture."""
+    edition_file.write_text("CLAWBOX_EDITION=dual\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    (tmp_path / ".openclaw").mkdir()
+    (tmp_path / ".hermes").mkdir()
+    config = tmp_path / "clawbox" / "data" / "config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"active_harness": "hermes"}), encoding="utf-8")
+    assert agent.device_agent() == "hermes"
+
+    config.write_text(json.dumps({"active_harness": "openclaw"}), encoding="utf-8")
+    assert agent.device_agent() == "openclaw"
+
+
+@pytest.mark.parametrize("raw", ["{not json", '{"active_harness": "codex"}', "[]"])
+def test_dual_with_an_unusable_choice_keeps_the_default(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str,
+) -> None:
+    edition_file.write_text("CLAWBOX_EDITION=dual\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    (tmp_path / ".openclaw").mkdir()
+    (tmp_path / ".hermes").mkdir()
+    config = tmp_path / "clawbox" / "data" / "config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(raw, encoding="utf-8")
     assert agent.device_agent() == "openclaw"
 
 
