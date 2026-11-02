@@ -494,6 +494,11 @@ describe("signOutOfProvider — ClawBox AI on OpenClaw (#1369's sign-out, genera
     expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/checked in the gateway's auth store/) });
   });
 
+  it("never answers signed out while the row's own reader still finds a ClawBox AI token", async () => {
+    credentials.hasClawaiToken.mockResolvedValue(true);
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/removed from the box's ClawBox AI sign-in/) });
+  });
+
   it("says so when the gateway restart that would drop the old sign-in was refused", async () => {
     box.hot = { applied: false, why: "timeout" };
     box.restartRefused = true;

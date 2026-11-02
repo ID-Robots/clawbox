@@ -60,7 +60,7 @@ import { clearClawAiSession, isClawAiSessionConfiguring, readClawAiSession } fro
 import { get as getConfigValue, getKnown, setMany } from "@/lib/config-store";
 import { EXPLICIT_MODEL_PICKS_KEY, explicitPicksFrom, forgetProviderPicks } from "@/lib/explicit-model-pick";
 import { getActiveHarnessSource, type Harness } from "@/lib/harness";
-import { forgetClawaiCredentialRefusal, resolveClawaiToken } from "@/lib/harness/credentials";
+import { forgetClawaiCredentialRefusal, hasClawaiToken, resolveClawaiToken } from "@/lib/harness/credentials";
 import { resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { HERMES_AUTO_PROVIDER } from "@/lib/hermes-providers";
 import { readConfigStrict } from "@/lib/openclaw-config";
@@ -283,6 +283,9 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
   else if (tokenNow.value !== undefined || Object.keys(explicitPicksFrom(picksNow.value)).some((slot) => slotBelongs(harness, row, slot))) {
     left.push("the ClawBox config store");
   }
+  // And the row's own reader, which is what the list will say: a copy in a
+  // home neither half looked in is still a sign-in to the owner.
+  if (row === CLAWAI_ROW && !left.length && (await hasClawaiToken().catch(() => false))) left.push("the box's ClawBox AI sign-in");
 
   // The coding agent hears a ClawBox AI token that is gone whatever the
   // answer below: a refusal can come after the token was cleared.
