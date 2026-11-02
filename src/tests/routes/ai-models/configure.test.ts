@@ -3600,6 +3600,9 @@ describe("POST /setup-api/ai-models/configure", () => {
         });
         let openclawJson = linkedTo(OLD);
         mockReadOpenClawConfig.mockImplementation(async () => openclawJson as never);
+        // The status route reads the same file strictly (a failed read is "not
+        // known", never the Free plan).
+        mockReadOpenClawConfigStrict.mockImplementation(async () => openclawJson as never);
         commitFails = false;
         realTransaction = vi.mocked(beginConfigWriteTransaction).getMockImplementation();
         vi.mocked(beginConfigWriteTransaction).mockImplementation((label: string) => {

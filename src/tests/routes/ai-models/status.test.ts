@@ -1,7 +1,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+// The route reads openclaw.json strictly: a file it cannot read throws to its
+// "not known" answer instead of reading as "no ClawBox AI account".
 vi.mock("@/lib/openclaw-config", () => ({
-  readConfig: vi.fn(),
+  readConfigStrict: vi.fn(),
 }));
 
 vi.mock("@/lib/config-store", () => ({
@@ -15,6 +17,9 @@ vi.mock("@/lib/harness", () => ({
 
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGetMany: vi.fn(),
+  // Every read below is an answer; status-plan-failed-read.test.ts holds the
+  // read that timed out.
+  hermesConfigReadPending: vi.fn(() => false),
 }));
 
 // What follows a plan that moved (the cloud voice of a new Max plan, the cloud
@@ -23,12 +28,12 @@ vi.mock("@/lib/hermes-config-cache", () => ({
 const follow = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("@/lib/clawai-plan-follow", () => ({ followClawaiPlanChange: follow }));
 
-import { readConfig } from "@/lib/openclaw-config";
+import { readConfigStrict } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 
-const mockReadConfig = vi.mocked(readConfig);
+const mockReadConfig = vi.mocked(readConfigStrict);
 const mockGetConfigValue = vi.mocked(getConfigValue);
 const mockSetConfigValue = vi.mocked(setConfigValue);
 const mockGetActiveHarness = vi.mocked(getActiveHarness);
