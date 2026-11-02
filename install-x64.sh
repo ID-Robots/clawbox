@@ -1035,6 +1035,11 @@ seed_network_interface() {
 # account with no usable password is left to the wizard, which sets the first.
 record_owner_password() {
   local config="$PROJECT_DIR/data/config.json" status
+  # Already recorded: nothing to ask. Read before any password check, as the
+  # app reads it, so a re-run leaves no failed check in the owner's auth.log.
+  if grep -Eq '"password_configured": *true' "$config" 2>/dev/null; then
+    return 0
+  fi
   status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk '{ print $2 }' || true)"
   if [ "$status" != "P" ]; then
     return 0
