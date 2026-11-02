@@ -5053,3 +5053,96 @@ describe("getVersionInfo harness reporting", () => {
     expect(mockRunHermesCli).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * The update and the "Update available" check must agree on which OpenClaw is
+ * in scope.
+ *
+ * A Hermes box that a Settings → Harness swap had made out of an OpenClaw box
+ * still carried the old core on its disk. The full update rightly left that
+ * core alone (`openclaw_install` does not apply on the Hermes edition), but
+ * getVersionInfo read the core's package.json, compared it with the pin, and
+ * every desktop start offered "OpenClaw 2026.10.7 → 2026.10.9" — an update the
+ * updater never performs, so the card came back after every update.
+ *
+ * On `dual` the opposite holds, whichever harness is answering: both are the
+ * box's, the full update keeps both at their pins, and a later switch back must
+ * never land on a stale, un-doctored core. Hermes is the active harness in
+ * every case below unless a case says otherwise; nothing here may depend on it.
+ */
+describe("OpenClaw update scope: offered exactly where the full update installs it", () => {
+  const STALE = "2026.10.7";
+  const PIN = "2026.10.9";
+  const STALE_BANNER = `OpenClaw ${STALE} (aaaaaaa)`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The pin, and a stale core on disk — readable both ways getVersionInfo
+    // could ask it: the CLI, and the package.json beside it.
+    mockReadFile.mockImplementation(async (file) => {
+      const f = String(file);
+      if (f.endsWith("/config/openclaw-target.txt")) return `${PIN}\n`;
+      if (f.endsWith("/node_modules/openclaw/package.json")) return JSON.stringify({ name: "openclaw", version: STALE });
+      throw new Error("ENOENT");
+    });
+    mockGet.mockImplementation(async (key: string) => (key === "active_harness" ? "hermes" : undefined));
+    setupExecMock({ "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\n", stderr: "" } });
+    setupExecFileMock({ openclaw: { stdout: STALE_BANNER, stderr: "" } });
+    mockRunHermesCli.mockResolvedValue({ code: 0, stdout: "Hermes Agent v0.21.1 (2026.9.7)", stderr: "" });
+  });
+
+  afterEach(() => {
+    delete process.env.CLAWBOX_EDITION;
+  });
+
+  /** The step list a full update would run, and what the desktop is told, on one box. */
+  async function boxFor(edition: string) {
+    vi.resetModules();
+    process.env.CLAWBOX_EDITION = edition;
+    const fresh = await import("@/lib/updater");
+    fresh.resetUpdateState();
+    const steps = fresh.getUpdateState().steps.map((s) => s.id);
+    return { steps, info: await fresh.getVersionInfo() };
+  }
+
+  it("dual with Hermes active: the full update installs the pinned OpenClaw, and the stale core is offered for it", async () => {
+    const { steps, info } = await boxFor("dual");
+
+    for (const id of ["openclaw_install", "openclaw_patch", "gateway_setup", "post_update", "hermes_edition", "gateway_verify"]) {
+      expect(steps, `${id} runs on a dual box while Hermes is active`).toContain(id);
+    }
+    expect(info.openclaw).toEqual({ current: STALE_BANNER, target: PIN, updateAvailable: true });
+  });
+
+  it("dual with OpenClaw active: Hermes is kept current too", async () => {
+    mockGet.mockImplementation(async (key: string) => (key === "active_harness" ? "openclaw" : undefined));
+
+    const { steps, info } = await boxFor("dual");
+
+    // post_update re-checks the Hermes pin (step_hermes_install, which applies on
+    // dual), and hermes_edition re-provisions it after the rebuild.
+    expect(steps).toContain("post_update");
+    expect(steps).toContain("hermes_edition");
+    expect(steps.indexOf("hermes_edition")).toBeGreaterThan(steps.indexOf("post_update"));
+    expect(info.hermes?.current).toBe("v0.21.1");
+  });
+
+  it("hermes with a core a swap left on disk: no OpenClaw update is offered, because none is run", async () => {
+    const { steps, info } = await boxFor("hermes");
+
+    expect(steps).not.toContain("openclaw_install");
+    expect(info.openclaw).toEqual({ current: null, target: null, updateAvailable: false });
+    // Nothing was asked of that core either.
+    expect(mockExecFile.mock.calls.some(([cmd]) => String(cmd).endsWith("openclaw"))).toBe(false);
+    expect(mockReadFile.mock.calls.some(([f]) => String(f).endsWith("/node_modules/openclaw/package.json"))).toBe(false);
+  });
+
+  it.each(["openclaw", "dual", "hermes"])(
+    "%s: an OpenClaw update is offered exactly when the update's step list installs one",
+    async (edition) => {
+      const { steps, info } = await boxFor(edition);
+
+      expect(info.openclaw.updateAvailable).toBe(steps.includes("openclaw_install"));
+    },
+  );
+});

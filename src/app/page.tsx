@@ -39,7 +39,7 @@ import AgentBrowserIcon from "@/components/AgentBrowserIcon";
 import GoogleChromeIcon from "@/components/GoogleChromeIcon";
 import PrimeRadiantIcon from "@/components/PrimeRadiantIcon";
 import { I18nProvider, useT } from "@/lib/i18n";
-import { cleanVersion } from "@/lib/version-utils";
+import { cleanVersion, updateNoticeComponents } from "@/lib/version-utils";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
@@ -2771,6 +2771,9 @@ function ChromeDesktopInner() {
     // no notice, because there is nothing it can honestly offer.
     clawbox: { current: string | null; target: string | null; updateAvailable?: boolean | null };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean | null };
+    // Which OpenClaw the card may name: none on the Hermes edition (see
+    // `shipsOpenclaw` in src/lib/version-utils.ts).
+    edition?: string;
   } | null>(null);
   // Mirrors `updateAvailable` so the dismiss handler can read the notice it is
   // dismissing WITHOUT an updater. Every writer advances it on the line before
@@ -2800,8 +2803,10 @@ function ChromeDesktopInner() {
         const versionsRes = await fetch("/setup-api/update/versions");
         if (!active || !versionsRes.ok) return;
         const data = await versionsRes.json();
-        const clawboxNeedsUpdate = data.clawbox?.updateAvailable ?? (!!data.clawbox?.target && data.clawbox.target !== data.clawbox.current);
-        const openclawNeedsUpdate = data.openclaw?.updateAvailable ?? (!!data.openclaw?.target && data.openclaw.target !== data.openclaw.current);
+        // OpenClaw only where the device has one the update keeps current: a
+        // Hermes box that a swap left an old core on was offered an OpenClaw
+        // update here on every start that its updater would never perform.
+        const { clawbox: clawboxNeedsUpdate, openclaw: openclawNeedsUpdate } = updateNoticeComponents(data);
         // Fingerprint covers both targets *and* currents — bumping the device
         // version after an update should retire a stale "available" card even
         // if the next-target hasn't shifted yet.
@@ -3437,8 +3442,7 @@ function ChromeDesktopInner() {
           {updateAvailable && !updateNoticeHidden && (() => {
             const cb = updateAvailable.clawbox;
             const oc = updateAvailable.openclaw;
-            const cbNeeds = cb?.updateAvailable ?? (!!cb?.target && cb.target !== cb.current);
-            const ocNeeds = oc?.updateAvailable ?? (!!oc?.target && oc.target !== oc.current);
+            const { clawbox: cbNeeds, openclaw: ocNeeds } = updateNoticeComponents(updateAvailable);
             return (
               <div
                 className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"

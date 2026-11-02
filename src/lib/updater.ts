@@ -4557,6 +4557,18 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   const edition = readEdition();
   const hasHermes = hasHermesHarness();
+  // THE STEP LIST'S OWN PREDICATE, asked once: `openclaw_install` applies
+  // exactly where this is false, so the OpenClaw half of this payload offers an
+  // update only where the update performs one. On `dual` that is true whichever
+  // harness is answering — the full update keeps both harnesses at their pins.
+  // On the Hermes edition it is not, and a core still on its disk is no reason
+  // to say otherwise: the Settings → Harness swap from OpenClaw leaves the old
+  // core there, unused, and this payload used to read its package.json and
+  // offer "OpenClaw 2026.10.7 → 2026.10.9" on every desktop start of a box
+  // whose update would never touch it. The swap back installs and doctors the
+  // pinned core before the lock flips (install.sh harness_swap_to_openclaw), so
+  // nothing stale is ever what such a box runs.
+  const openclawAbsent = openclawIsAbsent();
   // One round of concurrent reads. The release remote's check used to wait
   // for the tag ls-remote to finish first for no reason (neither reads the
   // other's answer). The pinned branch's fetch still runs AFTER the tag fetch:
@@ -4565,11 +4577,10 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // refspec too), which would turn a reachable origin into a refused fetch.
   const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
     getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
-    // The Hermes edition ships no openclaw binary, so skip the spawn and read
-    // the version from the installed package.json (absent there too → null,
-    // which is correct: there is no OpenClaw version to report on Hermes).
-    openclawIsAbsent()
-      ? readPkgVersion(OPENCLAW_PKG)
+    // Nothing to read on the Hermes edition: there is no OpenClaw to report
+    // there (see `openclawAbsent` above).
+    openclawAbsent
+      ? Promise.resolve(null)
       : execFile(openclawBin(), ["--version"], { timeout: 10_000 })
           .then(({ stdout }) => stdout.trim() || null)
           // Fallback: read version from the installed package.json
@@ -4577,7 +4588,8 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
-    readPinnedOpenclawVersion(),
+    // No target on the Hermes edition, where the update installs none.
+    openclawAbsent ? Promise.resolve(null) : readPinnedOpenclawVersion(),
     readClawboxVersion(),
     // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
     // hermes binary, so this must never spawn there.

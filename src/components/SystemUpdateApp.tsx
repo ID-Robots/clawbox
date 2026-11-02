@@ -19,7 +19,7 @@ import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-consta
 import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
-import { cleanVersion } from "@/lib/version-utils";
+import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
 import {
   HARNESS_DOWNGRADE_BACKUP_FAILED_CODE,
   HARNESS_DOWNGRADE_CODE,
@@ -59,15 +59,9 @@ export interface VersionInfo {
   remote?: RemoteReachability;
 }
 
-/**
- * Whether an OpenClaw row is about software this device has. The `hermes` SKU
- * ships none; `dual` has one even while Hermes is the harness answering. A
- * payload from a server that predates the `edition` field reads as OpenClaw,
- * which is what those builds were.
- */
-export function shipsOpenclaw(versions: VersionInfo | null): boolean {
-  return versions?.edition !== "hermes";
-}
+// The OpenClaw-row rule lives in version-utils, shared with the desktop's
+// "Update available" card; re-exported for the screens that import it from here.
+export { shipsOpenclaw };
 
 /** How the effective branch was decided — `EffectiveUpdateBranch` in src/lib/updater.ts. */
 type EffectiveBranchSource = "pin-file" | "checkout-branch" | "detached-recovered" | "default" | "unresolved";
