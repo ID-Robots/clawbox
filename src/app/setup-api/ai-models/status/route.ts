@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readConfig } from "@/lib/openclaw-config";
+import { readConfigStrict } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
@@ -11,7 +11,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
-import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
+import { hermesConfigGetMany, hermesConfigReadPending } from "@/lib/hermes-config-cache";
 // Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
 // configure route can reach the same answer from the same cache (TASK-481).
 import { clawaiTokenRejectedByPortal, fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
@@ -117,7 +117,10 @@ interface ResolvedAiState {
  * user's chosen provider isn't reported as the active one.
  */
 async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
-  const config = await readConfig();
+  // Strict: `readConfig` answers `{}` to an unreadable or half-written file,
+  // which reads as "no ClawBox AI profile" and so as the Free plan. A missing
+  // file is still `{}`; any other failure throws to GET's "not known" answer.
+  const config = await readConfigStrict();
 
   const profiles = config.auth?.profiles ?? {};
   const model = config.agents?.defaults?.model?.primary ?? null;
@@ -179,6 +182,12 @@ async function resolveHermesAiState(): Promise<ResolvedAiState> {
   // provider to something else, so its presence — not the active provider — is
   // what "a ClawBox AI account is configured" means.
   const hasClawaiProfile = Boolean(cfg["providers.clawai.base_url"]);
+  // A read that timed out (or never reached the CLI) is "" too. That is not
+  // "no ClawBox AI account": throw to GET's "not known" answer rather than let
+  // it read as the Free plan.
+  if (!hasClawaiProfile && hermesConfigReadPending("providers.clawai.base_url")) {
+    throw new Error("hermes config read for providers.clawai.base_url did not complete");
+  }
 
   const tokenRaw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY).catch(() => null);
   const clawaiToken = typeof tokenRaw === "string" && tokenRaw.startsWith("claw_") ? tokenRaw : null;

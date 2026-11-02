@@ -37,7 +37,7 @@ vi.mock("@/lib/config-store", () => ({
 }));
 // openclaw.json after the sign-in: the ClawBox AI profile and its portal token.
 vi.mock("@/lib/openclaw-config", () => ({
-  readConfig: async () => ({
+  readConfigStrict: async () => ({
     auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
     agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
     models: { providers: { deepseek: { apiKey: "claw_signin_flow_token" } } },
