@@ -156,8 +156,13 @@ def upload(
     the *delta* bytes transferred since the last call — the runner accumulates
     those into the live upload-progress fields in state.json so the UI can
     show MB/s.
+
+    The transfer manager re-raises a refused put (`ClientError`) as boto3's
+    own `S3UploadFailedError`, a `Boto3Error` and not a botocore one, so that
+    family is caught too: the runner handles only `S3Error`.
     """
     try:
+        from boto3.exceptions import Boto3Error
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
@@ -180,7 +185,7 @@ def upload(
             Callback=progress_cb,
             Config=transfer,
         )
-    except (BotoCoreError, ClientError, OSError) as e:
+    except (Boto3Error, BotoCoreError, ClientError, OSError) as e:
         raise S3Error(f"upload failed for s3://{creds.bucket}/{key}: {e}") from e
     return key
 
@@ -473,8 +478,11 @@ def download(
     dest_path: Path,
 ) -> None:
     """GET an object into dest_path. Uses boto3's `download_file` so multipart
-    transfer kicks in for the >300MB tarballs we routinely produce."""
+    transfer kicks in for the >300MB tarballs we routinely produce. Exhausted
+    retries come out of the transfer manager as boto3's `RetriesExceededError`
+    (a `Boto3Error`), so that family is an `S3Error` too, as in `upload`."""
     try:
+        from boto3.exceptions import Boto3Error
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
@@ -484,5 +492,5 @@ def download(
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         cli.download_file(creds.bucket, key, str(dest_path))
-    except (BotoCoreError, ClientError, OSError) as e:
+    except (Boto3Error, BotoCoreError, ClientError, OSError) as e:
         raise S3Error(f"download failed for s3://{creds.bucket}/{key}: {e}") from e
