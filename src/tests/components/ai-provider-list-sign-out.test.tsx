@@ -84,6 +84,10 @@ describe("AiProviderList — signing out of a provider", () => {
     for (const row of OPENCLAW_ROWS) {
       const button = await signOutButton(row.id, row.label);
       expect(button, row.id).toBeEnabled();
+      // Under the name, not among the controls: beside them the name had no
+      // room left and "ClawBox AI" drew as "C…".
+      expect(screen.getByTestId(`ai-provider-controls-${row.id}`)).not.toContainElement(button);
+      expect(screen.getByTestId(`ai-provider-${row.id}`)).toContainElement(button);
     }
     expect(screen.getByTestId("ai-provider-default-clawai")).toBeInTheDocument();
   });

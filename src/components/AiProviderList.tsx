@@ -413,6 +413,28 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                         {t("settings.providers.lockedHint")}
                       </span>
                     )}
+                    {/* Under the row's status, not among the controls: beside the
+                        usage disclosure, Make default and the switch, a labelled
+                        sign-out left a 576 px pane too little room for the name
+                        ("ClawBox AI" drew as "C…" on a board). The name column
+                        has the width; the label stays whole. */}
+                    {canSignOut && (
+                      <button
+                        type="button"
+                        onClick={() => onSignOutClick(row)}
+                        onBlur={armed ? disarmSignOut : undefined}
+                        disabled={signingOut !== null || busy || signOutLocked}
+                        aria-busy={signingOut === row.id}
+                        aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
+                        title={signOutLocked ? t("settings.providers.lockedHint") : undefined}
+                        data-testid={`ai-provider-sign-out-${row.id}`}
+                        className={`mt-1 text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                          armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                        }`}
+                      >
+                        {armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut", { name: row.label })}
+                      </button>
+                    )}
                     {/* "Not connected" is true here and useless on its own: the
                         boot script could not install or consent this provider's
                         plugin and switched it off so the gateway could start.
@@ -461,24 +483,6 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                       variant="inline"
                       testId="anthropic-accounts-toggle"
                     />
-                  )}
-
-                  {canSignOut && (
-                    <button
-                      type="button"
-                      onClick={() => onSignOutClick(row)}
-                      onBlur={armed ? disarmSignOut : undefined}
-                      disabled={signingOut !== null || busy || signOutLocked}
-                      aria-busy={signingOut === row.id}
-                      aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
-                      title={signOutLocked ? t("settings.providers.lockedHint") : undefined}
-                      data-testid={`ai-provider-sign-out-${row.id}`}
-                      className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
-                        armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                      }`}
-                    >
-                      {armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut", { name: row.label })}
-                    </button>
                   )}
 
                   {canMakeDefault && (
