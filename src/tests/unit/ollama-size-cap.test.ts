@@ -31,6 +31,14 @@ describe("ollamaMaxModelParamB", () => {
     expect(ollamaMaxModelParamB(dropin, 130 * GB)).toBe(OLLAMA_MAX_MODEL_PARAM_B);
   });
 
+  it("keeps the Jetson's figure on a Jetson whose drop-in is missing", () => {
+    // A skipped or failed resource-limits step must not open 7B pulls on an
+    // 8 GB board that shares its memory with the local model and the desktop.
+    const tegra = path.join(dir, "nv_tegra_release");
+    writeFileSync(tegra, "# R36 (release), REVISION: 4.3\n");
+    expect(ollamaMaxModelParamB(path.join(dir, "absent.conf"), 7.4 * GB, tegra)).toBe(OLLAMA_MAX_MODEL_PARAM_B);
+  });
+
   it("offers 120B-class models on an uncapped 128 GB workstation", () => {
     const cap = ollamaMaxModelParamB(path.join(dir, "absent.conf"), 130.6 * GB);
     expect(cap).toBeGreaterThanOrEqual(122);

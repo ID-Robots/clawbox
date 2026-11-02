@@ -20,11 +20,17 @@ export const OLLAMA_MEMORY_DROPIN = "/etc/systemd/system/ollama.service.d/50-cla
 const WEIGHT_SHARE = 0.6;
 const BYTES_PER_BILLION_PARAMS_Q4 = 0.6e9;
 
+/** The marker install.sh and install-x64.sh use for "this is a Jetson". */
+export const TEGRA_RELEASE = "/etc/nv_tegra_release";
+
 export function ollamaMaxModelParamB(
   dropin: string = OLLAMA_MEMORY_DROPIN,
   totalBytes: number = os.totalmem(),
+  tegraRelease: string = TEGRA_RELEASE,
 ): number {
-  if (fs.existsSync(dropin)) return OLLAMA_MAX_MODEL_PARAM_B;
+  // A Jetson keeps its figure even when the drop-in is missing (a skipped or
+  // failed resource-limits step): its memory is shared with the local model.
+  if (fs.existsSync(dropin) || fs.existsSync(tegraRelease)) return OLLAMA_MAX_MODEL_PARAM_B;
   const derived = Math.floor((totalBytes * WEIGHT_SHARE) / BYTES_PER_BILLION_PARAMS_Q4);
   return Math.max(OLLAMA_MAX_MODEL_PARAM_B, derived);
 }
