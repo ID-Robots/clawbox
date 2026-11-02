@@ -555,9 +555,20 @@ export async function register() {
     // is one: a timer rebuilt at every boot cannot be duplicated or orphaned
     // by an update. The module keeps the last pass's date on disk, so a
     // restart neither skips a day nor runs twice in one.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const folderJanitor = require('./lib/coding-folder-janitor')
-    folderJanitor.start()
+    //
+    // The DEVICE's own account only, like the git identity cleanup, the
+    // browser repair and the default project folder: under `bun run dev` on a
+    // developer's machine its scope would be that person's ~/Projects, and
+    // ten minutes later it would remove their own idle worktrees and move
+    // their second clones to a trash. The module refuses off the account as
+    // well (`start`); this keeps it from even loading there.
+    if (onDeviceAccount) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const folderJanitor = require('./lib/coding-folder-janitor')
+      folderJanitor.start()
+    } else {
+      console.log('[instrumentation] Not the device account: the coding folder janitor is not armed')
+    }
   } catch (err) {
     console.error('[instrumentation] Could not arm the coding folder janitor:', err instanceof Error ? err.message : err)
   }

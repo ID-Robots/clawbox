@@ -924,6 +924,8 @@ interface ProjectPayload {
   app: { name?: string; kind?: string | null; port?: number | null } | null;
   /** Copies a run or an agent made of this project beside it, grouped here by the projects route. */
   copies?: { folder: string; directory: string }[];
+  /** Its git worktrees beside it in the project folder: no rows of their own, so their runs are this row's. */
+  worktrees?: string[];
 }
 
 /**
@@ -940,8 +942,10 @@ function runInProject(run: RunPayload, project: ProjectPayload): boolean {
   if (run.projectId) return false;
   const home = runHome(run);
   if (home === project.directory || home.startsWith(`${project.directory}/`)) return true;
-  // A run in one of the project's copies is the project's: the copy is not a row of its own.
+  // A run in one of the project's copies or sibling worktrees is the
+  // project's: neither is a row of its own.
   if ((project.copies ?? []).some((c) => home === c.directory || home.startsWith(`${c.directory}/`) || basename(home) === c.folder)) return true;
+  if ((project.worktrees ?? []).some((w) => home === w || home.startsWith(`${w}/`) || basename(home) === basename(w))) return true;
   return basename(home) === project.folder;
 }
 

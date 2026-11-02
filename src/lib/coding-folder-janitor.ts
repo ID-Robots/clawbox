@@ -66,6 +66,7 @@ import { directorySize, projectTrashDir, TRASH_RETENTION_MS, trashEntryTime } fr
 import { classifyFolders, readGitPointer, readHeadBranch, readRunMarker } from "./coding-folder-kind";
 import { worktreeProject } from "./coding-worktree-paths";
 import { processStore } from "./process-store";
+import { CLAWBOX_ACCOUNT_HOME } from "./coding-git-factory-identity";
 import type { ChildResult } from "./child-run";
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -925,17 +926,21 @@ export async function runJanitorPass(options: {
       appendLog(full);
       result.actions.push(full);
     };
-    const pruneRepos = new Set<string>();
     for (const entry of plan.entries) {
       if (entry.action === "keep") {
         result.kept += 1;
         continue;
       }
       if (entry.action === "prune") {
+        // This entry's admin record alone, never `git worktree prune`: that
+        // takes every prunable record in the repository, the ones judged
+        // KEPT included (a live run's, a leased one, a tree that only lost
+        // its `.git` file).
         const repo = entry.project ?? null;
-        if (repo && !pruneRepos.has(repo)) {
-          pruneRepos.add(repo);
-          await withDirLock(repo, () => gitIn(repo, ["worktree", "prune"]));
+        const pruned = repo ? await withDirLock(repo, () => pruneOneAdmin(repo, entry.path)).catch(() => false) : false;
+        if (!pruned) {
+          result.kept += 1;
+          continue;
         }
         log({ action: "pruned", kind: entry.kind, path: entry.path, project: entry.project, branch: entry.branch, reason: entry.reason, freedBytes: 0 });
         result.pruned += 1;
@@ -1049,15 +1054,14 @@ async function removeWorktree(entry: JanitorEntry): Promise<Acted> {
       // counts a link as an untracked file and would (rightly) refuse to
       // remove the tree without --force. The link alone goes, and comes back
       // if git refuses for any other reason.
+      // `readlink` is the look and the read in one: it answers only for a link.
       const link = path.join(entry.path, "node_modules");
       let linkTarget: string | null = null;
-      if (isLink(link)) {
-        try {
-          linkTarget = fs.readlinkSync(link);
-          fs.unlinkSync(link);
-        } catch {
-          linkTarget = null;
-        }
+      try {
+        linkTarget = fs.readlinkSync(link);
+        fs.unlinkSync(link);
+      } catch {
+        linkTarget = null;
       }
       const removed = await gitIn(repo, ["worktree", "remove", entry.path]);
       if (!ok(removed)) {
@@ -1070,13 +1074,53 @@ async function removeWorktree(entry: JanitorEntry): Promise<Acted> {
         }
         return { ...base, detail: (removed.stderr || removed.stdout || "git worktree remove failed").trim().slice(0, 300) };
       }
-      await gitIn(repo, ["worktree", "prune"]);
+      // No `git worktree prune` after it: `remove` took its own admin record,
+      // and a repository-wide prune would take records judged kept.
       if (fs.existsSync(entry.path)) return { ...base, detail: "git answered, but the folder is still there." };
       return { ...base, action: "removed", freedBytes: size.bytes };
     });
   } finally {
     releaseClaim();
   }
+}
+
+/**
+ * Remove the ONE worktree admin record (`<common dir>/worktrees/<name>`) whose
+ * `gitdir` names `worktreePath`, while that folder is still gone — what `git
+ * worktree prune` does, for one entry instead of all. Never a locked record.
+ * Answers whether it went.
+ */
+export async function pruneOneAdmin(repo: string, worktreePath: string): Promise<boolean> {
+  try {
+    fs.lstatSync(worktreePath);
+    return false;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  const common = await gitIn(repo, ["rev-parse", "--git-common-dir"]);
+  if (!ok(common)) return false;
+  const admin = path.join(path.resolve(repo, out(common)), "worktrees");
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(admin);
+  } catch {
+    return false;
+  }
+  const wanted = path.join(path.resolve(worktreePath), ".git");
+  for (const name of names) {
+    const record = path.join(admin, name);
+    let pointsAt: string;
+    try {
+      pointsAt = path.resolve(record, fs.readFileSync(path.join(record, "gitdir"), "utf8").trim());
+    } catch {
+      continue;
+    }
+    if (pointsAt !== wanted) continue;
+    if (fs.existsSync(path.join(record, "locked"))) return false;
+    await fs.promises.rm(record, { recursive: true, force: true });
+    return true;
+  }
+  return false;
 }
 
 function readMainRoot(dir: string): string | null {
@@ -1107,15 +1151,21 @@ async function trashCopy(entry: JanitorEntry, projectFolder: string, now: number
     const shelf = janitorTrashDir(projectFolder);
     await fs.promises.mkdir(shelf, { recursive: true });
     const stamp = stampFor(now);
-    let name = `${path.basename(entry.path)}--${stamp}`;
-    for (let n = 2; fs.existsSync(path.join(shelf, name)) && n < 100; n += 1) name = `${path.basename(entry.path)}-${n}--${stamp}`;
-    const trashPath = path.join(shelf, name);
-    try {
-      await fs.promises.rename(entry.path, trashPath);
-    } catch (err) {
-      return { ...base, detail: `Could not move it to the trash: ${err instanceof Error ? err.message : String(err)}` };
+    // The rename IS the look: a name already taken (EEXIST, ENOTEMPTY) moves
+    // on to the next one, so nothing is checked first and then trusted.
+    for (let n = 1; n < 100; n += 1) {
+      const name = n === 1 ? `${path.basename(entry.path)}--${stamp}` : `${path.basename(entry.path)}-${n}--${stamp}`;
+      const trashPath = path.join(shelf, name);
+      try {
+        await fs.promises.rename(entry.path, trashPath);
+        return { ...base, action: "trashed", sizeBytes: size.bytes, trashPath };
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "EEXIST" || code === "ENOTEMPTY") continue;
+        return { ...base, detail: `Could not move it to the trash: ${err instanceof Error ? err.message : String(err)}` };
+      }
     }
-    return { ...base, action: "trashed", sizeBytes: size.bytes, trashPath };
+    return { ...base, detail: "Could not find a free name in the trash." };
   } finally {
     releaseClaim();
   }
@@ -1198,12 +1248,20 @@ function rearm(): void {
  * boot hook (src/instrumentation.ts). A timer rebuilt at every boot cannot be
  * duplicated or orphaned by an update; the last pass's date is on disk, so a
  * restart neither skips a day nor runs twice in one.
+ *
+ * ONLY on the device's own account (`CLAWBOX_ACCOUNT_HOME`). Anywhere else —
+ * `bun run dev` on a developer's machine — the project folder is that
+ * person's ~/Projects, and their idle worktrees and second clones are theirs.
+ * The boot hook gates the call the same way; this is the second lock on the
+ * same door. Answers whether it armed. `home` is for tests.
  */
-export function start(): void {
-  if (sched.started) return;
+export function start(options: { home?: string } = {}): boolean {
+  if ((options.home ?? process.env.HOME) !== CLAWBOX_ACCOUNT_HOME) return false;
+  if (sched.started) return true;
   sched.started = true;
   arm(Math.max(BOOT_DELAY_MS, lastPassAt() + DAY_MS - Date.now()));
   sched.unsubscribe = onRunSettled(noteRunFinished);
+  return true;
 }
 
 export function stop(): void {

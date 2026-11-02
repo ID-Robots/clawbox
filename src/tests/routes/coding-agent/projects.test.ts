@@ -404,6 +404,28 @@ describe("GET projects", () => {
       const { projects } = await body();
       expect(projects.map((p: Record<string, unknown>) => p.folder)).toEqual(["shop"]);
       expect(projects[0].latestRun).toMatchObject({ id: "run-sibling1" });
+      // The sibling is named on its parent's row, so a caller counting runs
+      // per project (the MCP table) can still find the run in it.
+      expect(projects[0].worktrees).toEqual([wt]);
+    });
+
+    it("keeps a copy whose original is not listed as its own row, with its own runs", async () => {
+      // The run marker names a project outside the project folder: the copy
+      // cannot be grouped, so it is listed, and the run in it is ITS run.
+      const outside = path.join(home, "elsewhere", "shop");
+      fs.mkdirSync(outside, { recursive: true });
+      const copy = makeRepo("shop-copy-9", { commit: "first" });
+      fs.mkdirSync(path.join(copy, ".clawbox"), { recursive: true });
+      fs.writeFileSync(path.join(copy, ".clawbox", "run.json"), JSON.stringify({ kind: "run", id: "run-abcdef12", project: outside, path: path.join(outside, ".clawbox", "worktrees", "run-abcdef12"), createdAt: 1 }));
+      fs.writeFileSync(
+        path.join(root, "data", "coding-agent-runs.json"),
+        JSON.stringify([{ id: "run-incopy99", status: "completed", startedAt: 9, completedAt: 10, task: "in the copy", directory: fs.realpathSync(copy), source: "agent" }]),
+      );
+      vi.resetModules();
+      GET = (await import("@/app/setup-api/coding-agent/projects/route")).GET;
+      const { projects } = await body();
+      expect(projects.map((p: Record<string, unknown>) => p.folder)).toEqual(["shop-copy-9"]);
+      expect(projects[0].latestRun).toMatchObject({ id: "run-incopy99" });
     });
 
     it("groups a run's copy of a project under the project rather than listing it", async () => {

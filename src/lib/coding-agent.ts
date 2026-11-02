@@ -3603,6 +3603,12 @@ export interface CodingProject {
   app: { name: string; description: string | null; kind: string | null; port: number | null } | null;
   /** The run copies of this project beside it in the project folder, grouped here rather than listed (see listProjects). */
   copies?: ProjectCopy[];
+  /**
+   * This project's git worktrees beside it in the project folder. Never rows
+   * of their own; a run in one is this project's, which is what a caller
+   * counting runs per project (the MCP table) needs the folders for.
+   */
+  worktrees?: string[];
 }
 
 /**
@@ -3709,8 +3715,20 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     if (original) knownProjects.add(path.resolve(original));
   }
   const kinds = classifiedFolders(ownerFolder, allNames, knownProjects);
+  // A folder's runs go to its parent only when the folder is not a row of its
+  // own: every worktree, and a copy once it is grouped under a listed parent
+  // (below). An ungrouped copy is listed, and its runs are its own row's.
   const parentByName = new Map<string, string>();
-  for (const k of kinds.values()) if (k.kind !== "project" && k.parent) parentByName.set(k.name, path.resolve(k.parent));
+  const worktreesOf = new Map<string, string[]>();
+  const inOwnerFolder = (dir: string) => path.dirname(path.resolve(dir)) === path.resolve(ownerFolder);
+  for (const k of kinds.values()) {
+    if (k.kind !== "worktree" || !k.parent) continue;
+    parentByName.set(k.name, path.resolve(k.parent));
+    if (!inOwnerFolder(k.parent)) continue;
+    const list = worktreesOf.get(path.basename(k.parent)) ?? [];
+    list.push(k.dir);
+    worktreesOf.set(path.basename(k.parent), list);
+  }
   const homeOf = (dir: string): string => {
     const own = worktreeProject(dir) ?? dir;
     for (const b of new Set([ownerFolder, realBase])) {
@@ -3724,7 +3742,7 @@ export async function listProjects(): Promise<{ directory: string | null; projec
   const copiesOf = new Map<string, ProjectCopy[]>();
   for (const k of kinds.values()) {
     if (k.kind !== "copy" || !k.parent) continue;
-    const parentName = path.dirname(path.resolve(k.parent)) === path.resolve(ownerFolder) ? path.basename(k.parent) : null;
+    const parentName = inOwnerFolder(k.parent) ? path.basename(k.parent) : null;
     if (!parentName || !listedNames.has(parentName)) {
       // A copy whose original is not in the list is the only trace of it: listed.
       listedNames.add(k.name);
@@ -3733,6 +3751,7 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     const list = copiesOf.get(parentName) ?? [];
     list.push({ folder: k.name, directory: k.dir, branch: k.branch });
     copiesOf.set(parentName, list);
+    parentByName.set(k.name, path.resolve(k.parent));
   }
   const folders = { base: ownerFolder, names: allNames.filter((n) => listedNames.has(n)).slice(0, MAX_PROJECT_FOLDERS) };
   // Bounded like the readdir (readFolderNames keeps 100): the run store is
@@ -3771,7 +3790,8 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     if (!d || seen.has(d.real)) continue;
     seen.add(d.real);
     const copies = d.project.kind === "folder" ? copiesOf.get(d.project.folder) : undefined;
-    projects.push(copies?.length ? { ...d.project, copies } : d.project);
+    const worktrees = d.project.kind === "folder" ? worktreesOf.get(d.project.folder) : undefined;
+    projects.push({ ...d.project, ...(copies?.length ? { copies } : {}), ...(worktrees?.length ? { worktrees } : {}) });
   }
   projects.sort((a, b) => (b.lastCommit?.date ?? 0) - (a.lastCommit?.date ?? 0) || a.name.localeCompare(b.name));
   return { directory: folders.base, projects };

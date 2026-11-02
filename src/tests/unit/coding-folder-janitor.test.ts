@@ -536,6 +536,56 @@ describe("the pass itself", () => {
   });
 });
 
+describe("only on the device's own account", () => {
+  it("arms nothing off the device account — a developer's dev server, their ~/Projects", () => {
+    expect(janitor.start({ home: path.join(tmp, "some-developer") })).toBe(false);
+    expect(janitor.nextPassAt()).toBeNull();
+    // A run settling there must not turn into a pass either.
+    janitor.noteRunFinished();
+    expect(janitor.nextPassAt()).toBeNull();
+  });
+
+  it("arms the daily pass on the device account", () => {
+    expect(janitor.start({ home: "/home/clawbox" })).toBe(true);
+    expect(janitor.nextPassAt()).not.toBeNull();
+    janitor.stop();
+    expect(janitor.nextPassAt()).toBeNull();
+  });
+});
+
+describe("pruning one record, never the repository", () => {
+  it("prunes a vanished tree without cutting loose another the pass keeps", async () => {
+    const alpha = makeRepo("alpha");
+    const merged = path.join(projects, "alpha-merged");
+    const lost = path.join(projects, "alpha-lost");
+    const gone = path.join(tmp, "tmpdir", "alpha-gone");
+    const leased = path.join(tmp, "tmpdir", "alpha-gone-task-9");
+    git(alpha, "worktree", "add", "-q", "-b", "merged", merged);
+    git(alpha, "worktree", "add", "-q", "-b", "lost", lost);
+    git(alpha, "worktree", "add", "-q", "-b", "gone", gone);
+    git(alpha, "worktree", "add", "-q", "-b", "gone-leased", leased);
+    // `lost` loses its .git file but keeps uncommitted work: git calls it
+    // prunable, the pass keeps it. `leased` is gone, but a lease names it.
+    fs.writeFileSync(path.join(lost, "work.txt"), "mine\n");
+    fs.rmSync(path.join(lost, ".git"));
+    fs.rmSync(gone, { recursive: true, force: true });
+    fs.rmSync(leased, { recursive: true, force: true });
+    fs.mkdirSync(path.join(tmp, "leases"));
+    fs.writeFileSync(path.join(tmp, "leases", "board"), "lab board-b coding-agent task-9: bench\n");
+    age(merged, 30);
+
+    const result = await janitor.runJanitorPass({ trigger: "manual" });
+    expect(result).toMatchObject({ removed: 1, pruned: 1 });
+    const list = git(alpha, "worktree", "list", "--porcelain");
+    expect(list).not.toContain(merged);
+    expect(list).not.toContain(`${gone}\n`);
+    // Both records the pass kept are still git's.
+    expect(list).toContain(lost);
+    expect(list).toContain(leased);
+    expect(fs.readFileSync(path.join(lost, "work.txt"), "utf8")).toBe("mine\n");
+  });
+});
+
 describe("settings", () => {
   it("is on with 14 days by default, and refuses a bad value rather than clamping it", async () => {
     expect(await janitor.readJanitorSettings()).toEqual({ enabled: true, retentionDays: 14 });
