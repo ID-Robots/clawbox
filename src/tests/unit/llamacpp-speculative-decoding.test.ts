@@ -37,9 +37,27 @@ beforeEach(() => {
   argsFile = path.join(dir, "args");
   logPath = path.join(dir, "server.log");
   fakeServer = path.join(dir, "llama-server");
-  writeFileSync(fakeServer, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argsFile}"\n`);
-  chmodSync(fakeServer, 0o755);
+  writeServer(CURRENT_HELP);
 });
+
+/** Lines of `llama-server --help` from the build the feature was proven on (29c720e). */
+const CURRENT_HELP = [
+  "--spec-draft-model, -md, --model-draft FNAME",
+  "--spec-draft-n-max N                    number of tokens to draft for speculative decoding (default: 3)",
+  "--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,ngram-simple",
+];
+/** An older build, such as install.sh's pinned one, before any of it. */
+const OLD_HELP = ["--model, -m FNAME", "--n-gpu-layers, -ngl N"];
+
+function writeServer(help: string[]) {
+  writeFileSync(fakeServer, [
+    "#!/usr/bin/env bash",
+    `if [ "\${1:-}" = "--help" ]; then printf '%s\\n' ${help.map((l) => `'${l}'`).join(" ")}; exit 0; fi`,
+    `printf '%s\\n' "$@" > "${argsFile}"`,
+    "",
+  ].join("\n"));
+  chmodSync(fakeServer, 0o755);
+}
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -105,6 +123,17 @@ describe("start-llamacpp.sh speculative decoding", () => {
     expect(r.args).toContain("--model");
     expect(r.args).not.toContain("--spec-type");
     expect(r.log).toMatch(/Invalid LLAMACPP_SPEC_TYPE/);
+  });
+
+  it("starts without speculation on a llama-server too old to know it, asked of the binary itself", () => {
+    // An older binary exits on an argument it does not know: .env alone must
+    // never be able to cost the box its local model.
+    writeServer(OLD_HELP);
+    const r = start({ LLAMACPP_SPEC_TYPE: "draft-mtp", LLAMACPP_SPEC_DRAFT_N_MAX: "2" });
+    expect(r.args).toContain("--model");
+    expect(r.args).not.toContain("--spec-type");
+    expect(r.args).not.toContain("--spec-draft-n-max");
+    expect(r.log).toMatch(/does not support --spec-type draft-mtp/);
   });
 
   it("ignores a draft length that is not a small positive number", () => {
