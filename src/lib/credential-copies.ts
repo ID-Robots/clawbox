@@ -12,6 +12,10 @@
  *  - Hermes: `backups/config/config.yaml.good.<stamp>` (its last good parses)
  *    and ClawBox's own `config.yaml.bak` (src/lib/hermes-config-yaml.ts).
  *
+ * Only a value the LIVE files no longer hold ({@link stillLive}): one that is
+ * still there is another setting's copy of the same string — the owner's
+ * voice using the same key, say — and its backups are that setting's too.
+ *
  * The value is what is removed, never the file: each copy stays a valid file
  * of its kind (`"apiKey": ""` in JSON, `api_key: ` — null — in YAML), so a
  * roll-back to it still starts, signed out. Only a value of a plain key shape
@@ -47,6 +51,28 @@ export async function listCopies(dir: string, pattern: RegExp): Promise<{ files:
     if (code === "ENOENT" || code === "ENOTDIR") return { files: [], unlisted: false };
     return { files: [], unlisted: true };
   }
+}
+
+/**
+ * Which of `secrets` one of the live files still holds. A live file that is
+ * there and cannot be read holds them all, as far as this can tell: a key is
+ * never taken out of a backup on a guess that nothing else uses it.
+ */
+export async function stillLive(liveFiles: readonly string[], secrets: readonly string[]): Promise<Set<string>> {
+  const live = new Set<string>();
+  for (const file of liveFiles) {
+    let text: string;
+    try {
+      text = await fs.readFile(file, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      for (const secret of secrets) live.add(secret);
+      continue;
+    }
+    for (const secret of secrets) if (text.includes(secret)) live.add(secret);
+  }
+  return live;
 }
 
 /**

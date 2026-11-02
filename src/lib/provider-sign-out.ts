@@ -39,7 +39,9 @@
  * would otherwise have no way out of, and its row stays the default reading
  * "Sign in again" while the chat answers with "Sign in to ClawBox AI again".
  * Another provider's sign-out never touches the default, so the chat goes on
- * answering on the one it is on.
+ * answering on the one it is on. A box whose default cannot be read, or names
+ * none (Hermes on `auto` picks whichever credential it finds), is refused too
+ * (`default_unknown`): any provider may be the one the chat is on.
  *
  * WHICH HARNESS. The active one. On a dual box ClawBox AI is also signed out
  * of the other one: its token is ClawBox's own account, and a harness switch
@@ -56,10 +58,11 @@
 import { CLAWAI_PLAN_TIER_KEY } from "@/lib/clawai-plan-tier";
 import { clearClawAiSession, isClawAiSessionConfiguring, readClawAiSession } from "@/lib/clawai-connect";
 import { get as getConfigValue, getKnown, setMany } from "@/lib/config-store";
-import { forgetClawboxAiPick, forgetProviderPicks } from "@/lib/explicit-model-pick";
+import { EXPLICIT_MODEL_PICKS_KEY, explicitPicksFrom, forgetProviderPicks } from "@/lib/explicit-model-pick";
 import { getActiveHarnessSource, type Harness } from "@/lib/harness";
 import { forgetClawaiCredentialRefusal, resolveClawaiToken } from "@/lib/harness/credentials";
 import { resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
+import { HERMES_AUTO_PROVIDER } from "@/lib/hermes-providers";
 import { readConfigStrict } from "@/lib/openclaw-config";
 import { forgetUnavailableModels } from "@/lib/provider-model-availability";
 import { prepareHermesSignOut } from "@/lib/provider-sign-out-hermes";
@@ -91,7 +94,7 @@ const OPENCLAW_SLOTS: Readonly<Record<string, readonly string[]>> = {
 export type ProviderSignOutRefusal =
   | "unknown_provider"
   | "is_default"
-  | "default_unreadable"
+  | "default_unknown"
   | "sign_in_in_progress"
   | "still_signed_in"
   | "restart_refused";
@@ -124,20 +127,28 @@ async function codingAgentReady(): Promise<boolean | undefined> {
  * The row the active harness answers the chat on, or `known: false` when its
  * config could not be read to say — which refuses, rather than guess that a
  * provider is not the default and sign the chat out from under itself.
+ *
+ * NAMING NONE is not knowing either: an OpenClaw box with no primary, or a
+ * Hermes box on `auto` (or with no `model.provider`, which Hermes reads as
+ * `auto`), answers on whatever credential the harness resolves for itself
+ * (src/lib/hermes-model-options.ts will not guess it either) — so any
+ * provider may be the one the chat is on.
  */
-async function readDefaultRow(harness: Harness): Promise<{ known: boolean; row: string | null }> {
+async function readDefaultRow(harness: Harness): Promise<{ known: boolean; unset: boolean; row: string | null }> {
   if (harness === "openclaw") {
     try {
       const primary = (await readConfigStrict()).agents?.defaults?.model?.primary;
-      return { known: true, row: normalizeProviderId(typeof primary === "string" ? primary.split("/")[0] : null) };
+      const row = normalizeProviderId(typeof primary === "string" ? primary.split("/")[0] : null);
+      return row ? { known: true, unset: false, row } : { known: false, unset: true, row: null };
     } catch {
-      return { known: false, row: null };
+      return { known: false, unset: false, row: null };
     }
   }
   const read = await resolveHermesConfigValue("model.provider");
-  if (read.state === "absent") return { known: true, row: null };
-  if (read.state !== "value") return { known: false, row: null };
-  return { known: true, row: canonicalProviderId("hermes", read.value) };
+  if (read.state === "absent") return { known: false, unset: true, row: null };
+  if (read.state !== "value") return { known: false, unset: false, row: null };
+  const row = canonicalProviderId("hermes", read.value);
+  return !row || row === HERMES_AUTO_PROVIDER ? { known: false, unset: true, row: null } : { known: true, unset: false, row };
 }
 
 function prepareHalf(harness: Harness, row: string, token: string | null, active: boolean): Promise<HarnessSignOut> {
@@ -148,8 +159,17 @@ function prepareHalf(harness: Harness, row: string, token: string | null, active
  * ClawBox's records about the provider (see the file header, 2). Fail-soft
  * like each writer is; the token is what the read-back holds to account.
  */
+function slotsFor(harness: Harness, row: string): string[] {
+  return harness === "openclaw" ? [row, ...(OPENCLAW_SLOTS[row] ?? [])] : [row];
+}
+
+/** Is model-pick slot `slot` the row's? OpenClaw folds its wire spellings onto the row. */
+function slotBelongs(harness: Harness, row: string, slot: string): boolean {
+  return slotsFor(harness, row).includes(slot) || (harness === "openclaw" && normalizeProviderId(slot) === row);
+}
+
 async function forgetRecords(harness: Harness, row: string): Promise<void> {
-  const slots = harness === "openclaw" ? [row, ...(OPENCLAW_SLOTS[row] ?? [])] : [row];
+  const slots = slotsFor(harness, row);
   if (row === CLAWAI_ROW) {
     try {
       await setMany({
@@ -160,12 +180,11 @@ async function forgetRecords(harness: Harness, row: string): Promise<void> {
     } catch (err) {
       console.warn("[provider-sign-out] could not clear the ClawBox AI account's records:", err instanceof Error ? err.message : err);
     }
-    await forgetClawboxAiPick();
+    await forgetProviderPicks((slot) => slotBelongs(harness, row, slot));
     await forgetClawaiCredentialRefusal().catch(() => undefined);
     await clearClawAiSession().catch(() => undefined);
   } else {
-    await forgetProviderPicks((slot) =>
-      slots.includes(slot) || (harness === "openclaw" && normalizeProviderId(slot) === row));
+    await forgetProviderPicks((slot) => slotBelongs(harness, row, slot));
     for (const slot of slots) await forgetUnavailableModels(slot);
   }
   await forgetProviderVerified(row).catch(() => undefined);
@@ -203,8 +222,10 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
     if (!current.known) {
       return {
         ok: false,
-        kind: "default_unreadable",
-        error: `The box could not read which provider the chat runs on, so ${label} was not signed out. Try again in a moment.`,
+        kind: "default_unknown",
+        error: current.unset
+          ? `No provider is set as the default, so the chat may be running on ${label}. Make a provider the default first, then sign out of it.`
+          : `The box could not read which provider the chat runs on, so ${label} was not signed out. Try again in a moment.`,
       };
     }
     if (current.row === row) {
@@ -254,11 +275,29 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
     left.push(...back.left);
     unread.push(...back.unread);
   }
-  if (row === CLAWAI_ROW) {
-    const tokenNow = await getKnown(CLAWAI_TOKEN_KEY);
-    if (!tokenNow.known) unread.push("the ClawBox config store");
-    else if (tokenNow.value !== undefined) left.push("the ClawBox config store");
+  // ClawBox's own records: the token is the credential, and a pick left on
+  // record would be inherited by the next sign-in.
+  const tokenNow = row === CLAWAI_ROW ? await getKnown(CLAWAI_TOKEN_KEY) : { known: true, value: undefined };
+  const picksNow = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+  if (!tokenNow.known || !picksNow.known) unread.push("the ClawBox config store");
+  else if (tokenNow.value !== undefined || Object.keys(explicitPicksFrom(picksNow.value)).some((slot) => slotBelongs(harness, row, slot))) {
+    left.push("the ClawBox config store");
   }
+
+  // The coding agent hears a ClawBox AI token that is gone whatever the
+  // answer below: a refusal can come after the token was cleared.
+  if (readyBefore !== undefined) {
+    const readyAfter = await codingAgentReady();
+    if (readyAfter !== undefined) {
+      try {
+        const { refreshCodingAgentToolsIfReadinessChanged } = await import("@/lib/coding-agent-mcp-refresh");
+        await refreshCodingAgentToolsIfReadinessChanged(readyBefore, readyAfter);
+      } catch (err) {
+        console.warn("[provider-sign-out] could not refresh the coding agent's tools:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
   if (left.length > 0 || unread.length > 0) {
     const parts = [
       left.length ? `could not be removed from ${left.join(" and ")}` : null,
@@ -278,16 +317,5 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
     };
   }
 
-  if (readyBefore !== undefined) {
-    const readyAfter = await codingAgentReady();
-    if (readyAfter !== undefined) {
-      try {
-        const { refreshCodingAgentToolsIfReadinessChanged } = await import("@/lib/coding-agent-mcp-refresh");
-        await refreshCodingAgentToolsIfReadinessChanged(readyBefore, readyAfter);
-      } catch (err) {
-        console.warn("[provider-sign-out] could not refresh the coding agent's tools:", err instanceof Error ? err.message : err);
-      }
-    }
-  }
   return { ok: true, changed: held, gatewayRestarting };
 }

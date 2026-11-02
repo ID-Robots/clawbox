@@ -221,6 +221,7 @@ const hermesYaml = vi.hoisted(() => ({
 vi.mock("@/lib/hermes-config-yaml", () => hermesYaml);
 const hermesEnv = vi.hoisted(() => ({
   hermesHome: vi.fn(() => `${tmp}/hermes`),
+  hermesEnvPath: vi.fn(() => `${tmp}/hermes/.env`),
   getHermesEnvValue: vi.fn(async (key: string) => box.hermesEnv[key] ?? null),
   clearHermesEnvValues: vi.fn(async (keys: string[]) => { for (const key of keys) delete box.hermesEnv[key]; }),
 }));
@@ -468,10 +469,12 @@ describe("signOutOfProvider — ClawBox AI on OpenClaw (#1369's sign-out, genera
     expect(gateway.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
   });
 
-  it("never answers signed out while the gateway's store still holds the profile", async () => {
+  it("never answers signed out while the gateway's store still holds the profile — and the coding agent still hears the token is gone", async () => {
     box.logoutWorks = false;
     const result = await signOutOfProvider("clawai");
     expect(result).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/ClawBox AI sign-in could not be removed from the gateway's auth store/) });
+    expect(box.store.clawai_token).toBeUndefined();
+    expect(refresh.refreshCodingAgentToolsIfReadinessChanged).toHaveBeenCalledWith(true, false);
   });
 
   it("never answers signed out over a store it could not read to check", async () => {
@@ -628,10 +631,39 @@ describe("signOutOfProvider — every other provider on OpenClaw", () => {
     expect(store.setMany).not.toHaveBeenCalled();
   });
 
-  it("refuses when it cannot read which provider is the default", async () => {
+  it("refuses when it cannot read which provider is the default, or none is set", async () => {
     cli.readConfigStrict.mockRejectedValueOnce(new Error("openclaw.json is not valid JSON"));
-    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "default_unreadable" });
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "default_unknown", error: expect.stringMatching(/could not read/) });
+    delete (box.config.agents as { defaults: { model: Record<string, unknown> } }).defaults.model.primary;
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "default_unknown", error: expect.stringMatching(/^No provider is set as the default/) });
     expect(cli.spawnOpenclawCli).not.toHaveBeenCalled();
+  });
+
+  it("never hands the CLI a profile id it would read as a flag — and says the sign-in is still there", async () => {
+    (box.config.auth as { profiles: Record<string, unknown> }).profiles["--force"] = { provider: "openrouter", mode: "api_key" };
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/removed from openclaw.json/) });
+    expect(loggedOut()).toEqual(["openrouter:default"]);
+    expect(unset()).not.toContain("auth.profiles.--force");
+  });
+
+  it("leaves a value in the backups that another setting still holds live", async () => {
+    // The owner's voice happens to use the same string as the OpenRouter key.
+    (box.config.tts as { providers: { openai: { apiKey: string } } }).providers.openai.apiKey = OPENROUTER_KEY;
+    const backup = path.join(OPENCLAW_DIR, "openclaw.json.last-good");
+    fs.writeFileSync(path.join(OPENCLAW_DIR, "openclaw.json"), JSON.stringify(box.config));
+    fs.writeFileSync(backup, JSON.stringify(everyProviderConfig()), { mode: 0o600 });
+    cli.runOpenclawConfigUnset.mockImplementation(async (dotted: string) => {
+      unsetPath(box.config, dotted);
+      fs.writeFileSync(path.join(OPENCLAW_DIR, "openclaw.json"), JSON.stringify(box.config));
+    });
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: true });
+    expect(providersNow().openrouter).not.toHaveProperty("apiKey");
+    expect(fs.readFileSync(backup, "utf8")).toContain(OPENROUTER_KEY);
+  });
+
+  it("never answers signed out while it cannot check ClawBox's records of the provider", async () => {
+    box.configStoreUnreadable = true;
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/checked in the ClawBox config store/) });
   });
 
   it("never answers signed out while the store still holds the key", async () => {
@@ -737,8 +769,26 @@ describe("signOutOfProvider — Hermes", () => {
     box.hermesConfig["model.provider"] = "openrouter";
     expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "is_default", error: expect.stringMatching(/^OpenRouter is the default provider/) });
     box.hermesConfigUnreadable = true;
-    expect(await signOutOfProvider("gemini")).toMatchObject({ ok: false, kind: "default_unreadable" });
+    expect(await signOutOfProvider("gemini")).toMatchObject({ ok: false, kind: "default_unknown" });
     expect(hermesCli.runHermesCli).not.toHaveBeenCalled();
+  });
+
+  it("refuses any provider but ClawBox AI while Hermes picks its own (auto, or nothing set)", async () => {
+    box.hermesConfig["model.provider"] = "auto";
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "default_unknown", error: expect.stringMatching(/^No provider is set as the default/) });
+    delete box.hermesConfig["model.provider"];
+    expect(await signOutOfProvider("gemini")).toMatchObject({ ok: false, kind: "default_unknown" });
+    expect(hermesCli.runHermesCli).not.toHaveBeenCalled();
+    // ClawBox AI keeps #1369's rule.
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: true });
+  });
+
+  it("an env-seeded pool row goes through `hermes auth remove` even when it copies no secret", async () => {
+    const auth = readAuth();
+    auth.credential_pool.openrouter = [{ id: "e-1", label: "OPENROUTER_API_KEY", source: "env:OPENROUTER_API_KEY" }];
+    writeAuth(auth);
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: true, changed: true });
+    expect(removed()).toEqual(["auth remove openrouter e-1"]);
   });
 
   it("never answers signed out while the pool still holds the key, or over a pool it could not read", async () => {

@@ -187,11 +187,11 @@ describe("AiProviderList — signing out of a provider", () => {
     expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
   });
 
-  it("is not offered on a row that is not signed in", async () => {
-    stubBox({ rows: [OPENCLAW_ROWS[0], { ...OPENCLAW_ROWS[1], state: "needs-reauth" }] });
+  it("is offered on a dead sign-in the box still holds, and not on the default's 'needs sign-in' row", async () => {
+    stubBox({ rows: [{ ...OPENCLAW_ROWS[0], state: "needs-reauth" }, { ...OPENCLAW_ROWS[1], state: "needs-reauth" }] });
     renderList();
-    await signOutButton("clawai", "ClawBox AI");
-    expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument();
-    expect(screen.queryByTestId("ai-provider-sign-out-openai")).not.toBeInTheDocument();
+    await signOutButton("openai", "OpenAI GPT");
+    expect(screen.getByTestId("ai-provider-clawai")).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-provider-sign-out-clawai")).not.toBeInTheDocument();
   });
 });

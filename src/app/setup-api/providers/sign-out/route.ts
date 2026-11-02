@@ -8,7 +8,7 @@ import { signOutOfProvider, type ProviderSignOutRefusal } from "@/lib/provider-s
 const REFUSAL_STATUS: Record<ProviderSignOutRefusal, number> = {
   unknown_provider: 404,
   is_default: 409,
-  default_unreadable: 409,
+  default_unknown: 409,
   sign_in_in_progress: 409,
   still_signed_in: 500,
   restart_refused: 502,
@@ -31,8 +31,9 @@ const REFUSAL_STATUS: Record<ProviderSignOutRefusal, number> = {
  *   has no sign-in; it is turned off in Settings → Local AI).
  * - 409 `is_default`: the chat runs on it — make another provider the default
  *   first. ClawBox AI is the exception, as in #1369.
- * - 409 `default_unreadable`: the box could not read which provider is the
- *   default, so it did not risk signing the chat out from under itself.
+ * - 409 `default_unknown`: the box could not read which provider is the
+ *   default, or none is set (Hermes on `auto`), so it did not risk signing the
+ *   chat out from under itself.
  * - 409 `sign_in_in_progress`: a ClawBox AI device login is writing its token.
  * - 500 `still_signed_in`: something of the credential is still on the box,
  *   or a store could not be read to say it is gone.

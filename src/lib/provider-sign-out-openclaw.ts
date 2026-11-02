@@ -46,7 +46,7 @@ import path from "node:path";
 import { profileProviderId } from "@/lib/chatgpt-subscription";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
-import { copiesHolding, isScrubbableSecret, listCopies, scrubCopies } from "@/lib/credential-copies";
+import { copiesHolding, isScrubbableSecret, listCopies, scrubCopies, stillLive } from "@/lib/credential-copies";
 import { awaitGatewayHotApply, diffConfigPaths, readGatewayConfigBaseline, restartGatewayAnsweringEarly } from "@/lib/gateway-hot-apply";
 import { logSafe } from "@/lib/log-safe";
 import { readGatewayAuthProfile, readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
@@ -79,7 +79,7 @@ const ROW_WIRES: Readonly<Record<string, readonly string[]>> = {
 
 /** A path segment `config unset` can name: a profile id carries a colon, never a dot. */
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
-const SAFE_PROFILE_ID = /^[A-Za-z0-9_@+-]+(:[A-Za-z0-9_@+-]+)?$/;
+const SAFE_PROFILE_ID = /^[A-Za-z0-9_@+][A-Za-z0-9_@+-]*(:[A-Za-z0-9_@+-]+)?$/;
 
 /** The rotating copies `openclaw.json` keeps beside itself. */
 const CONFIG_COPY_NAME = /^openclaw\.json\.(bak(\.\d+)?|last-good)$/;
@@ -231,6 +231,8 @@ export async function prepareOpenclawSignOut(rowId: string, token: string | null
     async remove() {
       // 1. The gateway's auth profiles, natively.
       for (const profileId of profileIds) {
+        // Never an argument the CLI could read as a flag; what is left is read back.
+        if (!SAFE_PROFILE_ID.test(profileId)) continue;
         try {
           // Unpinned, like the configure route's paste and its take-over: the
           // core resolves the same agent store for both.
@@ -271,9 +273,11 @@ export async function prepareOpenclawSignOut(rowId: string, token: string | null
       }
     },
     async scrubCopies() {
-      if (secrets.length === 0) return;
+      const live = await stillLive([CONFIG_PATH], secrets);
+      const gone = secrets.filter((secret) => !live.has(secret));
+      if (gone.length === 0) return;
       const { files } = await listCopies(copiesDir, CONFIG_COPY_NAME);
-      await scrubCopies(files, secrets);
+      await scrubCopies(files, gone);
     },
     async readBack() {
       // The readers that say when they could not read: never a success over a
@@ -300,9 +304,11 @@ export async function prepareOpenclawSignOut(rowId: string, token: string | null
       } catch {
         unread.push("openclaw.json");
       }
-      if (secrets.length > 0) {
+      const live = await stillLive([CONFIG_PATH], secrets);
+      const gone = secrets.filter((secret) => !live.has(secret));
+      if (gone.length > 0) {
         const { files, unlisted } = await listCopies(copiesDir, CONFIG_COPY_NAME);
-        const copies = await copiesHolding(files, secrets);
+        const copies = await copiesHolding(files, gone);
         if (copies.holding.length > 0) left.push("openclaw.json's backups");
         else if (unlisted || copies.unreadable.length > 0) unread.push("openclaw.json's backups");
       }

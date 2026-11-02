@@ -57,7 +57,7 @@ export const CLAWAI_USER_CODE_LENGTH = 8;
  * Max time a session may sit in `configuring` before the poll route gives up
  * on the background configure and surfaces a retryable error. A gateway
  * restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
- * The sign-out (src/lib/clawai-sign-out.ts) reads the same window as "a
+ * The sign-out (src/lib/provider-sign-out.ts) reads the same window as "a
  * sign-in is still writing its token".
  */
 export const CLAWAI_CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;

@@ -38,10 +38,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isClawboxAiToken } from "@/lib/clawai-token";
-import { copiesHolding, isScrubbableSecret, listCopies, scrubCopies } from "@/lib/credential-copies";
+import { copiesHolding, isScrubbableSecret, listCopies, scrubCopies, stillLive } from "@/lib/credential-copies";
 import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { clearHermesEnvValues, getHermesEnvValue, hermesHome } from "@/lib/hermes-env";
+import { clearHermesEnvValues, getHermesEnvValue, hermesEnvPath, hermesHome } from "@/lib/hermes-env";
 import { HERMES_IMAGE_TOKEN_ENV } from "@/lib/hermes-image-plugin";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { logSafe } from "@/lib/log-safe";
@@ -53,8 +53,8 @@ const CLAWAI = "clawai";
 /** Where a ClawBox AI token is written besides its own block (hermes-clawai.ts, hermes-tts.ts). */
 const CLAWAI_KEY_COPIES = ["model.api_key", "tts.openai.api_key"] as const;
 
-/** An entry id `hermes auth remove` can be handed as an argument. */
-const SAFE_ENTRY_ID = /^[A-Za-z0-9_]{1,64}$/;
+/** An entry id `hermes auth remove` can be handed as an argument (never one that reads as a flag). */
+const SAFE_ENTRY_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
 
 /** The rotating copies Hermes and ClawBox keep of config.yaml. */
 const GOOD_COPY_NAME = /^config\.yaml\.good\./;
@@ -62,6 +62,15 @@ const BAK_COPY_NAME = /^config\.yaml\.bak$/;
 
 interface PoolEntry {
   id: string | null;
+  /**
+   * The row is a credential of the pool's own: anything but a row Hermes
+   * seeded from config.yaml (`config:<name>`, `model_config`), which carries
+   * a fingerprint of the key there and is pruned once that key is gone. An
+   * env-seeded or another tool's login (`env:*`, `claude_code`,
+   * `device_code`, `gh_cli`) counts whether or not the row copies the
+   * secret: `hermes auth remove` is what clears it from `.env` or stops it
+   * being seeded again.
+   */
   holdsSecret: boolean;
 }
 
@@ -105,11 +114,11 @@ async function readAuth(slug: string): Promise<AuthRead | null> {
       const rows = Array.isArray(pool[key]) ? pool[key] as unknown[] : [];
       pools[key] = rows.map((row) => {
         const entry = row && typeof row === "object" ? row as Record<string, unknown> : {};
+        const source = typeof entry.source === "string" ? entry.source : "";
+        const configSeeded = source.startsWith("config:") || source === "model_config";
         return {
           id: typeof entry.id === "string" && SAFE_ENTRY_ID.test(entry.id) ? entry.id : null,
-          // A config-seeded row carries a fingerprint, not the key: the key is
-          // config.yaml's, and is removed there.
-          holdsSecret: nonEmpty(entry.access_token) || nonEmpty(entry.api_key) || nonEmpty(entry.refresh_token),
+          holdsSecret: !configSeeded || nonEmpty(entry.access_token) || nonEmpty(entry.api_key) || nonEmpty(entry.refresh_token),
         };
       });
     }
@@ -148,6 +157,11 @@ async function configKeysFor(slug: string, token: string | null): Promise<{ keys
     if (isScrubbableSecret(value)) values.push(value);
   }
   return { keys, values, unreadable };
+}
+
+/** The files Hermes reads its credentials from: a value still in one is not gone. */
+function liveFiles(): string[] {
+  return [hermesConfigPath(), authJsonPath(), hermesEnvPath()];
 }
 
 async function hermesCopies(): Promise<{ files: string[]; unlisted: boolean }> {
@@ -240,9 +254,11 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
       return { restarting: outcome !== "restarted", refused: false };
     },
     async scrubCopies() {
-      if (secrets.length === 0) return;
+      const live = await stillLive(liveFiles(), secrets);
+      const gone = secrets.filter((secret) => !live.has(secret));
+      if (gone.length === 0) return;
       const { files } = await hermesCopies();
-      await scrubCopies(files, secrets);
+      await scrubCopies(files, gone);
     },
     async readBack() {
       const left: string[] = [];
@@ -261,9 +277,11 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
           unread.push("Hermes' .env");
         }
       }
-      if (secrets.length > 0) {
+      const live = await stillLive(liveFiles(), secrets);
+      const gone = secrets.filter((secret) => !live.has(secret));
+      if (gone.length > 0) {
         const { files, unlisted } = await hermesCopies();
-        const copies = await copiesHolding(files, secrets);
+        const copies = await copiesHolding(files, gone);
         if (copies.holding.length > 0) left.push("Hermes' config backups");
         else if (unlisted || copies.unreadable.length > 0) unread.push("Hermes' config backups");
       }

@@ -348,11 +348,15 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // drawing on this pool with it off.
             const hasAccounts = row.id === "anthropic";
             // The sign-out, on the row of every sign-in the box holds, on
-            // either harness. On the default it is LOCKED, like the switch —
+            // either harness — a dead one too (a refused ClawBox AI token, a
+            // Claude sign-in the gateway fenced off), which is still on the
+            // box. Not on the DEFAULT's "needs sign-in" row: that is the
+            // default with no credential left to remove, ClawBox AI's after
+            // its own sign-out. On the default it is LOCKED, like the switch —
             // signing the chat's own provider out would leave it answering on
             // nothing — except for ClawBox AI, the account a box with nothing
             // else had no way out of (#1369). The route holds the same rule.
-            const canSignOut = row.state === "connected";
+            const canSignOut = row.state === "connected" || (row.state === "needs-reauth" && !row.isDefault);
             const signOutLocked = row.isDefault && row.id !== "clawai";
             const armed = signOutArmed === row.id;
             return (

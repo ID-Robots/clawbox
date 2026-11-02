@@ -76,7 +76,7 @@ describe("POST /setup-api/providers/sign-out", () => {
     for (const [kind, status] of [
       ["unknown_provider", 404],
       ["is_default", 409],
-      ["default_unreadable", 409],
+      ["default_unknown", 409],
       ["sign_in_in_progress", 409],
       ["still_signed_in", 500],
       ["restart_refused", 502],
