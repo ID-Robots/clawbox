@@ -141,6 +141,7 @@ describe("the schema each pinned core supports", () => {
     expect(updater.openclawStateSchemaFor("2026.10.3")).toBe(20);
     expect(updater.openclawStateSchemaFor("2026.10.6")).toBe(20);
     expect(updater.openclawStateSchemaFor("2026.10.7")).toBe(20);
+    expect(updater.openclawStateSchemaFor("2026.10.9")).toBe(20);
   });
 
   it("records the agent databases' schema beside it, which moves on its own", () => {
@@ -150,6 +151,7 @@ describe("the schema each pinned core supports", () => {
     expect(updater.openclawAgentSchemaFor("2026.10.3")).toBe(24);
     expect(updater.openclawAgentSchemaFor("2026.10.6")).toBe(25);
     expect(updater.openclawAgentSchemaFor("2026.10.7")).toBe(25);
+    expect(updater.openclawAgentSchemaFor("2026.10.9")).toBe(25);
   });
 
   it("answers null rather than guessing for a version it has not been told about", () => {
