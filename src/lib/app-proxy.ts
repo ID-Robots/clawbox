@@ -219,6 +219,23 @@ export function exposeAllHeaders(existing: string | null): string {
   return have.join(", ");
 }
 
+/**
+ * The `Origin` a request reaches the app with.
+ *
+ * Next.js refuses a server action whose Origin is not the host it was
+ * forwarded for — its CSRF guard — and the sandbox makes every action the
+ * app's own document sends say `Origin: null`, so no server action could run
+ * in the window at all ("Invalid Server Actions request"). What that guard
+ * protects is the credentials a browser attaches by itself, and this hop
+ * carries none: the proxy strips every cookie before the app sees a request.
+ * So on a server action (`Next-Action`) `null` becomes the origin the
+ * browser is on; every other request keeps the Origin it came with.
+ */
+export function appUpstreamOrigin(requestOrigin: string | null, headers: Headers, forwardedHost: string, protocol: string): string | null {
+  if (requestOrigin !== "null" || !headers.has("next-action")) return requestOrigin;
+  return `${protocol}://${forwardedHost}`;
+}
+
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
 export const LISTENER_CHECK_TTL_MS = 30_000;
 export const LISTENER_REFUSAL_TTL_MS = 3_000;

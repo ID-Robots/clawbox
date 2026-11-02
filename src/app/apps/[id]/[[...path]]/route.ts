@@ -5,6 +5,7 @@ import {
   APP_PROXY_CSP,
   NEXT_ROUTER_PREFLIGHT_METHODS,
   appProxyAllowOrigin,
+  appUpstreamOrigin,
   exposeAllHeaders,
   isAppApiPath,
   isNextRouterPreflight,
@@ -94,9 +95,15 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   // Loopback: compressing this hop costs CPU and saves nothing, and an
   // uncompressed answer is one the relay below cannot mislabel.
   headers.set("accept-encoding", "identity");
-  headers.set("x-forwarded-host", request.headers.get("host") ?? incoming.host);
-  headers.set("x-forwarded-proto", incoming.protocol.replace(":", ""));
+  const forwardedHost = request.headers.get("host") ?? incoming.host;
+  const forwardedProto = incoming.protocol.replace(":", "");
+  headers.set("x-forwarded-host", forwardedHost);
+  headers.set("x-forwarded-proto", forwardedProto);
   headers.set("x-forwarded-prefix", prefix);
+  // A server action from the sandboxed document says `Origin: null`, which
+  // Next.js refuses; see appUpstreamOrigin.
+  const upstreamOrigin = appUpstreamOrigin(requestOrigin, request.headers, forwardedHost, forwardedProto);
+  if (upstreamOrigin !== null) headers.set("origin", upstreamOrigin);
 
   const method = request.method.toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";

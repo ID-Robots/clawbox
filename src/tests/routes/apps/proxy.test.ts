@@ -279,6 +279,8 @@ describe("the app proxy", () => {
     expect(nav.headers.get("content-security-policy")).toContain("sandbox");
     // The request reached the app as the router sent it — and never with a cookie.
     expect(seen.at(-1)?.headers.rsc).toBe("1");
+    expect(seen.at(-1)?.headers.origin).toBe("null");
+    expect(seen.at(-1)?.headers.cookie).toBeUndefined();
 
     // A server action: a POST with Next-Action to the page's own path.
     const actionPreflight = await routes.OPTIONS(req("/apps/site/books/new", {
@@ -293,6 +295,12 @@ describe("the app proxy", () => {
     expect(action.headers.get("access-control-allow-origin")).toBe("null");
     expect(action.headers.get("access-control-expose-headers")).toBe("X-Request-Id, *");
     expect(seen.at(-1)?.body).toBe("[]");
+    // Next.js refuses an action from `Origin: null` (its CSRF guard), and this
+    // hop carries no cookie for that guard to protect: the action arrives from
+    // the origin the browser is on. Nothing else has its Origin touched.
+    expect(seen.at(-1)?.headers.origin).toBe("http://box.local");
+    await routes.POST(req("/apps/site/api/notes", { method: "POST", body: "{}", headers: { origin: "null", "content-type": "application/json" } }), ctx("site", ["api", "notes"]));
+    expect(seen.at(-1)?.headers.origin).toBe("null");
 
     // Only for the opaque origin the proxy itself makes, and only for the router's own fetches.
     expect((await routes.GET(req("/apps/site/books/2?_rsc=abc", { headers: { origin: "https://evil.example", rsc: "1" } }), ctx("site", ["books", "2"]))).headers.get("access-control-allow-origin")).toBeNull();
