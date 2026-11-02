@@ -58,6 +58,8 @@ export interface HermesBox {
   transcriptDeletes: number;
   /** The session key of every transcript DELETEd, in order. */
   deletedKeys: string[];
+  /** The session key of every Stop that reached the box, in order. */
+  stops: string[];
   /** The session key of every transcript READ, in order. */
   historyReads: string[];
   /**
@@ -132,6 +134,7 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
     tabTranscripts: {},
     transcriptDeletes: 0,
     deletedKeys: [],
+    stops: [],
     historyReads: [],
     historyDelayMs: {},
     commandRows: [],
@@ -236,6 +239,17 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
             available: box.commandsAvailable,
           }),
         };
+      }
+      // The owner's Stop, and the follow of a turn still running, on the same
+      // route as the turn itself (TASK-2117). Neither is a turn sent, so
+      // neither is counted as one. Nothing is ever running on this box: a
+      // follow is answered 204, as the route answers it.
+      if (url.startsWith("/setup-api/hermes/chat?") && init?.method === "DELETE") {
+        box.stops.push(new URL(url, "http://box").searchParams.get("sessionKey") || DESKTOP_TRANSCRIPT_KEY);
+        return { ok: true, status: 200, json: async () => ({ stopped: 0 }) };
+      }
+      if (url.startsWith("/setup-api/hermes/chat?")) {
+        return { ok: true, status: 204, headers: { get: () => null }, body: null, json: async () => ({}) };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;

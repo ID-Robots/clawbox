@@ -123,12 +123,29 @@ function earlyStopKey(sessionKey: string, turnId: string): string {
   return `${sessionKey}\n${turnId}`;
 }
 
-/** Take (and spend) an early Stop for this turn, if one is waiting for it. */
-function takeEarlyStop(sessionKey: string, turnId: string, now: number): boolean {
+/**
+ * At most this many early Stops are held at once. Each is a Stop that named a
+ * turn the box had not seen yet, and nearly all are spent within a second; the
+ * cap only bounds what a page that kept stopping turns it never sent can leave.
+ */
+const MAX_EARLY_STOPS = 64;
+
+function pruneEarlyStops(now: number): void {
   const { earlyStops } = shared();
   for (const [key, until] of earlyStops) {
     if (until <= now) earlyStops.delete(key);
   }
+  // Oldest first, in insertion order.
+  for (const key of earlyStops.keys()) {
+    if (earlyStops.size <= MAX_EARLY_STOPS) break;
+    earlyStops.delete(key);
+  }
+}
+
+/** Take (and spend) an early Stop for this turn, if one is waiting for it. */
+function takeEarlyStop(sessionKey: string, turnId: string, now: number): boolean {
+  const { earlyStops } = shared();
+  pruneEarlyStops(now);
   const key = earlyStopKey(sessionKey, turnId);
   const waiting = earlyStops.has(key);
   earlyStops.delete(key);
@@ -204,10 +221,14 @@ export function beginLiveTurn(sessionKey: string, opts: { turnId?: string; now?:
       // arrived in: a re-attaching page only needs the text so far, and a long
       // answer streamed token by token would otherwise be thousands of frames.
       // Only RUNS of deltas merge, so a tool step still lands where it happened.
+      // A status line is only ever the latest one — the caption under the
+      // thread — so a run of those keeps its last.
       const last = state.frames[state.frames.length - 1];
       const chunk = event === "delta" ? deltaText(data) : null;
       if (chunk !== null && last?.event === "delta") {
         state.frames[state.frames.length - 1] = { event: "delta", data: { text: `${deltaText(last.data) ?? ""}${chunk}` } };
+      } else if (event === "status" && last?.event === "status") {
+        state.frames[state.frames.length - 1] = frame;
       } else {
         state.frames.push(frame);
       }
@@ -255,9 +276,14 @@ function latest(sessionKey: string): LiveTurnState | null {
   return turns[turns.length - 1] ?? null;
 }
 
-/** Whether a turn is still running under this transcript key. */
+/**
+ * Whether a turn is still running under this transcript key — one a page
+ * should follow. A turn the owner has already STOPPED is not, even while it is
+ * still writing its ending down: the page that pressed Stop has drawn the stop,
+ * and following the turn again would paint whatever it settled under it.
+ */
 export function hasLiveTurn(sessionKey: string): boolean {
-  return (registry().get(sessionKey) ?? []).some((turn) => !turn.ended);
+  return (registry().get(sessionKey) ?? []).some((turn) => !turn.ended && !turn.controller.signal.aborted);
 }
 
 /**
@@ -275,7 +301,9 @@ export async function stopLiveTurns(
 ): Promise<number> {
   const turns = registry().get(sessionKey) ?? [];
   if (opts.turnId && !turns.some((turn) => turn.id === opts.turnId)) {
-    shared().earlyStops.set(earlyStopKey(sessionKey, opts.turnId), (opts.now ?? Date.now()) + EARLY_STOP_RETENTION_MS);
+    const now = opts.now ?? Date.now();
+    shared().earlyStops.set(earlyStopKey(sessionKey, opts.turnId), now + EARLY_STOP_RETENTION_MS);
+    pruneEarlyStops(now);
   }
   const running = turns.filter((turn) => !turn.ended);
   if (!running.length) return 0;

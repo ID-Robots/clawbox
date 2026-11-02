@@ -202,6 +202,34 @@ describe("stopping a turn", () => {
     ]);
   });
 
+  it("stops on the box before closing a tab even when this page was not following its turn", async () => {
+    // A turn left running across a reload in a tab nobody re-opened: this page
+    // has no request for it, and its answer must not land on a deleted transcript.
+    const { adapter, calls } = makeAdapter(() => json({ ok: true, stopped: 1 }));
+    await adapter.deleteSession("desktop-abc123def456", { running: false });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      "/setup-api/hermes/chat?sessionKey=desktop-abc123def456",
+      "/setup-api/chat/history?sessionKey=desktop-abc123def456",
+    ]);
+  });
+
+  it("stops on the box before a new chat clears the transcript", async () => {
+    const { adapter, calls } = makeAdapter(() => json({ ok: true, stopped: 0 }));
+    await adapter.resetSession();
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      "/setup-api/hermes/chat?sessionKey=desktop",
+      "/setup-api/chat/history?sessionKey=desktop",
+    ]);
+  });
+
+  it("ends as a Stop when another window stopped the turn this page is waiting on", async () => {
+    // A JSON-answered turn (a picture rides the CLI) the box stopped on
+    // another window's word answers 499 — a Stop, not "Hermes chat failed".
+    const { adapter } = makeAdapter(() => ({ ok: false, status: 499, headers: { get: () => null }, body: null, json: async () => { throw new Error("no body"); } } as unknown as Response));
+    const err = await adapter.sendTurn({ text: "what is this?", attachments: [], idempotencyKey: "turn-4" }).catch((e) => e);
+    expect((err as HarnessError).code).toBe("aborted");
+  });
+
   it("does not stop anything on the box when the page merely goes away", async () => {
     // A reload unmounts the page. That must not be what ends an answer.
     const { adapter, calls } = makeAdapter((_call, init) => held(init));

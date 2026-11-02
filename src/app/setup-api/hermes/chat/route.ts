@@ -821,7 +821,14 @@ async function runStreamedTurn(
         }
       },
     );
-    if (final.status === "error") {
+    if (live.signal.aborted) {
+      // Stopped in the moment between the transport's last frame and the
+      // settle — which can take a while (the record, a spoken clip). The owner
+      // has been shown the stop, so the record says so too, and nothing more
+      // is spent on an answer they stopped.
+      await recordStoppedTurn(sessionKey, streamed);
+      send("stopped", {});
+    } else if (final.status === "error") {
       // The dashboard's `payload.error` is Python-authored text off a
       // socket, no different in kind from the CLI's stderr — so it takes
       // the same road out. `final.text` is NOT a fallback for it: the
@@ -1571,6 +1578,9 @@ export async function POST(request: Request) {
       // A reload while the CLI is answering leaves the child running; its answer
       // is recorded below and handed to whoever re-attached.
       const { out: text, err } = await runHermes(args, live.signal);
+      // The child exited in the instant the owner stopped it: the same ending
+      // as a Stop that caught it running.
+      if (live.signal.aborted) throw new DOMException("aborted", "AbortError");
       // The run reports its own session id on stderr — no DB race, no guessing
       // from `sessions list`. Hand it back so the next turn can resume it.
       const threaded = parseSessionId(err) || rawSessionId;

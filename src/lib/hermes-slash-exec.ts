@@ -335,6 +335,8 @@ export async function runHermesSlashCommand(
     }
   };
   req.signal?.addEventListener("abort", abort, { once: true });
+  // A Stop that fired while the ticket was being fetched never fires again.
+  if (req.signal?.aborted) abort();
 
   try {
     await new Promise<void>((resolve, reject) => {

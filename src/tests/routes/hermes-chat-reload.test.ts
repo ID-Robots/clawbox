@@ -227,6 +227,37 @@ describe("the owner's Stop", () => {
     expect(hasLiveTurn(KEY)).toBe(false);
   });
 
+  it("still ends as a Stop when it lands after the last frame, before the answer is settled", async () => {
+    // The transport has finished but the route has not written the answer
+    // yet (the record, a spoken clip): the owner was shown the stop, so the
+    // record says so, and a page reading the history is not told to follow it.
+    let finish: () => void = () => {};
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    openTurnMock.mockResolvedValue({
+      sessionId: SESSION,
+      model: "",
+      provider: "",
+      async run(onDelta: (chunk: string) => void) {
+        onDelta("All of it.");
+        await finished;
+        return { text: "All of it.", reasoning: "", status: "complete" };
+      },
+      close() {},
+    });
+    const { reader } = await firstFrames(await POST(post({ message: "Tell me" })));
+    const stopping = DELETE(stopRequest(`sessionKey=${KEY}`));
+    await vi.waitFor(() => expect(hasLiveTurn(KEY)).toBe(false));
+    finish();
+    expect(await (await stopping).json()).toEqual({ stopped: 1 });
+    await reader.cancel();
+    expect(readTurnMock).not.toHaveBeenCalled();
+    const tail = records().slice(-2);
+    expect(tail[0]).toMatchObject({ role: "assistant", text: "All of it." });
+    expect(tail[1]).toMatchObject({ role: "system", variant: "stopped" });
+  });
+
   it("stops nothing, and says so, when nothing is running", async () => {
     const res = await DELETE(stopRequest(`sessionKey=${KEY}`));
     expect(await res.json()).toEqual({ stopped: 0 });

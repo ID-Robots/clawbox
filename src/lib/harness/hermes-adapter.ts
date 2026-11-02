@@ -537,6 +537,10 @@ export class HermesAdapter implements HarnessAdapter {
       // of `readStreamedTurn` — so the same question is asked again in the
       // catch below, which is what covers both.
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
+      // The box stopped the turn on the owner's word from somewhere else — a
+      // second window's Stop — and the route answers that with 499. A Stop, so
+      // not "Hermes chat failed" under the reply that was stopped.
+      if (res.status === 499) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",
@@ -683,6 +687,13 @@ export class HermesAdapter implements HarnessAdapter {
    */
   async resetSession(): Promise<void> {
     const key = this.context().sessionKey;
+    // A turn still answering the conversation being forgotten is stopped
+    // first — here, and on the box, where it would otherwise go on to write
+    // its answer into the transcript this is about to clear: it no longer ends
+    // with the request that sent it (TASK-2117). Never rejects either.
+    const running = this.inFlight.get(key);
+    running?.controller.abort();
+    await this.stopOnBox(key, running?.turnId);
     this.sessions.delete(key);
     this.sessionModels.delete(key);
     // …and the replay log with it. Clearing only the session id would make the
@@ -715,14 +726,14 @@ export class HermesAdapter implements HarnessAdapter {
    * best-effort call a reset makes.
    */
   async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
-    if (opts.running) {
-      const running = this.inFlight.get(key);
-      running?.controller.abort();
-      // Stopped on the box BEFORE the transcript goes: the stopped turn writes
-      // its own ending, and the route answers only once it has, so that write
-      // cannot land on the conversation after it was deleted.
-      await this.stopOnBox(key, running?.turnId);
-    }
+    const running = this.inFlight.get(key);
+    if (opts.running) running?.controller.abort();
+    // Stopped on the box BEFORE the transcript goes, and whatever this page
+    // thinks: a turn can be running there that no page is following — one
+    // left across a reload in a tab nobody re-opened, or sent from another
+    // device. The stopped turn writes its own ending and the route answers
+    // only once it has, so no write of it can land on the deleted transcript.
+    await this.stopOnBox(key, running?.turnId);
     this.sessions.delete(key);
     this.sessionModels.delete(key);
     await this.deleteTranscript(key);
