@@ -967,6 +967,45 @@ NODE
   echo "  OpenClaw configured for local access"
 }
 
+# The Local AI (llama.cpp) settings .env carries. Every line only fills a
+# missing key or moves a superseded shipped value, so a rerun changes nothing
+# the owner set.
+seed_llamacpp_env() {
+  local ENV_FILE="$1"
+  # A fresh install on a workstation seeds the model its memory is for. A .env
+  # that already names a model keeps it: an update must never swap the owner's
+  # local model (a 23 GB download, a different model) out from under them.
+  if ! grep -q '^LLAMACPP_MODEL=' "$ENV_FILE" 2>/dev/null \
+    && llamacpp_workstation_host "${LLAMACPP_WORKSTATION_MEMINFO:-/proc/meminfo}"; then
+    echo "  Workstation-class host: seeding $LLAMACPP_WORKSTATION_MODEL as the local model"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "$LLAMACPP_WORKSTATION_MODEL"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "$LLAMACPP_WORKSTATION_HF_REPO"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "$LLAMACPP_WORKSTATION_HF_FILE"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "$LLAMACPP_WORKSTATION_CONTEXT_WINDOW"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_TYPE" "draft-mtp"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_DRAFT_N_MAX" "$LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX"
+  fi
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
+  # Keep these four lines in step with src/lib/llamacpp.ts - the model id is
+  # deliberately unchanged, only the GGUF moved. src/tests/unit/llamacpp-gguf-pin.test.ts
+  # fails if this file and that one ever disagree.
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf" "gemma-4-E2B_q4_0-it.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
+  # Same values and migration as install.sh (src/lib/llamacpp.ts says why).
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
+}
+
 step_directories_permissions() {
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
@@ -997,25 +1036,7 @@ step_directories_permissions() {
     printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
-  # Keep these four lines in step with src/lib/llamacpp.ts - the model id is
-  # deliberately unchanged, only the GGUF moved. src/tests/unit/llamacpp-gguf-pin.test.ts
-  # fails if this file and that one ever disagree.
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf" "google/gemma-4-E2B-it-qat-q4_0-gguf"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf" "gemma-4-E2B_q4_0-it.gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
-  # Same values and migration as install.sh (src/lib/llamacpp.ts says why).
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
+  seed_llamacpp_env "$ENV_FILE"
   echo "  Done"
 }
 
@@ -1032,6 +1053,31 @@ step_ollama_install() {
     systemctl start ollama 2>/dev/null || true
   fi
   echo "  Ollama installed and running"
+}
+
+# ── Local AI on a workstation ───────────────────────────────────────────────
+# The shipped local model is Gemma 4 E2B, sized for an 8 GB Jetson: 3 GB on a
+# host whose GPU can hold forty times that. A host with a CUDA GPU and at least
+# 96 GiB of memory (a DGX Spark has 128 GB, 121 GiB usable) is seeded with
+# Qwen3.6-35B-A3B instead: a mixture-of-experts with 3B active parameters, from
+# unsloth's MTP GGUF, so its own multi-token-prediction head drafts for it
+# (start-llamacpp.sh, LLAMACPP_SPEC_TYPE). NVIDIA's DGX Spark llama.cpp
+# playbook runs this exact file. Measured on a Spark (llama.cpp 29c720e, 512
+# tokens): 66.9 tok/s plain, 94.4 with draft-mtp at a draft length of 2.
+# 65536, not 131072: seed_llamacpp_env migrates a 131072 window away.
+LLAMACPP_WORKSTATION_MIN_MEM_KIB=$((96 * 1024 * 1024))
+LLAMACPP_WORKSTATION_MODEL="qwen3.6-35b-a3b-mtp"
+LLAMACPP_WORKSTATION_HF_REPO="unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+LLAMACPP_WORKSTATION_HF_FILE="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+LLAMACPP_WORKSTATION_CONTEXT_WINDOW=65536
+LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX=2
+
+llamacpp_workstation_host() {
+  local meminfo="${1:-/proc/meminfo}" mem_kib
+  mem_kib="$(awk '/^MemTotal:/ { print $2; exit }' "$meminfo" 2>/dev/null || true)"
+  [[ "$mem_kib" =~ ^[0-9]+$ ]] || return 1
+  [ "$mem_kib" -ge "$LLAMACPP_WORKSTATION_MIN_MEM_KIB" ] || return 1
+  nvidia-smi -L >/dev/null 2>&1 || return 1
 }
 
 # Where NVIDIA's CUDA packages (and DGX OS) put the compiler. It is on no PATH a
