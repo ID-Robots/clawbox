@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { clearTranscript, readTranscript, type TranscriptRecord } from "@/lib/harness/transcript-store";
+import { hasLiveTurn } from "@/lib/harness/hermes-live-turn";
 import { transcriptKeyFor } from "@/lib/chat-scope-server";
 
 export const dynamic = "force-dynamic";
@@ -108,11 +109,22 @@ export async function GET(req: NextRequest) {
   // A missing or nonsensical limit is the default, not a 400: the caller asked
   // for the conversation, and there is a right answer to give them.
   const limit = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), MAX_LIMIT) : DEFAULT_LIMIT;
+  // Whether the box is still answering this conversation — a reload landed
+  // mid-turn (TASK-2117) — so the page follows the turn instead of drawing its
+  // question as unanswered. Asked BEFORE the read, never after: a turn writes
+  // its answer and only then ends, so "not running" here means the answer is
+  // already on disk for the read below. The other order could see the turn end
+  // between the two and paint neither the answer nor the wait.
+  const liveTurn = hasLiveTurn(key);
   const records = await readTranscript(limit, key);
   // The Hermes session the newest reply ran on, beside the messages: the
   // adapter resumes it, so a reload continues the conversation it redraws.
   const sessionId = records.findLast((record) => record.sessionId)?.sessionId;
-  return NextResponse.json({ messages: records.map(toMessage), ...(sessionId ? { sessionId } : {}) });
+  return NextResponse.json({
+    messages: records.map(toMessage),
+    ...(sessionId ? { sessionId } : {}),
+    ...(liveTurn ? { liveTurn: true } : {}),
+  });
 }
 
 // DELETE /setup-api/chat/history[?sessionKey=…] → { ok: true }

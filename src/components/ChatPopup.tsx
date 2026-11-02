@@ -107,7 +107,7 @@ import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-ad
 import { chatKeyUser, defaultTranscriptKeyFor } from '@/lib/chat-scope'
 import { useSessionUser } from '@/lib/use-session-user'
 import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
-import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
+import { HarnessError, type HarnessStatus, type TurnEvent, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
 import { splitMediaDirectives, mediaFileName, mediaUrl, isImageMedia, boundedAudio } from '@/lib/chat-media'
 import { ChatMessageRow, NO_AUDIO_NOTES, StreamingReplyBubble } from '@/components/ChatMessageRow'
 import { samePlainData } from '@/lib/same-plain-data'
@@ -456,6 +456,21 @@ type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped'
  */
 export function stoppedMarker(): ChatMessage {
   return { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }
+}
+
+/**
+ * Whether the latest question already has this answer under it — a followed
+ * turn's reply that the history read had already brought in (see `attachTurn`).
+ */
+function answerAlreadyShown(messages: readonly ChatMessage[], text: string): boolean {
+  const answer = text.trim()
+  if (!answer) return false
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role === 'user') return false
+    if (message.role === 'assistant' && message.text.trim() === answer) return true
+  }
+  return false
 }
 
 // One selectable entry in the Hermes provider pill, as reported by
@@ -2456,6 +2471,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     async () => {},
   )
   /**
+   * `attachTurn`, reachable from `loadHistory` — which is declared above it and
+   * is the one place that learns the box is still answering (TASK-2117).
+   */
+  const attachTurnRef = useRef<(key: string) => void>(() => {})
+  /**
    * `settleEmailDrafts`, reachable from the gateway socket handler.
    *
    * A ref for the same reason `dispatchTurnRef` is one: `connect` is a
@@ -4106,7 +4126,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // past its deadline. It used to be this single read with its failure
       // sent to the console: a conversation the gateway was still rebuilding
       // simply came back empty, with nothing to press.
-      const { messages: chatMsgs, imageGenerationFailed } = restoreCtl
+      const { messages: chatMsgs, imageGenerationFailed, liveTurn } = restoreCtl
         ? await restoreWithRetry(read, {
           signal: restoreCtl.signal,
           attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
@@ -4141,6 +4161,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // the failure restores it when the box stored one, and nothing else
       // would put it back when it did not.
       setMessages(prev => mergeRestoredTranscript(prev, chatMsgs, { keepFailureNotes: true }))
+      // The box is still answering this conversation: the page was reloaded,
+      // or opened here, while a turn ran (TASK-2117). Follow it — thinking,
+      // the text so far, Stop — rather than draw its question as unanswered.
+      // Every read may find one, the 5-second refresh included, and
+      // `attachTurn` ignores it while this page already has a run going.
+      if (liveTurn) attachTurnRef.current(keyAtCall)
 
       // Open the FIRST conversation, but only on a box that actually has an
       // introduction waiting.
@@ -6283,39 +6309,34 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     text: string,
     sendAttachments: ChatAttachment[],
     idempotencyKey: string,
+    /**
+     * Follow a turn the box is ALREADY running for this conversation instead
+     * of sending one — the turn a reload cut this page off from (TASK-2117,
+     * see `attachTurn`). Everything after the call is the same run: the same
+     * painting, the same Stop, the same endings.
+     */
+    attach = false,
   ) => {
     // The conversation this turn belongs to. A harness that answers on this
     // promise rather than on a keyed event stream needs it remembered: the
     // owner may be in another tab by the time the reply lands, and painting
     // it there would put one conversation inside another.
     const keyAtSend = sessionKeyRef.current
-    // Tell the box this is where the owner is now, so the phone (or the
-    // desktop) they pick up next opens this conversation (TASK-1364). Best
-    // effort: the turn does not wait on it and a box that cannot answer
-    // changes nothing here. A turn sent here is also the owner's own answer to
-    // an arrival still waiting on the box: they chose this conversation.
-    followPendingRef.current = false
-    void syncTabsRef.current({ activity: { key: keyAtSend === mainSessionKeyRef.current ? null : keyAtSend } })
-    turnsRef.current.remember(idempotencyKey, text, sendAttachments.length > 0)
-    // A new turn is the owner's answer to a restore choice left on screen.
-    setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
-    let result: TurnResult
+    if (!attach) {
+      // Tell the box this is where the owner is now, so the phone (or the
+      // desktop) they pick up next opens this conversation (TASK-1364). Best
+      // effort: the turn does not wait on it and a box that cannot answer
+      // changes nothing here. A turn sent here is also the owner's own answer to
+      // an arrival still waiting on the box: they chose this conversation.
+      followPendingRef.current = false
+      void syncTabsRef.current({ activity: { key: keyAtSend === mainSessionKeyRef.current ? null : keyAtSend } })
+      turnsRef.current.remember(idempotencyKey, text, sendAttachments.length > 0)
+      // A new turn is the owner's answer to a restore choice left on screen.
+      setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
+    }
+    let result: TurnResult | null
     try {
-      result = await adapter.sendTurn({
-        text,
-        attachments: sendAttachments,
-        idempotencyKey,
-        // Ignored by a harness with no such dial. Read here, at send time, so a
-        // pill changed mid-run applies to the NEXT turn rather than
-        // retroactively to this one.
-        provider: hermesProviderRef.current,
-        model: hermesModelRef.current,
-        // The default level is only a placeholder for the picker. Until the
-        // level is KNOWN (read from the device, or chosen by the user) send
-        // none at all, so a failed seeding fetch cannot silently override the
-        // device's own reasoning effort with "medium".
-        reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
-      }, (event) => {
+      const onEvent = (event: TurnEvent) => {
         // The answer so far, for the streaming bubble — the same state the
         // gateway's own delta handler sets, so both harnesses paint through
         // one renderer. Passed unconditionally: an adapter that cannot stream
@@ -6367,7 +6388,24 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         else if (event.kind === 'clarifyExpire') {
           setClarifies(prev => expireClarifyCard(prev, event.requestId))
         }
-      })
+      }
+      result = attach
+        ? await (adapter.attachLiveTurn?.(onEvent) ?? Promise.resolve(null))
+        : await adapter.sendTurn({
+          text,
+          attachments: sendAttachments,
+          idempotencyKey,
+          // Ignored by a harness with no such dial. Read here, at send time, so a
+          // pill changed mid-run applies to the NEXT turn rather than
+          // retroactively to this one.
+          provider: hermesProviderRef.current,
+          model: hermesModelRef.current,
+          // The default level is only a placeholder for the picker. Until the
+          // level is KNOWN (read from the device, or chosen by the user) send
+          // none at all, so a failed seeding fetch cannot silently override the
+          // device's own reasoning effort with "medium".
+          reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
+        }, onEvent)
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line. Never render a
       // harness's own error text: it is written for an operator reading a log
@@ -6453,6 +6491,20 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       }
       return
     }
+    // Nothing was running after all — the turn ended between the history read
+    // that saw it and the attach. Its answer is already in the transcript, and
+    // the next read paints it; this run only has to end.
+    if (result === null) {
+      settleRun(keyAtSend)
+      if (sessionKeyRef.current !== keyAtSend) return
+      sendingRef.current = false
+      setSending(false)
+      applyStreaming('')
+      clearToolCalls()
+      clearClarifies()
+      runIdRef.current = null
+      return
+    }
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
     // stream; those handlers paint the reply and end the run.
     if (result.acknowledgedOnly) return
@@ -6479,7 +6531,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // from busy to unread (settleRun).
     if (sessionKeyRef.current !== keyAtSend) return
     const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
-    setMessages(prev => [...prev, {
+    // A followed turn can have landed in the transcript the page just read —
+    // it ended between that read and the attach — and the same answer twice
+    // is a second reply the agent never gave.
+    setMessages(prev => attach && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
       role: 'assistant',
       // A reply that is nothing BUT a picture is still a real answer — don't
       // call it '(no response)'.
@@ -6519,6 +6574,32 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     runIdRef.current = null
   }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming, refreshChatModelState, noteConversationModel])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
+
+  // Follow a turn the box is still running for the conversation on screen
+  // (TASK-2117). On Hermes a turn belongs to the box, not to the request that
+  // sent it, so a reload no longer stops it — but the reloaded page has no
+  // promise to wait on. This gives it one: the same run state `startRun` sets
+  // (thinking, Stop, a composer that queues), fed by `attachLiveTurn`, which
+  // replays what the turn has said so far and then streams the rest.
+  //
+  // Only while this page has no run of its own on this conversation: a run it
+  // started, or a tab it came back to whose run is still going, is already
+  // being followed, and a second follower would paint the answer twice.
+  const attachTurn = useCallback((key: string) => {
+    if (!adapter.attachLiveTurn) return
+    if (sendingRef.current || sessionKeyRef.current !== key) return
+    const runKey = uuid()
+    sendingRef.current = true
+    setSending(true)
+    applyStreaming('')
+    runIdRef.current = runKey
+    // Neither spoken nor typed HERE, so nothing of the reply is owed aloud by
+    // this page — on Hermes the clip is made inside the turn by its route.
+    voiceTurnKeyRef.current = null
+    askedTurnKeyRef.current = null
+    void dispatchTurn('', [], runKey, true)
+  }, [adapter, dispatchTurn, applyStreaming])
+  useEffect(() => { attachTurnRef.current = attachTurn }, [attachTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
     // The owner chose where to be by speaking here: an arrival still waiting on

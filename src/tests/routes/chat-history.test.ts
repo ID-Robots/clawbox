@@ -178,4 +178,23 @@ describe("/setup-api/chat/history", () => {
     const { GET } = await load();
     expect((await (await GET(request())).json()).messages).toHaveLength(1);
   });
+
+  it("says the box is still answering while a turn runs, and only then (TASK-2117)", async () => {
+    // A page reloaded mid-answer reads this to know there is a turn to follow,
+    // rather than drawing the question as unanswered.
+    writeTranscript([{ role: "user", text: "Write me a long story", timestamp: 1 }]);
+    const { GET } = await load();
+    const { beginLiveTurn, resetLiveTurns } = await import("@/lib/harness/hermes-live-turn");
+    resetLiveTurns();
+    try {
+      const turn = beginLiveTurn("desktop");
+      expect((await (await GET(request())).json()).liveTurn).toBe(true);
+      // Another conversation's turn is not this one's.
+      expect((await (await GET(request(undefined, "desktop-abc123def456"))).json()).liveTurn).toBeUndefined();
+      turn.end();
+      expect((await (await GET(request())).json()).liveTurn).toBeUndefined();
+    } finally {
+      resetLiveTurns();
+    }
+  });
 });

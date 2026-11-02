@@ -415,6 +415,13 @@ export interface HistoryPage {
    * until it timed out.
    */
   readonly imageGenerationFailed: boolean;
+  /**
+   * True when the box is still running a turn for this conversation — the page
+   * was reloaded mid-answer, or opened somewhere else while one ran. The caller
+   * follows it through `attachLiveTurn`. Absent on a harness whose turns reach
+   * a reloaded page on their own (OpenClaw's gateway socket).
+   */
+  readonly liveTurn?: boolean;
 }
 
 export type HarnessStatus = "idle" | "connecting" | "connected" | "error";
@@ -446,6 +453,19 @@ export interface HarnessAdapter {
    * `HarnessError('aborted')` when `req.signal` fires.
    */
   sendTurn(req: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResult>;
+
+  /**
+   * Follow a turn the box is ALREADY running for the current conversation, as
+   * though this page had sent it: what it has said so far, then the rest live,
+   * then the same result `sendTurn` resolves with. Resolves null when nothing
+   * is running. Rejects `HarnessError('aborted')` on a Stop, from this page
+   * (`abortTurn`) or any other.
+   *
+   * Optional, because only a harness whose turns are tied to one HTTP request
+   * needs it: Hermes (TASK-2117). OpenClaw's gateway hands a reloaded page the
+   * rest of a run on its own socket.
+   */
+  attachLiveTurn?(onEvent?: (event: TurnEvent) => void): Promise<TurnResult | null>;
 
   /**
    * Kill the in-flight turn. Resolves (no-op) when nothing is running.
