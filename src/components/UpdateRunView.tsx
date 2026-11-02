@@ -174,6 +174,11 @@ export interface UpdateRun {
   /** Bumped each time the box answers again after an outage. */
   reconnects: number;
   answer: RunAnswer | null;
+  /**
+   * `hold` only: a Dismiss the box did not take. Said beside the verdict it
+   * could not clear, which stays on screen with its Resume — not in its place.
+   */
+  dismissError: string | null;
   /** Start a run (Update, Resume); `allowDowngrade` is the owner's "Back up and update anyway". */
   trigger: (allowDowngrade?: boolean) => Promise<void>;
   /** Clear a settled run, on the server too. */
@@ -185,10 +190,11 @@ export interface UpdateRun {
  *
  * `hold` is /updating's. That screen exists because an update owns the box, so
  * it follows from the first moment whatever the box answers or fails to, never
- * gives up on "idle" (a click it never made cannot have failed to start), keeps
+ * gives up on "idle" (the lock is what says whether a run owns the box), keeps
  * asking past "completed" until the answer says the lock is gone (`answer`),
- * and keeps a verdict on screen while it is being dismissed — it leaves for the
- * desktop instead of going back to an idle System Update window.
+ * asks again after a Resume or a Dismiss that did not take, and keeps a verdict
+ * on screen while it is being dismissed — it leaves for the desktop instead of
+ * going back to an idle System Update window.
  *
  * Without it — the System Update app — a run already going or already failed
  * when the app opens is adopted, and `onCompleted` runs once when the run this
@@ -202,6 +208,7 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
   const [offline, setOffline] = useState(false);
   const [reconnects, setReconnects] = useState(0);
   const [answer, setAnswer] = useState<RunAnswer | null>(null);
+  const [dismissError, setDismissError] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -295,6 +302,9 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
           window.location.reload();
           return;
         }
+        // /updating asks again after a Resume whose request was lost: a run
+        // the box is running is the answer to it, whatever the click said.
+        if (hold && data.phase === "running") setError(null);
         setState(data);
         if (data.phase !== "running") {
           // /updating leaves on "completed" only once the lock is gone, and
@@ -371,7 +381,13 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
   const trigger = useCallback(async (allowDowngrade = false) => {
     setStarted(true);
     setError(null);
+    setDismissError(null);
     setState(null);
+    // /updating goes on asking whatever the click's answer: the request can be
+    // lost to the very restart it set off, and the lock may still be held.
+    const followAnyway = () => {
+      if (hold) startPolling({ seen: true });
+    };
     try {
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
@@ -384,6 +400,7 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
         setError(typeof data.error === "string"
           ? data.error
           : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
+        followAnyway();
         return;
       }
       // A 200 can still say the click started nothing: another run holds the
@@ -407,16 +424,21 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
         setError(typeof begun.error === "string"
           ? begun.error
           : tr("update.startFailed", "Failed to start update"));
+        followAnyway();
         return;
       }
-      startPolling();
+      // /updating never gives up on "idle": whether a run owns the box is the
+      // lock's to say, and the page leaves when it does.
+      startPolling({ seen: hold });
     } catch (err) {
       setError(err instanceof Error ? err.message : tr("update.startFailed", "Failed to start update"));
+      followAnyway();
     }
-  }, [startPolling, tr]);
+  }, [hold, startPolling, tr]);
 
   const dismiss = useCallback(async (): Promise<DismissOutcome> => {
     stopPolling();
+    setDismissError(null);
     // The System Update app clears at once and goes back to its idle screen.
     // /updating keeps the verdict up until the desktop has replaced it: there
     // is no idle screen there to go back to.
@@ -427,11 +449,19 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
     }
     // Anything the server did not take is said, with the panel put back: the
     // record is still there, and it would come back on the next reload with
-    // nothing said about the dismissal that did not happen.
+    // nothing said about the dismissal that did not happen. /updating never
+    // took the verdict down, so it keeps it — its Resume included — says why
+    // beside it, and asks the box again.
     const refused = () => {
+      const said = tr("update.dismissFailed", "The device could not clear that result. Try again in a moment.");
+      if (hold) {
+        setDismissError(said);
+        startPolling({ seen: true, now: true });
+        return;
+      }
       setStarted(true);
       setState(null);
-      setError(tr("update.dismissFailed", "The device could not clear that result. Try again in a moment."));
+      setError(said);
     };
     // The settled run lives in the web server's memory, not in this component,
     // so clearing local state alone would hide the panel until the next mount
@@ -471,7 +501,7 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
     }
   }, [hold, stopPolling, startPolling, tr]);
 
-  return { state, error, started, offline, reconnects, answer, trigger, dismiss };
+  return { state, error, started, offline, reconnects, answer, dismissError, trigger, dismiss };
 }
 
 /**
@@ -673,6 +703,7 @@ export function UpdateRunView({
   offline = false,
   reconnects = 0,
   notice,
+  dismissError,
   onDismiss,
   onResume,
   onOverrideDowngrade,
@@ -693,6 +724,8 @@ export function UpdateRunView({
   reconnects?: number;
   /** Said across the bottom in place of the run's own note — what the screen around the view needs the owner to know. */
   notice?: RunNotice;
+  /** A Dismiss the box did not take, said beside the result it could not clear. */
+  dismissError?: string | null;
   onDismiss: () => void;
   /** Present only for an interrupted run: starts the fresh run that resumes it. */
   onResume?: () => void;
@@ -859,6 +892,12 @@ export function UpdateRunView({
     </button>
   );
 
+  const dismissRefusal = dismissError && (
+    <p role="alert" className="m-0 mt-3 text-xs leading-relaxed text-amber-200" data-testid="update-dismiss-error">
+      {dismissError}
+    </p>
+  );
+
   const agentVersions = versions && status !== "updating" && <AgentVersions versions={versions} />;
 
   if (failure) {
@@ -928,6 +967,7 @@ export function UpdateRunView({
                 )}
                 {dismissButton}
               </div>
+              {dismissRefusal}
             </section>
 
             {ran.length > 0 && (
@@ -1001,7 +1041,7 @@ export function UpdateRunView({
           {versionRow}
           {stepsPanel}
           {warningList}
-          {status === "completed" && <div>{dismissButton}</div>}
+          {status === "completed" && <div>{dismissButton}{dismissRefusal}</div>}
           {agentVersions}
         </div>
         <div className="min-w-0">

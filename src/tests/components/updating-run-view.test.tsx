@@ -340,15 +340,63 @@ describe("/updating draws the System Update run view", () => {
     expect(replace).toHaveBeenCalledWith("/");
   });
 
-  it("stays, and says so, when the box could not clear the result", async () => {
-    const { fetchMock } = stubBox(() => ({ body: FAILED, locked: false }));
+  it("keeps a verdict the box could not clear — its Resume included — and says why beside it", async () => {
+    const { fetchMock, statusPolls } = stubBox(() => ({ body: INTERRUPTED, locked: false }));
     const view = render(<UpdatingPage />);
     await advance();
+    const polls = statusPolls();
     fetchMock.mockImplementationOnce(async () => respond({ error: "disk full" }, {}, 500));
     fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
     await advance();
     expect(replace).not.toHaveBeenCalled();
-    expect(view.getByTestId("update-error-panel")).toHaveTextContent("The device could not clear that result.");
+    expect(view.getByTestId("update-dismiss-error")).toHaveTextContent("The device could not clear that result.");
+    expect(view.getByTestId("update-error-panel")).toHaveTextContent("Updating OpenClaw");
+    expect(view.getByRole("button", { name: "Resume update" })).toBeTruthy();
+    // And asks the box again rather than going quiet.
+    expect(statusPolls()).toBeGreaterThan(polls);
+  });
+
+  it("keeps the verdict on a Dismiss lost to the network too", async () => {
+    const { fetchMock } = stubBox(() => ({ body: INTERRUPTED, locked: false }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    fetchMock.mockImplementationOnce(async () => { throw new TypeError("Failed to fetch"); });
+    fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
+    await advance();
+    expect(replace).not.toHaveBeenCalled();
+    expect(view.getByTestId("update-dismiss-error")).toBeTruthy();
+    expect(view.getByRole("button", { name: "Resume update" })).toBeTruthy();
+  });
+
+  it("follows the run a Resume started even when the click's own request was lost", async () => {
+    let resumed = false;
+    const { fetchMock } = stubBox(() => ({ body: resumed ? { phase: "running", currentStepIndex: 4, steps: steps(4) } : INTERRUPTED, locked: resumed }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    // The box takes the request and starts the run; the answer never arrives.
+    fetchMock.mockImplementationOnce(async () => {
+      resumed = true;
+      throw new TypeError("Failed to fetch");
+    });
+    fireEvent.click(view.getByRole("button", { name: "Resume update" }));
+    await advance();
+    await advance(2_000);
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(view.getByTestId("update-step-count")).toHaveTextContent("4 / 10 steps complete");
+  });
+
+  it("does not give up on a resumed run that answers 'idle' while the lock is held", async () => {
+    let resumed = false;
+    stubBox(() => (resumed ? { body: IDLE } : { body: INTERRUPTED, locked: false }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    resumed = true;
+    fireEvent.click(view.getByRole("button", { name: "Resume update" }));
+    await advance();
+    await advance(60_000);
+    expect(view.queryByText("Failed to start update")).toBeNull();
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(replace).not.toHaveBeenCalled();
   });
 
   it("names the restart escape once the run has outlasted its budget, and offers no link the lock would bounce", async () => {
@@ -362,6 +410,35 @@ describe("/updating draws the System Update run view", () => {
     expect(notice).toHaveAttribute("data-tone", "warn");
     expect(notice).toHaveTextContent(/restart it — the desktop unlocks by itself on the next start/);
     expect(document.querySelector('a[href="/"]')).toBeNull();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("starts the budget again for a run the owner resumes from here", async () => {
+    let resumed = false;
+    stubBox(() => ({ body: resumed ? { phase: "running", currentStepIndex: 4, steps: steps(4) } : INTERRUPTED, locked: resumed }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    // The verdict sat on screen past the budget.
+    await advance(26 * 60_000);
+    resumed = true;
+    fireEvent.click(view.getByRole("button", { name: "Resume update" }));
+    await advance();
+    await advance(2_000);
+    expect(view.getByTestId("update-run-notice")).not.toHaveAttribute("data-tone");
+    expect(view.getByTestId("update-run-notice")).toHaveTextContent("Don't power off until this finishes.");
+    await advance(25 * 60_000);
+    expect(view.getByTestId("update-run-notice")).toHaveAttribute("data-tone", "warn");
+  });
+
+  it("says restart, not 'returning to the desktop', when a finished run's lock is never released", async () => {
+    stubBox(() => ({ body: COMPLETED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    expect(view.getByTestId("update-run-notice")).toHaveTextContent("Returning to the desktop");
+    await advance(25 * 60_000 + 2_000);
+    const notice = view.getByTestId("update-run-notice");
+    expect(notice).toHaveAttribute("data-tone", "warn");
+    expect(notice).toHaveTextContent(/restart it/);
     expect(replace).not.toHaveBeenCalled();
   });
 

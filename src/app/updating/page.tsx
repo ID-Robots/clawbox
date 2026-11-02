@@ -45,9 +45,12 @@ import {
  *     works, which is a restart: at boot the updater finds no update to resume
  *     and releases the lock (resumeContinuation in src/lib/updater.ts). It does
  *     NOT offer a link to the desktop, because the middleware would redirect
- *     such a navigation straight back here. A run that stops says so with its
- *     step and reason, Resume where the box can resume it, and Dismiss, which
- *     clears the verdict and goes back to the desktop.
+ *     such a navigation straight back here. The same hint replaces "returning
+ *     to the desktop" on a finished run whose lock is never released, and the
+ *     clock starts again for a run the owner resumes from here. A run that
+ *     stops says so with its step and reason, Resume where the box can resume
+ *     it, and Dismiss, which clears the verdict and goes back to the desktop —
+ *     or, when the box does not take it, keeps the verdict and says why.
  *  3. LEAVE WHEN THE LOCK DOES. The lock is the middleware's to release, and
  *     the middleware marks every /setup-api answer while it is set
  *     (UPDATE_LOCK_HEADER). A finished run — or none — on an answer without
@@ -89,14 +92,24 @@ function UpdatingScreen() {
   const run = useUpdateRun({ hold: true });
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [channel, setChannel] = useState<string | null>(null);
-  const [stuck, setStuck] = useState(false);
+  // The run this page is timing: bumped when the owner starts one from here
+  // (Resume, or "Back up and update anyway"), so a verdict that sat on screen
+  // for half an hour does not greet the run after it with "restart it".
+  const [runEpoch, setRunEpoch] = useState(0);
+  const [stuckEpoch, setStuckEpoch] = useState<number | null>(null);
+  const stuck = stuckEpoch === runEpoch;
 
   // Not Date.now() arithmetic across a reboot — this only ever measures how
-  // long THIS page has been open, in one process, on the viewer's device.
+  // long THIS page has been open (or this run been going), in one process, on
+  // the viewer's device.
   useEffect(() => {
-    const id = window.setTimeout(() => setStuck(true), STUCK_AFTER_MS);
+    const id = window.setTimeout(() => setStuckEpoch(runEpoch), STUCK_AFTER_MS);
     return () => window.clearTimeout(id);
-  }, []);
+  }, [runEpoch]);
+  const startRun = (allowDowngrade = false) => {
+    setRunEpoch((n) => n + 1);
+    void run.trigger(allowDowngrade);
+  };
 
   // The version row: what the box runs, what it is going to, and the channel.
   // Asked once, and again after an outage only if the first ask got nothing;
@@ -146,10 +159,13 @@ function UpdatingScreen() {
   }, [leave]);
 
   // The line across the bottom: the one thing the owner may need to ACT on.
-  const notice: RunNotice | undefined = status === "completed"
-    ? { icon: "task_alt", title: tr("update.returningToDesktop", "Update complete. Returning to the desktop…") }
-    : status !== "updating"
-      ? undefined
+  // A finished run says it is going back to the desktop — unless its lock is
+  // still held past the budget, when that promise is the one thing not
+  // happening and the restart hint takes its place.
+  const notice: RunNotice | undefined = status === "failed"
+    ? undefined
+    : status === "completed" && (leave === "completed" || !stuck)
+      ? { icon: "task_alt", title: tr("update.returningToDesktop", "Update complete. Returning to the desktop…") }
       : stuck
         ? {
             icon: "warning",
@@ -191,6 +207,7 @@ function UpdatingScreen() {
             offline={run.offline}
             reconnects={run.reconnects}
             notice={notice}
+            dismissError={run.dismissError}
             // Dismiss clears the verdict on the server and goes back to the
             // desktop; a click the server did not take stays, and says so.
             onDismiss={() => {
@@ -200,8 +217,8 @@ function UpdatingScreen() {
             }}
             // Resume starts the fresh run that continues an interrupted one,
             // and this screen follows it like the first.
-            onResume={canResume(run.state) ? () => void run.trigger() : undefined}
-            onOverrideDowngrade={() => void run.trigger(true)}
+            onResume={canResume(run.state) ? () => startRun() : undefined}
+            onOverrideDowngrade={() => startRun(true)}
           />
         </div>
       </main>
