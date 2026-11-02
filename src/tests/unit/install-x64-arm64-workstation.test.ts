@@ -168,6 +168,19 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
       expect(r.out.trim()).toBe("-DCMAKE_BUILD_TYPE=Release");
     });
 
+    it("builds the pinned llama.cpp, in a directory of ClawBox's own", () => {
+      // Unpinned HEAD, or whatever ~/llama.cpp held, could be a build without
+      // the speculative decoding .env asks for. And ~/llama.cpp is where NVIDIA's
+      // DGX Spark playbook builds the owner's OWN llama.cpp: the step must not
+      // reconfigure that tree (it deletes the CMake cache before configuring).
+      const step = sliceFunction("step_llamacpp_install");
+      const pin = /LLAMACPP_COMMIT="\$\{LLAMACPP_COMMIT:-([0-9a-f]{40})\}"/.exec(step);
+      expect(pin, "a full-SHA default pin").not.toBeNull();
+      expect(step).toMatch(/git fetch --quiet --depth 1 origin \$LLAMACPP_COMMIT && git checkout --quiet \$LLAMACPP_COMMIT/);
+      expect(step).not.toContain('local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"');
+      expect(step).toContain('local LLAMA_DIR="$CLAWBOX_HOME/.local/share/clawbox/llama.cpp"');
+    });
+
     it("uses that decision in the build step instead of `command -v nvcc`", () => {
       const step = sliceFunction("step_llamacpp_install");
       expect(step).toContain("llamacpp_cmake_args");

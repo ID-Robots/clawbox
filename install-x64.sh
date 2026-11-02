@@ -1195,7 +1195,15 @@ llamacpp_cmake_args() {
 }
 
 step_llamacpp_install() {
-  local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
+  # A directory of ClawBox's own: on a PC this home is the owner's, and
+  # ~/llama.cpp is where NVIDIA's DGX Spark playbook builds the owner's OWN
+  # llama.cpp, which the configure below (it deletes the CMake cache) must never
+  # touch. An existing install keeps its binary, whose libraries stay put.
+  local LLAMA_DIR="$CLAWBOX_HOME/.local/share/clawbox/llama.cpp"
+  # Pinned, as install.sh pins its own: the build the .env this installer seeds
+  # was proven against (draft-mtp, --spec-draft-n-max; 2026-11-02 on a DGX
+  # Spark). start-llamacpp.sh still asks the binary before using either.
+  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-29c720eaf72fcf8e4e61a56a88b994d92668261d}"
   local CMAKE_ARGS
   CMAKE_ARGS="$(llamacpp_cmake_args)"
   echo "  llama.cpp build: $CMAKE_ARGS"
@@ -1236,10 +1244,14 @@ step_llamacpp_install() {
   if [ ! -x /usr/local/bin/llama-server ]; then
     echo "  Installing llama.cpp server..."
     if [ ! -d "$LLAMA_DIR/.git" ]; then
+      as_user mkdir -p "$(dirname "$LLAMA_DIR")"
       if ! as_user git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"; then
         echo "Error: failed to clone llama.cpp into $LLAMA_DIR" >&2
         return 1
       fi
+    fi
+    if ! as_user_login "cd $LLAMA_DIR && git fetch --quiet --depth 1 origin $LLAMACPP_COMMIT && git checkout --quiet $LLAMACPP_COMMIT"; then
+      echo "  Warning: could not check out llama.cpp $LLAMACPP_COMMIT; building $(as_user git -C "$LLAMA_DIR" rev-parse --short HEAD 2>/dev/null || echo 'the checkout as it is')" >&2
     fi
     if ! as_user_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build $CMAKE_ARGS"; then
       echo "Error: failed to configure llama.cpp build in $LLAMA_DIR" >&2

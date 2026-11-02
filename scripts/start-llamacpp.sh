@@ -103,8 +103,21 @@ case "$LLAMACPP_SPEC_TYPE" in
     echo "[llamacpp] Invalid LLAMACPP_SPEC_TYPE='${LLAMACPP_SPEC_TYPE}' (expected none|draft-mtp|draft-eagle3|draft-simple); starting without speculative decoding"
     ;;
 esac
+# The binary must know what .env asks for: an older llama-server (install.sh's
+# pinned Jetson build, a reused checkout) exits on an argument it does not
+# know. Asked of the binary on every start, never remembered.
+if [ "${#SPEC_ARGS[@]}" -gt 0 ]; then
+  SPEC_HELP="$("$BIN_PATH" --help 2>&1 || true)"
+  if ! grep -q -- "--spec-type .*${LLAMACPP_SPEC_TYPE}" <<<"$SPEC_HELP" \
+    || { [ "${SPEC_ARGS[2]:-}" = "--spec-draft-model" ] && ! grep -q -- "--spec-draft-model" <<<"$SPEC_HELP"; }; then
+    echo "[llamacpp] ${BIN_PATH} does not support --spec-type ${LLAMACPP_SPEC_TYPE}; starting without speculative decoding"
+    SPEC_ARGS=()
+  fi
+fi
 if [ "${#SPEC_ARGS[@]}" -gt 0 ] && [ -n "${LLAMACPP_SPEC_DRAFT_N_MAX:-}" ]; then
-  if [[ "$LLAMACPP_SPEC_DRAFT_N_MAX" =~ ^[0-9]+$ ]] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -ge 1 ] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -le 16 ]; then
+  if ! grep -q -- "--spec-draft-n-max" <<<"$SPEC_HELP"; then
+    echo "[llamacpp] ${BIN_PATH} does not support --spec-draft-n-max; using its default draft length"
+  elif [[ "$LLAMACPP_SPEC_DRAFT_N_MAX" =~ ^[0-9]+$ ]] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -ge 1 ] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -le 16 ]; then
     SPEC_ARGS+=(--spec-draft-n-max "$LLAMACPP_SPEC_DRAFT_N_MAX")
   else
     echo "[llamacpp] Invalid LLAMACPP_SPEC_DRAFT_N_MAX='${LLAMACPP_SPEC_DRAFT_N_MAX}' (expected 1-16); using llama-server's default"
