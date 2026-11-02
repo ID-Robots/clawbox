@@ -1875,7 +1875,7 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
     for (const task of tasks) {
       const named = namedDeliverables(task.files_hint);
       if (!named.length) continue;
-      const gone = await removedNamed(place, named, removed);
+      const gone = await removedNamed(settled, place, named, removed);
       const kept = named.filter((n) => !gone.includes(n));
       gaps.set(task.task_id, { named: kept, missing: await missingDeliverables(place, kept), removed: gone });
     }
@@ -2054,49 +2054,86 @@ async function namedState(place: DeliverablePlace, entry: string): Promise<Named
  * delete as readily as a file (team-qpx784qm: `design`, whose one file the
  * run removed, failed the team as missing). A folder the run only partly
  * emptied, or that still holds a file, is not removed: it is judged as any
- * named folder is.
+ * named folder is. Where its work waits on a branch behind a removed
+ * worktree, the branch says whether the folder is gone: the project folder
+ * holds the owner's tree, not the run's (`removedByRun`). An absolute hint is
+ * read inside the folder or the branch's roots, as the removed paths are.
  */
-export async function removedNamed(place: DeliverablePlace, named: readonly string[], removed: ReadonlySet<string>): Promise<string[]> {
+export async function removedNamed(run: Pick<CodingRun, "worktree">, place: DeliverablePlace, named: readonly string[], removed: ReadonlySet<string>): Promise<string[]> {
   const norm = (p: string) => p.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
   const gone = [...removed].map(norm).filter(Boolean);
+  const roots = [place.dir, ...(place.branch?.roots ?? [])].map(norm).filter(Boolean);
+  const inside = (p: string): string | null => {
+    if (!p.startsWith("/")) return p;
+    const root = roots.find((r) => p.startsWith(`${r}/`));
+    return root ? p.slice(root.length + 1) : null;
+  };
+  const onBranchOnly = place.branch !== null && !!run.worktree && place.dir !== run.worktree.path;
+  const stillThere = async (folder: string) => onBranchOnly && place.branch
+    ? (await branchState(place.branch, folder)) !== "missing"
+    : (await namedState(place, folder)) === "present";
   const out: string[] = [];
   for (const entry of named) {
-    const n = norm(entry);
+    const n = inside(norm(entry));
     if (!n || n === ".") continue;
     if (removed.has(entry) || gone.includes(n)) out.push(entry);
-    else if (gone.some((f) => f.startsWith(`${n}/`)) && (await namedState(place, n)) !== "present") out.push(entry);
+    else if (gone.some((f) => f.startsWith(`${n}/`)) && !(await stillThere(n))) out.push(entry);
   }
   return out;
 }
+
+/** git's paths as they are: a quoted `"design/\303\251t\303\251.png"` is never under `design`. */
+const RAW_PATHS = ["-c", "core.quotePath=false"];
 
 /**
  * The paths a settled run deleted, relative to its folder: the files it
  * recorded touching that are gone (`vanishedFiles`), and — since a removal
  * made through Bash (`rm`, `git rm`) is never recorded as touched — the files
- * its branch deleted against the base it was forked from, and the tracked
- * files missing from its working tree while that is still there. Never
- * throws: what cannot be looked at was not removed.
+ * its branch deleted against the base it was forked from, the files its
+ * commits deleted that the merge home left gone (by then its worktree, and
+ * every other trace of a removal, are gone), and the tracked files missing
+ * from its working tree while that is still there. Commit by commit: a folder
+ * the run made, committed and removed again is removed. Never throws: what
+ * cannot be looked at was not removed.
  */
 export async function removedByRun(run: Pick<CodingRun, "directory" | "filesTouched" | "worktree">, place: DeliverablePlace): Promise<Set<string>> {
   const removed = vanishedFiles(run.directory, run.filesTouched ?? []);
-  const add = (out: string) => { for (const line of out.split("\n")) if (line.trim()) removed.add(line.trim()); };
+  const add = (paths: Iterable<string>) => { for (const p of paths) if (p.trim()) removed.add(p.trim()); };
   try {
-    const base = run.worktree?.base;
+    const wt = run.worktree;
+    const base = wt?.base;
     if (place.branch && base) {
-      const r = await gitIn(place.branch.repo, ["diff", "--name-only", "--no-renames", "--diff-filter=D", `${base}...${place.branch.name}`, "--"]);
-      if (r.code === 0) add(r.stdout);
+      const r = await gitIn(place.branch.repo, [...RAW_PATHS, "diff", "--name-only", "--no-renames", "--diff-filter=D", `${base}...${place.branch.name}`, "--"]);
+      if (r.code === 0) add(r.stdout.split("\n"));
+      add(await deletedByCommits(place.branch.repo, `${base}..${place.branch.name}`, place.branch.name));
     }
+    // Merged home with --no-ff (`mergeRunBranch`): the run's commits are what
+    // the merge's second parent holds and its first does not.
+    const merge = wt?.result?.kind === "merged" ? wt.result.commit : null;
+    if (wt && merge) add(await deletedByCommits(wt.project, `${merge}^1..${merge}^2`, merge));
     // The run's own tree only: the project behind a removed worktree holds
     // the owner's changes, not the run's.
-    const own = !run.worktree || place.dir === run.worktree.path;
+    const own = !wt || place.dir === wt.path;
     if (own && path.isAbsolute(place.dir) && fs.existsSync(place.dir)) {
-      const r = await gitIn(place.dir, ["ls-files", "--deleted"]);
-      if (r.code === 0) add(r.stdout);
+      const r = await gitIn(place.dir, [...RAW_PATHS, "ls-files", "--deleted"]);
+      if (r.code === 0) add(r.stdout.split("\n"));
     }
   } catch {
     // Not looked at: nothing more counts as removed.
   }
   return removed;
+}
+
+/** The files a commit of `range` deleted that `tip` does not hold; none when git cannot say. */
+async function deletedByCommits(repo: string, range: string, tip: string): Promise<string[]> {
+  const log = await gitIn(repo, [...RAW_PATHS, "log", "--format=", "--name-only", "--no-renames", "--diff-filter=D", range, "--"]);
+  if (log.code !== 0) return [];
+  const deleted = [...new Set(log.stdout.split("\n").map((l) => l.trim()).filter(Boolean))];
+  if (!deleted.length) return [];
+  const kept = await gitIn(repo, [...RAW_PATHS, "--literal-pathspecs", "ls-tree", "-r", "--name-only", tip, "--", ...deleted]);
+  if (kept.code !== 0) return [];
+  const there = new Set(kept.stdout.split("\n"));
+  return deleted.filter((f) => !there.has(f));
 }
 
 type NamedState = "present" | "missing" | "empty";
