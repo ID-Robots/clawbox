@@ -515,6 +515,8 @@ async function settleTurn(
     // asks it for the one case nothing else can speak for.
     ...(served.model ? { model: served.model } : {}),
     ...(served.provider ? { provider: served.provider } : {}),
+    // The session this answer ran on, so a reloaded page resumes it.
+    ...(threaded ? { sessionId: threaded } : {}),
   }, sessionKey);
   return {
     text: answer,
@@ -1368,7 +1370,7 @@ export async function POST(request: Request) {
       const text = withSessionModelNote(ran, rawModel);
       noteHermesSession(ran.sessionId, sessionKey);
       await appendTranscript(
-        { role: "assistant", text, timestamp: Date.now() },
+        { role: "assistant", text, timestamp: Date.now(), ...(ran.sessionId ? { sessionId: ran.sessionId } : {}) },
         sessionKey,
       );
       return NextResponse.json({
