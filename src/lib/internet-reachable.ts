@@ -1,9 +1,10 @@
 import { execFile } from "child_process";
+import net from "net";
 import { promisify } from "util";
 
 /**
  * Whether this machine can reach the internet right now: one ping to 1.1.1.1
- * (NetworkManager's own connectivity check where ICMP is dropped), shared by
+ * (a TCP connection to it where ICMP is dropped), shared by
  * every caller while it runs and remembered for five seconds, so the screens
  * that poll it (the tray's online dot, the setup wizard's network step) share
  * one probe instead of each spawning their own.
@@ -27,22 +28,33 @@ let cache: InternetStatus | null = null;
 // than each spawning their own (the route that reads it is open before sign-in).
 let inflight: Promise<InternetStatus> | null = null;
 
+function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (ok: boolean) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
 async function check(): Promise<{ online: boolean; latencyMs: number | null }> {
   try {
     const t0 = Date.now();
     await execFileAsync("ping", ["-c", "1", "-W", "2", "-n", "1.1.1.1"], { timeout: 3000 });
     return { online: true, latencyMs: Date.now() - t0 };
   } catch {
-    // Many office networks drop outbound ICMP. NetworkManager runs its own
-    // connectivity check; `full` is its word for "reaches the internet". A box
-    // broadcasting its setup hotspot answers none or limited. Its last result,
-    // not a re-check: re-checking needs a polkit grant a service user lacks.
-    try {
-      const { stdout } = await execFileAsync("nmcli", ["-t", "networking", "connectivity"], { timeout: 5000 });
-      return { online: stdout.trim() === "full", latencyMs: null };
-    } catch {
-      return { online: false, latencyMs: null };
-    }
+    // Many office networks drop outbound ICMP: ask with a fresh TCP connection
+    // to the same host instead. Fresh on every probe, never a cached verdict —
+    // the tray's online dot reads this and must go offline when the internet
+    // does. A box broadcasting its setup hotspot has no route out at all.
+    const t0 = Date.now();
+    return (await tcpReachable("1.1.1.1", 443, 2000))
+      ? { online: true, latencyMs: Date.now() - t0 }
+      : { online: false, latencyMs: null };
   }
 }
 

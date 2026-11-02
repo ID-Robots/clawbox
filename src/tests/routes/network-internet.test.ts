@@ -19,7 +19,28 @@ vi.mock("child_process", () => ({
   },
 }));
 
+// The fallback where ICMP is dropped (src/lib/internet-reachable.ts) is a TCP
+// connect to the same address. These cases pin it to "does not get through"
+// unless a case says otherwise, so no test depends on the runner's network.
+const tcp = vi.hoisted(() => ({ connects: false, hosts: [] as string[] }));
+vi.mock("net", () => {
+  const connect = (opts: { host: string; port: number }) => {
+    tcp.hosts.push(`${opts.host}:${opts.port}`);
+    const handlers: Record<string, () => void> = {};
+    const socket = {
+      once: (event: string, fn: () => void) => { handlers[event] = fn; return socket; },
+      setTimeout: () => socket,
+      destroy: () => socket,
+    };
+    queueMicrotask(() => handlers[tcp.connects ? "connect" : "error"]?.());
+    return socket;
+  };
+  return { default: { connect }, connect };
+});
+
 beforeEach(() => {
+  tcp.connects = false;
+  tcp.hosts.length = 0;
   execFileMock.mockReset();
   // Each test gets a fresh module so the in-memory cache resets.
   vi.resetModules();
@@ -37,7 +58,16 @@ describe("/setup-api/network/internet", () => {
     expect(typeof body.latencyMs).toBe("number");
   });
 
-  it("reports offline + null latency when ping fails", async () => {
+  it("reports online when ping is blocked but a TCP connection gets through", async () => {
+    execFileMock.mockReturnValue({ error: new Error("100% packet loss") });
+    tcp.connects = true;
+    const mod = await import("@/app/setup-api/network/internet/route");
+    const body = await (await mod.GET()).json();
+    expect(body.online).toBe(true);
+    expect(tcp.hosts).toEqual(["1.1.1.1:443"]);
+  });
+
+  it("reports offline + null latency when neither ping nor TCP gets through", async () => {
     execFileMock.mockReturnValue({ error: new Error("Network unreachable") });
     const mod = await import("@/app/setup-api/network/internet/route");
     const res = await mod.GET();
