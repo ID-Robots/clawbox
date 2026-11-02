@@ -1023,6 +1023,49 @@ seed_network_interface() {
   ensure_env_setting "$env_file" "NETWORK_INTERFACE" "$dev"
 }
 
+# A PC's install user is a real desktop account that already has the password
+# its owner chose for this computer: an owner by /etc/shadow from the first
+# second, which is what the routes behind the wizard check (deviceHasOwner).
+# Middleware, the wizard and /login read `password_configured` in
+# data/config.json instead, and nothing wrote it, so the wizard ran open while
+# every save behind it was refused for want of a session, and /login sent the
+# owner straight back to it. Recording the fact gives the flow the app already
+# has for an owned box: /setup asks for the password, the owner signs in with
+# the computer's own, and the wizard skips the steps a PC does not need. An
+# account with no usable password is left to the wizard, which sets the first.
+record_owner_password() {
+  local config="$PROJECT_DIR/data/config.json" status
+  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk '{ print $2 }' || true)"
+  if [ "$status" != "P" ]; then
+    return 0
+  fi
+  # As the install user, written the way src/lib/config-store.ts writes it: a
+  # 0600 temp file renamed into place. A file that does not parse is left alone.
+  as_user python3 - "$config" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    data = {}
+except (OSError, ValueError) as err:
+    print(f"  WARN: {path} could not be read ({err}); not recording the owner password", file=sys.stderr)
+    sys.exit(0)
+if data.get("password_configured") is True:
+    sys.exit(0)
+data["password_configured"] = True
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.json.")
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print("  Recorded this account's existing password as the owner's sign-in")
+PY
+}
+
 step_directories_permissions() {
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
@@ -1055,6 +1098,7 @@ step_directories_permissions() {
   fi
   seed_llamacpp_env "$ENV_FILE"
   seed_network_interface "$ENV_FILE"
+  record_owner_password
   echo "  Done"
 }
 
