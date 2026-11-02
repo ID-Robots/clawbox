@@ -1,3 +1,4 @@
+import os from "os";
 import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import path from "./runtime-path";
@@ -16,7 +17,11 @@ const LLAMACPP_RUNTIME_DIR = path.join(DATA_DIR, "llamacpp");
 const LLAMACPP_PID_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.pid");
 const LLAMACPP_LOG_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.log");
 const DEFAULT_LLAMACPP_BIN = "/usr/local/bin/llama-server";
-const DEFAULT_HF_BIN = "/home/clawbox/.local/bin/hf";
+// The running user's own: pipx puts `hf` in ~/.local/bin, and on a PC
+// (install-x64.sh) that user is the machine's owner, not `clawbox`.
+function defaultHfBin(): string {
+  return path.join(os.homedir(), ".local", "bin", "hf");
+}
 const DEFAULT_STARTUP_TIMEOUT_MS = 20 * 60 * 1000;
 
 export interface LlamaCppLaunchSpec {
@@ -118,7 +123,7 @@ export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel(), harness
     hfRepo,
     hfFile,
     binPath: process.env.LLAMACPP_BIN?.trim() || DEFAULT_LLAMACPP_BIN,
-    hfBinPath: process.env.HF_BIN?.trim() || DEFAULT_HF_BIN,
+    hfBinPath: process.env.HF_BIN?.trim() || defaultHfBin(),
     // The checkout, not the cwd. In production the cwd is `.next/standalone`
     // (Next's standalone server.js chdirs there), so this resolved to a path
     // whose only occupant is whatever Next's dependency tracer happened to trace in — a
