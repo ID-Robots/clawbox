@@ -136,7 +136,7 @@ os.replace(t, p)
 uninstall() { call POST /setup-api/apps/uninstall "{\"appId\":\"$APP\"}" 60; }
 # install MAX_SECONDS
 install() { call POST /setup-api/apps/install "{\"appId\":\"$APP\",\"source\":\"clawbox\"}" "$1"; }
-# $1: the seconds the window flow already took of the test's deadline.
+# $1: the seconds the window flow already took of the deadline of the test.
 T0=$(( $(date +%s) - ${1:-0} ))
 left() { local n=$(( T0 + $1 - $(date +%s) )); [ "$n" -lt 30 ] && n=30; echo "$n"; }
 
@@ -271,7 +271,7 @@ EXE=$(find "$HOME/.cache/ms-playwright" -maxdepth 4 -type f \( -name headless_sh
 if [ -z "$EXE" ] || [ ! -d "$REPO/node_modules/playwright" ]; then say "skip no Chromium for Playwright on the board: the window click-through needs one"; exit 0; fi
 if [ ! -r "$SECRET_FILE" ]; then say "not ok - $SECRET_FILE is not readable as the box account"; exit 0; fi
 COOKIE=$(owner_cookie)
-# This flow's share of the test's deadline (see the header).
+# The share of the deadline of the test this flow may use (see the header).
 END=$(( $(date +%s) + 240 ))
 left() { local n=$(( END - $(date +%s) )); [ "$n" -lt 10 ] && n=10; echo "$n"; }
 
