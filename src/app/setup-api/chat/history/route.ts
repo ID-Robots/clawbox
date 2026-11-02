@@ -109,7 +109,10 @@ export async function GET(req: NextRequest) {
   // for the conversation, and there is a right answer to give them.
   const limit = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), MAX_LIMIT) : DEFAULT_LIMIT;
   const records = await readTranscript(limit, key);
-  return NextResponse.json({ messages: records.map(toMessage) });
+  // The Hermes session the newest reply ran on, beside the messages: the
+  // adapter resumes it, so a reload continues the conversation it redraws.
+  const sessionId = records.findLast((record) => record.sessionId)?.sessionId;
+  return NextResponse.json({ messages: records.map(toMessage), ...(sessionId ? { sessionId } : {}) });
 }
 
 // DELETE /setup-api/chat/history[?sessionKey=…] → { ok: true }
