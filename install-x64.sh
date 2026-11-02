@@ -1006,6 +1006,23 @@ seed_llamacpp_env() {
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
 }
 
+# The Wi-Fi device the app's network code is pointed at. src/lib/network.ts
+# defaults NETWORK_INTERFACE to the Jetson's wlP1p1s0, which names nothing on a
+# PC, so every Wi-Fi reading there (Settings, the agent's wifi_status tool) was
+# an interface_mismatch. Seed the machine's own device, the first nmcli lists as
+# `wifi`; leave a machine with none, and an operator's own choice, alone.
+seed_network_interface() {
+  local env_file="$1" dev
+  if grep -q '^NETWORK_INTERFACE=' "$env_file" 2>/dev/null; then
+    return 0
+  fi
+  dev="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }' || true)"
+  if [ -z "$dev" ]; then
+    return 0
+  fi
+  ensure_env_setting "$env_file" "NETWORK_INTERFACE" "$dev"
+}
+
 step_directories_permissions() {
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
@@ -1037,6 +1054,7 @@ step_directories_permissions() {
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
   seed_llamacpp_env "$ENV_FILE"
+  seed_network_interface "$ENV_FILE"
   echo "  Done"
 }
 
