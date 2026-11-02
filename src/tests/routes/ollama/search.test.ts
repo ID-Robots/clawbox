@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+// The size cap is per host (src/lib/ollama-size-cap.ts). These cases are the
+// Jetson's, whose ollama.service carries ClawBox's memory cap; the workstation
+// case names its own.
+const sizeCap = vi.hoisted(() => ({ value: 4 }));
+vi.mock("@/lib/ollama-size-cap", () => ({ ollamaMaxModelParamB: () => sizeCap.value }));
+
 describe("GET /setup-api/ollama/search", () => {
   let ollamaSearchGet: (req: Request) => Promise<Response>;
 
@@ -12,6 +18,7 @@ describe("GET /setup-api/ollama/search", () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    sizeCap.value = 4;
     vi.stubGlobal("fetch", vi.fn());
     const mod = await import("@/app/setup-api/ollama/search/route");
     ollamaSearchGet = mod.GET;
@@ -185,6 +192,19 @@ describe("GET /setup-api/ollama/search", () => {
     expect(names).not.toContain("bigmodel");
   });
 
+  it("offers what an uncapped workstation can hold, and says so", async () => {
+    // A DGX Spark installed by install-x64.sh: no cgroup cap on ollama.service.
+    sizeCap.value = 130;
+    const mockHtml = `
+      <li><a href="/library/gpt-oss">gpt-oss</a><span>20b</span><span>120b</span></li>
+      <li><a href="/library/deepseek-r1">DeepSeek</a><span>671b</span></li>
+    `;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve(mockHtml) }));
+    const body = await (await ollamaSearchGet(createRequest("gpt-oss"))).json();
+    expect(body.maxParamBillions).toBe(130);
+    expect(body.results.map((r: { name: string }) => r.name)).toEqual(["gpt-oss"]);
+  });
+
   it("keeps models with no size info", async () => {
     const mockHtml = `
       <html>
@@ -355,6 +375,7 @@ describe("GET /setup-api/ollama/search — description sanitization", () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    sizeCap.value = 4;
     vi.stubGlobal("fetch", vi.fn());
     get = (await import("@/app/setup-api/ollama/search/route")).GET;
   });
