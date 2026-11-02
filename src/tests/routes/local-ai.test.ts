@@ -76,7 +76,9 @@ describe("POST /setup-api/local-ai", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockSetMany.mockResolvedValue();
-    mockReadConfig.mockResolvedValue({});
+    // What enabling Local AI leaves: the local model as the fallback. Only the
+    // local entries are taken out (local-ai-keeps-fallbacks.test.ts).
+    mockReadConfig.mockResolvedValue({ agents: { defaults: { model: { fallbacks: ["llamacpp/gemma4-e2b-it-q4_0"] } } } });
     mockInferConfiguredLocalModel.mockReturnValue({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
     mockRestartGateway.mockResolvedValue();
     mockStopLocalAiProvider.mockResolvedValue();
