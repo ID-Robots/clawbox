@@ -341,7 +341,7 @@ describe("the harvest of a worker's worktree", () => {
     fs.writeFileSync(path.join(wt.path, "note.md"), "kept\n");
     fs.mkdirSync(path.join(wt.path, "__pycache__"));
     fs.writeFileSync(path.join(wt.path, "__pycache__", "x.cpython-310.pyc"), "bytes");
-    fs.mkdirSync(path.join(wt.path, ".clawbox"));
+    fs.mkdirSync(path.join(wt.path, ".clawbox"), { recursive: true });
     fs.writeFileSync(path.join(wt.path, ".clawbox", "state.json"), "{}");
     const harvested = await harvestWorktree(wt.path, MESSAGE);
     expect(harvested).toEqual({ ok: true, files: ["note.md"] });
@@ -369,7 +369,7 @@ describe("the harvest of a worker's worktree", () => {
     if (!wt.ok) throw new Error(wt.detail);
     fs.writeFileSync(path.join(wt.path, "notes.md"), "kept\n");
     fs.writeFileSync(path.join(wt.path, "e2e.log"), "ignored by the project\n");
-    fs.mkdirSync(path.join(wt.path, ".clawbox"));
+    fs.mkdirSync(path.join(wt.path, ".clawbox"), { recursive: true });
     fs.writeFileSync(path.join(wt.path, ".clawbox", "state.json"), "{}");
     // e2e_check.py was written and deleted again; index.html is tracked and untouched.
     expect(await committableFiles(wt.path, ["notes.md", "e2e.log", ".clawbox/state.json", "e2e_check.py", "index.html"])).toEqual(["notes.md", "index.html"]);

@@ -922,6 +922,10 @@ interface ProjectPayload {
   onDesktop: boolean;
   latestRun: { id: string; status: string; startedAt?: number; completedAt?: number | null } | null;
   app: { name?: string; kind?: string | null; port?: number | null } | null;
+  /** Copies a run or an agent made of this project beside it, grouped here by the projects route. */
+  copies?: { folder: string; directory: string }[];
+  /** Its git worktrees beside it in the project folder: no rows of their own, so their runs are this row's. */
+  worktrees?: string[];
 }
 
 /**
@@ -938,6 +942,10 @@ function runInProject(run: RunPayload, project: ProjectPayload): boolean {
   if (run.projectId) return false;
   const home = runHome(run);
   if (home === project.directory || home.startsWith(`${project.directory}/`)) return true;
+  // A run in one of the project's copies or sibling worktrees is the
+  // project's: neither is a row of its own.
+  if ((project.copies ?? []).some((c) => home === c.directory || home.startsWith(`${c.directory}/`) || basename(home) === c.folder)) return true;
+  if ((project.worktrees ?? []).some((w) => home === w || home.startsWith(`${w}/`) || basename(home) === basename(w))) return true;
   return basename(home) === project.folder;
 }
 
@@ -964,6 +972,7 @@ function projectRow(project: ProjectPayload, runs: RunPayload[] | null): Record<
     last_commit: commit,
     on_desktop: project.onDesktop,
     ...(app ? { app } : {}),
+    ...(project.copies?.length ? { run_copies: project.copies.length } : {}),
     latest_run: project.latestRun ? `${project.latestRun.id} (${project.latestRun.status})` : "none",
     runs_working: count((r) => r.status === "running"),
     runs_waiting: count((r) => r.status === "paused" || r.status === "gave_up" || r.status === "draft" || r.status === "queued"),

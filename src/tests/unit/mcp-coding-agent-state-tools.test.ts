@@ -480,6 +480,29 @@ describe("coding_project_status", () => {
     expect(projects[1]).toMatchObject({ project: "notes", name: "Notes", kind: "code project", run_it_with: { project_id: "notes" }, runs_working: 0 });
   });
 
+  it("counts a run in a sibling worktree or a copy as its project's: neither is a row of its own", async () => {
+    const site = PROJECTS.projects[0];
+    apiGet.mockResolvedValue({
+      ...PROJECTS,
+      projects: [
+        { ...site, worktrees: ["/home/clawbox/projects/site-ref-task-7"], copies: [{ folder: "site-copy-1", directory: "/home/clawbox/projects/site-copy-1" }] },
+        PROJECTS.projects[1],
+      ],
+    });
+    apiTry.mockResolvedValue({
+      runs: [
+        { ...RUN, id: "run-sibling1", status: "running", leftover: false, worktree: null, directory: "/home/clawbox/projects/site-ref-task-7" },
+        { ...RUN, id: "run-incopy01", status: "running", leftover: false, worktree: null, directory: "/home/clawbox/projects/site-copy-1" },
+      ],
+    });
+    const out = await harness().call("coding_project_status", {});
+    if (out.isError) throw new Error("expected the table");
+    const { projects } = JSON.parse(out.text) as { projects: Record<string, unknown>[] };
+    expect(projects).toHaveLength(2);
+    expect(projects[0]).toMatchObject({ project: "site", runs_working: 2, run_copies: 1 });
+    expect(projects[1]).toMatchObject({ project: "notes", runs_working: 0 });
+  });
+
   it("keeps the table when the run list cannot be read", async () => {
     apiGet.mockResolvedValue(PROJECTS);
     apiTry.mockResolvedValue(null);

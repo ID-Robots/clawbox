@@ -545,29 +545,32 @@ export async function register() {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }
   try {
-    // Run worktrees nothing needs any more (src/lib/coding-run-worktree.ts).
-    // At most weekly — the module keeps the date, so this fires on the first
-    // boot after the week is up rather than on every restart — and after the
-    // boot rush, because it is a `git worktree list` per project and nothing
-    // on the box is waiting for its answer.
+    // The folder janitor (src/lib/coding-folder-janitor.ts): the worktrees
+    // and project copies runs and agents left behind, removed once nothing
+    // can still need them — daily, and a little after a run settles. It
+    // replaces the weekly worktree sweep, which forced dirty trees away; the
+    // owner's switch and retention are in the Coding Agent settings.
     //
     // A boot hook rather than a cron entry for the reason the memory schedule
     // is one: a timer rebuilt at every boot cannot be duplicated or orphaned
-    // by an update.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { sweepCodingWorktrees } = require('./lib/coding-agent')
-    const sweep = setTimeout(() => {
-      void sweepCodingWorktrees()
-        .then((removed: number) => {
-          if (removed > 0) console.log(`[instrumentation] Swept ${removed} stale coding worktree(s)`)
-        })
-        .catch((err: unknown) => {
-          console.error('[instrumentation] Coding worktree sweep failed:', err instanceof Error ? err.message : err)
-        })
-    }, 60_000)
-    sweep.unref?.()
+    // by an update. The module keeps the last pass's date on disk, so a
+    // restart neither skips a day nor runs twice in one.
+    //
+    // The DEVICE's own account only, like the git identity cleanup, the
+    // browser repair and the default project folder: under `bun run dev` on a
+    // developer's machine its scope would be that person's ~/Projects, and
+    // ten minutes later it would remove their own idle worktrees and move
+    // their second clones to a trash. The module refuses off the account as
+    // well (`start`); this keeps it from even loading there.
+    if (onDeviceAccount) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const folderJanitor = require('./lib/coding-folder-janitor')
+      folderJanitor.start()
+    } else {
+      console.log('[instrumentation] Not the device account: the coding folder janitor is not armed')
+    }
   } catch (err) {
-    console.error('[instrumentation] Could not arm the coding worktree sweep:', err instanceof Error ? err.message : err)
+    console.error('[instrumentation] Could not arm the coding folder janitor:', err instanceof Error ? err.message : err)
   }
   try {
     // The ClawBox AI cloud defaults (the owner's decision of 2026-09-14): a box

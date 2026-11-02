@@ -25,6 +25,7 @@ import fs from "fs";
 import { runChild, failureDetail, type ChildResult } from "./child-run";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { BOX_FAVICONS } from "./project-icon";
+import { writeRunMarker } from "./coding-folder-kind";
 
 const CALL_TIMEOUT_MS = 60_000;
 export const WORKTREES_DIR = path.join(".clawbox", "worktrees");
@@ -260,6 +261,9 @@ async function addWorkerWorktreeNow(dir: string, teamId: string, taskId: string,
   fs.mkdirSync(path.join(dir, WORKTREES_DIR), { recursive: true });
   const added = await git(dir, ["worktree", "add", "-b", branch, target, teamBranchName(teamId)]);
   if (!ok(added)) return { ok: false, detail: failureDetail(added, `Making a worktree for ${taskId}`) };
+  // The run marker (coding-folder-kind.ts), under the `.clawbox/` the
+  // repository's info/exclude already hides from `git status`.
+  writeRunMarker(target, { kind: "team", id: teamId, project: dir });
   return { ok: true, path: target, branch };
 }
 
