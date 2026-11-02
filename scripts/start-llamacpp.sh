@@ -28,7 +28,7 @@ fi
 
 if [ ! -f "$MODEL_PATH" ]; then
   if [ ! -x "$HF_BIN" ]; then
-    echo "[llamacpp] Missing local model at ${MODEL_PATH} and Hugging Face CLI at ${HF_BIN}. Run the llama.cpp install step to provision Gemma 4 offline."
+    echo "[llamacpp] Missing local model at ${MODEL_PATH} and Hugging Face CLI at ${HF_BIN}. Run the llama.cpp install step to provision the local model."
     exit 1
   fi
   echo "[llamacpp] Downloading ${HF_REPO}/${HF_FILE}"
