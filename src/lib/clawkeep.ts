@@ -31,7 +31,7 @@ import {
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import { formatBytes, formatBytesApart } from "@/lib/format-bytes";
-import { getEdition } from "@/lib/harness";
+import { getActiveHarness, getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import type { HarnessId } from "@/lib/harness/transport";
 import { migrateLegacyPortalUrl } from "@/lib/portal-legacy-domain";
@@ -1360,10 +1360,13 @@ async function readStatus(): Promise<ClawKeepStatus> {
 
   const server = readServer(configToml);
   // A single-harness edition names its own agent. "dual" installs both and
-  // defaults to OpenClaw (`DEFAULT_HARNESS` in harness.ts), which is also what
-  // the daemon's `device_agent()` picks when both state directories exist — the
-  // two must agree, because the daemon is what actually builds the archive.
-  const agent: HarnessId = getEdition() === "hermes" ? "hermes" : "openclaw";
+  // runs the one the owner switched it to (`active_harness`), else OpenClaw
+  // (`DEFAULT_HARNESS` in harness.ts), which is also what the daemon's
+  // `device_agent()` picks — the two must agree, because the daemon is what
+  // actually builds the archive.
+  const edition = getEdition();
+  const agent: HarnessId =
+    edition === "hermes" || (edition === "dual" && (await getActiveHarness()) === "hermes") ? "hermes" : "openclaw";
   const source = backupSourceFor(agent);
   return {
     paired: !!token,
