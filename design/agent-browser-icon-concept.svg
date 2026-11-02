@@ -1,0 +1,6 @@
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="">
+<rect x="2.5" y="3.5" width="19" height="17" rx="3.5"/><path d="M2.5 8h19"/>
+<circle cx="5.9" cy="5.8" r="0.75" fill="currentColor" stroke="none"/><circle cx="8.3" cy="5.8" r="0.75" fill="currentColor" stroke="none"/>
+<path fill="currentColor" stroke="none" d="M9 10.3Q9.55 13.45 12.7 14Q9.55 14.55 9 17.7Q8.45 14.55 5.3 14Q8.45 13.45 9 10.3Z"/>
+<path fill="currentColor" stroke="none" d="M13.4 11.2l6 2.45q.55.25.05.5l-2.35 1 1.55 2.45q.2.35-.15.55l-.75.45q-.35.2-.55-.15l-1.5-2.45-1.7 1.95q-.4.4-.5-.15z"/>
+</svg>
