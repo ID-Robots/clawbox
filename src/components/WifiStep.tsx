@@ -116,9 +116,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     setCableStuck(false);
   }, [eth?.cable, eth?.connected]);
 
-  // Online with no cable at all: the network is already the machine's own.
-  // (A cable that is in but has no internet yet stays on the cable path.)
-  const onlineWithoutCable = eth?.connected !== true && eth?.cable !== true && eth?.online === true;
+  // Online without a working cable: the network is already the machine's own.
+  // A cable with carrier but no connection (an unconfigured second port, a DGX
+  // Spark's stacking port) does not hold back a machine that is online anyway.
+  const onlineWithoutCable = eth?.connected !== true && eth?.online === true;
 
   const [hasScanned, setHasScanned] = useState(false);
 
@@ -340,9 +341,9 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                 className="w-full py-3 px-4 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed"
               >
                 <span className="whitespace-nowrap">
-                  {eth?.cable && !eth?.connected
-                    ? t("connecting")
-                    : onlineWithoutCable ? t("wifi.proceedOnline") : t("wifi.proceedEthernet")}
+                  {onlineWithoutCable
+                    ? t("wifi.proceedOnline")
+                    : eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
                 </span>
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>

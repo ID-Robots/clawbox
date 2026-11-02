@@ -58,6 +58,15 @@ describe("WifiStep on a computer that is already online", () => {
     expect(skip?.body).toBe(JSON.stringify({ skip: true }));
   });
 
+  it("lets an online computer continue even with a cable in a port that has no connection", async () => {
+    // An unconfigured second NIC, or a DGX Spark's stacking port cabled to a
+    // second Spark: carrier, no connection — the Wi-Fi uplink still works.
+    mockFetch({ connected: false, cable: true, iface: "enp1s0f0np0", online: true });
+    render(<WifiStep onNext={vi.fn()} />);
+    const button = await screen.findByRole("button", { name: /wifi\.proceedOnline/ });
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
   it("still holds a box with no cable and no internet at the choice", async () => {
     // A Jetson on first boot: broadcasting its setup hotspot, nothing upstream.
     mockFetch({ connected: false, cable: false, iface: "eth0", online: false });
