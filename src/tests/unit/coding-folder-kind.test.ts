@@ -76,6 +76,13 @@ describe("classifyFolders", () => {
     });
   });
 
+  it("leaves a clone with a name of its own as a project, even on a run branch", () => {
+    repo("shop", "https://example.com/owner/shop.git");
+    const mine = repo("storefront", "https://example.com/owner/shop.git");
+    git(mine, "checkout", "-q", "-b", "claude/try-it");
+    expect(kindsOf(["shop", "storefront"])).toEqual({ shop: { kind: "project", parent: null }, storefront: { kind: "project", parent: null } });
+  });
+
   it("says a folder carrying another worktree's run marker is a copy of that run's project", () => {
     const shop = repo("shop");
     const copy = repo("elsewhere");

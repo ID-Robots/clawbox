@@ -19,10 +19,11 @@
  * - `.git` is a directory and `.clawbox/run.json` (the run marker this box
  *   writes into every run and team worktree, `writeRunMarker`) names another
  *   folder → a copy of that run's worktree.
- * - `.git` is a directory, another top-level repository has the same `origin`,
- *   and this one is checked out on a run-style branch (`isRunStyleBranch`) →
- *   a copy of that project. Never a repository with linked worktrees of its
- *   own: that one is somebody's original.
+ * - `.git` is a directory, another top-level repository has the same `origin`
+ *   and a name this one's STARTS with (`shop` → `shop-run-x`), and this one is
+ *   checked out on a run-style branch (`isRunStyleBranch`) → a copy of that
+ *   project. Never a repository with linked worktrees of its own, nor one the
+ *   box made a run worktree or a team in: those are somebody's original.
  * - Anything else — no git at all, a submodule pointer, a repository with no
  *   twin — is the owner's project, and nothing here or in the janitor touches
  *   it.
@@ -264,23 +265,25 @@ export function classifyFolders(base: string, names: readonly string[], knownPro
     const group = r.origin ? byOrigin.get(r.origin) ?? [] : [];
     let parent: (typeof repos)[number] | null = null;
     if (!r.original && group.length > 1) {
-      // A copy is usually named after what it copied (`shop` → `shop-run-x`),
-      // so an original whose name starts this one's wins; otherwise the
-      // shortest name. With no original at all — every twin on a run branch —
-      // the shortest-named twin stands in for one and stays a project.
-      const originals = group.filter((g) => g !== r && g.original);
-      if (originals.length) {
-        parent = originals.filter((g) => r.name.startsWith(g.name)).sort(byShortName)[0] ?? originals.sort(byShortName)[0];
-      } else {
-        const standIn = group.slice().sort(byShortName)[0];
-        if (standIn !== r) parent = standIn;
-      }
+      // A run's or an agent's copy is named after what it copied (`shop` →
+      // `shop-run-x`): only a twin whose name STARTS this one's is taken for
+      // its original. A clone with a name of its own — the owner's second
+      // checkout, say — stays a project whatever branch it is on. With no
+      // original at all (every twin on a run branch), the shortest prefix
+      // twin stands in for one and stays a project itself.
+      const prefixed = group.filter((g) => g !== r && r.name.startsWith(g.name) && r.name.length > g.name.length).sort(byShortName);
+      parent = prefixed.find((g) => g.original) ?? prefixed.find((g) => !isPrefixedTwin(g, group)) ?? null;
     }
     out.set(r.name, parent
       ? { name: r.name, dir: r.dir, kind: "copy", parent: parent.dir, why: `same origin as ${parent.name}, on run branch ${r.branch}`, branch: r.branch }
       : { name: r.name, dir: r.dir, kind: "project", parent: null, why: "", branch: r.branch });
   }
   return out;
+}
+
+/** Is `g` itself named after a shorter twin — a copy, not a stand-in for the original? */
+function isPrefixedTwin(g: { name: string }, group: readonly { name: string }[]): boolean {
+  return group.some((o) => o !== g && g.name.startsWith(o.name) && g.name.length > o.name.length);
 }
 
 function byShortName(a: { name: string }, b: { name: string }): number {

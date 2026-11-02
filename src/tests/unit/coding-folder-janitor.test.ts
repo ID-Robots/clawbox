@@ -21,9 +21,13 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 type RunStub = { id: string; status: string; directory: string; worktree?: { path: string; branch: string; base: string; project: string; removed: boolean } | null; leftover?: boolean; team?: unknown };
 type BoardStub = { id: string; status: string; directory: string; tasks: { worktree: string | null }[] };
 
-const stores = vi.hoisted(() => ({ runs: [] as RunStub[], boards: [] as BoardStub[], folder: "", marked: [] as string[] }));
+const stores = vi.hoisted(() => ({ runs: [] as RunStub[], boards: [] as BoardStub[], folder: "", marked: [] as string[], reads: 0, laterRuns: null as null | { after: number; runs: RunStub[] } }));
 vi.mock("@/lib/coding-agent", () => ({
-  listRuns: () => stores.runs.map((r) => ({ leftover: false, worktree: null, ...r })),
+  listRuns: () => {
+    stores.reads += 1;
+    const runs = stores.laterRuns && stores.reads > stores.laterRuns.after ? stores.laterRuns.runs : stores.runs;
+    return runs.map((r) => ({ leftover: false, worktree: null, ...r }));
+  },
   getDefaultDirectory: async () => stores.folder,
   projectDirectoryOf: (r: RunStub) => r.worktree?.project ?? r.directory,
   onRunSettled: () => () => {},
@@ -106,6 +110,8 @@ beforeEach(async () => {
   stores.runs = [];
   stores.boards = [];
   stores.marked = [];
+  stores.reads = 0;
+  stores.laterRuns = null;
   stores.folder = projects;
   vi.resetModules();
   janitor = await import("@/lib/coding-folder-janitor");
@@ -235,7 +241,10 @@ describe("what is removed", () => {
     expect(fs.existsSync(path.join(shelf, entry, "copy.txt"))).toBe(true);
     // The owner's deleted projects live one level up; the shelf is no entry of theirs.
     expect(fs.readdirSync(path.dirname(shelf))).toEqual(["run-copies"]);
-    expect(logLines()[0]).toMatchObject({ action: "trashed", kind: "copy", path: copy, branch: "clawbox/run-copy1234", trashPath: path.join(shelf, entry) });
+    expect(logLines()[0]).toMatchObject({ action: "trashed", kind: "copy", path: copy, branch: "clawbox/run-copy1234", trashPath: path.join(shelf, entry), freedBytes: 0 });
+    // Nothing is freed by a move: the size is said, and freed when the trash lets it go.
+    expect(logLines()[0].sizeBytes).toBeGreaterThan(0);
+    expect(result.freedBytes).toBe(0);
   });
 
   it("still takes a copy a settled run once worked in, but never the original a run's worktree was made from", async () => {
@@ -404,6 +413,66 @@ describe("what is kept, and why", () => {
     commit(copy, "local.txt");
     age(copy, 30);
     expect(await keptFor(copy)).toMatchObject({ kind: "copy", action: "keep", reason: "unmerged" });
+  });
+
+  it("keeps a tree with ignored files that are not build output, and lets build output go", async () => {
+    const alpha = makeRepo("alpha");
+    fs.writeFileSync(path.join(alpha, ".gitignore"), ".env\ndist/\n");
+    git(alpha, "add", "-A");
+    git(alpha, "commit", "-q", "-m", "ignore");
+    const secret = path.join(projects, "alpha-env");
+    const built = path.join(projects, "alpha-built");
+    git(alpha, "worktree", "add", "-q", "-b", "env", secret);
+    git(alpha, "worktree", "add", "-q", "-b", "built", built);
+    fs.writeFileSync(path.join(secret, ".env"), "TOKEN=x\n");
+    fs.mkdirSync(path.join(built, "dist"));
+    fs.writeFileSync(path.join(built, "dist", "app.js"), "1\n");
+    age(secret, 30);
+    age(built, 30);
+    expect(await keptFor(secret)).toMatchObject({ action: "keep", reason: "dirty", detail: expect.stringContaining(".env") });
+    expect(fs.existsSync(built)).toBe(false);
+  });
+
+  it("keeps everything when the run records cannot be read", async () => {
+    const alpha = makeRepo("alpha");
+    const wt = path.join(projects, "alpha-old");
+    git(alpha, "worktree", "add", "-q", "-b", "old", wt);
+    age(wt, 30);
+    fs.writeFileSync(path.join(tmp, "root", "data", "coding-agent-runs.json"), "{ torn");
+    expect(await keptFor(wt)).toMatchObject({ action: "keep", reason: "unknown" });
+  });
+
+  it("keeps everything when a lease file cannot be read in full", async () => {
+    const alpha = makeRepo("alpha");
+    const wt = path.join(projects, "alpha-old");
+    git(alpha, "worktree", "add", "-q", "-b", "old", wt);
+    age(wt, 30);
+    fs.mkdirSync(path.join(tmp, "leases"));
+    fs.writeFileSync(path.join(tmp, "leases", "huge"), "x".repeat(1024 * 1024 + 1));
+    expect(await keptFor(wt)).toMatchObject({ action: "keep", reason: "lease" });
+  });
+
+  it("never prunes a worktree git calls prunable while its folder is still there", async () => {
+    const alpha = makeRepo("alpha");
+    const wt = path.join(projects, "alpha-lost");
+    git(alpha, "worktree", "add", "-q", "-b", "lost", wt);
+    fs.writeFileSync(path.join(wt, "work.txt"), "mine\n");
+    fs.rmSync(path.join(wt, ".git"));
+    expect(await keptFor(wt)).toMatchObject({ action: "keep", reason: "unknown" });
+    expect(fs.existsSync(path.join(wt, "work.txt"))).toBe(true);
+    expect(git(alpha, "worktree", "list", "--porcelain")).toContain(wt);
+  });
+
+  it("keeps a tree a run started in after the plan was made", async () => {
+    const alpha = makeRepo("alpha");
+    const wt = path.join(projects, "alpha-late");
+    git(alpha, "worktree", "add", "-q", "-b", "late", wt);
+    age(wt, 30);
+    // Two reads of the run store make the plan; the run is there from the third.
+    stores.laterRuns = { after: 2, runs: [{ id: "run-late1234", status: "running", directory: wt }] };
+    const result = await janitor.runJanitorPass({ trigger: "manual" });
+    expect(result.removed).toBe(0);
+    expect(fs.existsSync(wt)).toBe(true);
   });
 
   it("does not make a folder look used by looking at it", async () => {

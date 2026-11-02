@@ -60,7 +60,7 @@ import { getDefaultDirectory, listRuns, markRunWorktreesRemoved, onRunSettled, p
 import { isHeld } from "./coding-agent-status";
 import { listBoards } from "./coding-team-board";
 import { isSettledTeamStatus } from "./coding-team-status";
-import { gitIn, withDirLock } from "./coding-team-worktree";
+import { gitIn, isGeneratedArtifact, withDirLock } from "./coding-team-worktree";
 import { beginProjectRemoval, isProjectBeingRemoved, runStartingIn } from "./coding-project-removal-lock";
 import { directorySize, projectTrashDir, TRASH_RETENTION_MS, trashEntryTime } from "./coding-project-delete";
 import { classifyFolders, readGitPointer, readHeadBranch, readRunMarker } from "./coding-folder-kind";
@@ -194,6 +194,10 @@ interface PassContext {
   /** Run worktree path → the base the run forked from. */
   runBases: Map<string, string>;
   leases: string[];
+  /** False when a lease file could not be read in full: then every candidate is kept. */
+  leasesComplete: boolean;
+  /** False when the run or team records could not be read: then every candidate is kept. */
+  stateReadable: boolean;
   protectedPaths: string[];
 }
 
@@ -206,6 +210,11 @@ const out = (r: ChildResult) => r.stdout.trim();
  * left as it was.
  */
 export async function planJanitorPass(options: { now?: number; maxRemovals?: number } = {}): Promise<JanitorPlan> {
+  return (await planWithCandidates(options)).plan;
+}
+
+/** The plan, and the candidate behind each entry — what the act re-judges under its claim. */
+async function planWithCandidates(options: { now?: number; maxRemovals?: number }): Promise<{ plan: JanitorPlan; candidates: Map<string, Candidate> }> {
   const now = options.now ?? Date.now();
   const maxRemovals = Math.max(0, options.maxRemovals ?? MAX_REMOVALS_PER_PASS);
   const settings = await readJanitorSettings();
@@ -213,6 +222,7 @@ export async function planJanitorPass(options: { now?: number; maxRemovals?: num
   const scan = await scanCandidates(projectFolder);
   const ctx = await passContext(projectFolder, settings, now);
   const entries = (await mapLimit(scan.candidates, 4, (c) => judge(c, ctx))).sort(byAction);
+  const candidates = new Map(scan.candidates.map((c) => [c.path, c]));
   // The pass's share, said in the plan: past it a removal waits for the next pass.
   let taken = 0;
   const capped = entries.map((e) => {
@@ -220,7 +230,7 @@ export async function planJanitorPass(options: { now?: number; maxRemovals?: num
     taken += 1;
     return taken <= maxRemovals ? e : { ...e, action: "keep" as const, reason: "limit" as const, detail: `${e.detail} Waits for the next pass: one pass removes at most ${maxRemovals}.` };
   });
-  return { at: now, settings, projectFolder, entries: capped.sort(byAction), userProjects: scan.userProjects, notScanned: scan.notScanned };
+  return { plan: { at: now, settings, projectFolder, entries: capped.sort(byAction), userProjects: scan.userProjects, notScanned: scan.notScanned }, candidates };
 }
 
 const ACTION_ORDER: Record<JanitorAction, number> = { remove: 0, trash: 1, prune: 2, keep: 3 };
@@ -342,6 +352,36 @@ function safeBoards(): ReturnType<typeof listBoards> {
   }
 }
 
+/**
+ * Can the run and team records be read? A store that is not there is an empty
+ * one; a file that is there and will not parse is NOT — the run store answers
+ * an empty list for it, and "nothing is running" read off a corrupt file is
+ * exactly the answer that must never reach a removal.
+ */
+export function stateReadable(): boolean {
+  try {
+    if (!Array.isArray(JSON.parse(fs.readFileSync(path.join(DATA_DIR, "coding-agent-runs.json"), "utf8")))) return false;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  const teams = path.join(DATA_DIR, "coding-team");
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(teams);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      JSON.parse(fs.readFileSync(path.join(teams, name), "utf8"));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function passContext(projectFolder: string, settings: JanitorSettings, now: number): Promise<PassContext> {
   const live: PassContext["live"] = [];
   const runBases = new Map<string, string>();
@@ -367,7 +407,8 @@ async function passContext(projectFolder: string, settings: JanitorSettings, now
     projectFolder,
     live,
     runBases,
-    leases: readLeases(),
+    ...readLeases(),
+    stateReadable: stateReadable(),
     protectedPaths: [path.resolve(CONFIG_ROOT), projectFolder],
   };
 }
@@ -387,32 +428,41 @@ export function leaseFiles(): string[] {
 }
 
 const MAX_LEASE_FILES = 200;
-const MAX_LEASE_BYTES = 256 * 1024;
+const MAX_LEASE_BYTES = 1024 * 1024;
 
-function readLeases(): string[] {
+/**
+ * Every lease file's text, and whether ALL of them were read in full. A lease
+ * file that is there but cannot be read — a permission, a size past the
+ * bound, one file too many — is not "no lease": the pass then keeps every
+ * candidate (`leasesComplete: false`), because it cannot say which one the
+ * unread lease named.
+ */
+function readLeases(): { leases: string[]; leasesComplete: boolean } {
   const texts: string[] = [];
+  let complete = true;
   const readOne = (file: string) => {
-    if (texts.length >= MAX_LEASE_FILES) return;
+    if (texts.length >= MAX_LEASE_FILES) {
+      complete = false;
+      return;
+    }
     try {
       const st = fs.statSync(file);
       if (!st.isFile()) return;
-      const fd = fs.openSync(file, "r");
-      try {
-        const buf = Buffer.alloc(Math.min(st.size, MAX_LEASE_BYTES));
-        const n = fs.readSync(fd, buf, 0, buf.length, 0);
-        texts.push(buf.subarray(0, n).toString("utf8"));
-      } finally {
-        fs.closeSync(fd);
+      if (st.size > MAX_LEASE_BYTES) {
+        complete = false;
+        return;
       }
-    } catch {
-      // Not there, or not readable: no lease from this one.
+      texts.push(fs.readFileSync(file, "utf8"));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") complete = false;
     }
   };
   for (const entry of leaseFiles()) {
     let st: fs.Stats | null = null;
     try {
       st = fs.statSync(entry);
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") complete = false;
       continue;
     }
     if (st.isDirectory()) {
@@ -420,6 +470,7 @@ function readLeases(): string[] {
       try {
         names = fs.readdirSync(entry).sort();
       } catch {
+        complete = false;
         continue;
       }
       for (const name of names) readOne(path.join(entry, name));
@@ -427,7 +478,7 @@ function readLeases(): string[] {
       readOne(entry);
     }
   }
-  return texts;
+  return { leases: texts, leasesComplete: complete };
 }
 
 /**
@@ -509,15 +560,21 @@ async function judge(c: Candidate, ctx: PassContext): Promise<JanitorEntry> {
   if (ctx.protectedPaths.some((p) => inside(realOr(p), real)) || (c.project && realOr(c.project) === real)) {
     return keep(c, "protected", "ClawBox's own checkout, the project folder or a main checkout is never removed.");
   }
+  if (!ctx.stateReadable) return keep(c, "unknown", "The run or team records could not be read, so nothing is removed.");
   if (c.locked) return keep(c, "locked", "Locked with git worktree lock.");
-  if (c.prunable || !fs.existsSync(c.path)) {
-    if (c.kind !== "worktree") return keep(c, "unknown", "The folder is not there.");
-    return go(c, "prune", "missing", "The folder is gone; git still lists it, and git worktree prune clears that.", null);
-  }
   const live = liveIn(c, ctx);
   if (live) return keep(c, live.why, `In use by the ${live.label}.`);
   if (isProjectBeingRemoved(real) || runStartingIn(real)) return keep(c, "busy", "A run is starting there, or it is being removed.");
+  if (!ctx.leasesComplete) return keep(c, "lease", "A lease file could not be read in full, so nothing is removed.");
   if (leaseNaming(c, ctx.leases)) return keep(c, "lease", "A lab or board lease names it.");
+  if (!fs.existsSync(c.path)) {
+    // Only git's own word that the folder is gone lets the record go.
+    if (c.kind !== "worktree" || !c.prunable) return keep(c, "unknown", "The folder is not there.");
+    return go(c, "prune", "missing", "The folder is gone; git still lists it, and git worktree prune clears that.", null);
+  }
+  // Prunable with the folder still there (its `.git` file lost, say): pruning
+  // would cut it loose from the repository with its files left behind.
+  if (c.prunable) return keep(c, "unknown", "git calls it prunable, but its folder is still there.");
 
   const last = lastGitActivity(c.path);
   const idleDays = last === null ? null : Math.max(0, Math.floor((ctx.now - last) / DAY_MS));
@@ -526,9 +583,9 @@ async function judge(c: Candidate, ctx: PassContext): Promise<JanitorEntry> {
     return keep(c, "recent", `Used ${idleDays === 0 ? "today" : `${idleDays} day(s) ago`}; kept for ${Math.round(ctx.retentionMs / DAY_MS)} days.`, idleDays);
   }
 
-  const clean = await isClean(c.path);
+  const clean = await cleanState(c.path);
   if (clean === null) return keep(c, "unknown", "git status could not be read.", idleDays);
-  if (!clean) return keep(c, "dirty", "It has changed or untracked files.", idleDays);
+  if (clean !== true) return keep(c, "dirty", clean, idleDays);
 
   if (c.kind === "copy") {
     const stash = await gitIn(c.path, ["--no-optional-locks", "stash", "list"]);
@@ -550,13 +607,36 @@ async function judge(c: Candidate, ctx: PassContext): Promise<JanitorEntry> {
   return keep(c, "unmerged", `${unpushed} commit(s) are neither merged nor pushed.`, idleDays);
 }
 
-/** `git status` empty, untracked files included; a root `node_modules` LINK is the project's and not work. Null: git could not say. */
-async function isClean(dir: string): Promise<boolean | null> {
+/**
+ * Build output a removal may take with the tree: what `isGeneratedArtifact`
+ * says git should never have been handed, the usual build and cache folders,
+ * logs, and the box's own `.clawbox/`. Anything else ignored — a `.env`, a
+ * local database, a `secrets.json` — is somebody's, and keeps the tree.
+ */
+const BUILD_OUTPUT = /(^|\/)(\.next|dist|build|out|coverage|\.cache|\.turbo|target|\.parcel-cache|\.vite|\.svelte-kit|\.nuxt|\.output|playwright-report|test-results|\.clawbox)(\/|$)|\.log$|(^|\/)\.eslintcache$/;
+
+export function isBuildOutput(relPath: string): boolean {
+  const p = relPath.replace(/\/+$/, "");
+  return isGeneratedArtifact(p) || BUILD_OUTPUT.test(p);
+}
+
+/**
+ * True when `git status` is empty, untracked files included, and nothing
+ * ignored is anything but build output — `git worktree remove` takes ignored
+ * files with it without asking. Otherwise the sentence that says why; null
+ * when git could not say. A root `node_modules` LINK is the project's, not work.
+ */
+async function cleanState(dir: string): Promise<true | string | null> {
   const args = ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"];
   if (isLink(path.join(dir, "node_modules"))) args.push("--", ".", ":(exclude)node_modules");
   const r = await gitIn(dir, args);
   if (!ok(r)) return null;
-  return out(r) === "";
+  if (out(r) !== "") return "It has changed or untracked files.";
+  const ignored = await gitIn(dir, ["--no-optional-locks", "status", "--porcelain", "--ignored=matching", "--untracked-files=normal"]);
+  if (!ok(ignored)) return null;
+  const kept = ignored.stdout.split("\n").filter((l) => l.startsWith("!! ")).map((l) => l.slice(3).replace(/^"|"$/g, "")).filter((p) => !isBuildOutput(p));
+  if (kept.length) return `It has ignored files that are not build output: ${kept.slice(0, 3).join(", ")}${kept.length > 3 ? ", …" : ""}.`;
+  return true;
 }
 
 function isLink(p: string): boolean {
@@ -624,6 +704,8 @@ export interface JanitorLogLine {
   branch: string | null;
   reason: string;
   freedBytes: number;
+  /** For a copy moved to the trash: its size. Nothing is freed until the trash lets it go (`expired`). */
+  sizeBytes?: number;
   trashPath?: string;
   detail?: string;
 }
@@ -720,25 +802,50 @@ function writeState(state: JanitorState): void {
 /** A pass that holds the lock longer than this is taken to have died. */
 const STALE_LOCK_MS = 2 * 60 * 60_000;
 
-/** Take the cross-process lock, or null when another live pass holds it. */
+/**
+ * Take the cross-process lock, or null when another live pass holds it.
+ *
+ * The lock names its holder with a token, and only that token's holder
+ * deletes it. A dead holder's lock is taken over by RENAMING it aside — one
+ * process can win a rename — and checked again once it is aside: a lock a
+ * live pass took in between is put back, never deleted.
+ */
 function takeLock(now: number): (() => void) | null {
   const file = lockPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  const token = `${process.pid} ${now} ${Math.random().toString(36).slice(2, 10)}`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const fd = fs.openSync(file, "wx", 0o644);
-      fs.writeSync(fd, `${process.pid} ${now}\n`);
-      fs.closeSync(fd);
+      fs.writeFileSync(file, `${token}\n`, { flag: "wx", mode: 0o644 });
       let released = false;
       return () => {
         if (released) return;
         released = true;
-        fs.rmSync(file, { force: true });
+        try {
+          if (fs.readFileSync(file, "utf8").trim() === token) fs.rmSync(file, { force: true });
+        } catch {
+          // Already gone.
+        }
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") return null;
       if (!lockIsStale(file, now)) return null;
-      fs.rmSync(file, { force: true });
+      const aside = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.stale`;
+      try {
+        fs.renameSync(file, aside);
+      } catch {
+        return null;
+      }
+      if (!lockIsStale(aside, now)) {
+        try {
+          fs.linkSync(aside, file);
+        } catch {
+          // A newer lock is in place already: it stands.
+        }
+        fs.rmSync(aside, { force: true });
+        return null;
+      }
+      fs.rmSync(aside, { force: true });
     }
   }
   return null;
@@ -803,7 +910,7 @@ export async function runJanitorPass(options: {
       if (options.throwIfBusy) throw new JanitorError("busy", "A clean-up is already running.");
       return { ...result, skipped: "busy" };
     }
-    const plan = await planJanitorPass({ now, maxRemovals });
+    const { plan, candidates } = await planWithCandidates({ now, maxRemovals });
     const log = (line: Omit<JanitorLogLine, "at" | "trigger">) => {
       const full: JanitorLogLine = { at: new Date().toISOString(), trigger: options.trigger, ...line };
       appendLog(full);
@@ -825,14 +932,35 @@ export async function runJanitorPass(options: {
         result.pruned += 1;
         continue;
       }
-      const acted = entry.action === "trash" ? await trashCopy(entry, plan.projectFolder, now) : await removeWorktree(entry);
+      const candidate = candidates.get(entry.path);
+      let acted: Acted | null;
+      try {
+        // Judged again, fresh, right before the act: the plan may be minutes
+        // old, and a run, a lease or a commit may have arrived since.
+        const fresh = candidate ? await judge(candidate, await passContext(plan.projectFolder, settings, now)) : null;
+        if (!candidate || !fresh || fresh.action !== entry.action) {
+          acted = null;
+        } else {
+          acted = entry.action === "trash" ? await trashCopy(entry, plan.projectFolder, now) : await removeWorktree(entry);
+        }
+      } catch (err) {
+        acted = { action: "failed", kind: entry.kind, path: entry.path, project: entry.project, branch: entry.branch, reason: entry.reason, freedBytes: 0, detail: err instanceof Error ? err.message : String(err) };
+      }
+      if (!acted) {
+        result.kept += 1;
+        continue;
+      }
       log(acted);
       if (acted.action === "removed") result.removed += 1;
       else if (acted.action === "trashed") result.trashed += 1;
+      else if (acted.action === "failed" && acted.detail?.startsWith("Kept:")) result.kept += 1;
       else result.failed += 1;
       result.freedBytes += acted.freedBytes;
     }
-    for (const expired of await expireTrash(plan.projectFolder, now)) log(expired);
+    for (const expired of await expireTrash(plan.projectFolder, now).catch(() => [] as Acted[])) {
+      log(expired);
+      result.freedBytes += expired.freedBytes;
+    }
     // A run whose tree went must not go on claiming one: a resume rebuilds it.
     const gone = result.actions.filter((a) => a.kind === "worktree" && (a.action === "removed" || a.action === "pruned")).map((a) => a.path);
     try {
@@ -853,7 +981,7 @@ function summaryOf(r: JanitorPassResult): Omit<JanitorPassResult, "actions"> {
   return { at: r.at, trigger: r.trigger, skipped: r.skipped, removed: r.removed, trashed: r.trashed, pruned: r.pruned, failed: r.failed, kept: r.kept, freedBytes: r.freedBytes };
 }
 
-/** The checks that guard the act itself, again, with the folder claimed: a run may have started since the plan. */
+/** The run and team stores, read again at the act: a run may have started since the plan. Synchronous, for `claimFree`. */
 function stillFree(p: string): JanitorKeepReason | null {
   const real = realOr(p);
   if (runStartingIn(real)) return "busy";
@@ -878,16 +1006,34 @@ function stillFree(p: string): JanitorKeepReason | null {
 
 type Acted = Omit<JanitorLogLine, "at" | "trigger">;
 
+/**
+ * Claim the folder for removal, the way the owner's Delete does
+ * (coding-project-removal-lock.ts): never over somebody else's claim, and the
+ * claim WRITTEN before the run store and the run starts are READ, with no
+ * await between, so a run that starts later is refused and one that started
+ * earlier is seen. Answers why it is busy, or the claim's release.
+ */
+function claimFree(p: string): { release: () => void } | { busy: JanitorKeepReason } {
+  const real = realOr(p);
+  if (isProjectBeingRemoved(real)) return { busy: "busy" };
+  const release = beginProjectRemoval(real);
+  const busy = stillFree(p);
+  if (busy) {
+    release();
+    return { busy };
+  }
+  return { release };
+}
+
 async function removeWorktree(entry: JanitorEntry): Promise<Acted> {
   const base: Acted = { action: "failed", kind: "worktree", path: entry.path, project: entry.project, branch: entry.branch, reason: entry.reason, freedBytes: 0 };
-  const real = realOr(entry.path);
   const repo = entry.project ?? readMainRoot(entry.path);
   if (!repo) return { ...base, detail: "Its repository could not be found." };
-  const releaseClaim = beginProjectRemoval(real);
+  const claim = claimFree(entry.path);
+  if ("busy" in claim) return { ...base, detail: `Kept: ${claim.busy}.` };
+  const releaseClaim = claim.release;
   try {
-    const busy = stillFree(entry.path);
-    if (busy) return { ...base, detail: `Kept: ${busy}.` };
-    if ((await isClean(entry.path)) !== true) return { ...base, detail: "Kept: it changed since it was checked." };
+    if ((await cleanState(entry.path)) !== true) return { ...base, detail: "Kept: it changed since it was checked." };
     const size = await directorySize(entry.path);
     return await withDirLock(repo, async () => {
       // The run worktree's `node_modules` is a LINK to the project's; git
@@ -943,12 +1089,11 @@ async function trashCopy(entry: JanitorEntry, projectFolder: string, now: number
   // Only ever a folder directly inside the project folder: that is the only
   // place a copy is looked for, and the trash is on the same filesystem.
   if (path.dirname(path.resolve(entry.path)) !== path.resolve(projectFolder)) return { ...base, detail: "Not directly inside the project folder." };
-  const real = realOr(entry.path);
-  const releaseClaim = beginProjectRemoval(real);
+  const claim = claimFree(entry.path);
+  if ("busy" in claim) return { ...base, detail: `Kept: ${claim.busy}.` };
+  const releaseClaim = claim.release;
   try {
-    const busy = stillFree(entry.path);
-    if (busy) return { ...base, detail: `Kept: ${busy}.` };
-    if ((await isClean(entry.path)) !== true) return { ...base, detail: "Kept: it changed since it was checked." };
+    if ((await cleanState(entry.path)) !== true) return { ...base, detail: "Kept: it changed since it was checked." };
     const size = await directorySize(entry.path);
     const shelf = janitorTrashDir(projectFolder);
     await fs.promises.mkdir(shelf, { recursive: true });
@@ -961,7 +1106,7 @@ async function trashCopy(entry: JanitorEntry, projectFolder: string, now: number
     } catch (err) {
       return { ...base, detail: `Could not move it to the trash: ${err instanceof Error ? err.message : String(err)}` };
     }
-    return { ...base, action: "trashed", freedBytes: size.bytes, trashPath };
+    return { ...base, action: "trashed", sizeBytes: size.bytes, trashPath };
   } finally {
     releaseClaim();
   }
@@ -1075,12 +1220,14 @@ export function nextPassAt(): number | null {
  */
 export function noteRunFinished(): void {
   if (!sched.started || sched.afterRun) return;
+  // Deferred, never dropped: a run that settles soon after a pass is
+  // followed once the gap since that pass is up.
+  const wait = Math.max(AFTER_RUN_DELAY_MS, lastPassAt() + AFTER_RUN_MIN_GAP_MS - Date.now());
   sched.afterRun = setTimeout(() => {
     sched.afterRun = null;
-    if (Date.now() - lastPassAt() < AFTER_RUN_MIN_GAP_MS) return;
     void runJanitorPass({ trigger: "run-finished", maxRemovals: MAX_REMOVALS_AFTER_RUN })
       .catch((err: unknown) => console.error("[coding-folder-janitor] after-run pass failed:", err instanceof Error ? err.message : err));
-  }, AFTER_RUN_DELAY_MS);
+  }, Math.min(wait, 0x7fffffff));
   sched.afterRun.unref?.();
 }
 

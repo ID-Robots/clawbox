@@ -3622,6 +3622,26 @@ export interface ProjectCopy {
 /** How many folders the listing classifies before it keeps its hundred projects. */
 const MAX_CLASSIFIED_FOLDERS = 2_000;
 
+/**
+ * The listing's classification, kept for a short while: the app polls the
+ * projects every few seconds while something runs, and a project folder of
+ * five hundred clones is a few thousand file reads a time. Keyed on the
+ * folder, its names and the box's own projects, so a folder appearing or
+ * going, or a new run's project, is seen at once; a branch switched inside a
+ * folder within the window, a few seconds late.
+ */
+const CLASSIFY_TTL_MS = 30_000;
+let classifyCache: { key: string; at: number; kinds: ReturnType<typeof classifyFolders> } | null = null;
+
+function classifiedFolders(base: string, names: string[], known: Set<string>): ReturnType<typeof classifyFolders> {
+  const key = [base, names.join("\0"), [...known].sort().join("\0")].join("\u0001");
+  const now = Date.now();
+  if (classifyCache && classifyCache.key === key && now - classifyCache.at < CLASSIFY_TTL_MS) return classifyCache.kinds;
+  const kinds = classifyFolders(base, names, known);
+  classifyCache = { key, at: now, kinds };
+  return kinds;
+}
+
 /** A folder that may be a project, before describeProject has looked. */
 interface ProjectCandidate {
   base: string;
@@ -3688,7 +3708,7 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     const original = run.worktree?.project ?? worktreeProject(projectDirectoryOf(run));
     if (original) knownProjects.add(path.resolve(original));
   }
-  const kinds = classifyFolders(ownerFolder, allNames, knownProjects);
+  const kinds = classifiedFolders(ownerFolder, allNames, knownProjects);
   const parentByName = new Map<string, string>();
   for (const k of kinds.values()) if (k.kind !== "project" && k.parent) parentByName.set(k.name, path.resolve(k.parent));
   const homeOf = (dir: string): string => {
