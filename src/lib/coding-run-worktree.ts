@@ -42,6 +42,7 @@ import { failureDetail, type ChildResult } from "./child-run";
 import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
+import { writeRunMarker } from "./coding-folder-kind";
 
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
@@ -189,6 +190,9 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   if (!ok(added)) return { ok: false, reason: "failed", detail: failureDetail(added, `Making a worktree for ${runId}`) };
   await excludeWorktrees(dir);
   linkSharedNodeModules(dir, target);
+  // Under `.clawbox/`, which excludeWorktrees keeps out of `git status`: a
+  // copy of this tree is then still known for one (coding-folder-kind.ts).
+  writeRunMarker(target, { kind: "run", id: runId, project: dir });
   return { ok: true, path: target, branch, base };
 }
 
@@ -454,75 +458,6 @@ export async function listRunWorktrees(projectDir: string): Promise<LinkedWorktr
   }
   flush();
   return found;
-}
-
-/** How old a worktree has to be before the sweep will even look at it. */
-export const WORKTREE_SWEEP_AGE_MS = 14 * 24 * 60 * 60_000;
-
-export interface SweepOutcome {
-  removed: string[];
-  kept: string[];
-}
-
-/**
- * Prune the run worktrees this project has accumulated: older than
- * `olderThanMs`, and only where the branch is merged or gone.
- *
- * The age is the WORKTREE's own mtime, not the run record's: records are
- * trimmed to thirty and a worktree can outlive the run that made it, so the
- * folder is the only thing that can still say when it was last touched. A
- * worktree with unmerged commits is never removed however old it is — that is
- * work nobody has looked at, and disk is cheaper than losing it.
- */
-export async function sweepRunWorktrees(projectDir: string, options: {
-  olderThanMs?: number;
-  /** Paths a live run is working in right now; never touched whatever their age. */
-  inUse?: ReadonlySet<string>;
-  now?: number;
-} = {}): Promise<SweepOutcome> {
-  const { olderThanMs = WORKTREE_SWEEP_AGE_MS, inUse, now = Date.now() } = options;
-  const dir = path.resolve(projectDir);
-  const outcome: SweepOutcome = { removed: [], kept: [] };
-  const trees = await listRunWorktrees(dir);
-  if (trees.length === 0) return outcome;
-  const base = await currentBranch(dir);
-  for (const tree of trees) {
-    const resolved = path.resolve(tree.path);
-    if (inUse?.has(resolved)) {
-      outcome.kept.push(resolved);
-      continue;
-    }
-    let age: number;
-    try {
-      age = now - fs.statSync(resolved).mtimeMs;
-    } catch {
-      // The files are gone and only git's record of them is left: prune it.
-      // `removeRunWorktree` answers true for a path that is not there, so a
-      // git that refuses the stale registration is still a removal.
-      await removeRunWorktree(dir, resolved);
-      outcome.removed.push(resolved);
-      continue;
-    }
-    if (age < olderThanMs) {
-      outcome.kept.push(resolved);
-      continue;
-    }
-    if (tree.branch) {
-      const merged = await branchIsMerged(dir, tree.branch, base);
-      // `null` is "git could not say", which is not permission to delete.
-      if (merged !== true) {
-        outcome.kept.push(resolved);
-        continue;
-      }
-    }
-    if (!(await removeRunWorktree(dir, resolved))) {
-      outcome.kept.push(resolved);
-      continue;
-    }
-    if (tree.branch) await deleteRunBranch(dir, tree.branch);
-    outcome.removed.push(resolved);
-  }
-  return outcome;
 }
 
 /** What the main checkout is on, or "main" when git will not say (a detached HEAD, a fresh repository). */

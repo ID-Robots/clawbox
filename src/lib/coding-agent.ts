@@ -318,11 +318,11 @@ import {
   mergeRunBranch,
   removeRunWorktree,
   restoreRunWorktree,
-  sweepRunWorktrees,
   worktreeHasChanges,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
 import { worktreeHintFor, worktreeHintText, worktreeProject } from "@/lib/coding-worktree-paths";
+import { classifyFolders } from "@/lib/coding-folder-kind";
 import {
   autoMergeOutstanding,
   buildReviewFeedback,
@@ -3540,14 +3540,14 @@ async function readProjectFolders(): Promise<{ base: string; names: string[] }> 
 /** The most folders a listing names — the readdir's and the run store's alike. */
 const MAX_PROJECT_FOLDERS = 100;
 
-async function readFolderNames(base: string): Promise<string[]> {
+async function readFolderNames(base: string, limit = MAX_PROJECT_FOLDERS): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(base, { withFileTypes: true });
     return entries
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name)
       .sort()
-      .slice(0, MAX_PROJECT_FOLDERS);
+      .slice(0, limit);
   } catch {
     return [];
   }
@@ -3601,6 +3601,8 @@ export interface CodingProject {
    * `port` here is what `/apps/<folder>/` is proxied to.
    */
   app: { name: string; description: string | null; kind: string | null; port: number | null } | null;
+  /** The run copies of this project beside it in the project folder, grouped here rather than listed (see listProjects). */
+  copies?: ProjectCopy[];
 }
 
 /**
@@ -3609,6 +3611,36 @@ export interface CodingProject {
  * CodingAgentApp.tsx); the projects test holds the two together.
  */
 export const HARNESS_TEST_PROJECT_ID = "harness-test";
+
+/** A copy of a project that a run or an agent made beside it (coding-folder-kind.ts). */
+export interface ProjectCopy {
+  folder: string;
+  directory: string;
+  branch: string | null;
+}
+
+/** How many folders the listing classifies before it keeps its hundred projects. */
+const MAX_CLASSIFIED_FOLDERS = 2_000;
+
+/**
+ * The listing's classification, kept for a short while: the app polls the
+ * projects every few seconds while something runs, and a project folder of
+ * five hundred clones is a few thousand file reads a time. Keyed on the
+ * folder, its names and the box's own projects, so a folder appearing or
+ * going, or a new run's project, is seen at once; a branch switched inside a
+ * folder within the window, a few seconds late.
+ */
+const CLASSIFY_TTL_MS = 30_000;
+let classifyCache: { key: string; at: number; kinds: ReturnType<typeof classifyFolders> } | null = null;
+
+function classifiedFolders(base: string, names: string[], known: Set<string>): ReturnType<typeof classifyFolders> {
+  const key = [base, names.join("\0"), [...known].sort().join("\0")].join("\u0001");
+  const now = Date.now();
+  if (classifyCache && classifyCache.key === key && now - classifyCache.at < CLASSIFY_TTL_MS) return classifyCache.kinds;
+  const kinds = classifyFolders(base, names, known);
+  classifyCache = { key, at: now, kinds };
+  return kinds;
+}
 
 /** A folder that may be a project, before describeProject has looked. */
 interface ProjectCandidate {
@@ -3654,13 +3686,55 @@ interface ProjectCandidate {
  * and a hundred concurrent spawns on a Jetson is a stall, not a listing.
  */
 export async function listProjects(): Promise<{ directory: string | null; projects: CodingProject[] }> {
-  const [folders, codeProjects] = await Promise.all([readProjectFolders(), readFolderNames(CODE_PROJECTS_DIR)]);
+  const ownerFolder = await getDefaultDirectory();
+  const [allNames, codeProjects] = await Promise.all([readFolderNames(ownerFolder, MAX_CLASSIFIED_FOLDERS), readFolderNames(CODE_PROJECTS_DIR)]);
   const candidates: ProjectCandidate[] = [];
   // The folders runs have worked in, directly under the project folder: a
   // project by that run alone, `.git` or not. A run records the folder it
   // worked in symlink-resolved, so both spellings of the base are matched.
   // Never a dot-folder: that is state, not a project.
-  const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
+  const realBase = await fs.promises.realpath(ownerFolder).catch(() => ownerFolder);
+  // A git worktree of another project, or a run's copy of one, is not a
+  // project of its own (coding-folder-kind.ts): its runs are its parent's,
+  // a worktree is not listed at all, and a copy is grouped under its parent
+  // when the parent is listed. Classified BEFORE the hundred are kept, so a
+  // folder full of worktrees cannot push the owner's projects off the list.
+  // Originals the box knows: a project it made a run worktree or a team
+  // worker's tree in. A run that only worked IN a folder proves nothing —
+  // runs are pointed at copies too.
+  const knownProjects = new Set<string>();
+  for (const run of loadRuns()) {
+    if (typeof run.directory !== "string") continue;
+    const original = run.worktree?.project ?? worktreeProject(projectDirectoryOf(run));
+    if (original) knownProjects.add(path.resolve(original));
+  }
+  const kinds = classifiedFolders(ownerFolder, allNames, knownProjects);
+  const parentByName = new Map<string, string>();
+  for (const k of kinds.values()) if (k.kind !== "project" && k.parent) parentByName.set(k.name, path.resolve(k.parent));
+  const homeOf = (dir: string): string => {
+    const own = worktreeProject(dir) ?? dir;
+    for (const b of new Set([ownerFolder, realBase])) {
+      if (!own.startsWith(b + path.sep)) continue;
+      const parent = parentByName.get(path.relative(b, own).split(path.sep)[0]);
+      if (parent) return parent;
+    }
+    return own;
+  };
+  const listedNames = new Set(allNames.filter((n) => kinds.get(n)?.kind === "project"));
+  const copiesOf = new Map<string, ProjectCopy[]>();
+  for (const k of kinds.values()) {
+    if (k.kind !== "copy" || !k.parent) continue;
+    const parentName = path.dirname(path.resolve(k.parent)) === path.resolve(ownerFolder) ? path.basename(k.parent) : null;
+    if (!parentName || !listedNames.has(parentName)) {
+      // A copy whose original is not in the list is the only trace of it: listed.
+      listedNames.add(k.name);
+      continue;
+    }
+    const list = copiesOf.get(parentName) ?? [];
+    list.push({ folder: k.name, directory: k.dir, branch: k.branch });
+    copiesOf.set(parentName, list);
+  }
+  const folders = { base: ownerFolder, names: allNames.filter((n) => listedNames.has(n)).slice(0, MAX_PROJECT_FOLDERS) };
   // Bounded like the readdir (readFolderNames keeps 100): the run store is
   // not a hard bound — held runs are never trimmed — and every folder here
   // costs a stat and a git log on every poll.
@@ -3668,11 +3742,11 @@ export async function listProjects(): Promise<{ directory: string | null; projec
   for (const run of loadRuns()) {
     if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
     if (typeof run.directory !== "string") continue;
-    const worked = projectDirectoryOf(run);
+    const worked = homeOf(projectDirectoryOf(run));
     for (const base of new Set([folders.base, realBase])) {
       if (!worked.startsWith(base + path.sep)) continue;
       const first = path.relative(base, worked).split(path.sep)[0];
-      if (first && !first.startsWith(".")) workedIn.add(first);
+      if (first && !first.startsWith(".") && kinds.get(first)?.kind !== "worktree" && !parentByName.has(first)) workedIn.add(first);
     }
   }
   for (const folder of folders.names) {
@@ -3685,7 +3759,7 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     if (folder === HARNESS_TEST_PROJECT_ID) continue;
     candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
   }
-  const described = await mapLimit(candidates, 4, describeProject);
+  const described = await mapLimit(candidates, 4, (c) => describeProject(c, homeOf));
 
   // Once per real folder. config.json is a file the owner can edit, so the
   // project folder can be pointed at data/code-projects by hand, and every
@@ -3696,13 +3770,14 @@ export async function listProjects(): Promise<{ directory: string | null; projec
   for (const d of described) {
     if (!d || seen.has(d.real)) continue;
     seen.add(d.real);
-    projects.push(d.project);
+    const copies = d.project.kind === "folder" ? copiesOf.get(d.project.folder) : undefined;
+    projects.push(copies?.length ? { ...d.project, copies } : d.project);
   }
   projects.sort((a, b) => (b.lastCommit?.date ?? 0) - (a.lastCommit?.date ?? 0) || a.name.localeCompare(b.name));
   return { directory: folders.base, projects };
 }
 
-async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
+async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate, homeOf: (dir: string) => string = (d) => d): Promise<{ project: CodingProject; real: string } | null> {
   const directory = path.join(base, folder);
   const [dotGit, metaName, self] = await Promise.all([
     fs.promises.stat(path.join(directory, ".git")).catch(() => null),
@@ -3731,8 +3806,9 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
   // given a project id recorded the id as well as the folder.
   const run = loadRuns().find((r) => {
     // The project the run belongs to — its own copy of it, for a run with a
-    // worktree, is two segments deeper and would match nothing here.
-    const worked = projectDirectoryOf(r);
+    // worktree, is two segments deeper and would match nothing here; a team
+    // worker's tree and a sibling worktree or copy are their parent's.
+    const worked = homeOf(projectDirectoryOf(r));
     return worked === real || worked === directory || (kind === "codeProject" && r.projectId === folder);
   }) ?? null;
   return {
@@ -5260,6 +5336,32 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
 }));
 
 const live = store.live;
+
+/**
+ * Called once a run's settle chain has ended — the folder janitor's
+ * after-run pass (coding-folder-janitor.ts) listens here. Per PROCESS, not
+ * per module copy: the boot hook that subscribes and the route that started
+ * the run load different copies of this module (process-store.ts).
+ */
+const runSettledHooks = processStore("coding-agent:run-settled-hooks", () => ({ hooks: new Set<() => void>() })).hooks;
+
+/** Subscribe to settled runs; answers the unsubscribe. */
+export function onRunSettled(hook: () => void): () => void {
+  runSettledHooks.add(hook);
+  return () => {
+    runSettledHooks.delete(hook);
+  };
+}
+
+function emitRunSettled(): void {
+  for (const hook of runSettledHooks) {
+    try {
+      hook();
+    } catch (err) {
+      console.error("[coding-agent] a run-settled hook failed:", err instanceof Error ? err.message : err);
+    }
+  }
+}
 const waiters = store.waiters;
 
 /**
@@ -11870,6 +11972,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         // Kept until here, not dropped with the secrets: the transient retry
         // respawns before this chain and commits as the same identity.
         runGitIdentity.delete(run.id);
+        // The folder janitor's after-run pass, if the boot hook armed it.
+        emitRunSettled();
       }
     }
   })(), run.id);
@@ -12976,64 +13080,25 @@ export async function removeRunWorktreeFor(id: string): Promise<CodingRun> {
   return cloneRun(run);
 }
 
-/** How often the box looks for worktrees nothing needs any more. */
-export const WORKTREE_SWEEP_INTERVAL_MS = 7 * 24 * 60 * 60_000;
-export const WORKTREE_SWEEP_AT_KEY = "coding_agent_worktree_swept_at";
-
 /**
- * The weekly sweep: worktrees older than a fortnight whose branch is merged
- * or gone, across every project a known run has one in.
- *
- * WHY IT IS NEEDED at all, when the settle already tidies up: a run whose
- * merge conflicted, a box that restarted mid-settle, a project the owner
- * rebased by hand — each leaves a tree the settle never got to. Fourteen days
- * of no-one-touched-it plus a merged-or-gone branch is the point at which the
- * files are certainly recoverable from git.
- *
- * At most weekly (`WORKTREE_SWEEP_AT_KEY` in the config store), because the
- * web server restarts far more often than that and a sweep per boot would be
- * a `git worktree list` per project on every one. Never throws, and never
- * touches a tree a live run is in.
+ * Tell the run records that these worktrees are gone — the folder janitor
+ * (coding-folder-janitor.ts) removed them. A record whose tree was taken must
+ * not go on claiming one, or a resume would try to work in a folder that is
+ * not there; `removed` is what makes a resume rebuild it from the branch.
+ * Answers how many records changed.
  */
-export async function sweepCodingWorktrees(options: { force?: boolean } = {}): Promise<number> {
-  try {
-    if (!options.force) {
-      const last = await configGet(WORKTREE_SWEEP_AT_KEY);
-      if (typeof last === "number" && Date.now() - last < WORKTREE_SWEEP_INTERVAL_MS) return 0;
+export function markRunWorktreesRemoved(paths: readonly string[]): number {
+  if (paths.length === 0) return 0;
+  const gone = new Set(paths.map((p) => path.resolve(p)));
+  let changed = 0;
+  for (const run of loadRuns()) {
+    if (run.worktree && !run.worktree.removed && gone.has(path.resolve(run.worktree.path))) {
+      run.worktree.removed = true;
+      changed += 1;
     }
-    const runs = loadRuns();
-    const projects = new Set<string>();
-    for (const run of runs) {
-      if (run.worktree) projects.add(run.worktree.project);
-    }
-    if (projects.size === 0) {
-      await configSet(WORKTREE_SWEEP_AT_KEY, Date.now());
-      return 0;
-    }
-    const inUse = new Set(runs.filter((r) => isLive(r.status)).map((r) => r.directory));
-    let removed = 0;
-    for (const project of projects) {
-      try {
-        const outcome = await sweepRunWorktrees(project, { inUse });
-        removed += outcome.removed.length;
-        // A record whose tree the sweep took must not go on claiming one, or
-        // a resume would try to work in a folder that is not there.
-        for (const gone of outcome.removed) {
-          for (const run of runs) {
-            if (run.worktree && run.worktree.path === gone) run.worktree.removed = true;
-          }
-        }
-      } catch (err) {
-        console.warn(`[coding-agent] worktree sweep of ${project} failed:`, err instanceof Error ? err.message : err);
-      }
-    }
-    if (removed > 0) persist(true);
-    await configSet(WORKTREE_SWEEP_AT_KEY, Date.now());
-    return removed;
-  } catch (err) {
-    console.error("[coding-agent] worktree sweep:", err instanceof Error ? err.message : err);
-    return 0;
   }
+  if (changed > 0) persist(true);
+  return changed;
 }
 
 // ─── Public operations ───────────────────────────────────────────────────────

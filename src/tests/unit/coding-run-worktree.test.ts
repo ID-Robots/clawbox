@@ -21,7 +21,6 @@ import {
   removeRunWorktree,
   restoreRunWorktree,
   runWorktreePath,
-  sweepRunWorktrees,
   worktreeHasChanges,
 } from "@/lib/coding-run-worktree";
 
@@ -189,36 +188,6 @@ describe("a run's worktree", () => {
     } finally {
       execFileSync("git", ["worktree", "remove", "--force", theirs], { cwd: dir, env });
     }
-  });
-
-  it("sweeps a merged worktree older than the age and keeps a young one, an unmerged one and one in use", async () => {
-    const old = new Date(Date.now() - 30 * 24 * 60 * 60_000);
-    const merged = await addRunWorktree({ projectDir: dir, runId: "run-old-mrgd", protectedRoot: PROTECTED });
-    const unmerged = await addRunWorktree({ projectDir: dir, runId: "run-old-work", protectedRoot: PROTECTED });
-    const young = await addRunWorktree({ projectDir: dir, runId: "run-young000", protectedRoot: PROTECTED });
-    const busy = await addRunWorktree({ projectDir: dir, runId: "run-busy0000", protectedRoot: PROTECTED });
-    if (!merged.ok || !unmerged.ok || !young.ok || !busy.ok) throw new Error("fixtures");
-    fs.writeFileSync(path.join(unmerged.path, "work.js"), "kept\n");
-    git(unmerged.path, "add", "-A");
-    git(unmerged.path, "commit", "-q", "-m", "unmerged work");
-    for (const p of [merged.path, unmerged.path, busy.path]) fs.utimesSync(p, old, old);
-
-    const outcome = await sweepRunWorktrees(dir, { inUse: new Set([busy.path]) });
-    expect(outcome.removed).toEqual([merged.path]);
-    expect(outcome.kept.sort()).toEqual([busy.path, unmerged.path, young.path].sort());
-    expect(fs.existsSync(merged.path)).toBe(false);
-    // A swept branch that held nothing is gone too; the unmerged one stays.
-    expect(await branchExists(dir, merged.branch)).toBe(false);
-    expect(await branchExists(dir, unmerged.branch)).toBe(true);
-  });
-
-  it("prunes a worktree whose files somebody deleted by hand", async () => {
-    const made = await addRunWorktree({ projectDir: dir, runId: "run-handgone", protectedRoot: PROTECTED });
-    if (!made.ok) throw new Error(made.detail);
-    fs.rmSync(made.path, { recursive: true, force: true });
-    const outcome = await sweepRunWorktrees(dir);
-    expect(outcome.removed).toEqual([made.path]);
-    expect(await listRunWorktrees(dir)).toEqual([]);
   });
 
   it("says whether the files are actually gone, not whether git was happy", async () => {

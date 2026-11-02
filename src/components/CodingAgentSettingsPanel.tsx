@@ -17,6 +17,7 @@ import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
 import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
+import CodingAgentJanitorSection from "./CodingAgentJanitorSection";
 // The toggle lives in its own module now — the secrets card draws one too.
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
@@ -1358,6 +1359,13 @@ export default function CodingAgentSettingsPanel() {
                 onChange={(next) => void saveSetting({ generateMedia: next }, "genMedia", t("codingAgent.genMediaFailed"))}
               />
             </div>
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.janitorGroup")}</p>
+            {/* The folder janitor: worktrees and copies runs left behind
+                (src/lib/coding-folder-janitor.ts). Its own state and route,
+                read once when the panel opens, never on the status poll. */}
+            <CodingAgentJanitorSection />
           </div>
         </details>
 
