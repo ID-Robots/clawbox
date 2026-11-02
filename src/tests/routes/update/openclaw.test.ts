@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 
 vi.mock("@/lib/updater", () => ({
   startOpenclawUpdate: vi.fn(),
@@ -10,15 +11,25 @@ const mockStartOpenclawUpdate = vi.mocked(startOpenclawUpdate);
 
 describe("POST /setup-api/update/openclaw", () => {
   let postOpenclawUpdate: () => Promise<Response>;
+  let session: SessionFixture;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    session = installSessionFixture();
 
     mockStartOpenclawUpdate.mockReturnValue({ started: true });
 
     const mod = await import("@/app/setup-api/update/openclaw/route");
-    postOpenclawUpdate = mod.POST;
+    // The owner's click: the route checks for a signed-in person itself.
+    postOpenclawUpdate = () => mod.POST(new Request("http://localhost/setup-api/update/openclaw", {
+      method: "POST",
+      headers: { Cookie: session.cookie },
+    }));
+  });
+
+  afterEach(() => {
+    session.cleanup();
   });
 
   it("starts an OpenClaw update", async () => {
