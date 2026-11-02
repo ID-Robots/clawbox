@@ -1,66 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
 import {
-  describeUpdateFailure,
-  shownStepStatus,
-  stepFailureReason,
-  UpdateStepCount,
-  UpdateStepList,
-  UpdateStepMeter,
-} from "@/components/UpdateStep";
-import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
-import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
-import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
-import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
-import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
-import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
+  AgentVersions,
+  canResume,
+  CARD,
+  HarnessDowngradeNotice,
+  runHeadline,
+  UpdateRunView,
+  useUpdateRun,
+  type VersionInfo,
+} from "@/components/UpdateRunView";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
 import {
-  HARNESS_DOWNGRADE_BACKUP_FAILED_CODE,
   HARNESS_DOWNGRADE_CODE,
   HARNESS_DOWNGRADE_OVERRIDE_FLAG,
-  HARNESS_LABEL,
   readHarnessDowngradeDetail,
   type HarnessDowngradeDetail,
 } from "@/lib/harness-downgrade";
 
-export interface ComponentVersion {
-  current: string | null;
-  target: string | null;
-  /**
-   * `null` where the device could not look — see `remote` below. It resolves
-   * through `componentNeedsUpdate`, which falls back to the version comparison
-   * for both null and absent, so nothing here changes behaviour on its own:
-   * `remote.reachable === false` is what the screen renders the unknown from.
-   */
-  updateAvailable?: boolean | null;
-}
-
-export interface VersionInfo {
-  clawbox: ComponentVersion & { current: string };
-  openclaw: ComponentVersion;
-  // Both optional: a device that has not been updated yet still answers
-  // /update/versions with the old two-key shape, and the Hermes block is
-  // present only on the SKUs that ship Hermes.
-  hermes?: ComponentVersion;
-  edition?: "openclaw" | "hermes" | "dual";
-  /**
-   * Whether the device actually reached its update remote — the producer's own
-   * type, so a field added there (`cause`) cannot be missed here. Optional for
-   * the same reason as the two above: a payload from a server that predates the
-   * field must keep rendering exactly as it did, so ABSENT means "not known",
-   * never "unreachable".
-   */
-  remote?: RemoteReachability;
-}
+// The run view and its types moved to UpdateRunView.tsx, which /updating
+// draws too; these stay importable from here.
+export { type ComponentVersion, type VersionInfo } from "@/components/UpdateRunView";
 
 // The OpenClaw-row rule lives in version-utils, shared with the desktop's
-// "Update available" card; re-exported for the screens that import it from here.
+// "Update available" card and the run view; re-exported for the screens that
+// import it from here.
 export { shipsOpenclaw };
 
 /** How the effective branch was decided — `EffectiveUpdateBranch` in src/lib/updater.ts. */
@@ -125,17 +94,6 @@ function readEffectiveBranch(value: unknown): EffectiveBranch | null {
       : "default";
   return { branch: v.branch, source };
 }
-
-const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
-
-/** How often a run's poll asks again while the box answers "idle" (each answer reads git on the box). */
-const IDLE_POLL_MS = 10_000;
-/**
- * "idle" answers, before the run was ever seen, that mean the click started
- * nothing. The run route marks the run running before it answers, so a run it
- * started never reads "idle" first.
- */
-const NOT_STARTED_AFTER_IDLE = 3;
 
 /**
  * A translated sentence with one or more rendered elements inside it.
@@ -206,9 +164,6 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const branchInputId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
-  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [updateStarted, setUpdateStarted] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
@@ -228,20 +183,6 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // rebuilds.
   const identity = useBuildIdentity(true);
   const driftDetected = !!identity?.drift?.detected;
-
-  const pollRef = useRef<number | null>(null);
-  const pollControllerRef = useRef<AbortController | null>(null);
-
-  const stopPolling = useCallback(() => {
-    if (pollRef.current !== null) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    if (pollControllerRef.current) {
-      pollControllerRef.current.abort();
-      pollControllerRef.current = null;
-    }
-  }, []);
 
   const fetchVersions = useCallback(async (force = false) => {
     setRefreshing(true);
@@ -281,210 +222,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     void fetchBranch();
   }, [fetchVersions, fetchBranch]);
 
-  // If an update is already running when the user opens this app (it was
-  // kicked off from Settings, the wizard, or a prior session), immediately
-  // join the poll so the live progress shows.
-  //
-  // A run that already FAILED is adopted the same way. It used to be ignored,
-  // and the failure of 2026-09-05 is what that costs: the restart step is the
-  // one that failed, so nobody was watching this page when it did, and every
-  // window opened afterwards showed "1 update available — Update everything"
-  // over an update that had died an hour earlier. `completed` is deliberately
-  // NOT adopted — the status route synthesises that phase for any box whose
-  // `update_completed` flag is set and has nothing to do, so adopting it would
-  // paint "Update complete" on a device that has just been sitting there.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch("/setup-api/update/status", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as UpdateState;
-        if (cancelled) return;
-        if (data.phase === "running") {
-          setUpdateStarted(true);
-          setUpdateState(data);
-          startPolling();
-        } else if (data.phase === "failed") {
-          setUpdateStarted(true);
-          setUpdateState(data);
-        }
-      } catch { /* idle */ }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const startPolling = useCallback(() => {
-    if (pollRef.current !== null) return;
-    const controller = new AbortController();
-    pollControllerRef.current = controller;
-    let serverWentDown = false;
-    let failures = 0;
-    let inFlight = false;
-    // "idle" answers: when the last one came, and how many came before this
-    // screen ever saw the run.
-    let idleAt = 0;
-    let idleBeforeRun = 0;
-    let sawRun = false;
-    pollRef.current = window.setInterval(async () => {
-      if (inFlight) return;
-      // Each "idle" answer reads git for drift on the box: while that is the
-      // answer, ask less often.
-      if (idleAt && Date.now() - idleAt < IDLE_POLL_MS) return;
-      inFlight = true;
-      try {
-        const res = await fetch("/setup-api/update/status", { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        if (!res.ok) {
-          failures++;
-          if (failures >= 3) serverWentDown = true;
-          return;
-        }
-        failures = 0;
-        const data = (await res.json()) as UpdateState;
-        if (controller.signal.aborted) return;
-        // "idle" is no verdict on the run this screen is following. A web
-        // server that replaced the one running it answers "idle" until it has
-        // judged that run's lock — a live run, or an interrupted one, which it
-        // then reports as "failed" with the step to resume from. Stopping here
-        // left the screen on "Don't power off" with every step waiting, for
-        // good, over a run nothing was running any more. Keep the progress
-        // last seen and keep asking — and do not reload over it either: the
-        // page that came back would adopt no run and offer "Update everything".
-        // Only a run this screen never saw is one that did not start.
-        if (data.phase === "idle") {
-          idleAt = Date.now();
-          if (!sawRun && ++idleBeforeRun >= NOT_STARTED_AFTER_IDLE) {
-            stopPolling();
-            setUpdateError(tr("update.startFailed", "Failed to start update"));
-          }
-          return;
-        }
-        idleAt = 0;
-        sawRun = true;
-        if (serverWentDown) {
-          window.location.reload();
-          return;
-        }
-        setUpdateState(data);
-        if (data.phase !== "running") {
-          stopPolling();
-          if (data.phase === "completed") {
-            // Re-fetch versions so the dashboard reflects the new ones.
-            // Force a fresh lookup — the install just bumped current and
-            // we want the new state visible immediately, not after the
-            // 60s server cache expires.
-            void fetchVersions(true);
-          }
-        }
-      } catch {
-        if (controller.signal.aborted) return;
-        failures++;
-        if (failures >= 3) serverWentDown = true;
-      } finally {
-        inFlight = false;
-      }
-    }, 2000);
-  }, [stopPolling, fetchVersions, tr]);
-
-  useEffect(() => () => stopPolling(), [stopPolling]);
-
-  // Only the "full" ClawBox update path is exposed from the UI now —
-  // OpenClaw is pinned by ClawBox (config/openclaw-target.txt) and rides
-  // along inside the full update. The "openclaw" mode remains as a
-  // server-side endpoint for SSH/MCP/admin triggers but no UI button
-  // reaches it, so the type stays narrow to reflect actual call sites.
-  //
-  // `allowDowngrade` is the owner's "Back up and update anyway", offered only on
-  // a run the server refused for installing an older harness.
-  const triggerUpdate = useCallback(async (allowDowngrade = false) => {
-    setUpdateStarted(true);
-    setUpdateError(null);
-    setUpdateState(null);
-    try {
-      const res = await fetch("/setup-api/update/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // `=== true`: a handler that passes its click event must never be the override.
-        body: JSON.stringify(allowDowngrade === true ? { force: true, [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : { force: true }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setUpdateError(typeof data.error === "string"
-          ? data.error
-          : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
-        return;
-      }
-      // A 200 can still say the click started nothing: another run holds the
-      // box, or a database compaction does. Show the run if there is one — a
-      // live one to join, or one that has just failed (an interrupted run's
-      // verdict carries its Resume) — and otherwise say the server's reason at
-      // once rather than after the poll gives up on "idle".
-      let started: { started?: unknown; error?: unknown } | null = null;
-      try {
-        started = await res.json();
-      } catch { /* no body to read: the poll says what happened */ }
-      if (started?.started === false) {
-        const live = await fetch("/setup-api/update/status", { cache: "no-store" })
-          .then((r) => (r.ok ? (r.json() as Promise<UpdateState>) : null))
-          .catch(() => null);
-        if (live?.phase === "running" || live?.phase === "failed") {
-          setUpdateState(live);
-          if (live.phase === "running") startPolling();
-          return;
-        }
-        setUpdateError(typeof started.error === "string"
-          ? started.error
-          : tr("update.startFailed", "Failed to start update"));
-        return;
-      }
-      startPolling();
-    } catch (err) {
-      setUpdateError(err instanceof Error ? err.message : tr("update.startFailed", "Failed to start update"));
-    }
-  }, [startPolling, tr]);
-
-  const dismissResult = useCallback(() => {
-    setUpdateStarted(false);
-    setUpdateError(null);
-    setUpdateState(null);
-    stopPolling();
-    // The settled run lives in the web server's memory, not in this component,
-    // so clearing local state alone would hide the panel until the next mount
-    // re-adopted the same dead run.
-    //
-    // A 409 is not an error to show — it means another surface (Settings, the
-    // wizard, the MCP tools) started an update between the click and the POST,
-    // and the state this button was clearing now belongs to that run. `fetch`
-    // resolves for a 409, so ignoring the answer left the screen showing "1
-    // update available — Update everything" over an update that was already
-    // running, and a second Update from here is exactly what the run route
-    // refuses. Read the status back and rejoin the live run instead.
-    void (async () => {
-      try {
-        const res = await fetch("/setup-api/update/dismiss", { method: "POST" });
-        if (res.ok) return;
-        // Anything OTHER than a 409 is the server saying the result is still
-        // there — the record could not be written away. The panel has already
-        // been cleared locally, so leaving it at that hides a dismissal that
-        // did not happen and hands the same failure back on the next reload,
-        // with nothing said. Put it back and say why.
-        if (res.status !== 409) {
-          setUpdateStarted(true);
-          setUpdateError(tr("update.dismissFailed", "The device could not clear that result. Try again in a moment."));
-          return;
-        }
-        const status = await fetch("/setup-api/update/status", { cache: "no-store" });
-        if (!status.ok) return;
-        const data = (await status.json()) as UpdateState;
-        if (data.phase !== "running") return;
-        setUpdateStarted(true);
-        setUpdateState(data);
-        startPolling();
-      } catch { /* offline: the next mount adopts whatever is running */ }
-    })();
-  }, [stopPolling, startPolling, tr]);
+  // The run — adopted on open, started from here, followed, dismissed — is
+  // the hook's, shared with /updating. A completed run re-fetches the versions
+  // so the dashboard reflects the new ones, forced past the route's 60 s cache:
+  // the install just bumped `current`.
+  const run = useUpdateRun({ onCompleted: () => void fetchVersions(true) });
+  const { state: updateState, error: updateError, started: updateStarted, trigger: triggerUpdate, dismiss } = run;
+  const dismissResult = useCallback(() => { void dismiss(); }, [dismiss]);
 
   const saveBranch = useCallback(async (next: string | null, allowDowngrade = false) => {
     setBranchSaving(true);
@@ -619,34 +363,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         };
       }
       // The three run states are drawn by UpdateRunView, which takes the
-      // headline and subhead from here. "Don't power off" is its footer bar.
+      // headline and subhead from here — the same words /updating shows.
+      // "Don't power off" is its footer bar.
       case "updating":
-        return {
-          icon: "downloading", iconClass: "text-orange-300",
-          headline: tr("update.heroUpdating", "Updating your device"),
-          subhead: tr("update.updatingDescription", "Updating your ClawBox with the latest software…"),
-          tone: "busy" as const,
-        };
+        return { icon: "downloading", iconClass: "text-orange-300", ...runHeadline(status, updateState, tr), tone: "busy" as const };
       case "completed":
-        return {
-          icon: "task_alt", iconClass: "text-emerald-300",
-          headline: tr("update.heroComplete", "Update complete"),
-          subhead: updateState?.steps.some((s) => s.id === RESTART_STEP_ID)
-            ? tr("update.heroCompleteRestart", "The device will restart in a moment.")
-            : tr("update.heroCompleteSub", "Everything's been updated."),
-          tone: "good" as const,
-        };
+        return { icon: "task_alt", iconClass: "text-emerald-300", ...runHeadline(status, updateState, tr), tone: "good" as const };
       case "failed":
-        return {
-          icon: "error", iconClass: "text-red-300",
-          headline: tr("update.heroFailed", "Update failed"),
-          // What stopped and why is the error panel's, said once, beside the
-          // steps; a refused downgrade is said there in the owner's language,
-          // from its detail — its English sentence is for the log and the MCP
-          // tools.
-          subhead: tr("update.heroFailedSub", "One step couldn't complete. See the steps below."),
-          tone: "error" as const,
-        };
+        return { icon: "error", iconClass: "text-red-300", ...runHeadline(status, updateState, tr), tone: "error" as const };
     }
   })();
 
@@ -690,6 +414,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               heading={HeroHeading}
               headline={hero.headline}
               lede={hero.subhead}
+              offline={run.offline}
+              reconnects={run.reconnects}
               onDismiss={dismissResult}
               // A run the box lost (a restart, a power cut, a replaced web
               // server) is RESUMED from the step it died on by a fresh run —
@@ -699,7 +425,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               // this the resume was reachable by no gesture at all. Any other
               // failure starts over from step 1 on a fresh run, so it is not
               // offered as a "resume": Dismiss, then Update everything.
-              onResume={updateState?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX) ? () => void triggerUpdate() : undefined}
+              onResume={canResume(updateState) ? () => void triggerUpdate() : undefined}
               onOverrideDowngrade={() => void triggerUpdate(true)}
             />
           ) : (
@@ -1049,73 +775,6 @@ function ConfirmModal({
   );
 }
 
-/**
- * The harness this box actually runs, read-only.
- *
- * TASK-548: this screen is where an owner goes to ask "what version am I on",
- * and it named only ClawBox — so a Hermes owner could read their agent's
- * version in Settings -> About and nowhere here. The rows follow the same
- * per-edition rule About uses: OpenClaw unless the SKU is `hermes`, Hermes
- * whenever the payload carries it.
- *
- * BOTH harnesses are pinned by ClawBox and bumped inside the full update —
- * OpenClaw by `config/openclaw-target.txt`, Hermes by `HERMES_PIN_COMMIT` in
- * install.sh, which `step_hermes_install` re-checks on every update — so the
- * note is the same for both. There is no way for an owner to update either one
- * on its own, and telling them otherwise sends them looking for a button that
- * does not exist.
- *
- * `format` per row, not one shared call: `hermes.current` has already been
- * normalised server-side by `parseHermesVersion`, whose whole reason for
- * existing is that `cleanVersion`'s rules are shaped for OpenClaw/git-describe
- * output. Running the second parser over the first one's result turned
- * "Hermes Agent (dev build)" into "Hermes Agent" here while About, reading the
- * same field raw, kept it — two windows the desktop can show side by side.
- */
-function AgentVersions({ versions }: { versions: VersionInfo }) {
-  const tr = useTr();
-  const pinnedNote = tr("update.pinnedByClawbox", "Pinned by ClawBox — updated with it");
-  const rows: { name: string; version: string | null; note: string }[] = [];
-  if (shipsOpenclaw(versions)) {
-    rows.push({
-      name: "OpenClaw",
-      version: cleanVersion(versions.openclaw.current) || versions.openclaw.current,
-      note: pinnedNote,
-    });
-  }
-  if (versions.hermes) {
-    rows.push({
-      name: "Hermes",
-      version: versions.hermes.current,
-      note: pinnedNote,
-    });
-  }
-  if (!rows.length) return null;
-
-  return (
-    <div className={CARD} data-testid="agent-versions">
-      <div className="text-base font-semibold text-gray-100">{tr("update.agent", "Agent")}</div>
-      <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-3">{tr("update.agentSub", "The assistant harness running on this device")}</p>
-      <div className="space-y-2">
-        {rows.map((row) => (
-          <div key={row.name} className="flex items-baseline justify-between gap-3 text-xs">
-            <div className="min-w-0">
-              <div className="text-sm text-gray-100">{row.name}</div>
-              <div className="text-[11px] text-[var(--text-muted)]">{row.note}</div>
-            </div>
-            {/* "—", not "not installed": a null version here means the probe
-                failed, never that the harness is absent. The payload only
-                carries a `hermes` block on a box that HAS Hermes, and
-                `hermes --version` does not answer while step_hermes_install is
-                moving the checkout aside mid-update. ComponentCard below says
-                the same nothing the same way. */}
-            <div className="min-w-0 font-mono text-gray-100 truncate">{row.version || "—"}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 function ComponentCard({
   name,
@@ -1208,468 +867,5 @@ function BetaToggle({
         style={{ left: 2, transform: enabled ? "translateX(18px)" : "translateX(0)" }}
       />
     </button>
-  );
-}
-
-/**
- * "This would install an older assistant" — a branch or an update the box
- * refused because the harness it installs is older than the one that wrote the
- * assistant's data (src/lib/harness-downgrade.ts). Said from the refusal's
- * detail, one line per harness, with the documented override beside it:
- * back the data up first, then go ahead.
- */
-function HarnessDowngradeNotice({
-  detail,
-  kind,
-  busy = false,
-  backupFailure,
-  onOverride,
-}: {
-  detail: HarnessDowngradeDetail;
-  kind: "branch" | "update";
-  busy?: boolean;
-  /** Present when the override's backup failed: the server's reason, shown as given. */
-  backupFailure?: string;
-  onOverride?: () => void;
-}) {
-  const tr = useTr();
-  return (
-    <div
-      role="alert"
-      data-testid="update-harness-downgrade"
-      className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
-    >
-      <p className="font-semibold text-amber-50">
-        {kind === "branch" && detail.branch
-          ? tr("update.harnessDowngrade.titleBranch", "Branch {branch} would install an older assistant", { branch: detail.branch })
-          : tr("update.harnessDowngrade.titleUpdate", "This update would install an older assistant")}
-      </p>
-      <ul className="mt-1 space-y-0.5">
-        {detail.downgrades.map((d) => (
-          <li key={d.harness}>
-            {d.schema
-              ? tr(
-                "update.harnessDowngrade.schemaLine",
-                "{harness} data on this box is on schema {onDisk}; {harness} {target} supports up to schema {supported}.",
-                { harness: HARNESS_LABEL[d.harness], onDisk: d.schema.onDisk, target: d.target, supported: d.schema.supported },
-              )
-              : tr(
-                "update.harnessDowngrade.versionLine",
-                "{harness} {installed} is installed; this would install the older {target}.",
-                { harness: HARNESS_LABEL[d.harness], installed: d.installed ?? "?", target: d.target },
-              )}
-          </li>
-        ))}
-      </ul>
-      {backupFailure !== undefined ? (
-        <>
-          <p className="mt-1">
-            {tr("update.harnessDowngrade.backupFailed", "The backup could not be taken, so the older version was not installed and nothing was changed.")}
-          </p>
-          {backupFailure && <p className="mt-1 text-amber-200/80 break-words">{backupFailure}</p>}
-        </>
-      ) : (
-        <p className="mt-1">
-          {tr(
-            "update.harnessDowngrade.body",
-            "An older version cannot open data a newer one has written, so nothing was changed. Stay on your current update branch, or back up the assistant's data and continue anyway: whatever the older version cannot open is set aside in that backup.",
-          )}
-        </p>
-      )}
-      {onOverride && (
-        <button
-          type="button"
-          onClick={onOverride}
-          disabled={busy}
-          className="mt-2 px-3 py-1 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold disabled:opacity-50 cursor-pointer hover:bg-amber-500/25"
-        >
-          {kind === "branch"
-            ? tr("update.harnessDowngrade.switchAnyway", "Back up and switch anyway")
-            : tr("update.harnessDowngrade.updateAnyway", "Back up and update anyway")}
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** A step's place in the list, as the log writes it: `05`. */
-function stepNumber(index: number): string {
-  return String(index + 1).padStart(2, "0");
-}
-
-/**
- * A version as the run view's version row writes it: a release always with its
- * `v` (the device says `v4.3.0`, the notes `4.3.0`, and the two must compare
- * equal), anything else — a branch build like `beta@a2c1718` — as it is.
- */
-function runVersion(version: string | null): string | null {
-  if (!version) return null;
-  const release = normalizeVersion(version);
-  return release ? `v${release}` : version;
-}
-
-/**
- * The System Update window while a run is on screen — running, finished or
- * failed.
- *
- * Running and finished: the run on the left (where it is, how far, every step
- * by number) and what the version being installed brings on the right, with
- * "don't power off" across the bottom while it runs. Failed: what stopped and
- * why first — the failed step's name, the most specific reason the updater
- * recorded, the way on (Resume where the server can resume, Dismiss always) —
- * then the log of the steps that ran, beside the stopped step list.
- *
- * The columns follow the window, not the screen (container queries), so a
- * narrow window, the Settings pane or a phone stacks them. In a stack the
- * failure comes before the steps, and it stays first in the document either
- * way: a refused downgrade's explanation and override were once out of sight
- * below ten pending steps on a laptop-sized window.
- */
-function UpdateRunView({
-  status,
-  state,
-  error,
-  versions,
-  channel,
-  heading: Heading,
-  headline,
-  lede,
-  onDismiss,
-  onResume,
-  onOverrideDowngrade,
-}: {
-  status: Status;
-  state: UpdateState | null;
-  /** This screen's own failure to start or clear a run. */
-  error: string | null;
-  versions: VersionInfo | null;
-  /** The branch this box updates from, as far as this screen knows it. */
-  channel: string | null;
-  heading: "h1" | "h2";
-  headline: string;
-  lede: string;
-  onDismiss: () => void;
-  /** Present only for an interrupted run: starts the fresh run that resumes it. */
-  onResume?: () => void;
-  /** "Back up and update anyway", offered on a run refused for installing an older harness. */
-  onOverrideDowngrade?: () => void;
-}) {
-  const tr = useTr();
-  const SubHeading = Heading === "h1" ? "h2" : "h3";
-  // Asked only while a run is on screen: the route reads the target's notes,
-  // and an idle System Update window has no target to ask about.
-  const whatsNew = useUpdateWhatsNew();
-  const panel = updateWhatsNewPanel(whatsNew.answer);
-
-  const failed = status === "failed";
-  // The screen's verdict wins over a stale poll: a run this screen calls
-  // failed has no step still "in progress".
-  const phase: UpdatePhase | undefined = failed ? "failed" : state?.phase;
-  const steps = state?.steps ?? [];
-  const running = steps.find((s) => shownStepStatus(s, phase) === "running");
-  const failure = failed ? describeUpdateFailure(state, error) : null;
-  // A refused downgrade (or the backup its override could not take) is said
-  // from its detail in the owner's language, never as the server's English.
-  const downgrade = failed
-    && (state?.errorCode === HARNESS_DOWNGRADE_CODE || state?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE)
-    ? readHarnessDowngradeDetail(state.downgrade)
-    : null;
-  // Non-fatal problems the update found and worked around — build drift, a
-  // missing update pin it wrote for the owner. The ruling is that these
-  // warn rather than block, which only means anything if they are visible;
-  // the text comes from the server alongside the step labels.
-  const warnings = state?.warnings ?? [];
-  const restarts = steps.some((s) => s.id === RESTART_STEP_ID);
-
-  const current = versions ? runVersion(cleanVersion(versions.clawbox.current) ?? versions.clawbox.current) : null;
-  const nextBuild = versions?.clawbox.target
-    ? runVersion(cleanVersion(versions.clawbox.target) ?? versions.clawbox.target)
-    : null;
-  // The notes name a package version, and every build a channel like beta
-  // ships carries the one already installed until the next bump. There the
-  // version said nothing — "v4.3.0 → 4.3.0" on a real board — and the build
-  // the box is going to (`beta@a2c1718`) is what is being installed.
-  const notesVersion = runVersion(panel.version);
-  const target = notesVersion && notesVersion !== current ? notesVersion : nextBuild ?? notesVersion;
-  const shownChannel = panel.channel ?? channel;
-
-  const header = (
-    <div className="min-w-0">
-      <p className="m-0 mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-orange-400">
-        {tr("update.title", "System Update")}
-      </p>
-      <Heading className="m-0 font-display text-[32px] font-bold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
-        {headline}
-      </Heading>
-      <p className="m-0 mt-2 text-[15px] leading-relaxed text-[var(--text-secondary)]">{lede}</p>
-    </div>
-  );
-
-  const versionRow = (current || target) && (
-    <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[13px] text-[var(--text-secondary)]"
-      data-testid="update-run-versions"
-    >
-      <span>ClawBox</span>
-      {current && <span className="font-mono">{current}</span>}
-      {target && target !== current && (
-        <>
-          {current && <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>arrow_forward</span>}
-          <span className="font-mono text-[var(--text-primary)]">{target}</span>
-        </>
-      )}
-      {isNamedChannel(shownChannel) && (
-        // A QA pin can be a long branch name: it is cut, never allowed to
-        // push the row past a narrow window.
-        <span
-          className="min-w-0 max-w-[14rem] truncate rounded-[var(--r-full)] border border-[var(--coral-edge)] bg-[var(--coral-wash)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-orange-400"
-          title={shownChannel}
-          data-testid="update-run-channel"
-        >
-          {tr("update.whatsNewChannel", "{channel} channel", { channel: shownChannel })}
-        </span>
-      )}
-    </div>
-  );
-
-  const countHeadline = status === "completed"
-    ? tr("update.progressFinished", "Update finished")
-    : failed
-      ? tr("update.progressStopped", "Update stopped")
-      : running?.label ?? (state ? tr("update.progressRunning", "In progress") : tr("update.connecting", "Connecting…"));
-
-  const stepsPanel = (
-    <section
-      className="rounded-[var(--r-2)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6"
-      data-testid="update-steps-panel"
-    >
-      <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
-        <span className="inline-flex min-w-0 items-center gap-2 font-medium text-[var(--text-primary)]">
-          {!state && !failed && (
-            <span className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent motion-safe:animate-spin" aria-hidden="true" />
-          )}
-          <span className="truncate">{countHeadline}</span>
-        </span>
-        {steps.length > 0 && <UpdateStepCount steps={steps} />}
-      </div>
-      {steps.length > 0 && (
-        <>
-          <div className="mt-4">
-            <UpdateStepMeter steps={steps} phase={phase} label={tr("update.title", "System Update")} />
-          </div>
-          <div className="mt-[18px]">
-            <UpdateStepList steps={steps} phase={phase} />
-          </div>
-        </>
-      )}
-    </section>
-  );
-
-  const warningList = warnings.length > 0 && (
-    <ul className="m-0 list-none space-y-2 p-0">
-      {warnings.map((w) => {
-        // The line a finished run leaves behind about drift it RESOLVED is
-        // history, not a problem. Drawn amber with a warning triangle it
-        // alarmed the owner exactly as the stale imperative did, which is
-        // the thing the completion view is meant to stop doing.
-        const resolved = w.code === DRIFT_RESOLVED_CODE;
-        return (
-          <li
-            key={w.code}
-            data-testid={`update-warning-${w.code}`}
-            data-tone={resolved ? "info" : "warning"}
-            className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
-              resolved
-                ? "border-[var(--border-subtle)] bg-white/5 text-[var(--text-muted)]"
-                : "border-amber-500/20 bg-amber-500/10 text-amber-100"
-            }`}
-          >
-            <span
-              className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
-              style={{ fontSize: 16 }}
-            >
-              {resolved ? "history" : "warning"}
-            </span>
-            <span>{w.message}</span>
-          </li>
-        );
-      })}
-    </ul>
-  );
-
-  const dismissButton = (
-    <button
-      type="button"
-      onClick={onDismiss}
-      className="rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-4 py-2.5 text-sm font-semibold text-gray-300 hover:bg-[var(--fill-3)] cursor-pointer"
-    >
-      {tr("update.dismiss", "Dismiss")}
-    </button>
-  );
-
-  const agentVersions = versions && status !== "updating" && <AgentVersions versions={versions} />;
-
-  if (failure) {
-    const ran = steps
-      .map((step, index) => ({ step, index, shown: shownStepStatus(step, phase) }))
-      .filter(({ shown }) => shown === "completed" || shown === "failed");
-    const completedCount = steps.filter((s) => s.status === "completed").length;
-    const noReason = tr(
-      "update.noFailureReason",
-      "The device did not say why the update stopped. Run the update again; if it stops at the same step, contact ClawBox support.",
-    );
-
-    return (
-      <div className="@container w-full" data-testid="update-run" data-status={status}>
-        <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
-          {header}
-          {versionRow}
-        </div>
-        {/* Placed, not reordered, on a wide window: the steps fill the left
-            column, the failure and its log sit right with the feature below.
-            Stacked, the document order reads failure, log, steps, feature. */}
-        <div className="mt-6 grid grid-cols-1 gap-5 @3xl:grid-cols-[minmax(0,420px)_minmax(0,1fr)] @3xl:grid-rows-[auto_1fr] @3xl:gap-x-7">
-          <div className="min-w-0 space-y-5 @3xl:col-start-2 @3xl:row-start-1">
-            <section className="rounded-[var(--r-2)] border border-red-500/25 bg-red-500/[0.06] p-5" data-testid="update-error-panel">
-              {failure.step && (
-                <SubHeading className="m-0 mb-2 flex items-center gap-2 font-display text-[19px] font-semibold text-red-300">
-                  <span className="material-symbols-rounded shrink-0" aria-hidden="true" style={{ fontSize: 21 }}>error</span>
-                  <span className="min-w-0 break-words">{failure.step.label}</span>
-                </SubHeading>
-              )}
-              {downgrade && state ? (
-                <HarnessDowngradeNotice
-                  detail={downgrade}
-                  kind="update"
-                  backupFailure={state.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE ? downgrade.backupFailure ?? "" : undefined}
-                  onOverride={onOverrideDowngrade}
-                />
-              ) : (
-                <>
-                  <p className="m-0 flex items-start gap-2 text-[13px] leading-relaxed text-[var(--text-secondary)]" data-testid="update-error-reason">
-                    {!failure.step && (
-                      <span className="material-symbols-rounded shrink-0 text-red-300" aria-hidden="true" style={{ fontSize: 20 }}>error</span>
-                    )}
-                    <span className="min-w-0 break-words">{failure.reason ?? noReason}</span>
-                  </p>
-                  {failure.context && (
-                    <p className="m-0 mt-2 break-words text-xs leading-relaxed text-[var(--text-muted)]" data-testid="update-error-context">
-                      {failure.context}
-                    </p>
-                  )}
-                </>
-              )}
-              <div className="mt-[18px] flex flex-wrap items-center gap-2.5">
-                {onResume && (
-                  <button
-                    type="button"
-                    onClick={onResume}
-                    className="inline-flex items-center gap-2 rounded-[var(--r-1)] bg-[var(--coral-bright)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--coral-mid)] cursor-pointer"
-                  >
-                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>refresh</span>
-                    {/* The step is known when one is marked failed: the run picks
-                        up there. With none known a fresh run is what "again" means. */}
-                    {failure.step
-                      ? tr("update.resume", "Resume update")
-                      : tr("update.startAgain", "Start the update again")}
-                  </button>
-                )}
-                {dismissButton}
-              </div>
-            </section>
-
-            {ran.length > 0 && (
-              <section
-                aria-label={tr("update.updateLog", "Update log")}
-                className="rounded-[var(--r-2)] border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-5 font-mono text-xs text-[var(--text-secondary)]"
-                data-testid="update-log"
-              >
-                <div className="mb-2 flex justify-between gap-3 border-b border-[var(--border-subtle)] pb-2 text-gray-300" aria-hidden="true">
-                  <span>{tr("update.updateLog", "Update log")}</span>
-                  <span className="tabular-nums">{completedCount} / {steps.length}</span>
-                </div>
-                <ol className="m-0 list-none p-0">
-                  {ran.map(({ step, index, shown }) => {
-                    // The step the run stopped at carries the reason the panel
-                    // gives; any other failed step only its own. A refused
-                    // downgrade's English is never written here.
-                    const reason = shown !== "failed" || downgrade
-                      ? null
-                      : step === failure.step ? failure.reason : stepFailureReason(step);
-                    return (
-                      <li key={step.id} className="flex min-w-0 gap-3 py-[3px] leading-relaxed">
-                        <span className="shrink-0 text-[var(--text-muted)]">{stepNumber(index)}</span>
-                        {shown === "completed" ? (
-                          <span className="min-w-0">
-                            <span className="text-[var(--cyan-bright)]" aria-hidden="true">✓</span> {step.label}
-                          </span>
-                        ) : (
-                          <span className="min-w-0 break-words text-red-300">
-                            <span aria-hidden="true">×</span> {reason ? `${step.label}: ${reason}` : step.label}
-                          </span>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ol>
-              </section>
-            )}
-
-          </div>
-
-          <div className="min-w-0 space-y-4 @3xl:col-start-1 @3xl:row-span-2 @3xl:row-start-1">
-            {stepsPanel}
-            {warningList}
-            {agentVersions}
-          </div>
-
-          {whatsNew.settled && (
-            <div className="min-w-0 self-start @3xl:col-start-2 @3xl:row-start-2">
-              <UpdateWhatsNewPanel panel={panel} variant="compact" headingLevel={SubHeading} />
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  const bar = status === "updating"
-    ? { icon: "power_settings_new", title: tr("update.heroUpdatingSub", "Don't power off until this finishes."), note: tr("update.reconnectNote", "Your ClawBox will briefly go offline while restarting. This page reconnects automatically.") }
-    : restarts
-      ? { icon: "restart_alt", title: tr("update.reloadOnRestart", "The page will reload once the device is back up."), note: null }
-      : null;
-
-  return (
-    <div className="@container w-full" data-testid="update-run" data-status={status}>
-      <div className="grid grid-cols-1 gap-8 @3xl:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
-        <div className="min-w-0 space-y-[18px]">
-          {header}
-          {versionRow}
-          {stepsPanel}
-          {warningList}
-          {status === "completed" && <div>{dismissButton}</div>}
-          {agentVersions}
-        </div>
-        <div className="min-w-0">
-          {whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />}
-        </div>
-      </div>
-      {/* While the run is live it is held to the bottom of the window as the
-          steps scroll under it: "don't power off" is the one line that must
-          stay in sight. A finished run's restart note sits in the flow, over
-          nothing. */}
-      {bar && (
-        <div
-          className={`${status === "updating" ? "sticky bottom-4 z-10 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]" : ""} mt-7 flex items-center gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-5 py-4 text-xs text-[var(--text-secondary)]`}
-          data-testid="update-run-notice"
-        >
-          <span className="material-symbols-rounded shrink-0 text-orange-400" aria-hidden="true" style={{ fontSize: 21 }}>{bar.icon}</span>
-          <div className="min-w-0">
-            <p className="m-0 font-medium text-gray-300">{bar.title}</p>
-            {bar.note && <p className="m-0 mt-1 text-[11px]">{bar.note}</p>}
-          </div>
-        </div>
-      )}
-    </div>
   );
 }

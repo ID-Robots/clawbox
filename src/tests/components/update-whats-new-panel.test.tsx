@@ -296,12 +296,14 @@ describe("the /updating screen", () => {
     render(<UpdatingPage />);
 
     const panel = await screen.findByRole("region", { name: "What's new in ClawBox 4.2.0" });
-    const step = await screen.findByText("Applying system fixups");
-    expect(screen.getByText("Verifying gateway health")).toBeInTheDocument();
-    expect(screen.getByText("Faster updates")).toBeInTheDocument();
+    const steps = await screen.findByTestId("update-steps-panel");
+    expect(within(steps).getAllByText("Applying system fixups").length).toBeGreaterThan(0);
+    expect(within(steps).getByText("Verifying gateway health")).toBeInTheDocument();
+    expect(within(panel).getByText("Faster updates")).toBeInTheDocument();
     // The steps come first in the document: a phone reads them before the panel.
-    expect(step.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByTestId("reconnect-stage-with-aside")).toContainElement(panel);
+    expect(steps.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Inside the run view, as in the System Update window (TASK-2111).
+    expect(screen.getByTestId("update-run")).toContainElement(panel);
   });
 
   it("re-asks the server that comes back after an outage, and draws its answer", async () => {
@@ -332,7 +334,8 @@ describe("the /updating screen", () => {
     stubRoutes(async () => { throw new TypeError("Failed to fetch"); });
     render(<UpdatingPage />);
 
-    await screen.findByText("Applying system fixups");
+    const steps = await screen.findByTestId("update-steps-panel");
+    expect(within(steps).getAllByText("Applying system fixups").length).toBeGreaterThan(0);
     const panel = await screen.findByRole("region", { name: "What's new in this update" });
     await waitFor(() => expect(panel).toHaveAttribute("data-kind", "generic"));
     expect(within(panel).getByRole("link")).toHaveAttribute("href", CLAWBOX_RELEASES_URL);
