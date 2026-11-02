@@ -1049,6 +1049,14 @@ record_owner_password() {
   if [ "$status" != "P" ]; then
     return 0
   fi
+  # The published factory default is nobody's password (src/lib/system-password.ts
+  # FACTORY_DEFAULT_PASSWORD): the wizard may claim such an account and makes its
+  # owner choose a real one. Checked the way the app checks it, as the account
+  # itself through unix_chkpwd; a check that cannot run fails closed, as the
+  # app's does, and counts the password as the owner's.
+  if printf 'clawbox\0' | as_user unix_chkpwd "$CLAWBOX_USER" nullok >/dev/null 2>&1; then
+    return 0
+  fi
   # As the install user, written the way src/lib/config-store.ts writes it: a
   # 0600 temp file renamed into place. A file that does not parse is left alone.
   as_user python3 - "$config" <<'PY'

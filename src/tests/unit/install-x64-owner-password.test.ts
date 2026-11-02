@@ -52,11 +52,18 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** record_owner_password with `passwd -S` answering `status` for the user. */
-function record(status: string) {
+/**
+ * record_owner_password with `passwd -S` answering `status` for the user and
+ * unix_chkpwd exiting `defaultCheck` for the factory default (0: it IS the
+ * default, 7: PAM_AUTH_ERR, it is not; anything else: the check could not run).
+ */
+function record(status: string, defaultCheck = 7) {
   const passwd = path.join(bin, "passwd");
   writeFileSync(passwd, `#!/usr/bin/env bash\necho "owner ${status} 2026-11-02 0 99999 7 -1"\n`);
   chmodSync(passwd, 0o755);
+  const chk = path.join(bin, "unix_chkpwd");
+  writeFileSync(chk, `#!/usr/bin/env bash\ncat > "${dir}/chkpwd-stdin"\nexit ${defaultCheck}\n`);
+  chmodSync(chk, 0o755);
   const r = spawnSync("bash", ["-c", [
     'as_user() { "$@"; }',
     `PROJECT_DIR="${dir}"`,
@@ -88,6 +95,19 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
       record(status);
       expect(existsSync(config)).toBe(false);
     }
+  });
+
+  it("leaves an account still on the published factory default to the wizard, as deviceHasOwner does", () => {
+    // src/lib/system-password.ts: the shipped default is "nobody's yet", so the
+    // wizard may claim it and must make the owner choose a real password.
+    record("P", 0);
+    expect(existsSync(config)).toBe(false);
+    expect(readFileSync(path.join(dir, "chkpwd-stdin"), "utf8")).toBe("clawbox\0");
+  });
+
+  it("records the owner when the default check cannot run, failing closed as the app does", () => {
+    record("P", 9);
+    expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ password_configured: true });
   });
 
   it("never rewrites a config.json it cannot read", () => {
