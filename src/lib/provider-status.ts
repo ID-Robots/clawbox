@@ -84,6 +84,15 @@ export interface ProviderStatusRow {
   /** True for the provider the harness config actually names as its default. */
   isDefault: boolean;
   /**
+   * Whether the box HOLDS a credential for this row, usable or not. The two
+   * `needs-reauth` rows differ in exactly this: a refused ClawBox AI token or
+   * a fenced Claude sign-in is still on the box (true), and the default left
+   * with nothing — ClawBox AI's after its own sign-out — holds none (false).
+   * The list offers a sign-out of the first and never of the second. Optional
+   * for a client reading an older server; absent means "not said".
+   */
+  credentialHeld?: boolean;
+  /**
    * The owner's switch, orthogonal to `state`: a provider can be connected and
    * switched off at the same time, and the strip shows both facts. False only
    * for an id in `ai_disabled_providers`; see `provider-enablement.ts` for the
@@ -400,6 +409,7 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
         ? "needs-reauth"
         : stateFor(credentialed, isDefault, awaitingProbe),
       isDefault,
+      credentialHeld: credentialed === true,
       section: sectionFor(id),
     };
   });
@@ -602,6 +612,7 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
         ? "needs-reauth"
         : stateFor(credentialed.has(id), isDefault),
       isDefault,
+      credentialHeld: credentialed.has(id),
       section: sectionFor(id),
     };
   });

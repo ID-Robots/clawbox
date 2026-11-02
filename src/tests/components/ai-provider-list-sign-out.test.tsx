@@ -7,15 +7,15 @@
  * AI's, the account a box had no way out of (#1369).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import AiProviderList from "@/components/AiProviderList";
-import { PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
+import { PROVIDERS_CHANGED_EVENT, notifyProvidersChanged } from "@/lib/ui-events";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid="icon" /> }));
 
-type Row = { id: string; label: string; state: string; isDefault: boolean; section: string; enabled: boolean };
+type Row = { id: string; label: string; state: string; isDefault: boolean; section: string; enabled: boolean; credentialHeld?: boolean };
 
 const OPENCLAW_ROWS: Row[] = [
   { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
@@ -32,11 +32,12 @@ const HERMES_ROWS: Row[] = [
 interface Box {
   posts: { provider: string }[];
   signedOut: Set<string>;
+  /** What the status answers for rows not signed out here; a test may change it. */
+  rows: Row[];
 }
 
-function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?: { status: number; error: string } } = {}): Box {
-  const state: Box = { posts: [], signedOut: new Set() };
-  const rows = opts.rows ?? OPENCLAW_ROWS;
+function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?: { status: number; error: string }; answer?: Promise<void> } = {}): Box {
+  const state: Box = { posts: [], signedOut: new Set(), rows: opts.rows ?? OPENCLAW_ROWS };
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
@@ -45,6 +46,7 @@ function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?:
     if (url.startsWith("/setup-api/providers/status")) {
       // What the box answers once a row is signed out: the default stays
       // listed with no credential, any other row is gone from this list.
+      const rows = state.rows;
       const now = rows.flatMap((row) => !state.signedOut.has(row.id)
         ? [row]
         : row.isDefault ? [{ ...row, state: "needs-reauth" }] : [{ ...row, state: "disconnected" }]);
@@ -53,6 +55,7 @@ function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?:
     if (url === "/setup-api/providers/sign-out" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as { provider: string };
       state.posts.push(body);
+      await opts.answer;
       expect(new Headers(init.headers).get("content-type")).toBe("application/json");
       if (opts.refuse) return json({ error: opts.refuse.error, kind: "still_signed_in" }, opts.refuse.status);
       state.signedOut.add(body.provider);
@@ -65,10 +68,13 @@ function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?:
 
 const renderList = () => render(<I18nProvider><AiProviderList /></I18nProvider>);
 
-/** A row's button, once the English table (a chunk of its own) has named it. */
+/**
+ * A row's button, by its role and the name a person reads — once the English
+ * table (a chunk of its own) has named it — and on the row it belongs to.
+ */
 async function signOutButton(id: string, label: string): Promise<HTMLElement> {
-  const button = await screen.findByTestId(`ai-provider-sign-out-${id}`);
-  await waitFor(() => expect(button).toHaveTextContent(`Sign out of ${label}`));
+  const button = await screen.findByRole("button", { name: `Sign out of ${label}` }, { timeout: 5_000 });
+  expect(button).toHaveAttribute("data-testid", `ai-provider-sign-out-${id}`);
   return button;
 }
 
@@ -197,5 +203,49 @@ describe("AiProviderList — signing out of a provider", () => {
     await signOutButton("openai", "OpenAI GPT");
     expect(screen.getByTestId("ai-provider-clawai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-sign-out-clawai")).not.toBeInTheDocument();
+  });
+  it("offers the sign-out of a refused token on the default ClawBox AI row, not of a default left with nothing", async () => {
+    stubBox({ rows: [{ ...OPENCLAW_ROWS[0], state: "needs-reauth", credentialHeld: true }, OPENCLAW_ROWS[1]] });
+    renderList();
+    expect(await signOutButton("clawai", "ClawBox AI")).toBeEnabled();
+    cleanup();
+    stubBox({ rows: [{ ...OPENCLAW_ROWS[0], state: "needs-reauth", credentialHeld: false }, OPENCLAW_ROWS[1]] });
+    renderList();
+    await signOutButton("openai", "OpenAI GPT");
+    expect(screen.queryByTestId("ai-provider-sign-out-clawai")).not.toBeInTheDocument();
+  });
+
+  it("holds every Make default and switch while a sign-out runs", async () => {
+    let answer!: () => void;
+    const box = stubBox({ answer: new Promise<void>((resolve) => { answer = resolve; }) });
+    renderList();
+    const button = await signOutButton("openai", "OpenAI GPT");
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(box.posts).toEqual([{ provider: "openai" }]));
+    expect(screen.getByTestId("ai-provider-make-default-xai")).toBeDisabled();
+    expect(screen.getByTestId("ai-provider-switch-xai")).toBeDisabled();
+    expect(screen.getByTestId("ai-provider-sign-out-xai")).toBeDisabled();
+    answer();
+    await waitFor(() => expect(screen.getByTestId("ai-provider-make-default-xai")).toBeEnabled());
+  });
+
+  it("forgets the note once the provider is signed in again, so a later refusal does not bring it back", async () => {
+    const box = stubBox();
+    renderList();
+    const button = await signOutButton("openai", "OpenAI GPT");
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("Signed out of OpenAI GPT."));
+    // Signed in again: the box answers it connected.
+    box.signedOut.clear();
+    act(() => notifyProvidersChanged());
+    await waitFor(() => expect(screen.getByTestId("ai-provider-sign-out-openai")).toBeInTheDocument());
+    expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
+    // ...and that new sign-in is then refused: "Needs sign-in", never "Signed out".
+    box.rows = OPENCLAW_ROWS.map((row) => (row.id === "openai" ? { ...row, state: "needs-reauth", credentialHeld: true } : row));
+    act(() => notifyProvidersChanged());
+    await waitFor(() => expect(screen.getByTestId("ai-provider-openai")).toHaveTextContent(/Needs sign-in/));
+    expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
   });
 });

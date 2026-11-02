@@ -140,7 +140,7 @@ function clawaiKeyCopies(config: OpenClawConfig | null, token: string | null): s
         if (node.clawboxManaged === true) return;
       }
     }
-    for (const [key, value] of Object.entries(node)) {
+    for (const key of Object.keys(node)) {
       if (!SAFE_SEGMENT.test(key)) continue;
       const next = child(node, key);
       if (next) walk(next, [...at, key], depth + 1);

@@ -67,6 +67,9 @@
  "src/lib/prime-radiant/plugin-wiring.ts": {
   "runOpenclawConfigSetBatch: the operations are built at runtime": 1
  },
+ "src/lib/provider-sign-out-hermes.ts": {
+  "patchHermesConfig: unset is built at runtime": 1
+ },
  "src/lib/updater.ts": {
   "runOpenclawConfigSet: the key is computed at runtime": 1,
   "runOpenclawConfigSetBatch: the operations are built at runtime": 1

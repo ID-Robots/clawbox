@@ -1,5 +1,6 @@
 export const dynamic = "force-dynamic";
 
+import { withProviderChangeLock } from "@/lib/provider-change-lock";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
@@ -207,7 +208,17 @@ export async function GET(request: Request) {
 // Set the Hermes default model and/or inference provider. Persists via
 // `hermes config set` (the same store the GET above reads back), so the change
 // survives restarts and applies to `hermes -z` chats.
+/**
+ * One write of the default at a time with the provider sign-out
+ * (src/lib/provider-change-lock.ts): a sign-out checks that its provider is
+ * not the default and removes the credential under the same lock, so a pick
+ * made in between waits, and then reads the box as the sign-out left it.
+ */
 export async function POST(request: Request) {
+  return withProviderChangeLock(() => postHermesModels(request));
+}
+
+async function postHermesModels(request: Request) {
   let body: { model?: string; provider?: string };
   try {
     body = await request.json();

@@ -86,8 +86,14 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
    */
   const [signOutArmed, setSignOutArmed] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState<string | null>(null);
-  /** The provider just signed out of, for the note below — said in the reader's language at render. */
-  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string } | null>(null);
+  /**
+   * The provider just signed out of, for the note below — said in the
+   * reader's language at render. `seen`: the box's own answer has shown it
+   * signed out since, so the next time it reads Connected is a NEW sign-in,
+   * and the note is done with (a later refusal of that sign-in turns the row
+   * to "Needs sign-in" again, and must not bring back "Signed out").
+   */
+  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string; seen: boolean } | null>(null);
   const signOutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disarmSignOut = useCallback(() => {
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
@@ -112,7 +118,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
       if (!res.ok) {
         throw new Error(typeof data.error === "string" && data.error ? data.error : failed);
       }
-      setSignOutNote({ id: row.id, label: row.label });
+      setSignOutNote({ id: row.id, label: row.label, seen: false });
     } catch (e) {
       setToggleError(e instanceof Error && e.message ? e.message : failed);
     } finally {
@@ -190,9 +196,20 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // know about is shown rather than hidden behind everyone else's spinner.
   // Said once the box's own answer shows the provider signed out, and gone
   // again once a sign-in has connected it.
-  const signedOutNote = signOutNote && !rows.some((row) => row.id === signOutNote.id && row.state === "connected")
+  const noteRowConnected = !!signOutNote && rows.some((row) => row.id === signOutNote.id && row.state === "connected");
+  const signedOutNote = signOutNote && !noteRowConnected
     ? t("settings.providers.signedOut", { name: signOutNote.label })
     : null;
+  // The note follows the box's answers: marked seen once they show the
+  // provider signed out, and cleared — not only hidden — once they show it
+  // connected again after that.
+  useEffect(() => {
+    if (!signOutNote) return;
+    const next = !signOutNote.seen && !noteRowConnected
+      ? { ...signOutNote, seen: true }
+      : signOutNote.seen && noteRowConnected ? null : signOutNote;
+    if (next !== signOutNote) setSignOutNote(next);
+  }, [signOutNote, noteRowConnected]);
 
   const awaitingProbe = rows.length === 0
     && (summary?.providers ?? []).some((row) => row.state === "checking");
@@ -325,7 +342,11 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
            switch cannot share a line without the name giving way. */
         <ul className="@container rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
           {rows.map((row) => {
-            const busy = toggling === row.id || settingDefault === row.id;
+            // A sign-out in flight holds every row's Make default and switch:
+            // the server refuses the default's sign-out, and a default moved
+            // onto the provider being signed out would leave the chat on it
+            // (the server serialises the two as well — provider-change-lock.ts).
+            const busy = toggling === row.id || settingDefault === row.id || signingOut !== null;
             const canMakeDefault = row.enabled && row.state === "connected" && !row.isDefault;
             // The ClawBox AI allowances belong to ONE row and hang off it here
             // rather than standing as a card of their own further down the page
@@ -350,13 +371,17 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // The sign-out, on the row of every sign-in the box holds, on
             // either harness — a dead one too (a refused ClawBox AI token, a
             // Claude sign-in the gateway fenced off), which is still on the
-            // box. Not on the DEFAULT's "needs sign-in" row: that is the
-            // default with no credential left to remove, ClawBox AI's after
-            // its own sign-out. On the default it is LOCKED, like the switch —
-            // signing the chat's own provider out would leave it answering on
-            // nothing — except for ClawBox AI, the account a box with nothing
-            // else had no way out of (#1369). The route holds the same rule.
-            const canSignOut = row.state === "connected" || (row.state === "needs-reauth" && !row.isDefault);
+            // box. `credentialHeld` is what tells the two "needs sign-in"
+            // rows apart: that one, and the default left with NOTHING to
+            // remove (ClawBox AI's after its own sign-out), which gets none.
+            // An older server that does not say falls back to "not the
+            // default". On the default it is LOCKED, like the switch —
+            // signing the chat's own provider out would leave it answering
+            // on nothing — except for ClawBox AI, the account a box with
+            // nothing else had no way out of (#1369). The route holds the
+            // same rule.
+            const canSignOut = row.state === "connected"
+              || (row.state === "needs-reauth" && (row.credentialHeld ?? !row.isDefault));
             const signOutLocked = row.isDefault && row.id !== "clawai";
             const armed = signOutArmed === row.id;
             return (
@@ -423,7 +448,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                         type="button"
                         onClick={() => onSignOutClick(row)}
                         onBlur={armed ? disarmSignOut : undefined}
-                        disabled={signingOut !== null || busy || signOutLocked}
+                        disabled={busy || settingDefault !== null || signOutLocked}
                         aria-busy={signingOut === row.id}
                         aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
                         title={signOutLocked ? t("settings.providers.lockedHint") : undefined}

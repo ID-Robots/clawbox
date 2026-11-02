@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { withProviderChangeLock } from "@/lib/provider-change-lock";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
@@ -1183,7 +1184,17 @@ export async function GET() {
   }
 }
 
+/**
+ * One write of the default at a time with the provider sign-out
+ * (src/lib/provider-change-lock.ts): a sign-out checks that its provider is
+ * not the default and removes the credential under the same lock, so a pick
+ * made in between waits, and then reads the box as the sign-out left it.
+ */
 export async function POST(request: Request) {
+  return withProviderChangeLock(() => postChatModel(request));
+}
+
+async function postChatModel(request: Request) {
   // The model the WHOLE box chats on is the owner's to change. Middleware
   // refuses a signed-in user's write already (src/lib/non-owner-scope.ts);
   // asked here as well because a user's first desktop load is what moved it.

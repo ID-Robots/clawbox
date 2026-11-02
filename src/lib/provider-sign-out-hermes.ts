@@ -39,7 +39,7 @@ import fs from "node:fs/promises";
 import path from "@/lib/runtime-path";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { copiesHolding, isScrubbableSecret, listCopies, scrubCopies, stillLive } from "@/lib/credential-copies";
-import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
+import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue, type HermesConfigRead } from "@/lib/hermes-config-yaml";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { clearHermesEnvValues, getHermesEnvValue, hermesEnvPath, hermesHome } from "@/lib/hermes-env";
 import { HERMES_IMAGE_TOKEN_ENV } from "@/lib/hermes-image-plugin";
@@ -50,8 +50,15 @@ import type { HarnessSignOut } from "@/lib/provider-sign-out-types";
 
 const CLAWAI = "clawai";
 
-/** Where a ClawBox AI token is written besides its own block (hermes-clawai.ts, hermes-tts.ts). */
-const CLAWAI_KEY_COPIES = ["model.api_key", "tts.openai.api_key"] as const;
+/**
+ * ClawBox AI's homes in config.yaml: its block's key, and the copies its
+ * link writes besides (hermes-clawai.ts, hermes-tts.ts). Named constants, each
+ * read on its own, so the harness contract checks every one of them against
+ * the pinned Hermes (scripts/harness-contract).
+ */
+const HERMES_CLAWAI_API_KEY = "providers.clawai.api_key";
+const HERMES_MODEL_API_KEY = "model.api_key";
+const HERMES_VOICE_API_KEY = "tts.openai.api_key";
 
 /** An entry id `hermes auth remove` can be handed as an argument (never one that reads as a flag). */
 const SAFE_ENTRY_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
@@ -140,9 +147,17 @@ async function configKeysFor(slug: string, token: string | null): Promise<{ keys
   const keys: string[] = [];
   const values: string[] = [];
   let unreadable = false;
-  const candidates = slug === CLAWAI ? [`providers.${CLAWAI}.api_key`, ...CLAWAI_KEY_COPIES] : [`providers.${slug}.api_key`];
-  for (const key of candidates) {
-    const read = await resolveHermesConfigValue(key);
+  // A provider defined in config.yaml keeps its key under its own slug: the
+  // one key here the contract cannot check (recorded in
+  // config/harness-contract-unchecked.json).
+  const reads: [string, HermesConfigRead][] = slug === CLAWAI
+    ? [
+      [HERMES_CLAWAI_API_KEY, await resolveHermesConfigValue(HERMES_CLAWAI_API_KEY)],
+      [HERMES_MODEL_API_KEY, await resolveHermesConfigValue(HERMES_MODEL_API_KEY)],
+      [HERMES_VOICE_API_KEY, await resolveHermesConfigValue(HERMES_VOICE_API_KEY)],
+    ]
+    : [[`providers.${slug}.api_key`, await resolveHermesConfigValue(`providers.${slug}.api_key`)]];
+  for (const [key, read] of reads) {
     if (read.state === "unreadable") {
       unreadable = true;
       continue;

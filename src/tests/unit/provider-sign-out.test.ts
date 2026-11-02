@@ -237,6 +237,9 @@ const messaging = vi.hoisted(() => ({ restartHermesGatewayIfRunning: vi.fn(async
 vi.mock("@/lib/clawbox-mcp-registration", () => messaging);
 
 import { signOutOfProvider } from "@/lib/provider-sign-out";
+import { withProviderChangeLock } from "@/lib/provider-change-lock";
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 type AuthJson = { version: 1; providers: Record<string, unknown>; credential_pool: Record<string, Record<string, unknown>[]> };
 
@@ -634,6 +637,41 @@ describe("signOutOfProvider — every other provider on OpenClaw", () => {
     expect(await signOutOfProvider("openai")).toMatchObject({ ok: false, kind: "is_default" });
     expect(cli.spawnOpenclawCli).not.toHaveBeenCalled();
     expect(store.setMany).not.toHaveBeenCalled();
+  });
+
+  it("a default write that arrives during the sign-out waits until the key is gone", async () => {
+    // The sign-out is inside its removal (its first logout has started)...
+    let inRemoval!: () => void;
+    const removing = new Promise<void>((resolve) => { inRemoval = resolve; });
+    const logout = cli.spawnOpenclawCli.getMockImplementation()!;
+    cli.spawnOpenclawCli.mockImplementation(async (args: string[], opts: unknown) => {
+      inRemoval();
+      await tick();
+      return logout(args, opts);
+    });
+    const signingOut = signOutOfProvider("openrouter");
+    await removing;
+    // ...when a second browser makes OpenRouter the default — through the
+    // writer's own lock, as /setup-api/chat/model takes it.
+    let seenByWriter: string[] | null = null;
+    const write = withProviderChangeLock(async () => {
+      seenByWriter = Object.keys(box.gatewayStore).filter((id) => id.startsWith("openrouter:"));
+      (box.config.agents as { defaults: { model: { primary: string } } }).defaults.model.primary = "openrouter/auto";
+    });
+    expect(await signingOut).toMatchObject({ ok: true, changed: true });
+    await write;
+    // It ran after the removal, and so sees a provider with nothing to sign in with.
+    expect(seenByWriter).toEqual([]);
+  });
+
+  it("a sign-out that arrives after a default write sees the new default, and touches nothing", async () => {
+    const write = withProviderChangeLock(async () => {
+      (box.config.agents as { defaults: { model: { primary: string } } }).defaults.model.primary = "openrouter/auto";
+    });
+    expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "is_default" });
+    await write;
+    expect(cli.spawnOpenclawCli).not.toHaveBeenCalled();
+    expect(box.gatewayStore).toHaveProperty("openrouter:default");
   });
 
   it("refuses when it cannot read which provider is the default, or none is set", async () => {

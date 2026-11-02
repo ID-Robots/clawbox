@@ -69,6 +69,7 @@ import { prepareHermesSignOut } from "@/lib/provider-sign-out-hermes";
 import { prepareOpenclawSignOut } from "@/lib/provider-sign-out-openclaw";
 import type { HarnessSignOut } from "@/lib/provider-sign-out-types";
 import { canonicalProviderId, isLocalProviderRow, normalizeProviderId, providerRowLabel } from "@/lib/provider-status";
+import { withProviderChangeLock } from "@/lib/provider-change-lock";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 
 /** ClawBox AI's row, on both harnesses. */
@@ -190,22 +191,11 @@ async function forgetRecords(harness: Harness, row: string): Promise<void> {
   await forgetProviderVerified(row).catch(() => undefined);
 }
 
-/** Sign the box out of the provider behind row `providerId` — see the file header. Never throws. */
-export async function signOutOfProvider(providerId: string): Promise<ProviderSignOutResult> {
-  const source = await getActiveHarnessSource();
-  const harness = source.active;
-  const row = canonicalProviderId(harness, typeof providerId === "string" ? providerId : null) ?? "";
-  const label = providerRowLabel(harness, row);
-  if (!ROW_ID.test(row) || isLocalProviderRow(row) || row === "auto") {
-    return {
-      ok: false,
-      kind: "unknown_provider",
-      error: isLocalProviderRow(row)
-        ? "An on-device model has no sign-in: turn it off in Settings → Local AI."
-        : "There is no such provider to sign out of.",
-    };
-  }
-
+/**
+ * Why this sign-out may not go ahead, or null. Asked under the provider-change
+ * lock, so the default it reads is still the default when the removal lands.
+ */
+async function refusalBeforeSignOut(harness: Harness, row: string, label: string): Promise<ProviderSignOutResult | null> {
   if (row === CLAWAI_ROW) {
     // A device login that is writing its token right now would land it after
     // this sign-out, and the box would be signed in to that account after all.
@@ -237,25 +227,54 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
     }
   }
 
-  const token = row === CLAWAI_ROW ? await resolveClawaiToken() : null;
-  const storedToken = row === CLAWAI_ROW ? await getConfigValue(CLAWAI_TOKEN_KEY).catch(() => undefined) : undefined;
-  const halves = [await prepareHalf(harness, row, token, true)];
-  if (row === CLAWAI_ROW && source.edition === "dual") {
-    // The other harness of a dual box, cleaned and read back but never
-    // restarted: it does not answer the chat.
-    const other: Harness = harness === "openclaw" ? "hermes" : "openclaw";
-    halves.push(await prepareHalf(other, row, token, false));
-  }
-  const held = halves.some((half) => half.held)
-    || (row === CLAWAI_ROW && (storedToken !== undefined || token !== null));
-  // Every writer of `clawai_token` samples the coding agent's readiness before
-  // its write (coding-agent-mcp-refresh.ts): a box with no ClawBox AI account
-  // loses the coding tools, and the running agent must hear it.
-  const readyBefore = row === CLAWAI_ROW && held ? await codingAgentReady() : undefined;
+  return null;
+}
 
-  // 1. The harness's copies, then 2. ClawBox's records.
-  for (const half of halves) await half.remove();
-  await forgetRecords(harness, row);
+/** Sign the box out of the provider behind row `providerId` — see the file header. Never throws. */
+export async function signOutOfProvider(providerId: string): Promise<ProviderSignOutResult> {
+  const source = await getActiveHarnessSource();
+  const harness = source.active;
+  const row = canonicalProviderId(harness, typeof providerId === "string" ? providerId : null) ?? "";
+  const label = providerRowLabel(harness, row);
+  if (!ROW_ID.test(row) || isLocalProviderRow(row) || row === "auto") {
+    return {
+      ok: false,
+      kind: "unknown_provider",
+      error: isLocalProviderRow(row)
+        ? "An on-device model has no sign-in: turn it off in Settings → Local AI."
+        : "There is no such provider to sign out of.",
+    };
+  }
+
+  // From the default check until the removal has landed, nothing may move
+  // the default (src/lib/provider-change-lock.ts): a second browser making
+  // this provider the default in between would leave the chat on nothing.
+  const removed = await withProviderChangeLock(async () => {
+    const refusal = await refusalBeforeSignOut(harness, row, label);
+    if (refusal) return refusal;
+    const token = row === CLAWAI_ROW ? await resolveClawaiToken() : null;
+    const storedToken = row === CLAWAI_ROW ? await getConfigValue(CLAWAI_TOKEN_KEY).catch(() => undefined) : undefined;
+    const halves = [await prepareHalf(harness, row, token, true)];
+    if (row === CLAWAI_ROW && source.edition === "dual") {
+      // The other harness of a dual box, cleaned and read back but never
+      // restarted: it does not answer the chat.
+      const other: Harness = harness === "openclaw" ? "hermes" : "openclaw";
+      halves.push(await prepareHalf(other, row, token, false));
+    }
+    const held = halves.some((half) => half.held)
+      || (row === CLAWAI_ROW && (storedToken !== undefined || token !== null));
+    // Every writer of `clawai_token` samples the coding agent's readiness before
+    // its write (coding-agent-mcp-refresh.ts): a box with no ClawBox AI account
+    // loses the coding tools, and the running agent must hear it.
+    const readyBefore = row === CLAWAI_ROW && held ? await codingAgentReady() : undefined;
+
+    // 1. The harness's copies, then 2. ClawBox's records.
+    for (const half of halves) await half.remove();
+    await forgetRecords(harness, row);
+    return { halves, held, readyBefore };
+  });
+  if ("ok" in removed) return removed;
+  const { halves, held, readyBefore } = removed;
 
   // 3. The running harness onto the change, then the backups it rotated.
   let gatewayRestarting = false;
