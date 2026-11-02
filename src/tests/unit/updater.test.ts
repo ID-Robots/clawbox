@@ -5067,8 +5067,10 @@ describe("getVersionInfo harness reporting", () => {
  *
  * On `dual` the opposite holds, whichever harness is answering: both are the
  * box's, the full update keeps both at their pins, and a later switch back must
- * never land on a stale, un-doctored core. Hermes is the active harness in
- * every case below unless a case says otherwise; nothing here may depend on it.
+ * never land on a stale, un-doctored core. The updater reads no active
+ * harness at all — the store says Hermes in every case below unless a case
+ * says otherwise, so that if anything here ever started to, these cases would
+ * see a Hermes-active box.
  */
 describe("OpenClaw update scope: offered exactly where the full update installs it", () => {
   const STALE = "2026.10.7";
@@ -5125,6 +5127,25 @@ describe("OpenClaw update scope: offered exactly where the full update installs 
     expect(steps).toContain("hermes_edition");
     expect(steps.indexOf("hermes_edition")).toBeGreaterThan(steps.indexOf("post_update"));
     expect(info.hermes?.current).toBe("v0.21.1");
+    // And the answer about OpenClaw is the same one the Hermes-active box got.
+    expect(steps).toContain("openclaw_install");
+    expect(info.openclaw).toEqual({ current: STALE_BANNER, target: PIN, updateAvailable: true });
+  });
+
+  it("answers for the edition the box is now, not the one it was swapped from", async () => {
+    // The swap re-bakes the lock under a web server that keeps running, and a
+    // reachable check is cached for 30 minutes: the pre-swap payload, OpenClaw
+    // offer and all, must not be what the reloaded desktop is told.
+    const { info: before } = await boxFor("openclaw");
+    expect(before.openclaw.updateAvailable).toBe(true);
+
+    process.env.CLAWBOX_EDITION = "hermes";
+    const { getVersionInfo } = await import("@/lib/updater");
+    const after = await getVersionInfo();
+
+    expect(after.edition).toBe("hermes");
+    expect(after.openclaw).toEqual({ current: null, target: null, updateAvailable: false });
+    expect(after.hermes?.current).toBe("v0.21.1");
   });
 
   it("hermes with a core a swap left on disk: no OpenClaw update is offered, because none is run", async () => {
