@@ -619,7 +619,7 @@ export class HermesAdapter implements HarnessAdapter {
 
   /**
    * Only while a session is threaded: a conversation with none — a new chat,
-   * or one this page reloaded into, whose session id was never handed back —
+   * or one this page reloaded into whose transcript recorded no session id —
    * opens a fresh session on its next turn, and that one runs on whatever the
    * header sends.
    */
@@ -694,6 +694,12 @@ export class HermesAdapter implements HarnessAdapter {
       }
       const data = await res.json();
       const rows = Array.isArray(data?.messages) ? data.messages : [];
+      // The session the conversation on screen ran on. A reloaded page has no
+      // id of its own, and without this its next turn opened a fresh session
+      // that knew nothing of what it redraws. A live page keeps its own.
+      if (typeof data?.sessionId === "string" && data.sessionId && !this.sessions.has(key)) {
+        this.sessions.set(key, data.sessionId);
+      }
       return {
         messages: rows.filter(isHistoryMessage),
         // There is no image-generation wait to resolve on this path: the

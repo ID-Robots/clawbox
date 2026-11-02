@@ -240,7 +240,8 @@ describe("POST /setup-api/hermes/chat", () => {
     await post({ message: "remember 41" });
     expect(transcript()).toEqual([
       { role: "user", text: "remember 41", timestamp: expect.any(Number) },
-      { role: "assistant", text: "hello back", timestamp: expect.any(Number) },
+      // With the session it ran on, so a reloaded page resumes it.
+      { role: "assistant", text: "hello back", timestamp: expect.any(Number), sessionId: "20260810_221825_609d1e" },
     ]);
   });
 

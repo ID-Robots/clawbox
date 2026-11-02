@@ -244,6 +244,13 @@ describe("a streamed chat turn", () => {
     });
   });
 
+  it("records the session the answer ran on, so a reloaded page can resume it", async () => {
+    openTurnMock.mockResolvedValue(fakeTurn({ sessionId: "20260823_185842_1eabd5", deltas: ["ok"] }).handle);
+    await readEvents(await POST(post({ message: "remember 42" })));
+    const assistant = appendMock.mock.calls.map((c) => c[0]).find((r) => r.role === "assistant");
+    expect(assistant).toMatchObject({ text: "ok", sessionId: "20260823_185842_1eabd5" });
+  });
+
   it("reports a failed turn inside the stream, since the status code is spent", async () => {
     openTurnMock.mockResolvedValue(
       fakeTurn({ deltas: ["…"], status: "error", error: "the provider is rate limiting" }).handle,
@@ -319,6 +326,9 @@ describe("when the box cannot stream", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     expect(await res.json()).toMatchObject({ text: "spawned instead", harness: "hermes" });
     expect(spawnMock).toHaveBeenCalled();
+    // The spawned turn records its session beside the answer too.
+    const assistant = appendMock.mock.calls.map((c) => c[0]).find((r) => r.role === "assistant");
+    expect(assistant).toMatchObject({ sessionId: "20260823_190508_ce85d3" });
   });
 
   it("does not even try to stream a turn carrying a picture", async () => {
