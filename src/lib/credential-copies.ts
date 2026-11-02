@@ -27,7 +27,7 @@
  */
 
 import fs from "node:fs/promises";
-import path from "node:path";
+import path from "@/lib/runtime-path";
 
 /** Long enough that a match is the key and not a word, and nothing a replace could break. */
 const SCRUBBABLE = /^[A-Za-z0-9._~+/=-]{8,512}$/;

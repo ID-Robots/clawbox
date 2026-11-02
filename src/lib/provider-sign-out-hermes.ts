@@ -36,7 +36,7 @@
  */
 
 import fs from "node:fs/promises";
-import path from "node:path";
+import path from "@/lib/runtime-path";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { copiesHolding, isScrubbableSecret, listCopies, scrubCopies, stillLive } from "@/lib/credential-copies";
 import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";

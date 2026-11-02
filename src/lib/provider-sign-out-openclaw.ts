@@ -42,7 +42,7 @@
  * SERVER ONLY.
  */
 
-import path from "node:path";
+import path from "@/lib/runtime-path";
 import { profileProviderId } from "@/lib/chatgpt-subscription";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
