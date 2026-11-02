@@ -492,3 +492,78 @@ describe("removedByRun: a named file the run deleted is not missing", () => {
     expect([...removed]).toEqual(["old.md"]);
   });
 });
+
+describe("removedNamed: a named folder the run emptied is not missing", () => {
+  const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { stdio: "pipe" }).toString();
+  /** The project as a repository holding `files`, committed on main. */
+  const repo = (files: Record<string, string>) => {
+    git(project, "init", "-q", "-b", "main");
+    for (const [file, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(project, file)), { recursive: true });
+      fs.writeFileSync(path.join(project, file), content);
+    }
+    git(project, "add", "-A");
+    git(project, "commit", "-qm", "base");
+  };
+  const inPlace = { directory: "", filesTouched: [] as string[], worktree: null };
+
+  it("accepts a task that named the folder it deleted, says so, and the team is done", async () => {
+    repo({ "README.md": "# Widgets\n", "design/plan-check-existing.png": "png\n" });
+    const plan = answer(
+      ["README.md — the readme", "design/plan-check-existing.png — an old mock-up, committed by mistake"],
+      [{ task_description: "Remove the committed design/ folder and say so in the readme", files_hint: ["design/", "README.md"] }],
+    );
+    outcomes = [
+      { summary: plan },
+      // Removed through Bash, never recorded as touched; the empty folder stays behind on disk.
+      { summary: "Removed design/ and updated the readme.", writes: { "README.md": "# Widgets\n\nNo design folder.\n" }, removes: ["design/plan-check-existing.png"], filesTouched: ["README.md"] },
+    ];
+    const board = await teams.startTeam({ goal: "Remove the committed design folder.", directory: "widgets", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.singleRun).toBe(true);
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    expect(fs.readdirSync(path.join(project, "design"))).toEqual([]);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.review?.verdict])).toEqual([["t1", "complete", "accepted"]]);
+    expect(done.tasks[0].review?.notes).toMatch(/^Ran as a single run, and the files it names are present \(README\.md\) or removed by the run \(design\) in the project folder: /);
+    expect(messages(done).some((m) => /Deliverable missing/.test(m))).toBe(false);
+    expect(done.status).toBe("done");
+    expect(done.error ?? null).toBeNull();
+  });
+
+  it("never reads `design` as a folder of a deleted designs/x.png", async () => {
+    repo({ "designs/x.png": "png\n" });
+    fs.rmSync(path.join(project, "designs"), { recursive: true });
+    const run = { ...inPlace, directory: project };
+    const place = teams.deliverablePlace(run as never, project);
+    const removed = await teams.removedByRun(run as never, place);
+    expect([...removed]).toEqual(["designs/x.png"]);
+    expect(await teams.removedNamed(place, ["design", "designs"], removed)).toEqual(["designs"]);
+    expect(await teams.missingDeliverables(place, ["design"])).toEqual(["design (missing)"]);
+  });
+
+  it("does not count a folder that still holds a file as removed, only the file the run deleted from it", async () => {
+    repo({ "design/a.png": "a\n", "design/b.png": "b\n" });
+    fs.rmSync(path.join(project, "design", "a.png"));
+    const run = { ...inPlace, directory: project };
+    const place = teams.deliverablePlace(run as never, project);
+    const removed = await teams.removedByRun(run as never, place);
+    expect([...removed]).toEqual(["design/a.png"]);
+    expect(await teams.removedNamed(place, ["design", "design/", "design/a.png"], removed)).toEqual(["design/a.png"]);
+    expect(await teams.missingDeliverables(place, ["design"])).toEqual([]);
+  });
+
+  it("counts a folder the run's branch deleted, in its own worktree, as removed", async () => {
+    repo({ "design/x.png": "x\n", "keep.md": "keep\n" });
+    const wt = path.join(root, "wt");
+    git(project, "worktree", "add", "-q", "-b", "clawbox/run-y", wt);
+    git(wt, "rm", "-rq", "design");
+    git(wt, "commit", "-qm", "work");
+    const run = { directory: wt, filesTouched: [], worktree: { path: wt, branch: "clawbox/run-y", base: "main", project, removed: false, branchRemoved: false } };
+    const place = teams.deliverablePlace(run as never, project);
+    expect(place.dir).toBe(wt);
+    const removed = await teams.removedByRun(run as never, place);
+    expect([...removed]).toEqual(["design/x.png"]);
+    expect(await teams.removedNamed(place, ["design", "keep.md"], removed)).toEqual(["design"]);
+  });
+});

@@ -1869,13 +1869,15 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
   if (ok && settled && landing?.landed) {
     const place = landing.place;
     // A file the run removed was the task's to delete (a hint names what a
-    // task touches, not only what it leaves): it is not missing.
+    // task touches, not only what it leaves): it is not missing — nor is a
+    // named folder it emptied (`removedNamed`).
     const removed = await removedByRun(settled, place);
     for (const task of tasks) {
       const named = namedDeliverables(task.files_hint);
       if (!named.length) continue;
-      const kept = named.filter((n) => !removed.has(n));
-      gaps.set(task.task_id, { named: kept, missing: await missingDeliverables(place, kept), removed: named.filter((n) => removed.has(n)) });
+      const gone = await removedNamed(place, named, removed);
+      const kept = named.filter((n) => !gone.includes(n));
+      gaps.set(task.task_id, { named: kept, missing: await missingDeliverables(place, kept), removed: gone });
     }
   }
   for (const task of tasks) {
@@ -2021,20 +2023,50 @@ export function deliverablePlace(run: Pick<CodingRun, "directory" | "worktree">,
 export async function missingDeliverables(place: DeliverablePlace, named: readonly string[]): Promise<string[]> {
   const missing: string[] = [];
   for (const entry of named) {
-    let state: NamedState = "missing";
-    try {
-      const file = path.resolve(place.dir, entry);
-      state = isInside(file, path.resolve(place.dir)) ? diskState(file) : "missing";
-      if (state !== "present" && place.branch) {
-        const onBranch = await branchState(place.branch, entry);
-        if (onBranch === "present" || (onBranch === "empty" && state === "missing")) state = onBranch;
-      }
-    } catch {
-      // Whatever went wrong looking, the file was not seen: missing.
-    }
+    const state = await namedState(place, entry);
     if (state !== "present") missing.push(`${entry} (${state})`);
   }
   return missing;
+}
+
+/** One named path where a settled run's work is (`missingDeliverables`): in the folder, else on the run's branch. */
+async function namedState(place: DeliverablePlace, entry: string): Promise<NamedState> {
+  let state: NamedState = "missing";
+  try {
+    const file = path.resolve(place.dir, entry);
+    state = isInside(file, path.resolve(place.dir)) ? diskState(file) : "missing";
+    if (state !== "present" && place.branch) {
+      const onBranch = await branchState(place.branch, entry);
+      if (onBranch === "present" || (onBranch === "empty" && state === "missing")) state = onBranch;
+    }
+  } catch {
+    // Whatever went wrong looking, the file was not seen: missing.
+  }
+  return state;
+}
+
+/**
+ * The entries of `named` (`namedDeliverables`) the run removed, out of what
+ * `removedByRun` found: a file it deleted, or a folder it emptied — one that
+ * held a file it deleted (`design` holds `design/x.png`, never
+ * `designs/x.png`) and that is no longer there where its work is, a folder
+ * left with nothing in it included. A planner names the folder a task is to
+ * delete as readily as a file (team-qpx784qm: `design`, whose one file the
+ * run removed, failed the team as missing). A folder the run only partly
+ * emptied, or that still holds a file, is not removed: it is judged as any
+ * named folder is.
+ */
+export async function removedNamed(place: DeliverablePlace, named: readonly string[], removed: ReadonlySet<string>): Promise<string[]> {
+  const norm = (p: string) => p.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  const gone = [...removed].map(norm).filter(Boolean);
+  const out: string[] = [];
+  for (const entry of named) {
+    const n = norm(entry);
+    if (!n || n === ".") continue;
+    if (removed.has(entry) || gone.includes(n)) out.push(entry);
+    else if (gone.some((f) => f.startsWith(`${n}/`)) && (await namedState(place, n)) !== "present") out.push(entry);
+  }
+  return out;
 }
 
 /**
