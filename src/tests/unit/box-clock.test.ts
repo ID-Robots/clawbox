@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FUTURE_SKEW_TOLERANCE_MS,
   MAX_SAMPLE_RTT_MS,
   _resetBoxClockForTests,
   boxAge,
@@ -150,13 +149,13 @@ describe("boxAge", () => {
   it("reads a time a little ahead of now — the clocks' leftover skew — as just now", () => {
     expect(boxAge(NOW + 1, NOW)).toEqual({ unit: "now" });
     expect(boxAge(NOW + 5 * SEC, NOW)).toEqual({ unit: "now" });
-    expect(boxAge(NOW + FUTURE_SKEW_TOLERANCE_MS, NOW)).toEqual({ unit: "now" });
+    expect(boxAge(NOW + 2 * MIN, NOW)).toEqual({ unit: "now" });
   });
 
-  it("gives no age to a time further ahead than any skew explains", () => {
-    expect(FUTURE_SKEW_TOLERANCE_MS).toBe(2 * MIN);
-    expect(boxAge(NOW + FUTURE_SKEW_TOLERANCE_MS + 1, NOW)).toEqual({ unit: "ahead" });
-    expect(boxAge(NOW + 3 * HOUR, NOW)).toEqual({ unit: "ahead" });
+  it("never puts a past event in the future: a box clock set back since reads just now too", () => {
+    expect(boxAge(NOW + 2 * MIN + 1, NOW)).toEqual({ unit: "now" });
+    expect(boxAge(NOW + 3 * HOUR, NOW)).toEqual({ unit: "now" });
+    expect(boxAge(NOW + 400 * 24 * HOUR, NOW)).toEqual({ unit: "now" });
   });
 
   it("is null for a time that is not a number", () => {
@@ -172,9 +171,17 @@ describe("a backup the box finished three seconds ago", () => {
 
   it("is just now on a browser 10 minutes behind the box, not in the future", () => {
     const browserNow = BOX_NOW - 10 * MIN;
-    expect(boxAge(finishedAt, browserNow)).toEqual({ unit: "ahead" });
     noteBoxClock(stamped(BOX_NOW), browserNow - 50, browserNow);
     expect(boxAge(finishedAt, boxNowMs(browserNow))).toEqual({ unit: "now" });
+  });
+
+  it("keeps its age on a browser 10 minutes behind the box, once the box's clock is known", () => {
+    // Five minutes ago by the box: on the browser's clock that is five minutes AHEAD.
+    const browserNow = BOX_NOW - 10 * MIN;
+    const fiveMinutesAgo = BOX_NOW - 5 * MIN;
+    expect(boxAge(fiveMinutesAgo, browserNow)).toEqual({ unit: "now" });
+    noteBoxClock(stamped(BOX_NOW), browserNow - 50, browserNow);
+    expect(boxAge(fiveMinutesAgo, boxNowMs(browserNow))).toEqual({ unit: "minutes", n: 5 });
   });
 
   it("is just now on a browser 10 minutes ahead of the box, not 10 minutes ago", () => {

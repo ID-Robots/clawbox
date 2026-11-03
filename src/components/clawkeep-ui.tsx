@@ -27,8 +27,9 @@ export type Translator = (key: string, params?: Record<string, string | number>)
 
 /** How long ago the box wrote `ms`, measured on the box's clock (`boxNowMs`),
  *  not the viewer's: a browser a few seconds behind the box called a backup
- *  that had just finished "in the future". What is left of a skew — up to
- *  `FUTURE_SKEW_TOLERANCE_MS` ahead — reads "just now" (`boxAge`).
+ *  that had just finished "in the future". A time ahead of now — what is left
+ *  of a skew, or a box clock set back since — reads "just now" (`boxAge`):
+ *  every caller's time is of something that has already happened.
  *  `nowMs` lets a caller share the clock it already sampled (from
  *  `boxNowMs()`), so a verdict and the "when" printed beside it cannot be
  *  drawn from two different reads. */
@@ -36,7 +37,6 @@ export function timeAgo(ms: number, t: Translator, nowMs?: number): string {
   if (!ms) return t("clawkeep.never");
   const age = boxAge(ms, nowMs ?? boxNowMs());
   if (!age) return t("clawkeep.never");
-  if (age.unit === "ahead") return t("clawkeep.inFuture");
   if (age.unit === "now") return t("clawkeep.justNow");
   if (age.unit === "minutes") return t("clawkeep.minutesAgo", { count: age.n });
   if (age.unit === "hours") return t("clawkeep.hoursAgo", { count: age.n });

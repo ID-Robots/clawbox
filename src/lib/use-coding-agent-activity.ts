@@ -5,7 +5,7 @@ import { isCodingRunStatus, parsePauseReason, type CodingPauseReason, type Codin
 import { onCodingRunStarted, onCodingTeamChanged } from "@/lib/ui-events";
 import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding-pr-state";
 import { samePlainData } from "@/lib/same-plain-data";
-import { fetchFromBox } from "@/lib/box-clock";
+import { boxNowMs, fetchFromBox } from "@/lib/box-clock";
 import { isSettledTeamStatus, TEAM_STATUSES, type TeamStatus } from "@/lib/coding-team-status";
 import type { TeamCard, TeamCardAgent, TeamCardTask } from "@/lib/coding-agent-slim";
 import { isTeamStartStep, readCodingStarts, runRecordStartStep, START_POLL_MS, type CodingStartView, type RunCardStartStep, type TeamStartStep } from "@/lib/coding-start-phase";
@@ -559,7 +559,10 @@ export function useCodingAgentActivity(active: boolean): {
       openedAtRef.current = 0;
       return;
     }
-    if (openedAtRef.current === 0) openedAtRef.current = Date.now();
+    // On the box's clock (`boxNowMs`): every `startedAt` / `requestedAt` it is
+    // held against below the box wrote, and a browser minutes off the box would
+    // move the RECENT_MS window by as much.
+    if (openedAtRef.current === 0) openedAtRef.current = boxNowMs();
 
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;

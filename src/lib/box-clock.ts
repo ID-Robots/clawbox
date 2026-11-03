@@ -16,15 +16,6 @@
  * Client-safe and dependency-free; on the server `boxNowMs()` is `Date.now()`.
  */
 
-/**
- * How far ahead of "now" a time may lie and still read as "just now". What is
- * left of a skew after the correction — the `Date` header's whole seconds, the
- * trip back from the box, an answer from before the first one arrived — is a
- * few seconds; two minutes covers that with room to spare, and is still short
- * enough that a time further ahead is not passed off as fresh.
- */
-export const FUTURE_SKEW_TOLERANCE_MS = 2 * 60_000;
-
 /** An answer slower than this places the box's clock too loosely to keep: the
  *  trip back could be any part of it, and the previous reading is better. */
 export const MAX_SAMPLE_RTT_MS = 30_000;
@@ -98,22 +89,22 @@ export function _resetBoxClockForTests(): void {
 
 export type BoxAge =
   | { unit: "now" }
-  | { unit: "minutes" | "hours" | "days"; n: number }
-  | { unit: "ahead" };
+  | { unit: "minutes" | "hours" | "days"; n: number };
 
 /**
  * How long ago a past event on the box was, in the one unit an "x ago" label
- * says. A time up to `FUTURE_SKEW_TOLERANCE_MS` ahead of `nowMs` is the clocks'
- * leftover disagreement and reads as `now` — a backup that has completed did
- * not happen in the future. One further ahead than that has no age that can
- * honestly be given (the box's clock was set back since it was written) and is
- * `ahead`, which the caller says as such rather than as an age. Null for a time
- * that is not a number.
+ * says. A time AHEAD of `nowMs` reads as `now`, however far: a backup that has
+ * completed did not happen in the future. A few seconds ahead is what is left
+ * of a skew after the correction (the `Date` header's whole seconds, the trip
+ * back, a label drawn before the first answer); further ahead means the box's
+ * clock was set back since it wrote the time — the event still happened, and
+ * nothing truer than "just now" can be said of when (the protection verdict
+ * reads such a backup the same way: the snapshot exists). Null for a time that
+ * is not a number.
  */
 export function boxAge(thenMs: number, nowMs: number): BoxAge | null {
   if (!Number.isFinite(thenMs) || !Number.isFinite(nowMs)) return null;
   const elapsed = nowMs - thenMs;
-  if (elapsed < -FUTURE_SKEW_TOLERANCE_MS) return { unit: "ahead" };
   if (elapsed < 60_000) return { unit: "now" };
   if (elapsed < 3_600_000) return { unit: "minutes", n: Math.floor(elapsed / 60_000) };
   if (elapsed < 86_400_000) return { unit: "hours", n: Math.floor(elapsed / 3_600_000) };

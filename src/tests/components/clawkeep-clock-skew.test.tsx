@@ -10,8 +10,9 @@ import { _resetBoxClockForTests, noteBoxClock } from "@/lib/box-clock";
  * was a few seconds behind the box's, and the label measured the box's
  * `lastBackupAtMs` against the browser's `Date.now()`. The label now measures
  * on the box's clock — learned from the status answer's `Date` header — and a
- * leftover skew of under two minutes reads "just now". Both ways round: a
- * browser ahead of the box used to age a fresh backup by its lead.
+ * time ahead of it (a leftover skew) reads "just now", never "in the future".
+ * Both ways round: a browser ahead of the box used to age a fresh backup by its
+ * lead, and one behind it took minutes off every age.
  */
 
 const SEC = 1_000;
@@ -37,12 +38,13 @@ describe("timeAgo on the box's clock", () => {
     const boxNow = BROWSER_NOW + 10 * MIN;
     noteBoxClock(stamped(boxNow), BROWSER_NOW - 20, BROWSER_NOW);
     const finishedAt = boxNow - 2 * SEC;
-    // Against the browser's own clock that is ten minutes in the future.
-    expect(timeAgo(finishedAt, t, BROWSER_NOW)).toBe("clawkeep.inFuture");
     vi.useFakeTimers();
     vi.setSystemTime(BROWSER_NOW);
     try {
       expect(timeAgo(finishedAt, t)).toBe("clawkeep.justNow");
+      // Older backups keep their age: on the browser's clock this one is 5 minutes ahead.
+      expect(timeAgo(finishedAt - 5 * MIN, t, BROWSER_NOW)).toBe("clawkeep.justNow");
+      expect(timeAgo(finishedAt - 5 * MIN, t)).toBe("clawkeep.minutesAgo:5");
     } finally {
       vi.useRealTimers();
     }
@@ -63,10 +65,12 @@ describe("timeAgo on the box's clock", () => {
     }
   });
 
-  it("reads a few seconds ahead as just now even before the box's clock is known", () => {
+  it("reads a time ahead of now as just now, never in the future", () => {
     expect(timeAgo(BROWSER_NOW + 5 * SEC, t, BROWSER_NOW)).toBe("clawkeep.justNow");
     expect(timeAgo(BROWSER_NOW + 2 * MIN, t, BROWSER_NOW)).toBe("clawkeep.justNow");
-    expect(timeAgo(BROWSER_NOW + 2 * MIN + 1, t, BROWSER_NOW)).toBe("clawkeep.inFuture");
+    // Further ahead than any skew: the box's clock was set back since. Still a past backup.
+    expect(timeAgo(BROWSER_NOW + 2 * MIN + 1, t, BROWSER_NOW)).toBe("clawkeep.justNow");
+    expect(timeAgo(BROWSER_NOW + 3 * 3_600_000, t, BROWSER_NOW)).toBe("clawkeep.justNow");
   });
 
   it("keeps its other answers", () => {
@@ -173,6 +177,12 @@ describe("the ClawKeep window right after a backup", () => {
 
   it("says just now with the browser a few seconds behind and no Date header to correct it", async () => {
     boxAnswering(8 * SEC, { dateHeader: false });
+    expect(await lastBackupCell()).toBe("just now");
+    expect(screen.queryByText(/in the future/i)).toBeNull();
+  });
+
+  it("never says in the future, even 10 minutes behind with no Date header to correct it", async () => {
+    boxAnswering(10 * MIN, { dateHeader: false });
     expect(await lastBackupCell()).toBe("just now");
     expect(screen.queryByText(/in the future/i)).toBeNull();
   });
