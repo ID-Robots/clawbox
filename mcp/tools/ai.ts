@@ -277,7 +277,7 @@ type PoolAccount = NonNullable<AnthropicPoolBody["accounts"]>[number];
 
 /**
  * One account's usage as the agent is told it (TASK-2141): the session and the
- * account's week, each ACTIVE model week, and the model weeks a run found
+ * account's week, each model week, and the model weeks a run found
  * spent — which keep only runs on THAT model off the account.
  */
 function accountUsage(a: PoolAccount): Record<string, unknown> {

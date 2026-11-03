@@ -386,7 +386,7 @@ export default function AnthropicAccountsCard() {
 
   /**
    * Anthropic's own percents and the model weeks (TASK-2141): the session and
-   * the account's week when Anthropic said, each ACTIVE model week, and a
+   * the account's week when Anthropic said, each model week, and a
    * model week a run found spent — that one says until when its runs wait,
    * and the status chip stays "Ready": the account answers every other model.
    */

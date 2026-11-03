@@ -28,14 +28,14 @@ describe("reading the windows", () => {
     })).toMatchObject({ exhausted: true, resetsAt: at("2026-10-19T09:00:00Z"), kind: "weekly" });
   });
 
-  it("reads a model-scoped week from `limits[]` as THAT model's, never the account's, and skips one Anthropic marks inactive", () => {
+  it("reads a model-scoped week from `limits[]` as THAT model's, never the account's, and skips one that names no model", () => {
     // TASK-2141: a spent `weekly_scoped` week stops runs on its model only —
     // the account is not exhausted (before, this read as the account's week).
     const reading = parseAnthropicUsage({
       five_hour: { utilization: 12, resets_at: null },
       limits: [
         { kind: "weekly_scoped", percent: 100, resets_at: "2026-10-20T00:00:00Z", scope: { model: { display_name: "Fable" } } },
-        { kind: "weekly_scoped", percent: 100, is_active: false, resets_at: "2026-10-21T00:00:00Z" },
+        { kind: "weekly_scoped", percent: 100, resets_at: "2026-10-21T00:00:00Z" },
       ],
     });
     expect(reading).toMatchObject({ exhausted: false, resetsAt: null, kind: "session" });
@@ -120,17 +120,26 @@ describe("the usage scheme of 2026-11", () => {
     spend: { currency: "USD", amount: null },
   };
 
-  /** The live answer with its Fable week switched on, at `percent`. */
+  /**
+   * The live answer with its Fable week at `percent`, the server's headline
+   * pick (`is_active`) moved onto it as Anthropic moves it to the binding meter
+   * (an Ultra account's answer of 2026-11-03: the week 54 % `is_active: false`,
+   * Fable 100 % `critical` `is_active: true`).
+   */
   const withFable = (percent: number, extra: Record<string, unknown> = {}) => ({
     ...LIVE,
-    limits: [LIVE.limits[0], { ...LIVE.limits[1], percent, is_active: true, ...extra }],
+    limits: [{ ...LIVE.limits[0], is_active: false }, { ...LIVE.limits[1], percent, is_active: true, ...extra }],
   });
 
-  it("reads today's answer: the account's week at 56 %, nothing spent, no session window, the inactive Fable week left out", () => {
+  it("reads today's answer: the account's week at 56 %, nothing spent, no session window, and the Fable week that is not the headline", () => {
+    // `is_active` is the server's headline pick — the one row a single-value
+    // indicator shows (Claude Code 2.1.317's schema) — not "this meter is off":
+    // the Fable week at 34 % still counts for every run on Fable.
     const reading = parseAnthropicUsage(LIVE);
     expect(reading).toMatchObject({ exhausted: false, resetsAt: null, kind: "session" });
     expect(reading.utilization).toEqual({ fiveHour: null, sevenDay: 56 });
-    expect(reading.models).toEqual([]);
+    expect(reading.models).toEqual([{ family: "fable", name: "Fable", percent: 34, resetsAt: at(FABLE_RESET), spent: false }]);
+    expect(usageForModel(reading, "claude-fable-5-1")).toMatchObject({ exhausted: false, week: null, fullness: 56 });
     expect(reading.windows).toContainEqual({ kind: "weekly", percent: 56, resetsAt: at(WEEK_RESET) });
     expect(reading.windows?.some((w) => w.kind === "session")).toBe(false);
     expect(reading.extraUsage).toEqual({ enabled: true, spendLimitReached: false });
@@ -149,6 +158,16 @@ describe("the usage scheme of 2026-11", () => {
     });
     expect(usageForModel(reading, "claude-opus-5-5")).toMatchObject({ exhausted: false, resetsAt: null, week: null, fullness: 56 });
     expect(usageForModel(reading, null)).toMatchObject({ exhausted: false, fullness: 56 });
+  });
+
+  it("reads the account's week from a `weekly_all` meter that is not the headline, with no `seven_day` beside it", () => {
+    // The Fable week spent took the headline from the account's week; the week
+    // still counts for every run, and must not hang on the old field.
+    const reading = parseAnthropicUsage({ five_hour: null, limits: withFable(100).limits });
+    expect(reading.utilization).toEqual({ fiveHour: null, sevenDay: 56 });
+    expect(reading.windows).toEqual([{ kind: "weekly", percent: 56, resetsAt: at(WEEK_RESET) }]);
+    expect(usageForModel(reading, "claude-opus-5-5")).toMatchObject({ exhausted: false, week: null, fullness: 56 });
+    expect(usageForModel(reading, "claude-fable-5-1")).toMatchObject({ exhausted: true, account: null, week: { family: "fable", spent: true }, resetsAt: at(FABLE_RESET) });
   });
 
   it("matches the scoped week on the model's id when Anthropic gives one, and on its name when it does not", () => {
@@ -197,6 +216,9 @@ describe("the usage scheme of 2026-11", () => {
   it("says which window a stop the answer does not show spent was nearest to — the session or the run's model week, never the account's week", () => {
     expect(nearestFull(parseAnthropicUsage(withFable(97)), "claude-fable-5-1")?.week).toMatchObject({ family: "fable", percent: 97 });
     expect(nearestFull(parseAnthropicUsage(withFable(97)), "claude-opus-5-5")).toBeNull();
+    // The account's week fuller still, so the headline stays on it: the Fable week at 93 % is still the run's.
+    const weekFirst = parseAnthropicUsage({ ...LIVE, seven_day: { utilization: 96, resets_at: WEEK_RESET }, limits: [{ ...LIVE.limits[0], percent: 96 }, { ...LIVE.limits[1], percent: 93 }] });
+    expect(nearestFull(weekFirst, "claude-fable-5-1")?.week).toMatchObject({ family: "fable", percent: 93 });
     // A week at 99 % is a week with room: parking the account until its reset would lose it for days.
     expect(nearestFull(parseAnthropicUsage({ ...LIVE, limits: [{ ...LIVE.limits[0], percent: 99 }] }), null)).toBeNull();
     const session = { kind: "session", group: "session", percent: 92, severity: "normal", resets_at: "2026-11-03T21:00:00Z", scope: null, is_active: true };
@@ -218,7 +240,10 @@ describe("the usage scheme of 2026-11", () => {
   it("reads the old shape's model weeks beside `limits[]` as those models' weeks, not the account's", () => {
     const reading = parseAnthropicUsage({ ...LIVE, seven_day_opus: { utilization: 100, resets_at: FABLE_RESET } });
     expect(reading.exhausted).toBe(false);
-    expect(reading.models).toEqual([{ family: "opus", name: "Opus", percent: 100, resetsAt: at(FABLE_RESET), spent: true }]);
+    expect(reading.models).toEqual([
+      { family: "fable", name: "Fable", percent: 34, resetsAt: at(FABLE_RESET), spent: false },
+      { family: "opus", name: "Opus", percent: 100, resetsAt: at(FABLE_RESET), spent: true },
+    ]);
     expect(usageForModel(reading, "claude-opus-5-5").exhausted).toBe(true);
     expect(usageForModel(reading, "claude-fable-5-1").exhausted).toBe(false);
   });

@@ -118,8 +118,9 @@ function usageEndpoint(byToken: Record<string, { week: number; fable: number | n
       seven_day_opus: null,
       seven_day_sonnet: null,
       limits: [
-        { kind: "weekly_all", group: "weekly", percent: u.week, severity: u.week >= 100 ? "exceeded" : "normal", resets_at: week, scope: null, is_active: true },
-        { kind: "weekly_scoped", group: "weekly", percent: u.fable ?? 0, severity: "normal", resets_at: new Date(resets.fable).toISOString(), scope: { model: { id: null, display_name: "Fable" } }, is_active: u.fable !== null },
+        // `is_active` is the server's headline pick, on the fuller meter; null: the plan has no Fable week.
+        { kind: "weekly_all", group: "weekly", percent: u.week, severity: u.week >= 100 ? "exceeded" : "normal", resets_at: week, scope: null, is_active: u.fable === null || u.week >= u.fable },
+        ...(u.fable === null ? [] : [{ kind: "weekly_scoped", group: "weekly", percent: u.fable, severity: "normal", resets_at: new Date(resets.fable).toISOString(), scope: { model: { id: null, display_name: "Fable" } }, is_active: u.fable > u.week }]),
       ],
       weekly_scoped_shares: [{ limit_index: 1, used_percent_of_weekly: 17, allowance_percent_of_weekly: 50 }],
       extra_usage: { is_enabled: false, spend_limit_reached: false },

@@ -255,7 +255,7 @@ describe("anthropic_accounts on the meters of 2026-11 (TASK-2141)", () => {
   const FABLE_RESET = Date.UTC(2026, 10, 8, 17, 0);
   const WEEK_RESET = Date.UTC(2026, 10, 9, 8, 0);
 
-  it("asks the route for Anthropic's percents and says each account's week, its active model weeks, and which model's runs wait — never calling the account limited for a model week", async () => {
+  it("asks the route for Anthropic's percents and says each account's week, its model weeks, and which model's runs wait — never calling the account limited for a model week", async () => {
     apiGet.mockResolvedValue(pool([
       account({
         id: "a",

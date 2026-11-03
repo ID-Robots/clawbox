@@ -72,7 +72,7 @@ afterEach(() => {
 });
 
 describe("each account's usage on the card", () => {
-  it("asks for Anthropic's percents and shows the week, the active model weeks, and the model whose runs wait — the account stays Ready", async () => {
+  it("asks for Anthropic's percents and shows the week, the model weeks, and the model whose runs wait — the account stays Ready", async () => {
     render(<AnthropicAccountsCard />);
     const work = await screen.findByTestId(`anthropic-account-usage-${WORK}`);
     expect(urls[0]).toBe("/setup-api/anthropic/accounts?usage=1");
@@ -86,7 +86,7 @@ describe("each account's usage on the card", () => {
     expect(status).not.toContain(BULGARIAN["settings.anthropicAccounts.statusLimited"].split("{time}")[0]);
   });
 
-  it("shows the session, the week and an active model week with room, and a reached monthly spend limit", async () => {
+  it("shows the session, the week and a model week with room, and a reached monthly spend limit", async () => {
     render(<AnthropicAccountsCard />);
     const personal = await screen.findByTestId(`anthropic-account-usage-${PERSONAL}`);
     await waitFor(() => expect(personal.textContent).toContain(say("settings.anthropicAccounts.usageSession", { percent: "12" })));

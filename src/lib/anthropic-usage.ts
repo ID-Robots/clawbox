@@ -30,6 +30,12 @@
  * label, and so does this reader. A spent `weekly_scoped` week stops only runs
  * on THAT model: it is a model week here (`models`), never the account's
  * `exhausted`. The answer of the old shape still reads as it always did.
+ *
+ * `is_active` is NOT "this meter is off". It is the server's headline pick —
+ * the one row a single-value indicator shows (Claude Code 2.1.317's schema) —
+ * and it moves to whichever meter binds: an Ultra account's answer of
+ * 2026-11-03 carried its week at 54 % `is_active: false` beside a Fable week at
+ * 100 % `critical` `is_active: true`. Every row counts, the headline or not.
  */
 
 import { modelFamily } from "@/lib/anthropic-limit";
@@ -67,13 +73,13 @@ export interface AnthropicUsageReading {
   kind: "session" | "weekly";
   /**
    * How full the session and the account's week are, in Anthropic's own
-   * percent — `five_hour` / `seven_day`, else the active `session` /
-   * `weekly_all` meter; null where the answer had no such window.
+   * percent — `five_hour` / `seven_day`, else the `session` / `weekly_all`
+   * meter; null where the answer had no such window.
    */
   utilization: { fiveHour: number | null; sevenDay: number | null };
   /** The account's own windows, as read (both shapes). Optional only for a reading made before TASK-2141. */
   windows?: AnthropicUsageWindow[];
-  /** The active model weeks (`weekly_scoped`, `is_active` not false). Optional as `windows` is. */
+  /** The model weeks (`weekly_scoped`), the headline or not. Optional as `windows` is. */
   models?: AnthropicModelWeek[];
   /** Extra usage past the plan, when the answer says: on, and whether its monthly spend limit is reached. */
   extraUsage?: { enabled: boolean; spendLimitReached: boolean } | null;
@@ -127,7 +133,7 @@ const SESSION_REFUSES_PERCENT = 90;
  * The reading of one `/api/oauth/usage` answer, the windows core's parser
  * reads (`parseClaudeUsage`): `five_hour`, `seven_day`, the old shape's model
  * weeks (`seven_day_opus`/`_sonnet`, read as the account's, as they always
- * were), and every active entry of `limits[]` by its `kind`. Spent: every one
+ * were), and every entry of `limits[]` by its `kind` — `is_active` aside. Spent: every one
  * of the ACCOUNT's windows at 100 % (or that Anthropic's `severity` calls
  * refused) — the latest of their resets is when the account answers again —
  * else the session window when it is at 90 % or more. A model's own week is
@@ -159,7 +165,8 @@ export function parseAnthropicUsage(body: unknown): AnthropicUsageReading {
   let session: number | null = null;
   let week: number | null = null;
   for (const limit of Array.isArray(usage.limits) ? usage.limits : []) {
-    if (!isRecord(limit) || limit.is_active === false) continue;
+    // Not `is_active === false`: that is a meter the server did not pick for its headline, not one that is off.
+    if (!isRecord(limit)) continue;
     const percent = percentOf(limit.percent) ?? percentOf(limit.utilization);
     if (percent === null) continue;
     const kind = word(limit.kind);
