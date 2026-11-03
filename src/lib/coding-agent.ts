@@ -240,9 +240,11 @@ import {
   activeAccountSnapshot,
   markCredentialProblem,
   markLimited,
+  markModelLimited,
   onLimitReset,
   prepareAccount,
   probeAccountCredential,
+  readAccountUsage,
   readAccounts,
   removeCredentialHandoffs,
   startAnthropicAccounts,
@@ -256,14 +258,20 @@ import {
   detectAnthropicAccountDisabled,
   detectAnthropicAuthFailure,
   detectAnthropicLimit,
+  detectAnthropicLimitNotice,
   formatResetClock,
   isUsable,
+  isUsableFor,
   limitUntil,
+  modelFamily,
+  modelLimitedUntil,
+  nextResetFor,
   pickAccount,
   poolHealth,
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
+import { modelWeekOf, nearestFull, usageForModel } from "@/lib/anthropic-usage";
 import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
@@ -5209,6 +5217,12 @@ interface LiveRun {
    */
   limitSignal: string | null;
   /**
+   * The CLI's last "usage limit reached · continuing automatically" / "grace
+   * window active" line (TASK-2141): it carries on by itself, so this is NO
+   * limit — kept only so the run's feed says it once per line, not per event.
+   */
+  limitNotice: string | null;
+  /**
    * The owner's test hook (`simulateAnthropicLimit`): the words of a limit to
    * settle this run with, set just before the hook ends the process.
    */
@@ -5609,6 +5623,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     allowanceRefusal: null,
     pauseReason: null,
     limitSignal: null,
+    limitNotice: null,
     simulatedLimit: null,
     forcedAccountPause: null,
     authSignal: null,
@@ -7445,7 +7460,7 @@ async function prepareRunAccount(run: CodingRun): Promise<void> {
   armCodingSwapConsumer();
   let prepared: PreparedAccount | null = null;
   try {
-    ({ prepared } = await prepareAccount({ fallback: true, exclude: store.anthropicAuthTrail?.get(run.id)?.refused }));
+    ({ prepared } = await prepareAccount({ fallback: true, exclude: store.anthropicAuthTrail?.get(run.id)?.refused, model: runModelOf(run) }));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
@@ -8558,13 +8573,26 @@ function firstEventText(event: StreamEvent): string | null {
 }
 
 /** See the call site in handleEvent. */
-function noteAnthropicLimitSignal(state: LiveRun, event: StreamEvent): void {
+function noteAnthropicLimitSignal(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   const tagged = event.error === "rate_limit" || event.error === "billing_error";
   const authTagged = event.error === "authentication_failed";
   const synthetic = event.message?.model === "<synthetic>";
   if (!tagged && !authTagged && !synthetic) return;
   const text = firstEventText(event);
   if (!text) return;
+  // "Usage limit reached · continuing automatically", "… — grace window
+  // active" (CLI 2.1.317, TASK-2141): the CLI carries on by itself, tagged or
+  // not. NOT a limit — the run is not ended and its account is not changed;
+  // the feed says so once.
+  const carryingOn = detectAnthropicLimitNotice(text);
+  if (carryingOn) {
+    if (state.limitNotice !== text) {
+      state.limitNotice = text;
+      pushProgress(run, RUNNER_STEP.usageLimitCarriesOn(carryingOn));
+      console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount ?? "(none)"} reached a usage limit and the CLI carries on by itself (${carryingOn}); not a stop`);
+    }
+    return;
+  }
   // A synthetic message is not always a limit (an interrupted request is one
   // too), so an untagged one must read as a limit in its own words; a tagged
   // one IS the CLI saying so, whatever its wording.
@@ -8689,7 +8717,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // "You've hit your session limit · resets 10:50pm". Remembered as the
     // HARNESS's words, so the settle path never has to take the run's own
     // closing sentence for a limit (TASK-902).
-    if (run.provider === "anthropic") noteAnthropicLimitSignal(state, event);
+    if (run.provider === "anthropic") noteAnthropicLimitSignal(run, state, event);
     // numTurns stays the CLI's own number from the final result event.
     // A live per-event count was tried and measured 291 events against the
     // CLI's 38 turns on run-5vt51ppv — no event arithmetic reproduces the
@@ -11115,10 +11143,13 @@ const PROXY_REFUSAL_RE = /\b429\b|\busage_limit\b/;
 
 /** A limit found on a settling run: what it is, when it lifts, and the words it came in. */
 interface FoundAccountLimit {
+  /** `limit.model` set: only that model's own week is spent (TASK-2141), not the account. */
   limit: AnthropicLimit;
-  /** When the account is taken to be back: the parsed reset, else the default window. */
+  /** When the account is taken to be back: the parsed reset, else the default window — until Anthropic says (settleLimitScope). */
   until: number;
   text: string;
+  /** Anthropic's name for the model week that is spent ("Fable"), once its answer said. */
+  weekName?: string;
 }
 
 /**
@@ -11151,14 +11182,87 @@ function anthropicLimitOf(run: CodingRun, state: LiveRun): FoundAccountLimit | n
  * refused as back at `until` — what a run waiting for "all limited" to end is
  * told. Off the snapshot, because the settle path that asks is synchronous.
  */
-function earliestAccountReset(refusedId: string | null, until: number): number {
+function earliestAccountReset(refusedId: string | null, until: number, model: string | null = null): number {
   const now = Date.now();
   let earliest = until;
   for (const account of accountsSnapshot() ?? []) {
-    if (account.id === refusedId || account.status !== "limited" || account.limitedUntil === null) continue;
-    if (account.limitedUntil > now && account.limitedUntil < earliest) earliest = account.limitedUntil;
+    if (account.id === refusedId) continue;
+    // Back for THIS run once both its own limit and its model's week are over (TASK-2141).
+    const ends = [account.status === "limited" ? account.limitedUntil : null, modelLimitedUntil(account, model, now)]
+      .filter((t): t is number => t !== null && t > now);
+    if (ends.length > 0 && Math.max(...ends) < earliest) earliest = Math.max(...ends);
   }
   return earliest;
+}
+
+/**
+ * The model a run is on, for the account pick (TASK-2141): the one it was
+ * started with — `run.model` is only the CLI's own report, from its first
+ * event, so a fresh run's first spawn has none yet.
+ */
+function runModelOf(run: CodingRun): string | null {
+  return run.requestedModel ?? run.model;
+}
+
+/** The model a run's limit is about: the one its words named, else the run's own (TASK-2141). */
+function limitModelOf(run: CodingRun, found: FoundAccountLimit | null): string | null {
+  return found?.limit.model ?? modelFamily(runModelOf(run));
+}
+
+/**
+ * WHICH window stopped the run, and until when, in Anthropic's own words
+ * (TASK-2141) — the CLI's line no longer says either reliably: "You've hit
+ * your limit" names no window and no time, and a model's own week
+ * (`weekly_scoped`) stops only runs on that model. So the account's usage is
+ * asked, and `found` is settled in place from the answer:
+ *
+ *  - one of the ACCOUNT's own windows spent: the account's limit, until
+ *    Anthropic's `resets_at` (a monthly spend limit keeps its kind);
+ *  - only the run's model's week spent: that model's limit, until its reset —
+ *    the account stays with every other model;
+ *  - nothing reads spent: the window nearest full that a request could have
+ *    crossed (nearestFull), else the CLI's own words as they were.
+ *
+ * Anthropic not answering (an API key, the `claude` sign-in, offline) leaves
+ * the words in charge: a model they name is that model's week; a time they
+ * give stands; else the default window. Never throws.
+ */
+async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promise<void> {
+  if (!run.anthropicAccount || found.limit.kind === "credit") return;
+  const model = limitModelOf(run, found);
+  const reading = await readAccountUsage(run.anthropicAccount).catch(() => null);
+  if (!reading) return;
+  const now = Date.now();
+  const spent = usageForModel(reading, model);
+  const keepKind = (kind: "session" | "weekly"): AnthropicLimitKind => (found.limit.kind === "spend" ? "spend" : kind);
+  const at = (resetsAt: number | null, fallback: number) => (resetsAt !== null && resetsAt > now ? resetsAt : fallback);
+  if (spent.account) {
+    found.limit = { kind: keepKind(spent.account.kind), resetsAt: spent.account.resetsAt };
+    found.until = at(spent.account.resetsAt, found.until);
+  } else if (spent.week?.family) {
+    found.limit = { kind: "weekly", resetsAt: spent.week.resetsAt, model: spent.week.family };
+    found.weekName = spent.week.name;
+    found.until = at(spent.week.resetsAt, found.until);
+  } else if (!found.limit.model) {
+    // Words that gave a time keep their window; "You've hit your limit" gave none.
+    const near = found.limit.resetsAt === null ? nearestFull(reading, model) : null;
+    if (near?.week?.family) {
+      found.limit = { kind: "weekly", resetsAt: near.week.resetsAt, model: near.week.family };
+      found.weekName = near.week.name;
+      found.until = at(near.week.resetsAt, found.until);
+    } else if (near) {
+      found.limit = { kind: keepKind(near.window.kind), resetsAt: near.window.resetsAt };
+      found.until = at(near.window.resetsAt, found.until);
+    }
+  } else if (found.limit.resetsAt === null) {
+    // The words named the model; Anthropic gives its week's reset (none of its weeks is spent here: the fullest).
+    const week = modelWeekOf(reading, found.limit.model);
+    if (week) {
+      found.weekName = week.name;
+      found.until = at(week.resetsAt, found.until);
+    }
+  }
+  console.error(`[coding-agent] ${run.id}: Anthropic says the limit on account ${run.anthropicAccount} is ${found.limit.model ? `the ${found.limit.model} week` : `its ${found.limit.kind} window`}, until ${new Date(found.until).toISOString()}`);
 }
 
 /**
@@ -11172,8 +11276,22 @@ function earliestAccountReset(refusedId: string | null, until: number): number {
 async function recordAccountLimit(run: CodingRun, found: FoundAccountLimit): Promise<LimitRecorded | null> {
   if (!run.anthropicAccount) return null;
   try {
-    const recorded = await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
-    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${found.limit.kind} limit until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    const guessed = found.until;
+    await settleLimitScope(run, found);
+    // A model's own week keeps the account for every other model (TASK-2141).
+    const week = found.limit.model;
+    const recorded = week
+      ? await markModelLimited(run.anthropicAccount, { family: week, name: found.weekName ?? week }, found.until, { source: "coding", runId: run.id })
+      : await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
+    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${week ? `${week} week` : `${found.limit.kind} limit`} until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    // Already waiting on the time the words gave (or the default window):
+    // the record says the one Anthropic gave.
+    if (found.until !== guessed && run.status === "paused" && run.pauseReason?.kind === "allowance" && run.pauseReason.meter === "anthropic") {
+      const resetsAt = earliestAccountReset(run.anthropicAccount, found.until, limitModelOf(run, found));
+      run.pauseReason = { ...run.pauseReason, resetsAt: new Date(resetsAt).toISOString() };
+      pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
+      persist(true);
+    }
     return recorded;
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: could not record the Anthropic account's limit:`, err instanceof Error ? err.message : err);
@@ -11342,7 +11460,7 @@ async function continueOnAnotherAccount(
   // the pool knows? Null when the pool could not be read at all.
   let otherAccountOk: boolean | null = null;
   try {
-    const answer = await prepareAccount({ exclude, prefer: prefer ? { id: prefer, refused: held } : null });
+    const answer = await prepareAccount({ exclude, prefer: prefer ? { id: prefer, refused: held } : null, model: limitModelOf(run, why.kind === "limit" ? why.found : null) });
     prepared = answer.prepared;
     if (prefer && prepared?.account.id !== prefer) {
       // The store had nothing fresher than the credential just refused (or
@@ -11353,7 +11471,7 @@ async function continueOnAnotherAccount(
     }
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
     const now = Date.now();
-    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsable(a, now));
+    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsableFor(a, now, limitModelOf(run, why.kind === "limit" ? why.found : null)));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
@@ -11364,7 +11482,9 @@ async function continueOnAnotherAccount(
     // out dead, or could not be renewed just now). Wait for the first reset,
     // settled through finishRun's ordinary tail as the pause it is — or, when
     // no account comes back by itself, fail with the one thing that helps.
-    const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
+    // The first account back for THIS run's model — a model week counts (TASK-2141).
+    const resetsAt = nextResetFor(accountsSnapshot() ?? [], Date.now(), limitModelOf(run, why.kind === "limit" ? why.found : null))
+      ?? nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
     if (resetsAt === null) {
       // Another account that can answer is still on the list: its sign-in only
       // could not be renewed (or read) just now, which marks nothing — so
@@ -11787,9 +11907,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         // a pause has to be on the record before the cleanup and the settle
         // below read the status. `null` — the pool has not been read since
         // boot — goes the slow way, which settles the pause itself if it must.
-        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount) : false;
+        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount, Date.now(), limitModelOf(run, accountLimit)) : false;
         if (another === false) {
-          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until);
+          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until, limitModelOf(run, accountLimit));
           run.status = "paused";
           run.resumable = true;
           run.error = null;
@@ -12584,6 +12704,7 @@ function spawnRun(
     allowanceRefusal: null,
     pauseReason: null,
     limitSignal: null,
+    limitNotice: null,
     simulatedLimit: null,
     forcedAccountPause: null,
     authSignal: null,

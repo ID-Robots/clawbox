@@ -113,6 +113,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   accountMoved: "codingAgent.stepAccountMoved",
   accountsWaiting: "codingAgent.stepAccountsWaiting",
   resumedAfterLimit: "codingAgent.stepResumedAfterLimit",
+  usageLimitContinuing: "codingAgent.stepUsageLimitContinuing",
+  usageLimitGrace: "codingAgent.stepUsageLimitGrace",
   teamMessageToRun: "codingAgent.stepTeamMessageToRun",
   teamMessageToLead: "codingAgent.stepTeamMessageToLead",
   messageMidTurn: "codingAgent.stepMessageMidTurn",
