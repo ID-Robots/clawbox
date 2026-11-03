@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react';
 import { useT } from '@/lib/i18n';
+import { boxNowMs, FUTURE_SKEW_TOLERANCE_MS, formatBoxTime } from '@/lib/box-clock';
 
 // Every user-facing string of the Hermes Skills store, resolved through `t()`.
 //
@@ -16,7 +17,7 @@ import { useT } from '@/lib/i18n';
 // reimplement them.
 
 export function useCopy() {
-  const { t } = useT();
+  const { t, locale } = useT();
   return useMemo(
     () => ({
       title: t('skills.title'),
@@ -314,12 +315,16 @@ export function useCopy() {
       breadcrumbBrowse: t('skills.breadcrumbBrowse'),
       breadcrumbInstalled: t('skills.breadcrumbInstalled'),
 
-      /** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601). */
+      /** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601),
+       *  written on the box's clock, so held to it (src/lib/box-clock.ts). One
+       *  further ahead than the clocks can disagree by prints as itself. */
       relativeDate: (iso?: string): string | undefined => {
         if (!iso) return undefined;
         const parsed = Date.parse(iso);
         if (Number.isNaN(parsed)) return undefined;
-        const seconds = Math.round((Date.now() - parsed) / 1000);
+        const elapsed = boxNowMs() - parsed;
+        if (elapsed < -FUTURE_SKEW_TOLERANCE_MS) return formatBoxTime(parsed, locale);
+        const seconds = Math.round(elapsed / 1000);
         if (seconds < 60) return t('skills.relative.justNow');
         const minutes = Math.round(seconds / 60);
         if (minutes < 60) return t('skills.relative.minutes', { n: minutes });
@@ -340,7 +345,7 @@ export function useCopy() {
         return t('skills.relative.years', { n: Math.round(months / 12) });
       },
     }),
-    [t],
+    [t, locale],
   );
 }
 

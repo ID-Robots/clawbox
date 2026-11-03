@@ -2,6 +2,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { boxNowMs } from "@/lib/box-clock";
 import {
   BACKGROUND_TASK_EVENT,
   SUCCESS_CARD_MS,
@@ -36,7 +37,9 @@ export function useBackgroundTasks(enabled: boolean): {
 } {
   const [all, setAll] = useState<BackgroundTaskView[]>([]);
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
-  const [now, setNow] = useState(() => Date.now());
+  // The box's clock (src/lib/box-clock.ts): a task's end is stamped on it, and
+  // a browser behind the box kept a finished card up for as long as it lagged.
+  const [now, setNow] = useState(() => boxNowMs());
   const runningRef = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -45,7 +48,7 @@ export function useBackgroundTasks(enabled: boolean): {
       setAll(tasks);
       runningRef.current = tasks.some((t) => t.state === "running");
     }
-    setNow(Date.now());
+    setNow(boxNowMs());
   }, []);
 
   useEffect(() => {
@@ -101,7 +104,7 @@ export function useBackgroundTasks(enabled: boolean): {
     const timers = all
       .filter((t) => endsQuietly(t) && !t.dismissed && !hidden.has(t.id))
       .map((t) => {
-        const left = Math.max(0, (t.finishedAt ?? now) + SUCCESS_CARD_MS - Date.now());
+        const left = Math.max(0, (t.finishedAt ?? now) + SUCCESS_CARD_MS - boxNowMs());
         return setTimeout(() => dismiss(t.id), left);
       });
     return () => timers.forEach(clearTimeout);

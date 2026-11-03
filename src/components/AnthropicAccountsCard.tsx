@@ -44,6 +44,18 @@ interface AccountView {
   limitedUntil: number | null;
   priority: number;
   active: boolean;
+  /**
+   * TASK-2141 — absent from an older server's answer. The model weeks spent
+   * on the account: runs on those models wait, the account is NOT limited.
+   */
+  modelLimits?: { family: string; name: string; until: number }[];
+  /** Anthropic's own percents, when the server read them (`?usage=1`). */
+  usage?: {
+    sessionPercent: number | null;
+    weeklyPercent: number | null;
+    models: { name: string; family: string | null; percent: number; spent: boolean }[];
+    extraUsage: { enabled: boolean; spendLimitReached: boolean } | null;
+  } | null;
 }
 
 type SwapCause = "limit" | "auth" | "reset" | "owner" | "removed" | "added" | "renewed";
@@ -158,7 +170,9 @@ export default function AnthropicAccountsCard() {
   const load = useCallback(async () => {
     const issuedAt = writes.current;
     try {
-      const res = await fetch("/setup-api/anthropic/accounts", { cache: "no-store" });
+      // `usage=1`: the weekly percent and the model weeks too (TASK-2141) —
+      // the server asks Anthropic at most every ten minutes per account.
+      const res = await fetch("/setup-api/anthropic/accounts?usage=1", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const next = await res.json() as PoolView;
       if (writes.current !== issuedAt) return;
@@ -371,6 +385,43 @@ export default function AnthropicAccountsCard() {
   };
 
   /**
+   * Anthropic's own percents and the model weeks (TASK-2141): the session and
+   * the account's week when Anthropic said, each model week, and a
+   * model week a run found spent — that one says until when its runs wait,
+   * and the status chip stays "Ready": the account answers every other model.
+   */
+  const usageChips = (account: AccountView) => {
+    const usage = account.usage ?? null;
+    const waiting = account.modelLimits ?? [];
+    const chips: { key: string; text: string; amber: boolean }[] = [];
+    const pct = (value: number) => String(Math.round(value));
+    if (usage?.sessionPercent != null) chips.push({ key: "session", text: t("settings.anthropicAccounts.usageSession", { percent: pct(usage.sessionPercent) }), amber: usage.sessionPercent >= 90 });
+    if (usage?.weeklyPercent != null) chips.push({ key: "week", text: t("settings.anthropicAccounts.usageWeek", { percent: pct(usage.weeklyPercent) }), amber: usage.weeklyPercent >= 90 });
+    // Keyed by position too: Anthropic may send two weeks under one name.
+    for (const [index, week] of (usage?.models ?? []).entries()) {
+      if (week.family && waiting.some((l) => l.family === week.family)) continue;
+      chips.push({ key: `model-${index}-${week.name}`, text: t("settings.anthropicAccounts.usageModelWeek", { model: week.name, percent: pct(week.percent) }), amber: week.spent || week.percent >= 90 });
+    }
+    for (const limit of waiting) {
+      chips.push({ key: `wait-${limit.family}`, text: t("settings.anthropicAccounts.modelLimited", { model: limit.name, time: formatReset(limit.until, locale, now) }), amber: true });
+    }
+    if (usage?.extraUsage?.spendLimitReached) chips.push({ key: "spend", text: t("settings.anthropicAccounts.spendLimitReached"), amber: true });
+    if (chips.length === 0) return null;
+    return (
+      <span className="flex flex-wrap items-center gap-1 mt-1" data-testid={`anthropic-account-usage-${account.id}`}>
+        {chips.map((chip) => (
+          <span
+            key={chip.key}
+            className={`text-[10px] rounded-full border px-1.5 py-px ${chip.amber ? "text-amber-300 border-amber-400/40" : "text-[var(--text-secondary)] border-white/15"}`}
+          >
+            {chip.text}
+          </span>
+        ))}
+      </span>
+    );
+  };
+
+  /**
    * Said where the owner is looking. While the connect panel is open the
    * refusal belongs beside its Save/Connect button: at the top of the card it
    * sat a whole list above that button — 926 px on a phone with eight
@@ -536,6 +587,7 @@ export default function AnthropicAccountsCard() {
                     <span className="block text-[11px] text-[var(--text-muted)] break-all">
                       {[account.email, t(KIND_KEY[account.kind])].filter(Boolean).join(" · ")}
                     </span>
+                    {usageChips(account)}
                     {account.kind === "login" && (
                       <span className="block text-[11px] text-[var(--text-muted)] mt-0.5">
                         {t("settings.anthropicAccounts.loginNote")}

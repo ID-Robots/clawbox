@@ -7,6 +7,7 @@
  */
 import type { BackgroundTaskView } from "@/lib/background-tasks";
 import { readInstallStream, type InstallOutcome, type InstallProgress } from "@/lib/install-stream";
+import { noteBoxClock } from "@/lib/box-clock";
 
 export type { BackgroundTaskView } from "@/lib/background-tasks";
 
@@ -26,7 +27,12 @@ export function notifyBackgroundTaskStarted(taskId?: string): void {
 export async function fetchBackgroundTasks(filter: { kind?: string } = {}): Promise<BackgroundTaskView[] | null> {
   const query = filter.kind ? `?kind=${encodeURIComponent(filter.kind)}` : "";
   try {
+    const sentAt = Date.now();
     const res = await fetch(`${BACKGROUND_TASKS_URL}${query}`, { cache: "no-store" });
+    // The corner card holds each task's `finishedAt` against the box's clock
+    // (src/lib/box-clock.ts); this answer's Date header keeps it, also on a
+    // page with no desktop notice poll beside it.
+    noteBoxClock(res, sentAt);
     if (!res.ok) return null;
     const body = (await res.json()) as { tasks?: unknown };
     return Array.isArray(body.tasks) ? (body.tasks as BackgroundTaskView[]) : null;

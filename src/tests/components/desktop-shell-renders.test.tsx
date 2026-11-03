@@ -4,6 +4,7 @@ import ChromeDesktop from "@/app/page";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { snapshotDesktop, type DesktopState } from "@/lib/desktop-state";
+import { _resetBoxClockForTests, boxClockOffsetMs } from "@/lib/box-clock";
 
 /**
  * What the desktop re-renders, and what it does not (the performance sweep of
@@ -115,6 +116,9 @@ function answer(body: unknown) {
 let saved: DesktopState | null = null;
 /** The owner-notice ring as the box holds it (`ui:pending-actions`). */
 let ring: unknown[] = [];
+/** How far the box's clock is ahead of the browser's, as the ring's answers
+ *  stamp it in their Date header; null for answers that carry none. */
+let ringBoxLeadMs: number | null = null;
 /** What the power-approval route answers is pending. */
 let powerPending: unknown = null;
 /** The box's saved preferences (`/setup-api/preferences?all=1`). */
@@ -139,7 +143,11 @@ function installFetch() {
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
     if (url.includes("/setup-api/telegram/pairing")) return answer(await pairing.promise);
-    if (url.includes("/setup-api/kv?key=ui:pending-actions")) return answer({ value: JSON.stringify(ring) });
+    if (url.includes("/setup-api/kv?key=ui:pending-actions")) {
+      const res = answer({ value: JSON.stringify(ring) });
+      if (ringBoxLeadMs !== null) res.headers.set("date", new Date(Date.now() + ringBoxLeadMs).toUTCString());
+      return res;
+    }
     if (url.includes("/setup-api/system/power/approval")) return answer({ pending: powerPending });
     if (url.includes("/setup-api/preferences?all=1")) return answer(prefs);
     return answer({});
@@ -186,6 +194,8 @@ beforeEach(() => {
   seen.settingsUi = [];
   saved = null;
   ring = [];
+  ringBoxLeadMs = null;
+  _resetBoxClockForTests();
   powerPending = null;
   prefs = {};
   seen.launcherProps = null;
@@ -224,6 +234,17 @@ describe("the Telegram pairing poll", () => {
       await wait(50);
     });
     expect(await screen.findByText("Approve")).toBeInTheDocument();
+  });
+});
+
+describe("the notice poll", () => {
+  // TASK-2138: the desktop's most frequent question is also what tells it
+  // the box's clock, so its "x ago"s are not off by the browser's own.
+  it("tells the page what the box's clock reads", async () => {
+    ringBoxLeadMs = -10 * 60_000;
+    await mountDesktop();
+    await waitFor(() => expect(boxClockOffsetMs()).toBeLessThan(-9 * 60_000), { timeout: 5_000 });
+    expect(boxClockOffsetMs()).toBeGreaterThan(-11 * 60_000);
   });
 });
 

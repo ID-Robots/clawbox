@@ -60,6 +60,7 @@ import { useSteppedFlow } from "@/lib/coding-agent-flow";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
 import { BTN_DANGER, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
 import { dispatchOpenChat } from "@/lib/ui-events";
+import { boxNowMs } from "@/lib/box-clock";
 
 /** What the chart and its panel read of a run — the app's own `Run` has all of it. */
 export interface DiagramRun extends GraphRun {
@@ -287,12 +288,13 @@ function useRunRecord(runId: string | null, supplied: DiagramRun | undefined, re
   return { run: null, loading: true };
 }
 
-/** A clock that moves once a second while `on`, for the panel's elapsed time. */
+/** A clock that moves once a second while `on`, for the panel's elapsed time:
+ *  the box's (src/lib/box-clock.ts), as the run's start is stamped on it. */
 function useSecondTicker(on: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     if (!on) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(boxNowMs()), 1000);
     return () => clearInterval(id);
   }, [on]);
   return now;
