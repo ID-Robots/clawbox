@@ -2382,6 +2382,118 @@ input[type="range"].appearance-none::-moz-range-track {
   }
 }
 
+/* ── Signing out of a provider (src/components/AiProviderList.tsx) ─────────
+   The row in hand dims — everything on it but the button, which reads
+   "Signing out…" beside its spinner — and a soft sheen crosses it for as long
+   as the request and the gateway restart behind it run. Then a row the box no
+   longer lists folds away, one it still lists brightens back, and the note
+   above the list opens out, stands, and folds away again (its 3 s are
+   SIGNED_OUT_NOTE_MS there). The sheen is transform-only: it can run for a
+   minute. Reduced motion keeps the dimming, the words and the state changes
+   and drops every movement — no sheen, no fold, no fade. Flat classes and one
+   descendant combinator: the setup-ground parity test parses this file with
+   its own small engine. */
+.provider-sign-out-dim {
+  transition: opacity var(--d-3) var(--ease-standard);
+}
+.provider-sign-out-pending .provider-sign-out-dim,
+.provider-sign-out-leaving .provider-sign-out-dim {
+  opacity: 0.45;
+}
+.provider-sign-out-pending {
+  position: relative;
+  overflow: hidden;
+}
+.provider-sign-out-pending::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 25%, rgba(255, 255, 255, 0.07) 50%, transparent 75%);
+  transform: translateX(-100%);
+  animation: provider-sign-out-sheen 1.6s var(--ease-standard) infinite;
+}
+@keyframes provider-sign-out-sheen {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@keyframes provider-row-leave {
+  to {
+    opacity: 0;
+    transform: translateX(12px);
+    height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-top-width: 0;
+    border-bottom-width: 0;
+  }
+}
+.provider-sign-out-leaving {
+  interpolate-size: allow-keywords;
+  overflow: hidden;
+  pointer-events: none;
+  animation: provider-row-leave 320ms var(--ease-exit) forwards;
+}
+/* The dimmed parts come back on their own transition; the wash is what says
+   this row is the one that changed. */
+.provider-sign-out-settled {
+  position: relative;
+}
+.provider-sign-out-settled::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(0, 229, 204, 0.08);
+  opacity: 0;
+  animation: provider-row-settle 600ms var(--ease-exit);
+}
+@keyframes provider-row-settle {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes provider-sign-out-note-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    height: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-top-width: 0;
+    border-bottom-width: 0;
+  }
+}
+@keyframes provider-sign-out-note-out {
+  to {
+    opacity: 0;
+    height: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-top-width: 0;
+    border-bottom-width: 0;
+  }
+}
+.provider-sign-out-note {
+  interpolate-size: allow-keywords;
+  overflow: hidden;
+  animation:
+    provider-sign-out-note-in 240ms var(--ease-entrance) both,
+    provider-sign-out-note-out 240ms var(--ease-exit) 2760ms forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .provider-sign-out-pending::after,
+  .provider-sign-out-settled::after {
+    content: none;
+    animation: none;
+  }
+  .provider-sign-out-leaving,
+  .provider-sign-out-note {
+    animation: none;
+  }
+}
+
 /* ── The code editor (src/components/CodeEditor.tsx) ──────────────────────
    A gutter that sticks to the left while long lines scroll, the coloured
    text, and over it — while editing — a textarea with transparent glyphs

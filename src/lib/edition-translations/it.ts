@@ -49,7 +49,10 @@ export const it: Record<string, string> = {
   "settings.providers.lockedHint": "Imposta prima un altro provider come predefinito.",
   "settings.providers.signOut": "Esci da {name}",
   "settings.providers.signOutConfirm": "Esci — tocca di nuovo",
+  "settings.providers.signingOut": "Uscita in corso…",
+  "settings.providers.signOutRestarting": "L'assistente si sta riavviando per completare: torna tra circa un minuto.",
   "settings.providers.signOutFailed": "Impossibile uscire da {name}.",
+  "settings.providers.signOutTimedOut": "Il box non ha risposto in tempo. L'elenco è stato riletto: se {name} non c'è più, l'uscita è riuscita.",
   "settings.providers.signedOut": "Disconnesso da {name}. Accedi di nuovo qui sotto per usarlo.",
   "settings.providers.empty": "Nessun provider è ancora collegato — collegane uno qui sotto.",
 
