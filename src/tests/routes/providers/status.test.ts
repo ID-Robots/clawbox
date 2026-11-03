@@ -512,8 +512,11 @@ describe("the response carries statuses, never credentials", () => {
       ["defaultProvider", "degraded", "harness", "providers", "unrunnable"],
     );
     for (const row of body.providers) {
-      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
+      // `credentialHeld` is a yes/no, never the credential: it tells the two
+      // "needs sign-in" rows apart for the row's sign-out (TASK-2114).
+      expect(Object.keys(row).sort()).toEqual(["credentialHeld", "enabled", "id", "isDefault", "label", "section", "state"]);
       expect(typeof row.isDefault).toBe("boolean");
+      expect(typeof row.credentialHeld).toBe("boolean");
       expect(typeof row.enabled).toBe("boolean");
       // The owner's switch is an orthogonal FIELD — never a state.
       expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
@@ -535,7 +538,7 @@ describe("the response carries statuses, never credentials", () => {
     );
     expect(body.providers.some((row: Row) => row.state === "checking")).toBe(true);
     for (const row of body.providers) {
-      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
+      expect(Object.keys(row).sort()).toEqual(["credentialHeld", "enabled", "id", "isDefault", "label", "section", "state"]);
       expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
     }
   });

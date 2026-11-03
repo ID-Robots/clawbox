@@ -346,7 +346,7 @@ export async function POST() {
   }
 
   // The session this poll read may have ended while the portal answered: a
-  // sign-out clears it (src/lib/clawai-sign-out.ts), and the token in hand
+  // sign-out clears it (src/lib/provider-sign-out.ts), and the token in hand
   // must not sign the box back in to the account it just left.
   const current = await readClawAiSession();
   if (!current || current.device_id !== session.device_id) {

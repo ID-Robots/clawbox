@@ -124,7 +124,9 @@ describe("AiProviderList", () => {
     expect(screen.getByTestId("ai-provider-default-clawai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-default-openai")).not.toBeInTheDocument();
     // A switched-off provider says so instead of pretending to be disconnected.
-    expect(screen.getByTestId("ai-provider-anthropic").textContent).toContain("Switched off");
+    // Waited for: the English table is a chunk of its own, and the rows can
+    // land before it does.
+    await waitFor(() => expect(screen.getByTestId("ai-provider-anthropic").textContent).toContain("Switched off"));
   });
 
   it("flips a provider through the route and re-reads the list", async () => {

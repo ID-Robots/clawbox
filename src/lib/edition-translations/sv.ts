@@ -32,10 +32,10 @@ export const sv: Record<string, string> = {
   "settings.providers.switchedOff": "Avstängd",
   "settings.providers.makeDefault": "Gör till standard",
   "settings.providers.lockedHint": "Gör först en annan leverantör till standard.",
-  "settings.providers.signOut": "Logga ut från ClawBox AI",
+  "settings.providers.signOut": "Logga ut från {name}",
   "settings.providers.signOutConfirm": "Logga ut — tryck igen",
-  "settings.providers.signOutFailed": "Det gick inte att logga ut från ClawBox AI.",
-  "settings.providers.signedOut": "Utloggad från ClawBox AI. Logga in igen nedan för att använda det.",
+  "settings.providers.signOutFailed": "Det gick inte att logga ut från {name}.",
+  "settings.providers.signedOut": "Utloggad från {name}. Logga in igen nedan för att använda det.",
   "settings.providers.empty": "Ingen leverantör är ansluten ännu — anslut en nedan.",
 
   // === System password card ===

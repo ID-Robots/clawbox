@@ -97,6 +97,9 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     ["POST", "/setup-api/ai-models/oauth/exchange"],
     ["POST", "/setup-api/providers/default"],
     ["POST", "/setup-api/providers/enabled"],
+    // Signing the box out of a provider is the owner's; so is ClawBox AI's.
+    ["POST", "/setup-api/providers/sign-out"],
+    ["POST", "/setup-api/ai-models/clawai/sign-out"],
     ["POST", "/setup-api/anthropic/accounts"],
     ["POST", "/setup-api/harness/swap"],
     ["POST", "/setup-api/harness/select"],
