@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep kunde inte kontrollera hur mycket molnlagring som används, så säkerhetskopian laddades inte upp. Dina tidigare säkerhetskopior är orörda. Kontrollera internetanslutningen och försök igen.",
   "clawkeep.hoursAgo": "{count} h sedan",
   "clawkeep.inDays": "om {days}d {hours}h",
-  "clawkeep.inFuture": "i framtiden",
   "clawkeep.inHours": "om {hours}h {mins}min",
   "clawkeep.inMinutes": "om {mins}min",
   "clawkeep.justNow": "just nu",

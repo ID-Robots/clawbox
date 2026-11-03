@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep konnte nicht prüfen, wie viel Cloud-Speicher belegt ist, daher wurde dieses Backup nicht hochgeladen. Ihre bisherigen Backups sind unverändert. Prüfen Sie die Internetverbindung und versuchen Sie es erneut.",
   "clawkeep.hoursAgo": "vor {count} Std.",
   "clawkeep.inDays": "in {days} T. {hours} Std.",
-  "clawkeep.inFuture": "in der Zukunft",
   "clawkeep.inHours": "in {hours} Std. {mins} Min.",
   "clawkeep.inMinutes": "in {mins} Min.",
   "clawkeep.justNow": "gerade eben",
