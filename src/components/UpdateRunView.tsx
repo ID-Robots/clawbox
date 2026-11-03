@@ -119,10 +119,12 @@ export const UPDATE_SCREEN_MEDIA = `(min-width: ${SHOWCASE_NARROW_PX + SCREEN_ST
  * Every size is the 1280×720 design times `--update-px`: 1 px there, 1.5 px
  * on 1920×1080, 2 px on 2560×1440 (whichever of width and height runs out
  * first, from 1 px up to 3 px), so a big screen gets bigger type and a bigger
- * picture rather than more empty space, and a 720 px screen still never
- * scrolls. A finished run's column also holds Dismiss and the Agent card,
- * about 200 px they keep at any scale, so its scale leaves them 220 px and the
- * 1280×748 rest fits beside them. The page marks its frame
+ * picture rather than more empty space, and a live run on a 720 px screen
+ * still never scrolls. A finished run's column also holds Dismiss and the
+ * Agent card, about 200 px they keep at any scale, so its scale leaves them
+ * 220 px and the 1280×748 rest fits beside them — from about 970 px tall; on a
+ * shorter screen the 1 px floor keeps its text readable and the page scrolls
+ * (for the few seconds before the desktop comes back). The page marks its frame
  * (`data-update-screen` with the run's status, `.us-page`, `.us-frame`); the
  * run view marks its parts, and the showcase its own
  * (`.wns-*`, its wide layout only). Unlayered CSS, so it wins over the utility
@@ -147,7 +149,8 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .us-channel{max-width:calc(224*var(--update-px));padding:calc(4*var(--update-px)) calc(10*var(--update-px));font-size:calc(10.5*var(--update-px))}
 [data-update-screen] .us-side{grid-column:1;grid-row:2;margin-top:calc(16*var(--update-px));display:flex;flex-direction:column;gap:calc(14*var(--update-px))}
 [data-update-screen] .us-side>*{margin:0}
-[data-update-screen] .us-side li[data-tone]{font-size:calc(12*var(--update-px))}
+[data-update-screen] .us-side li[data-tone]{gap:calc(8*var(--update-px));border-radius:calc(6*var(--update-px));padding:calc(8*var(--update-px)) calc(12*var(--update-px));font-size:calc(12*var(--update-px))}
+[data-update-screen] .us-side li[data-tone]:not(:last-child){margin-bottom:calc(8*var(--update-px))}
 [data-update-screen] .us-show{grid-column:2;grid-row:2;margin-top:calc(16*var(--update-px))}
 [data-update-screen] .us-steps{--t-2:calc(14*var(--update-px));flex:1 1 auto;display:flex;flex-direction:column;padding:calc(20*var(--update-px)) calc(22*var(--update-px))}
 [data-update-screen] .us-steps-head{gap:calc(12*var(--update-px));font-size:calc(12*var(--update-px))}
@@ -157,7 +160,7 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .us-meter [role=progressbar]>span{height:calc(6*var(--update-px))}
 [data-update-screen] .us-list{flex:1 1 auto;display:flex;flex-direction:column;margin-top:calc(14*var(--update-px))}
 [data-update-screen] .us-list>ol{flex:1 1 auto;display:flex;flex-direction:column}
-[data-update-screen] .us-list li{flex:1 1 auto;min-height:calc(34*var(--update-px));max-height:calc(54*var(--update-px));gap:calc(12*var(--update-px));padding-block:calc(3*var(--update-px))}
+[data-update-screen] .us-list li{flex:1 1 auto;min-height:calc(32*var(--update-px));max-height:calc(54*var(--update-px));gap:calc(12*var(--update-px));padding-block:calc(3*var(--update-px))}
 [data-update-screen] .us-list li>span:first-child{width:calc(26*var(--update-px));height:calc(26*var(--update-px));font-size:calc(11*var(--update-px))}
 [data-update-screen] .us-list li>span:last-child,[data-update-screen] .us-list [data-testid=update-step-detail]{font-size:calc(11.5*var(--update-px))}
 [data-update-screen] .us-bar{bottom:calc(16*var(--update-px));margin-top:calc(14*var(--update-px));gap:calc(12*var(--update-px));border-radius:calc(10*var(--update-px));padding:calc(12*var(--update-px)) calc(20*var(--update-px));font-size:calc(13*var(--update-px))}
@@ -958,9 +961,10 @@ export function UpdateRunView({
                 : "border-amber-500/20 bg-amber-500/10 text-amber-100"
             }`}
           >
+            {/* 16 px beside the row's 12 px text, and in step with it where /updating scales the row. */}
             <span
               className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
-              style={{ fontSize: 16 }}
+              style={{ fontSize: "calc(16em / 12)" }}
             >
               {resolved ? "history" : "warning"}
             </span>
