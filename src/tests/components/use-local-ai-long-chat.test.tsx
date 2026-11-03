@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { useLocalAiLongChat, type LocalAiLongChatOptions } from "@/lib/use-local-ai-long-chat";
+import { SHORTEN_REMEASURE_MS, useLocalAiLongChat, type LocalAiLongChatOptions } from "@/lib/use-local-ai-long-chat";
 import type { HarnessAdapter } from "@/lib/harness/transport";
 
 /**
@@ -176,6 +176,32 @@ describe("the 90-second bound", () => {
     await waitFor(() => expect(base.noteSystem).toHaveBeenCalledWith(KEY, "Conversation shortened for the local model."));
     expect(base.queueSend).toHaveBeenCalledWith(KEY, expect.objectContaining({ text: "Колко е 17 × 23?" }));
     expect(result.current.offer).toBeNull();
+  });
+
+  it("takes the harness's word when the size after a shorten is unknown, or does not come in time", async () => {
+    for (const after of [Promise.resolve(null), new Promise(() => {})]) {
+      const adapter = adapterWith(100460, async () => ({}));
+      const { result, base, unmount } = setup(adapter);
+      await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
+      adapter.conversationSize.mockReturnValue(after);
+      await act(async () => { result.current.shorten(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SHORTEN_REMEASURE_MS + 500); });
+      await waitFor(() => expect(base.noteSystem).toHaveBeenCalledWith(KEY, "Conversation shortened for the local model."));
+      expect(result.current.offer).toBeNull();
+      expect(result.current.shorteningSince).toBe(0);
+      unmount();
+    }
+  });
+
+  it("does not bring back a card the owner closed while the shorten ran past the bound", async () => {
+    const adapter = adapterWith(100460);
+    const { result } = setup(adapter);
+    await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
+    act(() => { result.current.shorten(); });
+    act(() => { result.current.dismiss(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_500); });
+    expect(result.current.offer).toBeNull();
+    expect(result.current.shorteningSince).toBe(0);
   });
 });
 

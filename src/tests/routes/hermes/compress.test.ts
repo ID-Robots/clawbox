@@ -59,12 +59,15 @@ describe("POST /setup-api/hermes/compress", () => {
   it("believes Hermes' own summary over its status: a noop, a refused or an aborted summary removed nothing", async () => {
     for (const flag of ["noop", "refused_would_grow", "aborted"]) {
       const headline = `Nothing removed (${flag}): 14 messages preserved`;
-      vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({
-        status: "compressed", before_tokens: 64923, after_tokens: 64923, summary: { [flag]: true, headline },
-      }));
-      const res = await post({ sessionId: SESSION });
-      expect(res.status).toBe(409);
-      expect((await res.json()).error).toBe(headline);
+      // Token counts that went down, or none at all: the flag alone decides.
+      for (const counts of [{ before_tokens: 64923, after_tokens: 30000 }, {}]) {
+        vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({
+          status: "compressed", compressed: true, ...counts, summary: { [flag]: true, headline },
+        }));
+        const res = await post({ sessionId: SESSION });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toBe(headline);
+      }
     }
   });
 
