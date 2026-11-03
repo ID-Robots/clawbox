@@ -309,12 +309,15 @@ export function liveTurnKeys(): Array<{ sessionKey: string; startedAt: number }>
 }
 
 /**
- * Resolves once every turn running under `sessionKey` now has ended — at
- * once when none is. A turn begun after the call is not waited for.
+ * Resolves once no turn is running under `sessionKey` — at once when none is.
+ * A turn begun while it waits is waited for too. No bound of its own: race it.
  */
-export function whenLiveTurnsSettle(sessionKey: string): Promise<void> {
-  const running = (registry().get(sessionKey) ?? []).filter((turn) => !turn.ended);
-  return Promise.all(running.map((turn) => turn.settled)).then(() => undefined);
+export async function whenLiveTurnsSettle(sessionKey: string): Promise<void> {
+  for (;;) {
+    const running = (registry().get(sessionKey) ?? []).filter((turn) => !turn.ended);
+    if (running.length === 0) return;
+    await Promise.all(running.map((turn) => turn.settled));
+  }
 }
 
 /**

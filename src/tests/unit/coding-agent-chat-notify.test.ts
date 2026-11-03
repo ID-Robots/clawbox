@@ -96,7 +96,7 @@ const endTurns: Array<() => void> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
-  fs.rmSync(NOTICES, { force: true });
+  fs.rmSync(NOTICES, { recursive: true, force: true });
   fs.rmSync(TABS, { force: true });
   fs.rmSync(TRANSCRIPTS, { recursive: true, force: true });
   // The Telegram leg is coding-agent-notify.test.ts's; off here, so the only
@@ -187,7 +187,7 @@ describe("the notice, on OpenClaw", () => {
     expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
     const [method, params] = gateway.gatewayWsCall.mock.calls[0];
     expect(method).toBe("chat.send");
-    expect(params).toMatchObject({ sessionKey: TAB, deliver: false, idempotencyKey: "coding-run-run-k3x9q2ab-completed" });
+    expect(params).toMatchObject({ sessionKey: TAB, deliver: false, idempotencyKey: "coding-run-run-k3x9q2ab-completed-1095000" });
     expect(params.message).toContain("[Coding run run-k3x9q2ab] finished in project \"site\"");
     expect(params.message).toContain("coding_agent_status");
     expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
@@ -214,14 +214,25 @@ describe("the notice, on OpenClaw", () => {
     expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
   });
 
-  it("tells of a second, different ending — a run that gave up and was resumed in place", async () => {
+  it("tells of a second ending — a run that gave up and was resumed in place, whichever way it ends again", async () => {
     recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 });
-    await announceCodingAgent(run({ status: "gave_up" }));
-    await announceCodingAgent(run({ status: "completed" }));
+    await announceCodingAgent(run({ status: "gave_up", completedAt: 2_000_000 }));
+    await announceCodingAgent(run({ status: "gave_up", completedAt: 2_000_000 }));
+    await announceCodingAgent(run({ status: "gave_up", completedAt: 3_000_000 }));
+    await announceCodingAgent(run({ status: "completed", completedAt: 4_000_000 }));
     expect(gateway.gatewayWsCall.mock.calls.map(([, p]) => p.idempotencyKey)).toEqual([
-      "coding-run-run-k3x9q2ab-gave_up",
-      "coding-run-run-k3x9q2ab-completed",
+      "coding-run-run-k3x9q2ab-gave_up-2000000",
+      "coding-run-run-k3x9q2ab-gave_up-3000000",
+      "coding-run-run-k3x9q2ab-completed-4000000",
     ]);
+  });
+
+  it("keeps what it has told when the record cannot be read, and sends nothing rather than twice", async () => {
+    fs.mkdirSync(NOTICES, { recursive: true });
+    expect(() => recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 })).not.toThrow();
+    await expect(announceCodingAgent(run())).resolves.toBeUndefined();
+    expect(fs.statSync(NOTICES).isDirectory()).toBe(true);
+    expect(gateway.gatewayWsCall).not.toHaveBeenCalled();
   });
 
   it("sends nothing for a run no chat asked for, for a pause, or once the box runs the other harness", async () => {
@@ -293,15 +304,31 @@ describe("the notice, on Hermes", () => {
     expect(body).not.toHaveProperty("sessionId");
   });
 
-  it("waits for a turn already running in that chat, then sends", async () => {
+  it("waits for every turn running in that chat — one the owner sends meanwhile too — then sends", async () => {
     recordRunChatOrigin("run-k3x9q2ab", { harness: "hermes", key: HERMES_TAB, at: 1 });
     const busy = beginLiveTurn(HERMES_TAB);
     const done = announceCodingAgent(run());
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fetchMock).not.toHaveBeenCalled();
+    const next = beginLiveTurn(HERMES_TAB);
     busy.end();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchMock).not.toHaveBeenCalled();
+    next.end();
     await done;
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call a turn that outlived the request lost: it goes on, and answers in the chat", async () => {
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "hermes", key: HERMES_TAB, at: 1 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockRejectedValueOnce(new DOMException("The operation timed out.", "TimeoutError"));
+    await expect(announceCodingAgent(run())).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("still running"));
+    expect(error).not.toHaveBeenCalled();
+    warn.mockRestore();
+    error.mockRestore();
   });
 
   it("never throws when the route refuses or the box cannot be reached", async () => {

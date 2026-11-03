@@ -297,21 +297,25 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
 //     own; the conversation the owner last sent a turn in (the chat-tab
 //     registry's `active`, stamped when the chat sends) stands for it, within
 //     CHAT_ORIGIN_WINDOW_MS of that send.
-// Only the OWNER's chats: their main conversation and their tabs. A run the
-// assistant starts from Telegram, a cron job or a ClawBox user's chat has no
-// owner turn in flight (Hermes) or no recent owner send (OpenClaw) and gets no
-// chat notice — its owner still gets the card and Telegram.
+// Only the OWNER's chats: their main conversation and their tabs. Both are
+// evidence, not proof. A run the assistant starts from Telegram, a cron job or
+// a ClawBox user's chat gets no chat notice while no owner turn is in flight
+// (Hermes) and no owner send is recent (OpenClaw), and its owner still gets the
+// card and Telegram. Started while the owner IS busy in a chat, it is told in
+// that chat, which is where the owner is. An OpenClaw turn that works past the
+// window before it starts the run is told nowhere but the card and Telegram,
+// which is what every run got before.
 //
 // WHAT IT SAYS. The same rule as the card: ClawBox's template — status, run id,
 // counts — never the task or the summary. The assistant reads those itself
 // with `coding_agent_status`, as a tool result rather than as words ClawBox
 // put in its mouth.
 //
-// ONCE. The record also holds the statuses the chat has been told of, written
-// BEFORE the turn is sent, so a second announce of the same ending — a
-// restart's recovery, two settle paths — sends nothing. Per status rather than
-// per run: a run that gave up and was resumed in place ends a second time, and
-// that ending is news.
+// ONCE. The record also holds the endings the chat has been told of — the
+// status and the run's `completedAt` — written BEFORE the turn is sent, so a
+// second announce of the same ending (a restart's recovery, two settle paths)
+// sends nothing. Per ending rather than per run: a run that gave up and was
+// resumed in place ends a second time, and that ending is news.
 
 /** Which ClawBox chat asked for a run, as the run route recorded it. */
 export interface RunChatOrigin {
@@ -324,7 +328,7 @@ export interface RunChatOrigin {
 }
 
 interface ChatNoticeRecord extends RunChatOrigin {
-  /** The endings this run's chat has been told of. */
+  /** The endings this run's chat has been told of, each `<status>@<completedAt>` (`endingOf`). */
   told: string[];
 }
 
@@ -334,6 +338,12 @@ const MAX_CHAT_NOTICE_RECORDS = 500;
 const RUN_ID_RE = /^run-[a-z0-9]{1,32}$/;
 /** The endings a chat hears of. A pause is the owner's own gesture, a queue is not an ending. */
 const CHAT_NOTICE_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "gave_up", "stopped"]);
+const ENDING_RE = /^(?:completed|failed|gave_up|stopped)@\d{1,16}$/;
+
+/** One ending of a run: how, and when — a run resumed in place ends again, later. */
+function endingOf(run: CodingRun): string {
+  return `${run.status}@${Math.max(0, Math.floor(run.completedAt ?? 0))}`;
+}
 
 /**
  * OpenClaw: how long after the owner's last send in a chat a run the assistant
@@ -355,10 +365,23 @@ function isOriginKey(key: unknown): key is string | null {
   return key === null || isOwnerChatTabKey(key);
 }
 
+/**
+ * The records on disk. No file, or one that is not JSON, is no records — the
+ * next write puts a whole one in its place. A file that is there and cannot be
+ * READ throws instead: writing the next record over it would forget every
+ * ending already told, and each of those chats would be told again.
+ */
 function readChatNotices(): Record<string, ChatNoticeRecord> {
+  let text: string;
+  try {
+    text = fs.readFileSync(CHAT_NOTICE_PATH, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw err;
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(CHAT_NOTICE_PATH, "utf8"));
+    parsed = JSON.parse(text);
   } catch {
     return {};
   }
@@ -369,7 +392,7 @@ function readChatNotices(): Record<string, ChatNoticeRecord> {
     if (!RUN_ID_RE.test(id) || !r || typeof r !== "object") continue;
     if ((r.harness !== "openclaw" && r.harness !== "hermes") || !isOriginKey(r.key ?? null)) continue;
     if (typeof r.at !== "number" || !Number.isFinite(r.at)) continue;
-    const told = Array.isArray(r.told) ? r.told.filter((s): s is string => typeof s === "string" && CHAT_NOTICE_STATUSES.has(s)) : [];
+    const told = Array.isArray(r.told) ? r.told.filter((s): s is string => typeof s === "string" && ENDING_RE.test(s)) : [];
     out[id] = { harness: r.harness, key: r.key ?? null, at: r.at, told };
   }
   return out;
@@ -383,6 +406,13 @@ function writeChatNotices(all: Record<string, ChatNoticeRecord>): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = untraced(`${CHAT_NOTICE_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(kept), { mode: 0o600 });
+  // `mode` applies only to a file the write creates; a temp file left behind
+  // by a crash keeps whatever mode it had.
+  try {
+    fs.chmodSync(tmp, 0o600);
+  } catch {
+    /* best effort: a temp file the write created is 0600 already */
+  }
   fs.renameSync(tmp, CHAT_NOTICE_PATH);
 }
 
@@ -429,16 +459,17 @@ export function recordRunChatOrigin(runId: string, origin: RunChatOrigin): void 
 }
 
 /**
- * Mark `status` as told for `runId` and answer the chat to tell — or null when
+ * Mark `ending` as told for `runId` and answer the chat to tell — or null when
  * no chat asked for this run, or it has already been told of this ending.
  * Written before anything is sent: a notice lost to a crash is better than one
- * sent twice.
+ * sent twice. The oldest endings go first past a handful: a run is resumed in
+ * place a few times, not hundreds.
  */
-function claimChatNotice(runId: string, status: string): RunChatOrigin | null {
+function claimChatNotice(runId: string, ending: string): RunChatOrigin | null {
   const all = readChatNotices();
   const record = all[runId];
-  if (!record || record.told.includes(status)) return null;
-  record.told = [...record.told, status];
+  if (!record || record.told.includes(ending)) return null;
+  record.told = [...record.told, ending].slice(-20);
   writeChatNotices(all);
   return { harness: record.harness, key: record.key, at: record.at };
 }
@@ -518,10 +549,15 @@ async function sendOpenClawChatNotice(key: string | null, message: string, idemp
  * turn live so an open chat follows it. Called with the agent's bearer, which
  * that route serves as the owner, the only person this leg writes to.
  *
- * After any turn already running in that chat: a second `hermes chat --resume`
- * on a busy session is a second agent beside the first, not a turn after it.
+ * After every turn running in that chat — one the owner sends during the wait
+ * too: a second `hermes chat --resume` on a busy session is a second agent
+ * beside the first, not a turn after it.
+ *
+ * Resolves "late" when the route had not answered within its timeout: the turn
+ * belongs to the box and goes on without this request, so that is not a
+ * notice lost.
  */
-async function sendHermesChatNotice(key: string, notice: { message: string; display: string }): Promise<void> {
+async function sendHermesChatNotice(key: string, notice: { message: string; display: string }): Promise<"sent" | "late"> {
   const { whenLiveTurnsSettle } = await import("@/lib/harness/hermes-live-turn");
   await Promise.race([whenLiveTurnsSettle(key), sleep(HERMES_BUSY_WAIT_MS)]);
   const { readTranscript } = await import("@/lib/harness/transcript-store");
@@ -529,20 +565,28 @@ async function sendHermesChatNotice(key: string, notice: { message: string; disp
   const sessionId = (await readTranscript(50, key)).findLast((record) => record.sessionId)?.sessionId;
   const { getMcpToken } = await import("@/lib/mcp-token");
   const port = /^\d{1,5}$/.test(process.env.PORT ?? "") ? process.env.PORT : "80";
-  const res = await fetch(`http://127.0.0.1:${port}/setup-api/hermes/chat`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${getMcpToken()}`, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ message: notice.message, displayText: notice.display, sessionKey: key, ...(sessionId ? { sessionId } : {}) }),
-    signal: AbortSignal.timeout(HERMES_TURN_TIMEOUT_MS),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/setup-api/hermes/chat`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${getMcpToken()}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ message: notice.message, displayText: notice.display, sessionKey: key, ...(sessionId ? { sessionId } : {}) }),
+      signal: AbortSignal.timeout(HERMES_TURN_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") return "late";
+    throw err;
+  }
   if (!res.ok) throw new Error(`the chat answered ${res.status}`);
+  return "sent";
 }
 
 /** The chat leg; never throws. */
 async function notifyOriginChat(run: CodingRun): Promise<void> {
   try {
     if (!CHAT_NOTICE_STATUSES.has(run.status)) return;
-    const origin = claimChatNotice(run.id, run.status);
+    const ending = endingOf(run);
+    const origin = claimChatNotice(run.id, ending);
     if (!origin) return;
     const harness = await getActiveHarness();
     if (harness !== origin.harness) {
@@ -556,9 +600,10 @@ async function notifyOriginChat(run: CodingRun): Promise<void> {
     const key = origin.key !== null && readOwnerChatTabs().closed.includes(origin.key) ? null : origin.key;
     const notice = buildChatNotice(run, harness);
     if (harness === "openclaw") {
-      await sendOpenClawChatNotice(key, notice.message, `coding-run-${run.id}-${run.status}`);
-    } else {
-      await sendHermesChatNotice(key ?? DESKTOP_TRANSCRIPT_KEY, notice);
+      await sendOpenClawChatNotice(key, notice.message, `coding-run-${run.id}-${ending.replace("@", "-")}`);
+    } else if ((await sendHermesChatNotice(key ?? DESKTOP_TRANSCRIPT_KEY, notice)) === "late") {
+      console.warn(`[coding-agent] the chat's turn about ${run.id} is still running after ${HERMES_TURN_TIMEOUT_MS / 60_000} min; it answers in the chat when it is done`);
+      return;
     }
     console.info(`[coding-agent] told the chat that asked for ${run.id} that it ended ${run.status}`);
   } catch (err) {
