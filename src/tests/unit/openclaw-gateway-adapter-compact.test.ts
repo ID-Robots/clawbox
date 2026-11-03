@@ -43,4 +43,20 @@ describe("OpenClawGatewayAdapter.compactConversation", () => {
     );
     await expect(adapter.compactConversation("agent:main:main")).rejects.toThrow(/not shortened/);
   });
+
+  it("rejects a compaction that left the conversation exactly as large", async () => {
+    const adapter = new OpenClawGatewayAdapter(
+      {} as HarnessCapabilities,
+      link({ ok: true, compacted: true, result: { tokensBefore: 53000, tokensAfter: 53000 } }),
+    );
+    await expect(adapter.compactConversation("agent:main:main")).rejects.toThrow(/not shortened/);
+  });
+
+  it("takes a compaction that reported only one count at its word", async () => {
+    const adapter = new OpenClawGatewayAdapter(
+      {} as HarnessCapabilities,
+      link({ ok: true, compacted: true, result: { tokensBefore: 53000 } }),
+    );
+    await expect(adapter.compactConversation("agent:main:main")).resolves.toEqual({ tokensBefore: 53000, tokensAfter: undefined });
+  });
 });

@@ -551,8 +551,10 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
   /**
    * `sessions.compact` without `maxLines`: the gateway summarizes the session
    * with its configured compaction model — the cloud model while the primary is
-   * on the box (src/lib/local-compaction-model.ts). A refusal, or an answer that
-   * says nothing was compacted, rejects: the caller offers a new chat instead.
+   * on the box (src/lib/local-compaction-model.ts). A refusal, an answer that
+   * says nothing was compacted, or one whose `result` counts show the history
+   * no smaller rejects: the caller offers a new chat instead. An answer
+   * without both counts is taken at its word.
    */
   async compactConversation(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }> {
     let res: { ok?: unknown; compacted?: unknown; result?: { tokensBefore?: unknown; tokensAfter?: unknown } } | null;
