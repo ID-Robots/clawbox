@@ -23,6 +23,7 @@ const SWEPT = [
   "src/components/FilesApp.tsx",
   "src/components/SettingsApp.tsx",
   "src/components/TerminalApp.tsx",
+  "src/components/UpdateHandover.tsx",
   "src/components/UpdateRunView.tsx",
 ];
 
