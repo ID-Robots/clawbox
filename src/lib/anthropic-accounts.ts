@@ -78,25 +78,30 @@ import {
 } from "@/lib/project-secrets";
 import {
   ANTHROPIC_ACCOUNT_STATUSES,
+  ANTHROPIC_LIMIT_KINDS,
+  activeModelLimits,
   effectiveStatus,
   isUsable,
+  isUsableFor,
+  modelLimitedUntil,
   pickAccount,
   pickForSpawn,
   poolHealth,
   resolveActiveAccount,
   type AnthropicAccountStatus,
   type AnthropicLimitKind,
+  type ModelLimit,
   type PickMode,
   type PoolHealth,
 } from "@/lib/anthropic-limit";
-import { fetchAnthropicUsage } from "@/lib/anthropic-usage";
+import { fetchAnthropicUsage, usageForModel, type AnthropicUsageReading } from "@/lib/anthropic-usage";
 
 // ── the record ──────────────────────────────────────────────────────────────
 
 export const ANTHROPIC_ACCOUNT_KINDS = ["oauth", "api_key", "login"] as const;
 export type AnthropicAccountKind = (typeof ANTHROPIC_ACCOUNT_KINDS)[number];
 
-const LIMIT_KINDS: readonly AnthropicLimitKind[] = ["session", "weekly", "rate", "credit"];
+const LIMIT_KINDS = ANTHROPIC_LIMIT_KINDS;
 
 export interface AnthropicAccount {
   /** Eight lowercase hex characters. Stable for the account's life; the secret's name derives from it. */
@@ -123,6 +128,12 @@ export interface AnthropicAccount {
    * again since: a credential file written after it lifts the refusal.
    */
   authFailedAt: number | null;
+  /**
+   * The model weeks spent on it (TASK-2141, `weekly_scoped`): runs on such a
+   * model are kept off it until each one's `until`, every other use goes on —
+   * `status` stays `ok` and the active account does not move. Absent: none.
+   */
+  modelLimits?: ModelLimit[];
 }
 
 /** Why the active account moved — said to the owner, and what decides which consumers act. */
@@ -260,6 +271,7 @@ function normalizeAccount(raw: unknown): AnthropicAccount | null {
   if (!(ANTHROPIC_ACCOUNT_KINDS as readonly unknown[]).includes(v.kind)) return null;
   const status = (ANTHROPIC_ACCOUNT_STATUSES as readonly unknown[]).includes(v.status) ? (v.status as AnthropicAccountStatus) : "ok";
   const limitedUntil = num(v.limitedUntil);
+  const modelLimits = normalizeModelLimits(v.modelLimits);
   return {
     id: v.id,
     label: cleanLabel(v.label, "Anthropic account"),
@@ -274,7 +286,24 @@ function normalizeAccount(raw: unknown): AnthropicAccount | null {
     lastLimitedAt: num(v.lastLimitedAt),
     expiresAt: num(v.expiresAt),
     authFailedAt: num(v.authFailedAt),
+    ...(modelLimits.length > 0 ? { modelLimits } : {}),
   };
+}
+
+const FAMILY_RE = /^[a-z][a-z0-9]{2,30}$/;
+
+/** The model weeks off disk: one per family, each with its end; anything else is dropped. */
+function normalizeModelLimits(raw: unknown): ModelLimit[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ModelLimit[] = [];
+  for (const entry of raw.slice(0, 16)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const v = entry as Record<string, unknown>;
+    const until = num(v.until);
+    if (typeof v.family !== "string" || !FAMILY_RE.test(v.family) || until === null || out.some((l) => l.family === v.family)) continue;
+    out.push({ family: v.family, name: cleanLabel(v.name, v.family), until });
+  }
+  return out;
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
@@ -441,8 +470,14 @@ interface PoolRuntime {
   changeListeners: Set<(change: ActiveChange) => void>;
   wakeTimer: ReturnType<typeof setTimeout> | null;
   wakeAt: number | null;
-  /** Per account, how full its fullest usage window was and when that was asked (readRoom); `percent` null: no answer. */
-  room: Map<string, { percent: number | null; at: number }>;
+  /**
+   * Per account, Anthropic's last answer about its usage windows and when it
+   * was taken (readRoom, readAccountUsage); `reading` null: no answer.
+   * `askedAt`: the last ask, answered or not — what the next ask waits on.
+   */
+  room: Map<string, { reading: AnthropicUsageReading | null; at: number; askedAt?: number }>;
+  /** Per account, the usage ask in flight (readAccountUsage): every caller meanwhile awaits that one. */
+  usageAsks: Map<string, Promise<AnthropicUsageReading | null>>;
   /** The last readRoom pass: each waits for the one before it. */
   roomRead: Promise<void>;
 }
@@ -459,6 +494,7 @@ function runtime(): PoolRuntime {
     wakeAt: null,
     room: new Map(),
     roomRead: Promise.resolve(),
+    usageAsks: new Map(),
   }));
 }
 
@@ -982,13 +1018,37 @@ export async function markLimited(id: unknown, until: number, kind: AnthropicLim
   }, { cause: "limit" });
 }
 
-/** Take a recorded limit back (the owner knows better, or a test is over). */
+/**
+ * Record that one MODEL's own week is spent on an account (TASK-2141,
+ * Anthropic's `weekly_scoped` meter), until `until`. Runs on that model are
+ * kept off the account (pickForSpawn with the run's model); the account stays
+ * `ok` for every other model and for the gateway, so the active account does
+ * not move and no swap is announced. A later `until` wins, as in markLimited.
+ */
+export async function markModelLimited(id: unknown, week: { family: string; name: string }, until: number, context: FailureContext = {}): Promise<LimitRecorded> {
+  return mutate((file, now) => {
+    const account = find(file, id);
+    const family = FAMILY_RE.test(week.family) ? week.family : null;
+    if (!family) throw new AnthropicAccountError("invalid", "That is not a model this box can tell apart.");
+    const running = activeModelLimits(account, now);
+    const same = running.find((l) => l.family === family);
+    const next: ModelLimit = { family, name: cleanLabel(week.name, family), until: same ? Math.max(same.until, until) : until };
+    account.modelLimits = [...running.filter((l) => l.family !== family), next];
+    account.lastLimitedAt = now;
+    console.error(`[anthropic-accounts] account ${account.id}: the ${family} week is spent until ${new Date(next.until).toISOString()}${context.runId ? ` (run ${context.runId})` : ""}; other models keep the account`);
+    const health = poolHealth(file.accounts, now);
+    return { account: { ...account, modelLimits: [...account.modelLimits] }, newlyLimited: !same, becameAllLimited: false, health };
+  });
+}
+
+/** Take a recorded limit back (the owner knows better, or a test is over) — the model weeks with it. */
 export async function clearLimit(id: unknown): Promise<AnthropicAccount> {
   return mutate((file) => {
     const account = find(file, id);
     if (account.status === "limited") account.status = "ok";
     account.limitedUntil = null;
     account.limitKind = null;
+    delete account.modelLimits;
     return { ...account };
   }, { cause: "renewed" });
 }
@@ -1040,13 +1100,64 @@ export async function setPickMode(mode: PickMode): Promise<void> {
 /** A usage reading is good for ten minutes: not asked again sooner, and not used later. */
 const ROOM_TTL_MS = 10 * 60_000;
 
-/** How full each account's fullest window is, from the readings younger than ROOM_TTL_MS. */
-function roomNow(now: number): Map<string, number> {
+/**
+ * How full each account's fullest window is, from the readings younger than
+ * ROOM_TTL_MS: the session and the account's week, and — for a pick for one
+ * model (TASK-2141) — that model's own week; 100 for one that is spent. Works
+ * on the answer of 2026-11 with `five_hour: null`: the windows read are the
+ * ones ranked (usageForModel).
+ */
+function roomNow(now: number, model?: string | null): Map<string, number> {
   const room = new Map<string, number>();
-  for (const [id, reading] of runtime().room) {
-    if (reading.percent !== null && now - reading.at < ROOM_TTL_MS) room.set(id, reading.percent);
+  for (const [id, entry] of runtime().room) {
+    if (!entry.reading || now - entry.at >= ROOM_TTL_MS) continue;
+    const fullness = usageForModel(entry.reading, model).fullness;
+    if (fullness !== null) room.set(id, fullness);
   }
   return room;
+}
+
+/** One `oauth` account's usage, asked with the access token the pool holds — never renewed for it. Null: no answer. */
+async function askUsage(account: AnthropicAccount): Promise<AnthropicUsageReading | null> {
+  if (account.kind !== "oauth") return null;
+  const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
+  const tokens = stored.found ? parseOAuthSecret(stored.value) : null;
+  if (!tokens || (tokens.expires !== null && tokens.expires <= Date.now())) return null;
+  return fetchAnthropicUsage(tokens.access);
+}
+
+/**
+ * Anthropic's answer about one account's usage windows, NOW (TASK-2141) —
+ * for a run that stopped on a limit, to learn which window it was and when it
+ * resets instead of guessing, and for the owner's view. Kept as the account's
+ * room reading too. Null: not an `oauth` account, or Anthropic could not be
+ * asked or would not say. `maxAgeMs`: an answer younger than this is used as
+ * it is (0, the default: always ask). Never throws.
+ */
+export function readAccountUsage(id: string, maxAgeMs = 0): Promise<AnthropicUsageReading | null> {
+  const state = runtime();
+  const cached = state.room.get(id);
+  if (maxAgeMs > 0 && cached && Date.now() - cached.at < maxAgeMs) return Promise.resolve(cached.reading);
+  const inFlight = state.usageAsks.get(id);
+  if (inFlight) return inFlight;
+  const ask = (async () => {
+    try {
+      const account = (state.snapshot ?? (await serialised(loadLocked))).accounts.find((a) => a.id === id);
+      if (!account || account.kind !== "oauth") return null;
+      const at = Date.now();
+      const reading = await askUsage(account).catch(() => null);
+      // No answer leaves the last good one in place, until it is too old to use.
+      const previous = state.room.get(id);
+      state.room.set(id, reading || !previous ? { reading, at, askedAt: at } : { ...previous, askedAt: at });
+      return reading;
+    } catch {
+      return null;
+    }
+  })().finally(() => {
+    if (state.usageAsks.get(id) === ask) state.usageAsks.delete(id);
+  });
+  state.usageAsks.set(id, ask);
+  return ask;
 }
 
 /**
@@ -1060,37 +1171,33 @@ function roomNow(now: number): Map<string, number> {
  * token the pool holds — never renewed for it: one at its end has no
  * reading, and the pick takes it in the owner's order. One read at a time,
  * so a move just behind another one finds its readings. Never throws.
+ * `model`: a spawn's run model — an active account whose week for it is spent
+ * is about to be passed over too (TASK-2141).
  */
-function readRoom(leaving: ReadonlySet<string>): Promise<void> {
+function readRoom(leaving: ReadonlySet<string>, model?: string | null): Promise<void> {
   const state = runtime();
-  const next = state.roomRead.then(() => readRoomNow(leaving)).catch(() => {});
+  const next = state.roomRead.then(() => readRoomNow(leaving, model)).catch(() => {});
   state.roomRead = next;
   return next;
 }
 
-async function readRoomNow(leaving: ReadonlySet<string>): Promise<void> {
+async function readRoomNow(leaving: ReadonlySet<string>, model?: string | null): Promise<void> {
   const state = runtime();
   const file = state.snapshot ?? (await serialised(loadLocked));
   if (file.pickMode !== "most-room" || file.returnToPrimary) return;
   const now = Date.now();
   const active = file.activeId ? file.accounts.find((a) => a.id === file.activeId) : undefined;
-  if (active && !leaving.has(active.id) && isUsable(active, now)) return;
+  if (active && !leaving.has(active.id) && isUsableFor(active, now, model)) return;
   const due = file.accounts.filter((a) => {
     const asked = state.room.get(a.id)?.at;
-    return a.kind === "oauth" && !leaving.has(a.id) && isUsable(a, now) && (asked === undefined || now - asked >= ROOM_TTL_MS);
+    return a.kind === "oauth" && !leaving.has(a.id) && isUsableFor(a, now, model) && (asked === undefined || now - asked >= ROOM_TTL_MS);
   });
   await Promise.all(due.map(async (account) => {
     // Asked once per window, whatever the answer: a failure is not asked again at once.
-    state.room.set(account.id, { percent: null, at: now });
+    state.room.set(account.id, { reading: null, at: now });
     try {
-      const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
-      const tokens = stored.found ? parseOAuthSecret(stored.value) : null;
-      if (!tokens || (tokens.expires !== null && tokens.expires <= Date.now())) return;
-      const reading = await fetchAnthropicUsage(tokens.access);
-      if (!reading) return;
-      const percents = [reading.utilization.fiveHour, reading.utilization.sevenDay].filter((p): p is number => p !== null);
-      const percent = reading.exhausted ? 100 : percents.length > 0 ? Math.max(...percents) : null;
-      state.room.set(account.id, { percent, at: now });
+      const reading = await askUsage(account);
+      if (reading) state.room.set(account.id, { reading, at: now });
     } catch {
       // No reading: the pick takes this account in the owner's order.
     }
@@ -1446,6 +1553,9 @@ export async function gatewayCredentialFor(id: string): Promise<{ access: string
  * order — skipping any in `exclude` (the one that has just refused) and any
  * whose credential turns out not to work — those are marked on the way past,
  * so the owner's list says why, and marking one moves the active account.
+ * `model` is the run's (TASK-2141): an account whose week for THAT model is
+ * spent is passed over — and handed to runs on any other model as before —
+ * and "most room" counts that model's week (roomNow).
  *
  * `fallback` answers the question "and if NONE can answer?": the runner still
  * has to spawn something on a path that has already committed to a spawn, and
@@ -1460,20 +1570,25 @@ export async function gatewayCredentialFor(id: string): Promise<{ access: string
  * run was refused with — nothing has changed that could make the next try go
  * any differently, so the pick goes on past it as if it had not been preferred.
  */
-export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean; prefer?: { id: string; refused: string | null } | null } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
+export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean; prefer?: { id: string; refused: string | null } | null; model?: string | null } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
   const tried = new Set(opts.exclude ?? []);
   const prefer = opts.prefer ?? null;
-  await readRoom(tried);
+  await readRoom(tried, opts.model);
   for (;;) {
     const now = Date.now();
     const file = await serialised(loadLocked);
     const accounts = file.accounts.map((a) => ({ ...a }));
-    const preferred = prefer && !tried.has(prefer.id) ? accounts.find((a) => a.id === prefer.id && isUsable(a, now)) : undefined;
-    const next = preferred ?? pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? {} : { mode: file.pickMode, fullness: roomNow(now) });
+    const preferred = prefer && !tried.has(prefer.id) ? accounts.find((a) => a.id === prefer.id && isUsableFor(a, now, opts.model)) : undefined;
+    const next = preferred ?? pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? { model: opts.model } : { mode: file.pickMode, fullness: roomNow(now, opts.model), model: opts.model });
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
-          if (effectiveStatus(account, now) !== "limited") continue;
+          // Never one the run gave up on after refusals (TASK-2139): an
+          // account still "ok" whose week for the run's model is spent would
+          // otherwise be handed straight back.
+          if (opts.exclude?.has(account.id)) continue;
+          const status = effectiveStatus(account, now);
+          if (status !== "limited" && !(status === "ok" && modelLimitedUntil(account, opts.model, now) !== null)) continue;
           const credential = await credentialFor(account, now).catch(() => null);
           if (credential) return { prepared: { account, credential }, health: poolHealth(await readAccounts(), now) };
         }
@@ -1510,12 +1625,13 @@ export async function readUsableApiKey(): Promise<string | null> {
  * Could an account OTHER than `excludeId` take a run over, as far as this
  * process knows right now? Synchronous, off the snapshot — for the runner's
  * settle path. `null` means "not known yet" (nothing read since boot): the
- * caller then asks the slow way.
+ * caller then asks the slow way. `model`: the run's — an account whose week
+ * for it is spent cannot take it over (TASK-2141).
  */
-export function anotherAccountLikely(excludeId: string | null, now: number = Date.now()): boolean | null {
+export function anotherAccountLikely(excludeId: string | null, now: number = Date.now(), model: string | null = null): boolean | null {
   const { snapshot } = runtime();
   if (!snapshot) return null;
-  return pickAccount(snapshot.accounts, now, new Set(excludeId ? [excludeId] : [])) !== null;
+  return pickAccount(snapshot.accounts, now, new Set(excludeId ? [excludeId] : []), { model }) !== null;
 }
 
 // ── handing a credential to the wrapper ─────────────────────────────────────
@@ -1603,7 +1719,10 @@ export function onLimitReset(listener: () => void): () => void {
 function armWake(file: PoolFile): void {
   const state = runtime();
   const now = Date.now();
-  const next = poolHealth(file.accounts, now).nextResetAt;
+  // A model week's end wakes the runs waiting for it too (TASK-2141).
+  const ends = [poolHealth(file.accounts, now).nextResetAt, ...file.accounts.flatMap((a) => activeModelLimits(a, now).map((l) => l.until))]
+    .filter((t): t is number => t !== null);
+  const next = ends.length > 0 ? Math.min(...ends) : null;
   const at = next === null ? null : next + WAKE_MARGIN_MS;
   if (at === state.wakeAt && state.wakeTimer) return;
   if (state.wakeTimer) clearTimeout(state.wakeTimer);
@@ -1653,6 +1772,70 @@ export interface AnthropicAccountView {
   addedAt: number;
   lastUsedAt: number | null;
   lastLimitedAt: number | null;
+  /**
+   * The model weeks spent on it (TASK-2141): runs on those models wait for
+   * `until`, everything else goes on — the account is NOT `limited` for them.
+   */
+  modelLimits?: { family: string; name: string; until: number }[];
+  /** Anthropic's last answer about its windows, when one is fresh (readAccountUsage); null for none. */
+  usage?: AccountUsageView | null;
+}
+
+/**
+ * One account's usage as Anthropic last gave it (TASK-2141) — percents and
+ * resets only. `weeklyPercent` is the account's own week (`weekly_all`, or
+ * `seven_day` of the old shape); `models` every model week
+ * (`weekly_scoped`), each only for runs on that model.
+ */
+export interface AccountUsageView {
+  at: number;
+  sessionPercent: number | null;
+  weeklyPercent: number | null;
+  weeklyResetsAt: number | null;
+  models: { name: string; family: string | null; percent: number; resetsAt: number | null; spent: boolean }[];
+  extraUsage: { enabled: boolean; spendLimitReached: boolean } | null;
+}
+
+function usageView(entry: { reading: AnthropicUsageReading | null; at: number } | undefined, now: number): AccountUsageView | null {
+  if (!entry?.reading || now - entry.at >= ROOM_TTL_MS) return null;
+  const { reading } = entry;
+  const week = (reading.windows ?? []).filter((w) => w.kind === "weekly").sort((a, b) => b.percent - a.percent)[0] ?? null;
+  return {
+    at: entry.at,
+    sessionPercent: reading.utilization.fiveHour,
+    weeklyPercent: reading.utilization.sevenDay ?? week?.percent ?? null,
+    weeklyResetsAt: week?.resetsAt ?? null,
+    models: (reading.models ?? []).map((m) => ({ name: m.name, family: m.family, percent: m.percent, resetsAt: m.resetsAt, spent: m.spent })),
+    extraUsage: reading.extraUsage ? { ...reading.extraUsage } : null,
+  };
+}
+
+/**
+ * Ask Anthropic about every `oauth` account whose last answer is older than
+ * ROOM_TTL_MS, for the owner's view (TASK-2141) — at most `budgetMs` waited
+ * for: what lands later is in the next view. An account that needs the owner
+ * is not asked. Never throws.
+ */
+export async function refreshPoolUsage(budgetMs = 4_000): Promise<void> {
+  try {
+    const state = runtime();
+    const now = Date.now();
+    const file = state.snapshot ?? (await serialised(loadLocked));
+    const due = file.accounts.filter((a) => {
+      const status = effectiveStatus(a, now);
+      const entry = state.room.get(a.id);
+      const asked = entry ? entry.askedAt ?? entry.at : undefined;
+      return a.kind === "oauth" && status !== "expired" && status !== "revoked" && (asked === undefined || now - asked >= ROOM_TTL_MS);
+    });
+    if (due.length === 0) return;
+    const reads = Promise.all(due.map((a) => readAccountUsage(a.id)));
+    const budget = new Promise<void>((resolve) => {
+      setTimeout(resolve, budgetMs).unref?.();
+    });
+    await Promise.race([reads, budget]);
+  } catch {
+    // The view goes without: an unreadable pool is said by describePool itself.
+  }
 }
 
 export interface AnthropicPoolView {
@@ -1694,6 +1877,8 @@ export async function describePool(): Promise<AnthropicPoolView> {
       addedAt: a.addedAt,
       lastUsedAt: a.lastUsedAt,
       lastLimitedAt: a.lastLimitedAt,
+      modelLimits: activeModelLimits(a, now).map((l) => ({ family: l.family, name: l.name, until: l.until })),
+      usage: usageView(runtime().room.get(a.id), now),
     })),
     health: poolHealth(accounts, now),
     activeAccountId: active?.id ?? null,
@@ -1742,6 +1927,7 @@ export function _resetAnthropicAccountsForTests(): void {
   state.changeListeners.clear();
   state.room.clear();
   state.roomRead = Promise.resolve();
+  state.usageAsks.clear();
 }
 
 export { isUsable };
