@@ -47,7 +47,7 @@ const execFile = promisify(execFileCb);
 
 /** Installed by install.sh::install_root_libexec, root:root 0755, granted in config/clawbox-sudoers. */
 export const USER_HELPER = "/usr/local/libexec/clawbox/clawbox-user-helper.sh";
-/** Root steps behind Settings → Users. Keep aligned with install.sh step_user_add / step_user_remove. */
+/** Root steps behind Settings → System → Users. Keep aligned with install.sh step_user_add / step_user_remove. */
 export const USER_ADD_STEP = "user_add";
 export const USER_REMOVE_STEP = "user_remove";
 /** Where each step reads its one record. install.sh names the same two paths. */
@@ -462,7 +462,7 @@ export async function checkUserPassword(username: string, password: string): Pro
  * Can this box check a second user's password at all? Asks the helper about
  * NOBODY — an empty request, which it refuses with PAM_AUTH_ERR before
  * unix_chkpwd runs — so no password is involved. Anything but that refusal is
- * a helper sudo would not start: Settings → Users shows the repair for it.
+ * a helper sudo would not start: Settings → System → Users shows the repair for it.
  */
 export async function userHelperAvailable(): Promise<boolean> {
   return new Promise((resolve) => {

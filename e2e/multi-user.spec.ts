@@ -111,7 +111,7 @@ class Box {
     }, 60);
   }
 
-  /** The routes one browser sees: who it is signed in as, Settings → Users, /login. */
+  /** The routes one browser sees: who it is signed in as, Settings → System → Users, /login. */
   async mount(page: Page, session: Session) {
     await page.route("**/setup-api/users/me", (route) => {
       if (!session.username) return route.fulfill({ status: 401, json: { error: "Authentication required" } });

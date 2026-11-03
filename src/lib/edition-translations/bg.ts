@@ -1709,7 +1709,7 @@ export const bg: Record<string, string> = {
   "localModels.chatBannerDismiss": "Скрий тази бележка",
   "localModels.chatLoading": "Зареждане на локалния модел…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Потребители",
   "users.title": "Потребители",
   "users.intro": "Всеки, който влиза в този ClawBox, има собствен Linux акаунт и парола, както и същите приложения и настройки. Само акаунтът на собственика — неговата парола и връщането към фабричните настройки — остава за собственика.",

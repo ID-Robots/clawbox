@@ -113,7 +113,7 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   // Off UI_ROOT_STEPS, like set_hostname, so `install/run-step` — the endpoint
   // the agent's bearer reaches with a step NAME — cannot start it. TASK-514.
   "set_timezone",
-  // Settings → Users (TASK-1256): create / remove a ClawBox user's Linux
+  // Settings → System → Users (TASK-1256): create / remove a ClawBox user's Linux
   // account. Each reads ONE record from a 0600 file under data/, like
   // chpasswd, and install.sh holds them to accounts in `clawbox-users` — never
   // root, never the owner. Owner-cookie-only routes start them

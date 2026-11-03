@@ -1734,7 +1734,7 @@ export const it: Record<string, string> = {
   "localModels.chatBannerDismiss": "Nascondi questa nota",
   "localModels.chatLoading": "Caricamento del modello locale…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Utenti",
   "users.title": "Utenti",
   "users.intro": "Ogni persona che accede a questo ClawBox ha un proprio account Linux e una propria password, e le stesse app e impostazioni. Solo l’account del proprietario — la sua password e il ripristino di fabbrica — resta del proprietario.",

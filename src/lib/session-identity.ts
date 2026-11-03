@@ -28,7 +28,7 @@ export const USERS_CONFIG_KEY = "clawbox_users";
 
 export interface ClawboxUserRecord {
   username: string;
-  /** ISO timestamp the account was created through Settings → Users. */
+  /** ISO timestamp the account was created through Settings → System → Users. */
   createdAt: string;
   /** Session version: a random token every cookie for this user must carry. */
   sv: string;

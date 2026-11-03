@@ -1723,7 +1723,7 @@ export const ja: Record<string, string> = {
   "localModels.chatBannerDismiss": "このお知らせを閉じる",
   "localModels.chatLoading": "ローカルモデルを読み込み中…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "ユーザー",
   "users.title": "ユーザー",
   "users.intro": "この ClawBox にサインインする人は、それぞれ自分の Linux アカウントとパスワードを持ち、同じアプリと設定を使えます。オーナー自身のアカウント（パスワードと初期化）だけはオーナー専用です。",

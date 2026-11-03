@@ -202,6 +202,30 @@ describe("Settings → System → Users", () => {
     await waitFor(() => expect(statsRequested()).toBe(onUsers + 1));
   });
 
+  it("on a phone, stops polling the figures once Back shows the list of sections", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const width = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 400 });
+    try {
+      handoffSettingsSection("system");
+      render(<SettingsApp ui={ui} />);
+      await screen.findByRole("tabpanel", { name: "Device" });
+      await waitFor(() => expect(statsRequested()).toBeGreaterThan(0));
+      const onDevice = statsRequested();
+      act(() => { vi.advanceTimersByTime(3_000); });
+      expect(statsRequested()).toBe(onDevice + 1);
+
+      // Back to the list: System is still the last section, but nothing of it is drawn.
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      await waitFor(() => expect(screen.queryByRole("tabpanel", { name: "Device" })).toBeNull());
+      const onList = statsRequested();
+      act(() => { vi.advanceTimersByTime(9_000); });
+      expect(statsRequested()).toBe(onList);
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+    }
+  });
+
   it("moves between the tabs with the arrow keys, Home and End", async () => {
     await mount();
     fireEvent.click(navRow("System")!);

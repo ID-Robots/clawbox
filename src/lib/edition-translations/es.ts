@@ -1718,7 +1718,7 @@ export const es: Record<string, string> = {
   "localModels.chatBannerDismiss": "Ocultar este aviso",
   "localModels.chatLoading": "Cargando el modelo local…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Usuarios",
   "users.title": "Usuarios",
   "users.intro": "Cada persona que inicia sesión en este ClawBox tiene su propia cuenta de Linux y su propia contraseña, y las mismas apps y la misma configuración. Solo la cuenta del propietario —su contraseña y el restablecimiento de fábrica— sigue siendo del propietario.",
@@ -1777,7 +1777,7 @@ export const es: Record<string, string> = {
   "login.incorrectPassword": "Contraseña incorrecta",
   "login.incorrectCredentials": "Nombre de usuario o contraseña incorrectos",
   "login.tooManyAttempts": "Demasiados intentos fallidos. Vuelve a intentarlo en unos minutos.",
-  "login.signinUnavailable": "Esta caja todavía no puede comprobar las contraseñas de otros usuarios. Pide al propietario que abra Configuración → Sistema → Usuarios, donde se muestra la reparación única.",
+  "login.signinUnavailable": "Esta caja todavía no puede comprobar las contraseñas de otros usuarios. Pide al propietario que abra Ajustes → Sistema → Usuarios, donde se muestra la reparación única.",
   "tray.signedInAs": "Sesión iniciada como",
   "tray.signedInAsName": "Sesión iniciada como {name}",
   "tray.switchUser": "Cambiar de usuario",

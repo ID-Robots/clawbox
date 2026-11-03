@@ -924,8 +924,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // second ordering simply has no memory view to switch to.
   const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
   // System's figures are on screen in its device view only: System → Users
-  // draws none of them, so it polls for none.
-  const systemFiguresShown = section === "system" && systemShows === "device";
+  // draws none of them, and neither does the phone's list of sections, which
+  // keeps `section` while it is up — so neither polls.
+  const systemFiguresShown = (isMobile ? mobileSection : section) === "system" && systemShows === "device";
   useEffect(() => {
     if (!systemFiguresShown && section !== "about") return;
     // Ask only for what is on screen. About draws neither block, and on System

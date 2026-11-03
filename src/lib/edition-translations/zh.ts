@@ -1731,7 +1731,7 @@ export const zh: Record<string, string> = {
   "localModels.chatBannerDismiss": "关闭此提示",
   "localModels.chatLoading": "正在加载本地模型…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "用户",
   "users.title": "用户",
   "users.intro": "登录这台 ClawBox 的每个人都有自己的 Linux 账户和密码，并使用相同的应用和设置。只有所有者本人的账户（其密码和恢复出厂设置）仍归所有者专用。",

@@ -20,7 +20,7 @@
 #
 # Both session cookies are minted ON the board from data/.session-secret —
 # the box's own secret, never printed and never leaving the board — because
-# Settings → Users answers a person's session, never the MCP bearer.
+# Settings → System → Users answers a person's session, never the MCP bearer.
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -80,7 +80,7 @@ trap remove_user EXIT
 # 1. Create.
 r=$(call POST /setup-api/users "$OWNER" "{\"username\":\"$USER_NAME\",\"password\":\"$USER_PASS\"}")
 if [ "$(status_of "$r")" = 201 ]; then
-  say "ok - the owner added a user through Settings → Users"
+  say "ok - the owner added a user through Settings → System → Users"
 else
   say "not ok - creating a user answered $(status_of "$r"): $(body_of "$r" | head -c 400)"
   exit 0

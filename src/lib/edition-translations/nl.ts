@@ -1723,7 +1723,7 @@ export const nl: Record<string, string> = {
   "localModels.chatBannerDismiss": "Deze melding verbergen",
   "localModels.chatLoading": "Lokaal model laden…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Gebruikers",
   "users.title": "Gebruikers",
   "users.intro": "Iedereen die zich aanmeldt op deze ClawBox heeft een eigen Linux-account en wachtwoord, en dezelfde apps en instellingen. Alleen het account van de eigenaar zelf — het wachtwoord en de fabrieksreset — blijft van de eigenaar.",
