@@ -3,6 +3,7 @@ import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
+import { confirmSessionStillValid } from "@/lib/session-expiry";
 import { transcriptKeyIsSafe } from "./transcript-key";
 import {
   asHarnessError,
@@ -211,6 +212,12 @@ function isEventStream(res: { headers?: { get(name: string): string | null } }):
  * A stream that ends without a `done` is a failure, not an empty answer: the
  * connection dropped mid-turn, and silently resolving with the partial text
  * would record a truncated reply as if the agent had finished.
+ *
+ * The box also ends a stream whose session ran out while the turn was still
+ * answering (TASK-2131). So before such a stream is reported cut off,
+ * `onCutOff` asks whether the session still holds — which takes the page to
+ * /login when it does not, rather than leaving a signed-out chat on screen
+ * with "cut off" under its last reply.
  */
 async function readStreamedTurn(
   res: Response,
@@ -220,6 +227,7 @@ async function readStreamedTurn(
   // asked for does not decide what arrives — and a non-null assertion here
   // turned that case into a TypeError that lost a turn the box had already run.
   onEvent?: (event: TurnEvent) => void,
+  onCutOff?: () => Promise<unknown>,
 ): Promise<Record<string, unknown>> {
   const body = res.body;
   if (!body) throw new HarnessError("upstream", "Hermes streamed an empty response");
@@ -327,7 +335,10 @@ async function readStreamedTurn(
 
   if (stopped) throw new HarnessError("aborted", "Stopped.");
   if (failure) throw new HarnessError("upstream", failure);
-  if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
+  if (!settled) {
+    await onCutOff?.().catch(() => {});
+    throw new HarnessError("upstream", "The reply was cut off before it finished.");
+  }
   return settled;
 }
 
@@ -527,7 +538,7 @@ export class HermesAdapter implements HarnessAdapter {
       // reached the user as "Unexpected token <" instead of the actionable
       // `invalid-input` the route actually sent.
       const data = isEventStream(res)
-        ? await readStreamedTurn(res, onEvent)
+        ? await readStreamedTurn(res, onEvent, () => this.confirmSession())
         : await readJsonBody(res);
       // Reading the body is where a Stop most often lands — it is the long
       // part of the turn on both paths. On the JSON path a failed parse comes
@@ -604,6 +615,15 @@ export class HermesAdapter implements HarnessAdapter {
   }
 
   /**
+   * Ask the box whether this page's session still holds, through the same fetch
+   * the turn went out on; when it does not, the page goes to /login
+   * (src/lib/session-expiry.ts).
+   */
+  private confirmSession(): Promise<boolean> {
+    return confirmSessionStillValid((input, init) => this.fetchImpl(input, init));
+  }
+
+  /**
    * Follow the turn the box is still running for the conversation on screen —
    * the one a reload cut this page off from (TASK-2117).
    *
@@ -628,7 +648,7 @@ export class HermesAdapter implements HarnessAdapter {
       });
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok || res.status === 204 || !isEventStream(res)) return null;
-      const data = await readStreamedTurn(res, onEvent);
+      const data = await readStreamedTurn(res, onEvent, () => this.confirmSession());
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       return this.settledTurn(key, resumed, data);
     } catch (err) {

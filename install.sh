@@ -4620,6 +4620,32 @@ hermes_dashboard_restart_after_install() {
   return 0
 }
 
+# The Hermes dashboard's auth proxy is ClawBox's own node process, run straight
+# from scripts/ in this checkout (config/clawbox-hermes-dashboard-proxy.service).
+# Nothing in an update restarted it — hermes_dashboard_restart_after_install
+# runs only when the Hermes pin moves — so a changed proxy reached a running box
+# at its next reboot: the session guard it puts in the dashboard's pages
+# (TASK-2131) sat on disk while the old process kept serving a dead chat to a
+# signed-out tab. Run by step_post_update after the unit files are reinstalled.
+# Only a RUNNING proxy is touched, and with `try-restart`, for the reason given
+# above: an edition that does not run it must not get it started. A node start
+# is sub-second and the proxy keeps nothing a restart loses; an open dashboard
+# reconnects through the new one. A refused restart is reported as a failed
+# fixup and never fails the update.
+step_hermes_dashboard_proxy_refresh() {
+  local unit=clawbox-hermes-dashboard-proxy.service
+  if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+    echo "  $unit is not running here — nothing to refresh"
+    return 0
+  fi
+  if systemctl try-restart "$unit" >/dev/null 2>&1; then
+    echo "  Asked $unit to restart on the updated proxy script"
+    return 0
+  fi
+  echo "  WARN: could not restart $unit — it keeps serving the previous proxy script until the next reboot" >&2
+  return 1
+}
+
 # The interpreter the Hermes agent runs on, or nothing when it has none.
 #
 # Up to v0.21.1 that was always `<agent_dir>/venv/bin/python`. From v0.21.7
@@ -10008,6 +10034,7 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  optional_step hermes_dashboard_proxy_refresh step_hermes_dashboard_proxy_refresh
   optional_step nm_dispatcher step_nm_dispatcher
   # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
   # after its verified rebuild, but a box can reach this step by another road —

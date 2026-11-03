@@ -330,22 +330,53 @@ export const LIVE_TURN_STREAM_HEADERS: Readonly<Record<string, string>> = {
   "x-accel-buffering": "no",
 };
 
+/** How often a stream opened on a person's session asks whether that session still holds. */
+export const LIVE_TURN_SESSION_RECHECK_MS = 5_000;
+
+/** Who may go on listening: see {@link liveTurnResponse}. */
+export interface LiveTurnListenerOptions {
+  /**
+   * Whether the session the stream was opened on is still accepted — false once
+   * its cookie has expired or been revoked. Absent for a caller with no session
+   * to run out (the assistant's bearer).
+   */
+  readonly stillSignedIn?: () => Promise<boolean>;
+  /** Tests shorten it. */
+  readonly recheckMs?: number;
+}
+
 /**
  * A server-sent-event response that follows a turn until it ends.
  *
  * `subscribe` is handed the listener and returns the detach. The browser going
  * away cancels the stream, and cancelling only DETACHES: the turn neither hears
  * nor cares that nobody is reading any more.
+ *
+ * The session gate judged the request once, when it arrived, and a turn can run
+ * for many minutes — so a reply asked for just before the session ran out went
+ * on streaming to a page that was signed out (TASK-2131). With `stillSignedIn`,
+ * the stream asks again every `recheckMs` and ends once the answer is no. That
+ * too only detaches: the turn still records its answer, which the page reads
+ * from the transcript after signing in again.
  */
-export function liveTurnResponse(subscribe: (listener: Listener) => () => void): Response {
+export function liveTurnResponse(
+  subscribe: (listener: Listener) => () => void,
+  options: LiveTurnListenerOptions = {},
+): Response {
   const encoder = new TextEncoder();
   let detach: (() => void) | null = null;
+  let sessionCheck: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+  const stopSessionCheck = () => {
+    if (sessionCheck) clearInterval(sessionCheck);
+    sessionCheck = null;
+  };
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const close = () => {
         if (closed) return;
         closed = true;
+        stopSessionCheck();
         detach?.();
         try {
           controller.close();
@@ -353,6 +384,13 @@ export function liveTurnResponse(subscribe: (listener: Listener) => () => void):
           /* the caller already went away */
         }
       };
+      const stillSignedIn = options.stillSignedIn;
+      if (stillSignedIn) {
+        sessionCheck = setInterval(() => {
+          void stillSignedIn().then((ok) => { if (!ok) close(); }, () => {});
+        }, Math.max(1, options.recheckMs ?? LIVE_TURN_SESSION_RECHECK_MS));
+        sessionCheck.unref?.();
+      }
       const unsubscribe = subscribe((frame) => {
         if (closed) return;
         if (frame === null) {
@@ -372,6 +410,7 @@ export function liveTurnResponse(subscribe: (listener: Listener) => () => void):
     },
     cancel() {
       closed = true;
+      stopSessionCheck();
       detach?.();
     },
   });
@@ -386,10 +425,10 @@ export function liveTurnResponse(subscribe: (listener: Listener) => () => void):
  * its end, so a page that read the history a moment before the answer landed
  * is still handed it.
  */
-export function liveTurnResponseFor(sessionKey: string): Response | null {
+export function liveTurnResponseFor(sessionKey: string, options: LiveTurnListenerOptions = {}): Response | null {
   const state = latest(sessionKey);
   if (!state) return null;
-  return liveTurnResponse((listener) => attach(state, listener));
+  return liveTurnResponse((listener) => attach(state, listener), options);
 }
 
 /** Test seam: forget every turn and every held Stop. */
