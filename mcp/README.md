@@ -1169,7 +1169,14 @@ it does for stop and resume, and a browser request from another site is
 refused 403 `cross_origin` (a header-less caller such as this server is not). The summary it returns is model-authored and labelled as information,
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
-to the approved senders (`src/lib/coding-agent-notify.ts`).
+to the approved senders (`src/lib/coding-agent-notify.ts`). A run the
+assistant started from one of the owner's ClawBox chats also puts one turn into
+THAT chat when it ends (`[Coding run <id>] finished …`, the same template),
+asking the assistant to read `coding_agent_status` and tell the user — so it
+reports without being asked. This tool sends nothing extra for that: the run
+route works out which chat asked from whichever of the owner's chats has a
+turn running when the call arrives (Hermes' live turns on the box, the
+OpenClaw gateway's busy sessions).
 
 ### Memory Shard
 

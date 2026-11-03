@@ -107,6 +107,12 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
+import {
+  disarmLocalCompactionModel,
+  localCompactionModelArmOps,
+  localCompactionModelDisarmNeeded,
+  noteLocalCompactionModel,
+} from "@/lib/local-compaction-model";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
@@ -3854,6 +3860,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //    *parallel* writes: concurrent `openclaw config set` processes race on
     //    the same file and lose to ConfigMutationConflictError. One batched
     //    process is not concurrency, it is one validated read-modify-write.
+    // Compaction on the cloud model the box is leaving, in the batch that puts
+    // the primary on the device (TASK-2127, src/lib/local-compaction-model.ts).
+    let compactionArmOps: OpenclawConfigSetArgs[] = [];
     const baseOps: OpenclawConfigSetArgs[] = [
       [
         `auth.profiles.${config.profileKey}`,
@@ -3881,6 +3890,12 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // Tool Search off while the primary is the on-device model, in the batch
       // that puts it there (src/lib/local-tool-search.ts).
       baseOps.push(...(await localToolSearchArmOps(configBeforeSave, config.defaultModel)));
+      compactionArmOps = await localCompactionModelArmOps(
+        configBeforeSave,
+        config.defaultModel,
+        configBeforeSave?.agents?.defaults?.model?.primary ?? null,
+      );
+      baseOps.push(...compactionArmOps);
       // The reference is `openai/<id>` for both OpenAI auth modes; this entry
       // is what says the turn belongs to the ChatGPT account and runs on the
       // Codex app-server — the key the core itself keeps when it migrates a
@@ -4071,6 +4086,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     let toolSearchWarning: string | undefined;
     if (primaryIdx !== -1 && localToolSearchDisarmNeeded(configBeforeSave, config.defaultModel)) {
       toolSearchWarning = await disarmLocalToolSearch("AI Config");
+    }
+    // ...and OpenClaw's own compaction model back, when ClawBox set it.
+    await noteLocalCompactionModel(compactionArmOps);
+    if (primaryIdx !== -1 && await localCompactionModelDisarmNeeded(configBeforeSave, config.defaultModel)) {
+      await disarmLocalCompactionModel("AI Config");
     }
 
     // 5. Ensure openclaw config files are owned by clawbox

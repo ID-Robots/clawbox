@@ -15,6 +15,7 @@ import {
   useUpdateRun,
   type VersionInfo,
 } from "@/components/UpdateRunView";
+import UpdateHandover from "@/components/UpdateHandover";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
 import {
   HARNESS_DOWNGRADE_CODE,
@@ -230,6 +231,21 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const { state: updateState, error: updateError, started: updateStarted, trigger: triggerUpdate, dismiss } = run;
   const dismissResult = useCallback(() => { void dismiss(); }, [dismiss]);
 
+  // A click's request still out. The hand-over to /updating waits for its
+  // answer: a run the box refused at the door (an error, `started: false`) is
+  // said here, where Dismiss and the reason are, not lost behind a page that
+  // has no run to show. One the box stops after accepting it — a refused
+  // harness downgrade — is /updating's to say, override included.
+  const [starting, setStarting] = useState(false);
+  const startUpdate = useCallback(async (allowDowngrade = false) => {
+    setStarting(true);
+    try {
+      await triggerUpdate(allowDowngrade);
+    } finally {
+      setStarting(false);
+    }
+  }, [triggerUpdate]);
+
   const saveBranch = useCallback(async (next: string | null, allowDowngrade = false) => {
     setBranchSaving(true);
     setBranchError(null);
@@ -362,9 +378,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           tone: "available" as const,
         };
       }
-      // The three run states are drawn by UpdateRunView, which takes the
-      // headline and subhead from here — the same words /updating shows.
-      // "Don't power off" is its footer bar.
+      // A settled run is drawn by UpdateRunView, which takes the headline and
+      // subhead from here — the same words /updating shows. A live one is
+      // handed over to /updating (UpdateHandover) and never drawn here.
       case "updating":
         return { icon: "downloading", iconClass: "text-orange-300", ...runHeadline(status, updateState, tr), tone: "busy" as const };
       case "completed":
@@ -396,15 +412,23 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // offer, because that fact was established without the remote.
   const clawboxUnknown = !clawboxAvail && versions?.remote?.reachable === false;
 
-  // A run on screen — live, finished or failed — gets the run view instead of
-  // the hero and the component cards.
-  const inRun = status === "updating" || status === "completed" || status === "failed";
+  // A live run is /updating's to show, from the click on (TASK-2146): the app
+  // hands over to it behind a full-screen loader and never draws "Updating
+  // your device" in its own pane — the same words used to appear here first
+  // and then again, full screen, a few seconds later. That holds for a run
+  // started here and for one already going when the app opens.
+  const handover = status === "updating";
+  // A settled run — finished or failed — gets the run view instead of the
+  // hero and the component cards.
+  const inRun = status === "completed" || status === "failed";
 
   return (
     <div className={embedded ? "relative w-full text-gray-200" : "relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200"} data-testid="system-update-app">
       <div className={embedded ? "w-full" : `min-h-full w-full flex items-start justify-center p-6 ${inRun ? "pt-8" : "pt-10"} bg-[var(--bg-deep)]`}>
         <div className={`w-full ${inRun ? "max-w-[1200px]" : "max-w-2xl"} space-y-4`}>
-          {inRun ? (
+          {handover ? (
+            <UpdateHandover ready={!starting} />
+          ) : inRun ? (
             <UpdateRunView
               status={status}
               state={updateState}
@@ -425,8 +449,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               // this the resume was reachable by no gesture at all. Any other
               // failure starts over from step 1 on a fresh run, so it is not
               // offered as a "resume": Dismiss, then Update everything.
-              onResume={canResume(updateState) ? () => void triggerUpdate() : undefined}
-              onOverrideDowngrade={() => void triggerUpdate(true)}
+              onResume={canResume(updateState) ? () => void startUpdate() : undefined}
+              onOverrideDowngrade={() => void startUpdate(true)}
             />
           ) : (
           <>
@@ -462,7 +486,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 {(status === "available" || status === "drift") && (
                   <button
                     type="button"
-                    onClick={() => void triggerUpdate()}
+                    onClick={() => void startUpdate()}
                     className="px-6 py-2.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black text-sm font-semibold shadow-lg cursor-pointer"
                   >
                     {tr("update.updateEverything", "Update everything")}
@@ -511,7 +535,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 target={versions.clawbox.target}
                 available={clawboxAvail}
                 unknown={clawboxUnknown}
-                onUpdate={() => void triggerUpdate()}
+                onUpdate={() => void startUpdate()}
               />
             </div>
           )}
@@ -684,7 +708,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           icon="restart_alt"
           confirmLabel={tr("update.forceConfirmAction", "Yes, run full update")}
           onCancel={() => setForceConfirm(false)}
-          onConfirm={() => { setForceConfirm(false); void triggerUpdate(); }}
+          onConfirm={() => { setForceConfirm(false); void startUpdate(); }}
         >
           <p>
             <Interpolated

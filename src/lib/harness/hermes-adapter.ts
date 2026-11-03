@@ -2,7 +2,9 @@ import { splitAssistantMedia } from "@/lib/chat-media";
 import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
+import type { ConversationSize } from "@/lib/chat-local-fit";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
+import { confirmSessionStillValid } from "@/lib/session-expiry";
 import { transcriptKeyIsSafe } from "./transcript-key";
 import {
   asHarnessError,
@@ -66,6 +68,8 @@ const CHAT_ROUTE = "/setup-api/hermes/chat";
 const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
 const IMAGES_ROUTE = "/setup-api/chat/images";
 const COMMANDS_ROUTE = "/setup-api/hermes/commands";
+const SIZE_ROUTE = "/setup-api/hermes/session-size";
+const COMPRESS_ROUTE = "/setup-api/hermes/compress";
 
 /**
  * How long the command catalogue may take.
@@ -211,6 +215,12 @@ function isEventStream(res: { headers?: { get(name: string): string | null } }):
  * A stream that ends without a `done` is a failure, not an empty answer: the
  * connection dropped mid-turn, and silently resolving with the partial text
  * would record a truncated reply as if the agent had finished.
+ *
+ * The box also ends a stream whose session ran out while the turn was still
+ * answering (TASK-2131). So before such a stream is reported cut off,
+ * `onCutOff` asks whether the session still holds — which takes the page to
+ * /login when it does not, rather than leaving a signed-out chat on screen
+ * with "cut off" under its last reply.
  */
 async function readStreamedTurn(
   res: Response,
@@ -220,6 +230,7 @@ async function readStreamedTurn(
   // asked for does not decide what arrives — and a non-null assertion here
   // turned that case into a TypeError that lost a turn the box had already run.
   onEvent?: (event: TurnEvent) => void,
+  onCutOff?: () => Promise<unknown>,
 ): Promise<Record<string, unknown>> {
   const body = res.body;
   if (!body) throw new HarnessError("upstream", "Hermes streamed an empty response");
@@ -299,6 +310,8 @@ async function readStreamedTurn(
     } else if (name === "status") {
       const text = typeof payload.text === "string" ? payload.text : "";
       if (text) onEvent?.({ kind: "status", text });
+    } else if (name === "compaction") {
+      if (payload.phase === "start" || payload.phase === "end") onEvent?.({ kind: "compaction", phase: payload.phase });
     } else if (name === "done") {
       settled = payload;
     } else if (name === "error") {
@@ -327,7 +340,10 @@ async function readStreamedTurn(
 
   if (stopped) throw new HarnessError("aborted", "Stopped.");
   if (failure) throw new HarnessError("upstream", failure);
-  if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
+  if (!settled) {
+    await onCutOff?.().catch(() => {});
+    throw new HarnessError("upstream", "The reply was cut off before it finished.");
+  }
   return settled;
 }
 
@@ -527,7 +543,7 @@ export class HermesAdapter implements HarnessAdapter {
       // reached the user as "Unexpected token <" instead of the actionable
       // `invalid-input` the route actually sent.
       const data = isEventStream(res)
-        ? await readStreamedTurn(res, onEvent)
+        ? await readStreamedTurn(res, onEvent, () => this.confirmSession())
         : await readJsonBody(res);
       // Reading the body is where a Stop most often lands — it is the long
       // part of the turn on both paths. On the JSON path a failed parse comes
@@ -604,6 +620,15 @@ export class HermesAdapter implements HarnessAdapter {
   }
 
   /**
+   * Ask the box whether this page's session still holds, through the same fetch
+   * the turn went out on; when it does not, the page goes to /login
+   * (src/lib/session-expiry.ts).
+   */
+  private confirmSession(): Promise<boolean> {
+    return confirmSessionStillValid((input, init) => this.fetchImpl(input, init));
+  }
+
+  /**
    * Follow the turn the box is still running for the conversation on screen —
    * the one a reload cut this page off from (TASK-2117).
    *
@@ -628,7 +653,7 @@ export class HermesAdapter implements HarnessAdapter {
       });
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok || res.status === 204 || !isEventStream(res)) return null;
-      const data = await readStreamedTurn(res, onEvent);
+      const data = await readStreamedTurn(res, onEvent, () => this.confirmSession());
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       return this.settledTurn(key, resumed, data);
     } catch (err) {
@@ -748,6 +773,55 @@ export class HermesAdapter implements HarnessAdapter {
   conversationModel(sessionKey: string): ConversationModel | null {
     if (!this.sessions.has(sessionKey)) return null;
     return this.sessionModels.get(sessionKey) ?? null;
+  }
+
+  /**
+   * The session's live history as `state.db` holds it, estimated in tokens by
+   * the size route, with Hermes' own compression line for the local window as
+   * the limit (TASK-2127). A conversation with no session threaded yet — a new
+   * chat — has nothing to measure.
+   */
+  async conversationSize(sessionKey: string): Promise<ConversationSize | null> {
+    const sessionId = this.sessions.get(sessionKey);
+    if (!sessionId) return null;
+    try {
+      const res = await this.fetchImpl(`${SIZE_ROUTE}?sessionId=${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+      if (!res.ok) return null;
+      const data = await readJsonBody(res);
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+      const tokens = num(data.tokens);
+      return tokens === null ? null : { tokens, window: num(data.window), limit: num(data.limit) };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Hermes' own manual compression (`session.compress`) on the conversation's
+   * session, through the compress route — the summary runs on the auxiliary
+   * compression model, which is ClawBox AI while Local AI is on
+   * (src/lib/hermes-local-ai.ts). Resolves only when Hermes says it
+   * compressed: a "nothing to compress" is a refusal, never a success.
+   */
+  async compactConversation(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }> {
+    const sessionId = this.sessions.get(sessionKey);
+    if (!sessionId) throw new HarnessError("invalid-input", "This conversation has no session to shorten yet.");
+    let res: Response;
+    try {
+      res = await this.fetchImpl(COMPRESS_ROUTE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+    } catch (err) {
+      throw asHarnessError(err, "upstream");
+    }
+    const data = await readJsonBody(res);
+    if (!res.ok || data.compressed !== true) {
+      throw new HarnessError("upstream", typeof data.error === "string" && data.error ? data.error : "The conversation was not shortened.");
+    }
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    return { tokensBefore: num(data.tokensBefore), tokensAfter: num(data.tokensAfter) };
   }
 
   /**

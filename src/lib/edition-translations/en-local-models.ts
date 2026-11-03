@@ -140,4 +140,20 @@ export const localModelsEn: Record<string, string> = {
   "localModels.chatBannerBody": "The first reply can take up to a minute while the local model loads. After that it's faster.",
   "localModels.chatBannerDismiss": "Dismiss this note",
   "localModels.chatLoading": "Loading the local model…",
+  "localModels.chatCompacting": "Shortening the conversation for the local model…",
+
+  // === A long conversation switched to Local AI (TASK-2127) ===
+  // The card in the chat when the conversation is larger than the local
+  // model's window: a new chat (one click, the waiting message goes with it)
+  // or a summary first. {tokens} and {window} are short counts such as "100k".
+  "localModels.longChat.title": "This conversation is too long for the local model",
+  "localModels.longChat.body": "It holds about {tokens} tokens; the local model reads up to {window}. A new chat answers in seconds. Shortening this one summarizes it first, which takes longer.",
+  "localModels.longChat.pending": "Your message waits here and goes to the chat you pick.",
+  "localModels.longChat.newChat": "Start a new chat with Local AI",
+  "localModels.longChat.recommended": "Recommended",
+  "localModels.longChat.shorten": "Shorten this conversation first",
+  "localModels.longChat.timeoutTitle": "Still shortening after {seconds} seconds",
+  "localModels.longChat.timeoutBody": "The local model could not shorten this long conversation in time, so the reply was stopped. Start a new chat with Local AI to get an answer in seconds.",
+  "localModels.longChat.failed": "This conversation could not be shortened. A new chat with Local AI answers in seconds.",
+  "localModels.longChat.shortened": "Conversation shortened for the local model.",
 };

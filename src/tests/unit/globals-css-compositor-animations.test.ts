@@ -172,6 +172,7 @@ describe("modal scrims — no backdrop blur over the whole desktop", () => {
   it.each([
     "components/HarnessPicker.tsx",
     "components/SystemUpdateApp.tsx",
+    "components/UpdateHandover.tsx",
     "components/SettingsApp.tsx",
     "components/ClawKeepApp.tsx",
     "components/ClawBoxLoginModal.tsx",

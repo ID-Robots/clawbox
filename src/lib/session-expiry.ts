@@ -92,6 +92,9 @@ export function signOutExpiredSession(): void {
 
 let probeInFlight: { promise: Promise<boolean>; sentAt: number } | null = null;
 
+/** The one call the probe makes. Narrower than `typeof fetch`, which some runtimes extend. */
+export type SessionProbeFetch = (input: string, init?: RequestInit) => Promise<Response>;
+
 /**
  * Ask the box whether this page's session is good NOW, and leave for /login if
  * it is not. Every "signed out" signal goes through here rather than signing
@@ -111,7 +114,7 @@ let probeInFlight: { promise: Promise<boolean>; sentAt: number } | null = null;
  * stay until the next refused request, which on an idle chat is never.
  */
 export function confirmSessionStillValid(
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: SessionProbeFetch = fetch,
   evidenceSentAt: number = Date.now(),
 ): Promise<boolean> {
   if (probeInFlight && probeInFlight.sentAt >= evidenceSentAt) return probeInFlight.promise;
