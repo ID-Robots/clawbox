@@ -3,16 +3,17 @@
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
-import { isWhatsNewVersion, WHATS_NEW_HIGHLIGHTS } from "@/lib/whats-new";
+import { isWhatsNewVersion, WHATS_NEW_HIGHLIGHTS, WHATS_NEW_RELEASE } from "@/lib/whats-new";
 import { isNamedChannel, type UpdateWhatsNewPanel as Panel } from "@/lib/update-whats-new";
+import UpdateWhatsNewShowcase, { type Floor } from "@/components/UpdateWhatsNewShowcase";
 
 interface UpdateWhatsNewPanelProps {
   /** What to draw — `updateWhatsNewPanel()` of the route's answer. */
   panel: Panel;
   /**
    * `list` (the default) is the /updating screen's muted bullet list. `grid`
-   * and `compact` are the System Update window's: four feature cards with
-   * their screenshots beside the step list, or one beside a failed run.
+   * and `compact` are the System Update window's: the release's showcase, one
+   * feature at a time beside the step list, or one card beside a failed run.
    */
   variant?: "list" | "grid" | "compact";
   /** The grid's title level: `h3` where the window it sits in is itself under an `h2`. */
@@ -20,11 +21,10 @@ interface UpdateWhatsNewPanelProps {
 }
 
 /**
- * The highlights the System Update window draws as cards, in the approved
- * layout's order. A release whose catalogue no longer has one of them falls
- * back to its own order, so a new "What's new" never leaves a hole.
+ * The highlight the System Update window draws beside a failed run. A release
+ * whose catalogue no longer has it falls back to its own order, so a new
+ * "What's new" never leaves a hole.
  */
-export const UPDATE_GRID_PICKS = ["whatsNew.screenshotTitle", "whatsNew.sharedBrowserTitle", "whatsNew.publicLinksTitle", "whatsNew.primeRadiantTitle"];
 export const UPDATE_COMPACT_PICKS = ["whatsNew.agentChartTitle"];
 
 type Highlight = (typeof WHATS_NEW_HIGHLIGHTS)[number];
@@ -52,9 +52,9 @@ interface Card {
  * panel is drawn on the one screen guaranteed to be open while the box is
  * offline, and I18nProvider loads its catalogue through a dynamic import.
  */
-function useFloor() {
+function useFloor(): Floor {
   const { t } = useT();
-  return (key: string, english: string, params?: Record<string, string>) => {
+  return (key, english, params) => {
     const value = t(key, params);
     if (value !== key) return value;
     let text = english;
@@ -214,8 +214,9 @@ function CardImage({ src, className }: { src: string; className: string }) {
 }
 
 /**
- * The System Update window's "What's new": the version being installed as
- * feature cards — four beside the step list, one beside a failed run.
+ * The System Update window's "What's new": the version being installed —
+ * beside the step list as the release's showcase (every highlight, one at a
+ * time, see UpdateWhatsNewShowcase), beside a failed run as one card.
  *
  * Drawn from this build's own "What's new" catalogue (screenshot, icon, title
  * and text, in the owner's language, off the box's own disk) whenever the
@@ -225,7 +226,7 @@ function CardImage({ src, className }: { src: string; className: string }) {
  * another line are cards without pictures; nothing at all is one plain line
  * and the release page. The window was drawn with the Material Symbols font
  * before the box went down, unlike the /updating page, so the cards use the
- * catalogue's own glyphs.
+ * catalogue's own glyphs; the showcase draws inline SVG only.
  */
 function FeatureCards({ panel, compact, headingLevel }: { panel: Panel; compact: boolean; headingLevel: "h2" | "h3" }) {
   const tr = useFloor();
@@ -234,7 +235,7 @@ function FeatureCards({ panel, compact, headingLevel }: { panel: Panel; compact:
   const bundled = panel.kind === "bundled" || isWhatsNewVersion(panel.version);
   const count = compact ? 1 : 4;
   const cards: Card[] = bundled
-    ? pickHighlights(compact ? UPDATE_COMPACT_PICKS : UPDATE_GRID_PICKS, count).map((item) => ({
+    ? pickHighlights(UPDATE_COMPACT_PICKS, count).map((item) => ({
         key: item.title,
         icon: item.icon,
         title: tr(item.title, whatsNewEn[item.title]),
@@ -271,6 +272,36 @@ function FeatureCards({ panel, compact, headingLevel }: { panel: Panel; compact:
       <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>open_in_new</span>
     </a>
   );
+
+  if (!compact && bundled && WHATS_NEW_HIGHLIGHTS.length > 0) {
+    return (
+      <section aria-label={title} data-testid="update-whats-new" data-kind={panel.kind} data-variant="grid" className="flex h-full min-w-0 flex-col">
+        <Heading className="sr-only">{title}</Heading>
+        <UpdateWhatsNewShowcase
+          items={WHATS_NEW_HIGHLIGHTS.map((item) => ({
+            key: item.title,
+            title: tr(item.title, whatsNewEn[item.title]),
+            body: tr(item.body, whatsNewEn[item.body]),
+            image: item.fullImage,
+          }))}
+          release={WHATS_NEW_RELEASE}
+          tr={tr}
+          headingLevel={CardHeading}
+          releaseLink={
+            <a
+              href={panel.releaseUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[12.5px] font-medium text-orange-400 no-underline hover:text-orange-300"
+            >
+              {tr("update.whatsNewReleaseNotes", "Read the full release notes")}
+              <ExternalIcon />
+            </a>
+          }
+        />
+      </section>
+    );
+  }
 
   if (compact) {
     const card = cards[0];

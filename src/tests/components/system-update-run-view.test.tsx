@@ -5,7 +5,6 @@ import UpdateStep, { describeUpdateFailure } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel, {
   pickHighlights,
   UPDATE_COMPACT_PICKS,
-  UPDATE_GRID_PICKS,
 } from "@/components/UpdateWhatsNewPanel";
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -129,21 +128,26 @@ describe("SystemUpdateApp — a run in progress", () => {
     expect(screen.queryByRole("button", { name: /Advanced options/ })).toBeNull();
   });
 
-  it("shows four feature cards of the version being installed, with their screenshots", async () => {
+  it("shows the version being installed as its showcase: every highlight, one at a time, on its real screenshot", async () => {
     mount({ phase: "running", currentStepIndex: 4, steps: steps(4) });
 
     const region = await screen.findByRole("region", { name: `What's new in ClawBox ${TARGET}` });
     expect(region).toHaveAttribute("data-variant", "grid");
-    const expected = pickHighlights(UPDATE_GRID_PICKS, 4);
-    const cards = within(region).getAllByRole("listitem");
-    expect(cards).toHaveLength(Math.min(4, WHATS_NEW_HIGHLIGHTS.length));
-    // The heading's first child is the icon's ligature, hidden from the name.
-    expect(cards.map((card) => within(card).getByRole("heading").lastElementChild?.textContent))
-      .toEqual(expected.map((item) => whatsNewEn[item.title]));
-    expect(within(region).getAllByTestId("update-whats-new-image").map((img) => img.getAttribute("src")))
-      .toEqual(expected.map((item) => item.image));
+    // One chip per highlight, in the catalogue's order; the first one is on.
+    const chips = within(region).getAllByRole("tab");
+    expect(chips).toHaveLength(WHATS_NEW_HIGHLIGHTS.length);
+    expect(chips[0]).toHaveAttribute("aria-selected", "true");
+    const [first] = WHATS_NEW_HIGHLIGHTS;
+    expect(within(region).getByRole("heading", { name: whatsNewEn[first.title] })).toBeInTheDocument();
+    expect(within(region).getByText(whatsNewEn[first.body])).toBeInTheDocument();
+    // ONE screenshot on the stage, the full-resolution file; every one loaded behind it.
+    expect(within(region).getAllByTestId("update-whats-new-image").map((img) => img.getAttribute("src"))).toEqual([first.fullImage]);
+    expect([...region.querySelectorAll("img[data-showcase-image]")].map((img) => img.getAttribute("src")))
+      .toEqual(WHATS_NEW_HIGHLIGHTS.map((item) => item.fullImage));
     expect(within(region).getByRole("link", { name: "Read the full release notes" }))
       .toHaveAttribute("href", releasePageUrl(TARGET));
+    // No four-card grid any more.
+    expect(within(region).queryByRole("list")).toBeNull();
   });
 
   // On a board, a beta update read "ClawBox v4.3.0 → 4.3.0": the device names
