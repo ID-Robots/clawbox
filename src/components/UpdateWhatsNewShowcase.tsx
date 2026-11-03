@@ -361,8 +361,10 @@ function featureOf(key: string): Feature {
  * phone, 4:3 up to the two columns) and a camera of its own pans it to where
  * the demo is (`--wns-fx`/`--wns-fy`, the point at the stage's centre, clamped
  * so the picture always covers the stage); the demo's overlays are drawn at
- * that size, its toasts become a band across the stage's foot. With motion off
- * that camera stands where the demo ends.
+ * that size, no word of them under 10 px, its toasts become a band across the
+ * stage's foot (Talk's at its head, over nothing it shows). The link demo's
+ * second cursor, which points at the dialog's desktop place, is left out.
+ * With motion off that camera stands where the demo ends.
  */
 const SHOWCASE_CSS = `
 @keyframes wns-up{from{opacity:0;transform:translateY(12px)}}
@@ -532,6 +534,12 @@ const SHOWCASE_CSS = `
 .wns[data-layout="narrow"][data-motion="reduce"] .wns-scr .wns-cam{animation:none}
 .wns[data-layout="narrow"] .wns-scr .wns-toast{left:4%;right:4%;top:auto;bottom:4%;width:auto;padding:2.6% 3.4%}
 .wns[data-layout="narrow"] .wns-scr .wns-key{left:4%;top:auto;bottom:5%}
+.wns[data-layout="narrow"] .wns-talk .wns-key,.wns[data-layout="narrow"] .wns-talk .wns-toast{top:5%;bottom:auto}
+.wns[data-layout="narrow"] .wns-scr :is(.wns-tag,.wns-ver span){font-size:max(10px,.8em)}
+.wns[data-layout="narrow"] .wns-scr :is(.wns-sz,.wns-urlp,.wns-toast small){font-size:max(10px,.85em)}
+.wns[data-layout="narrow"] .wns-scr :is(.wns-tmr,.wns-cnt){font-size:max(10px,.9em)}
+.wns[data-layout="narrow"] .wns-scr .wns-row{font-size:max(10px,.92em)}
+.wns[data-layout="narrow"] .wns-scr :is(.wns-cn,.wns-kbd){font-size:max(10px,.95em)}
 .wns[data-layout="narrow"] .wns-link .wns-cur-2{display:none}
 .wns-held{position:absolute;right:10px;top:10px;z-index:12;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#0a0f19d9;border:1px solid #f9731699;color:#f97316;font-size:14px;pointer-events:none}
 `;
@@ -741,9 +749,9 @@ export default function UpdateWhatsNewShowcase({
         onFocus={() => setFocused(true)}
         onBlur={onBlur}
         onKeyDown={onKeyDown}
-        onTouchStart={onTouchStart}
-        onTouchEnd={onTouchEnd}
-        onTouchCancel={() => { touch.current = null; }}
+        onTouchStart={narrow ? onTouchStart : undefined}
+        onTouchEnd={narrow ? onTouchEnd : undefined}
+        onTouchCancel={narrow ? () => { touch.current = null; } : undefined}
       >
         <style>{SHOWCASE_CSS}</style>
         <div
@@ -837,7 +845,12 @@ export default function UpdateWhatsNewShowcase({
                 aria-selected={on}
                 aria-controls={`${id}-panel`}
                 tabIndex={on ? 0 : -1}
-                onClick={() => show(at, false)}
+                onClick={(event) => {
+                  show(at, false);
+                  // A thumb picked it, as a swipe would: the show goes on from
+                  // here, not held by the focus a phone's browser gives the chip.
+                  if (Date.now() - touchedAt.current <= TOUCH_MOUSE_MS) event.currentTarget.blur();
+                }}
                 className={`inline-flex cursor-pointer items-center gap-[5px] rounded-full border leading-snug focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 ${
                   narrow ? "shrink-0 whitespace-nowrap px-3 py-1.5 text-[12px] pointer-coarse:snap-start pointer-coarse:focus-visible:-outline-offset-2" : "px-[9px] py-1 text-[10.5px]"
                 } ${

@@ -367,9 +367,23 @@ for (const size of [{ width: 360, height: 740 }, { width: 390, height: 844 }, { 
       expect(steps.y + steps.height).toBeLessThanOrEqual(hero.y);
       expect(hero.width).toBeGreaterThan(size.width * 0.85);
       expect(hero.x + hero.width).toBeLessThanOrEqual(size.width);
-      // The demo's text is drawn at the cropped picture's size, not the stage's 3–4 px.
+      // The demo's text is drawn at the cropped picture's size, not the stage's 3–4 px:
+      // no word of it under 10 px.
       const stage = showcase.getByTestId("whats-new-showcase-stage");
       expect(await stage.locator(".wns-cam").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
+      const smallest = await stage.evaluate((root) => Math.min(...[...root.querySelectorAll("*")]
+        .filter((el) => [...el.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent!.trim().length > 1))
+        .map((el) => parseFloat(getComputedStyle(el).fontSize))));
+      expect(smallest).toBeGreaterThanOrEqual(9.99);
+      // A taller stage on a phone held upright (square), the screenshot's 16:10 held sideways,
+      // and the cropped picture covers it all, wherever its camera is.
+      const box = (await stage.boundingBox())!;
+      expect(box.width / box.height).toBeCloseTo(size.width < 600 ? 1 : 1.6, 1);
+      const picture = (await stage.locator(".wns-cam").boundingBox())!;
+      expect(picture.x).toBeLessThanOrEqual(box.x + 1);
+      expect(picture.y).toBeLessThanOrEqual(box.y + 1);
+      expect(picture.x + picture.width).toBeGreaterThanOrEqual(box.x + box.width - 1);
+      expect(picture.y + picture.height).toBeGreaterThanOrEqual(box.y + box.height - 1);
       const chips = showcase.getByTestId("whats-new-showcase-chips");
       expect(await chips.evaluate((el) => getComputedStyle(el).flexWrap)).toBe("nowrap");
       expect(await chips.evaluate((el) => el.getBoundingClientRect().right)).toBeLessThanOrEqual(size.width);
@@ -380,7 +394,8 @@ for (const size of [{ width: 360, height: 740 }, { width: 390, height: 844 }, { 
       const showcase = await openUpdateWindow(page);
       const stage = showcase.getByTestId("whats-new-showcase-stage");
       // The stage floats by design, so it is never "stable": no actionability waits on it.
-      await stage.evaluate((el) => el.scrollIntoView({ block: "center" }));
+      // Scrolled at once, so the coordinates read next are where it is.
+      await stage.evaluate((el) => el.scrollIntoView({ block: "center", behavior: "instant" }));
       const box = (await stage.boundingBox())!;
       const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
       await swipe(page, [x + box.width * 0.3, y], [x - box.width * 0.3, y + 6]);

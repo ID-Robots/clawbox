@@ -484,6 +484,22 @@ describe("UpdateWhatsNewShowcase — narrow: a phone, a small window, Settings' 
     expect(showcase).toHaveAttribute("data-index", "2");
   });
 
+  it("leaves the desktop's layout as it was: a touch on it neither turns nor holds it", () => {
+    const showcase = mountAt(728);
+    expect(showcase).toHaveAttribute("data-layout", "wide");
+    touch(stage(showcase), [300, 400], [200, 400]);
+    touch(stage(showcase), [150, 400]);
+    expect(showcase).toHaveAttribute("data-index", "0");
+    expect(showcase).toHaveAttribute("data-held", "false");
+    expect(within(showcase).queryByTestId("whats-new-showcase-held")).toBeNull();
+    // A chip clicked keeps the focus there, and the show holds, as it always has.
+    const chip = within(showcase).getByRole("tab", { name: CHIPS[2] });
+    act(() => chip.focus());
+    fireEvent.click(chip);
+    expect(document.activeElement).toBe(chip);
+    expect(showcase).toHaveAttribute("data-paused", "true");
+  });
+
   it("takes a long press for no tap", () => {
     const showcase = mountAt(390);
     fireEvent.touchStart(stage(showcase), { touches: [{ clientX: 150, clientY: 400 }] });
@@ -497,10 +513,12 @@ describe("UpdateWhatsNewShowcase — narrow: a phone, a small window, Settings' 
     const chip = within(showcase).getByRole("tab", { name: CHIPS[3] });
     fireEvent.touchStart(chip, { touches: [{ clientX: 40, clientY: 700 }] });
     fireEvent.touchEnd(chip, { touches: [], changedTouches: [{ clientX: 40, clientY: 700 }] });
-    // What a browser makes up after the tap.
+    // What a phone's browser makes up after the tap: a hover, the focus, the click.
     fireEvent.mouseEnter(showcase);
+    act(() => chip.focus());
     fireEvent.click(chip);
     expect(showcase).toHaveAttribute("data-index", "3");
+    expect(document.activeElement).not.toBe(chip);
     expect(showcase).toHaveAttribute("data-paused", "false");
     advance(SHOWCASE_ADVANCE_MS);
     expect(showcase).toHaveAttribute("data-index", "4");
@@ -578,5 +596,8 @@ describe("UpdateWhatsNewShowcase — narrow: a phone, a small window, Settings' 
     }
     // Wherever it pans, the picture covers the stage: at least as wide as the stage, and as tall.
     expect(css).toContain("--wns-pw:max(100cqw,calc(var(--wns-pz) * 1px),calc(160cqw * var(--wns-ar)))");
+    // Never zoomed out below a legible size: the demo's text is at least 10 px.
+    for (const zoom of css.match(/--wns-pz:\d+/g)!) expect(Number(zoom.split(":")[1]) * 0.0115, zoom).toBeGreaterThanOrEqual(10);
+    expect(css).toMatch(/\.wns\[data-layout="narrow"\] \.wns-scr :is\(\.wns-tag,\.wns-ver span\)\{font-size:max\(10px,\.8em\)\}/);
   });
 });
