@@ -6,9 +6,11 @@ import { installClawboxMocks } from "./helpers/clawbox";
  * "What's new in 4.3", in a real browser: a dialog of one slide per highlight
  * that fits the screen whole — the common laptop sizes and a phone — and the
  * "Free backup with ClawBox AI" offer held back until it is closed. Then the
- * System Update window's own "What's new" (TASK-2121): the release's showcase,
- * one feature at a time beside the steps, still drawing every screenshot once
- * the box has gone down to restart.
+ * update screen's own "What's new" (TASK-2121): the release's showcase, one
+ * feature at a time beside the steps, still drawing every screenshot once the
+ * box has gone down to restart. A live run is drawn on /updating alone — the
+ * System Update window hands it over (TASK-2146) — and a computer window too
+ * small for the steps and the showcase side by side shows the steps alone.
  *
  * The card used to be the first of the top-right notices: on a 720 px screen
  * its highlights scrolled inside a 320 px column and the offer was pushed off
@@ -194,8 +196,8 @@ const SHOWCASE_CHIPS = ["Screenshots", "One browser for you", "Share an app with
 const FULL_IMAGES = ["screenshot", "agent-browser", "public-link", "model-picker", "hold-to-talk", "agent-chart", "prime-radiant"]
   .map((name) => `/whats-new/4.3/${name}-full.webp`);
 
-/** The System Update window, standalone, over a run of 4.3.0 in progress. */
-async function openUpdateWindow(page: Page) {
+/** A box running an update to 4.3.0, as every route the update screens ask answers it. */
+async function mockRun(page: Page) {
   await installClawboxMocks(page, { initialSetup: SETUP, timeoutCapMs: 300_000, chatFacts: { onboardingArmed: false } });
   await page.route("**/setup-api/update/status", (route) => route.fulfill({ json: { phase: "running", currentStepIndex: 2, steps: RUN_STEPS } }));
   await page.route("**/setup-api/update/versions", (route) => route.fulfill({
@@ -209,9 +211,20 @@ async function openUpdateWindow(page: Page) {
   await page.route("**/setup-api/update/whats-new", (route) => route.fulfill({
     json: { version: "4.3.0", channel: "beta", source: "none", highlights: [], releaseUrl: "https://github.com/ID-Robots/clawbox/releases/tag/v4.3.0" },
   }));
+}
+
+/**
+ * The System Update window, standalone, over that run — which it hands to
+ * /updating (TASK-2146), where the run and its showcase are drawn. `showcase:
+ * false` for a window too small for one: the steps are what to wait for there.
+ */
+async function openUpdateWindow(page: Page, { showcase: drawn = true }: { showcase?: boolean } = {}) {
+  await mockRun(page);
   await page.goto("/app/system_update");
+  await page.waitForURL("**/updating", { timeout: 15_000 });
   const showcase = page.getByTestId("whats-new-showcase");
-  await expect(showcase).toBeVisible({ timeout: 15_000 });
+  if (drawn) await expect(showcase).toBeVisible({ timeout: 15_000 });
+  else await expect(page.getByTestId("update-step-list")).toBeVisible({ timeout: 15_000 });
   return showcase;
 }
 
@@ -222,7 +235,7 @@ async function expectStageImage(page: Page, src: string) {
   await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth)).toBeGreaterThan(0);
 }
 
-test.describe("the System Update window's What's new showcase", () => {
+test.describe("the update screen's What's new showcase", () => {
   test.use({ viewport: { width: 1366, height: 768 } });
 
   test("shows one feature at a time, picked by a chip or ←/→, and turns by itself", async ({ page }) => {
@@ -275,15 +288,38 @@ test.describe("the System Update window's What's new showcase", () => {
     expect(await page.evaluate(() => document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth)).toBeLessThanOrEqual(1);
   });
 
-  test("in a narrower window it stacks the text over a full-width screenshot instead of squeezing it", async ({ page }) => {
-    await page.setViewportSize({ width: 1024, height: 768 });
+  // A computer window too small for the two columns (TASK-2146): they ran past
+  // the bottom, the last steps under "Don't power off" and the showcase cut off.
+  for (const size of [{ width: 1024, height: 768 }, { width: 1030, height: 700 }]) {
+    test(`in a ${size.width}x${size.height} window it shows the steps alone, every one of them above the bar`, async ({ page }) => {
+      await page.setViewportSize(size);
+      const showcase = await openUpdateWindow(page, { showcase: false });
+      await expect(showcase).toBeHidden();
+      const rows = page.getByTestId("update-step-list").getByRole("listitem");
+      await expect(rows).toHaveCount(RUN_STEPS.length);
+      for (const row of await rows.all()) await expect(row).toBeInViewport({ ratio: 1 });
+      const bar = page.getByTestId("update-run-notice");
+      await expect(bar).toBeInViewport({ ratio: 1 });
+      const last = (await rows.last().boundingBox())!;
+      expect((await bar.boundingBox())!.y).toBeGreaterThanOrEqual(last.y + last.height);
+      // Sized to the window: the page scrolls neither way.
+      expect(await page.getByTestId("updating-screen").evaluate((el) => ({ h: el.scrollHeight - el.clientHeight, w: el.scrollWidth - el.clientWidth })))
+        .toEqual({ h: 0, w: 0 });
+    });
+  }
+
+  test("in a window narrower than a tablet it stacks the text over a full-width screenshot, cropped and legible", async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 900 });
     const showcase = await openUpdateWindow(page);
+    await expect(showcase).toHaveAttribute("data-layout", "narrow");
     const hero = (await showcase.boundingBox())!;
-    const stage = (await showcase.getByTestId("whats-new-showcase-stage").boundingBox())!;
-    expect(hero.width).toBeLessThan(672);
-    expect(stage.width).toBeGreaterThan(hero.width * 0.8);
+    const stage = showcase.getByTestId("whats-new-showcase-stage");
+    const box = (await stage.boundingBox())!;
+    expect(box.width).toBeGreaterThan(hero.width * 0.8);
     const title = (await showcase.getByRole("heading", { name: "Screenshots, built in" }).boundingBox())!;
-    expect(stage.y).toBeGreaterThan(title.y + title.height);
+    expect(box.y).toBeGreaterThan(title.y + title.height);
+    expect(box.width / box.height).toBeCloseTo(4 / 3, 1);
+    expect(await stage.locator(".wns-cam").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
   });
 
   test("with reduced motion: no zoom and no typing, every demo already at its end", async ({ page }) => {
@@ -301,18 +337,31 @@ test.describe("the System Update window's What's new showcase", () => {
     await expect(stage).toContainText("Recording 0:04");
   });
 
-  test("in Settings → System Update's 672 px pane it is narrow: the text over a cropped, legible screenshot", async ({ page }) => {
+  // TASK-2146: the run used to be drawn in Settings' 672 px pane first, the
+  // showcase squeezed into it, and then again full screen a few seconds later.
+  test("Settings → System Update hands a running update to the update screen: never drawn in its pane", async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 1080 });
-    await openUpdateWindow(page);
+    // Every run view drawn on a page other than /updating, from the first paint on.
+    await page.addInitScript(() => {
+      new MutationObserver(() => {
+        if (location.pathname !== "/updating" && document.querySelector('[data-testid="update-run"]')) {
+          sessionStorage.setItem("runViewOutsideUpdating", "true");
+        }
+      }).observe(document, { subtree: true, childList: true });
+    });
+    await mockRun(page);
     await page.goto("/app/settings");
     await page.getByRole("button", { name: "System Update" }).first().click();
+    // A moment of the full-screen loader, then the update screen.
+    await expect(page.getByTestId("update-handover")).toBeVisible();
+    await page.waitForURL("**/updating", { timeout: 15_000 });
+    await expect(page.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(await page.evaluate(() => sessionStorage.getItem("runViewOutsideUpdating"))).toBeNull();
+    // The whole screen for the showcase, beside the steps.
     const showcase = page.getByTestId("whats-new-showcase");
-    await expect(showcase).toHaveAttribute("data-layout", "narrow", { timeout: 15_000 });
-    const stage = showcase.getByTestId("whats-new-showcase-stage");
-    const box = (await stage.boundingBox())!;
-    expect(box.width).toBeGreaterThan((await showcase.boundingBox())!.width * 0.8);
-    expect(box.width / box.height).toBeCloseTo(4 / 3, 1);
-    expect(await stage.locator(".wns-cam").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
+    await expect(showcase).toHaveAttribute("data-layout", "wide", { timeout: 15_000 });
+    const steps = (await page.getByTestId("update-steps-panel").boundingBox())!;
+    expect((await showcase.boundingBox())!.x).toBeGreaterThan(steps.x + steps.width);
   });
 
   test("goes on drawing every feature, screenshot and all, once the box has gone down", async ({ page }) => {

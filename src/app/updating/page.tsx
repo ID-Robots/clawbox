@@ -29,7 +29,9 @@ import {
  * and the owner who started an update in Settings watched the run view for a
  * few seconds before the desktop's notice poll and the middleware moved them
  * here, onto the other screen, for the rest of the update (TASK-2111). One
- * screen, from the click to the desktop coming back.
+ * screen, from the click to the desktop coming back. The app no longer draws a
+ * live run at all: the click shows a short full-screen loader on this page's
+ * ground and comes straight here (UpdateHandover, TASK-2146).
  *
  * Four things it must get right, in order of how badly each one bites:
  *

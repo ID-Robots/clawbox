@@ -16,7 +16,7 @@ import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater
 import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID, UPDATE_LOCK_HEADER } from "@/lib/update-constants";
 import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
-import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
+import { DRIFT_RESOLVED_CODE, isDriftCode } from "@/lib/drift-codes";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
 import {
   HARNESS_DOWNGRADE_BACKUP_FAILED_CODE,
@@ -98,15 +98,29 @@ export type RunStatus = "updating" | "completed" | "failed";
 /** The full screen's steps column, and its page margin and column gap, at 1 px (UPDATE_SCREEN_CSS). */
 const SCREEN_STEPS_PX = 420;
 const SCREEN_GUTTER_PX = 24;
+/** The full screen's design height: its 1 px floor, where the steps and the showcase still fit side by side. */
+const SCREEN_HEIGHT_PX = 720;
 
 /**
  * Where /updating fills the screen it is on (TASK-2137): a computer's screen
  * wide enough for the showcase beside the steps to draw its wide layout
- * (SHOWCASE_NARROW_PX, 1196 px at 1 px), and taller than a phone held
- * sideways. Narrower — a phone, a tablet held upright, a 1024 px window — the
- * page keeps the window's layout and scrolls as before.
+ * (SHOWCASE_NARROW_PX, 1196 px at 1 px), and as tall as the 1280×720 design
+ * the layout is scaled from. A smaller computer window gets the steps alone
+ * (UPDATE_COMPACT_MEDIA); a phone keeps the window's layout and scrolls as
+ * before.
  */
-export const UPDATE_SCREEN_MEDIA = `(min-width: ${SHOWCASE_NARROW_PX + SCREEN_STEPS_PX + 3 * SCREEN_GUTTER_PX}px) and (min-height: 501px)`;
+export const UPDATE_SCREEN_MEDIA = `(min-width: ${SHOWCASE_NARROW_PX + SCREEN_STEPS_PX + 3 * SCREEN_GUTTER_PX}px) and (min-height: ${SCREEN_HEIGHT_PX}px)`;
+
+/**
+ * A computer's window too small for that (TASK-2146): from a tablet's width
+ * and taller than a phone held sideways, but narrower or shorter than the full
+ * screen. Exactly the windows UPDATE_SCREEN_MEDIA leaves out above a phone, so
+ * the two never both apply.
+ */
+export const UPDATE_COMPACT_MEDIA = [
+  `(min-width: 768px) and (min-height: 501px) and (max-width: ${SHOWCASE_NARROW_PX + SCREEN_STEPS_PX + 3 * SCREEN_GUTTER_PX - 0.02}px)`,
+  `(min-width: 768px) and (min-height: 501px) and (max-height: ${SCREEN_HEIGHT_PX - 0.02}px)`,
+].join(", ");
 
 /**
  * /updating on a computer's screen (TASK-2137): the run fills the window top
@@ -180,6 +194,39 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .wns[data-layout="wide"]+.wns-more{margin-top:calc(10*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"]+.wns-more a{font-size:calc(12.5*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"]+.wns-more svg{width:1em;height:1em}
+}`;
+
+/**
+ * /updating in a computer's window too small for the steps and the showcase
+ * side by side (UPDATE_COMPACT_MEDIA, TASK-2146). Measured at 1030×700, the
+ * window's two columns ran past the bottom: the last steps went under the
+ * sticky "Don't power off" bar and the showcase was cut off on the right.
+ * Here the run is the steps alone — the header and version row, the steps
+ * card, the bar — in one centred column whose step rows share the height the
+ * window has, so the bar sits under the last step, not over it. A live run's
+ * column stops at about the height its rows need at their tallest and is
+ * centred, so a tall narrow window does not leave the steps card half empty.
+ * What's new is the part to drop: it is the one thing on the page the owner
+ * does not need to follow the update. Same marks as UPDATE_SCREEN_CSS, at 1 px.
+ */
+const UPDATE_COMPACT_CSS = `
+@media ${UPDATE_COMPACT_MEDIA}{
+[data-update-screen] .us-page{flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 16px}
+[data-update-screen] .us-frame{flex:1 1 auto;display:flex;flex-direction:column;max-width:760px}
+[data-update-screen="updating"] .us-frame{max-height:740px}
+[data-update-screen] .us-run{flex:1 1 auto;display:flex;flex-direction:column}
+[data-update-screen] .us-grid{flex:1 1 auto;display:flex;flex-direction:column}
+[data-update-screen] .us-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:8px 32px}
+[data-update-screen] .us-head>*{margin:0}
+[data-update-screen] .us-side{flex:1 1 auto;display:flex;flex-direction:column;margin-top:16px;gap:14px}
+[data-update-screen] .us-side>*{margin:0}
+[data-update-screen] .us-show{display:none}
+[data-update-screen] .us-steps{flex:1 1 auto;display:flex;flex-direction:column;padding:18px 22px}
+[data-update-screen] .us-meter{margin-top:12px}
+[data-update-screen] .us-list{flex:1 1 auto;display:flex;flex-direction:column;margin-top:12px}
+[data-update-screen] .us-list>ol{flex:1 1 auto;display:flex;flex-direction:column}
+[data-update-screen] .us-list li{flex:1 1 auto;min-height:28px;max-height:46px;padding-block:2px}
+[data-update-screen] .us-bar{margin-top:14px;padding:12px 20px}
 }`;
 
 /** The line across the bottom of a live or finished run: "don't power off", or what the screen around it has to say. */
@@ -849,7 +896,15 @@ export function UpdateRunView({
   // missing update pin it wrote for the owner. The ruling is that these
   // warn rather than block, which only means anything if they are visible;
   // the text comes from the server alongside the step labels.
-  const warnings = state?.warnings ?? [];
+  //
+  // Except the drift, while the run is live. The diagnosis is taken before
+  // step 1, and "the code on disk is not the tested commit" is exactly what
+  // the running update is there to change: said under the steps all the way
+  // through, it read as an error (TASK-2146). It is shown again once the run
+  // stops or finishes — a finished run re-measures it and keeps only the drift
+  // that is left (reconcileDriftWarnings) — and an idle box reports live drift
+  // in Settings and About, not here.
+  const warnings = (state?.warnings ?? []).filter((w) => status !== "updating" || !isDriftCode(w.code));
   const restarts = steps.some((s) => s.id === RESTART_STEP_ID);
 
   const current = versions ? runVersion(cleanVersion(versions.clawbox.current) ?? versions.clawbox.current) : null;
@@ -1140,6 +1195,7 @@ export function UpdateRunView({
     <>
       {/* Beside the view, not in it: its text is the window's, word for word. */}
       {fill && <style>{UPDATE_SCREEN_CSS}</style>}
+      {fill && <style data-update-compact="">{UPDATE_COMPACT_CSS}</style>}
       <div className={`${fill ? "us-run " : ""}@container w-full`} data-testid="update-run" data-status={status} data-fill={fill ? "true" : undefined}>
         {fill ? (
           // The same view placed for a whole screen: the header and version row

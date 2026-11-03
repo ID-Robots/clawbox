@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import UpdatingPage from "@/app/updating/page";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import UpdateStep, { describeUpdateFailure } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel, {
@@ -13,10 +14,11 @@ import type { StepState, UpdateState } from "@/lib/updater";
 import { WHATS_NEW_HIGHLIGHTS, WHATS_NEW_RELEASE } from "@/lib/whats-new";
 
 /**
- * The System Update window while a run is on screen: the steps on the left,
- * the version being installed on the right, "don't power off" across the
- * bottom; and a failed run said as its step, its real reason and the way on —
- * never as the updater's bare "Unknown error".
+ * The run view while a run is on screen: the steps on the left, the version
+ * being installed on the right, "don't power off" across the bottom; and a
+ * failed run said as its step, its real reason and the way on — never as the
+ * updater's bare "Unknown error". A live run is drawn by /updating (the System
+ * Update window hands it over, TASK-2146); a settled one by both.
  */
 
 const TARGET = `${WHATS_NEW_RELEASE}.0`;
@@ -59,9 +61,11 @@ const WHATS_NEW: UpdateWhatsNew = {
 
 function mount(
   status: Partial<UpdateState>,
-  { clawbox = { current: "4.2.5", target: TARGET }, whatsNew = WHATS_NEW }: {
+  { clawbox = { current: "4.2.5", target: TARGET }, whatsNew = WHATS_NEW, page = false }: {
     clawbox?: { current: string; target: string | null };
     whatsNew?: UpdateWhatsNew;
+    /** Draw /updating rather than the System Update window: a live run is that page's. */
+    page?: boolean;
   } = {},
 ) {
   vi.stubGlobal(
@@ -82,16 +86,39 @@ function mount(
       return jsonResponse({});
     }),
   );
-  return render(<SystemUpdateApp />);
+  return render(page ? <UpdatingPage /> : <SystemUpdateApp />);
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("SystemUpdateApp — a run in progress", () => {
+describe("/updating — a run in progress", () => {
+  it("is never drawn in the System Update window, which hands it to /updating", async () => {
+    const replace = vi.fn();
+    const saved = Object.getOwnPropertyDescriptor(window, "location");
+    const real = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { href: real.href, origin: real.origin, pathname: real.pathname, search: "", hash: "", replace, assign: vi.fn(), reload: vi.fn() },
+    });
+    try {
+      mount({ phase: "running", currentStepIndex: 4, steps: steps(4) });
+      expect(await screen.findByTestId("update-handover")).toBeInTheDocument();
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/updating"));
+      expect(screen.queryByTestId("update-run")).toBeNull();
+      // The run view's heading and first line never reach the window; the
+      // loader says what is happening to a screen reader only.
+      expect(screen.queryByRole("heading", { name: "Updating your device" })).toBeNull();
+      expect(screen.queryByText("Connecting…")).toBeNull();
+      expect(screen.getByRole("status")).toHaveTextContent("Updating your device");
+    } finally {
+      if (saved) Object.defineProperty(window, "location", saved);
+    }
+  });
+
   it("lays out the eyebrow, title, versions, count, meter and every step by number", async () => {
-    mount({ phase: "running", currentStepIndex: 4, steps: steps(4, { status: "running", detail: "Installing openclaw@2026.10.7" }) });
+    mount({ phase: "running", currentStepIndex: 4, steps: steps(4, { status: "running", detail: "Installing openclaw@2026.10.7" }) }, { page: true });
 
     await screen.findByText("Updating your device");
     expect(screen.getByText("System Update")).toBeInTheDocument();
@@ -129,7 +156,7 @@ describe("SystemUpdateApp — a run in progress", () => {
   });
 
   it("shows the version being installed as its showcase: every highlight, one at a time, on its real screenshot", async () => {
-    mount({ phase: "running", currentStepIndex: 4, steps: steps(4) });
+    mount({ phase: "running", currentStepIndex: 4, steps: steps(4) }, { page: true });
 
     const region = await screen.findByRole("region", { name: `What's new in ClawBox ${TARGET}` });
     expect(region).toHaveAttribute("data-variant", "grid");
@@ -156,7 +183,7 @@ describe("SystemUpdateApp — a run in progress", () => {
   it("names the build being installed when the notes' version is the one installed", async () => {
     mount(
       { phase: "running", currentStepIndex: 2, steps: steps(2) },
-      { clawbox: { current: "v4.3.0", target: "beta@a2c1718" }, whatsNew: { ...WHATS_NEW, version: "4.3.0" } },
+      { clawbox: { current: "v4.3.0", target: "beta@a2c1718" }, whatsNew: { ...WHATS_NEW, version: "4.3.0" }, page: true },
     );
 
     // Asserted once the notes have arrived: before that the row has only the versions route to go on.
@@ -170,7 +197,7 @@ describe("SystemUpdateApp — a run in progress", () => {
   it("writes both releases alike when the notes name a newer one", async () => {
     mount(
       { phase: "running", currentStepIndex: 2, steps: steps(2) },
-      { clawbox: { current: "v4.2.5", target: `v${TARGET}` } },
+      { clawbox: { current: "v4.2.5", target: `v${TARGET}` }, page: true },
     );
 
     await screen.findByRole("region", { name: `What's new in ClawBox ${TARGET}` });
@@ -183,7 +210,7 @@ describe("SystemUpdateApp — a run in progress", () => {
     // A forced re-run of the installed build: nothing newer to name.
     mount(
       { phase: "running", currentStepIndex: 2, steps: steps(2) },
-      { clawbox: { current: "v4.3.0", target: null }, whatsNew: { ...WHATS_NEW, version: "4.3.0" } },
+      { clawbox: { current: "v4.3.0", target: null }, whatsNew: { ...WHATS_NEW, version: "4.3.0" }, page: true },
     );
 
     const versions = await screen.findByTestId("update-run-versions");
@@ -372,7 +399,7 @@ describe("UpdateStep — the wizard's run-level error", () => {
 
 describe("UpdateStepList — every row's state in words", () => {
   it("says done and waiting to a screen reader, not by colour alone", async () => {
-    mount({ phase: "running", currentStepIndex: 4, steps: steps(4) });
+    mount({ phase: "running", currentStepIndex: 4, steps: steps(4) }, { page: true });
 
     const rows = within(await screen.findByTestId("update-step-list")).getAllByRole("listitem");
     expect(within(rows[0]).getByText("Completed")).toHaveClass("sr-only");
