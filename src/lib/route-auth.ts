@@ -17,70 +17,17 @@
  * and `@/lib/auth`. That mirrors middleware's own resolution (so the two can't
  * drift), keeps the second line of defence independent of the app modules it is
  * defending, and means a route test that mocks config-store doesn't
- * accidentally mock the auth check out of existence.
+ * accidentally mock the auth check out of existence. Those reads live in
+ * ./session-lease, which judges the cookie for this module and, again later,
+ * for a response that outlives its request.
  */
 
 import { NextResponse } from "next/server";
-import crypto from "crypto";
-import fs from "fs";
-import path from "./runtime-path";
 import { verifyMcpBearer } from "./mcp-token";
 import { hasOwnerPassword } from "./system-password";
-import { ownerUsername } from "./owner-username";
-import {
-  USERS_CONFIG_KEY,
-  identityFromClaims,
-  parseUserRegistry,
-  registryVersions,
-  type SessionIdentity,
-} from "./session-identity";
+import { type SessionIdentity } from "./session-identity";
+import { judgeSessionCookie, readConfigFacts, readSessionCookie } from "./session-lease";
 import { sessionExpiredHeaders } from "./session-expiry";
-
-function dataDir(): string {
-  const root = process.env.CLAWBOX_ROOT
-    || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
-  return path.join(root, "data");
-}
-
-interface ConfigFacts {
-  setupComplete: boolean;
-  passwordConfigured: boolean;
-  sessionGeneration: number;
-  /** Non-owner users (TASK-1256): username → session version. */
-  users: ReadonlyMap<string, string>;
-}
-
-const NO_USERS: ReadonlyMap<string, string> = new Map();
-
-/**
- * Fail-closed config read. A config.json that is genuinely absent is a
- * first-boot device (no owner). Any other read/parse failure is a provisioned
- * box with a damaged file, and is treated as "has an owner" so a corrupt or
- * clobbered config can't reopen the bootstrap window.
- */
-function readConfigFacts(): ConfigFacts {
-  try {
-    const raw = fs.readFileSync(path.join(dataDir(), "config.json"), "utf-8");
-    const parsed = JSON.parse(raw) as {
-      setup_complete?: unknown;
-      password_configured?: unknown;
-      session_generation?: unknown;
-      [USERS_CONFIG_KEY]?: unknown;
-    };
-    const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
-      ? parsed.session_generation
-      : 0;
-    return {
-      setupComplete: parsed.setup_complete === true,
-      passwordConfigured: parsed.password_configured === true,
-      sessionGeneration: gen,
-      users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
-    };
-  } catch (err) {
-    const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
-    return { setupComplete: !missing, passwordConfigured: !missing, sessionGeneration: 0, users: NO_USERS };
-  }
-}
 
 /**
  * Fail-closed setup flags for the pre-auth /login ⇄ /setup handoff, mirroring
@@ -97,17 +44,6 @@ function readConfigFacts(): ConfigFacts {
 export function readSetupGateFacts(): { setupComplete: boolean; passwordConfigured: boolean } {
   const { setupComplete, passwordConfigured } = readConfigFacts();
   return { setupComplete, passwordConfigured };
-}
-
-function sessionSecret(): string | null {
-  const fromEnv = process.env.SESSION_SECRET?.trim();
-  if (fromEnv) return fromEnv;
-  try {
-    const onDisk = fs.readFileSync(path.join(dataDir(), ".session-secret"), "utf-8").trim();
-    return onDisk.length >= 32 ? onDisk : null;
-  } catch {
-    return null;
-  }
 }
 
 export interface RequireSessionOptions {
@@ -148,42 +84,6 @@ export async function deviceHasOwner(): Promise<boolean> {
   return (await hasOwnerPassword()) === true;
 }
 
-function readSessionCookie(request: Request): string | null {
-  const raw = request.headers.get("cookie");
-  if (!raw) return null;
-  const m = /(?:^|;\s*)clawbox_session=([^;]*)/.exec(raw);
-  if (!m || !m[1]) return null;
-  try {
-    return decodeURIComponent(m[1]);
-  } catch {
-    return m[1];
-  }
-}
-
-function verifySignedCookie(cookie: string, secret: string, expectedGen: number): Record<string, unknown> | null {
-  const dot = cookie.indexOf(".");
-  if (dot < 0) return null;
-  const payload = cookie.slice(0, dot);
-  const sig = cookie.slice(dot + 1);
-  if (!payload || !/^[0-9a-f]{64}$/i.test(sig)) return null;
-
-  try {
-    const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-    const a = Buffer.from(sig.toLowerCase(), "hex");
-    const b = Buffer.from(expected, "hex");
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (typeof data !== "object" || data === null) return null;
-    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return null;
-    // Cookies minted before the last password change are revoked.
-    if ((typeof data.gen === "number" ? data.gen : 0) !== expectedGen) return null;
-    return data as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Who the request's session cookie speaks for (TASK-1256), or `null` when it
  * carries no cookie this box still honours — expired, revoked by a password
@@ -194,12 +94,7 @@ export async function sessionIdentity(request: Request | undefined): Promise<Ses
   if (!request || typeof request.headers?.get !== "function") return null;
   const cookie = readSessionCookie(request);
   if (!cookie) return null;
-  const secret = sessionSecret();
-  if (!secret) return null;
-  const facts = readConfigFacts();
-  const claims = verifySignedCookie(cookie, secret, facts.sessionGeneration);
-  if (!claims) return null;
-  return identityFromClaims(claims, ownerUsername(), facts.users);
+  return judgeSessionCookie(cookie)?.identity ?? null;
 }
 
 /**

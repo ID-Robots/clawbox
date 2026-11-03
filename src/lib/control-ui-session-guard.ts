@@ -108,11 +108,22 @@ function probe(evidenceSentAt) {
   });
 }
 
+// The gate answers a path outside /api and /setup-api — the UI's own avatar
+// and /__openclaw__ reads — with a redirect to /login, which the fetch follows
+// and hands back as a 200 login page (isLoginRedirect, src/lib/session-expiry.ts).
+function sentToLogin(res) {
+  try {
+    return !!res && res.redirected === true && new URL(res.url).pathname === "/login";
+  } catch (e) {
+    return false;
+  }
+}
+
 if (nativeFetch) {
   window.fetch = function (input, init) {
     var sentAt = Date.now();
     return nativeFetch.call(window, input, init).then(function (res) {
-      if (refused(res)) probe(sentAt);
+      if (refused(res) || sentToLogin(res)) probe(sentAt);
       return res;
     });
   };

@@ -34,6 +34,9 @@
  * SERVER ONLY.
  */
 
+import type { SessionLease } from "@/lib/session-lease";
+import { SESSION_EXPIRED_CHAT_MESSAGE, SESSION_EXPIRED_STREAM_CODE } from "@/lib/session-expiry";
+
 /** One server-sent event as the chat route writes it: a name and a JSON body. */
 export interface LiveTurnFrame {
   readonly event: string;
@@ -96,6 +99,19 @@ export const STOP_SETTLE_TIMEOUT_MS = 5_000;
  * the turn id the page sent, so it can never stop the NEXT message instead.
  */
 export const EARLY_STOP_RETENTION_MS = 60_000;
+
+/**
+ * How often a stream re-judges the session it was admitted on, for a
+ * revocation (a password change, a removed user) — the expiry itself has its
+ * own timer. scripts/upgrade-session-watch.js re-judges sockets as often.
+ */
+export const SESSION_RECHECK_MS = 10_000;
+
+// setTimeout's ceiling; a later expiry is re-armed when it fires.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+// A clock that disagrees with the cookie's `exp` by a few hundred ms re-arms
+// at least this far out rather than spinning.
+const MIN_REARM_MS = 1_000;
 
 const STATE_KEY = Symbol.for("clawbox.hermes.live-turns");
 
@@ -330,22 +346,57 @@ export const LIVE_TURN_STREAM_HEADERS: Readonly<Record<string, string>> = {
   "x-accel-buffering": "no",
 };
 
+export interface LiveTurnResponseOptions {
+  /**
+   * The session the request was admitted on (`sessionLease`,
+   * src/lib/session-lease.ts). The stream ends when it does — see
+   * {@link liveTurnResponse}. Null or absent: the stream follows the turn to
+   * its end, as for the agent's bearer.
+   */
+  readonly lease?: SessionLease | null;
+  /** Tests shorten it. */
+  readonly recheckMs?: number;
+}
+
 /**
  * A server-sent-event response that follows a turn until it ends.
  *
  * `subscribe` is handed the listener and returns the detach. The browser going
  * away cancels the stream, and cancelling only DETACHES: the turn neither hears
  * nor cares that nobody is reading any more.
+ *
+ * …or until the session it was admitted on ends (TASK-2131). The session gate
+ * judged the request once, when it arrived, and a turn answers for minutes: a
+ * browser whose session ran out halfway through kept being handed the answer,
+ * its tool steps and its questions as if nobody had signed out. At the lease's
+ * expiry — or on a revocation, re-judged every `recheckMs` — this stream sends
+ * one last `error` frame carrying SESSION_EXPIRED_STREAM_CODE and closes. That
+ * too only DETACHES, exactly as the box's socket cut does on OpenClaw, where the
+ * run goes on in the gateway: the turn finishes and records its answer, which
+ * the person reads in the transcript once they have signed in again.
  */
-export function liveTurnResponse(subscribe: (listener: Listener) => () => void): Response {
+export function liveTurnResponse(
+  subscribe: (listener: Listener) => () => void,
+  opts: LiveTurnResponseOptions = {},
+): Response {
   const encoder = new TextEncoder();
+  const frameBytes = (event: string, data: unknown) => encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   let detach: (() => void) | null = null;
   let closed = false;
+  let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  let recheckTimer: ReturnType<typeof setInterval> | null = null;
+  const stopWatching = () => {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    if (recheckTimer) clearInterval(recheckTimer);
+    expiryTimer = null;
+    recheckTimer = null;
+  };
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const close = () => {
         if (closed) return;
         closed = true;
+        stopWatching();
         detach?.();
         try {
           controller.close();
@@ -360,7 +411,7 @@ export function liveTurnResponse(subscribe: (listener: Listener) => () => void):
           return;
         }
         try {
-          controller.enqueue(encoder.encode(`event: ${frame.event}\ndata: ${JSON.stringify(frame.data)}\n\n`));
+          controller.enqueue(frameBytes(frame.event, frame.data));
         } catch {
           // Enqueueing into a stream the browser cancelled throws; the turn
           // carries on regardless, so this listener simply leaves.
@@ -368,10 +419,47 @@ export function liveTurnResponse(subscribe: (listener: Listener) => () => void):
         }
       });
       detach = unsubscribe;
-      if (closed) unsubscribe();
+      if (closed) {
+        unsubscribe();
+        return;
+      }
+
+      const lease = opts.lease;
+      if (!lease) return;
+      const sessionEnded = () => {
+        if (closed) return;
+        try {
+          controller.enqueue(frameBytes("error", { error: SESSION_EXPIRED_CHAT_MESSAGE, code: SESSION_EXPIRED_STREAM_CODE }));
+        } catch {
+          /* the caller already went away */
+        }
+        close();
+      };
+      // Nothing here may throw: it runs in the server's timers.
+      const judge = () => {
+        try {
+          return lease.stillValid();
+        } catch {
+          return false;
+        }
+      };
+      const armExpiry = (minMs: number) => {
+        const delay = Math.min(MAX_TIMER_MS, Math.max(minMs, lease.expiresAt - Date.now()));
+        expiryTimer = setTimeout(() => {
+          expiryTimer = null;
+          if (closed) return;
+          if (judge()) armExpiry(MIN_REARM_MS);
+          else sessionEnded();
+        }, delay);
+      };
+      armExpiry(0);
+      recheckTimer = setInterval(() => {
+        if (!closed && !judge()) sessionEnded();
+      }, Math.max(1, opts.recheckMs ?? SESSION_RECHECK_MS));
     },
     cancel() {
       closed = true;
+      stopWatching();
       detach?.();
     },
   });
@@ -386,10 +474,10 @@ export function liveTurnResponse(subscribe: (listener: Listener) => () => void):
  * its end, so a page that read the history a moment before the answer landed
  * is still handed it.
  */
-export function liveTurnResponseFor(sessionKey: string): Response | null {
+export function liveTurnResponseFor(sessionKey: string, opts: LiveTurnResponseOptions = {}): Response | null {
   const state = latest(sessionKey);
   if (!state) return null;
-  return liveTurnResponse((listener) => attach(state, listener));
+  return liveTurnResponse((listener) => attach(state, listener), opts);
 }
 
 /** Test seam: forget every turn and every held Stop. */

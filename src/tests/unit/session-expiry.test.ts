@@ -7,6 +7,7 @@ import {
   SESSION_PROBE_URL,
   confirmSessionStillValid,
   installSessionExpiryGuard,
+  isLoginRedirect,
   isSessionExpiredClose,
   isSessionExpiredResponse,
   sessionExpiredHeaders,
@@ -62,6 +63,25 @@ describe("isSessionExpiredResponse", () => {
 
   it("marks the 401 uncacheable", () => {
     expect(sessionExpiredHeaders()).toMatchObject({ [SESSION_EXPIRED_HEADER]: "expired", "cache-control": "no-store" });
+  });
+});
+
+describe("isLoginRedirect", () => {
+  it("is a fetch the gate sent to /login, wherever it was going", () => {
+    expect(isLoginRedirect({ redirected: true, url: "http://clawbox.local/login?redirect=%2Fchat" })).toBe(true);
+    expect(isLoginRedirect({ redirected: true, url: "http://192.0.2.10/login" })).toBe(true);
+  });
+
+  it("is never an answer that was not redirected, or one redirected elsewhere", () => {
+    expect(isLoginRedirect({ redirected: false, url: "http://clawbox.local/login" })).toBe(false);
+    expect(isLoginRedirect({ redirected: true, url: "http://clawbox.local/updating" })).toBe(false);
+    expect(isLoginRedirect({ redirected: true, url: "http://clawbox.local/login-api/users" })).toBe(false);
+  });
+
+  it("tolerates the half-shaped responses test doubles pass", () => {
+    expect(isLoginRedirect(null)).toBe(false);
+    expect(isLoginRedirect({ redirected: true })).toBe(false);
+    expect(isLoginRedirect({ redirected: true, url: "not a url" })).toBe(false);
   });
 });
 
@@ -214,6 +234,22 @@ describe("installSessionExpiryGuard", () => {
     installSessionExpiryGuard(win as unknown as Window);
     for (let i = 0; i < 3; i++) await win.fetch("/setup-api/system/credentials");
     expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("asks about the session when a request was sent to /login instead of answered 401 (TASK-2131)", async () => {
+    // The gate redirects a path outside /setup-api and /api; the fetch follows
+    // it and comes back a 200 login page.
+    const { win, replace } = fakeWindow();
+    const sentToLogin = { status: 200, redirected: true, url: "http://clawbox.local/login?redirect=%2Favatar%2Fmain", headers: new Headers() };
+    const original = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === SESSION_PROBE_URL ? gate401() : (sentToLogin as unknown as Response),
+    );
+    win.fetch = original as unknown as typeof fetch;
+    installSessionExpiryGuard(win as unknown as Window);
+
+    expect((await win.fetch("/avatar/main")).status).toBe(200);
+    await vi.waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"));
+    expect(original.mock.calls.map(([input]) => String(input))).toEqual(["/avatar/main", SESSION_PROBE_URL]);
   });
 
   it("passes a failed request's error through untouched", async () => {

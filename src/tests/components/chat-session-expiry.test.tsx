@@ -217,6 +217,35 @@ describe("the desktop chat (ChatPopup) on a lapsed session", () => {
     expect(screen.queryByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeNull();
   });
 
+  it("asks at once when the box CUTS the socket over plain HTTP — no close code — and signs out before any reconnect (TASK-2131)", async () => {
+    // clawbox.local is plain HTTP: the box cuts a lapsed session's socket and
+    // the browser reports a bare 1006. The chat used to wait out its retry
+    // delay for the reconnect's ws-config read to be refused, looking connected
+    // the whole time.
+    const wsConfigReads = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/setup-api/gateway/ws-config")).length;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(connects).toBe(1));
+    await settle();
+    expect(wsConfigReads()).toBe(1);
+
+    probeAnswer = "session-gate";
+    await act(async () => { sockets[0].serverClose(1006); });
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(SIGNED_OUT), { timeout: 1_000 });
+    expect(wsConfigReads()).toBe(1);
+    expect(await screen.findByText(SESSION_EXPIRED_CHAT_MESSAGE)).toBeInTheDocument();
+    await settle();
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("still reconnects after a bare close whose session the box still accepts — a gateway restart", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(connects).toBe(1));
+    await settle();
+    await act(async () => { sockets[0].serverClose(1006); });
+    await waitFor(() => expect(connects).toBe(2), { timeout: 10_000 });
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   it("opens no socket at all when the session gate answers the chat's ws-config", async () => {
     wsConfigAnswer = "session-gate";
     probeAnswer = "session-gate";

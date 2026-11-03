@@ -49,6 +49,8 @@ import {
   type LiveTurn,
 } from "@/lib/harness/hermes-live-turn";
 import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
+import { sessionLease, type SessionLease } from "@/lib/session-lease";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
@@ -737,10 +739,12 @@ function streamTurn(
   /** Whether the REQUEST named a provider — see `billedProviderFor`. */
   requestNamedProvider: boolean,
   live: LiveTurn,
+  /** The session the request was admitted on: the stream ends with it (TASK-2131). */
+  lease: SessionLease | null,
 ): Response {
   // Attach BEFORE the run starts, so the response hears the first frame live
   // rather than out of the replay. Either would be correct; this is cheaper.
-  const response = liveTurnResponse((listener) => live.attach(listener));
+  const response = liveTurnResponse((listener) => live.attach(listener), { lease });
   runStreamedTurn(turn, fallbackSessionId, sessionKey, requestNamedProvider, live).catch((err) => {
     // Nobody awaits the turn any more, so nothing above may escape as an
     // unhandled rejection — a transcript write failing on the error path is
@@ -1041,7 +1045,8 @@ export async function GET(request: Request) {
   if (!which.ok) {
     return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
-  return liveTurnResponseFor(which.key) ?? new NextResponse(null, { status: 204 });
+  // A re-attach is bounded by the session it came in on, like the POST's stream.
+  return liveTurnResponseFor(which.key, { lease: sessionLease(request) }) ?? new NextResponse(null, { status: 204 });
 }
 
 // DELETE /setup-api/hermes/chat?sessionKey=…[&turnId=…] → { stopped }
@@ -1127,6 +1132,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
   const sessionKey = which.key;
+  // The session this turn was admitted on, taken NOW: the answer goes back to
+  // the browser only while it lasts (TASK-2131). The turn itself does not end
+  // with it — see `liveTurnResponse`.
+  const lease = sessionLease(request);
   // A Hermes session another person's chat opened is not resumed: the turn
   // starts a fresh one instead.
   const rawSessionId = hermesSessionFor(which.principal, requestedSessionId);
@@ -1558,7 +1567,7 @@ export async function POST(request: Request) {
       // harness's own record is precisely the answer to what it decided.
       if (turn) {
         handedOff = true;
-        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live);
+        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, lease);
       }
     }
 
@@ -1592,6 +1601,12 @@ export async function POST(request: Request) {
       // box knows the model of is a false unknown, not modesty.
       const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
       live.emit("done", answered);
+      // The CLI answers whole, at the end: a session that ran out while it
+      // worked gets the session gate's 401, not the answer — which is in the
+      // transcript for whoever signs in again, as on the streamed path.
+      if (lease && !lease.stillValid()) {
+        return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
+      }
       return NextResponse.json(answered);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {

@@ -2859,6 +2859,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       try { socket.close() } catch { /* already closing */ }
     }
     failPending('Signed out')
+    // …and stop reading a Hermes answer that is still streaming in: nothing
+    // more of it is drawn for a signed-out page. The turn itself goes on on the
+    // box and is in the transcript after the next sign-in.
+    adapterRef.current?.disconnect()
     tearDownReloadOverlay()
     setStatus('error')
     setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
@@ -3738,7 +3742,17 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // and hands the page a new one. So ask: a lapsed session signs the page
       // out (SESSION_EXPIRED_EVENT stops this chat and its retry), a live one
       // takes the ordinary reconnect below.
-      if (isSessionExpiredClose(event)) void confirmSessionStillValid()
+      //
+      // Over plain HTTP — clawbox.local, the LAN — there is no 4401 to read:
+      // the box CUTS a lapsed session's socket, which the browser reports as a
+      // bare 1006. Waiting for the reconnect's ws-config read to be refused
+      // left the composer looking connected for that RETRY_DELAY, taking
+      // messages into a socket that was gone (TASK-2131). So any close but an
+      // orderly one asks too, at once, as ChatApp's does; the probe is shared,
+      // and a box that cannot be reached is not a sign-out.
+      if (isSessionExpiredClose(event) || (event?.code !== 1000 && event?.code !== 1001)) {
+        void confirmSessionStillValid()
+      }
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth

@@ -85,6 +85,17 @@ describe("the Control UI's lapsed-session guard", () => {
     expect(probes()).toBe(1);
   });
 
+  it("asks too when a read was sent to /login rather than refused (TASK-2131)", async () => {
+    // The gate redirects the UI's avatar and /__openclaw__ reads; the fetch
+    // follows to the login page and hands it back as a 200.
+    const sentToLogin = () => ({ status: 200, redirected: true, url: "http://clawbox.local/login?redirect=%2Favatar%2Fmain", headers: new Headers() }) as unknown as Response;
+    const { win, probes } = page({ request: sentToLogin, probe: gate401 });
+    const res = await win.fetch("/avatar/main");
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(win.location.replace).toHaveBeenCalledWith("/login?redirect=%2Fchat"));
+    expect(probes()).toBe(1);
+  });
+
   it("leaves the chat alone on a late refusal for a session another tab has already renewed", async () => {
     const { win, probes } = page({ request: gate401, probe: ok });
     await win.fetch("/api/sessions");

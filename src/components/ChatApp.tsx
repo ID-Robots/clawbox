@@ -850,6 +850,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       try { socket.close() } catch { /* already closing */ }
     }
     failPending('Signed out')
+    // A Hermes answer still streaming in stops being read, as in ChatPopup.
+    adapterRef.current?.disconnect()
     setStatus('error')
     setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps

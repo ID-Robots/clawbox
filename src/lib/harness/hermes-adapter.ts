@@ -3,6 +3,7 @@ import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
+import { SESSION_EXPIRED_STREAM_CODE, confirmSessionStillValid } from "@/lib/session-expiry";
 import { transcriptKeyIsSafe } from "./transcript-key";
 import {
   asHarnessError,
@@ -230,6 +231,7 @@ async function readStreamedTurn(
   let settled: Record<string, unknown> | null = null;
   let failure = "";
   let stopped = false;
+  let sessionEnded = false;
 
   const consume = (frame: string) => {
     let name = "message";
@@ -303,6 +305,7 @@ async function readStreamedTurn(
       settled = payload;
     } else if (name === "error") {
       failure = typeof payload.error === "string" && payload.error ? payload.error : "Hermes chat failed";
+      if (payload.code === SESSION_EXPIRED_STREAM_CODE) sessionEnded = true;
     } else if (name === "stopped") {
       // The box stopped the turn on the owner's word — this page's Stop or
       // another window's. Not a dropped stream, so not "cut off".
@@ -326,6 +329,12 @@ async function readStreamedTurn(
   if (buffer.trim()) consume(buffer);
 
   if (stopped) throw new HarnessError("aborted", "Stopped.");
+  // The stream answered 200 long before it ended, so the page's fetch guard
+  // never saw a refusal: a stream the box ended because the session it was
+  // admitted on did (src/lib/harness/hermes-live-turn.ts), and one that simply
+  // stopped short, ask about the session here. A lapsed one takes the page to
+  // /login; a live one, or a box that cannot be reached, leaves the error below.
+  if (sessionEnded || (!failure && !settled)) void confirmSessionStillValid();
   if (failure) throw new HarnessError("upstream", failure);
   if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
   return settled;

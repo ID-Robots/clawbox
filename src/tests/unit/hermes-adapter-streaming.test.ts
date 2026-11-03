@@ -1,8 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { HermesAdapter } from "@/lib/harness/hermes-adapter";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { HarnessError, type TurnEvent } from "@/lib/harness/transport";
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_STREAM_CODE,
+  SESSION_PROBE_URL,
+  sessionExpiredHeaders,
+} from "@/lib/session-expiry";
 
 /**
  * The Hermes adapter reading a STREAMED turn.
@@ -312,5 +318,54 @@ describe("a Hermes turn that reports what it is doing", () => {
     const result = await adapter.sendTurn(turn, (e) => seen.push(e));
     expect(seen).toEqual([{ kind: "delta", text: "still here" }]);
     expect(result.text).toBe("still here");
+  });
+});
+
+describe("a Hermes stream whose session ended (SUP-1017, TASK-2131)", () => {
+  // The stream answered 200 before the session ran out, so the page's fetch
+  // guard never sees a refusal for it: the reader asks about the session itself.
+  const gate401 = () => new Response("{}", { status: 401, headers: sessionExpiredHeaders() });
+
+  function signedInPage(probe: () => Response) {
+    const replace = vi.fn();
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { location: { pathname: "/", replace } }));
+    const pageFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === SESSION_PROBE_URL) return probe();
+      throw new Error(`unexpected request ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", pageFetch);
+    const probes = () => pageFetch.mock.calls.filter(([input]) => String(input) === SESSION_PROBE_URL).length;
+    return { replace, probes };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("takes the page to /login when the box ended the stream because the session did", async () => {
+    const { replace, probes } = signedInPage(gate401);
+    const { adapter } = makeAdapter(sseResponse([
+      frame("delta", { text: "The first half, " }),
+      frame("error", { error: SESSION_EXPIRED_CHAT_MESSAGE, code: SESSION_EXPIRED_STREAM_CODE }),
+    ]));
+    await expect(adapter.sendTurn(turn, () => {})).rejects.toThrow(SESSION_EXPIRED_CHAT_MESSAGE);
+    await vi.waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"));
+    expect(probes()).toBe(1);
+  });
+
+  it("asks about a stream that simply stopped short too — and a live session keeps the page", async () => {
+    const { replace, probes } = signedInPage(() => new Response("{}", { status: 200 }));
+    const { adapter } = makeAdapter(sseResponse([frame("delta", { text: "half a sen" })]));
+    await expect(adapter.sendTurn(turn, () => {})).rejects.toThrow("The reply was cut off before it finished.");
+    await vi.waitFor(() => expect(probes()).toBe(1));
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about a failure the stream itself explained", async () => {
+    const { probes } = signedInPage(gate401);
+    const { adapter } = makeAdapter(sseResponse([frame("error", { error: "the provider is rate limiting" })]));
+    await expect(adapter.sendTurn(turn, () => {})).rejects.toThrow("the provider is rate limiting");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(probes()).toBe(0);
   });
 });

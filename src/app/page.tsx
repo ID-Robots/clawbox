@@ -73,7 +73,7 @@ import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
-import { confirmSessionStillValid } from "@/lib/session-expiry";
+import { confirmSessionStillValid, isSessionExpiredResponse } from "@/lib/session-expiry";
 import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
 import { mergeDesktopApps, knownSetChanged } from "@/lib/desktop-app-merge";
@@ -2809,8 +2809,17 @@ function ChromeDesktopInner() {
             lastSeenTs = newest;
           }
         }
-      } catch {}
-      polling = false;
+      } catch {
+        // the next tick tries again
+      } finally {
+        // In a `finally` (TASK-2131): the 401 and update-lock branches above
+        // RETURN, and a reset after the try was skipped by them — one refused
+        // poll whose session probe then answered "still signed in" (a sign-in
+        // in another tab, a probe that timed out) left this flag set, and every
+        // later tick returned at the top: the desktop's 2 s session check and
+        // every ring notice stopped for the life of the page.
+        polling = false;
+      }
     };
     // Every 2 s on a page that is on screen; behind a hidden tab every
     // RING_HIDDEN_POLL_MS instead — not paused, because the ring carries events
@@ -3339,6 +3348,11 @@ function ChromeDesktopInner() {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve({ ok: true });
         } else {
+          // An XMLHttpRequest goes past the page's fetch guard, so the session
+          // gate's 401 is read here (src/lib/session-expiry.ts).
+          if (isSessionExpiredResponse({ status: xhr.status, headers: { get: (name) => xhr.getResponseHeader(name) } })) {
+            void confirmSessionStillValid();
+          }
           try {
             const data = JSON.parse(xhr.responseText);
             resolve({ ok: false, error: data.error });

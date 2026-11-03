@@ -39,18 +39,47 @@ export const SESSION_PROBE_TIMEOUT_MS = 5_000;
 /** What a chat shows for the moment between its session ending and the page reaching /login. */
 export const SESSION_EXPIRED_CHAT_MESSAGE = "Your session has expired. Taking you to sign in again…";
 
+/**
+ * The `code` on the last frame of a streamed chat turn the box ended because
+ * the session the request was admitted on did (src/lib/harness/hermes-live-turn.ts).
+ * A stream answers 200 before the session runs out, so the page guard never sees
+ * a 401 for it: the reader asks about the session itself (hermes-adapter.ts).
+ */
+export const SESSION_EXPIRED_STREAM_CODE = "session_expired";
+
 /** The headers the session gate's 401 carries. */
 export function sessionExpiredHeaders(): Record<string, string> {
   return { [SESSION_EXPIRED_HEADER]: SESSION_EXPIRED_HEADER_VALUE, "cache-control": "no-store" };
 }
 
-type ResponseLike = { status?: number; headers?: { get?: (name: string) => string | null } | null } | null | undefined;
+type ResponseLike = {
+  status?: number;
+  headers?: { get?: (name: string) => string | null } | null;
+  redirected?: boolean;
+  url?: string;
+} | null | undefined;
 
 /** The session gate's 401 — never a route's own 401 for a wrong password or a refused key. */
 export function isSessionExpiredResponse(res: ResponseLike): boolean {
   if (!res || res.status !== 401) return false;
   try {
     return res.headers?.get?.(SESSION_EXPIRED_HEADER) === SESSION_EXPIRED_HEADER_VALUE;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A fetch the session gate turned away with a redirect to /login instead of a
+ * 401 — its answer for a path outside /setup-api and /api (src/middleware.ts,
+ * step 5). The browser follows it, so the caller sees the login page as a 200
+ * and the 401 check above never fires. Like a 401, only ever a reason to ASK
+ * (`confirmSessionStillValid`), never to sign out on its own say-so.
+ */
+export function isLoginRedirect(res: ResponseLike): boolean {
+  if (!res?.redirected || typeof res.url !== "string") return false;
+  try {
+    return new URL(res.url).pathname === "/login";
   } catch {
     return false;
   }
@@ -159,7 +188,7 @@ export function installSessionExpiryGuard(win: Window = window): () => void {
     // Not on this answer alone — it may predate a sign-in in another tab. The
     // probe asks about the current session, through the unguarded fetch so its
     // own answer is not judged here a second time.
-    if (isSessionExpiredResponse(res)) void confirmSessionStillValid(unguarded, sentAt);
+    if (isSessionExpiredResponse(res) || isLoginRedirect(res)) void confirmSessionStillValid(unguarded, sentAt);
     return res;
   };
   // Cast: some runtimes' `typeof fetch` carries extras (Bun's `preconnect`) a

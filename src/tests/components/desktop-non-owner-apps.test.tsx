@@ -35,6 +35,8 @@ let signedOut = false;
 let filesAnswer: "ok" | "session-gate" | "wrong-password" = "ok";
 /** The session probe (/users/me) refused too: the session really is over. */
 let probeRefused = false;
+/** Notice-ring polls still to refuse with the session gate's 401 (a late one, from before a sign-in elsewhere). */
+let ringRefusals = 0;
 
 function answer(body: unknown, headers: Record<string, string> = {}) {
   return {
@@ -52,6 +54,10 @@ function installFetch() {
     // The middleware's answer to a session the box no longer accepts, on every
     // /setup-api request alike.
     if (signedOut && url.includes("/setup-api/")) {
+      return { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), json: async () => ({ error: "Authentication required" }), text: async () => "" };
+    }
+    if (ringRefusals > 0 && url.includes("/setup-api/kv?key=ui:pending-actions")) {
+      ringRefusals -= 1;
       return { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), json: async () => ({ error: "Authentication required" }), text: async () => "" };
     }
     // One app's own request, answered by the session gate or by the route's
@@ -125,6 +131,7 @@ beforeEach(() => {
   signedOut = false;
   filesAnswer = "ok";
   probeRefused = false;
+  ringRefusals = 0;
   installFetch();
   // The launcher asks matchMedia on its focus timer; the setup file's mock
   // loses its implementation to `mockReset` between cases.
@@ -407,6 +414,29 @@ describe("a desktop whose session is gone", () => {
       await waitFor(() => expect(requests().filter((r) => r.url.pathname === "/setup-api/users/me").length).toBeGreaterThan(probesBefore));
       await act(async () => {});
       expect(replace).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps polling after a refused poll whose session the box still accepts, so a later expiry still signs it out (TASK-2131)", async () => {
+    // The poll's reset used to sit after its try, where the 401 branch's
+    // return skipped it: one refusal like this one stopped the desktop's 2 s
+    // session check, and every notice, for the life of the page.
+    me = OWNER;
+    const { replace, restore } = stubLocation();
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      const ringPolls = () => requests().filter((r) => r.label === "GET /setup-api/kv?key=ui:pending-actions").length;
+      await waitFor(() => expect(ringPolls()).toBeGreaterThan(0), { timeout: 6_000 });
+      ringRefusals = 1;
+      const refusedAt = ringPolls();
+      await waitFor(() => expect(ringPolls()).toBeGreaterThan(refusedAt + 1), { timeout: 8_000 });
+      expect(replace).not.toHaveBeenCalled();
+
+      signedOut = true;
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"), { timeout: 6_000 });
     } finally {
       restore();
     }
