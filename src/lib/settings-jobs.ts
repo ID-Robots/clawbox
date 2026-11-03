@@ -257,7 +257,16 @@ export interface RouteJobSpec {
   handler: (request: Request) => Promise<Response>;
   /** The code a refusal while another job of the group runs answers with. */
   busyCode?: string;
+  /**
+   * The sentence the card says a failure in, by the code a route answers as
+   * its `error` (Settings translates those codes itself; the card cannot). A
+   * code with no sentence here is said as "<title> did not finish (<code>)."
+   */
+  messages?: Record<string, string>;
 }
+
+/** An `error` that is a code (`allowlist_unsupported`), not a sentence. */
+const ERROR_CODE = /^[a-z][a-z0-9_]*$/;
 
 /**
  * The route-side helper: when `request` asks for a job, start one that calls
@@ -286,8 +295,9 @@ export async function routeAsSettingsJob(request: Request, spec: RouteJobSpec): 
       ctx.step(steps[0].id, about.status);
       const outcome = await outcomeOf(await spec.handler(jobRequest(spec.path, body, method)));
       if (!outcome.ok) {
+        const said = outcome.message ?? humanizeApiError(outcome.body, `${about.title} did not finish.`);
         throw new BackgroundTaskFailure(
-          outcome.message ?? humanizeApiError(outcome.body, `${about.title} did not finish.`),
+          ERROR_CODE.test(said) ? spec.messages?.[said] ?? `${about.title} did not finish (${said}).` : said,
           { ...outcome.body, httpStatus: outcome.httpStatus },
         );
       }

@@ -115,6 +115,22 @@ describe("routeAsSettingsJob", () => {
     expect(await ended((await denied!.json()).taskId)).toMatchObject({ state: "failed", result: { success: false, httpStatus: 200 } });
   });
 
+  it("never ends a card on a bare error code: its sentence, or the title with the code", async () => {
+    const coded = async () => json({ error: "allowlist_unsupported", code: "allowlist_unsupported" }, 400);
+    const named = await routeAsSettingsJob(post({ allowedUsers: ["1"], background: true }), spec(coded, {
+      messages: { allowlist_unsupported: "This box's WhatsApp has no allowed-numbers list." },
+    }));
+    expect(await ended((await named!.json()).taskId)).toMatchObject({
+      state: "failed",
+      error: "This box's WhatsApp has no allowed-numbers list.",
+      // The code stays in the result for the caller that translates it.
+      result: { error: "allowlist_unsupported", code: "allowlist_unsupported", httpStatus: 400 },
+    });
+    resetBackgroundTasksForTests();
+    const bare = await routeAsSettingsJob(post({ allowedUsers: ["2"], background: true }), spec(coded));
+    expect((await ended((await bare!.json()).taskId)).error).toBe("Setting up Telegram did not finish (allowlist_unsupported).");
+  });
+
   it("answers the same ask with the running job, and refuses another one of the group", async () => {
     let release!: () => void;
     const handler = vi.fn(() => new Promise<Response>((resolve) => { release = () => resolve(json({ success: true })); }));

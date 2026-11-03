@@ -170,6 +170,9 @@ export async function POST(request: Request) {
       done: "WhatsApp settings saved.",
     }),
     handler: configureWhatsapp,
+    messages: {
+      allowlist_unsupported: "This box's WhatsApp channel has no allowed-numbers list or mode to set; it answers its own linked number.",
+    },
   });
   return job ?? configureWhatsapp(request);
 }
