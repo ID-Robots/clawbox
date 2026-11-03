@@ -311,12 +311,26 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
       timer = setTimeout(() => resolve("timeout"), LOCAL_COMPACTION_DEADLINE_MS);
     });
     void Promise.race([compact(key).then(() => "done" as const), deadline])
-      .then((outcome) => {
-        const pending = offersRef.current[key]?.pending ?? null;
+      .then(async (outcome) => {
         if (outcome === "timeout") {
+          const pending = offersRef.current[key]?.pending ?? null;
           setOffers((prev) => ({ ...prev, [key]: { ...(prev[key] ?? { key, tokens: null, window: null, pending }), kind: "timeout" } }));
           return;
         }
+        // A compaction can fold a little and still leave more than the local
+        // model reads (a board: Hermes folded one exchange of seven, 53k → 50k
+        // tokens over its 32k line). Measured again, that is not "shortened for
+        // the local model": the card says it could not be, and keeps the message.
+        const size = await opts.adapter.conversationSize?.(key).catch(() => null);
+        const sizeWindow = size?.window ?? optsRef.current.localWindow;
+        if (size && tooLongForLocal(size, sizeWindow)) {
+          const tokens = size.tokens ?? null;
+          const room = size.limit ?? sizeWindow ?? null;
+          if (!fitRef.current.get(key)?.dismissed) fitRef.current.set(key, { long: true, tokens, window: room });
+          setOffers((prev) => (prev[key] ? { ...prev, [key]: { ...prev[key], kind: "failed", tokens, window: room } } : prev));
+          return;
+        }
+        const pending = offersRef.current[key]?.pending ?? null;
         fitRef.current.set(key, { long: false, tokens: null, window: null });
         setOffers((prev) => without(prev, key));
         optsRef.current.noteSystem(key, optsRef.current.shortenedText);

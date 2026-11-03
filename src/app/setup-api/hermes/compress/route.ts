@@ -12,8 +12,8 @@ import { requireSession } from "@/lib/route-auth";
  *
  * POST `{ sessionId }` → 200 `{ compressed: true, tokensBefore?, tokensAfter? }`,
  * 409 `{ error }` when Hermes compressed nothing (an idle session with nothing
- * to fold, a lock held elsewhere, a summary that would grow), 503 when the
- * dashboard could not be reached.
+ * to fold, a lock held elsewhere, a summary that would grow, a fold that left
+ * the request no smaller), 503 when the dashboard could not be reached.
  *
  * Hermes' own `session.compress` (its manual `/compress` of an idle session),
  * on the session resumed by its stored id; the summary runs on
@@ -46,17 +46,32 @@ export async function POST(request: Request) {
   const ran = await runHermesSlashCommand({ command: "/compress", sessionId, rpc: "session.compress", signal: request.signal });
   if (!ran) return NextResponse.json({ error: "Hermes could not be reached." }, { status: 503 });
   const result = ran.result;
+  const summary = result?.summary && typeof result.summary === "object" ? result.summary as Record<string, unknown> : null;
+  const tokensBefore = count(result?.before_tokens);
+  const tokensAfter = count(result?.after_tokens);
   // `status: "compressed"` is how an in-process compression answers (a board's
   // did, with no `compressed` flag); `compressed: true` how a compute host's
   // passes through. "pending", "aborted", a noop or a held lock compressed nothing yet.
-  const compressed = result?.compressed === true || (result?.status === "compressed" && result.compressed !== false);
+  // Hermes also answers "compressed" when its own summary says nothing was
+  // removed (`noop`, `refused_would_grow`, `aborted`), and for a fold that left
+  // the request no smaller: a board's folded one exchange of seven, ~64.9k →
+  // ~66.7k tokens, still far past the local line.
+  const removedNothing = summary?.noop === true || summary?.refused_would_grow === true || summary?.aborted === true;
+  const noSmaller = tokensBefore !== undefined && tokensAfter !== undefined && tokensAfter >= tokensBefore;
+  const compressed = !removedNothing && !noSmaller
+    && (result?.compressed === true || (result?.status === "compressed" && result?.compressed !== false));
   if (!result || !compressed) {
-    const message = typeof result?.message === "string" && result.message ? result.message : ran.output;
+    const headline = typeof summary?.headline === "string" ? summary.headline : "";
+    const message = typeof result?.message === "string" && result.message
+      ? result.message
+      : !removedNothing && noSmaller
+        ? `The summary left this conversation no shorter (~${tokensBefore} → ~${tokensAfter} tokens).`
+        : headline || ran.output;
     return NextResponse.json({ error: message || "Nothing was compressed." }, { status: 409 });
   }
   return NextResponse.json({
     compressed: true,
-    ...(count(result.before_tokens) !== undefined ? { tokensBefore: count(result.before_tokens) } : {}),
-    ...(count(result.after_tokens) !== undefined ? { tokensAfter: count(result.after_tokens) } : {}),
+    ...(tokensBefore !== undefined ? { tokensBefore } : {}),
+    ...(tokensAfter !== undefined ? { tokensAfter } : {}),
   });
 }

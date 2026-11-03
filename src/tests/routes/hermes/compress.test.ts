@@ -56,6 +56,28 @@ describe("POST /setup-api/hermes/compress", () => {
     expect((await post({ sessionId: SESSION })).status).toBe(409);
   });
 
+  it("believes Hermes' own summary over its status: a noop, a refused or an aborted summary removed nothing", async () => {
+    for (const flag of ["noop", "refused_would_grow", "aborted"]) {
+      const headline = `Nothing removed (${flag}): 14 messages preserved`;
+      vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({
+        status: "compressed", before_tokens: 64923, after_tokens: 64923, summary: { [flag]: true, headline },
+      }));
+      const res = await post({ sessionId: SESSION });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe(headline);
+    }
+  });
+
+  it("is a refusal when the fold left the conversation no smaller (a board: one exchange of seven, 64.9k → 66.7k)", async () => {
+    vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({
+      status: "compressed", removed: 2, before_tokens: 64923, after_tokens: 66743,
+      summary: { noop: false, refused_would_grow: false, aborted: false, headline: "Compressed: 14 → 12 messages" },
+    }));
+    const res = await post({ sessionId: SESSION });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("The summary left this conversation no shorter (~64923 → ~66743 tokens).");
+  });
+
   it("answers 503 when the dashboard could not be reached, and 400 for anything but a session id", async () => {
     vi.mocked(runHermesSlashCommand).mockResolvedValue(null);
     expect((await post({ sessionId: SESSION })).status).toBe(503);
