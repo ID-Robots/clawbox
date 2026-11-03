@@ -327,14 +327,6 @@ const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border:
 // into a mascot bag that must be in the UI locale. The server deletes the
 // legacy KV key on first read.
 
-/** The floating popup's live rect, in viewport coordinates. */
-export interface ChatFloatingRect {
-  left: number
-  top: number
-  right: number
-  bottom: number
-}
-
 interface ChatPopupProps {
   isOpen: boolean
   onClose: () => void
@@ -364,34 +356,18 @@ interface ChatPopupProps {
    * overlapping it — and stays at `DESKTOP_LAYERS.chat`.
    */
   floatingZIndex?: number
-  /** Any pointer press inside the chat, so the desktop can put it back on top. */
-  onFocus?: () => void
   /**
-   * The floating popup's rect whenever it moves, and `null` while the chat is
-   * closed, docked or full-screen — for the surfaces that have to keep clear of
-   * it (the top-right notice column).
+   * Any pointer press inside the chat, so the desktop can put it back on top —
+   * of the windows, and of the top-right bubbles, which stand in the corner
+   * the chat docks to and overlap it rather than step aside
+   * (src/lib/notice-layer.ts).
    */
-  onFloatingRectChange?: (rect: ChatFloatingRect | null) => void
+  onFocus?: () => void
   mascotX?: number
   mobile?: boolean
   trayMode?: boolean
 }
 
-/**
- * How far LEFT the desktop's top-right notice column has to move to clear the
- * FLOATING chat, on top of its own `margin`.
- *
- * The docked half of this answer is a number the desktop already has — the
- * panel's width plus the gap it floats in — and the notices use it so a card
- * lands beside the panel instead of over its tab row and its +, dock and close
- * buttons. The floating popup had no such answer: the cards are fixed to the
- * top-right corner and the chat is often standing in it, so for the 30s before
- * a card hides itself the chat's header controls were unreachable.
- *
- * Returns 0 when the chat is nowhere near the column, and never shifts the
- * column off the screen: on a desktop too narrow for both, the cards move as
- * far as they can and no further.
- */
 /**
  * Whether this box has any voice to speak WITH, from the tts route's answer.
  *
@@ -427,22 +403,6 @@ export function speechEngineAvailable(engines: unknown): boolean | null {
   const configured = engines.map(engine => (engine as { configured?: unknown } | null)?.configured)
   if (configured.some(value => value === true)) return true
   return configured.every(value => value === false) ? false : null
-}
-
-export function noticeColumnInset(
-  rect: { left: number; right: number } | null,
-  viewportWidth: number,
-  columnWidth: number,
-  margin: number,
-): number {
-  if (!rect) return 0
-  const columnLeft = viewportWidth - margin - columnWidth
-  if (rect.right <= columnLeft) return 0
-  // The column's right edge lands `margin` clear of the chat's left edge; the
-  // caller adds its own margin back, so what it needs is the difference.
-  const clear = viewportWidth - rect.left
-  const maxInset = viewportWidth - columnWidth - margin * 2
-  return Math.max(0, Math.min(clear, maxInset))
 }
 
 // `system`-role messages render as colored pill banners; `variant` picks
@@ -923,21 +883,6 @@ function placeFloating(el: HTMLElement, at: { x: number; y: number }, size?: { w
   }
 }
 
-/** `fn` at most once per animation frame, for as long as moves keep asking. */
-function frameThrottled(fn: () => void): { schedule: () => void; cancel: () => void } {
-  let frame: number | null = null
-  return {
-    schedule: () => {
-      if (frame !== null) return
-      frame = requestAnimationFrame(() => { frame = null; fn() })
-    },
-    cancel: () => {
-      if (frame !== null) cancelAnimationFrame(frame)
-      frame = null
-    },
-  }
-}
-
 const subscribeViewport = (onChange: () => void) => {
   window.addEventListener('resize', onChange)
   return () => window.removeEventListener('resize', onChange)
@@ -1066,7 +1011,7 @@ function shownCodingCardIds(transcript: HTMLElement | null): string[] {
   return Array.from(transcript.querySelectorAll(CODING_CARD_SELECTOR), el => el.getAttribute('data-run-id') ?? '')
 }
 
-function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
@@ -1892,48 +1837,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     }
   }, [isOpen, panelMode, panelWidth, mobile, onPanelModeChange])
 
-  // What the floating popup covers, for the desktop surfaces that must keep
-  // clear of it. Reported only while the desktop is listening (it passes no
-  // callback unless a notice is actually on screen), because `pos`/`size` move
-  // on every pointer event of a drag and each report is a desktop re-render.
-  const reportedRectRef = useRef<string | null>(null)
-  // The reporter below while the desktop is listening, for the drag and the
-  // resize: they move the popup without a render (see `placeFloating`), so
-  // the effect's own `pos`/`size` dependency no longer fires on every move and
-  // they call this instead — once a frame — so the notices still step aside
-  // live, exactly as they did.
-  const liveRectReportRef = useRef<(() => void) | null>(null)
-  useEffect(() => {
-    if (!onFloatingRectChange) return
-    if (!isOpen || panelMode || mobile) {
-      if (reportedRectRef.current !== null) {
-        reportedRectRef.current = null
-        onFloatingRectChange(null)
-      }
-      return
-    }
-    const report = () => {
-      const el = popupRef.current
-      if (!el) return
-      const r = el.getBoundingClientRect()
-      const key = `${r.left}|${r.top}|${r.right}|${r.bottom}`
-      if (key === reportedRectRef.current) return
-      reportedRectRef.current = key
-      onFloatingRectChange({ left: r.left, top: r.top, right: r.right, bottom: r.bottom })
-    }
-    report()
-    liveRectReportRef.current = report
-    window.addEventListener('resize', report)
-    return () => {
-      if (liveRectReportRef.current === report) liveRectReportRef.current = null
-      window.removeEventListener('resize', report)
-    }
-    // `viewport`: a resize MOVES the popup that hangs above the mascot, but in
-    // the render after the event — the listener above measures it where it
-    // stood — so the rect is told again once the move has landed, or the
-    // notices would keep dodging the place it left.
-  }, [isOpen, panelMode, mobile, pos, size, visible, onFloatingRectChange, viewport.w, viewport.h])
-
   // The width the panel was docked at before Undock, so Dock to right puts it
   // back rather than at the default: a brief undock used to cost a resized
   // panel its size — 858 became 420, and 420 is what was then persisted (the
@@ -2022,7 +1925,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // not free: after a commit React may still run this whole component once
     // before it notices the state did not move.
     let shownTarget: SnapTarget | null = null
-    const report = frameThrottled(() => liveRectReportRef.current?.())
     const onMove = (ev: PointerEvent) => {
       const d = dragRef.current
       if (!d) return
@@ -2053,16 +1955,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         shownTarget = target
         setSnapPreview(target)
       }
-      report.schedule()
     }
     // Both ends of the drag — the drop and a cancel — take the gesture down
-    // the same way: its listeners, the pending rect report and the snap plate.
+    // the same way: its listeners and the snap plate.
     const detach = () => {
       dragRef.current = null
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
-      report.cancel()
       if (shownTarget) setSnapPreview(null)
     }
     const onUp = (ev: PointerEvent) => {
@@ -2121,7 +2021,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
     const start = { x: clientX, y: clientY, w: rect.width, h: rect.height, left: rect.left, top: rect.top }
-    const report = frameThrottled(() => liveRectReportRef.current?.())
     // The rect the moves last wrote, committed on release. Declared before
     // the move handler that assigns it, so the closure never reaches into
     // its temporal dead zone however the handlers come to be wired.
@@ -2150,7 +2049,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // whole popup for every pointer event of the resize.
       last = { x: newX, y: newY, w: newW, h: newH }
       placeFloating(el, { x: newX, y: newY }, { w: newW, h: newH })
-      report.schedule()
     }
     // The release, and a touch the system CANCELLED: a resize has no snap to
     // leave out, so a cancel ends it exactly as letting go there would — at
@@ -2163,7 +2061,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       window.removeEventListener('touchmove', onMove)
       window.removeEventListener('touchend', onUp)
       window.removeEventListener('touchcancel', onUp)
-      report.cancel()
       // The size the owner let go at is the one to remember — once per
       // resize, not once per pointer move.
       if (last) {

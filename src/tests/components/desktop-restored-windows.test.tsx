@@ -14,7 +14,7 @@ import { snapshotDesktop, type DesktopState } from "@/lib/desktop-state";
 // the one the device holds.
 
 vi.mock("@/components/Mascot", () => ({ default: () => null }));
-vi.mock("@/components/ChatPopup", () => ({ default: () => null, CHAT_PANEL_GAP: 12, noticeColumnInset: () => 0 }));
+vi.mock("@/components/ChatPopup", () => ({ default: () => null, CHAT_PANEL_GAP: 12 }));
 vi.mock("@/components/TimezoneAdopter", () => ({ default: () => null }));
 vi.mock("@/components/FilesApp", () => ({ default: () => <div data-testid="files-app-stub" /> }));
 vi.mock("@/components/SettingsApp", () => ({ default: () => <div data-testid="settings-app-stub" /> }));

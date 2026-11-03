@@ -177,23 +177,6 @@ describe("dragging the floating chat", () => {
     expect(Number.parseFloat(popup.style.width)).toBeGreaterThanOrEqual(VIEWPORT.w / 2);
   });
 
-  it("keeps the desktop's notices out of its way while it moves, once a frame", async () => {
-    const onFloatingRectChange = vi.fn();
-    render(<ChatPopup isOpen onClose={() => {}} onFloatingRectChange={onFloatingRectChange} />);
-    const popup = await screen.findByTestId("chat-popup");
-    await waitFor(() => expect(popup.style.opacity).toBe("1"));
-    followStyleRect(popup);
-    const start = popup.getBoundingClientRect();
-
-    fireEvent.pointerDown(screen.getByTestId("chat-header"), { clientX: 500, clientY: 300 });
-    fireEvent.pointerMove(window, { clientX: 460, clientY: 270 });
-
-    // Mid-gesture: nothing has been committed, and the desktop already knows.
-    await waitFor(() => expect(onFloatingRectChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ left: start.left - 40, top: start.top - 30 }),
-    ));
-    fireEvent.pointerUp(window, { clientX: 460, clientY: 270 });
-  });
 });
 
 describe("resizing the floating chat", () => {

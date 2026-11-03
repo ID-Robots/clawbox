@@ -1,13 +1,10 @@
 "use client";
 
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyActionLabel, parseNotifyAction, type NotifyAction } from "@/lib/notify-action";
 import { dispatchOpenSettingsSection } from "@/lib/ui-events";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
-import { DESKTOP_LAYERS } from "@/lib/window-snap";
-import { mainInsets } from "@/lib/desktop-screens";
-import { useDeskScreens } from "@/lib/use-desk-screens";
 
 /**
  * The desktop's toast surface.
@@ -31,6 +28,13 @@ import { useDeskScreens } from "@/lib/use-desk-screens";
  * The destination is an allowlisted pair (src/lib/notify-action.ts), checked
  * again here: the same ring carries agent-written notices, and a toast that
  * can be clicked must never take the owner somewhere the assistant chose.
+ *
+ * WHERE: in the desktop's top-right notice column, under its cards — one
+ * place for every bubble, which neither the chat nor anything else moves, and
+ * one place in the stacking order (src/lib/notice-layer.ts). The column places
+ * this list; it used to stand on its own in the bottom-right corner, over the
+ * docked chat's composer and, on a phone, over the full-screen chat's input.
+ * A toast arriving raises the column (`onArrive`), like any new bubble.
  */
 
 export const TOAST_EVENT = "clawbox:toast";
@@ -47,9 +51,6 @@ const TOAST_MS = 8_000;
 const ACTIONABLE_TOAST_MS = NOTICE_AUTO_HIDE_MS;
 const MAX_TOASTS = 4;
 const MAX_CHARS = 280;
-/** `bottom-20` and `right-4`: where the stack stands from the screen's corner. */
-const TOAST_BOTTOM_PX = 80;
-const TOAST_RIGHT_PX = 16;
 
 interface Toast {
   id: number;
@@ -77,14 +78,14 @@ function openNotifyAction(action: NotifyAction): void {
   }
 }
 
-function ToastHost() {
+function ToastHost({ onArrive }: { onArrive?: () => void }) {
   const { t } = useT();
   const [toasts, setToasts] = useState<Toast[]>([]);
-  // Over a row of monitors the stack stands in the MAIN monitor's corner,
-  // with the shelf and the notice cards — the viewport's corner is another
-  // monitor's, or page no monitor shows below a shorter one. No layout: the
-  // classes alone, exactly as before.
-  const deskScreens = useDeskScreens();
+  // Read at the event rather than subscribed with: the listener stays put.
+  const onArriveRef = useRef(onArrive);
+  useLayoutEffect(() => {
+    onArriveRef.current = onArrive;
+  }, [onArrive]);
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
@@ -105,6 +106,7 @@ function ToastHost() {
         setToasts((prev) => prev.filter((toast) => toast.id !== id));
       }, action ? ACTIONABLE_TOAST_MS : TOAST_MS);
       timers.add(timer);
+      onArriveRef.current?.();
     };
     window.addEventListener(TOAST_EVENT, handler);
     return () => {
@@ -114,14 +116,9 @@ function ToastHost() {
   }, []);
 
   if (toasts.length === 0) return null;
-  const ins = deskScreens ? mainInsets() : null;
 
   return (
-    <div
-      className="pointer-events-none fixed bottom-20 right-4 flex w-[340px] max-w-[calc(100vw-2rem)] flex-col gap-2"
-      style={{ zIndex: DESKTOP_LAYERS.menu, ...(ins ? { right: TOAST_RIGHT_PX + ins.right, bottom: TOAST_BOTTOM_PX + ins.bottom } : {}) }}
-      data-testid="toast-host"
-    >
+    <div className="flex flex-col gap-3" data-testid="toast-host">
       {toasts.map((toast) => {
         const action = toast.action;
         const body = (
@@ -142,7 +139,7 @@ function ToastHost() {
             key={toast.id}
             role="status"
             aria-live="polite"
-            className="pointer-events-auto flex items-start rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl animate-in slide-in-from-bottom-2 fade-in duration-300"
+            className="pointer-events-auto flex items-start rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl animate-in slide-in-from-top-2 fade-in duration-300"
           >
             {action ? (
               <button
@@ -180,7 +177,7 @@ function ToastHost() {
   );
 }
 
-// Memoized: it takes no props and learns of a toast through its window event,
-// so a desktop render — of which there are many, on a page that is on screen
-// all day — has nothing to tell it.
+// Memoized: its one prop is the desktop's stable raise and it learns of a
+// toast through its window event, so a desktop render — of which there are
+// many, on a page that is on screen all day — has nothing to tell it.
 export default memo(ToastHost);

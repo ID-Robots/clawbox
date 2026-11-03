@@ -48,6 +48,24 @@ function raise(id: string) {
   emit();
 }
 
+/**
+ * Every press on a pop-out, and every opening: the desktop's top-right notice
+ * column steps behind the window the owner reached for (src/lib/notice-layer.ts).
+ * Told even when the window is already the front one — the column may not be.
+ */
+const pressListeners = new Set<() => void>();
+export function onPopoutPress(listener: () => void): () => void {
+  pressListeners.add(listener);
+  return () => {
+    pressListeners.delete(listener);
+  };
+}
+
+function press(id: string) {
+  raise(id);
+  pressListeners.forEach((l) => l());
+}
+
 function drop(id: string) {
   if (!stack.includes(id)) return;
   stack = stack.filter((s) => s !== id);
@@ -93,7 +111,7 @@ export default function PopoutWindow({ title, appId, defaultWidth = 760, default
 
   // Opened in front, in the commit that draws it; forgotten on close.
   useLayoutEffect(() => {
-    raise(id);
+    press(id);
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
       if (stack[stack.length - 1] !== id) return;
@@ -134,7 +152,7 @@ export default function PopoutWindow({ title, appId, defaultWidth = 760, default
   const index = order.indexOf(id);
   const zIndex = Math.min(DESKTOP_LAYERS.popout + Math.max(0, index), MAX_POPOUT_Z);
   const isActive = index !== -1 && index === order.length - 1;
-  const focus = useCallback(() => raise(id), [id]);
+  const focus = useCallback(() => press(id), [id]);
 
   if (typeof document === "undefined") return null;
   return createPortal(

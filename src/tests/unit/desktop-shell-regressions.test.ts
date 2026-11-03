@@ -147,29 +147,25 @@ describe("installed app icons", () => {
 });
 
 describe("the top-right notices", () => {
-  it("stack beside the chat rather than over its header", () => {
-    // Both are anchored to the top-right corner, and the card covered the
-    // chat's tab row and its +, dock and close buttons for the 30 s it takes
-    // to hide itself.
-    expect(src).toMatch(/right: NOTICE_MARGIN \+ noticeRightInset/);
-    // The docked half is the strip the panel already reserves…
-    expect(src).toMatch(/const noticeRightInset = chatPanelInset > 0/);
-    // …and the floating half is the popup's own rect, which lands in the very
-    // corner the cards do and had no way of being dodged at all.
-    expect(src).toMatch(/noticeColumnInset\(chatFloatingRect, /);
+  it("stand in the corner whatever the chat does, and take turns with it in the stacking order", () => {
+    // They used to step aside — beside the docked panel, left of the floating
+    // popup — and so jumped every time the chat was opened, docked, resized
+    // or dragged (TASK-2129). Nothing about the chat is in their place now.
+    expect(src).not.toMatch(/noticeRightInset|noticeColumnInset|chatFloatingRect/);
+    expect(src).toMatch(/right: NOTICE_MARGIN \+ mainIns\.right,/);
+    // Whether they or the chat are seen is the focus order's business.
+    expect(src).toMatch(/zIndex: noticeZIndex,/);
+    expect(src).toMatch(/const noticeZIndex = noticeLayerZIndex\(\{/);
   });
 
-  it("measure the column against the width the markup actually draws", () => {
-    // A card that dodges by a number the markup does not use is a card that
-    // still lands on the chat's buttons.
-    expect(src).toMatch(/const NOTICE_COLUMN_WIDTH = 320;/);
+  it("keep one margin from the corner, and the column the markup draws", () => {
     expect(src).toMatch(/const NOTICE_MARGIN = 16;/);
-    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed flex w-\[320px\] flex-col gap-3"/);
+    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed flex w-\[320px\] max-w-\[calc\(100vw-2rem\)\] flex-col gap-3"/);
     // The column's top is the same margin, below the laptop's kiosk bar while
     // that bar is up (0 everywhere else), and on the main monitor's own top
     // over a row of monitors (0 everywhere else).
-    expect(src).toMatch(/top: NOTICE_MARGIN \+ kioskBarInset \+ mainIns\.top \}/);
-    expect(src).toMatch(/right: NOTICE_MARGIN \+ noticeRightInset \+ mainIns\.right,/);
+    expect(src).toMatch(/const noticeTop = NOTICE_MARGIN \+ kioskBarInset \+ mainIns\.top;/);
+    expect(src).toMatch(/top: noticeTop,/);
   });
 
   it("stand exactly where they always did without a monitor layout", () => {
@@ -180,10 +176,10 @@ describe("the top-right notices", () => {
     expect(src).toMatch(/const mainRect = deskScreens \? mainScreen\(\) : null;/);
   });
 
-  it("ask the chat where it is standing only while a card is up", () => {
-    // The popup reports its rect on every pointer move of a drag; nothing is
-    // dodging it the rest of the time.
-    expect(src).toMatch(/onFloatingRectChange=\{noticesUp \? handleChatFloatingRect : undefined\}/);
+  it("never ask the chat where it is standing", () => {
+    // The popup used to report its rect on every pointer move of a drag so the
+    // cards could dodge it; nothing dodges it now.
+    expect(src).not.toMatch(/onFloatingRectChange/);
   });
 });
 
@@ -201,7 +197,9 @@ describe("the floating chat's place among the windows", () => {
 
   it("comes back to the front when it is opened or pressed", () => {
     expect(src).toMatch(/onFocus=\{raiseChat\}/);
-    expect(src).toMatch(/if \(chatOpen\) raiseChat\(\);/);
+    // Opening it raises it over the windows — and the bubbles back over it,
+    // when they were on top: they stay over the chat until it is pressed.
+    expect(src).toMatch(/if \(!chatOpen\) return;\s+const bubblesWereOnTop = noticesOnTop\(\) && [^;]+;\s+raiseChat\(\);\s+if \(bubblesWereOnTop\) raiseNotices\(\);/);
     // …and when the shelf's chat button is pressed on a chat that is already
     // open: `setChatOpen(true)` is a no-op there, so without this the button is
     // dead on a chat a window is covering.
