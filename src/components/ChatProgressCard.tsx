@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { boxNowMs } from "@/lib/box-clock";
 import {
   PROGRESS_CARD_COLLAPSED_KEY,
   progressCardAge,
@@ -87,7 +88,8 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   const { t, locale } = useT();
   const bodyId = useId();
   const [collapsed, setCollapsed] = useState(() => readProgressCardCollapsed());
-  const [now, setNow] = useState(() => Date.now());
+  // The box's clock: the agent on the box stamped `updatedAt`.
+  const [now, setNow] = useState(() => boxNowMs());
 
   // A second chat surface (the popup and the full page in two tabs) folding the card folds this one.
   useEffect(() => {
@@ -102,7 +104,7 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   // revision re-reads the clock at once so it never says "5m ago" for a write
   // that just landed.
   useEffect(() => {
-    const tick = () => setNow(Date.now());
+    const tick = () => setNow(boxNowMs());
     const first = window.setTimeout(tick, 0);
     const timer = window.setInterval(tick, AGE_TICK_MS);
     return () => {

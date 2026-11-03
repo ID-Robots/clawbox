@@ -10,6 +10,7 @@ import {
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
+import { boxNowMs } from "@/lib/box-clock";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
 import ClawKeepWizard from "./ClawKeepWizard";
 import { PairChallengeCard, type PairStartResponse } from "./ClawKeepPairChallengeCard";
@@ -370,9 +371,14 @@ export default function ClawKeepApp() {
   // only from new data would freeze. Seeded with the current time so a lapsed
   // box never flashes green on first paint. A minute is finer than anything it
   // decides (a 36 h window, a 1 h run cap) and coarse enough to cost nothing.
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  // It is the BOX's clock (`boxNowMs`, learned from the status answers' `Date`
+  // header): every time judged here was written by the box, and a browser a
+  // few seconds behind it called the backup that had just finished "in the
+  // future". Every answer drawn re-reads it too (`take`), so a backup that
+  // finished since the last tick is not measured against a minute-old "now".
+  const [nowMs, setNowMs] = useState(() => boxNowMs());
   useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    const id = window.setInterval(() => setNowMs(boxNowMs()), 60_000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -397,6 +403,7 @@ export default function ClawKeepApp() {
     shownSeq.current = seq;
     if (next) {
       setStatus(next);
+      setNowMs(boxNowMs());
       setError(null);
     } else {
       setError(failure);
@@ -434,7 +441,7 @@ export default function ClawKeepApp() {
     // Reads the clock directly rather than `nowMs`: this is an effect, not a
     // render, and taking `nowMs` as a dependency would tear the poll down and
     // re-arm it every minute.
-    const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
+    const intervalMs = isBackupRunning(status, boxNowMs()) ? 3000 : 10000;
     const hidden = () => document.visibilityState === "hidden";
     let missed = false;
     const look = () => {
@@ -1245,9 +1252,11 @@ function BackupProgressPanel({
   // reads at render time — the React compiler rule that flags those is on).
   // It's the only thing the panel uses time for: deriving the upload MB/s
   // line. The visible elapsed-time clock was removed at the user's request.
+  // The box's clock, as `uploadStartedAtMs` is: on the browser's, a viewer
+  // behind the box saw an upload that had "not started yet" and a rate to match.
   const [nowMs, setNowMs] = useState(0);
   useEffect(() => {
-    const tick = () => setNowMs(Date.now());
+    const tick = () => setNowMs(boxNowMs());
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);

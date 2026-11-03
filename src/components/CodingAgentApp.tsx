@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
+import { boxNowMs, fetchFromBox } from "@/lib/box-clock";
 import { readCodingStarts, runRecordStartStep, START_POLL_MS, teamStartStep, type CodingStartView } from "@/lib/coding-start-phase";
 import { samePlainData } from "@/lib/same-plain-data";
 import { holdsResumableSession, isHeld, isLive, isSettled, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
@@ -302,7 +303,7 @@ const CONFIRM_MS = 5_000;
 
 /** Elapsed time, readable at every scale a run can reach — seconds to days. */
 function duration(run: Run): string {
-  const total = Math.max(0, Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000));
+  const total = Math.max(0, Math.round(((run.completedAt ?? boxNowMs()) - run.startedAt) / 1000));
   if (total < 60) return `${total}s`;
   const d = Math.floor(total / 86400);
   const h = Math.floor((total % 86400) / 3600);
@@ -746,7 +747,9 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
     // from its mount read; a settled run's text never changes, and sending
     // it every 5 s was most of a 337 KB tick. The other callers read whole,
     // which is also what fills a run that settled between two ticks.
-    const runs = read("runs", () => fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1${tick ? "&slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
+    // Through `fetchFromBox`: the box's clock, read off this answer, is what
+    // the "started 5m ago" labels below measure against.
+    const runs = read("runs", () => fetchFromBox(`/setup-api/coding-agent/runs?limit=30&artifacts=1${tick ? "&slim=1" : ""}`, { cache: "no-store" }).then(async (r) => {
       if (!r.ok) return;
       const data = await r.json() as { runs?: Run[]; starting?: unknown };
       const next = Array.isArray(data.runs) ? data.runs : [];
@@ -932,13 +935,17 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // edge sets it at once. The live poll's reads above wait there likewise,
   // and for the same reason need no exemption: the visible edge re-reads all
   // four, and nothing they bring acts on the screen while it is away.
-  const [now, setNow] = useState(() => Date.now());
+  //
+  // The box's clock (`boxNowMs`): every time measured against it — a run's
+  // start, a team's, a start request's — the box wrote, and a browser a few
+  // seconds behind it would hold a fresh run's clock at 0 s and its bar back.
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     // A start on its way ticks by the second too: Now's "Starting…" row shows its clock.
     const every = anyLive || anyStarting ? NOW_LIVE_TICK_MS : NOW_IDLE_TICK_MS;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      if (id === null) id = setInterval(() => setNow(Date.now()), every);
+      if (id === null) id = setInterval(() => setNow(boxNowMs()), every);
     };
     const stop = () => {
       if (id !== null) clearInterval(id);
@@ -949,7 +956,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         stop();
         return;
       }
-      setNow(Date.now());
+      setNow(boxNowMs());
       start();
     };
     if (document.visibilityState !== "hidden") start();

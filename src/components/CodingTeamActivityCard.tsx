@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { TeamActivity } from "@/lib/use-coding-agent-activity";
+import { boxNowMs } from "@/lib/box-clock";
 import type { TeamStatus } from "@/lib/coding-team-status";
 import type { TeamStartStep } from "@/lib/coding-start-phase";
 import { isSettledTeamStatus } from "@/lib/coding-team-status";
@@ -129,11 +130,12 @@ export default function CodingTeamActivityCard(
 ) {
   const settled = isSettledTeamStatus(team.status);
   const live = !settled && team.status !== "queued";
-  // A queued team's clock runs too: it is time the owner is waiting.
-  const [now, setNow] = useState(() => Date.now());
+  // A queued team's clock runs too: it is time the owner is waiting. On the
+  // box's clock (`boxNowMs`), which stamped `startedAt`.
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     if (settled) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(boxNowMs()), 1000);
     return () => clearInterval(id);
   }, [settled]);
   const [expanded, setExpanded] = useState(false);

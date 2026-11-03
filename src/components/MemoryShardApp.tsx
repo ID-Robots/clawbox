@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { TIME_OF_DAY } from "@/lib/memory-shard-state";
+import { fetchFromBox } from "@/lib/box-clock";
 import { onMemoryShardChanged } from "@/lib/ui-events";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
@@ -231,7 +232,8 @@ function MemoryIndexCard({ initial, onError }: {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
     try {
-      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
+      // Through `fetchFromBox`, so the "Last run 5m ago" below reads the box's clock.
+      const body = await jsonOrError<unknown>(await fetchFromBox("/setup-api/clawkeep/memory"));
       // Anything that is not a memory status is ignored outright rather than
       // rendered. The panel keeps its last good reading, or stays on its
       // loading line, and the rest of the window is untouched.

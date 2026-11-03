@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react';
 import { useT } from '@/lib/i18n';
+import { boxNowMs } from '@/lib/box-clock';
 
 // Every user-facing string of the Hermes Skills store, resolved through `t()`.
 //
@@ -314,12 +315,13 @@ export function useCopy() {
       breadcrumbBrowse: t('skills.breadcrumbBrowse'),
       breadcrumbInstalled: t('skills.breadcrumbInstalled'),
 
-      /** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601). */
+      /** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601),
+       *  which the box wrote, so they are measured on its clock (`boxNowMs`). */
       relativeDate: (iso?: string): string | undefined => {
         if (!iso) return undefined;
         const parsed = Date.parse(iso);
         if (Number.isNaN(parsed)) return undefined;
-        const seconds = Math.round((Date.now() - parsed) / 1000);
+        const seconds = Math.round((boxNowMs() - parsed) / 1000);
         if (seconds < 60) return t('skills.relative.justNow');
         const minutes = Math.round(seconds / 60);
         if (minutes < 60) return t('skills.relative.minutes', { n: minutes });

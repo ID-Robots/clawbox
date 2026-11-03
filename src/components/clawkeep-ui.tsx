@@ -3,6 +3,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { boxAge, boxNowMs } from "@/lib/box-clock";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { CARD as KIT_CARD } from "./coding-agent-ui";
 
@@ -24,19 +25,22 @@ export const CARD = KIT_CARD;
 
 export type Translator = (key: string, params?: Record<string, string | number>) => string;
 
-/** `nowMs` lets a caller share the clock it already sampled, so a verdict and
- *  the "when" printed beside it cannot be drawn from two different reads. */
+/** How long ago the box wrote `ms`, measured on the box's clock (`boxNowMs`),
+ *  not the viewer's: a browser a few seconds behind the box called a backup
+ *  that had just finished "in the future". What is left of a skew — up to
+ *  `FUTURE_SKEW_TOLERANCE_MS` ahead — reads "just now" (`boxAge`).
+ *  `nowMs` lets a caller share the clock it already sampled (from
+ *  `boxNowMs()`), so a verdict and the "when" printed beside it cannot be
+ *  drawn from two different reads. */
 export function timeAgo(ms: number, t: Translator, nowMs?: number): string {
   if (!ms) return t("clawkeep.never");
-  const diff = (nowMs ?? Date.now()) - ms;
-  if (diff < 0) return t("clawkeep.inFuture");
-  const minutes = Math.floor(diff / 60_000);
-  const hours = Math.floor(diff / 3_600_000);
-  const days = Math.floor(diff / 86_400_000);
-  if (minutes < 1) return t("clawkeep.justNow");
-  if (minutes < 60) return t("clawkeep.minutesAgo", { count: minutes });
-  if (hours < 24) return t("clawkeep.hoursAgo", { count: hours });
-  return t("clawkeep.daysAgo", { count: days });
+  const age = boxAge(ms, nowMs ?? boxNowMs());
+  if (!age) return t("clawkeep.never");
+  if (age.unit === "ahead") return t("clawkeep.inFuture");
+  if (age.unit === "now") return t("clawkeep.justNow");
+  if (age.unit === "minutes") return t("clawkeep.minutesAgo", { count: age.n });
+  if (age.unit === "hours") return t("clawkeep.hoursAgo", { count: age.n });
+  return t("clawkeep.daysAgo", { count: age.n });
 }
 
 /** `locale` is the caller's UI locale (`useT().locale`): "24.1 GB" on a German
@@ -91,9 +95,11 @@ export const WEEKDAY_LABEL_KEYS = [
   "clawkeep.weekday.sat",
 ];
 
+/** How long until the box's next scheduled backup, which the box set on its
+ *  own clock — so measured on that clock (`boxNowMs`), as `timeAgo` is. */
 export function formatNextRun(ms: number, t: Translator): string {
   if (!ms) return "—";
-  const diff = ms - Date.now();
+  const diff = ms - boxNowMs();
   if (diff <= 0) return t("clawkeep.anyMoment");
   const totalMin = Math.round(diff / 60_000);
   const days = Math.floor(totalMin / (60 * 24));

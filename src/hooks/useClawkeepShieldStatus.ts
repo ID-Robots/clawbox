@@ -9,6 +9,7 @@ import {
   type ProtectionInput,
 } from "@/lib/clawkeep-protection";
 import { monotonicNow } from "@/lib/visible-interval";
+import { boxNowMs, fetchFromBox } from "@/lib/box-clock";
 
 /** How often the desktop asks the box how its backup is doing. Fast, because
  *  the shelf's progress pulse has to start and stop within a few seconds of a
@@ -86,7 +87,10 @@ function startStatusRequest(): Promise<ClawkeepStatusResult> {
   const promise = (async (): Promise<ClawkeepStatusResult> => {
     let answer: ClawkeepStatusAnswer;
     try {
-      const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
+      // Through `fetchFromBox`: the shield asks every 5 s on every desktop, so
+      // this is what keeps the page's reading of the box's clock current for
+      // every "x ago" it draws, not only ClawKeep's.
+      const res = await fetchFromBox("/setup-api/clawkeep", { cache: "no-store" });
       let body: unknown;
       let bodyError: unknown;
       let parsed = false;
@@ -251,7 +255,7 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      if (facts.current) publish(facts.current, Date.now());
+      if (facts.current) publish(facts.current, boxNowMs());
     }, AGE_MS);
     return () => window.clearInterval(id);
   }, [publish]);
@@ -312,7 +316,8 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
       // explicit `paired: false` counts — a response missing the field keeps
       // the old alert fallback rather than silencing a real overdue backup.
       const notPaired = data.paired === false;
-      const now = Date.now();
+      // The box's clock, which wrote every time judged here.
+      const now = boxNowMs();
       const input: ProtectionInput = {
         lastBackupAtMs: data.lastBackupAtMs ?? 0,
         lastHeartbeatAtMs: data.lastHeartbeatAtMs,

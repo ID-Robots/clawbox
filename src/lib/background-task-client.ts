@@ -7,6 +7,7 @@
  */
 import type { BackgroundTaskView } from "@/lib/background-tasks";
 import { readInstallStream, type InstallOutcome, type InstallProgress } from "@/lib/install-stream";
+import { fetchFromBox } from "@/lib/box-clock";
 
 export type { BackgroundTaskView } from "@/lib/background-tasks";
 
@@ -26,7 +27,9 @@ export function notifyBackgroundTaskStarted(taskId?: string): void {
 export async function fetchBackgroundTasks(filter: { kind?: string } = {}): Promise<BackgroundTaskView[] | null> {
   const query = filter.kind ? `?kind=${encodeURIComponent(filter.kind)}` : "";
   try {
-    const res = await fetch(`${BACKGROUND_TASKS_URL}${query}`, { cache: "no-store" });
+    // Through `fetchFromBox`: the corner card judges each task's `finishedAt`
+    // on the box's clock, read off this answer.
+    const res = await fetchFromBox(`${BACKGROUND_TASKS_URL}${query}`, { cache: "no-store" });
     if (!res.ok) return null;
     const body = (await res.json()) as { tasks?: unknown };
     return Array.isArray(body.tasks) ? (body.tasks as BackgroundTaskView[]) : null;

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { artifactUrl, type CodingAgentActivity, type CodingTodo } from "@/lib/use-coding-agent-activity";
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
+import { boxNowMs } from "@/lib/box-clock";
 import type { RunCardStartStep } from "@/lib/coding-start-phase";
 import { describeProgressLine, estimateRunProgress, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { taskTitle } from "@/lib/task-title";
@@ -405,10 +406,11 @@ export default function CodingAgentActivityPill(
   const startFailed = status === "failed" && run.announced === true;
   // A queued run's clock runs too: it is time the owner is waiting.
   const ticking = live || status === "queued";
-  const [now, setNow] = useState(() => Date.now());
+  // The box's clock (`boxNowMs`), which stamped `startedAt`.
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     if (!ticking) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(boxNowMs()), 1000);
     return () => clearInterval(id);
   }, [ticking]);
   const [expanded, setExpanded] = useState(false);

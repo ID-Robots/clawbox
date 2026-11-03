@@ -31,6 +31,7 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { useT } from "@/lib/i18n";
+import { boxNowMs } from "@/lib/box-clock";
 import { holdsResumableSession, isHeld, isLive } from "@/lib/coding-agent-status";
 import {
   AGENT_STATES,
@@ -287,12 +288,13 @@ function useRunRecord(runId: string | null, supplied: DiagramRun | undefined, re
   return { run: null, loading: true };
 }
 
-/** A clock that moves once a second while `on`, for the panel's elapsed time. */
+/** A clock that moves once a second while `on`, for the panel's elapsed time —
+ *  the box's (`boxNowMs`), which stamped every start it is measured from. */
 function useSecondTicker(on: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     if (!on) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(boxNowMs()), 1000);
     return () => clearInterval(id);
   }, [on]);
   return now;
