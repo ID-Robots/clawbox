@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { render, renderHook, screen, waitFor } from "@/tests/helpers/test-utils";
 import MemoryShardApp from "@/components/MemoryShardApp";
 import CodingAgentApp from "@/components/CodingAgentApp";
 import { I18nProvider } from "@/lib/i18n";
-import { _resetBoxClockForTests, boxClockOffsetMs } from "@/lib/box-clock";
+import { useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
+import { fetchBackgroundTasks } from "@/lib/background-task-client";
+import { _resetBoxClockForTests, boxClockOffsetMs, noteBoxClock } from "@/lib/box-clock";
 
 /**
  * TASK-2138: a window opened on its own page (/app/<id>) has no desktop
@@ -90,5 +92,45 @@ describe("the Coding Agent on its own page", () => {
     await waitFor(() => expect(boxClockOffsetMs()).toBeLessThan(-9 * MINUTE), { timeout: 10_000 });
     expect(boxClockOffsetMs()).toBeGreaterThan(-11 * MINUTE);
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith("/setup-api/coding-agent/status"))).toBe(true);
+  });
+});
+
+describe("the background tasks list", () => {
+  it("learns the box's clock from its answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => answer({ tasks: [] })));
+    expect(await fetchBackgroundTasks()).toEqual([]);
+    expect(boxClockOffsetMs()).toBeLessThan(-9 * MINUTE);
+    expect(boxClockOffsetMs()).toBeGreaterThan(-11 * MINUTE);
+  });
+});
+
+describe("the chat's coding runs poll", () => {
+  it("learns the box's clock from the runs answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => answer({ runs: [] })));
+    renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(boxClockOffsetMs()).toBeLessThan(-9 * MINUTE), { timeout: 10_000 });
+    expect(boxClockOffsetMs()).toBeGreaterThan(-11 * MINUTE);
+  });
+
+  it("holds the recent-runs window on the box's clock: a run the box finished a minute ago is this chat's", async () => {
+    // A desktop poll has already told the page the box's clock. On the
+    // browser's, ten minutes ahead, the window opened at box + 8 min and the
+    // run was dropped as old.
+    noteBoxClock(answer({}), Date.now(), Date.now());
+    const boxNow = Date.now() + BOX_LEAD_MS;
+    const run = {
+      id: "run-k3x9q2ab",
+      projectId: "timer",
+      task: "Build a countdown timer",
+      status: "completed",
+      startedAt: boxNow - MINUTE,
+      completedAt: boxNow - 30_000,
+      source: "agent",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) => (
+      String(input).includes("/coding-agent/runs") ? answer({ runs: [run] }) : answer({ teams: [] })
+    )));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs.map((r) => r.id)).toEqual(["run-k3x9q2ab"]), { timeout: 10_000 });
   });
 });

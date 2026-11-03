@@ -10,7 +10,8 @@
  * each answer's `Date` header says what the box's clock read while the request
  * was out. Until an answer has been seen the offset is zero — the browser's
  * clock, as before. The polls are named (the desktop's notice poll, the
- * ClawKeep status poll, the Memory Shard and Coding Agent status reads), not
+ * ClawKeep status poll, the Memory Shard and Coding Agent status reads, the
+ * background tasks list and the chat's coding runs poll), not
  * every fetch the page makes: those are answered fresh every time, where an
  * answer the browser kept in its HTTP cache carries the Date it was first
  * sent with.

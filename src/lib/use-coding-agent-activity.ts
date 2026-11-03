@@ -5,6 +5,7 @@ import { isCodingRunStatus, parsePauseReason, type CodingPauseReason, type Codin
 import { onCodingRunStarted, onCodingTeamChanged } from "@/lib/ui-events";
 import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding-pr-state";
 import { samePlainData } from "@/lib/same-plain-data";
+import { boxNowMs, noteBoxClock } from "@/lib/box-clock";
 import { isSettledTeamStatus, TEAM_STATUSES, type TeamStatus } from "@/lib/coding-team-status";
 import type { TeamCard, TeamCardAgent, TeamCardTask } from "@/lib/coding-agent-slim";
 import { isTeamStartStep, readCodingStarts, runRecordStartStep, START_POLL_MS, type CodingStartView, type RunCardStartStep, type TeamStartStep } from "@/lib/coding-start-phase";
@@ -558,7 +559,10 @@ export function useCodingAgentActivity(active: boolean): {
       openedAtRef.current = 0;
       return;
     }
-    if (openedAtRef.current === 0) openedAtRef.current = Date.now();
+    // On the box's clock (src/lib/box-clock.ts): every `startedAt` /
+    // `requestedAt` the RECENT_MS window is held against below the box wrote,
+    // and a browser minutes off the box would move the window by as much.
+    if (openedAtRef.current === 0) openedAtRef.current = boxNowMs();
 
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -590,9 +594,13 @@ export function useCodingAgentActivity(active: boolean): {
         // together, one timer. The team list may be refused (403 to a
         // signed-in person who is not the owner — the team route is
         // owner-only); then the teams this chat holds are left as they are
-        // and the runs still come through.
+        // and the runs still come through. The runs' answer keeps the box's
+        // clock that the pill's run clocks read: the chat is not always beside
+        // a desktop whose own polls keep it.
+        const sentAt = Date.now();
         const [res, teamRes] = await Promise.all([
-          fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}&artifacts=1`, { cache: "no-store" }),
+          fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}&artifacts=1`, { cache: "no-store" })
+            .then((r) => { noteBoxClock(r, sentAt); return r; }),
           fetch("/setup-api/coding-agent/team?slim=1", { cache: "no-store" }).catch(() => null),
         ]);
         if (!res.ok) throw new Error("runs");
