@@ -227,6 +227,16 @@ interface AnthropicPoolBody {
     limitKind?: string | null;
     priority?: number;
     active?: boolean;
+    /** TASK-2141: model weeks spent on the account — only runs on those models wait. */
+    modelLimits?: { name?: string; until?: number }[];
+    /** TASK-2141: Anthropic's own percents (with `?usage=1`). */
+    usage?: {
+      sessionPercent?: number | null;
+      weeklyPercent?: number | null;
+      weeklyResetsAt?: number | null;
+      models?: { name?: string; percent?: number; resetsAt?: number | null; spent?: boolean }[];
+      extraUsage?: { enabled?: boolean; spendLimitReached?: boolean } | null;
+    } | null;
   }[];
   health?: { total?: number; healthy?: number; limited?: number; needsAttention?: number; allLimited?: boolean; nextResetAt?: number | null };
   /** TASK-1260: the most recent move of the box-wide active account. Labels and times only. */
@@ -261,6 +271,36 @@ function isoOrNull(at: unknown): string | null {
   return typeof at === "number" && Number.isFinite(at) ? new Date(at).toISOString() : null;
 }
 
+const pctOrNull = (v: unknown): string | null => (typeof v === "number" && Number.isFinite(v) ? `${Math.round(v)}%` : null);
+
+type PoolAccount = NonNullable<AnthropicPoolBody["accounts"]>[number];
+
+/**
+ * One account's usage as the agent is told it (TASK-2141): the session and the
+ * account's week, each ACTIVE model week, and the model weeks a run found
+ * spent — which keep only runs on THAT model off the account.
+ */
+function accountUsage(a: PoolAccount): Record<string, unknown> {
+  const u = a.usage ?? null;
+  const out: Record<string, unknown> = {};
+  const session = pctOrNull(u?.sessionPercent);
+  const week = pctOrNull(u?.weeklyPercent);
+  if (session) out.session_used = session;
+  if (week) out.week_used = week;
+  if (week && isoOrNull(u?.weeklyResetsAt)) out.week_resets = isoOrNull(u?.weeklyResetsAt);
+  const models = (u?.models ?? []).filter((m) => typeof m.name === "string" && pctOrNull(m.percent));
+  if (models.length > 0) {
+    out.model_weeks = models.map((m) => ({ model: m.name, used: pctOrNull(m.percent), ...(isoOrNull(m.resetsAt) ? { resets: isoOrNull(m.resetsAt) } : {}), ...(m.spent ? { full: true } : {}) }));
+  }
+  const waiting = (a.modelLimits ?? []).filter((l) => typeof l.name === "string" && isoOrNull(l.until));
+  if (waiting.length > 0) {
+    out.model_runs_waiting = waiting.map((l) => ({ model: l.name, until: isoOrNull(l.until) }));
+    out.note = "Only runs on these models wait; the account still answers every other model.";
+  }
+  if (u?.extraUsage?.spendLimitReached) out.monthly_spend_limit_reached = true;
+  return out;
+}
+
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "anthropic_accounts",
@@ -268,7 +308,8 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 3_000 },
     async () => {
-      const body = await apiGet<AnthropicPoolBody>("/setup-api/anthropic/accounts", { timeoutMs: 15_000 });
+      // `usage=1`: each Claude account's weekly percent and model weeks (TASK-2141).
+      const body = await apiGet<AnthropicPoolBody>("/setup-api/anthropic/accounts", { timeoutMs: 15_000, query: { usage: 1 } });
       const health = body.health ?? {};
       const accounts = (body.accounts ?? []).map((a) => ({
         priority: a.priority,
@@ -277,6 +318,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
         status: ACCOUNT_STATUS_NOUN[a.status ?? ""] ?? a.status,
         ...(a.status === "limited" && isoOrNull(a.limitedUntil) ? { back_at: isoOrNull(a.limitedUntil) } : {}),
         ...(a.active ? { in_use: true } : {}),
+        ...accountUsage(a),
       }));
       const nextReset = isoOrNull(health.nextResetAt);
       if (accounts.length === 0) {
