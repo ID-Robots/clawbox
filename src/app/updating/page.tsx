@@ -191,11 +191,16 @@ function UpdatingScreen() {
 
   const { headline, subhead } = runHeadline(status, run.state, tr);
 
+  // On a computer's screen a live or finished run fills it, top to bottom
+  // (TASK-2137): `data-update-screen` (the run's status) and the frame's `us-*`
+  // marks are what the run view's own CSS lays out (UPDATE_SCREEN_CSS). A
+  // phone scrolls the stacked view, and a stopped run keeps the window's layout.
   return (
-    <div className="h-dvh w-full overflow-y-auto bg-[var(--ground,#0a0f1a)] text-gray-200" data-testid="updating-screen">
-      <main className="min-h-full w-full flex items-start justify-center p-6 pt-8 bg-[var(--bg-deep,#111827)]">
-        <div className="w-full max-w-[1200px]">
+    <div className="h-dvh w-full overflow-y-auto bg-[var(--ground,#0a0f1a)] text-gray-200" data-testid="updating-screen" data-update-screen={status}>
+      <main className="us-page min-h-full w-full flex items-start justify-center p-6 pt-8 bg-[var(--bg-deep,#111827)]">
+        <div className="us-frame w-full max-w-[1200px]">
           <UpdateRunView
+            fill
             status={status}
             state={run.state}
             error={run.error}

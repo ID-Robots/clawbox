@@ -11,6 +11,7 @@ import {
   UpdateStepMeter,
 } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
+import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
 import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
 import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID, UPDATE_LOCK_HEADER } from "@/lib/update-constants";
 import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
@@ -93,6 +94,93 @@ const DOWN_AFTER_FAILURES = 3;
 
 /** A run on screen: live, finished, or stopped. */
 export type RunStatus = "updating" | "completed" | "failed";
+
+/** The full screen's steps column, and its page margin and column gap, at 1 px (UPDATE_SCREEN_CSS). */
+const SCREEN_STEPS_PX = 420;
+const SCREEN_GUTTER_PX = 24;
+
+/**
+ * Where /updating fills the screen it is on (TASK-2137): a computer's screen
+ * wide enough for the showcase beside the steps to draw its wide layout
+ * (SHOWCASE_NARROW_PX, 1196 px at 1 px), and taller than a phone held
+ * sideways. Narrower — a phone, a tablet held upright, a 1024 px window — the
+ * page keeps the window's layout and scrolls as before.
+ */
+export const UPDATE_SCREEN_MEDIA = `(min-width: ${SHOWCASE_NARROW_PX + SCREEN_STEPS_PX + 3 * SCREEN_GUTTER_PX}px) and (min-height: 501px)`;
+
+/**
+ * /updating on a computer's screen (TASK-2137): the run fills the window top
+ * to bottom — the header and version row, the steps beside the showcase taking
+ * all the height there is, "Don't power off" at the foot — instead of a
+ * 1200 px column with a band of nothing under it on a 16:9 screen. Each box
+ * down the page is a flex column (or the grid's `1fr` row) that takes the
+ * height left to it, never a height of its own.
+ *
+ * Every size is the 1280×720 design times `--update-px`: 1 px there, 1.5 px
+ * on 1920×1080, 2 px on 2560×1440 (whichever of width and height runs out
+ * first, from 1 px up to 3 px), so a big screen gets bigger type and a bigger
+ * picture rather than more empty space, and a live run on a 720 px screen
+ * still never scrolls. A finished run's column also holds Dismiss and the
+ * Agent card, about 200 px they keep at any scale, so its scale leaves them
+ * 220 px and the 1280×748 rest fits beside them — from about 970 px tall; on a
+ * shorter screen the 1 px floor keeps its text readable and the page scrolls
+ * (for the few seconds before the desktop comes back). The page marks its frame
+ * (`data-update-screen` with the run's status, `.us-page`, `.us-frame`); the
+ * run view marks its parts, and the showcase its own
+ * (`.wns-*`, its wide layout only). Unlayered CSS, so it wins over the utility
+ * classes the phone and window layouts keep; drawn only with the run on
+ * screen, so a stopped run keeps the window's layout. Below the media query
+ * none of it applies.
+ */
+const UPDATE_SCREEN_CSS = `
+@media ${UPDATE_SCREEN_MEDIA}{
+[data-update-screen]{--update-px:clamp(1px,min(.078125vw,.138889dvh),3px)}
+[data-update-screen="completed"]{--update-px:clamp(1px,min(.078125vw,calc((100dvh - 220px) / 748)),3px)}
+[data-update-screen] .us-page{flex-direction:column;align-items:center;padding:calc(20*var(--update-px)) calc(${SCREEN_GUTTER_PX}*var(--update-px)) calc(16*var(--update-px))}
+[data-update-screen] .us-frame{flex:1 1 auto;display:flex;flex-direction:column;max-width:calc(1440*var(--update-px))}
+[data-update-screen] .us-run{flex:1 1 auto;display:flex;flex-direction:column}
+[data-update-screen] .us-grid{flex:1 1 auto;grid-template-columns:minmax(0,calc(${SCREEN_STEPS_PX}*var(--update-px))) minmax(0,1fr);grid-template-rows:auto 1fr;column-gap:calc(${SCREEN_GUTTER_PX}*var(--update-px))}
+[data-update-screen] .us-head{display:flex;grid-column:1/-1;grid-row:1;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:calc(8*var(--update-px)) calc(32*var(--update-px))}
+[data-update-screen] .us-head>*{margin:0}
+[data-update-screen] .us-eyebrow{margin-bottom:calc(6*var(--update-px));font-size:calc(11.5*var(--update-px))}
+[data-update-screen] .us-title{font-size:calc(34*var(--update-px))}
+[data-update-screen] .us-lede{margin-top:calc(6*var(--update-px));font-size:calc(15.5*var(--update-px))}
+[data-update-screen] .us-versions{gap:calc(8*var(--update-px)) calc(16*var(--update-px));font-size:calc(13.5*var(--update-px))}
+[data-update-screen] .us-channel{max-width:calc(224*var(--update-px));padding:calc(4*var(--update-px)) calc(10*var(--update-px));font-size:calc(10.5*var(--update-px))}
+[data-update-screen] .us-side{grid-column:1;grid-row:2;margin-top:calc(16*var(--update-px));display:flex;flex-direction:column;gap:calc(14*var(--update-px))}
+[data-update-screen] .us-side>*{margin:0}
+[data-update-screen] .us-side li[data-tone]{gap:calc(8*var(--update-px));border-radius:calc(6*var(--update-px));padding:calc(8*var(--update-px)) calc(12*var(--update-px));font-size:calc(12*var(--update-px))}
+[data-update-screen] .us-side li[data-tone]:not(:last-child){margin-bottom:calc(8*var(--update-px))}
+[data-update-screen] .us-show{grid-column:2;grid-row:2;margin-top:calc(16*var(--update-px))}
+[data-update-screen] .us-steps{--t-2:calc(14*var(--update-px));flex:1 1 auto;display:flex;flex-direction:column;padding:calc(20*var(--update-px)) calc(22*var(--update-px))}
+[data-update-screen] .us-steps-head{gap:calc(12*var(--update-px));font-size:calc(12*var(--update-px))}
+[data-update-screen] .us-spin{width:calc(14*var(--update-px));height:calc(14*var(--update-px))}
+[data-update-screen] .us-meter{margin-top:calc(14*var(--update-px))}
+[data-update-screen] .us-meter [role=progressbar]{gap:calc(5*var(--update-px))}
+[data-update-screen] .us-meter [role=progressbar]>span{height:calc(6*var(--update-px))}
+[data-update-screen] .us-list{flex:1 1 auto;display:flex;flex-direction:column;margin-top:calc(14*var(--update-px))}
+[data-update-screen] .us-list>ol{flex:1 1 auto;display:flex;flex-direction:column}
+[data-update-screen] .us-list li{flex:1 1 auto;min-height:calc(32*var(--update-px));max-height:calc(54*var(--update-px));gap:calc(12*var(--update-px));padding-block:calc(3*var(--update-px))}
+[data-update-screen] .us-list li>span:first-child{width:calc(26*var(--update-px));height:calc(26*var(--update-px));font-size:calc(11*var(--update-px))}
+[data-update-screen] .us-list li>span:last-child,[data-update-screen] .us-list [data-testid=update-step-detail]{font-size:calc(11.5*var(--update-px))}
+[data-update-screen] .us-bar{bottom:calc(16*var(--update-px));margin-top:calc(14*var(--update-px));gap:calc(12*var(--update-px));border-radius:calc(10*var(--update-px));padding:calc(12*var(--update-px)) calc(20*var(--update-px));font-size:calc(13*var(--update-px))}
+[data-update-screen] .us-bar-note{margin-top:calc(2*var(--update-px));font-size:calc(11.5*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-logo{gap:calc(8*var(--update-px));padding:calc(20*var(--update-px)) calc(30*var(--update-px)) 0}
+[data-update-screen] .wns[data-layout="wide"] .wns-logo img{width:calc(28*var(--update-px));height:calc(28*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-logo span{font-size:calc(18*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-panel{grid-template-columns:minmax(0,calc(290*var(--update-px))) minmax(0,1fr);gap:calc(22*var(--update-px));padding:calc(14*var(--update-px)) calc(26*var(--update-px)) 0 calc(30*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-count{font-size:calc(12*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-title{min-height:calc(68*var(--update-px));margin:calc(14*var(--update-px)) 0 calc(10*var(--update-px));font-size:calc(30*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-caret{width:calc(3*var(--update-px));height:calc(28*var(--update-px));margin-left:calc(3*var(--update-px));vertical-align:calc(-4*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-body{font-size:calc(14*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-scene{align-self:stretch;container-type:size;display:flex;align-items:center;justify-content:center}
+[data-update-screen] .wns[data-layout="wide"] .wns-scr{width:min(100cqw,160cqh);font-size:calc(min(100cqw,160cqh)*.0115)}
+[data-update-screen] .wns[data-layout="wide"] .wns-chips{gap:calc(6*var(--update-px));padding:calc(18*var(--update-px)) calc(26*var(--update-px)) calc(16*var(--update-px)) calc(30*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"] .wns-chip{gap:calc(5*var(--update-px));padding:calc(4*var(--update-px)) calc(9*var(--update-px));font-size:calc(11*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"]+.wns-more{margin-top:calc(10*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"]+.wns-more a{font-size:calc(12.5*var(--update-px))}
+[data-update-screen] .wns[data-layout="wide"]+.wns-more svg{width:1em;height:1em}
+}`;
 
 /** The line across the bottom of a live or finished run: "don't power off", or what the screen around it has to say. */
 export interface RunNotice {
@@ -707,6 +795,7 @@ export function UpdateRunView({
   onDismiss,
   onResume,
   onOverrideDowngrade,
+  fill = false,
 }: {
   status: RunStatus;
   state: UpdateState | null;
@@ -731,6 +820,8 @@ export function UpdateRunView({
   onResume?: () => void;
   /** "Back up and update anyway", offered on a run refused for installing an older harness. */
   onOverrideDowngrade?: () => void;
+  /** /updating: a live or finished run fills a computer's screen (see UPDATE_SCREEN_CSS). */
+  fill?: boolean;
 }) {
   const tr = useTr();
   const SubHeading = Heading === "h1" ? "h2" : "h3";
@@ -775,26 +866,27 @@ export function UpdateRunView({
 
   const header = (
     <div className="min-w-0">
-      <p className="m-0 mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-orange-400">
+      <p className="us-eyebrow m-0 mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-orange-400">
         {tr("update.title", "System Update")}
       </p>
-      <Heading className="m-0 font-display text-[32px] font-bold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
+      <Heading className="us-title m-0 font-display text-[32px] font-bold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
         {headline}
       </Heading>
-      <p className="m-0 mt-2 text-[15px] leading-relaxed text-[var(--text-secondary)]">{lede}</p>
+      <p className="us-lede m-0 mt-2 text-[15px] leading-relaxed text-[var(--text-secondary)]">{lede}</p>
     </div>
   );
 
   const versionRow = (current || target) && (
     <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[13px] text-[var(--text-secondary)]"
+      className="us-versions flex flex-wrap items-center gap-x-4 gap-y-2 text-[13px] text-[var(--text-secondary)]"
       data-testid="update-run-versions"
     >
       <span>ClawBox</span>
       {current && <span className="font-mono">{current}</span>}
       {target && target !== current && (
         <>
-          {current && <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>arrow_forward</span>}
+          {/* 16 px beside the row's 13 px, and in step with it where /updating scales the row. */}
+          {current && <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: "calc(16em / 13)" }}>arrow_forward</span>}
           <span className="font-mono text-[var(--text-primary)]">{target}</span>
         </>
       )}
@@ -802,7 +894,7 @@ export function UpdateRunView({
         // A QA pin can be a long branch name: it is cut, never allowed to
         // push the row past a narrow window.
         <span
-          className="min-w-0 max-w-[14rem] truncate rounded-[var(--r-full)] border border-[var(--coral-edge)] bg-[var(--coral-wash)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-orange-400"
+          className="us-channel min-w-0 max-w-[14rem] truncate rounded-[var(--r-full)] border border-[var(--coral-edge)] bg-[var(--coral-wash)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-orange-400"
           title={shownChannel}
           data-testid="update-run-channel"
         >
@@ -824,14 +916,14 @@ export function UpdateRunView({
 
   const stepsPanel = (
     <section
-      className="rounded-[var(--r-2)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6"
+      className="us-steps rounded-[var(--r-2)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6"
       data-testid="update-steps-panel"
       data-offline={waiting ? "true" : undefined}
     >
-      <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
+      <div className="us-steps-head flex items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
         <span className="inline-flex min-w-0 items-center gap-2 font-medium text-[var(--text-primary)]">
           {(!state || waiting) && !failed && (
-            <span className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent motion-safe:animate-spin" aria-hidden="true" />
+            <span className="us-spin h-3.5 w-3.5 shrink-0 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent motion-safe:animate-spin" aria-hidden="true" />
           )}
           <span className="truncate">{countHeadline}</span>
         </span>
@@ -839,10 +931,10 @@ export function UpdateRunView({
       </div>
       {steps.length > 0 && (
         <>
-          <div className="mt-4">
+          <div className="us-meter mt-4">
             <UpdateStepMeter steps={steps} phase={phase} label={tr("update.title", "System Update")} />
           </div>
-          <div className="mt-[18px]">
+          <div className="us-list mt-[18px]">
             <UpdateStepList steps={listedSteps} phase={phase} />
           </div>
         </>
@@ -869,9 +961,10 @@ export function UpdateRunView({
                 : "border-amber-500/20 bg-amber-500/10 text-amber-100"
             }`}
           >
+            {/* 16 px beside the row's 12 px text, and in step with it where /updating scales the row. */}
             <span
               className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
-              style={{ fontSize: 16 }}
+              style={{ fontSize: "calc(16em / 12)" }}
             >
               {resolved ? "history" : "warning"}
             </span>
@@ -1033,41 +1126,68 @@ export function UpdateRunView({
         : null);
   const warn = bar?.tone === "warn";
 
+  const side = (
+    <>
+      {stepsPanel}
+      {warningList}
+      {status === "completed" && <div>{dismissButton}{dismissRefusal}</div>}
+      {agentVersions}
+    </>
+  );
+  const showcase = whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />;
+
   return (
-    <div className="@container w-full" data-testid="update-run" data-status={status}>
-      {/* Side by side in a window; a phone held sideways (under 501 px tall)
-          keeps the steps first and puts "What's new" under them, full width. */}
-      <div className="grid grid-cols-1 gap-8 @3xl:[@media(min-height:501px)]:grid-cols-[minmax(0,440px)_minmax(0,1fr)]" data-testid="update-run-grid">
-        <div className="min-w-0 space-y-[18px]">
-          {header}
-          {versionRow}
-          {stepsPanel}
-          {warningList}
-          {status === "completed" && <div>{dismissButton}{dismissRefusal}</div>}
-          {agentVersions}
-        </div>
-        <div className="min-w-0">
-          {whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />}
-        </div>
-      </div>
-      {/* While the run is live it is held to the bottom of the window as the
-          steps scroll under it: "don't power off" is the one line that must
-          stay in sight. A finished run's restart note sits in the flow, over
-          nothing. */}
-      {bar && (
-        <div
-          className={`${status === "updating" ? "sticky bottom-4 z-10 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]" : ""} mt-7 flex items-center gap-3 rounded-[10px] border ${warn ? "border-amber-500/40" : "border-[var(--border-subtle)]"} bg-[var(--bg-surface)] px-5 py-4 text-xs text-[var(--text-secondary)]`}
-          data-testid="update-run-notice"
-          data-tone={warn ? "warn" : undefined}
-          aria-live="polite"
-        >
-          <span className={`material-symbols-rounded shrink-0 ${warn ? "text-amber-300" : "text-orange-400"}`} aria-hidden="true" style={{ fontSize: 21 }}>{bar.icon}</span>
-          <div className="min-w-0">
-            <p className={`m-0 font-medium ${warn ? "text-amber-100" : "text-gray-300"}`}>{bar.title}</p>
-            {bar.note && <p className="m-0 mt-1 text-[11px]">{bar.note}</p>}
+    <>
+      {/* Beside the view, not in it: its text is the window's, word for word. */}
+      {fill && <style>{UPDATE_SCREEN_CSS}</style>}
+      <div className={`${fill ? "us-run " : ""}@container w-full`} data-testid="update-run" data-status={status} data-fill={fill ? "true" : undefined}>
+        {fill ? (
+          // The same view placed for a whole screen: the header and version row
+          // across the top, then the steps beside the showcase. Below
+          // UPDATE_SCREEN_MEDIA the row is not a box of its own (`contents`) and
+          // this lays out exactly as the window's grid below — a column on a
+          // phone, the header, versions and steps beside the showcase from
+          // 768 px — in the same reading order.
+          <div className="us-grid grid grid-cols-1 @3xl:[@media(min-height:501px)]:grid-cols-[minmax(0,440px)_minmax(0,1fr)] @3xl:[@media(min-height:501px)]:grid-rows-[auto_auto_1fr] @3xl:[@media(min-height:501px)]:gap-x-8" data-testid="update-run-grid">
+            <div className="us-head contents" data-testid="update-run-head">
+              <div className="min-w-0 @3xl:[@media(min-height:501px)]:col-start-1 @3xl:[@media(min-height:501px)]:row-start-1">{header}</div>
+              {versionRow && <div className="mt-[18px] min-w-0 @3xl:[@media(min-height:501px)]:col-start-1 @3xl:[@media(min-height:501px)]:row-start-2">{versionRow}</div>}
+            </div>
+            <div className="us-side mt-[18px] min-w-0 space-y-[18px] @3xl:[@media(min-height:501px)]:col-start-1 @3xl:[@media(min-height:501px)]:row-start-3">{side}</div>
+            <div className="us-show mt-8 min-w-0 @3xl:[@media(min-height:501px)]:col-start-2 @3xl:[@media(min-height:501px)]:row-span-3 @3xl:[@media(min-height:501px)]:row-start-1 @3xl:[@media(min-height:501px)]:mt-0">{showcase}</div>
           </div>
-        </div>
-      )}
-    </div>
+        ) : (
+          // Side by side in a window; a phone held sideways (under 501 px tall)
+          // keeps the steps first and puts "What's new" under them, full width.
+          <div className="grid grid-cols-1 gap-8 @3xl:[@media(min-height:501px)]:grid-cols-[minmax(0,440px)_minmax(0,1fr)]" data-testid="update-run-grid">
+            <div className="min-w-0 space-y-[18px]">
+              {header}
+              {versionRow}
+              {side}
+            </div>
+            <div className="min-w-0">{showcase}</div>
+          </div>
+        )}
+        {/* While the run is live it is held to the bottom of the window as the
+            steps scroll under it: "don't power off" is the one line that must
+            stay in sight. A finished run's restart note sits in the flow, over
+            nothing. */}
+        {bar && (
+          <div
+            className={`us-bar ${status === "updating" ? "sticky bottom-4 z-10 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]" : ""} mt-7 flex items-center gap-3 rounded-[10px] border ${warn ? "border-amber-500/40" : "border-[var(--border-subtle)]"} bg-[var(--bg-surface)] px-5 py-4 text-xs text-[var(--text-secondary)]`}
+            data-testid="update-run-notice"
+            data-tone={warn ? "warn" : undefined}
+            aria-live="polite"
+          >
+            {/* 21 px beside the bar's 12 px text, and in step with it where /updating scales the bar. */}
+            <span className={`material-symbols-rounded shrink-0 ${warn ? "text-amber-300" : "text-orange-400"}`} aria-hidden="true" style={{ fontSize: "1.75em" }}>{bar.icon}</span>
+            <div className="min-w-0">
+              <p className={`m-0 font-medium ${warn ? "text-amber-100" : "text-gray-300"}`}>{bar.title}</p>
+              {bar.note && <p className="us-bar-note m-0 mt-1 text-[11px]">{bar.note}</p>}
+            </div>
+          </div>
+        )}
+      </div>
+    </>
   );
 }

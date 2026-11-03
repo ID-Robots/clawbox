@@ -116,17 +116,19 @@ export function stepFailureReason(step: StepState): string | null {
  */
 function StepDisc({ status, number }: { status: StepStatus; number: number }) {
   const base = "grid place-items-center shrink-0 w-[23px] h-[23px] rounded-[var(--r-full)] font-mono text-[10px] leading-none";
+  // The glyph is 15 px on the disc's 10 px, and grows with the disc where
+  // /updating draws it larger.
   if (status === "completed") {
     return (
       <span className={`${base} bg-[var(--cyan-wash)] text-[var(--cyan-bright)]`} aria-hidden="true">
-        <span className="material-symbols-rounded" style={{ fontSize: 15 }}>check</span>
+        <span className="material-symbols-rounded" style={{ fontSize: "1.5em" }}>check</span>
       </span>
     );
   }
   if (status === "failed") {
     return (
       <span className={`${base} bg-red-500/20 text-red-300`} aria-hidden="true">
-        <span className="material-symbols-rounded" style={{ fontSize: 15 }}>close</span>
+        <span className="material-symbols-rounded" style={{ fontSize: "1.5em" }}>close</span>
       </span>
     );
   }

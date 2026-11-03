@@ -39,6 +39,8 @@ vi.mock("@/lib/i18n", async (importOriginal) => ({
 
 import UpdatingPage from "@/app/updating/page";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
+import { UPDATE_SCREEN_MEDIA } from "@/components/UpdateRunView";
+import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
 
 const LABELS: [string, string][] = [
   ["bootstrap_updater", "Refreshing updater scripts"],
@@ -462,5 +464,80 @@ describe("/updating draws the System Update run view", () => {
     expect(view.getByText(translations.de["update.notAnswering"])).toBeTruthy();
     expect(view.getByTestId("update-run-notice")).toHaveTextContent(translations.de["update.offlineHint"]);
     expect(document.body.textContent).not.toMatch(/\bupdate\.[a-zA-Z]/);
+  });
+});
+
+/**
+ * TASK-2137: on a computer's screen the run fills the window top to bottom —
+ * no band of nothing under a 1200 px column on a 16:9 screen — and a phone, a
+ * tablet held upright or a 1024 px window keeps the layout it had. jsdom lays
+ * nothing out, so these pin the contract the CSS keeps; the sizes themselves
+ * were measured in a real browser at 1280×720 up to 3840×2160.
+ */
+describe("/updating fills a computer's screen", () => {
+  /** The full-screen layout's CSS (UPDATE_SCREEN_CSS), wherever it is drawn. */
+  const screenStyle = () => [...document.querySelectorAll("style")].find((style) => style.textContent?.includes(".us-grid")) ?? null;
+
+  it("lays a live run out for the whole screen, and only where the showcase beside the steps is wide", async () => {
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(view.getByTestId("updating-screen")).toHaveAttribute("data-update-screen", "updating");
+    const run = view.getByTestId("update-run");
+    expect(run).toHaveAttribute("data-fill", "true");
+    const style = screenStyle();
+    expect(style).not.toBeNull();
+    // Beside the run view, never in it: the view's text stays the window's.
+    expect(run.contains(style)).toBe(false);
+
+    // Every rule is inside the one media query: below it nothing changes.
+    const css = style!.textContent!.trim();
+    expect(css.startsWith(`@media ${UPDATE_SCREEN_MEDIA}{`)).toBe(true);
+    let depth = 0;
+    let closed = -1;
+    for (let i = 0; i < css.length && closed < 0; i++) {
+      if (css[i] === "{") depth++;
+      if (css[i] === "}" && --depth === 0) closed = i;
+    }
+    expect(closed).toBe(css.length - 1);
+
+    // From its first width, the column the steps leave the showcase is wide
+    // enough for its wide layout (the one the full-screen rules size).
+    const minWidth = Number(/min-width: (\d+)px/.exec(UPDATE_SCREEN_MEDIA)?.[1]);
+    const margin = Number(/\.us-page\{[^}]*padding:calc\(\d+\*var\(--update-px\)\) calc\((\d+)\*/.exec(css)?.[1]);
+    const stepsColumn = Number(/\.us-grid\{[^}]*grid-template-columns:minmax\(0,calc\((\d+)\*/.exec(css)?.[1]);
+    const gap = Number(/\.us-grid\{[^}]*column-gap:calc\((\d+)\*/.exec(css)?.[1]);
+    expect(minWidth - 2 * margin - stepsColumn - gap).toBeGreaterThanOrEqual(SHOWCASE_NARROW_PX);
+    expect(UPDATE_SCREEN_MEDIA).toContain("(min-height: 501px)");
+  });
+
+  it("gives a finished run a scale of its own, with room for Dismiss and the Agent card", async () => {
+    stubBox(() => ({ body: COMPLETED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(view.getByTestId("updating-screen")).toHaveAttribute("data-update-screen", "completed");
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-fill", "true");
+    expect(screenStyle()?.textContent).toMatch(/\[data-update-screen="completed"\]\{--update-px:/);
+  });
+
+  it("keeps the window's layout for a stopped run", async () => {
+    stubBox(() => ({ body: FAILED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(view.getByTestId("updating-screen")).toHaveAttribute("data-update-screen", "failed");
+    expect(view.getByTestId("update-run")).not.toHaveAttribute("data-fill");
+    expect(screenStyle()).toBeNull();
+  });
+
+  it("never fills the System Update window", async () => {
+    stubBox(() => ({ body: RUNNING }));
+    const app = render(<SystemUpdateApp />);
+    await advance();
+
+    expect(app.getByTestId("update-run")).not.toHaveAttribute("data-fill");
+    expect(screenStyle()).toBeNull();
   });
 });
