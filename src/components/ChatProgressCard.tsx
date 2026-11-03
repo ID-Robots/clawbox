@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { boxNowMs, formatBoxTime } from "@/lib/box-clock";
 import {
   PROGRESS_CARD_COLLAPSED_KEY,
   progressCardAge,
@@ -87,7 +88,8 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   const { t, locale } = useT();
   const bodyId = useId();
   const [collapsed, setCollapsed] = useState(() => readProgressCardCollapsed());
-  const [now, setNow] = useState(() => Date.now());
+  // The box's clock (src/lib/box-clock.ts): the gateway stamped `updatedAt`.
+  const [now, setNow] = useState(() => boxNowMs());
 
   // A second chat surface (the popup and the full page in two tabs) folding the card folds this one.
   useEffect(() => {
@@ -102,7 +104,7 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   // revision re-reads the clock at once so it never says "5m ago" for a write
   // that just landed.
   useEffect(() => {
-    const tick = () => setNow(Date.now());
+    const tick = () => setNow(boxNowMs());
     const first = window.setTimeout(tick, 0);
     const timer = window.setInterval(tick, AGE_TICK_MS);
     return () => {
@@ -120,17 +122,20 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   if (blocks.length === 0 && card.steps.length === 0) return null;
 
   const age = progressCardAge(card.updatedAt, now);
+  const updatedIso = card.updatedAt !== null ? new Date(card.updatedAt).toISOString() : undefined;
+  const updatedFull = card.updatedAt !== null ? formatBoxTime(card.updatedAt, locale) : undefined;
+  // Far ahead of the box's clock there is no age to give: the time itself.
   const agoText = age === null
     ? null
-    : age.unit === "now"
-      ? t("chat.progressCard.justNow")
-      : age.unit === "minutes"
-        ? t("chat.progressCard.minutesAgo", { n: age.n })
-        : age.unit === "hours"
-          ? t("chat.progressCard.hoursAgo", { n: age.n })
-          : t("chat.progressCard.daysAgo", { n: age.n });
-  const updatedIso = card.updatedAt !== null ? new Date(card.updatedAt).toISOString() : undefined;
-  const updatedFull = card.updatedAt !== null ? formatLocalTime(card.updatedAt, locale) : undefined;
+    : age.unit === "ahead"
+      ? updatedFull ?? null
+      : age.unit === "now"
+        ? t("chat.progressCard.justNow")
+        : age.unit === "minutes"
+          ? t("chat.progressCard.minutesAgo", { n: age.n })
+          : age.unit === "hours"
+            ? t("chat.progressCard.hoursAgo", { n: age.n })
+            : t("chat.progressCard.daysAgo", { n: age.n });
 
   const toggle = () => {
     const next = !collapsed;
@@ -327,14 +332,6 @@ function firstLine(blocks: ProgressBlock[]): string | null {
     }
   }
   return null;
-}
-
-function formatLocalTime(ms: number, locale: string): string | undefined {
-  try {
-    return new Date(ms).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
-  } catch {
-    return undefined;
-  }
 }
 
 // ── The note ────────────────────────────────────────────────────────────────

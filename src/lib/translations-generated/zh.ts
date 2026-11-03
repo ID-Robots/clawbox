@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep 无法确认云存储的已用空间，因此本次备份未上传。之前的备份保持不变。请检查网络连接后重试。",
   "clawkeep.hoursAgo": "{count} 小时前",
   "clawkeep.inDays": "{days}天{hours}小时后",
-  "clawkeep.inFuture": "在未来",
   "clawkeep.inHours": "{hours}小时{mins}分钟后",
   "clawkeep.inMinutes": "{mins}分钟后",
   "clawkeep.justNow": "刚刚",

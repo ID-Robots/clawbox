@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep не успя да провери колко облачно пространство е заето, затова архивът не беше качен. Предишните резервни копия са непокътнати. Проверете интернет връзката и опитайте отново.",
   "clawkeep.hoursAgo": "преди {count} ч",
   "clawkeep.inDays": "след {days}д {hours}ч",
-  "clawkeep.inFuture": "в бъдеще",
   "clawkeep.inHours": "след {hours}ч {mins}мин",
   "clawkeep.inMinutes": "след {mins}мин",
   "clawkeep.justNow": "току-що",

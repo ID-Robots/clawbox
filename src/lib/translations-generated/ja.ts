@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep がクラウドストレージの使用量を確認できなかったため、このバックアップはアップロードされませんでした。これまでのバックアップはそのまま残っています。インターネット接続を確認して、もう一度お試しください。",
   "clawkeep.hoursAgo": "{count}時間前",
   "clawkeep.inDays": "{days}日{hours}時間後",
-  "clawkeep.inFuture": "未来",
   "clawkeep.inHours": "{hours}時間{mins}分後",
   "clawkeep.inMinutes": "{mins}分後",
   "clawkeep.justNow": "たった今",

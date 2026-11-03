@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
+import { boxNowMs, noteBoxClock } from "@/lib/box-clock";
 import { readCodingStarts, runRecordStartStep, START_POLL_MS, teamStartStep, type CodingStartView } from "@/lib/coding-start-phase";
 import { samePlainData } from "@/lib/same-plain-data";
 import { holdsResumableSession, isHeld, isLive, isSettled, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
@@ -302,7 +303,7 @@ const CONFIRM_MS = 5_000;
 
 /** Elapsed time, readable at every scale a run can reach — seconds to days. */
 function duration(run: Run): string {
-  const total = Math.max(0, Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000));
+  const total = Math.max(0, Math.round(((run.completedAt ?? boxNowMs()) - run.startedAt) / 1000));
   if (total < 60) return `${total}s`;
   const d = Math.floor(total / 86400);
   const h = Math.floor((total % 86400) / 3600);
@@ -736,10 +737,16 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
     // after Pause or Stop had answered (the sweep of 2026-09-07). The runs
     // and the status are what an action's feedback needs, so they must not
     // wait for the slowest reader.
-    const status = read("status", () => fetch("/setup-api/coding-agent/status", { cache: "no-store" }).then(async (s) => {
-      if (!s.ok) throw new Error("status");
-      setStatus(await s.json() as AppStatus);
-    }));
+    const status = read("status", () => {
+      const sentAt = Date.now();
+      return fetch("/setup-api/coding-agent/status", { cache: "no-store" }).then(async (s) => {
+        // The window's "N ago"s and run clocks are the box's (src/lib/box-clock.ts),
+        // and on its own page this is the read that says what that clock reads.
+        noteBoxClock(s, sentAt);
+        if (!s.ok) throw new Error("status");
+        setStatus(await s.json() as AppStatus);
+      });
+    });
     // A tick reads the settled runs SLIM — their progress lines and result
     // text emptied on the box (`?slim=1`, src/lib/coding-agent-slim.ts) —
     // and merges what comes back over the full records this window holds
@@ -932,13 +939,17 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // edge sets it at once. The live poll's reads above wait there likewise,
   // and for the same reason need no exemption: the visible edge re-reads all
   // four, and nothing they bring acts on the screen while it is away.
-  const [now, setNow] = useState(() => Date.now());
+  //
+  // The box's clock (src/lib/box-clock.ts), as every time it is held against
+  // is: off the browser's, a laptop a minute behind the box started each run
+  // a minute late and called a commit just made "in the future".
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     // A start on its way ticks by the second too: Now's "Starting…" row shows its clock.
     const every = anyLive || anyStarting ? NOW_LIVE_TICK_MS : NOW_IDLE_TICK_MS;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      if (id === null) id = setInterval(() => setNow(Date.now()), every);
+      if (id === null) id = setInterval(() => setNow(boxNowMs()), every);
     };
     const stop = () => {
       if (id !== null) clearInterval(id);
@@ -949,7 +960,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         stop();
         return;
       }
-      setNow(Date.now());
+      setNow(boxNowMs());
       start();
     };
     if (document.visibilityState !== "hidden") start();

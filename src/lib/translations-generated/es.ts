@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep no pudo comprobar cuánto almacenamiento en la nube está en uso, así que esta copia no se subió. Tus copias anteriores siguen intactas. Revisa la conexión a internet y vuelve a intentarlo.",
   "clawkeep.hoursAgo": "hace {count} h",
   "clawkeep.inDays": "en {days}d {hours}h",
-  "clawkeep.inFuture": "en el futuro",
   "clawkeep.inHours": "en {hours}h {mins}min",
   "clawkeep.inMinutes": "en {mins}min",
   "clawkeep.justNow": "ahora mismo",

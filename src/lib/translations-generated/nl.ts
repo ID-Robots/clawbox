@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep kon niet controleren hoeveel cloudopslag in gebruik is, dus deze back-up is niet geüpload. Je eerdere back-ups zijn ongewijzigd. Controleer de internetverbinding en probeer het opnieuw.",
   "clawkeep.hoursAgo": "{count} uur geleden",
   "clawkeep.inDays": "over {days}d {hours}u",
-  "clawkeep.inFuture": "in de toekomst",
   "clawkeep.inHours": "over {hours}u {mins}min",
   "clawkeep.inMinutes": "over {mins}min",
   "clawkeep.justNow": "zojuist",

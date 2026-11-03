@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { TIME_OF_DAY } from "@/lib/memory-shard-state";
 import { onMemoryShardChanged } from "@/lib/ui-events";
+import { noteBoxClock } from "@/lib/box-clock";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
 import MemoryShardSettingsPanel, { type MemoryShardSettingsState } from "./MemoryShardSettingsPanel";
@@ -231,7 +232,12 @@ function MemoryIndexCard({ initial, onError }: {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
     try {
-      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
+      const sentAt = Date.now();
+      const res = await fetch("/setup-api/clawkeep/memory");
+      // The "finished N ago" below is held to the box's clock, read off this
+      // poll on a page that has no other (src/lib/box-clock.ts).
+      noteBoxClock(res, sentAt);
+      const body = await jsonOrError<unknown>(res);
       // Anything that is not a memory status is ignored outright rather than
       // rendered. The panel keeps its last good reading, or stays on its
       // loading line, and the rest of the window is untouched.

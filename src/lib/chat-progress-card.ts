@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_MARKDOWN_CHARS } from "@/lib/progress-card-markdown";
 import { retryWhileAgentStarting } from "@/lib/chat-gateway-starting";
+import { boxAge, type BoxAgeUnit } from "@/lib/box-clock";
 
 /**
  * The session's progress card, as the OpenClaw gateway serves it (TASK-896).
@@ -176,20 +177,18 @@ export function progressCardCounts(card: Pick<ProgressCard, "steps">): { done: n
   return { done: card.steps.filter((s) => s.status === "completed").length, total: card.steps.length };
 }
 
-export type ProgressCardAgeUnit = "now" | "minutes" | "hours" | "days";
+export type ProgressCardAgeUnit = BoxAgeUnit;
 
 /**
  * How long ago the agent last wrote the card, in the one unit the header
- * says ("Updated 2h ago"). A time in the future — the browser's clock behind
- * the box's — reads as just now rather than as a negative age.
+ * says ("Updated 2h ago"), on the box's clock (`now` is `boxNowMs()`, as
+ * `updatedAt` is the gateway's): src/lib/box-clock.ts's `boxAge`. A time a
+ * little in the future — what is left of the two clocks' disagreement — reads
+ * as just now; one far ahead is `ahead`, and the header prints the time.
  */
 export function progressCardAge(updatedAt: number | null, now: number): { unit: ProgressCardAgeUnit; n: number } | null {
-  if (updatedAt === null || !Number.isFinite(updatedAt) || !Number.isFinite(now)) return null;
-  const elapsed = Math.max(0, now - updatedAt);
-  if (elapsed < 60_000) return { unit: "now", n: 0 };
-  if (elapsed < 3_600_000) return { unit: "minutes", n: Math.floor(elapsed / 60_000) };
-  if (elapsed < 86_400_000) return { unit: "hours", n: Math.floor(elapsed / 3_600_000) };
-  return { unit: "days", n: Math.floor(elapsed / 86_400_000) };
+  if (updatedAt === null) return null;
+  return boxAge(updatedAt, now);
 }
 
 /** Whether the owner folded the card. Absent or unreadable storage means open. */

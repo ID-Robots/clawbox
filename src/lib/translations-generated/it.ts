@@ -723,7 +723,6 @@ const table: Record<string, string> = {
   "clawkeep.error.usageUnverified": "ClawKeep non è riuscito a verificare quanto spazio cloud è in uso, quindi questo backup non è stato caricato. I backup precedenti sono intatti. Controlla la connessione a internet e riprova.",
   "clawkeep.hoursAgo": "{count} h fa",
   "clawkeep.inDays": "tra {days}g {hours}h",
-  "clawkeep.inFuture": "nel futuro",
   "clawkeep.inHours": "tra {hours}h {mins}min",
   "clawkeep.inMinutes": "tra {mins}min",
   "clawkeep.justNow": "proprio ora",
