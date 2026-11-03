@@ -5,6 +5,8 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { POST as disableLocalAi } from "@/app/setup-api/local-ai/route";
+import { liveBackgroundTasks } from "@/lib/background-tasks";
+import { LLAMACPP_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
 import { getLlamaCppLaunchSpec, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
@@ -361,6 +363,16 @@ export async function DELETE(req: Request) {
 async function uninstallEngine(): Promise<NextResponse> {
   if (inFlight) {
     return NextResponse.json({ error: "A model is being downloaded right now.", code: "busy" }, { status: 409 });
+  }
+  // A Gemma install running — or queued behind another install, from another
+  // browser whose row this one does not see busy — would download the GGUF
+  // this unlinks, or start llama-server on it (TASK-2128).
+  const installing = liveBackgroundTasks({ kinds: [LLAMACPP_INSTALL_KIND] })[0];
+  if (installing) {
+    return NextResponse.json(
+      { error: "Gemma 4 is being installed right now. Uninstall it once that has finished, or cancel it.", code: "busy", taskId: installing.id },
+      { status: 409 },
+    );
   }
   const spec = getLlamaCppLaunchSpec();
   const target = path.join(spec.modelDir, spec.hfFile);

@@ -1,6 +1,5 @@
-import { execFile as execFileCb, spawn } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs/promises";
-import { promisify } from "util";
 import { POST as configureAiModel } from "@/app/setup-api/ai-models/configure/route";
 import {
   BackgroundTaskFailure,
@@ -9,7 +8,6 @@ import {
 } from "@/lib/background-tasks";
 import { LLAMACPP_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { getActiveHarness } from "@/lib/harness";
-import { isJournalNoise } from "@/lib/journal-noise";
 import { LOCAL_AI_SYSTEM_LANE, llamacppInstallNeeds } from "@/lib/local-ai-install-queue";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import {
@@ -23,9 +21,7 @@ import {
   tailLlamaCppLog,
   writeLlamaCppPid,
 } from "@/lib/llamacpp-server";
-import { startRootStep } from "@/lib/root-step-runner";
 import { waitForGatewayBack } from "@/lib/gateway-hot-apply";
-import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 /**
  * Gemma 4 through llama.cpp — install, start, configure — as a background
@@ -70,23 +66,13 @@ export function llamacppInstallRequest(meta: Record<string, unknown>): LlamaCppI
   return { alias, scope, activate: meta.activate === true };
 }
 
-const execFile = promisify(execFileCb);
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 const LLAMACPP_INSTALL_STEP = "llamacpp_install";
-const LLAMACPP_INSTALL_SERVICE = rootStepUnit(LLAMACPP_INSTALL_STEP);
 // Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
 // systemd, not us, owns the kill. A cold box builds llama.cpp from source with
 // CUDA and downloads a multi-GB GGUF; 30 min was not enough and the install
 // died mid-build.
 const LLAMACPP_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
-// How often we ask systemd how the install unit is doing while it runs.
-const LLAMACPP_INSTALL_POLL_MS = 3000;
-// `systemctl start --no-block` returns before the unit leaves "inactive".
-// Re-check a couple of times at this interval before concluding it finished,
-// so we don't mistake "hasn't started yet" for "already done".
-const LLAMACPP_INSTALL_START_GRACE_MS = 1000;
-const LLAMACPP_INSTALL_START_GRACE_POLLS = 2;
-const SYSTEMCTL_QUERY_TIMEOUT_MS = 15_000;
 // Phase-stable prefix: getLlamaCppOverlayProgress keys the "Provisioning
 // offline Gemma 4" step off "installing gemma 4", and the raw journal lines
 // (cmake, hf download, apt) match nothing — without this the wizard would jump
@@ -96,15 +82,12 @@ const INSTALL_STATUS_PREFIX = "Installing Gemma 4 for offline use";
 const INSTALL_STATUS_SEPARATOR = " — ";
 
 function getLastLogLine(logText: string): string | null {
-  // Never su's or PAM's own lines: they are the root step's plumbing, and the
-  // last line is what the row shows as the install's status (journal-noise.ts).
   const lines = logText
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && !isJournalNoise(line));
+    .filter(Boolean);
   return lines.length > 0 ? lines[lines.length - 1] : null;
 }
-
 
 function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
   if (!logLine) return false;
@@ -115,121 +98,26 @@ function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
 }
 
 /**
- * What THIS install run has written.
+ * Run the root install step (`llamacpp_install`: the CUDA build of llama.cpp
+ * when it is missing, the Gemma 4 GGUF) and follow it to its end, its journal
+ * lines streamed as live detail behind the phase prefix the wizard's overlay
+ * keys on.
  *
- * Bounded by `sinceMs`, the moment this call started the unit: the journal is
- * persistent and this is polled from the first second — before the unit has
- * said anything — so an unbounded read answers with the LAST attempt's last
- * line, which the loop below shows as live progress and then reports as this
- * run's failure reason. root-step-journal.ts has the rest of the reasoning.
+ * Through the TASK's root step (`ctx.rootStep`), not a follow of its own: the
+ * run is recorded on the task, so a web server that restarts mid-build ADOPTS
+ * it and holds the install queue's lane until the unit really ends — a queued
+ * Kokoro or Whisper install must not start pip and a CUDA build beside a
+ * llama.cpp build that is still going (TASK-2128). The follow reads only this
+ * run's journal (bounded by its dispatch), never su's or PAM's session lines,
+ * and starts the unit `--no-block` through the root-owned launcher.
  */
-async function readLlamaCppInstallLog(sinceMs: number, lines: number): Promise<string> {
-  try {
-    const { stdout } = await execFile(
-      "/usr/bin/journalctl",
-      rootStepJournalArgs(LLAMACPP_INSTALL_STEP, { sinceMs, lines }),
-      { timeout: 10_000 },
-    );
-    return stdout;
-  } catch {
-    return "";
-  }
-}
-
-async function readLlamaCppInstallFailure(sinceMs: number): Promise<string | null> {
-  return getLastLogLine(await readLlamaCppInstallLog(sinceMs, 40));
-}
-
-/**
- * ActiveState/Result for the install unit. Empty strings mean "couldn't ask" —
- * callers treat that the same as "not running" and fall back to the on-disk
- * provisioning check, which is the real gate.
- */
-async function readInstallUnitState(): Promise<{ active: string; result: string }> {
-  try {
-    const { stdout } = await execFile(
-      "/usr/bin/systemctl",
-      ["show", LLAMACPP_INSTALL_SERVICE, "-p", "ActiveState", "-p", "Result"],
-      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
-    );
-    return {
-      active: /^ActiveState=(.*)$/m.exec(stdout)?.[1]?.trim() || "",
-      result: /^Result=(.*)$/m.exec(stdout)?.[1]?.trim() || "",
-    };
-  } catch {
-    return { active: "", result: "" };
-  }
-}
-
-function isUnitRunning(active: string): boolean {
-  return active === "activating" || active === "active" || active === "reloading";
-}
-
-/**
- * Run the root install step, streaming its journal output.
- *
- * Previously this was a single blocking `systemctl start`, which emitted
- * nothing for up to 30 minutes — a cold Jetson build looked identical to a
- * hang, and there was no way to tell whether it was progressing. Now we start
- * the unit detached and poll systemd, so the wizard shows live build/download
- * lines and a genuine failure surfaces the moment the unit fails.
- */
-async function repairLlamaCppRuntime(
-  onStatus: (line: string) => void,
-): Promise<{ ok: boolean; error?: string }> {
-  // Before the start, so nothing this run writes falls outside the window the
-  // journal reads are bounded by.
-  const startedAt = Date.now();
-  try {
-    await startRootStep(
-      LLAMACPP_INSTALL_STEP,
-      { noBlock: true, timeoutMs: SYSTEMCTL_QUERY_TIMEOUT_MS },
-    );
-  } catch (err) {
-    const failureLine = await readLlamaCppInstallFailure(startedAt);
-    return {
-      ok: false,
-      error: failureLine || (err instanceof Error ? err.message : "Failed to repair llama.cpp runtime"),
-    };
-  }
-
-  const deadline = Date.now() + LLAMACPP_INSTALL_TIMEOUT_MS;
-  let lastLine: string | null = null;
-  let sawRunning = false;
-  let gracePolls = 0;
-
-  while (Date.now() < deadline) {
-    const { active, result } = await readInstallUnitState();
-    if (isUnitRunning(active)) sawRunning = true;
-
-    const line = getLastLogLine(await readLlamaCppInstallLog(startedAt, 5));
-    if (line && line !== lastLine) {
-      lastLine = line;
-      onStatus(line);
-    }
-
-    if (active === "failed") {
-      return { ok: false, error: lastLine || `llama.cpp install failed (${result || "unknown"})` };
-    }
-
-    if (!isUnitRunning(active)) {
-      // Either it finished, or `--no-block` returned before it started. Give it
-      // a couple of short re-checks before believing the former.
-      if (sawRunning || gracePolls >= LLAMACPP_INSTALL_START_GRACE_POLLS) {
-        if (result && result !== "success") {
-          return { ok: false, error: lastLine || `llama.cpp install failed (${result})` };
-        }
-        return { ok: true };
-      }
-      gracePolls += 1;
-      await new Promise((resolve) => setTimeout(resolve, LLAMACPP_INSTALL_START_GRACE_MS));
-      continue;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, LLAMACPP_INSTALL_POLL_MS));
-  }
-
-  return { ok: false, error: lastLine || "Timed out installing the local Gemma 4 runtime." };
+async function repairLlamaCppRuntime(task: BackgroundTaskContext): Promise<{ ok: boolean; error?: string }> {
+  const result = await task.rootStep(LLAMACPP_INSTALL_STEP, {
+    timeoutMs: LLAMACPP_INSTALL_TIMEOUT_MS,
+    label: "the local Gemma 4 runtime install",
+    formatStatus: (line) => `${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${line}`,
+  });
+  return result.ok ? { ok: true } : { ok: false, error: result.error };
 }
 
 function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: string) {
@@ -398,9 +286,7 @@ async function installLlamaCpp(
         ? "Installing Gemma 4 for offline use..."
         : "Installing llama.cpp and Gemma 4 for offline use...",
     );
-    const repaired = await repairLlamaCppRuntime((line) => {
-      task.status(`${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${line}`);
-    });
+    const repaired = await repairLlamaCppRuntime(task);
     if (!repaired.ok) throw new BackgroundTaskFailure(repaired.error || "Failed to provision the local Gemma 4 runtime");
     provisioning = await getLlamaCppProvisioningStatus(alias);
     if (!provisioning.installed) {
@@ -473,9 +359,7 @@ async function installLlamaCpp(
       if (!attemptedRuntimeRepair && shouldRepairLlamaCppRuntime(logLine)) {
         task.status("Repairing the llama.cpp runtime so Gemma can start...");
         attemptedRuntimeRepair = true;
-        const repaired = await repairLlamaCppRuntime((repairLine) => {
-          task.status(`${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${repairLine}`);
-        });
+        const repaired = await repairLlamaCppRuntime(task);
         if (!repaired.ok) throw new BackgroundTaskFailure(repaired.error || "Failed to repair llama.cpp runtime");
         task.status("llama.cpp runtime repaired. Restarting Gemma...");
         continue;

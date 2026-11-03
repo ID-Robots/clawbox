@@ -360,3 +360,22 @@ describe("a task's headline", () => {
     work.resolve();
   });
 });
+
+describe("a second server on the same data/ (serving only)", () => {
+  it("never takes queued work over from the server that accepted it", async () => {
+    startBackgroundTask(held({ kind: "a", lanes: ["system"] }).spec);
+    const queued = startBackgroundTask(held({ kind: KOKORO_INSTALL_KIND, lanes: ["system"] }).spec);
+    if (!queued.started) throw new Error("accepted");
+    h.startSpecFor.mockResolvedValue(held({ kind: KOKORO_INSTALL_KIND, lanes: ["system"] }).spec);
+    vi.stubEnv("CLAWBOX_SKIP_BOOT_JOBS", "1");
+    try {
+      resetBackgroundTasksForTests();
+      resumeBackgroundTasks();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(getBackgroundTask(queued.task.id)?.state).toBe("queued");
+      expect(h.startSpecFor).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

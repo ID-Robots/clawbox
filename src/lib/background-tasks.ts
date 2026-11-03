@@ -223,7 +223,13 @@ export interface BackgroundTaskContext {
    */
   rootStep(
     step: string,
-    opts: { timeoutMs: number; label: string; finishes?: Record<string, unknown> },
+    opts: {
+      timeoutMs: number;
+      label: string;
+      finishes?: Record<string, unknown>;
+      /** How a journal line reads as the headline (a phase prefix a reader keys on). */
+      formatStatus?: (line: string) => string;
+    },
   ): Promise<FollowRootStepResult>;
 }
 
@@ -488,7 +494,7 @@ function load(reg: Registry): void {
         closeOrphan(task, now);
         cleanedUp.push(task.kind);
       }
-    } else if (task.state === "queued" && task.runner !== reg.runner) {
+    } else if (task.state === "queued" && task.runner !== reg.runner && takesOverQueue()) {
       // Still waiting, now in this process's queue. Nothing of it had started,
       // so nothing was lost: its work is rebuilt from its kind when its turn
       // comes (see `begin`).
@@ -513,6 +519,17 @@ function load(reg: Registry): void {
         .catch((err) => console.warn("[background-tasks] cleanup after a restart failed:", err instanceof Error ? err.message : err));
     });
   }
+}
+
+/**
+ * Whether this process may take queued work over from the server that
+ * accepted it. Not a second server on the same `data/` that only serves pages
+ * (`CLAWBOX_SKIP_BOOT_JOBS=1`, a `next dev` session beside the real one): the
+ * real server still holds that work and starts it when its turn comes, and a
+ * second taker would install it twice.
+ */
+function takesOverQueue(): boolean {
+  return process.env.CLAWBOX_SKIP_BOOT_JOBS !== "1";
 }
 
 function closeOrphan(task: BackgroundTask, now: number): void {
@@ -848,6 +865,9 @@ function pump(reg: Registry): void {
   const queued = [...reg.tasks.values()].filter((t) => t.state === "queued").sort(queueOrder);
   let moved = false;
   queued.forEach((task, index) => {
+    // Only work this process owns: a record another live server queued is
+    // that server's to start.
+    if (task.runner !== reg.runner) return;
     const ahead = queued.slice(0, index).filter((t) => t.state === "queued");
     const decision = decide(reg, task, ahead);
     if (decision.start) {
@@ -1028,7 +1048,7 @@ function contextFor(reg: Registry, task: BackgroundTask, signal: AbortSignal): B
       const result = await followRootStep(step, {
         timeoutMs: opts.timeoutMs,
         label: opts.label,
-        onStatus: (line) => ctx.status(line),
+        onStatus: (line) => ctx.status(opts.formatStatus ? opts.formatStatus(line) : line),
         onLog: (line) => ctx.log(line),
         onRunning: (run) => {
           if (!live()) return;

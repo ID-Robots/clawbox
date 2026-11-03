@@ -146,8 +146,10 @@ describe("POST /setup-api/llamacpp/install", () => {
       }
       throw new Error("ENOENT");
     }) as typeof fsp.stat);
+    // systemd answers: a unit that has finished (the root step's follow
+    // treats an unanswered query as "ask again", never as an ending).
     setupExecFileMock({
-      systemctl: { stdout: "", stderr: "" },
+      systemctl: { stdout: "ActiveState=inactive\nResult=success\n", stderr: "" },
       journalctl: { stdout: "", stderr: "" },
     });
     mockConfigureAiModel.mockResolvedValue(
@@ -497,6 +499,54 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("Installing Gemma 4 for offline use — Installing llama.cpp server (CUDA=ON)...");
     expect(text).toContain("\"success\":true");
   });
+
+  it("records the provisioning unit's run on its task, so a restarted server adopts it and keeps its place in the queue", async () => {
+    let finished = false;
+    mockFs.stat.mockImplementation((async (target: unknown) => {
+      const normalized = String(target);
+      const isRuntimeArtifact = normalized === "/usr/local/bin/llama-server" || normalized.endsWith(DEFAULT_LLAMACPP_HF_FILE);
+      if (isRuntimeArtifact && finished) return { size: 1 } as never;
+      throw new Error("ENOENT");
+    }) as typeof fsp.stat);
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+      const key = `${cmd} ${args.join(" ")}`;
+      let stdout = "";
+      if (key.includes("systemctl show") && key.includes("InvocationID")) stdout = `InvocationID=${"c".repeat(32)}\n`;
+      else if (key.includes("systemctl show")) stdout = finished ? "ActiveState=inactive\nResult=success\n" : "ActiveState=activating\nResult=success\n";
+      else if (key.includes("journalctl")) stdout = "pam_unix(su-l:session): session closed for user clawbox\n";
+      callback?.(null, { stdout, stderr: "" });
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
+      .mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) }));
+    mockSpawn.mockReturnValue(createSpawnedProcess(12345));
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const reader = res.body!.getReader();
+    const taskId = (JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]) as { taskId: string }).taskId;
+    await vi.waitFor(() => expect(getBackgroundTask(taskId)?.unit).toMatchObject({
+      step: "llamacpp_install",
+      invocationId: "c".repeat(32),
+      taskStep: "install",
+    }));
+    // su's session line is the newest journal line: never the headline.
+    expect(getBackgroundTask(taskId)?.status).not.toMatch(/pam_unix/);
+    finished = true;
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += new TextDecoder().decode(value);
+    }
+    expect(rest).toContain("\"success\":true");
+  }, 20_000);
 
   it("fails fast with the journal line when the provisioning unit fails", async () => {
     mockFs.stat.mockImplementation((async () => {
