@@ -11,6 +11,10 @@ import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import WebappFrame from "@/components/WebappFrame";
 import { BROWSER_IMPORT_MARK_PREFIX } from "@/lib/webapp-legacy-browser-import";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
+import { APP_REOPEN_ACK, APP_REOPEN_MESSAGE, APP_REOPEN_REPEAT_MS } from "@/lib/app-window";
+
+const navigateAppFrame = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/app-window", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/app-window")>()), navigateAppFrame }));
 
 type Call = { url: string; method: string; body: unknown };
 
@@ -34,6 +38,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+  navigateAppFrame.mockReset();
   localStorage.clear();
 });
 
@@ -108,5 +114,93 @@ describe("WebappFrame", () => {
     expect(frame.getAttribute("sandbox")).toBeNull();
     expect(frame.getAttribute("src")).toBe(`${window.location.origin}/apps/game/`);
     expect(calls).toHaveLength(0);
+  });
+
+  describe("a server app's window reopening the page it navigated to (src/lib/app-window.ts)", () => {
+    const origin = () => window.location.origin;
+
+    /** The frame, its guest window, and what the frame was told back. */
+    function mount(src: string, appId = "notes") {
+      stubBox({ migrated: true, plan: null });
+      const view = render(<WebappFrame appId={appId} src={src} title="App" />);
+      const frame = screen.getByTitle("App") as HTMLIFrameElement;
+      const guest = frame.contentWindow!;
+      const told: unknown[] = [];
+      vi.spyOn(guest, "postMessage").mockImplementation(((msg: unknown) => { told.push(msg); }) as typeof guest.postMessage);
+      return { view, frame, guest, told };
+    }
+
+    function ask(source: Window | null, href: unknown) {
+      window.dispatchEvent(new MessageEvent("message", { data: { [APP_REOPEN_MESSAGE]: { href } }, source }));
+    }
+
+    it("opens the app's own page in its frame with the desktop's navigation, and tells the page", () => {
+      const { frame, guest, told } = mount(`${origin()}/apps/notes/`);
+      ask(guest, `${origin()}/apps/notes/notes/2?tab=a`);
+      expect(navigateAppFrame).toHaveBeenCalledTimes(1);
+      expect(navigateAppFrame).toHaveBeenCalledWith(frame, `${origin()}/apps/notes/notes/2?tab=a`);
+      expect(told).toEqual([{ [APP_REOPEN_ACK]: true }]);
+    });
+
+    it("does the same for a window opened at the desktop address that sends it on to /apps/<id>/", () => {
+      const { frame, guest } = mount("/setup-api/webapps?app=audiobook-player", "audiobook-player");
+      expect(frame.getAttribute("sandbox")).toBe(WEBAPP_IFRAME_SANDBOX);
+      ask(guest, `${origin()}/apps/audiobook-player/books`);
+      expect(navigateAppFrame).toHaveBeenCalledWith(frame, `${origin()}/apps/audiobook-player/books`);
+    });
+
+    it("never opens the box's API, the desktop, another app or another origin for it", () => {
+      const { guest, told } = mount(`${origin()}/apps/notes/`);
+      for (const href of [
+        `${origin()}/setup-api/system/version`,
+        `${origin()}/`,
+        `${origin()}/apps/other/`,
+        `${origin()}/apps/notes/../../setup-api/x`,
+        `${origin()}/apps/notes/..%2f..%2fsetup-api`,
+        "https://evil.example/apps/notes/",
+        "javascript:alert(1)",
+        42,
+      ]) {
+        ask(guest, href);
+      }
+      expect(navigateAppFrame).not.toHaveBeenCalled();
+      expect(told).toEqual([]);
+    });
+
+    it("listens to its own frame only", () => {
+      const { guest } = mount(`${origin()}/apps/notes/`);
+      const stranger = document.createElement("iframe");
+      document.body.appendChild(stranger);
+      ask(stranger.contentWindow, `${origin()}/apps/notes/x`);
+      ask(window, `${origin()}/apps/notes/x`);
+      ask(null, `${origin()}/apps/notes/x`);
+      window.dispatchEvent(new MessageEvent("message", { data: { somethingElse: true }, source: guest }));
+      expect(navigateAppFrame).not.toHaveBeenCalled();
+      stranger.remove();
+    });
+
+    it("does not reopen the address it just opened — the desktop's cookie did not get it in either", () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const { guest, told } = mount(`${origin()}/apps/notes/`);
+      const href = `${origin()}/apps/notes/notes/2`;
+      ask(guest, href);
+      ask(guest, href);
+      expect(navigateAppFrame).toHaveBeenCalledTimes(1);
+      expect(told).toHaveLength(1);
+      // Another page is a click, not a loop.
+      ask(guest, `${origin()}/apps/notes/notes/3`);
+      expect(navigateAppFrame).toHaveBeenCalledTimes(2);
+      // …and the same one again later is a click too.
+      vi.setSystemTime(Date.now() + APP_REOPEN_REPEAT_MS + 1);
+      ask(guest, `${origin()}/apps/notes/notes/3`);
+      expect(navigateAppFrame).toHaveBeenCalledTimes(3);
+    });
+
+    it("stops listening when the window closes", () => {
+      const { view, guest } = mount(`${origin()}/apps/notes/`);
+      view.unmount();
+      ask(guest, `${origin()}/apps/notes/x`);
+      expect(navigateAppFrame).not.toHaveBeenCalled();
+    });
   });
 });
