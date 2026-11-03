@@ -2559,6 +2559,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     activeKey: activeTabKey ?? mainSessionKey,
     connected: !caps.hasLiveConnection || status === 'connected',
     sending,
+    historyMark: messages.length,
     turnHeardFrom,
     turnStartedAt,
     sessionKeyRef,

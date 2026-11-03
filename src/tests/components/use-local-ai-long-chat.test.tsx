@@ -35,6 +35,7 @@ function setup(adapter: HarnessAdapter, overrides: Partial<LocalAiLongChatOption
     activeKey: KEY,
     connected: true,
     sending: false,
+    historyMark: 0,
     turnHeardFrom: false,
     turnStartedAt: 0,
     sessionKeyRef: { current: KEY },
@@ -161,6 +162,16 @@ describe("loading, only while llama-server is not ready", () => {
 });
 
 describe("the card", () => {
+  it("measures again once the conversation's history has landed (Hermes learns its session from it)", async () => {
+    const adapter = adapterWith(100460);
+    (adapter.conversationSize as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const { result, rerender, base } = setup(adapter);
+    await waitFor(() => expect(adapter.conversationSize).toHaveBeenCalledTimes(1));
+    expect(result.current.offer).toBeNull();
+    rerender({ ...base, historyMark: 30 });
+    await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
+  });
+
   it("names the harness's own line as the local model's room when it gives one", async () => {
     const adapter = adapterWith(52000);
     (adapter.conversationSize as ReturnType<typeof vi.fn>).mockResolvedValue({ tokens: 52000, window: 65536, limit: 32768 });

@@ -69,6 +69,12 @@ export interface LocalAiLongChatOptions {
   /** The harness can be asked (the gateway socket is open, where there is one). */
   connected: boolean;
   sending: boolean;
+  /**
+   * Moves when the transcript on screen changes — its history landed, a turn
+   * was added. Hermes learns a conversation's session from its history, so a
+   * measure taken the moment its tab opened has nothing to ask about yet.
+   */
+  historyMark: number;
   turnHeardFrom: boolean;
   turnStartedAt: number;
   sessionKeyRef: MutableRefObject<string>;
@@ -127,7 +133,7 @@ function joinPending(prev: LongChatPending | null, next: LongChatPending): LongC
 }
 
 export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLongChat {
-  const { adapter, onLocalAi, llamaCpp, localWindow, activeKey, connected, sending, turnHeardFrom, turnStartedAt } = options;
+  const { adapter, onLocalAi, llamaCpp, localWindow, activeKey, connected, sending, historyMark, turnHeardFrom, turnStartedAt } = options;
   // Everything a callback needs at call time, never a closure's copy.
   const optsRef = useRef(options);
   useEffect(() => { optsRef.current = options; });
@@ -165,7 +171,8 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
     if (fitRef.current.get(activeKey)?.dismissed) return;
     let cancelled = false;
     void adapter.conversationSize(activeKey).then((size) => {
-      if (cancelled) return;
+      // Unknown is not "fits": nothing is recorded, and the next mark asks again.
+      if (cancelled || !size) return;
       const window = size?.window ?? localWindow;
       const long = tooLongForLocal(size, window);
       const tokens = size?.tokens ?? null;
@@ -188,7 +195,7 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
       });
     });
     return () => { cancelled = true; };
-  }, [adapter, onLocalAi, connected, activeKey, sending, localWindow, measureEpoch]);
+  }, [adapter, onLocalAi, connected, activeKey, sending, historyMark, localWindow, measureEpoch]);
 
   const admitTurn = useCallback((key: string, pending: LongChatPending): boolean => {
     if (!optsRef.current.onLocalAi) {
