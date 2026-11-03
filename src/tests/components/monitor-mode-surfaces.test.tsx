@@ -70,43 +70,19 @@ describe("the toast stack", () => {
     });
   }
 
-  it("keeps its classes alone — and its old corner — with no monitor layout", () => {
+  // The toasts stand in the desktop's top-right notice column now (TASK-2129),
+  // which takes the main monitor's corner for all of them — see
+  // src/tests/components/desktop-notice-layer.test.tsx. The list itself has
+  // no place of its own to get wrong over a row of monitors.
+  it("is placed by the notice column, with or without a monitor layout", () => {
+    act(() => setDeskScreens(ROW));
     render(<ToastHost />);
     toast("Hello");
     const host = screen.getByTestId("toast-host");
-    expect(host.className).toContain("bottom-20");
-    expect(host.className).toContain("right-4");
+    expect(host.className).not.toMatch(/\bfixed\b/);
     expect(host.style.right).toBe("");
     expect(host.style.bottom).toBe("");
-  });
-
-  it("stands in the MAIN monitor's corner over a row of monitors", () => {
-    act(() => setDeskScreens(ROW));
-    render(<ToastHost />);
-    toast("Hello");
-    const host = screen.getByTestId("toast-host");
-    // right-4 and bottom-20, measured from the main monitor's corner.
-    expect(host.style.right).toBe(`${16 + MON_W}px`);
-    expect(host.style.bottom).toBe("80px");
-  });
-
-  it("stays above a shorter main monitor's bottom, not in the strip below it no monitor shows", () => {
-    setViewport(MON_W + 1920, MON_H);
-    act(() => setDeskScreens([scr("big", 0, 0, MON_W, MON_H), scr("small", MON_W, 0, 1920, 1080, true)]));
-    render(<ToastHost />);
-    toast("Hello");
-    const host = screen.getByTestId("toast-host");
-    expect(host.style.right).toBe("16px");
-    expect(host.style.bottom).toBe(`${80 + (MON_H - 1080)}px`);
-  });
-
-  it("moves with the layout while it is up", () => {
-    render(<ToastHost />);
-    toast("Hello");
-    const host = screen.getByTestId("toast-host");
-    expect(host.style.right).toBe("");
-    act(() => setDeskScreens(ROW));
-    expect(host.style.right).toBe(`${16 + MON_W}px`);
+    expect(host.style.zIndex).toBe("");
   });
 });
 

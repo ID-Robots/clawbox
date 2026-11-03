@@ -95,7 +95,6 @@ vi.mock("@/components/ChatPopup", async () => {
   return {
     default: memo(function ChatStub() { count.chat++; return null; }),
     CHAT_PANEL_GAP: 12,
-    noticeColumnInset: () => 0,
   };
 });
 vi.mock("@/components/TimezoneAdopter", () => ({ default: () => null }));
@@ -287,9 +286,15 @@ describe("the apps in the windows", () => {
     await mountDesktop();
     const files = await screen.findByTestId("chrome-window-files");
     await waitFor(() => expect(files).toHaveAttribute("data-active", "true"));
+    const titleBar = files.firstElementChild as HTMLElement;
+    // In front of the top-right bubbles too (the ClawBox AI offer card comes
+    // up on this desktop after the window, and so stands over it): one press
+    // to put it there (TASK-2129), and the next grab has nothing to do.
+    fireEvent.mouseDown(titleBar, { clientX: 200, clientY: 75, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 200, clientY: 75 });
+    await wait(50);
     const z = files.style.zIndex;
     const desktop = count.desktop;
-    const titleBar = files.firstElementChild as HTMLElement;
     fireEvent.mouseDown(titleBar, { clientX: 200, clientY: 75, button: 0 });
     fireEvent.mouseUp(window, { clientX: 200, clientY: 75 });
     await wait(50);

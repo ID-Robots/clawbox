@@ -192,6 +192,13 @@ function ChromeWindow({
   // `moved`: the window has left the place the press found it — the moment it
   // takes a compositor layer of its own (see handleMove).
   const dragRef = useRef({ isDragging: false, moved: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
+  // The press the title bar has already asked forward with, so the window's
+  // own press handler (below) does not ask a second time for the same one.
+  const focusAskedForRef = useRef<Event | null>(null);
+  const handlePress = useCallback((e: React.MouseEvent) => {
+    if (focusAskedForRef.current === e.nativeEvent) return;
+    onFocus();
+  }, [onFocus]);
   const resizeRef = useRef<{
     isResizing: boolean;
     edge: string;
@@ -369,6 +376,7 @@ function ChromeWindow({
     // Whether it already holds the top layer is the desktop's to know — its
     // focus handler is where a press on the top window is answered with
     // nothing.
+    focusAskedForRef.current = e.nativeEvent;
     onFocus();
   }, [maximized, snapped, position.x, position.y, onFocus]);
 
@@ -833,7 +841,11 @@ function ChromeWindow({
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
           : "opacity 0.15s, box-shadow 0.15s",
       }}
-      onMouseDown={isActive ? undefined : onFocus}
+      // Every press, the active window's too: the floating chat or the
+      // top-right bubbles may stand over the window in front, and a press is
+      // what puts it back over them. The desktop answers a window that is
+      // already on top without a render (`focusWindow`).
+      onMouseDown={handlePress}
     >
       {/* Title bar — ChromeOS style */}
       <div

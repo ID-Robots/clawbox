@@ -2506,7 +2506,11 @@ input[type="range"].appearance-none::-moz-range-track {
   .desktop-notice-stack {
     /* At top-4 it covered the app/chat header, Back chevron included. Sit
      * it just under the header, full width between the margins (at the
-     * bottom it would cover the chat composer, which has no taskbar). */
+     * bottom it would cover the chat composer, which has no taskbar). The
+     * phone's one fixed place for the bubbles: the full-screen chat never
+     * moves it, and its bottom is bounded inline (page.tsx). No z-index
+     * here — whether the bubbles or the chat are in front is the desktop's
+     * focus order (src/lib/notice-layer.ts). */
     top: calc(60px + env(safe-area-inset-top)) !important;
     left: 12px;
     right: 12px !important;

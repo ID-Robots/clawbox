@@ -28,7 +28,6 @@ vi.mock("@/components/Mascot", () => ({ default: () => null }));
 vi.mock("@/components/ChatPopup", () => ({
   default: () => null,
   CHAT_PANEL_GAP: 12,
-  noticeColumnInset: () => 0,
 }));
 vi.mock("@/components/TimezoneAdopter", () => ({ default: () => null }));
 

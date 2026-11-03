@@ -20,7 +20,6 @@ vi.mock("@/components/Mascot", () => ({ default: () => { mounted.mascot++; retur
 vi.mock("@/components/ChatPopup", () => ({
   default: () => { mounted.chat++; return null; },
   CHAT_PANEL_GAP: 12,
-  noticeColumnInset: () => 0,
 }));
 vi.mock("@/components/TimezoneAdopter", () => ({ default: () => { mounted.timezone++; return null; } }));
 

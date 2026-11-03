@@ -5,10 +5,10 @@
 //     so a window opened while the chat was up had its minimize, maximize and
 //     close buttons underneath it — the owner had to close the chat to reach
 //     the window they had just asked for.
-//   - The top-right notice cards are fixed to the same corner the popup floats
-//     in. The docked panel already had a way to push them aside; the floating
-//     one had none, so a card sat over the chat's +, dock and close buttons
-//     until it hid itself 30 s later.
+//   - The top-right notice cards stand in the corner the popup floats and
+//     docks in. They no longer step aside (TASK-2129): a press inside the chat
+//     raises it over them, the same `onFocus` that raises it over a window —
+//     see src/tests/components/desktop-notice-layer.test.tsx.
 //   - PANEL mode ignored `mobile` entirely: a docked width chosen on a desktop
 //     was drawn on a 390px phone at its desktop geometry, off the left edge.
 //   - At the docked default width the three pills read "Cla…", "Ma…", "M…".
@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import ChatPopup, { noticeColumnInset } from "@/components/ChatPopup";
+import ChatPopup from "@/components/ChatPopup";
 import { installHermesBox } from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
@@ -32,8 +32,6 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const css = fs.readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf-8");
 
-/** What page.tsx draws the notice column at. */
-const COLUMN = { width: 320, margin: 16 };
 const VIEWPORT = { w: 1440, h: 900 };
 
 beforeEach(() => {
@@ -99,56 +97,6 @@ describe("the floating chat's place in the stacking order", () => {
     onFocus.mockClear();
     fireEvent.pointerDown(screen.getByTestId("chat-composer-row"));
     expect(onFocus).toHaveBeenCalled();
-  });
-});
-
-describe("the notice column's clearance", () => {
-  it("is zero while the chat stands clear of the column", () => {
-    const left = { left: 40, right: 560 };
-    expect(noticeColumnInset(left, VIEWPORT.w, COLUMN.width, COLUMN.margin)).toBe(0);
-    expect(noticeColumnInset(null, VIEWPORT.w, COLUMN.width, COLUMN.margin)).toBe(0);
-  });
-
-  it("moves the cards left of a chat standing in the corner", () => {
-    // A 520px popup at the right gutter: the cards clear its left edge, so the
-    // +, dock and close buttons in its header stay uncovered.
-    const chat = { left: 912, right: 1432 };
-    const inset = noticeColumnInset(chat, VIEWPORT.w, COLUMN.width, COLUMN.margin);
-    expect(inset).toBe(VIEWPORT.w - chat.left);
-    const columnRight = VIEWPORT.w - (COLUMN.margin + inset);
-    expect(columnRight).toBeLessThanOrEqual(chat.left);
-  });
-
-  it("never pushes the cards off the screen to do it", () => {
-    // A chat all but filling a small desktop: the column moves as far as it
-    // can and stays whole, rather than dodging into negative space.
-    const narrow = 900;
-    const chat = { left: 40, right: 880 };
-    const inset = noticeColumnInset(chat, narrow, COLUMN.width, COLUMN.margin);
-    expect(narrow - (COLUMN.margin + inset) - COLUMN.width).toBeGreaterThanOrEqual(COLUMN.margin);
-  });
-
-  it("reports the floating rect to the desktop, and nothing while docked", async () => {
-    const onFloatingRectChange = vi.fn();
-    const { rerender } = render(
-      <ChatPopup isOpen onClose={() => {}} onFloatingRectChange={onFloatingRectChange} />,
-    );
-    await screen.findByTestId("chat-popup");
-    await waitFor(() => expect(onFloatingRectChange).toHaveBeenCalled());
-    expect(onFloatingRectChange.mock.calls.at(-1)?.[0]).toMatchObject({ left: expect.any(Number) });
-
-    onFloatingRectChange.mockClear();
-    rerender(
-      <ChatPopup
-        isOpen
-        onClose={() => {}}
-        initialPanelWidth={420}
-        onFloatingRectChange={onFloatingRectChange}
-      />,
-    );
-    // Docked, the desktop uses the strip it already reserves; a stale floating
-    // rect would move the cards for a popup that is no longer there.
-    await waitFor(() => expect(onFloatingRectChange).toHaveBeenLastCalledWith(null));
   });
 });
 

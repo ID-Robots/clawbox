@@ -28,7 +28,9 @@ import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import TimezoneAdopter from "@/components/TimezoneAdopter";
 import type { StoreApp } from "@/components/AppStore";
 import WebappFrame from "@/components/WebappFrame";
-import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } from "@/components/ChatPopup";
+import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
+import { onPopoutPress } from "@/components/PopoutWindow";
+import { noticeLayerZIndex, PHONE_WINDOW_LAYER } from "@/lib/notice-layer";
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
 import ToastHost from "@/components/ToastHost";
@@ -237,12 +239,14 @@ function ringHiddenPollMs(): number {
 // `rowsPerColumn` without reaching into the component.
 const CELL_H = 110; // px — one icon cell, label included
 const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
-// The top-right notice column, as the markup below draws it (`w-[320px]`,
-// `top-4`, `right: NOTICE_MARGIN + …`). Named because the column has to be
-// placed against the chat, and a card that dodges by a number the markup does
-// not use is a card that still lands on the chat's buttons.
-const NOTICE_COLUMN_WIDTH = 320;
+// The top-right notice column's distance from the screen's corner, on both
+// sides. Fixed: the column is never placed against the chat — it stands in the
+// corner and takes its turn in the stacking order (src/lib/notice-layer.ts).
 const NOTICE_MARGIN = 16;
+// On a phone, what the column leaves free under it: the full-screen chat's
+// composer — a grown draft and its options row open — and the shelf. A column
+// taller than the rest scrolls instead of reaching down over the chat's input.
+const PHONE_NOTICE_BOTTOM_RESERVE = 240;
 
 /**
  * Declared order for icons that have no saved slot yet.
@@ -1124,6 +1128,17 @@ function ChromeDesktopInner() {
         // stays, above the restored windows.
         setOpenWindows((prev) => [...restored, ...prev.filter((w) => !ids.has(w.id)).map((w) => ({ ...w, zIndex: w.zIndex + n }))]);
         setNextZIndex((z) => z + n);
+        // The top-right bubbles and the chat move up with them: a bubble that
+        // arrived first stays over the restored windows, and the order
+        // between the bubbles and a chat pressed meanwhile is kept.
+        if (noticeSlotRef.current >= DESKTOP_LAYERS.window) {
+          noticeSlotRef.current += n;
+          setNoticeSlot(noticeSlotRef.current);
+        }
+        if (chatZIndexRef.current !== null) {
+          chatZIndexRef.current += n;
+          setChatZIndex(chatZIndexRef.current);
+        }
       }
       setDesktopRestored(true);
     });
@@ -1346,10 +1361,6 @@ function ChromeDesktopInner() {
   const [chatPanelWidth, setChatPanelWidth] = useState(0);
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
-  // What the FLOATING chat covers, reported by the popup itself — only while a
-  // notice is on screen, since that is the one surface that has to dodge it.
-  const [chatFloatingRect, setChatFloatingRect] = useState<ChatFloatingRect | null>(null);
-  const handleChatFloatingRect = useCallback((rect: ChatFloatingRect | null) => setChatFloatingRect(rect), []);
   // Stable, so the memo() on ChatPopup and on the Mascot holds: written inline
   // in the JSX they were new functions on every desktop render, and both
   // re-rendered with it — the chat with its whole transcript.
@@ -1388,10 +1399,60 @@ function ChromeDesktopInner() {
     setChatZIndex(next);
     setNextZIndex(next + 1);
   }, []);
-  // Opening the chat puts it in front of whatever was focused before it.
+
+  // ─── Where the top-right notice column stands among them ───
+  //
+  // The column is pinned to the corner, where the chat — docked, floating or
+  // full-screen on a phone — overlaps it; it used to step aside instead, and
+  // jumped about every time the chat was opened, docked, resized or moved. Now
+  // it is a peer in the same focus order (src/lib/notice-layer.ts): a new
+  // bubble, or a press or hover on one, takes a slot from the counter above;
+  // a press on the chat, a window or a pop-out takes a later one and stands in
+  // front of the bubbles until they are raised again.
+  // Starts below the counter: the column takes a slot of its own with its
+  // first bubble (a window restored after that moves up past it).
+  const [noticeSlot, setNoticeSlot] = useState<number>(DESKTOP_LAYERS.window - 1);
+  const noticeSlotRef = useRef<number>(DESKTOP_LAYERS.window - 1);
+  // Pop-outs stand in a band of their own, outside the counter.
+  const [popoutOverNotices, setPopoutOverNotices] = useState(false);
+  const popoutOverNoticesRef = useRef(false);
+  const noticesOnTop = useCallback(
+    () => !popoutOverNoticesRef.current
+      && noticeSlotRef.current >= DESKTOP_LAYERS.window
+      && noticeSlotRef.current === nextZIndexRef.current - 1,
+    [],
+  );
+  const raiseNotices = useCallback(() => {
+    // Already in front: every hover over a bubble lands here, and must not
+    // spin the counter and re-render the desktop.
+    if (noticesOnTop()) return;
+    const next = nextZIndexRef.current;
+    noticeSlotRef.current = next;
+    nextZIndexRef.current = next + 1;
+    popoutOverNoticesRef.current = false;
+    setNoticeSlot(next);
+    setPopoutOverNotices(false);
+    setNextZIndex(next + 1);
+  }, [noticesOnTop]);
+  useEffect(() => onPopoutPress(() => {
+    if (popoutOverNoticesRef.current) return;
+    popoutOverNoticesRef.current = true;
+    setPopoutOverNotices(true);
+  }), []);
+
+  // The column's element: whether a bubble is drawn in it at all.
+  const noticeColumnRef = useRef<HTMLDivElement>(null);
+
+  // Opening the chat puts it in front of whatever was focused before it — but
+  // not of the bubbles: they stay over the chat until the owner presses it
+  // (on a phone, until the full-screen chat is tapped). An empty column takes
+  // no slot: it would only leave the window in front one press short of it.
   useEffect(() => {
-    if (chatOpen) raiseChat();
-  }, [chatOpen, raiseChat]);
+    if (!chatOpen) return;
+    const bubblesWereOnTop = noticesOnTop() && Boolean(noticeColumnRef.current?.firstElementChild);
+    raiseChat();
+    if (bubblesWereOnTop) raiseNotices();
+  }, [chatOpen, raiseChat, noticesOnTop, raiseNotices]);
 
   // Open chat on skill-install, fix-error or handed-over-message events so
   // the user can watch the agent's response.
@@ -3117,15 +3178,20 @@ function ChromeDesktopInner() {
     if (getActiveWindowId() === topWindow.id) {
       appWindows.forEach(w => minimizeWindow(w.id));
     } else {
-      // Bring all to front, top window on top
-      let z = nextZIndex;
-      setOpenWindows((prev) =>
-        prev.map((w) => {
+      // Bring all to front, top window on top — on the LAST of the slots they
+      // take. It used to take `z + n` after the others had counted `z` up, so
+      // when it came last in the list it stood on or past the counter's next
+      // free slot, and the next window, chat or bubble raised tied with it.
+      const z0 = nextZIndex;
+      const n = appWindows.length;
+      setOpenWindows((prev) => {
+        let z = z0;
+        return prev.map((w) => {
           if (w.appId !== appId) return w;
-          return { ...w, zIndex: w.id === topWindow.id ? z + appWindows.length : z++ };
-        })
-      );
-      setNextZIndex((z) => z + appWindows.length + 1);
+          return { ...w, zIndex: w.id === topWindow.id ? z0 + n - 1 : z++ };
+        });
+      });
+      setNextZIndex((z) => z + n);
     }
   }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex, kioskPages, activateKioskTab, vibrate]);
 
@@ -3337,10 +3403,7 @@ function ChromeDesktopInner() {
   // left and log. Owner's routes started it, so the owner's desktop asks.
   const backgroundTasks = useBackgroundTasks(ownerApis);
 
-  // Is a top-right card on screen at all? Asked once, because it decides two
-  // things: whether the column is drawn, and whether the chat is asked to
-  // report where it is standing (a rect per pointer move of a drag is not a
-  // price to pay while nothing is dodging it).
+  // Is a top-right card on screen at all?
   //
   // Every card in that column — an update to run, a ClawBox AI offer, a
   // Telegram pairing to approve, a coding run — is every signed-in person's
@@ -3353,14 +3416,43 @@ function ChromeDesktopInner() {
     || codingNotices.length > 0
     || backgroundTasks.tasks.length > 0,
   );
-  // Beside the chat, not on top of it. The docked half is the strip the panel
-  // reserves; the floating half is the popup's own rect, which lands in the
-  // same top-right corner the cards do and hid the chat's +, dock and close
-  // buttons for the 30 s a card takes to hide itself.
-  const noticeRightInset = chatPanelInset > 0
-    ? chatPanelInset
-    // Measured against the main monitor's right edge, where the column lives.
-    : noticeColumnInset(chatFloatingRect, mainRect ? mainRect.x + mainRect.width : typeof window !== "undefined" ? window.innerWidth : 0, NOTICE_COLUMN_WIDTH, NOTICE_MARGIN);
+  // A bubble arriving raises the column — and so does a background task
+  // ending, which is news the owner has been waiting on even if they pressed
+  // the chat in front of its running card. A key per card (and per task
+  // state); a key not drawn last time is an arrival. The toasts tell the
+  // column themselves (ToastHost's `onArrive`).
+  const noticeKeys = noticesUp
+    ? [
+      updateAvailable && !updateNoticeHidden ? "update" : "",
+      offerNoticeUp ? "offer" : "",
+      ...codingNotices.map((notice) => `coding:${notice.id}`),
+      ...pairingRequests.map((req) => `pairing:${req.code || req.id}`),
+      ...backgroundTasks.tasks.map((task) => `task:${task.id}:${task.state}`),
+    ].filter(Boolean).join("\n")
+    : "";
+  const drawnNoticeKeysRef = useRef<ReadonlySet<string>>(new Set());
+  // Before paint: a new card is never drawn for a frame under the chat.
+  useLayoutEffect(() => {
+    const keys = noticeKeys ? noticeKeys.split("\n") : [];
+    const drawn = drawnNoticeKeysRef.current;
+    drawnNoticeKeysRef.current = new Set(keys);
+    if (keys.some((key) => !drawn.has(key))) raiseNotices();
+  }, [noticeKeys, raiseNotices]);
+
+  // The phone draws one window, full-screen: the topmost whose app is on this
+  // desktop (one restored after its app went would otherwise be the "top" and
+  // leave the screen empty).
+  const phoneWindows = isMobile ? openWindows.filter((w) => !w.minimized && allApps.some((a) => a.id === w.appId)) : [];
+  const phoneWindow = phoneWindows.length === 0 ? null : phoneWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
+  const noticeZIndex = noticeLayerZIndex({
+    slot: noticeSlot,
+    next: nextZIndex,
+    popoutRaised: popoutOverNotices,
+    // Docked, or full-screen on a phone: a fixed layer over the corner.
+    fixedChatSlot: chatOpen && (isMobile || chatPanelInset > 0) ? chatZIndex : null,
+    phoneWindowSlot: phoneWindow ? phoneWindow.zIndex : null,
+  });
+  const noticeTop = NOTICE_MARGIN + kioskBarInset + mainIns.top;
 
   if (!setupChecked || setupRequired) {
     return <div className="bg-[var(--bg-deep)]" style={{ height: '100dvh' }} />;
@@ -3412,10 +3504,6 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
-      {/* Renders the `clawbox:toast` events the pending-action poll above and
-          the pairing flow dispatch. Without it ui_notify, `clawbox notify`
-          and every server-side owner notice were fired and never shown. */}
-      <ToastHost />
       {/* The Screenshot app's capture keys and its region overlay (TASK-1475),
           mounted with the desktop so they work with the app's window closed.
           Owner-only like the app: its saves go through an owner-only route. */}
@@ -3427,17 +3515,41 @@ function ChromeDesktopInner() {
       {whatsNew.visible && whatsNew.state && (
         <WhatsNewCard state={whatsNew.state} onDismiss={whatsNew.dismiss} onEngage={engageWhatsNew} />
       )}
-      {noticesUp && (
-        <div
-          className="desktop-notice-stack pointer-events-none fixed flex w-[320px] flex-col gap-3"
-          // Beside the chat — docked or floating — never on top of it. Both are
-          // anchored to the top-right corner, and a notice at the top of the
-          // stacking order covered the chat's tab row and its +, dock and close
-          // buttons for the 30 s a card takes to hide itself. See
-          // `noticeRightInset`.
-          // Under the kiosk bar on the laptop while it is up (0 elsewhere).
-          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset + mainIns.right, top: NOTICE_MARGIN + kioskBarInset + mainIns.top }}
-        >
+      {/* The top-right notice column: every bubble, in one place. Always
+          mounted — the toasts listen from inside it — and empty, it is an
+          empty box nothing can press. */}
+      <div
+        ref={noticeColumnRef}
+        className="desktop-notice-stack pointer-events-none fixed flex w-[320px] max-w-[calc(100vw-2rem)] flex-col gap-3"
+        data-testid="desktop-notice-stack"
+        // In the corner, always: the chat — docked, floating or full-screen —
+        // never moves it, and overlaps it instead. Which of the two is seen is
+        // the stacking order's business (`noticeZIndex`). Under the kiosk bar
+        // on the laptop while it is up (0 elsewhere), and in the MAIN
+        // monitor's corner over a row of monitors (0 elsewhere).
+        style={{
+          zIndex: noticeZIndex,
+          right: NOTICE_MARGIN + mainIns.right,
+          top: noticeTop,
+          // On a phone the bottom is bounded as well — wherever the top is:
+          // the touch-phone stylesheet moves it under the app/chat header
+          // (globals.css, `.desktop-notice-stack`). The box is see-through
+          // and lets every press through; only the bubbles in it take any.
+          ...(isMobile
+            ? {
+              bottom: `calc(${PHONE_NOTICE_BOTTOM_RESERVE}px + env(safe-area-inset-bottom, 0px))`,
+              overflowY: "auto",
+              overscrollBehavior: "contain",
+            }
+            : {}),
+        }}
+        // Pressing, hovering or tabbing into a bubble brings the column back
+        // in front of the chat or the window that went over it.
+        onPointerDownCapture={raiseNotices}
+        onPointerOver={raiseNotices}
+        onFocusCapture={raiseNotices}
+      >
+        {noticesUp && (<>
           {/* New version available notification */}
           {updateAvailable && !updateNoticeHidden && (() => {
             const cb = updateAvailable.clawbox;
@@ -3445,7 +3557,7 @@ function ChromeDesktopInner() {
             const { clawbox: cbNeeds, openclaw: ocNeeds } = updateNoticeComponents(updateAvailable);
             return (
               <div
-                className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="pointer-events-auto rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
               >
@@ -3497,7 +3609,7 @@ function ChromeDesktopInner() {
 
           {offerNoticeUp && (
             <div
-              className="rounded-xl bg-[var(--bg-elevated)] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+              className="pointer-events-auto rounded-xl bg-[var(--bg-elevated)] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
               role="status"
               aria-live="polite"
             >
@@ -3568,7 +3680,7 @@ function ChromeDesktopInner() {
             return (
               <div
                 key={notice.id}
-                className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="pointer-events-auto rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
                 data-testid="coding-agent-notice"
@@ -3619,7 +3731,7 @@ function ChromeDesktopInner() {
             return (
               <div
                 key={code || req.id}
-                className="rounded-xl bg-[var(--bg-elevated)] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="pointer-events-auto rounded-xl bg-[var(--bg-elevated)] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
               >
@@ -3663,8 +3775,12 @@ function ChromeDesktopInner() {
             );
           })}
           <BackgroundTaskCards tasks={backgroundTasks.tasks} onDismiss={backgroundTasks.dismiss} />
-        </div>
-      )}
+        </>)}
+        {/* Renders the `clawbox:toast` events the pending-action poll above and
+            the pairing flow dispatch. Without it ui_notify, `clawbox notify`
+            and every server-side owner notice were fired and never shown. */}
+        <ToastHost onArrive={raiseNotices} />
+      </div>
       {/* Desktop wallpaper background (see `wallpaperLayers`). */}
       {wallpaperLayers}
       {/* Hidden file input for wallpaper upload */}
@@ -3911,9 +4027,6 @@ function ChromeDesktopInner() {
           initialPanelWidth={chatPanelWidth}
           floatingZIndex={chatZIndex}
           onFocus={raiseChat}
-          // Only while a card is up: the popup reports its rect on every pointer
-          // move of a drag, and nothing is dodging it the rest of the time.
-          onFloatingRectChange={noticesUp ? handleChatFloatingRect : undefined}
           mascotX={mascotHidden ? 85 : mascotX}
           trayMode={mascotHidden}
           mobile={isMobile}
@@ -3924,19 +4037,21 @@ function ChromeDesktopInner() {
       {isMobile ? (
         // Mobile: render only the topmost non-minimized window as fullscreen
         (() => {
-          // Only windows whose app is on this desktop: one restored after its
-          // app went would otherwise be the "top" and leave the screen empty.
-          const visible = openWindows.filter(w => !w.minimized && allApps.some(a => a.id === w.appId));
-          if (visible.length === 0) return null;
-          const top = visible.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
+          // `phoneWindow`: the topmost window whose app is on this desktop.
+          const top = phoneWindow;
+          if (!top) return null;
           const app = allApps.find(a => a.id === top.appId);
           if (!app) return null;
           return (
             <div
               key={top.id}
               data-testid="mobile-app-window"
-              className="mobile-app-window fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
-              style={{ paddingBottom: 'calc(56px + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
+              className="mobile-app-window fixed inset-0 flex flex-col bg-[#0d1117] animate-slide-up"
+              style={{ zIndex: PHONE_WINDOW_LAYER, paddingBottom: 'calc(56px + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
+              // A tap in the app is a press on its window: it goes in front of
+              // the bubbles, as a window does on the desktop (no-op while it
+              // already is).
+              onPointerDownCapture={() => focusWindow(top.id)}
             >
               {/* Mobile window header */}
               <div className="flex items-center gap-3 px-3 py-2 bg-[#161b22] border-b border-white/[0.06] shrink-0">
@@ -3962,7 +4077,7 @@ function ChromeDesktopInner() {
                     : <AppIcon id={app.id} size="w-3 h-3" />}
                 </div>
                 <span className="text-sm font-medium text-white/80 truncate flex-1">{resolveAppName(app)}</span>
-                {visible.length > 1 && (
+                {phoneWindows.length > 1 && (
                   <button
                     onClick={() => minimizeWindow(top.id)}
                     className="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
