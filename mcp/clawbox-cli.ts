@@ -477,6 +477,8 @@ async function main() {
     // compacts the ones that need it with the core's own `doctor ... compact`,
     // stopping the gateway for it only once the core says it is idle
     // (scripts/openclaw-db-maintenance.py `maintain`, the nightly slot's job).
+    // The operator's own call: it runs whether or not the owner turned the
+    // nightly slot on in Settings.
     if (sub !== "status" && sub !== "run") {
       console.error("Usage: clawbox db-maintenance status [--json] | run [--dry-run] [--all] [--no-idle-check]");
       process.exit(1);

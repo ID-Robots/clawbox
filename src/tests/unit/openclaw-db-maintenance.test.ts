@@ -81,7 +81,11 @@ case "$1 $2" in
     if [ "\${OC_COMPACT_EXIT:-0}" != 0 ]; then echo "compaction refused" >&2; exit "$OC_COMPACT_EXIT"; fi
     vacuum "$OPENCLAW_STATE_DIR/agents/$5/agent/openclaw-agent.sqlite"
     echo "(node) ExperimentalWarning: SQLite is an experimental feature" >&2
-    printf '{"agentId":"%s","before":{"bytes":1},"after":{"bytes":1},"quick_check":"%s","integrity_check":"ok"}\\n' "$5" "\${OC_QUICK:-ok}"
+    if [ -n "\${OC_NO_VERDICT:-}" ]; then
+      printf '{"agentId":"%s","before":{"bytes":1},"after":{"bytes":1}}\\n' "$5"
+    else
+      printf '{"agentId":"%s","before":{"bytes":1},"after":{"bytes":1},"quick_check":"%s","integrity_check":"ok"}\\n' "$5" "\${OC_QUICK:-ok}"
+    fi
     ;;
   "doctor --state-sqlite")
     vacuum "$OPENCLAW_STATE_DIR/state/openclaw.sqlite"
@@ -131,6 +135,16 @@ function prestart(extraArgs: string[] = [], extra: Record<string, string> = {}) 
 const status = () => JSON.parse(readFileSync(path.join(dataDir, "openclaw-migration-status.json"), "utf-8"));
 const record = () => JSON.parse(readFileSync(path.join(dataDir, "openclaw-db-maintenance.json"), "utf-8"));
 
+/**
+ * The owner's switch, as Settings saves it (src/lib/openclaw-db-maintenance.ts
+ * writes `openclaw_db_maintenance` into data/config.json). The pre-start
+ * compacts only while it says `enabled: true`.
+ */
+function setSwitch(value: unknown): void {
+  writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ setup_complete: true, openclaw_db_maintenance: value }));
+}
+const turnOn = () => setSwitch({ enabled: true, time: "04:30" });
+
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "db-maint-"));
   stateDir = path.join(root, ".openclaw");
@@ -151,6 +165,8 @@ afterEach(() => {
 });
 
 describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — compaction", () => {
+  beforeEach(turnOn);
+
   it("compacts an agent database over 30 % free pages with the core's own command, and leaves one under it", async () => {
     makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 300 });
     makeDb(agentDb("ops"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 40 });
@@ -269,6 +285,92 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — compaction
   });
 });
 
+describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the owner's switch", () => {
+  const OFF_LINE = /compaction is off: the owner has not turned on nightly maintenance \(Settings → System → Agent databases\); nothing compacted at this start/;
+
+  function bloated(): number {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 300 });
+    makeDb(stateDb(), { userVersion: STATE_SCHEMA, rows: 300, deleted: 200 });
+    return statSync(agentDb("main")).size;
+  }
+
+  it("compacts nothing on a box whose owner never saved a choice, and still records the migration status", () => {
+    const before = bloated();
+    const r = prestart();
+    expect(r.status).toBe(0);
+    expect(calledWith()).toEqual([]);
+    expect(statSync(agentDb("main")).size).toBe(before);
+    expect(r.out).toMatch(OFF_LINE);
+    expect(status()).toMatchObject({ state: "ok", reason: null, core: "2026.10.3", databases: { total: 2, behind: 0 } });
+    expect(record().databases?.["agent:main"]?.lastCompact).toBeUndefined();
+  });
+
+  it("compacts nothing when the switch is off, malformed, or the store cannot be read", () => {
+    const before = bloated();
+    for (const value of [{ enabled: false, time: "04:30" }, { enabled: "true", time: "04:30" }, { enabled: 1 }, { time: "04:30" }, true, null]) {
+      setSwitch(value);
+      const r = prestart();
+      expect(r.status).toBe(0);
+      expect(r.out).toMatch(OFF_LINE);
+    }
+    writeFileSync(path.join(dataDir, "config.json"), "{torn");
+    expect(prestart().out).toMatch(OFF_LINE);
+    // Python's json takes NaN; the web server's JSON.parse refuses the whole
+    // store and the card reads it as off — so the pre-start does too.
+    writeFileSync(path.join(dataDir, "config.json"), '{"openclaw_db_maintenance": {"enabled": true, "time": "04:30"}, "x": NaN}');
+    expect(prestart().out).toMatch(OFF_LINE);
+    expect(calledWith()).toEqual([]);
+    expect(statSync(agentDb("main")).size).toBe(before);
+  });
+
+  it("compacts once the owner turns it on — read from the store the pre-start names", () => {
+    const before = bloated();
+    const elsewhere = path.join(root, "elsewhere.json");
+    writeFileSync(elsewhere, JSON.stringify({ openclaw_db_maintenance: { enabled: true, time: "02:00" } }));
+    const r = prestart(["--device-store", elsewhere]);
+    expect(r.out).not.toMatch(OFF_LINE);
+    expect(calledWith()).toEqual([
+      "doctor --session-sqlite compact --session-sqlite-agent main --json",
+      "doctor --state-sqlite compact --json",
+    ]);
+    expect(statSync(agentDb("main")).size).toBeLessThan(before / 2);
+  });
+
+  it("keeps a migration's rollback copy it would have had to compact to check, compacting nothing", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const bak = `${agentDb("main")}.pre-startup-migration-20261020T101010Z-abc.bak`;
+    writeFileSync(bak, "x".repeat(50_000));
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({ version: 1, provenAt: Date.now() / 1000 + 1 }));
+    const r = prestart();
+    expect(calledWith()).toEqual([]);
+    expect(existsSync(bak)).toBe(true);
+    expect(r.out).toMatch(/rollback copy of agent main kept until a compaction has checked its integrity/);
+  });
+
+  it("still retires a rollback copy whose database already passed a recorded integrity check after it", () => {
+    // The check came from a compaction the owner asked for (a "Run now", or a
+    // start while the switch was on: both record `lastCompact` the same way),
+    // before the gateway had started on the migrated database. Off now, the
+    // pre-start compacts nothing, but the copy is as provably safe to remove.
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const bak = `${agentDb("main")}.pre-startup-migration-20261020T101010Z-abc.bak`;
+    writeFileSync(bak, "x".repeat(50_000));
+    turnOn();
+    prestart();
+    expect(record().databases["agent:main"].lastCompact).toMatchObject({ ok: true, integrity: "ok" });
+    expect(existsSync(bak)).toBe(true);
+
+    setSwitch({ enabled: false, time: "04:30" });
+    writeFileSync(path.join(dataDir, "openclaw-start-guard.json"), JSON.stringify({ version: 1, provenAt: Date.now() / 1000 + 1 }));
+    writeFileSync(calls, "");
+    const r = prestart();
+    expect(r.out).toMatch(OFF_LINE);
+    expect(calledWith()).toEqual(["update cleanup --yes --json"]);
+    expect(existsSync(bak)).toBe(false);
+    expect(r.out).toMatch(/removed the pre-migration copy of agent main \(50 KB\): the migrated database passed its integrity check/);
+  });
+});
+
 describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — migration status", () => {
   it("reports agents a migration has not reached as degraded, with what the migration needs", () => {
     makeDb(agentDb("main"), { userVersion: 21 });
@@ -313,6 +415,8 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — migration 
 });
 
 describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migration's rollback copies", () => {
+  beforeEach(turnOn);
+
   function backup(db: string, id = "20261020T101010Z-abc"): string {
     const bak = `${db}.pre-startup-migration-${id}.bak`;
     writeFileSync(bak, "x".repeat(50_000));
@@ -360,6 +464,16 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     expect(existsSync(bak)).toBe(true);
     expect(r.out).toMatch(/rollback copy of agent main kept until the gateway has started on the migrated database/);
     expect(calledWith()).not.toContain("update cleanup --yes --json");
+  });
+
+  it("keeps a copy whose compaction exited 0 but reported no integrity verdict", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const bak = backup(agentDb("main"));
+    gatewayStartedSince();
+    const r = prestart([], { OC_NO_VERDICT: "1" });
+    expect(record().databases["agent:main"].lastCompact).toMatchObject({ ok: true, exit: 0, integrity: "unreported" });
+    expect(existsSync(bak)).toBe(true);
+    expect(r.out).toMatch(/rollback copy of agent main kept until a compaction has checked its integrity/);
   });
 
   it("keeps every copy while a start-loop recovery has not settled", () => {

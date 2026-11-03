@@ -2062,7 +2062,7 @@ const table: Record<string, string> = {
   "dbMaintenance.runNow": "Изпълни сега",
   "dbMaintenance.running": "Поддръжката работи — {phase}",
   "dbMaintenance.saveFailed": "Графикът не можа да бъде запазен.",
-  "dbMaintenance.scheduleHelp": "Всяка нощ в този час ClawBox проверява базите данни и уплътнява само тези, които имат нужда.",
+  "dbMaintenance.scheduleHelp": "Изключено, докато не го включите. Докато е включено, ClawBox проверява базите данни всяка нощ в този час и при всяко стартиране на асистента и уплътнява само тези, които имат нужда. „Изпълни сега“ работи и в двата случая.",
   "dbMaintenance.scheduleLabel": "Нощна поддръжка",
   "dbMaintenance.startFailed": "Поддръжката не можа да започне.",
   "dbMaintenance.started": "Поддръжката започна. Ако някоя база данни трябва да се уплътни, чатовете спират, докато асистентът се върне.",

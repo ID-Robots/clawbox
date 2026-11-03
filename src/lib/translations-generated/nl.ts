@@ -2062,7 +2062,7 @@ const table: Record<string, string> = {
   "dbMaintenance.runNow": "Nu uitvoeren",
   "dbMaintenance.running": "Onderhoud bezig — {phase}",
   "dbMaintenance.saveFailed": "Kon het schema niet opslaan.",
-  "dbMaintenance.scheduleHelp": "Elke nacht op dit tijdstip controleert ClawBox de databases en comprimeert alleen de databases die het nodig hebben.",
+  "dbMaintenance.scheduleHelp": "Uit totdat je het aanzet. Zolang het aan staat, controleert ClawBox de databases elke nacht op dit tijdstip en bij elke start van de assistent, en comprimeert alleen de databases die het nodig hebben. ‘Nu uitvoeren’ werkt in beide gevallen.",
   "dbMaintenance.scheduleLabel": "Nachtelijk onderhoud",
   "dbMaintenance.startFailed": "Kon het onderhoud niet starten.",
   "dbMaintenance.started": "Onderhoud gestart. Als een database gecomprimeerd moet worden, pauzeren chats tot de assistent terug is.",

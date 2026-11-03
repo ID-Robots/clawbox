@@ -2062,7 +2062,7 @@ const table: Record<string, string> = {
   "dbMaintenance.runNow": "Esegui ora",
   "dbMaintenance.running": "Manutenzione in corso: {phase}",
   "dbMaintenance.saveFailed": "Impossibile salvare la pianificazione.",
-  "dbMaintenance.scheduleHelp": "Ogni notte a quest'ora ClawBox controlla i database e compatta solo quelli che ne hanno bisogno.",
+  "dbMaintenance.scheduleHelp": "Disattivata finché non la attiva. Quando è attiva, ClawBox controlla i database ogni notte a quest'ora e a ogni avvio dell'assistente, e compatta solo quelli che ne hanno bisogno. «Esegui ora» funziona in entrambi i casi.",
   "dbMaintenance.scheduleLabel": "Manutenzione notturna",
   "dbMaintenance.startFailed": "Impossibile avviare la manutenzione.",
   "dbMaintenance.started": "Manutenzione avviata. Se un database va compattato, le chat restano in pausa finché l'assistente non torna.",

@@ -7106,8 +7106,10 @@ step_openclaw_install() {
       echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Resolve the reported blocker and Retry before rebuilding." >&2
       return 1
     fi
-    # Complete: the gateway's next pre-start compacts what the migration left
-    # and, once every database passes its integrity check, retires the copies.
+    # Complete: the gateway's pre-start retires the copies once every database
+    # has passed a compaction's integrity check — compacted by the pre-start
+    # itself only when the owner turned nightly maintenance on, otherwise by
+    # the owner's own "Run now"; until then the copies stay.
     openclaw_record_migration_verdict complete "$_oc_live_pkg"
 
   fi

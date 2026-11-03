@@ -13,7 +13,10 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
        agent databases reports ready while every agent is degraded; this file
        is what the web server reads so the owner is told instead
        (``src/lib/openclaw-migration-status.ts``).
-    2. Compacts, with ``openclaw doctor --session-sqlite compact
+    2. ONLY when the owner has turned nightly maintenance on (Settings →
+       System → Agent databases; ``openclaw_db_maintenance.enabled: true`` in
+       the device store — off until they do, see ``compaction_turned_on``):
+       compacts, with ``openclaw doctor --session-sqlite compact
        --session-sqlite-agent <id> --json`` (and ``--state-sqlite compact`` for
        the shared state database), every database whose free pages are over
        the threshold (30 %) — the pages a schema migration or a large delete
@@ -31,7 +34,10 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
        of the database AFTER its copy was taken. And only once the gateway has
        STARTED on the migrated databases (``start-guard`` below records that):
        a database can pass every SQLite check and still hold a row the core
-       refuses at startup, and the copy is then the way back.
+       refuses at startup, and the copy is then the way back. Runs with the
+       switch off too, because it compacts nothing itself: the compaction it
+       counts is one already recorded — a "Run now", or a start while the
+       switch was on — and with none recorded since the copy, the copy stays.
 
 ``start-guard`` (run by scripts/gateway-pre-start.sh, first, gateway stopped)
     A single row the core refuses in the default agent's database (or the
@@ -57,7 +63,8 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
 ``record-doctor`` (run by install.sh after ``doctor --fix``)
     Records the migration verdict for the status file.
 
-``maintain`` (the web server's nightly slot, Settings "Run now", the CLI)
+``maintain`` (Settings "Run now" and the CLI, whatever the owner's switch
+says; the web server's nightly slot only while it is on)
     The pre-start's compaction outside a gateway start, with a window of its
     own (30 min) instead of what is left of a 600 s start. Measures every
     database read-only and logs its size, and touches the gateway only when one
@@ -146,6 +153,9 @@ DOWNGRADE_AUTHORIZATION_FILE = "harness-downgrade.json"
 DOWNGRADE_AUTHORIZATION_TTL_S = 12 * 3600
 SET_ASIDE_DIR = "openclaw-newer-schema"
 RECORD_FILE = "openclaw-db-maintenance.json"
+# The owner's switch in the device store (src/lib/openclaw-db-maintenance.ts
+# DB_MAINTENANCE_KEY): `{enabled, time}`, written only by Settings.
+SCHEDULE_KEY = "openclaw_db_maintenance"
 # `maintain`: one run at a time (flock), and its own log beside the record.
 MAINTAIN_LOCK_FILE = "openclaw-db-maintenance.lock"
 MAINTAIN_LOG_FILE = "openclaw-db-maintenance.log"
@@ -765,9 +775,11 @@ def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S,
 
 def verified_since(db, record, moment):
     """A successful compaction — OpenClaw's integrity checks — recorded at or
-    after `moment`, of the database on the schema it is on now."""
+    after `moment`, of the database on the schema it is on now. Its checks
+    must have SAID ok: a compaction that exited 0 with no verdict in its
+    report ("unreported") checked nothing a rollback copy may be retired on."""
     entry = ((record.get("databases") or {}).get(key_of(db)) or {}).get("lastCompact") or {}
-    if not entry.get("ok") or entry.get("integrity") == "failed":
+    if not entry.get("ok") or entry.get("integrity") != "ok":
         return False
     if entry.get("userVersion") != db.get("userVersion"):
         return False
@@ -1074,6 +1086,28 @@ def cleanup(args, dbs, core, status, record, deadline):
         record["cleanup"] = {"at": time.time(), "removedBytes": removed}
 
 
+def compaction_turned_on(store_path):
+    """The owner turned nightly maintenance on: the device store's
+    `openclaw_db_maintenance` says `enabled: true`. The one switch for every
+    compaction ClawBox starts by itself — the nightly slot and this pre-start;
+    "Run now" and the CLI are the owner's own call and do not ask it. No store,
+    no record, an unreadable store or anything but a literal `true` is OFF,
+    the default: a compaction stops the gateway for minutes and rewrites a
+    multi-GB file, which a box does only when its owner asked for it. Read as
+    strictly as the web server reads it (JSON.parse knows no NaN/Infinity), so
+    a store the Settings card reads as off is off here too."""
+    def not_json(name):
+        raise ValueError("%s is not JSON" % name)
+
+    try:
+        with open(store_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh, parse_constant=not_json)
+    except Exception:
+        return False
+    schedule = data.get(SCHEDULE_KEY) if isinstance(data, dict) else None
+    return isinstance(schedule, dict) and schedule.get("enabled") is True
+
+
 def cmd_prestart(args):
     started = time.monotonic()
     deadline = started + max(0, args.budget_seconds)
@@ -1104,7 +1138,10 @@ def cmd_prestart(args):
             )
         )
 
-    if args.budget_seconds <= 0:
+    store = args.device_store or os.path.join(data_dir, "config.json")
+    if not compaction_turned_on(store):
+        log("compaction is off: the owner has not turned on nightly maintenance (Settings → System → Agent databases); nothing compacted at this start")
+    elif args.budget_seconds <= 0:
         log("no time left in this gateway start for compaction")
     else:
         compact_all(args, dbs, core, record, deadline)
@@ -2655,6 +2692,8 @@ def main(argv=None):
     p.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     p.add_argument("--live-rate-bps", type=float, default=DEFAULT_LIVE_RATE_BPS)
     p.add_argument("--cli-overhead-seconds", type=float, default=CLI_OVERHEAD_S)
+    # The device store the owner's switch is read from (default <data-dir>/config.json).
+    p.add_argument("--device-store", default=None)
 
     p = sub.add_parser("start-guard")
     common(p)

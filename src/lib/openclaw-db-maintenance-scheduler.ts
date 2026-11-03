@@ -1,9 +1,10 @@
 /**
  * In-process scheduler for the nightly OpenClaw database check — the shape of
  * `prime-radiant/nightly-scheduler.ts`: one schedule (the device store's
- * `openclaw_db_maintenance`, on at 04:30 local by default), one timer rebuilt
- * from it at every boot and after every save, re-armed after every fire. No
- * crontab entry or systemd timer to duplicate or orphan.
+ * `openclaw_db_maintenance` — OFF until the owner switches it on, 04:30 local
+ * suggested), one timer rebuilt from it at every boot and after every save,
+ * re-armed after every fire. With no stored `enabled: true` nothing is armed.
+ * No crontab entry or systemd timer to duplicate or orphan.
  *
  * A slot only STARTS a run (`startDbMaintenance`); the run measures first and
  * stops the gateway only when a database needs compacting and the core says

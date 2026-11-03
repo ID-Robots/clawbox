@@ -2062,7 +2062,7 @@ const table: Record<string, string> = {
   "dbMaintenance.runNow": "立即运行",
   "dbMaintenance.running": "维护进行中——{phase}",
   "dbMaintenance.saveFailed": "无法保存计划。",
-  "dbMaintenance.scheduleHelp": "每晚在此时间，ClawBox 会检查数据库，并只压缩需要压缩的数据库。",
+  "dbMaintenance.scheduleHelp": "在你开启之前保持关闭。开启后，ClawBox 会在每晚此时间以及每次助手启动时检查数据库，并只压缩需要压缩的数据库。“立即运行”在两种情况下都可用。",
   "dbMaintenance.scheduleLabel": "夜间维护",
   "dbMaintenance.startFailed": "无法开始维护。",
   "dbMaintenance.started": "维护已开始。如果有数据库需要压缩，聊天会暂停，直到助手恢复。",

@@ -52,7 +52,13 @@ import {
   startDbMaintenance,
   writeDbMaintenanceSchedule,
 } from "@/lib/openclaw-db-maintenance";
-import { computeNextDbMaintenanceMs, stop as stopScheduler } from "@/lib/openclaw-db-maintenance-scheduler";
+import {
+  computeNextDbMaintenanceMs,
+  nextRunAtMs,
+  refresh as refreshScheduler,
+  start as startScheduler,
+  stop as stopScheduler,
+} from "@/lib/openclaw-db-maintenance-scheduler";
 
 const recordPath = () => path.join(h.root, "data", "openclaw-db-maintenance.json");
 
@@ -92,16 +98,31 @@ afterEach(() => {
 });
 
 describe("the nightly schedule", () => {
-  it("is on at 04:30 local until the owner says otherwise, and ignores a malformed value", async () => {
-    expect(await readDbMaintenanceSchedule()).toEqual({ enabled: true, time: "04:30" });
-    expect(normaliseDbMaintenanceSchedule({ enabled: "yes", time: "25:00" })).toEqual({ enabled: true, time: "04:30" });
+  it("is OFF until the owner turns it on, with 04:30 local as the suggested time, and ignores a malformed value", async () => {
+    // A box that never saved a choice — a fresh install, an update from a
+    // build whose default was on, a factory reset — has no record at all.
+    expect(h.store[DB_MAINTENANCE_KEY]).toBeUndefined();
+    expect(await readDbMaintenanceSchedule()).toEqual({ enabled: false, time: "04:30" });
+    expect(normaliseDbMaintenanceSchedule(undefined)).toEqual({ enabled: false, time: "04:30" });
+    expect(normaliseDbMaintenanceSchedule(null)).toEqual({ enabled: false, time: "04:30" });
+    expect(normaliseDbMaintenanceSchedule({ enabled: "yes", time: "25:00" })).toEqual({ enabled: false, time: "04:30" });
+    expect(normaliseDbMaintenanceSchedule({ enabled: 1, time: "04:30" })).toEqual({ enabled: false, time: "04:30" });
+    expect(normaliseDbMaintenanceSchedule({ time: "02:15" })).toEqual({ enabled: false, time: "02:15" });
     expect(normaliseDbMaintenanceSchedule({ enabled: false, time: "02:15" })).toEqual({ enabled: false, time: "02:15" });
   });
 
+  it("keeps an owner's own saved enabled:true", async () => {
+    h.store[DB_MAINTENANCE_KEY] = { enabled: true, time: "02:15" };
+    expect(await readDbMaintenanceSchedule()).toEqual({ enabled: true, time: "02:15" });
+  });
+
   it("writes only a valid switch and HH:MM, keeping the half it was not given", async () => {
-    expect(await writeDbMaintenanceSchedule({ time: "03:45" })).toEqual({ enabled: true, time: "03:45" });
-    expect(await writeDbMaintenanceSchedule({ enabled: false })).toEqual({ enabled: false, time: "03:45" });
-    expect(h.store[DB_MAINTENANCE_KEY]).toEqual({ enabled: false, time: "03:45" });
+    // A time alone never switches it on.
+    expect(await writeDbMaintenanceSchedule({ time: "03:45" })).toEqual({ enabled: false, time: "03:45" });
+    expect(await writeDbMaintenanceSchedule({ enabled: true })).toEqual({ enabled: true, time: "03:45" });
+    expect(await writeDbMaintenanceSchedule({ time: "02:00" })).toEqual({ enabled: true, time: "02:00" });
+    expect(await writeDbMaintenanceSchedule({ enabled: false })).toEqual({ enabled: false, time: "02:00" });
+    expect(h.store[DB_MAINTENANCE_KEY]).toEqual({ enabled: false, time: "02:00" });
     await expect(writeDbMaintenanceSchedule({ time: "3:45pm" })).rejects.toBeInstanceOf(DbMaintenanceScheduleError);
     await expect(writeDbMaintenanceSchedule({ enabled: 1 })).rejects.toBeInstanceOf(DbMaintenanceScheduleError);
   });
@@ -111,6 +132,27 @@ describe("the nightly schedule", () => {
     expect(new Date(computeNextDbMaintenanceMs({ enabled: true, time: "04:30" }, now))).toEqual(new Date(2026, 9, 26, 4, 30, 0));
     expect(new Date(computeNextDbMaintenanceMs({ enabled: true, time: "02:00" }, now))).toEqual(new Date(2026, 9, 27, 2, 0, 0));
     expect(computeNextDbMaintenanceMs({ enabled: false, time: "04:30" }, now)).toBe(0);
+  });
+});
+
+describe("the scheduler's boot hook", () => {
+  it("arms nothing on a box whose owner never saved a choice", async () => {
+    await startScheduler();
+    expect(nextRunAtMs()).toBe(0);
+    h.store[DB_MAINTENANCE_KEY] = { enabled: false, time: "04:30" };
+    await refreshScheduler();
+    expect(nextRunAtMs()).toBe(0);
+  });
+
+  it("arms the nightly slot once the owner turns it on, and disarms it when they turn it off", async () => {
+    h.store[DB_MAINTENANCE_KEY] = { enabled: true, time: "04:30" };
+    await startScheduler();
+    const armed = nextRunAtMs();
+    expect(armed).toBeGreaterThan(Date.now());
+    expect(armed).toBe(computeNextDbMaintenanceMs({ enabled: true, time: "04:30" }, new Date()));
+    h.store[DB_MAINTENANCE_KEY] = { enabled: false, time: "04:30" };
+    await refreshScheduler();
+    expect(nextRunAtMs()).toBe(0);
   });
 });
 
@@ -147,6 +189,8 @@ describe("dbMaintenanceRunning — what startUpdate asks", () => {
 describe("startDbMaintenance", () => {
   it("starts the helper's `maintain` in a transient user unit of its own, which a web-server restart does not stop", async () => {
     h.execFile.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: (e: Error | null, o: string, e2: string) => void) => cb(null, "", ""));
+    // "Run now" is the owner's own call: it starts with the nightly switch off.
+    h.store[DB_MAINTENANCE_KEY] = { enabled: false, time: "04:30" };
     const start = await startDbMaintenance("manual");
     expect(start).toEqual({ started: true, survivesRestart: true });
     expect(h.execFile).toHaveBeenCalledTimes(1);
@@ -197,7 +241,16 @@ describe("startDbMaintenance", () => {
 });
 
 describe("readDbMaintenanceStatus", () => {
+  it("says the schedule is off with no next check on a box whose owner never turned it on", async () => {
+    h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
+      cb(null, JSON.stringify({ core: "2026.10.6", supported: true, databases: [] }), ""));
+    const status = await readDbMaintenanceStatus();
+    expect(status.schedule).toEqual({ enabled: false, time: "04:30" });
+    expect(status.nextRunAt).toBeNull();
+  });
+
   it("reads the helper's read-only `status --json`, with the owner's schedule", async () => {
+    h.store[DB_MAINTENANCE_KEY] = { enabled: true, time: "04:30" };
     const report = {
       core: "2026.10.6", supported: true, totalBytes: 8_000_000_000, diskFreeBytes: 20_000_000_000,
       databases: [{ key: "agent:main", label: "agent main", kind: "agent", agentId: "main", bytes: 8_000_000_000, needs: "37% free pages" }],
@@ -219,7 +272,7 @@ describe("readDbMaintenanceStatus", () => {
 
   it("answers not-available on the Hermes edition without running anything", async () => {
     h.edition = "hermes";
-    expect(await readDbMaintenanceStatus()).toMatchObject({ available: false, databases: [] });
+    expect(await readDbMaintenanceStatus()).toMatchObject({ available: false, databases: [], schedule: { enabled: false }, nextRunAt: null });
     expect(h.execFile).not.toHaveBeenCalled();
   });
 });

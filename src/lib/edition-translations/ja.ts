@@ -1823,7 +1823,7 @@ export const ja: Record<string, string> = {
   "dbMaintenance.scheduleLabel": "夜間メンテナンス",
   "dbMaintenance.time": "時刻",
   "dbMaintenance.nextRun": "次回の確認: {when}",
-  "dbMaintenance.scheduleHelp": "毎晩この時刻に ClawBox がデータベースを確認し、必要なものだけを圧縮します。",
+  "dbMaintenance.scheduleHelp": "オンにするまではオフです。オンの間は、毎晩この時刻とアシスタントの起動時に ClawBox がデータベースを確認し、必要なものだけを圧縮します。「今すぐ実行」はどちらの場合でも使えます。",
   "dbMaintenance.runNow": "今すぐ実行",
   "dbMaintenance.started": "メンテナンスを開始しました。圧縮が必要なデータベースがある場合、アシスタントが戻るまでチャットは一時停止します。",
   "dbMaintenance.alreadyRunning": "メンテナンスはすでに実行中です。",

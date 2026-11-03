@@ -2062,7 +2062,7 @@ const table: Record<string, string> = {
   "dbMaintenance.runNow": "Lancer maintenant",
   "dbMaintenance.running": "Maintenance en cours — {phase}",
   "dbMaintenance.saveFailed": "Impossible d'enregistrer la planification.",
-  "dbMaintenance.scheduleHelp": "Chaque nuit à cette heure, ClawBox vérifie les bases de données et ne compacte que celles qui en ont besoin.",
+  "dbMaintenance.scheduleHelp": "Désactivée tant que vous ne l'activez pas. Lorsqu'elle est activée, ClawBox vérifie les bases de données chaque nuit à cette heure et à chaque démarrage de l'assistant, et ne compacte que celles qui en ont besoin. « Lancer maintenant » fonctionne dans les deux cas.",
   "dbMaintenance.scheduleLabel": "Maintenance nocturne",
   "dbMaintenance.startFailed": "Impossible de lancer la maintenance.",
   "dbMaintenance.started": "Maintenance lancée. Si une base de données doit être compactée, les discussions sont en pause jusqu'au retour de l'assistant.",

@@ -1819,7 +1819,7 @@ export const sv: Record<string, string> = {
   "dbMaintenance.scheduleLabel": "Nattligt underhåll",
   "dbMaintenance.time": "Tid",
   "dbMaintenance.nextRun": "Nästa kontroll: {when}",
-  "dbMaintenance.scheduleHelp": "Varje natt vid den här tiden kontrollerar ClawBox databaserna och komprimerar bara de som behöver det.",
+  "dbMaintenance.scheduleHelp": "Av tills du slår på det. Medan det är på kontrollerar ClawBox databaserna varje natt vid den här tiden och varje gång assistenten startar, och komprimerar bara de som behöver det. ”Kör nu” fungerar i båda fallen.",
   "dbMaintenance.runNow": "Kör nu",
   "dbMaintenance.started": "Underhållet har startat. Om en databas behöver komprimeras pausas chattar tills assistenten är tillbaka.",
   "dbMaintenance.alreadyRunning": "Underhållet körs redan.",
