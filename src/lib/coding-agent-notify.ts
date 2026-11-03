@@ -410,15 +410,21 @@ function parseChatNotice(raw: string | null | undefined): ChatNoticeRecord | nul
  * reading as empty — written back, that empty store would forget every ending
  * already told (and everything else kv.json holds), and each of those chats
  * would be told again. Synchronous from read to rename, so no other request in
- * this process lands in between. Past MAX_CHAT_NOTICE_RECORDS the oldest go.
+ * this process lands in between. Past MAX_CHAT_NOTICE_RECORDS the oldest go —
+ * runs whose ending has been told first, so a long run still under way keeps
+ * the record its notice needs.
  */
 function updateChatNotices<T>(mutate: (data: Record<string, string>) => T): T {
   return kvUpdateStrict((data) => {
     const result = mutate(data);
     const entries = Object.keys(data).filter((name) => name.startsWith(CHAT_NOTICE_KEY_PREFIX));
     if (entries.length > MAX_CHAT_NOTICE_RECORDS) {
-      const age = (name: string) => parseChatNotice(data[name])?.at ?? 0;
-      entries.sort((a, b) => age(a) - age(b));
+      const order = (name: string) => {
+        const record = parseChatNotice(data[name]);
+        // Unreadable entries first, then told ones, then those still waiting; oldest first in each.
+        return record ? (record.told.length > 0 ? 1 : 2) * 1e15 + record.at : 0;
+      };
+      entries.sort((a, b) => order(a) - order(b));
       for (const name of entries.slice(0, entries.length - MAX_CHAT_NOTICE_RECORDS)) delete data[name];
     }
     return result;
@@ -471,19 +477,34 @@ function busiestChat(busy: Array<string | null>, active: ChatActiveRecord | null
   return busy[0];
 }
 
-/** How long the run's start waits for the gateway to say which session is busy. */
-const ACTIVE_SESSIONS_TIMEOUT_MS = 4_000;
+/**
+ * How long the run's start waits, ALL told — connect, handshake and call — for
+ * the gateway to say which session is busy. The route holds the assistant's
+ * tool call while it asks; a gateway answers this in well under a second.
+ */
+export const ACTIVE_SESSIONS_BUDGET_MS = 2_500;
 
 /**
  * OpenClaw: the owner's chats the gateway says have a turn running — null for
  * the main conversation, a tab's key otherwise; a channel's, a cron job's or a
  * ClawBox user's session is none of them. Null when the gateway could not be
- * asked (down, restarting, a core without `activeOnly`).
+ * asked (down, restarting, a core without `activeOnly`) or did not answer
+ * within ACTIVE_SESSIONS_BUDGET_MS.
  */
 async function openClawBusyChats(): Promise<Array<string | null> | null> {
   try {
     const { gatewayWsActiveSessions } = await import("@/lib/openclaw-gateway-ws");
-    const { mainSessionKey, sessionKeys } = await gatewayWsActiveSessions({ timeoutMs: ACTIVE_SESSIONS_TIMEOUT_MS });
+    // The call's own timeout starts after the connect, which has a timer of
+    // its own: the race is what bounds the whole question.
+    const answer = await Promise.race([
+      gatewayWsActiveSessions({ timeoutMs: ACTIVE_SESSIONS_BUDGET_MS }),
+      sleep(ACTIVE_SESSIONS_BUDGET_MS).then(() => null),
+    ]);
+    if (!answer) {
+      console.warn(`[coding-agent] the gateway did not say which chat is busy within ${ACTIVE_SESSIONS_BUDGET_MS} ms; going by the owner's last send`);
+      return null;
+    }
+    const { mainSessionKey, sessionKeys } = answer;
     const busy: Array<string | null> = [];
     for (const key of sessionKeys) {
       if (key === mainSessionKey) busy.push(null);
@@ -619,9 +640,6 @@ async function sendOpenClawChatNotice(key: string | null, message: string, idemp
   }
 }
 
-/** A notice turn that failed before the assistant answered anything. */
-class HermesTurnRefused extends Error {}
-
 /**
  * Hermes: a turn through the box's own chat route, as the chat's own turns
  * go — the route records the question and the answer in the transcript the
@@ -637,12 +655,10 @@ class HermesTurnRefused extends Error {}
  * belongs to the box and goes on without this request, so that is not a
  * notice lost.
  *
- * A resumed session the turn could not use — Hermes refuses one another of
- * its transports holds (`SESSION_NOT_OWNED`, seen on a board when the notice
- * went the CLI way into a session the dashboard had opened) — is tried once
- * more in a fresh session, but only when nothing was answered yet: the notice
- * names the run and asks for its status, so it stands without the
- * conversation before it.
+ * Never sent twice. The route writes the question into the transcript before
+ * the turn runs, so a second try would show the owner the notice twice, and a
+ * try in a fresh session would move their chat off its conversation. A turn
+ * that fails is logged, and the card and Telegram have told the owner.
  */
 async function sendHermesChatNotice(key: string, notice: { message: string; display: string }): Promise<"sent" | "late"> {
   const { whenLiveTurnsSettle } = await import("@/lib/harness/hermes-live-turn");
@@ -650,24 +666,18 @@ async function sendHermesChatNotice(key: string, notice: { message: string; disp
   const { readTranscript } = await import("@/lib/harness/transcript-store");
   // Read after the wait: the turn just waited for may have moved the chat onto a new session.
   const sessionId = (await readTranscript(50, key)).findLast((record) => record.sessionId)?.sessionId;
-  const body = { message: notice.message, displayText: notice.display, sessionKey: key };
-  if (!sessionId) return hermesChatTurn(body);
-  try {
-    return await hermesChatTurn({ ...body, sessionId });
-  } catch (err) {
-    if (!(err instanceof HermesTurnRefused)) throw err;
-    console.warn(`[coding-agent] the chat's session would not take the notice (${err.message}); sending it in a new session`);
-    return hermesChatTurn(body);
-  }
+  return hermesChatTurn({ message: notice.message, displayText: notice.display, sessionKey: key, ...(sessionId ? { sessionId } : {}) });
 }
 
 /**
  * One turn through the chat route, STREAMED, as the desktop chat sends its own
  * (`Accept: text/event-stream`): the route then resumes the session over the
- * same transport the chat's turns used, and the open chat follows the turn
- * live. The answer is read to its end — the stream's `done` or `error` frame
- * is the only word on how the turn went, its status being spent on the first
- * byte. A JSON answer is the route's CLI fallback when the dashboard is not up.
+ * same transport the chat's turns used — sent the JSON way, `hermes chat
+ * --resume` refused a session the dashboard had opened (SESSION_NOT_OWNED, on
+ * a board) — and the open chat follows the turn live. The answer is read to
+ * its end: the stream's `done` or `error` frame is the only word on how the
+ * turn went, its status being spent on the first byte. A JSON answer is the
+ * route's CLI fallback when the dashboard is not up.
  */
 async function hermesChatTurn(body: Record<string, unknown>): Promise<"sent" | "late"> {
   const { getMcpToken } = await import("@/lib/mcp-token");
@@ -686,17 +696,12 @@ async function hermesChatTurn(body: Record<string, unknown>): Promise<"sent" | "
     if (err instanceof Error && err.name === "TimeoutError") return "late";
     throw err;
   }
-  if (!res.ok) throw new HermesTurnRefused(`the chat answered ${res.status}${errorOf(parseJson(text))}`);
+  if (!res.ok) throw new Error(`the chat answered ${res.status}${errorOf(parseJson(text))}`);
   if (!(res.headers.get("content-type") ?? "").includes("text/event-stream")) return "sent";
-  let answered = false;
   for (const block of text.split("\n\n")) {
     const event = /^event: (\S+)$/m.exec(block)?.[1];
-    if (event === "delta") answered = true;
     if (event === "done") return "sent";
-    if (event === "error") {
-      const why = `the chat's turn failed${errorOf(parseJson(/^data: (.*)$/m.exec(block)?.[1] ?? ""))}`;
-      throw answered ? new Error(why) : new HermesTurnRefused(why);
-    }
+    if (event === "error") throw new Error(`the chat's turn failed${errorOf(parseJson(/^data: (.*)$/m.exec(block)?.[1] ?? ""))}`);
   }
   // Cut off before it said how the turn went: the turn is the box's and goes on.
   return "late";

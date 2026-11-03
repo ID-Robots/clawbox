@@ -825,6 +825,42 @@ describe("a run", () => {
       expect(allRuns().length).toBe(1);
     });
 
+    it("announces the run its paused review pass held back once the owner stops that pass", async () => {
+      // The run had a deliverable, so its finish notice waits for the gate the
+      // review pass ends in; a pass paused and then stopped never reached it,
+      // and neither the desktop nor the chat that asked ever heard (TASK-2132).
+      installFakeClaude();
+      const flag = path.join(base, "review-pause-flag");
+      installFakeWrapper([
+        `if grep -q "Automatic review pass" "${stdinFile()}"; then`,
+        `  echo '${INIT}'`,
+        `  while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+        "  exit 0",
+        "fi",
+        'echo done > "$PWD/out.txt"',
+        TOUCHING_BODY,
+      ].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      makeProject("site");
+      const first = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent", deliverable: { kind: "paths", paths: ["out.txt"] } })).id);
+      expect(first.status).toBe("completed");
+      await vi.waitFor(() => { expect(allRuns().length).toBe(2); }, { timeout: 10_000 });
+      const pass = allRuns().find((r) => r.reviewOf === first.id)!;
+      await vi.waitFor(() => { expect(lib.getRun(pass.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 10_000 });
+      lib.pauseRun(pass.id);
+      expect((await finished(pass.id)).status).toBe("paused");
+      // The owner stops it later, as on a box: the pause's own chain is over by then.
+      expect(await lib.waitForRunSettled(pass.id, 10_000)).toBe(true);
+      // Held: the gate has not looked at the run yet.
+      expect(announce.mock.calls.map(([r]) => (r as { id: string }).id)).not.toContain(first.id);
+
+      expect(lib.stopRun(pass.id).status).toBe("stopped");
+      await vi.waitFor(() => {
+        expect(announce.mock.calls.map(([r]) => (r as { id: string }).id)).toContain(first.id);
+      }, { timeout: 10_000 });
+      expect(lib.getRun(first.id)?.status).toBe("completed");
+    });
+
     it("records a commit the run made ITSELF, so the pull request step and the row see it", async () => {
       // The angry-pigs run (2026-09-05) committed its own work through its
       // shell; the settle's `git add -A` then staged nothing, the record said

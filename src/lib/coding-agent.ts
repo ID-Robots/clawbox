@@ -13992,6 +13992,12 @@ export function stopRun(id: string): CodingRun {
     // The pause kept the worktree for its Resume; the stop is where its work
     // is parked on the branch, unmerged, like any stopped run's.
     trackSettleWork(settleRunWorktree(run), run.id);
+    // A paused REVIEW PASS is what its origin's finish notice was held back
+    // for (deliverableGateApplies), and the gate that releases it skipped the
+    // pause. A running pass's Stop reaches it through finishRun; this one is
+    // the owner's Stop too, so it goes the same way — the gate announces the
+    // origin, judging nothing over a Stop.
+    if (run.reviewOf !== null) trackSettleWork(enforceDeliverable(run, "stop", "skipped"), run.id);
     // The pause told the chat nothing (it is not an ending); this is one.
     announceEndingToChat(run);
     return cloneRun(run);

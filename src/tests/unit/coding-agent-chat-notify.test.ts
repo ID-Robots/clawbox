@@ -40,6 +40,7 @@ vi.mock("@/lib/coding-agent", () => ({ waitForRun }));
 
 import { DATA_DIR } from "@/lib/config-store";
 import {
+  ACTIVE_SESSIONS_BUDGET_MS,
   announceCodingAgent,
   announceCodingRunToChat,
   buildChatNotice,
@@ -196,6 +197,20 @@ describe("which chat asked for the run", () => {
     await expect(findChatOrigin(now)).resolves.toEqual({ harness: "openclaw", key: null, at: now });
   });
 
+  it("OpenClaw: a gateway that does not answer holds the run's start no longer than the budget, then the last send stands", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    const now = 50_000_000;
+    ownerSentIn(TAB, now - 90_000);
+    gateway.gatewayWsActiveSessions.mockReturnValue(new Promise(() => {}));
+    let settled: unknown = "pending";
+    void findChatOrigin(now).then((origin) => { settled = origin; });
+    await vi.advanceTimersByTimeAsync(ACTIVE_SESSIONS_BUDGET_MS - 10);
+    expect(settled).toBe("pending");
+    await vi.advanceTimersByTimeAsync(20);
+    expect(settled).toEqual({ harness: "openclaw", key: TAB, at: now });
+  });
+
   it("OpenClaw, when the gateway cannot say: none when the owner's last send is long gone, or never happened", async () => {
     gatewaySilent();
     const now = 50_000_000;
@@ -317,7 +332,7 @@ describe("the notice, on OpenClaw", () => {
     expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
   });
 
-  it("keeps the newest records and lets the oldest go, leaving the rest of the store alone", async () => {
+  it("keeps the newest records and lets the oldest go — told ones first — leaving the rest of the store alone", async () => {
     const seeded: Record<string, string> = { "ui:something-else": "kept" };
     for (let i = 0; i < 500; i++) {
       seeded[`${CHAT_NOTICE_KEY_PREFIX}run-old${i}`] = JSON.stringify({ harness: "openclaw", key: null, at: 1_000 + i, told: [] });
@@ -325,9 +340,15 @@ describe("the notice, on OpenClaw", () => {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(KV, JSON.stringify(seeded));
     recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 9_000 });
-    const kept = kvGetAll(CHAT_NOTICE_KEY_PREFIX);
+    let kept = kvGetAll(CHAT_NOTICE_KEY_PREFIX);
     expect(Object.keys(kept)).toHaveLength(500);
     expect(kept).not.toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-old0`);
+    expect(kept).toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-old1`);
+    // A run whose ending has been told goes before one still under way, however much newer it is.
+    await announceCodingRunToChat(run({ id: "run-old499" }));
+    recordRunChatOrigin("run-newer001", { harness: "openclaw", key: TAB, at: 9_001 });
+    kept = kvGetAll(CHAT_NOTICE_KEY_PREFIX);
+    expect(kept).not.toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-old499`);
     expect(kept).toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-old1`);
     expect(kept).toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`);
     expect(kvGet("ui:something-else")).toBe("kept");
@@ -498,31 +519,26 @@ describe("the notice, on Hermes", () => {
     error.mockRestore();
   });
 
-  it("tries a session that would not take the turn once more, in a new session — never after an answer", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("never sends a failed turn again: the route has written the question, and a second would show it twice", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     await appendTranscript({ role: "assistant", text: "Started run-k3x9q2ab.", timestamp: 2, sessionId: "20261103_101500_a1b2c3" }, HERMES_TAB);
     recordRunChatOrigin("run-k3x9q2ab", { harness: "hermes", key: HERMES_TAB, at: 1 });
-    // What the board answered when the notice went the CLI way into a session the dashboard held.
+    // What a board answered when a notice went the CLI way into a session the dashboard held.
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "hermes-refusal-reason: SESSION_NOT_OWNED" }), { status: 502 }));
-    fetchMock.mockResolvedValueOnce(sse(["delta", { text: "Done." }], ["done", { text: "Done." }]));
     await announceCodingAgent(run());
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const [first, second] = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body));
-    expect(first).toMatchObject({ sessionKey: HERMES_TAB, sessionId: "20261103_101500_a1b2c3" });
-    expect(second.sessionKey).toBe(HERMES_TAB);
-    expect(second).not.toHaveProperty("sessionId");
-    expect(second.message).toBe(first.message);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("SESSION_NOT_OWNED"));
-    expect(error).not.toHaveBeenCalled();
-
-    // A turn that failed AFTER it answered is not asked again: the chat would hear the run twice.
     recordRunChatOrigin("run-second01", { harness: "hermes", key: HERMES_TAB, at: 1 });
     fetchMock.mockResolvedValueOnce(sse(["delta", { text: "It finished, and" }], ["error", { error: "connection lost" }]));
     await announceCodingAgent(run({ id: "run-second01" }));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(error).toHaveBeenCalledTimes(1);
-    warn.mockRestore();
+    // One request each, both in the chat's own session; nothing moved the chat to a new one.
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).sessionId)).toEqual(["20261103_101500_a1b2c3", "20261103_101500_a1b2c3"]);
+    expect(error.mock.calls.map(([line]) => String(line))).toEqual([
+      expect.stringContaining("run-k3x9q2ab was not told"),
+      expect.stringContaining("run-second01 was not told"),
+    ]);
+    expect(error.mock.calls[0][1]).toContain("SESSION_NOT_OWNED");
+    // And the same ending again later sends nothing: it was claimed before the send.
+    await announceCodingAgent(run());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     error.mockRestore();
   });
 
