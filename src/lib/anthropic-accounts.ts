@@ -1583,6 +1583,10 @@ export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fall
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
+          // Never one the run gave up on after refusals (TASK-2139): an
+          // account still "ok" whose week for the run's model is spent would
+          // otherwise be handed straight back.
+          if (opts.exclude?.has(account.id)) continue;
           const status = effectiveStatus(account, now);
           if (status !== "limited" && !(status === "ok" && modelLimitedUntil(account, opts.model, now) !== null)) continue;
           const credential = await credentialFor(account, now).catch(() => null);

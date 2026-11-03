@@ -148,6 +148,15 @@ describe("a spent model week", () => {
     expect((await pool.prepareAccount({ model: FABLE, fallback: true })).prepared?.account.id).toBe(b.id);
   });
 
+  it("never falls back onto an account the run gave up on after refusals (TASK-2139), even one still ok", async () => {
+    usage({});
+    const { a, b } = await twoAccounts();
+    await pool.markModelLimited(a.id, { family: "fable", name: "Fable" }, Date.now() + 30 * H);
+    await pool.markModelLimited(b.id, { family: "fable", name: "Fable" }, Date.now() + 20 * H);
+    expect((await pool.prepareAccount({ model: FABLE, fallback: true, exclude: new Set([a.id]) })).prepared?.account.id).toBe(b.id);
+    expect((await pool.prepareAccount({ model: FABLE, fallback: true, exclude: new Set([a.id, b.id]) })).prepared).toBeNull();
+  });
+
   it("wakes the runs waiting for it at its end, like an account's own limit", async () => {
     usage({});
     const { a } = await twoAccounts();
