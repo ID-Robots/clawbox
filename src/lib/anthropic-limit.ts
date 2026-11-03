@@ -24,13 +24,45 @@
  * the run's words, not Anthropic's.
  */
 
-/** What kind of cap an account hit — said to the owner, never a code path. */
-export type AnthropicLimitKind = "session" | "weekly" | "rate" | "credit";
+/**
+ * What kind of cap an account hit — said to the owner, never a code path.
+ * `spend`: the subscription's monthly spend limit on extra usage (TASK-2141).
+ */
+export type AnthropicLimitKind = "session" | "weekly" | "rate" | "credit" | "spend";
+
+export const ANTHROPIC_LIMIT_KINDS: readonly AnthropicLimitKind[] = ["session", "weekly", "rate", "credit", "spend"];
 
 export interface AnthropicLimit {
   kind: AnthropicLimitKind;
   /** When the account is expected back (ms since the epoch), or null when the message did not say. */
   resetsAt: number | null;
+  /**
+   * The model family whose own week is spent ("opus", "fable"), when the CLI's
+   * words name one: only runs on that model are capped, not the account.
+   * Absent: the account's own window.
+   */
+  model?: string;
+}
+
+/** The model families Anthropic's subscriptions name today. */
+const KNOWN_FAMILIES = ["opus", "sonnet", "haiku", "fable"];
+
+/**
+ * A model's family, the part Anthropic's model-scoped weeks are matched on
+ * (TASK-2141): `claude-fable-5-1` and "Fable" are both `fable`,
+ * `claude-3-5-sonnet-20241022` is `sonnet`, `opus[1m]` is `opus`,
+ * `openrouter/anthropic/claude-haiku-4.5` is `haiku`. A known family anywhere
+ * in it; else the word after "claude"; else its first word of three letters
+ * or more that is not the vendor's name. Null for nothing to go on.
+ */
+export function modelFamily(model: string | null | undefined): string | null {
+  if (typeof model !== "string") return null;
+  const words = model.toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 3);
+  const known = words.find((w) => KNOWN_FAMILIES.includes(w));
+  if (known) return known;
+  const claude = words.indexOf("claude");
+  if (claude >= 0 && words[claude + 1] && words[claude + 1] !== "anthropic") return words[claude + 1];
+  return words.find((w) => w !== "claude" && w !== "anthropic") ?? null;
 }
 
 /**
@@ -65,9 +97,74 @@ const HEAD_CHARS = 400;
  *   Weekly limit reached ∙ resets Oct 9, 10am
  *   You've hit your weekly limit · resets Mon 9am
  *   Opus weekly limit reached ∙ resets Oct 9 at 10am
+ *   You've hit your limit                                   (CLI 2.1.317, TASK-2141)
+ *
+ * "You've hit your … limit" in any other words is read as the session window
+ * too, with no time: what it really was is Anthropic's answer to give
+ * (src/lib/coding-agent.ts asks it).
  */
-const SESSION_RE = /(?:claude ai usage limit reached|(?:5|five)[- ]hour limit reached|session limit reached|you(?:'|’)ve hit your (?:session |usage |5-hour )?limit|you(?:'|’)ve reached your (?:session |usage )?limit|usage limit reached)/i;
-const WEEKLY_RE = /(?:weekly limit reached|you(?:'|’)ve hit your (?:\w+ )?weekly limit|(?:opus|sonnet) (?:weekly )?limit reached)/i;
+const SESSION_RE = /(?:claude ai usage limit reached|(?:5|five)[- ]hour limit reached|session limit reached|you(?:'|’)ve (?:hit|reached) your (?:[\w-]+ ){0,2}limit|usage limit reached)/i;
+const WEEKLY_RE = /(?:weekly limit reached|you(?:'|’)ve (?:hit|reached) your (?:\w+ )?weekly limit|(?:opus|sonnet) (?:weekly )?limit reached)/i;
+/**
+ * The subscription's monthly spend limit on extra usage (CLI 2.1.317):
+ * "You've hit your monthly spend limit". Its own kind — it is not a window
+ * that resets in hours.
+ */
+const SPEND_RE = /you(?:'|’)ve (?:hit|reached) your monthly spend limit|monthly spend limit reached/i;
+/**
+ * The CLI saying a window is full and it CARRIES ON (CLI 2.1.317, the usage
+ * scheme of 2026-11) — on extra usage, or inside a grace window:
+ *
+ *   Usage limit reached · continuing automatically
+ *   Usage limit reached again · continuing automatically
+ *   Usage limit reached — grace window active
+ *
+ * Not a stop: the run is still working, on the same account. The notice — the
+ * phrase and its "Usage limit reached (again)" lead-in — is taken out of the
+ * head before any limit is looked for in it; whatever else its line says
+ * stays.
+ */
+const CARRYING_ON_RE = /\bcontinuing automatically\b|\bgrace window (?:is )?active\b/i;
+const CARRYING_ON_PARTS_RE = /\bcontinuing automatically\b|\bgrace window (?:is )?active\b|\b(?:claude ai )?usage limit reached(?: again)?\b/gi;
+/** What a line is left with at its ends once a notice is out of it. */
+const SEPARATORS_AT_ENDS_RE = /^[\s·∙•—–|:;,.-]+|[\s·∙•—–|:;,.-]+$/g;
+/**
+ * A limit line that names the model whose own week is spent — "Opus weekly
+ * limit reached", "You've hit your Fable limit". Only a family Anthropic's
+ * subscriptions name: "You've hit your Max limit" names a plan, and
+ * "Context limit reached" is no usage cap at all. A family this does not know
+ * yet is told apart by Anthropic's answer instead (`weekly_scoped`).
+ */
+const SCOPED_RE = /\b(opus|sonnet|haiku|fable)(?:\s+weekly)?\s+limit reached|you(?:'|’)ve (?:hit|reached) your\s+(opus|sonnet|haiku|fable)\s+(?:weekly\s+)?limit\b/i;
+
+/** The head of a failure with the CLI's "carrying on" notices taken out (CARRYING_ON_RE). */
+function stopWords(head: string): string {
+  return head
+    .split(/\r?\n/)
+    .map((line) => (CARRYING_ON_RE.test(line) ? line.replace(CARRYING_ON_PARTS_RE, " ").replace(SEPARATORS_AT_ENDS_RE, "").trim() : line))
+    .filter((line) => line.trim() !== "")
+    .join("\n")
+    .trim();
+}
+
+/** The model a limit line names (SCOPED_RE), as a family; null for the account's own window. */
+function scopedModel(head: string): string | null {
+  const m = SCOPED_RE.exec(head);
+  return modelFamily(m?.[1] ?? m?.[2] ?? null);
+}
+
+/**
+ * Is this the CLI saying a usage window is full while it carries on by itself
+ * (CARRYING_ON_RE)? `grace` for the grace window, `continuing` for the rest;
+ * null for anything else — and for a head that ALSO carries a real stop, which
+ * detectAnthropicLimit answers.
+ */
+export function detectAnthropicLimitNotice(text: string | null | undefined): "continuing" | "grace" | null {
+  if (typeof text !== "string") return null;
+  const head = text.trim().slice(0, HEAD_CHARS);
+  if (!CARRYING_ON_RE.test(head) || stopWords(head) !== "") return null;
+  return /\bgrace window\b/i.test(head) ? "grace" : "continuing";
+}
 /**
  * An API key's cap. Claude Code retries a 429 by itself and only gives up after
  * its own backoff, so reaching the run's failure means the minute's allowance
@@ -85,16 +182,22 @@ const CREDIT_RE = /credit balance is too low/i;
  */
 export function detectAnthropicLimit(text: string | null | undefined, now: number, timeZone?: string): AnthropicLimit | null {
   if (typeof text !== "string") return null;
-  const head = text.trim().slice(0, HEAD_CHARS);
+  // "continuing automatically" is the CLI carrying on, not stopping (TASK-2141).
+  const head = stopWords(text.trim().slice(0, HEAD_CHARS));
   if (!head) return null;
   let kind: AnthropicLimitKind | null = null;
-  // Weekly first: "Opus weekly limit reached" also contains "limit reached".
-  if (WEEKLY_RE.test(head)) kind = "weekly";
+  // Spend first: it is a limit of its own, whatever else the line says.
+  if (SPEND_RE.test(head)) kind = "spend";
+  // Weekly next: "Opus weekly limit reached" also contains "limit reached".
+  else if (WEEKLY_RE.test(head)) kind = "weekly";
   else if (SESSION_RE.test(head)) kind = "session";
   else if (RATE_RE.test(head)) kind = "rate";
   else if (CREDIT_RE.test(head)) kind = "credit";
-  if (!kind) return null;
-  return { kind, resetsAt: parseLimitReset(head, now, timeZone) };
+  // A model-scoped week the CLI words in a way the lines above do not know.
+  const model = kind === "spend" || kind === "credit" ? null : scopedModel(head);
+  if (!kind && !model) return null;
+  const resetsAt = parseLimitReset(head, now, timeZone);
+  return model ? { kind: "weekly", resetsAt, model } : { kind: kind as AnthropicLimitKind, resetsAt };
 }
 
 // ── a credential Anthropic refused ──────────────────────────────────────────
@@ -194,6 +297,9 @@ export function classifyAnthropicFailure(
   if (detectAnthropicAccountDisabled(text)) return { type: "auth", permanent: true };
   if (detectAnthropicAuthFailure(text)) return { type: "auth" };
   const reason = typeof opts.reason === "string" ? opts.reason.trim().toLowerCase() : "";
+  // The CLI carrying on by itself is no failure of the account, whatever the
+  // reason it came with (TASK-2141).
+  if (detectAnthropicLimitNotice(text)) return null;
   const words = typeof text === "string" ? text.trim().slice(0, HEAD_CHARS) : "";
   if (reason === "rate_limit" && !OVERLOAD_RE.test(words)) {
     const resetsAt = words ? parseLimitReset(words, now, opts.timeZone) : null;
@@ -359,12 +465,60 @@ export type AnthropicAccountStatus = "ok" | "limited" | "expired" | "revoked";
 
 export const ANTHROPIC_ACCOUNT_STATUSES: readonly AnthropicAccountStatus[] = ["ok", "limited", "expired", "revoked"];
 
+/**
+ * A model's own week spent on an account (TASK-2141): Anthropic caps some
+ * models with a week of their own (`weekly_scoped`) inside the account's.
+ * Only runs on that model are kept off the account until `until`; the account
+ * stays `ok` for everything else, and the box's active account does not move.
+ */
+export interface ModelLimit {
+  /** The family a run's model is matched on (modelFamily). */
+  family: string;
+  /** Anthropic's own name for it, for the owner ("Fable"). */
+  name: string;
+  until: number;
+}
+
 export interface PoolMember {
   id: string;
   status: AnthropicAccountStatus;
   limitedUntil: number | null;
   /** `oauth`, `api_key` or `login` (src/lib/anthropic-accounts.ts); only the "most room" pick reads it. */
   kind?: string;
+  /** The model weeks spent on it; absent is none. */
+  modelLimits?: readonly ModelLimit[];
+}
+
+/** Until when a run on `model` is kept off this account by that model's own week; null when it is not. */
+export function modelLimitedUntil(account: PoolMember, model: string | null | undefined, now: number): number | null {
+  const family = modelFamily(model);
+  if (!family || !account.modelLimits) return null;
+  const week = account.modelLimits.find((l) => l.family === family && l.until > now);
+  return week ? week.until : null;
+}
+
+/** The model weeks still running on this account. */
+export function activeModelLimits(account: PoolMember, now: number): ModelLimit[] {
+  return (account.modelLimits ?? []).filter((l) => l.until > now);
+}
+
+/**
+ * When the first account comes back by itself for a run on `model`: each
+ * account's own limit and that model's week, whichever ends later, the
+ * earliest of those. Null when none will — every account usable now, or
+ * needing the owner. poolHealth's `nextResetAt` with the model's weeks in it.
+ */
+export function nextResetFor(accounts: readonly PoolMember[], now: number, model?: string | null): number | null {
+  let next: number | null = null;
+  for (const account of accounts) {
+    const status = effectiveStatus(account, now);
+    if (status === "expired" || status === "revoked") continue;
+    const ends = [status === "limited" ? account.limitedUntil : null, modelLimitedUntil(account, model, now)].filter((t): t is number => t !== null);
+    if (ends.length === 0) continue;
+    const back = Math.max(...ends);
+    if (next === null || back < next) next = back;
+  }
+  return next;
 }
 
 /**
@@ -380,11 +534,18 @@ export interface PickOptions {
   /** Unset is `order`. */
   mode?: PickMode;
   /**
-   * Per account id, how full its fullest window is (five-hour or seven-day,
+   * Per account id, how full its fullest window is (the session and the
+   * account's week, and — for a pick for one model — that model's own week;
    * Anthropic's percent): the window closest to running out decides. An
    * account with no entry has no reading.
    */
   fullness?: ReadonlyMap<string, number>;
+  /**
+   * The model the pick is for (a run's `--model`), TASK-2141: an account whose
+   * week for THAT model is spent (ModelLimit) is not handed out — and stays
+   * available to runs on every other model. Unset: any model.
+   */
+  model?: string | null;
 }
 
 /**
@@ -421,6 +582,11 @@ export function isUsable(account: PoolMember, now: number): boolean {
   return effectiveStatus(account, now) === "ok";
 }
 
+/** Usable, and — for a run on `model` — that model's own week is not spent on it. */
+export function isUsableFor(account: PoolMember, now: number, model?: string | null): boolean {
+  return isUsable(account, now) && modelLimitedUntil(account, model, now) === null;
+}
+
 /**
  * The account that answers next: the FIRST usable one in priority order.
  *
@@ -436,7 +602,7 @@ export function isUsable(account: PoolMember, now: number): boolean {
  * order with the API keys after the subscriptions.
  */
 export function pickAccount<T extends PoolMember>(accounts: readonly T[], now: number, exclude: ReadonlySet<string> = new Set(), opts: PickOptions = {}): T | null {
-  const usable = accounts.filter((a) => !exclude.has(a.id) && isUsable(a, now));
+  const usable = accounts.filter((a) => !exclude.has(a.id) && isUsableFor(a, now, opts.model));
   if (opts.mode !== "most-room") return usable[0] ?? null;
   return byMostRoom(usable, opts.fullness ?? new Map())[0] ?? null;
 }
@@ -487,7 +653,7 @@ export function pickForSpawn<T extends PoolMember>(
   opts: PickOptions = {},
 ): T | null {
   const active = activeId ? accounts.find((a) => a.id === activeId) : undefined;
-  if (active && !exclude.has(active.id) && isUsable(active, now)) return active;
+  if (active && !exclude.has(active.id) && isUsableFor(active, now, opts.model)) return active;
   return pickAccount(accounts, now, exclude, opts);
 }
 

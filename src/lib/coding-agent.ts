@@ -240,9 +240,11 @@ import {
   activeAccountSnapshot,
   markCredentialProblem,
   markLimited,
+  markModelLimited,
   onLimitReset,
   prepareAccount,
   probeAccountCredential,
+  readAccountUsage,
   readAccounts,
   removeCredentialHandoffs,
   startAnthropicAccounts,
@@ -256,14 +258,20 @@ import {
   detectAnthropicAccountDisabled,
   detectAnthropicAuthFailure,
   detectAnthropicLimit,
+  detectAnthropicLimitNotice,
   formatResetClock,
   isUsable,
+  isUsableFor,
   limitUntil,
+  modelFamily,
+  modelLimitedUntil,
+  nextResetFor,
   pickAccount,
   poolHealth,
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
+import { modelWeekOf, nearestFull, usageForModel } from "@/lib/anthropic-usage";
 import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
 import { announceCodingAgent, announceCodingRunToChat } from "@/lib/coding-agent-notify";
@@ -5209,6 +5217,12 @@ interface LiveRun {
    */
   limitSignal: string | null;
   /**
+   * The CLI's last "usage limit reached · continuing automatically" / "grace
+   * window active" line (TASK-2141): it carries on by itself, so this is NO
+   * limit — kept only so the run's feed says it once per line, not per event.
+   */
+  limitNotice: string | null;
+  /**
    * The owner's test hook (`simulateAnthropicLimit`): the words of a limit to
    * settle this run with, set just before the hook ends the process.
    */
@@ -5322,8 +5336,8 @@ interface RunStore {
   swapConsumerArmed?: boolean;
   /** The pass resuming the runs that waited for an Anthropic reset — one at a time. */
   anthropicResume?: Promise<string[]>;
-  /** How many times each run was carried on after a refused credential — see MAX_AUTH_SWITCHES. */
-  anthropicAuthRetries?: Map<string, number>;
+  /** What each run has been through with refused credentials — see AuthTrail. */
+  anthropicAuthTrail?: Map<string, AuthTrail>;
   /** The owner's history setting as last read — see rememberHistoryPolicy. */
   historyPolicy: HistoryPolicy | null;
   /** The run queue's pass in flight, and whether a slot freed while it ran — see pumpRunQueue. */
@@ -5609,6 +5623,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     allowanceRefusal: null,
     pauseReason: null,
     limitSignal: null,
+    limitNotice: null,
     simulatedLimit: null,
     forcedAccountPause: null,
     authSignal: null,
@@ -7434,6 +7449,9 @@ async function prepareRunMcp(run: CodingRun, project: string | null): Promise<vo
  * read (the legacy key, else the `claude` sign-in) — and when every account is
  * limited the preferred one is handed over anyway (`fallback`), because its
  * refusal is what pauses the run until the reset.
+ *
+ * A run the box resumed after a reset skips the accounts it gave up on after
+ * refusals before the pause (AuthTrail, kept over that pause only).
  */
 async function prepareRunAccount(run: CodingRun): Promise<void> {
   runAnthropicCredential.delete(run.id);
@@ -7442,7 +7460,7 @@ async function prepareRunAccount(run: CodingRun): Promise<void> {
   armCodingSwapConsumer();
   let prepared: PreparedAccount | null = null;
   try {
-    ({ prepared } = await prepareAccount({ fallback: true }));
+    ({ prepared } = await prepareAccount({ fallback: true, exclude: store.anthropicAuthTrail?.get(run.id)?.refused, model: runModelOf(run) }));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
@@ -8555,13 +8573,26 @@ function firstEventText(event: StreamEvent): string | null {
 }
 
 /** See the call site in handleEvent. */
-function noteAnthropicLimitSignal(state: LiveRun, event: StreamEvent): void {
+function noteAnthropicLimitSignal(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   const tagged = event.error === "rate_limit" || event.error === "billing_error";
   const authTagged = event.error === "authentication_failed";
   const synthetic = event.message?.model === "<synthetic>";
   if (!tagged && !authTagged && !synthetic) return;
   const text = firstEventText(event);
   if (!text) return;
+  // "Usage limit reached · continuing automatically", "… — grace window
+  // active" (CLI 2.1.317, TASK-2141): the CLI carries on by itself, tagged or
+  // not. NOT a limit — the run is not ended and its account is not changed;
+  // the feed says so once.
+  const carryingOn = detectAnthropicLimitNotice(text);
+  if (carryingOn) {
+    if (state.limitNotice !== text) {
+      state.limitNotice = text;
+      pushProgress(run, RUNNER_STEP.usageLimitCarriesOn(carryingOn));
+      console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount ?? "(none)"} reached a usage limit and the CLI carries on by itself (${carryingOn}); not a stop`);
+    }
+    return;
+  }
   // A synthetic message is not always a limit (an interrupted request is one
   // too), so an untagged one must read as a limit in its own words; a tagged
   // one IS the CLI saying so, whatever its wording.
@@ -8686,7 +8717,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // "You've hit your session limit · resets 10:50pm". Remembered as the
     // HARNESS's words, so the settle path never has to take the run's own
     // closing sentence for a limit (TASK-902).
-    if (run.provider === "anthropic") noteAnthropicLimitSignal(state, event);
+    if (run.provider === "anthropic") noteAnthropicLimitSignal(run, state, event);
     // numTurns stays the CLI's own number from the final result event.
     // A live per-event count was tried and measured 291 events against the
     // CLI's 38 turns on run-5vt51ppv — no event arithmetic reproduces the
@@ -11126,10 +11157,13 @@ const PROXY_REFUSAL_RE = /\b429\b|\busage_limit\b/;
 
 /** A limit found on a settling run: what it is, when it lifts, and the words it came in. */
 interface FoundAccountLimit {
+  /** `limit.model` set: only that model's own week is spent (TASK-2141), not the account. */
   limit: AnthropicLimit;
-  /** When the account is taken to be back: the parsed reset, else the default window. */
+  /** When the account is taken to be back: the parsed reset, else the default window — until Anthropic says (settleLimitScope). */
   until: number;
   text: string;
+  /** Anthropic's name for the model week that is spent ("Fable"), once its answer said. */
+  weekName?: string;
 }
 
 /**
@@ -11162,14 +11196,87 @@ function anthropicLimitOf(run: CodingRun, state: LiveRun): FoundAccountLimit | n
  * refused as back at `until` — what a run waiting for "all limited" to end is
  * told. Off the snapshot, because the settle path that asks is synchronous.
  */
-function earliestAccountReset(refusedId: string | null, until: number): number {
+function earliestAccountReset(refusedId: string | null, until: number, model: string | null = null): number {
   const now = Date.now();
   let earliest = until;
   for (const account of accountsSnapshot() ?? []) {
-    if (account.id === refusedId || account.status !== "limited" || account.limitedUntil === null) continue;
-    if (account.limitedUntil > now && account.limitedUntil < earliest) earliest = account.limitedUntil;
+    if (account.id === refusedId) continue;
+    // Back for THIS run once both its own limit and its model's week are over (TASK-2141).
+    const ends = [account.status === "limited" ? account.limitedUntil : null, modelLimitedUntil(account, model, now)]
+      .filter((t): t is number => t !== null && t > now);
+    if (ends.length > 0 && Math.max(...ends) < earliest) earliest = Math.max(...ends);
   }
   return earliest;
+}
+
+/**
+ * The model a run is on, for the account pick (TASK-2141): the one it was
+ * started with — `run.model` is only the CLI's own report, from its first
+ * event, so a fresh run's first spawn has none yet.
+ */
+function runModelOf(run: CodingRun): string | null {
+  return run.requestedModel ?? run.model;
+}
+
+/** The model a run's limit is about: the one its words named, else the run's own (TASK-2141). */
+function limitModelOf(run: CodingRun, found: FoundAccountLimit | null): string | null {
+  return found?.limit.model ?? modelFamily(runModelOf(run));
+}
+
+/**
+ * WHICH window stopped the run, and until when, in Anthropic's own words
+ * (TASK-2141) — the CLI's line no longer says either reliably: "You've hit
+ * your limit" names no window and no time, and a model's own week
+ * (`weekly_scoped`) stops only runs on that model. So the account's usage is
+ * asked, and `found` is settled in place from the answer:
+ *
+ *  - one of the ACCOUNT's own windows spent: the account's limit, until
+ *    Anthropic's `resets_at` (a monthly spend limit keeps its kind);
+ *  - only the run's model's week spent: that model's limit, until its reset —
+ *    the account stays with every other model;
+ *  - nothing reads spent: the window nearest full that a request could have
+ *    crossed (nearestFull), else the CLI's own words as they were.
+ *
+ * Anthropic not answering (an API key, the `claude` sign-in, offline) leaves
+ * the words in charge: a model they name is that model's week; a time they
+ * give stands; else the default window. Never throws.
+ */
+async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promise<void> {
+  if (!run.anthropicAccount || found.limit.kind === "credit") return;
+  const model = limitModelOf(run, found);
+  const reading = await readAccountUsage(run.anthropicAccount).catch(() => null);
+  if (!reading) return;
+  const now = Date.now();
+  const spent = usageForModel(reading, model);
+  const keepKind = (kind: "session" | "weekly"): AnthropicLimitKind => (found.limit.kind === "spend" ? "spend" : kind);
+  const at = (resetsAt: number | null, fallback: number) => (resetsAt !== null && resetsAt > now ? resetsAt : fallback);
+  if (spent.account) {
+    found.limit = { kind: keepKind(spent.account.kind), resetsAt: spent.account.resetsAt };
+    found.until = at(spent.account.resetsAt, found.until);
+  } else if (spent.week?.family) {
+    found.limit = { kind: "weekly", resetsAt: spent.week.resetsAt, model: spent.week.family };
+    found.weekName = spent.week.name;
+    found.until = at(spent.week.resetsAt, found.until);
+  } else if (!found.limit.model) {
+    // Words that gave a time keep their window; "You've hit your limit" gave none.
+    const near = found.limit.resetsAt === null ? nearestFull(reading, model) : null;
+    if (near?.week?.family) {
+      found.limit = { kind: "weekly", resetsAt: near.week.resetsAt, model: near.week.family };
+      found.weekName = near.week.name;
+      found.until = at(near.week.resetsAt, found.until);
+    } else if (near) {
+      found.limit = { kind: keepKind(near.window.kind), resetsAt: near.window.resetsAt };
+      found.until = at(near.window.resetsAt, found.until);
+    }
+  } else if (found.limit.resetsAt === null) {
+    // The words named the model; Anthropic gives its week's reset (none of its weeks is spent here: the fullest).
+    const week = modelWeekOf(reading, found.limit.model);
+    if (week) {
+      found.weekName = week.name;
+      found.until = at(week.resetsAt, found.until);
+    }
+  }
+  console.error(`[coding-agent] ${run.id}: Anthropic says the limit on account ${run.anthropicAccount} is ${found.limit.model ? `the ${found.limit.model} week` : `its ${found.limit.kind} window`}, until ${new Date(found.until).toISOString()}`);
 }
 
 /**
@@ -11183,8 +11290,22 @@ function earliestAccountReset(refusedId: string | null, until: number): number {
 async function recordAccountLimit(run: CodingRun, found: FoundAccountLimit): Promise<LimitRecorded | null> {
   if (!run.anthropicAccount) return null;
   try {
-    const recorded = await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
-    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${found.limit.kind} limit until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    const guessed = found.until;
+    await settleLimitScope(run, found);
+    // A model's own week keeps the account for every other model (TASK-2141).
+    const week = found.limit.model;
+    const recorded = week
+      ? await markModelLimited(run.anthropicAccount, { family: week, name: found.weekName ?? week }, found.until, { source: "coding", runId: run.id })
+      : await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
+    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${week ? `${week} week` : `${found.limit.kind} limit`} until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    // Already waiting on the time the words gave (or the default window):
+    // the record says the one Anthropic gave.
+    if (found.until !== guessed && run.status === "paused" && run.pauseReason?.kind === "allowance" && run.pauseReason.meter === "anthropic") {
+      const resetsAt = earliestAccountReset(run.anthropicAccount, found.until, limitModelOf(run, found));
+      run.pauseReason = { ...run.pauseReason, resetsAt: new Date(resetsAt).toISOString() };
+      pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
+      persist(true);
+    }
     return recorded;
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: could not record the Anthropic account's limit:`, err instanceof Error ? err.message : err);
@@ -11206,11 +11327,57 @@ function anthropicAuthFailureOf(run: CodingRun, state: LiveRun): string | null {
 
 /**
  * How many times one run may be carried on because its credential was
- * refused. A 401 the probe cannot pin on the account (Anthropic unreachable, a
- * CLI that refuses a working token) must not bounce a run round the pool — or
- * back onto the same account — for ever.
+ * refused, all accounts together. A 401 the probe cannot pin on the account
+ * (Anthropic unreachable, a CLI that refuses a working token) must not bounce a
+ * run round the pool for ever. Each account gets at most two of these in a run
+ * (AuthTrail), so this only bites on a pool of more than three.
  */
-const MAX_AUTH_SWITCHES = 3;
+const MAX_AUTH_RETRIES = 6;
+
+/**
+ * What one run has been through with refused credentials (TASK-2139), for the
+ * stretch of the run it covers: dropped when the run settles without being
+ * carried on (kept over a pause for an Anthropic reset, which the box resumes
+ * by itself), and when the owner resumes it.
+ *
+ * On 2026-11-03 Anthropic refused one account's OAuth token mid-run and five
+ * runs died within half a minute: each was refused, the probe said the account
+ * was fine, the run was put straight back on it, was refused again, and round
+ * it went until its retries ran out — while another connected account sat
+ * unused. So an account whose credential is refused gets ONE restart on a
+ * credential read again from the store — only when that copy is fresher than
+ * the refused one — and a second refusal there (or nothing fresher) moves the
+ * run to the next account in the owner's order; it never goes back to it.
+ */
+interface AuthTrail {
+  /** Times the run was carried on after a refusal — see MAX_AUTH_RETRIES. */
+  count: number;
+  /** Accounts that already had their one restart on a credential read fresh from the store. */
+  refreshed: Set<string>;
+  /** Accounts this run does not go back to: refused again after that restart, with nothing fresher to restart on, or not vouched for by the probe. */
+  refused: Set<string>;
+}
+
+function authTrailOf(runId: string): AuthTrail {
+  const trails = store.anthropicAuthTrail ?? (store.anthropicAuthTrail = new Map<string, AuthTrail>());
+  let trail = trails.get(runId);
+  if (!trail) {
+    trail = { count: 0, refreshed: new Set(), refused: new Set() };
+    trails.set(runId, trail);
+  }
+  return trail;
+}
+
+/** Paused until an Anthropic account's reset, which the box resumes by itself (resumeRunsWaitingForAnthropic). */
+function pausedForAnthropicReset(run: CodingRun): boolean {
+  return run.status === "paused" && run.pauseReason?.kind === "allowance" && run.pauseReason.meter === "anthropic";
+}
+
+/** The run's error when it ran out of refused-credential retries (MAX_AUTH_RETRIES). */
+function authRetriesSpentError(count: number): string {
+  return `Anthropic kept refusing this run's credential: it was carried on ${count} times, on fresh credentials and on other accounts, and was refused each time.`
+    + " Check the accounts in Settings → Providers → Anthropic accounts, sign in again any that need it, then start the run again.";
+}
 
 /** Why a run is being carried on on another account (TASK-1260 adds the last two). */
 type AccountTrouble =
@@ -11252,27 +11419,54 @@ async function continueOnAnotherAccount(
 ): Promise<void> {
   const fromId = run.anthropicAccount;
   const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
-  const exclude = new Set<string>();
+  // Whatever moves the run now, it never goes back to an account it has
+  // already given up on after a refusal (AuthTrail).
+  const trail = authTrailOf(run.id);
+  const exclude = new Set<string>(trail.refused);
   let recorded: LimitRecorded | null = null;
-  // What asking Anthropic about a refused credential answered, when it was asked.
-  let authVerdict: "ok" | "dead" | "unknown" | null = null;
+  // What asking Anthropic about a refused credential answered, when it was
+  // asked — or `again`: refused once more after its restart on a fresh one.
+  let authVerdict: "ok" | "dead" | "unknown" | "again" | null = null;
+  // The account the run goes back on, its credential read again from the
+  // store: the one whose refusal turned out to be a stale token.
+  let prefer: string | null = null;
+  // The credential the refused process was handed. The probe answers from the
+  // store's copy when it differs, renewing nothing; and the run is never
+  // handed this one again (prepareAccount's `prefer`).
+  const held = carriedAccount && carriedAccount.accountId === fromId ? carriedAccount.credential.secret : null;
   if (why.kind === "limit") {
     recorded = await recordAccountLimit(run, why.found);
     if (fromId) exclude.add(fromId);
   } else if (why.kind === "auth" && fromId) {
     // Confirmed before the account is taken out: a grant the pool can still
     // renew was only stale in this process, and the run goes on on the SAME
-    // account with a fresh token. A dead one is marked (which moves the box's
-    // active account); one Anthropic could not be asked about sits this spawn out.
+    // account with a fresh token — ONCE, and never on the refused copy again
+    // (an API key Anthropic accepts when asked is still that copy, so the run
+    // moves on). A dead one is marked (which moves the box's active account);
+    // one Anthropic could not be asked about is left for the rest of the run.
     // An account its organisation switched off is not asked about: its grant
     // renews fine, so the probe would keep it and put the run straight back on it.
     const disabled = detectAnthropicAccountDisabled(why.text);
-    const verdict = disabled
-      ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
-      : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
-    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${verdict}`);
-    authVerdict = verdict;
-    if (verdict !== "ok") exclude.add(fromId);
+    if (!disabled && trail.refreshed.has(fromId)) {
+      // Refused AGAIN after that restart. Not asked again: it said "fine" last
+      // time, and asking renews the grant once more, replacing the token every
+      // other run on the account has just been handed. Nothing is marked —
+      // other runs may still be working on it — but this run moves on.
+      authVerdict = "again";
+      console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential again after its restart on a fresh one; not asking again, the run moves to the next account`);
+    } else {
+      authVerdict = disabled
+        ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
+        : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }, held).catch(() => "unknown" as const);
+      console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${authVerdict}${authVerdict === "ok" ? ": the run goes back on it once if the store holds a fresher credential" : ": the run moves to the next account"}`);
+    }
+    if (authVerdict === "ok") {
+      trail.refreshed.add(fromId);
+      prefer = fromId;
+    } else {
+      trail.refused.add(fromId);
+      exclude.add(fromId);
+    }
   }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
@@ -11280,11 +11474,18 @@ async function continueOnAnotherAccount(
   // the pool knows? Null when the pool could not be read at all.
   let otherAccountOk: boolean | null = null;
   try {
-    const answer = await prepareAccount({ exclude });
+    const answer = await prepareAccount({ exclude, prefer: prefer ? { id: prefer, refused: held } : null, model: limitModelOf(run, why.kind === "limit" ? why.found : null) });
     prepared = answer.prepared;
+    if (prefer && prepared?.account.id !== prefer) {
+      // The store had nothing fresher than the credential just refused (or
+      // could not hand it out): the run does not go back on that account.
+      trail.refused.add(prefer);
+      exclude.add(prefer);
+      console.error(`[coding-agent] ${run.id}: account ${prefer} has no credential fresher than the one Anthropic refused; the run moves to the next account`);
+    }
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
     const now = Date.now();
-    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsable(a, now));
+    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsableFor(a, now, limitModelOf(run, why.kind === "limit" ? why.found : null)));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
@@ -11295,7 +11496,9 @@ async function continueOnAnotherAccount(
     // out dead, or could not be renewed just now). Wait for the first reset,
     // settled through finishRun's ordinary tail as the pause it is — or, when
     // no account comes back by itself, fail with the one thing that helps.
-    const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
+    // The first account back for THIS run's model — a model week counts (TASK-2141).
+    const resetsAt = nextResetFor(accountsSnapshot() ?? [], Date.now(), limitModelOf(run, why.kind === "limit" ? why.found : null))
+      ?? nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
     if (resetsAt === null) {
       // Another account that can answer is still on the list: its sign-in only
       // could not be renewed (or read) just now, which marks nothing — so
@@ -11311,8 +11514,14 @@ async function continueOnAnotherAccount(
             // Refused in the run, and asking again got no answer — its grant may well be fine.
             ? "Anthropic refused the credential this run was using, and it could not be checked again just now."
               + " If the account was signed out, sign it in again in Settings → Providers → Anthropic accounts; then start the run again."
-            : "Anthropic refused the credential of every account this run could use."
-              + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
+            : authVerdict === "ok" || authVerdict === "again"
+              // The last one refused is not marked — the card still shows it
+              // connected — so "sign it in again" alone would not add up.
+              ? "Anthropic refused the credential of every account this run could use — including one it still accepts when asked, which stays connected."
+                + " Check the accounts in Settings → Providers → Anthropic accounts, sign in again any that need it, then start the run again."
+              : "Anthropic refused the credential of every account this run could use."
+                + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
+      console.error(`[coding-agent] ${run.id}: no Anthropic account left to carry the run on after ${fromId ?? "its account"} (left behind: ${[...exclude].join(", ") || "none"}); it ends failed`);
       finishRun(run, state, exitCode);
       return;
     }
@@ -11350,7 +11559,12 @@ async function continueOnAnotherAccount(
   else if (why.kind === "auth") pushProgress(run, RUNNER_STEP.accountRefused(from, prepared.account.label));
   else pushProgress(run, RUNNER_STEP.accountMoved(from, prepared.account.label));
   persist(true);
-  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}`);
+  const how = why.kind !== "auth"
+    ? ""
+    : sameAccount
+      ? `, restarted with its credential read again from the store (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`
+      : `, failed over in the owner's order (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`;
+  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}${how}`);
   try {
     // The SAME record and session: `continuingRecord`, so the counters add up,
     // and the session's own transcript is where the work is — the task is not
@@ -11687,15 +11901,19 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         accountDecision = "moved";
       } else if (!accountLimit) {
         const refused = anthropicAuthFailureOf(run, state);
-        const retries = store.anthropicAuthRetries ?? (store.anthropicAuthRetries = new Map<string, number>());
-        const spent = retries.get(run.id) ?? 0;
-        if (refused && spent < MAX_AUTH_SWITCHES) {
-          // Counted per RUN, not per switch: a refusal the probe cannot pin on
-          // the account carries the run on on the SAME account, which records
-          // no switch — and must still not do it for ever.
-          retries.set(run.id, spent + 1);
-          accountAuthText = refused;
-          accountDecision = "auth";
+        if (refused) {
+          const trail = authTrailOf(run.id);
+          if (trail.count < MAX_AUTH_RETRIES) {
+            // Counted per RUN, not per switch: a restart on the SAME account
+            // with a fresh credential records no switch — and is counted all
+            // the same.
+            trail.count += 1;
+            accountAuthText = refused;
+            accountDecision = "auth";
+          } else {
+            console.error(`[coding-agent] ${run.id}: Anthropic refused this run's credential again after ${trail.count} carried-on tries; it ends failed on account ${run.anthropicAccount ?? "(none)"}`);
+            run.error = authRetriesSpentError(trail.count);
+          }
         }
       }
       if (accountLimit) {
@@ -11703,9 +11921,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         // a pause has to be on the record before the cleanup and the settle
         // below read the status. `null` — the pool has not been read since
         // boot — goes the slow way, which settles the pause itself if it must.
-        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount) : false;
+        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount, Date.now(), limitModelOf(run, accountLimit)) : false;
         if (another === false) {
-          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until);
+          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until, limitModelOf(run, accountLimit));
           run.status = "paused";
           run.resumable = true;
           run.error = null;
@@ -11780,8 +11998,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     return;
   }
   // Not carried on: this stretch of the run is over, and its refused-credential
-  // count goes with it rather than staying in the process for ever.
-  store.anthropicAuthRetries?.delete(run.id);
+  // trail goes with it rather than staying in the process for ever — except
+  // over a pause for an Anthropic reset. The box resumes that one by itself,
+  // and that resume is the same stretch: it must not go back to an account the
+  // run gave up on, nor start the count again (the owner's Resume drops it).
+  if (!pausedForAnthropicReset(run)) store.anthropicAuthTrail?.delete(run.id);
   if (accountDecision === "wait" && accountLimit) {
     void recordAccountLimit(run, accountLimit);
   }
@@ -12497,6 +12718,7 @@ function spawnRun(
     allowanceRefusal: null,
     pauseReason: null,
     limitSignal: null,
+    limitNotice: null,
     simulatedLimit: null,
     forcedAccountPause: null,
     authSignal: null,
@@ -14190,10 +14412,10 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
   if (run.status !== "paused" && run.status !== "gave_up") {
     throw new CodingAgentError("invalid", "Only a paused run, or one that gave up, can be resumed in place. Start a new run instead.");
   }
-  // The owner's own Resume starts the refused-credential budget afresh
-  // (MAX_AUTH_SWITCHES): refusals from an earlier stretch of the run say
-  // nothing about the accounts the owner may have signed in again since.
-  if (!automatic) store.anthropicAuthRetries?.delete(run.id);
+  // The owner's own Resume starts the refused-credential trail afresh
+  // (AuthTrail): refusals from an earlier stretch of the run say nothing about
+  // the accounts the owner may have signed in again since.
+  if (!automatic) store.anthropicAuthTrail?.delete(run.id);
   // The account the session was OPENED on — a resume cannot move to another
   // one, so if that credential is gone the resume is refused rather than
   // quietly re-enacted somewhere else. Handed to the gate rather than checked

@@ -7,6 +7,7 @@ import {
   describePool,
   markLimited,
   readAccounts,
+  refreshPoolUsage,
   relistLogin,
   removeAccount,
   renameAccount,
@@ -46,7 +47,11 @@ export const dynamic = "force-dynamic";
  * with the MCP bearer: it is what the `anthropic_accounts` tool reads, so the
  * assistant running a queue knows how many accounts can answer and waits for
  * the reset instead of spending attempts. It never carries a credential — not
- * a key, not a token, not a masked form of either.
+ * a key, not a token, not a masked form of either. Each account also says
+ * the model weeks spent on it (`modelLimits`, TASK-2141: only runs on those
+ * models wait, the account is not `limited`) and, with `?usage=1`,
+ * Anthropic's own percents (`usage`: session, the account's week, the active
+ * model weeks).
  *
  * POST is OWNER-ONLY and OUR PAGE ONLY, like `coding-agent/anthropic`: it
  * decides which accounts a delegated shell and the assistant spend, and the
@@ -179,6 +184,11 @@ export async function GET(request: Request) {
     return refusal("Sign in first.", "unauthorized", 401);
   }
   try {
+    // `?usage=1` (the owner's card, the anthropic_accounts tool): Anthropic is
+    // asked first about each Claude account's windows not read in the last ten
+    // minutes, so the view carries the weekly percent and the model weeks
+    // (TASK-2141). A few seconds at most; what is still out lands next time.
+    if (new URL(request.url).searchParams.get("usage") === "1") await refreshPoolUsage();
     return NextResponse.json(await poolView());
   } catch (err) {
     return refusal(`The Anthropic accounts could not be read: ${err instanceof Error ? err.message : String(err)}`, "store_unavailable", 503);

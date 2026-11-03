@@ -11,6 +11,7 @@ import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import WhatsNewCard from "@/components/WhatsNewCard";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, OPEN_CHAT_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail, notifyCodingTeamChanged, handoffCodingTeam, openNewAppCard, dispatchOpenApp } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
+import { noteBoxClock } from "@/lib/box-clock";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { useWhatsNew } from "@/lib/use-whats-new";
 import { DESKTOP_LAYERS, dockedChatWidth, shelfHeight, type SnapZone } from "@/lib/window-snap";
@@ -2734,7 +2735,13 @@ function ChromeDesktopInner() {
       if (!active || polling) return;
       polling = true;
       try {
+        const sentAt = Date.now();
         const res = await (ownerApiAccess ? fetch(pollUrl) : fetch(pollUrl, { cache: "no-store" }));
+        // The desktop's most frequent question, owner or not: its answer's
+        // Date header is what every "x ago" on the desktop is held to
+        // (src/lib/box-clock.ts), so a browser whose clock is off does not
+        // call a backup that just finished "in the future".
+        noteBoxClock(res, sentAt);
         // An update took the box while this desktop was open. The middleware
         // redirects NAVIGATIONS to the updating page, and an open page makes
         // none — so without this it stayed here, kept polling, and went blank
