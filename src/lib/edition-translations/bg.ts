@@ -1720,6 +1720,18 @@ export const bg: Record<string, string> = {
   "localModels.chatBannerBody": "Първият отговор може да отнеме до минута, докато локалният модел се зареди. След това е по-бързо.",
   "localModels.chatBannerDismiss": "Скрий тази бележка",
   "localModels.chatLoading": "Зареждане на локалния модел…",
+  "localModels.chatCompacting": "Съкращаване на разговора за локалния модел…",
+  // A long conversation switched to Local AI (TASK-2127): the card and its notes.
+  "localModels.longChat.title": "Този разговор е твърде дълъг за локалния модел",
+  "localModels.longChat.body": "Съдържа около {tokens} токена, а локалният модел чете до {window}. Нов чат отговаря за секунди. Съкращаването на този първо го обобщава, което отнема повече време.",
+  "localModels.longChat.pending": "Съобщението ви чака тук и отива в чата, който изберете.",
+  "localModels.longChat.newChat": "Започни нов чат с локален AI",
+  "localModels.longChat.recommended": "Препоръчано",
+  "localModels.longChat.shorten": "Първо съкрати този разговор",
+  "localModels.longChat.timeoutTitle": "Все още се съкращава след {seconds} секунди",
+  "localModels.longChat.timeoutBody": "Локалният модел не успя да съкрати този дълъг разговор навреме, затова отговорът беше спрян. Започнете нов чат с локален AI, за да получите отговор за секунди.",
+  "localModels.longChat.failed": "Този разговор не можа да бъде съкратен. Нов чат с локален AI отговаря за секунди.",
+  "localModels.longChat.shortened": "Разговорът е съкратен за локалния модел.",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Потребители",

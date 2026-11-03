@@ -126,6 +126,43 @@ export async function gatewayWsChatSendMain(
 }
 
 /**
+ * The sessions with agent work running or queued RIGHT NOW (`sessions.list`
+ * with `activeOnly`), newest-updated first, and the main session's key from
+ * the same handshake — so a caller can tell the conversation the web chat is
+ * bound to from a tab, a channel's or a cron job's session.
+ *
+ * What a ClawBox MCP tool call cannot say for itself: the gateway calls the
+ * tool with no session key, so the session whose turn is running when the call
+ * arrives is the best evidence of who asked (src/lib/coding-agent-notify.ts).
+ * Rejects as {@link gatewayWsCall} does.
+ */
+export async function gatewayWsActiveSessions(
+  options: GatewayWsCallOptions = {},
+): Promise<{ mainSessionKey: string; sessionKeys: string[] }> {
+  let mainSessionKey = "main";
+  const payload = await callAfterHello(
+    "sessions.list",
+    (hello) => {
+      mainSessionKey = mainSessionKeyOf(hello);
+      // `closedObject` on the gateway's side: a key it does not know is refused.
+      return { activeOnly: true, rowMode: "compact", limit: 50 };
+    },
+    options,
+  );
+  const rows = Array.isArray(payload.sessions) ? payload.sessions : [];
+  const active: Array<{ key: string; updatedAt: number }> = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const { key, updatedAt, hasActiveRun } = row as Record<string, unknown>;
+    // `activeOnly` already selected them; a row that says otherwise is not taken on trust.
+    if (typeof key !== "string" || !key || hasActiveRun === false) continue;
+    active.push({ key, updatedAt: typeof updatedAt === "number" ? updatedAt : 0 });
+  }
+  active.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { mainSessionKey, sessionKeys: active.map((row) => row.key) };
+}
+
+/**
  * The exchange itself: connect, handshake, then ONE request whose params may
  * depend on what the gateway said in its hello (`chat.send` needs the session
  * key the hello names).

@@ -16,6 +16,9 @@ vi.mock("@/lib/config-store", () => ({
   // (TASK-713): a picker click is the one place a choice is made.
   getKnown: vi.fn(async () => ({ value: undefined, known: true })),
   setMany: vi.fn(),
+  // The compaction model ClawBox wrote (src/lib/local-compaction-model.ts).
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => {}),
 }));
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
@@ -115,7 +118,7 @@ import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
-import { getKnown, setMany } from "@/lib/config-store";
+import { getKnown, setMany, get as configGet, set as configSet } from "@/lib/config-store";
 import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { promisify } from "util";
 
@@ -228,6 +231,8 @@ describe("/setup-api/chat/model", () => {
       available: true,
       label: "Gemma 4 Local",
       model: "llamacpp/gemma4-e2b-it-q4_0",
+      // No llama.cpp row in this config: the window the box gives llama-server.
+      contextWindow: 32768,
     });
     expect(body.primary.model).toBe("deepseek/deepseek-v4-flash");
     expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-v4-flash");
@@ -502,6 +507,59 @@ describe("/setup-api/chat/model", () => {
       } finally {
         err.mockRestore();
       }
+    });
+  });
+
+  describe("OpenClaw's compaction runs on the cloud model while the primary is on the box (TASK-2127)", () => {
+    const COMPACTION = "agents.defaults.compaction.model";
+    const pick = (model: string) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    }));
+
+    beforeEach(() => {
+      coreAtLeastMock.mockReset().mockResolvedValue(true);
+      vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+      vi.mocked(configGet).mockReset().mockResolvedValue(undefined);
+      vi.mocked(configSet).mockReset().mockResolvedValue(undefined);
+    });
+
+    it("names the cloud model being left in the batch that makes the local model the primary, and records it", async () => {
+      const calls: string[][][] = [];
+      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => { calls.push(ops as string[][]); });
+
+      const response = await pick("llamacpp/gemma4-e2b-it-q4_0");
+
+      expect(response.status).toBe(200);
+      const batch = calls.find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      // The primary left was ClawBox AI Pro; a summary takes its Flash tier.
+      expect(batch).toContainEqual([COMPACTION, "deepseek/deepseek-v4-flash"]);
+      expect(configSet).toHaveBeenCalledWith("local_compaction_model", "deepseek/deepseek-v4-flash");
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalledWith(COMPACTION);
+    });
+
+    it("leaves an owner's own compaction model alone", async () => {
+      const calls: string[][][] = [];
+      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => { calls.push(ops as string[][]); });
+      vi.mocked(readConfigStrict).mockResolvedValue({ agents: { defaults: { compaction: { model: "ollama/qwen3:8b" } } } } as never);
+
+      await pick("llamacpp/gemma4-e2b-it-q4_0");
+      expect(calls.flat().some((op) => op[0] === COMPACTION)).toBe(false);
+
+      await pick("deepseek/deepseek-v4-flash");
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalledWith(COMPACTION);
+    });
+
+    it("takes its own value back out when the primary leaves the box", async () => {
+      vi.mocked(readConfigStrict).mockResolvedValue({ agents: { defaults: { compaction: { model: "deepseek/deepseek-v4-flash" } } } } as never);
+      vi.mocked(configGet).mockImplementation(async (key: string) => (key === "local_compaction_model" ? "deepseek/deepseek-v4-flash" : undefined));
+
+      const response = await pick("deepseek/deepseek-v4-flash");
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(COMPACTION);
+      expect(configSet).toHaveBeenCalledWith("local_compaction_model", undefined);
     });
   });
 
@@ -1821,7 +1879,7 @@ describe("/setup-api/chat/model", () => {
       expect(ollamaModelCanChat).toHaveBeenCalledWith("qwen3-embedding:0.6b");
       expect(body.options.map((o: { model: string | null }) => o.model)).not.toContain(EMBEDDER);
       expect(body.options).toContainEqual(localPlaceholder);
-      expect(body.local).toEqual({ available: false, label: null, model: null });
+      expect(body.local).toEqual({ available: false, label: null, model: null, contextWindow: null });
     });
 
     it("stays the local row when the check says it can chat", async () => {

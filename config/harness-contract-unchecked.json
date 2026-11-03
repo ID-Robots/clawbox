@@ -19,6 +19,7 @@
   "runOpenclawConfigSet: the key is computed at runtime": 1,
   "runOpenclawConfigSetBatch: operations from ...(await localToolSearchArmOps(configBeforeBatch, targetMod": 1,
   "runOpenclawConfigSetBatch: operations from ...armOps": 1,
+  "runOpenclawConfigSetBatch: operations from ...compactionArmOps": 1,
   "runOpenclawConfigSetBatch: operations from ...enableProviderPluginOps([targetModel])": 1,
   "runOpenclawConfigUnset: the key is computed at runtime": 1
  },

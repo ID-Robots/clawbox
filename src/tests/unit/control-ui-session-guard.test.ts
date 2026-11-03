@@ -32,7 +32,7 @@ class FakeSocket extends EventTarget {
 }
 
 interface FakeLocation { origin: string; pathname: string; replace: ReturnType<typeof vi.fn> }
-interface FakeWindow {
+interface FakeWindow extends EventTarget {
   location: FakeLocation;
   top: FakeWindow | null;
   fetch: typeof fetch;
@@ -54,12 +54,12 @@ function page(opts: { probe?: Answer; request?: Answer; pathname?: string; frame
   const request = opts.request ?? ok;
   const nativeFetch = vi.fn(async (input: RequestInfo | URL) => (String(input) === SESSION_PROBE_URL ? probe() : request()));
   const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
-  const win: FakeWindow = {
+  const win: FakeWindow = Object.assign(new EventTarget(), {
     location: fakeLocation(opts.pathname ?? "/chat"),
     top: null,
     fetch: nativeFetch as unknown as typeof fetch,
     WebSocket: FakeSocket,
-  };
+  });
   win.top = opts.framedBy ?? win;
   const install = () => new Function("window", "document", controlUiSessionGuardScriptBody({ closeProbeGapMs: GAP_MS }))(win, doc);
   install();
@@ -168,6 +168,22 @@ describe("the Control UI's lapsed-session guard", () => {
   it("asks when the tab is shown again, since a page in the background is refused nothing", async () => {
     const { win, doc } = page({ probe: gate401 });
     doc.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => expect(win.location.replace).toHaveBeenCalledWith("/login?redirect=%2Fchat"));
+  });
+
+  it("asks when the network comes back, which a phone's wake can trail (TASK-2131)", async () => {
+    const { win, probes } = page({ probe: gate401 });
+    expect(probes()).toBe(0);
+    win.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(win.location.replace).toHaveBeenCalledWith("/login?redirect=%2Fchat"));
+  });
+
+  it("asks when the page is restored from the back/forward cache, and not on its first show", async () => {
+    const { win, probes } = page({ probe: gate401 });
+    win.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: false }));
+    await flush();
+    expect(probes()).toBe(0);
+    win.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
     await vi.waitFor(() => expect(win.location.replace).toHaveBeenCalledWith("/login?redirect=%2Fchat"));
   });
 

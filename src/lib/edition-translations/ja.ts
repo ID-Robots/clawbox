@@ -1734,6 +1734,18 @@ export const ja: Record<string, string> = {
   "localModels.chatBannerBody": "ローカルモデルの読み込み中は、最初の返信に最大 1 分ほどかかることがあります。その後は速くなります。",
   "localModels.chatBannerDismiss": "このお知らせを閉じる",
   "localModels.chatLoading": "ローカルモデルを読み込み中…",
+  "localModels.chatCompacting": "ローカルモデル向けに会話を短縮中…",
+  // A long conversation switched to Local AI (TASK-2127): the card and its notes.
+  "localModels.longChat.title": "この会話はローカルモデルには長すぎます",
+  "localModels.longChat.body": "約 {tokens} トークンあり、ローカルモデルが読めるのは {window} までです。新しいチャットなら数秒で答えます。この会話を短縮すると先に要約するため、時間がかかります。",
+  "localModels.longChat.pending": "メッセージはここで待機し、選んだチャットに送られます。",
+  "localModels.longChat.newChat": "ローカル AI で新しいチャットを開始",
+  "localModels.longChat.recommended": "おすすめ",
+  "localModels.longChat.shorten": "先にこの会話を短縮",
+  "localModels.longChat.timeoutTitle": "{seconds} 秒たってもまだ短縮中です",
+  "localModels.longChat.timeoutBody": "ローカルモデルはこの長い会話を時間内に短縮できなかったため、返信を停止しました。ローカル AI で新しいチャットを始めると、数秒で答えが返ります。",
+  "localModels.longChat.failed": "この会話を短縮できませんでした。ローカル AI の新しいチャットなら数秒で答えます。",
+  "localModels.longChat.shortened": "ローカルモデル向けに会話を短縮しました。",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "ユーザー",

@@ -469,7 +469,8 @@ interface ChatModelState {
     thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
-  local: { available: boolean; label: string | null; model: string | null }
+  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127). */
+  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null }
   /** Providers this box authenticates to by SUBSCRIPTION only. The catalogue's
    * `availableOnSubscription` stamp says what a provider's subscription
    * surface carries; this says whether that applies to this device. Optional
@@ -555,6 +556,9 @@ import { usePortrait } from '@/lib/use-portrait'
 import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
 import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import LocalAiChatBanner, { chatOnLocalAi, useLocalAiBannerDismissed, useLocalAiLoadingLabel } from '@/components/LocalAiChatBanner'
+import LocalAiLongChatOffer from '@/components/LocalAiLongChatOffer'
+import { useLocalAiLongChat } from '@/lib/use-local-ai-long-chat'
+import { localModelsEn } from '@/lib/edition-translations/en-local-models'
 import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
@@ -2539,6 +2543,49 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const onLocalAi = harnessLoaded && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource)
   const [localAiBannerDismissed, dismissLocalAiBanner] = useLocalAiBannerDismissed()
   const localAiLoadingLabel = useLocalAiLoadingLabel()
+  // A long conversation on Local AI (TASK-2127): measured between turns, held
+  // on a card when it is larger than the local window (a new chat, or a summary
+  // first), and the running turn's status line told what is really happening —
+  // see src/lib/use-local-ai-long-chat.ts. `newTab` is defined further down and
+  // reached through a ref, as `connect` is.
+  const newTabRef = useRef<() => Promise<string | null>>(async () => null)
+  const longChat = useLocalAiLongChat({
+    adapter,
+    onLocalAi,
+    // Hermes' `clawlocal` is the box's llama.cpp; on OpenClaw the local row
+    // can also be an Ollama model, which has no readiness probe.
+    llamaCpp: harnessId === 'hermes' || (chatModelState?.local?.model ?? '').startsWith('llamacpp/'),
+    localWindow: chatModelState?.local?.contextWindow ?? null,
+    inferCompaction: harnessId !== 'hermes',
+    activeKey: activeTabKey ?? mainSessionKey,
+    connected: !caps.hasLiveConnection || status === 'connected',
+    sending,
+    historyMark: messages.length,
+    turnHeardFrom,
+    turnStartedAt,
+    sessionKeyRef,
+    openNewChat: () => newTabRef.current(),
+    queueSend: (key, pending) => {
+      const item: QueuedSend = { id: uuid(), text: pending.text, attachments: pending.attachments, voice: pending.voice, asked: pending.asked }
+      if (sessionKeyRef.current === key) {
+        setQueuedSends(prev => [...prev, item])
+        return
+      }
+      const stash = tabStashRef.current.get(key)
+      if (stash) stash.queuedSends = [...stash.queuedSends, item]
+      else tabStashRef.current.set(key, { input: '', queuedSends: [item], attachments: [], runId: null, voiceTurnKey: null, askedTurnKey: null })
+    },
+    restoreDraft: (key, text) => {
+      if (sessionKeyRef.current === key) setInput(prev => (prev.trim() ? prev : text))
+    },
+    noteSystem: (key, text) => {
+      if (sessionKeyRef.current === key) setMessages(prev => [...prev, { role: 'system', text, timestamp: Date.now() }])
+    },
+    shortenedText: tr('localModels.longChat.shortened', localModelsEn['localModels.longChat.shortened']),
+    abortTurn: () => adapter.abortTurn(),
+  })
+  const longChatRef = useRef(longChat)
+  useEffect(() => { longChatRef.current = longChat })
   // The model each conversation's session is held to, by session key (the
   // adapter's `conversationModel`). Kept as state rather than read off the
   // adapter while rendering: it moves only when a turn comes back, a chat is
@@ -3300,6 +3347,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           if (sk && sk !== sessionKeyRef.current) return
           const stuck = fallbackWatchRef.current.fromAgentFrame(payload, runFailureRef.current.peek(payload.runId))
           if (stuck) reportModelFallbackFor(stuck)
+          // The core's compaction frames: what the status line of a local turn
+          // names while a summary runs (TASK-2127).
+          longChatRef.current.noteAgentFrame(payload)
           if (payload.stream === 'tool') {
             const toolData = payload.data as Record<string, unknown> | undefined
             applyToolEvent(toolData)
@@ -4378,10 +4428,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest, markActiveSeen])
   useEffect(() => { switchSessionRef.current = switchSession }, [switchSession])
 
-  /** The + : a new tab, bound to a fresh session under the same agent. */
-  const newTab = useCallback(() => {
+  /**
+   * The + : a new tab, bound to a fresh session under the same agent. Resolves
+   * with its key once it is the one on screen (the long-chat card queues the
+   * owner's waiting message into it), null when there is no session to open.
+   */
+  const newTab = useCallback(async (): Promise<string | null> => {
     const main = mainSessionKeyRef.current
-    if (!main) return
+    if (!main) return null
     const key = adapter.newSessionKey(main)
     markTabsDirty()
     setTabs(prev => {
@@ -4394,8 +4448,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         seq: nextSeq,
       }]
     })
-    void switchSession(key)
+    await switchSession(key)
+    return sessionKeyRef.current === key ? key : null
   }, [adapter, switchSession, t, markTabsDirty])
+  useEffect(() => { newTabRef.current = newTab }, [newTab])
 
   /**
    * Close a tab: the popup forgets it and the transport deletes the session
@@ -6271,6 +6327,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         else if (event.kind === 'status' && runIdRef.current === idempotencyKey) {
           setTurnStatus(event.text?.trim() ? event.text.trim() : null)
         }
+        // Hermes compacting the conversation: the same words the gateway's
+        // compaction frames give an OpenClaw turn (TASK-2127).
+        else if (event.kind === 'compaction' && runIdRef.current === idempotencyKey) {
+          longChatRef.current.noteAgentFrame({ stream: 'compaction', data: { phase: event.phase } })
+        }
         // The agent has parked on a question. Held by `requestId`, so a
         // reconnect's REPLAY of a prompt still being waited on folds into the
         // card already on screen instead of drawing a second one beside it —
@@ -6499,6 +6560,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   useEffect(() => { attachTurnRef.current = attachTurn }, [attachTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
+    // On Local AI, a conversation too long for the local window holds the
+    // message on its card for the owner's choice instead of starting a
+    // minutes-long compaction on the box (TASK-2127).
+    if (longChatRef.current.admitTurn(sessionKeyRef.current, { text, attachments: sendAttachments, voice: origin.voice, asked: origin.asked })) return
     // The owner chose where to be by speaking here: an arrival still waiting on
     // the box must not move this turn — queued until the gateway answers — or
     // the owner into another conversation afterwards (TASK-1364).
@@ -8602,20 +8667,47 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             moving second is the cheapest proof a long turn is alive. The
             clock is aria-hidden: a live region that re-announced itself every
             second would talk over the answer. */}
-        {!reloadingSkill && (sending || isBootstrappingHistory) && (
+        {/* On Local AI the words say what is really happening (TASK-2127):
+            shortening while a summary runs — a local turn's own, or the
+            "Shorten this conversation first" the owner chose, which has no
+            turn and keeps its own clock — and loading only while llama-server
+            is not ready (src/lib/use-local-ai-long-chat.ts). */}
+        {!reloadingSkill && (sending || isBootstrappingHistory || longChat.shorteningSince > 0) && (
           <div
             data-testid="chat-turn-status"
             role="status"
             style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
           >
             <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
-            <span>{turnStatus ?? (
-              sending && onLocalAi && !turnHeardFrom ? localAiLoadingLabel
-              : sending && turnVerbRef.current ? `${turnVerbRef.current}…`
-              : t("chat.working")
-            )}</span>
-            {sending && turnStartedAt > 0 && <TurnClock startedAt={turnStartedAt} />}
+            <span>{(!sending && longChat.shorteningSince > 0) || longChat.phase === 'shortening'
+              ? tr('localModels.chatCompacting', localModelsEn['localModels.chatCompacting'])
+              // Ahead of the harness's own words: Hermes says "Thinking…" from
+              // the moment it is asked, over a llama-server still loading.
+              : longChat.phase === 'loading' ? localAiLoadingLabel
+              : turnStatus ?? (
+                sending && turnVerbRef.current ? `${turnVerbRef.current}…`
+                : t("chat.working")
+              )}</span>
+            {sending && turnStartedAt > 0
+              ? <TurnClock startedAt={turnStartedAt} />
+              : longChat.shorteningSince > 0 && <TurnClock startedAt={longChat.shorteningSince} />}
           </div>
+        )}
+
+        {/* A conversation too long for the local model, or one whose summary
+            ran out of time: a new chat (one click, the waiting message goes
+            with it) or a summary first (TASK-2127). */}
+        {longChat.offer && !reloadingSkill && (
+          <LocalAiLongChatOffer
+            kind={longChat.offer.kind}
+            tokens={longChat.offer.tokens}
+            window={longChat.offer.window}
+            pendingText={longChat.offer.pending?.text ?? null}
+            shortening={longChat.shorteningSince > 0}
+            onNewChat={longChat.startNewChat}
+            onShorten={adapter.compactConversation ? longChat.shorten : undefined}
+            onDismiss={longChat.dismiss}
+          />
         )}
 
         {/* A conversation being brought back, or one that could not be

@@ -1206,6 +1206,34 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
   });
 
+  describe("OpenClaw's compaction runs on the cloud model while the primary is on the box (TASK-2127)", () => {
+    const COMPACTION = "agents.defaults.compaction.model";
+
+    it("names the cloud primary being left in the batch that makes the on-device model the primary", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } } });
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+        .map((call) => call[0] as string[][])
+        .find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      expect(batch).toContainEqual(["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(batch).toContainEqual([COMPACTION, "deepseek/deepseek-v4-flash"]);
+    });
+
+    it("writes nothing for a local save that leaves the cloud primary in place", async () => {
+      mockGetAll.mockResolvedValue({ ai_model_configured: true, ai_model_provider: "openai" });
+      mockReadOpenClawConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "openai/gpt-5.5" } } } });
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", scope: "local" }));
+
+      expect(res.status).toBe(200);
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), COMPACTION)).toBeUndefined();
+      expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalledWith(COMPACTION);
+    });
+  });
+
   it("keeps local AI as fallback-only when a primary AI provider is already configured", async () => {
     mockGetAll.mockResolvedValue({
       ai_model_configured: true,

@@ -34,7 +34,11 @@ import {
 // Starts real processes through @/lib/coding-agent, like coding-agent.test.ts.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
+vi.mock("@/lib/coding-agent-notify", () => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  findChatOrigin: vi.fn(async () => null),
+  recordRunChatOrigin: vi.fn(),
+}));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 // Every run draws its project an icon through an upstream call; nothing here
 // asserts it, and a unit test must not depend on what the network answers.

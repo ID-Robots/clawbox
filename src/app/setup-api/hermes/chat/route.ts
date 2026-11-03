@@ -47,10 +47,13 @@ import {
   liveTurnResponseFor,
   stopLiveTurns,
   type LiveTurn,
+  type LiveTurnListenerOptions,
 } from "@/lib/harness/hermes-live-turn";
 import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
+import { personSession } from "@/lib/owner-session";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
@@ -737,10 +740,11 @@ function streamTurn(
   /** Whether the REQUEST named a provider — see `billedProviderFor`. */
   requestNamedProvider: boolean,
   live: LiveTurn,
+  listening: LiveTurnListenerOptions,
 ): Response {
   // Attach BEFORE the run starts, so the response hears the first frame live
   // rather than out of the replay. Either would be correct; this is cheaper.
-  const response = liveTurnResponse((listener) => live.attach(listener));
+  const response = liveTurnResponse((listener) => live.attach(listener), listening);
   runStreamedTurn(turn, fallbackSessionId, sessionKey, requestNamedProvider, live).catch((err) => {
     // Nobody awaits the turn any more, so nothing above may escape as an
     // unhandled rejection — a transcript write failing on the error path is
@@ -791,6 +795,9 @@ async function runStreamedTurn(
             break;
           case "status":
             send("status", { text: activity.text });
+            break;
+          case "compaction":
+            send("compaction", { phase: activity.phase });
             break;
           case "clarify":
             send("clarify", {
@@ -1041,7 +1048,22 @@ export async function GET(request: Request) {
   if (!which.ok) {
     return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
-  return liveTurnResponseFor(which.key) ?? new NextResponse(null, { status: 204 });
+  return liveTurnResponseFor(which.key, await listenerSession(request)) ?? new NextResponse(null, { status: 204 });
+}
+
+/**
+ * The session a streamed answer is read on, re-judged while it streams
+ * (TASK-2131). The session gate let the request in once, when it arrived; a turn
+ * runs for as long as its tools take, and the reply went on streaming to a page
+ * whose session had long run out. A person's cookie is asked about again by the
+ * same rule the gate applies — expiry, a password change, a removed user — and
+ * the stream ends when it no longer holds; the turn itself runs on and records
+ * its answer. The assistant's bearer has no session to run out and is not
+ * watched.
+ */
+async function listenerSession(request: Request): Promise<LiveTurnListenerOptions> {
+  if (!(await personSession(request))) return {};
+  return { stillSignedIn: async () => (await personSession(request)) !== null };
 }
 
 // DELETE /setup-api/hermes/chat?sessionKey=…[&turnId=…] → { stopped }
@@ -1399,6 +1421,9 @@ export async function POST(request: Request) {
   // ends itself when it settles: a live turn that never ended would leave every
   // later page load waiting on an answer that is not coming.
   const turnId = typeof body.turnId === "string" && TURN_ID_RE.test(body.turnId) ? body.turnId : undefined;
+  // Read before the turn opens: nothing between the hand-off and the stream
+  // may be left to fail with a turn already running (see `listenerSession`).
+  const listening = await listenerSession(request);
   const live = beginLiveTurn(sessionKey, { turnId });
   let handedOff = false;
   try {
@@ -1558,7 +1583,7 @@ export async function POST(request: Request) {
       // harness's own record is precisely the answer to what it decided.
       if (turn) {
         handedOff = true;
-        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live);
+        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, listening);
       }
     }
 
@@ -1592,6 +1617,12 @@ export async function POST(request: Request) {
       // box knows the model of is a false unknown, not modesty.
       const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
       live.emit("done", answered);
+      // The one-shot answer is held to the same rule as the stream: a session
+      // that ran out while the CLI was answering is signed out rather than
+      // handed the reply, which is on the transcript for after the sign-in.
+      if (listening.stillSignedIn && !(await listening.stillSignedIn())) {
+        return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
+      }
       return NextResponse.json(answered);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
