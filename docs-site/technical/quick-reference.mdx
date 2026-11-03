@@ -109,7 +109,9 @@ sudo bash install.sh --step openclaw_install  # fixes stale core / 'Unrecognized
 bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts tokens
 
 # OpenClaw agent databases: sizes and what needs compacting (read-only), then compact
-# the ones that need it — pauses the assistant while it runs, only once it is idle
+# the ones that need it — pauses the assistant while it runs, only once it is idle.
+# Nothing is compacted automatically unless you turn on Settings → System →
+# Agent databases → Nightly maintenance (off by default); `run` works either way.
 bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts db-maintenance status
 bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts db-maintenance run      # --dry-run to only look
 

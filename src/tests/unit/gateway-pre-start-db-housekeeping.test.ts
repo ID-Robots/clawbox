@@ -461,6 +461,8 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     expect(argv.slice(0, 3)).toEqual(["-I", path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py"), "prestart"]);
     expect(opt("--state-dir")).toBe(path.join(dir, ".openclaw"));
     expect(opt("--data-dir")).toBe(path.join(dir, "data"));
+    // Where the owner's switch is: the helper compacts only while it is on.
+    expect(opt("--device-store")).toBe(path.join(dir, "data", "config.json"));
     expect(opt("--openclaw-bin")).toBe("/opt/oc/bin/openclaw");
     expect(opt("--core-pkg")).toBe("/opt/oc/bin/../lib/node_modules/openclaw/package.json");
     expect(opt("--budget-seconds")).toBe("360");
@@ -488,6 +490,70 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     const { r } = housekeeping({ PY_EXIT: "9" });
     expect(r.status).toBe(0);
     expect(r.stderr).toMatch(/WARN: agent database housekeeping stopped \(exit 9\); the gateway starts on the databases as they are/);
+  });
+
+  describe.skipIf(!hasPython3)("with the real helper and a stub core", () => {
+    // The block as the unit runs it, the helper included: only `openclaw` is a
+    // stub, logging what it is asked. An agent database that is 75 % free
+    // pages is one the helper compacts — if the owner's switch lets it.
+    function realHousekeeping(store: unknown) {
+      const ocBin = path.join(dir, "oc", "bin");
+      const calls = path.join(dir, "oc-calls");
+      mkdirSync(ocBin, { recursive: true });
+      writeFileSync(path.join(ocBin, "openclaw"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${calls}"\necho '{"quick_check":"ok","integrity_check":"ok"}'\n`);
+      chmodSync(path.join(ocBin, "openclaw"), 0o755);
+      const pkg = path.join(dir, "oc", "lib", "node_modules", "openclaw", "package.json");
+      mkdirSync(path.dirname(pkg), { recursive: true });
+      writeFileSync(pkg, JSON.stringify({ name: "openclaw", version: "2026.10.6", openclaw: { schemaVersions: { state: 20, agent: 24 } } }));
+      const db = path.join(dir, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite");
+      mkdirSync(path.dirname(db), { recursive: true });
+      const made = spawnSync("python3", ["-c", [
+        "import sqlite3, sys",
+        "c = sqlite3.connect(sys.argv[1])",
+        "c.execute('PRAGMA page_size=4096')",
+        "c.execute('PRAGMA auto_vacuum=NONE')",
+        "c.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)')",
+        "c.executemany('INSERT INTO t(b) VALUES (?)', [(b'x' * 3000,) for _ in range(400)])",
+        "c.commit()",
+        "c.execute('DELETE FROM t WHERE id <= 300')",
+        "c.commit()",
+        "c.execute('PRAGMA user_version=24')",
+        "c.commit()",
+      ].join("\n"), db], { encoding: "utf-8" });
+      if (made.status !== 0) throw new Error(made.stderr);
+      writeFileSync(path.join(dir, ".openclaw", "openclaw.json"), "{}");
+      if (store !== undefined) writeFileSync(path.join(dir, "data", "config.json"), JSON.stringify(store));
+      const r = runBlock(BLOCK, {
+        SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
+        CLAWBOX_ROOT: dir,
+        CLAWBOX_OPENCLAW_2026_10: "1",
+        OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
+        OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
+        OPENCLAW_BIN: path.join(ocBin, "openclaw"),
+      }, { HOME: dir });
+      const asked = existsSync(calls) ? readFileSync(calls, "utf-8").trim().split("\n").filter(Boolean) : [];
+      const migration = JSON.parse(readFileSync(path.join(dir, "data", "openclaw-migration-status.json"), "utf-8"));
+      return { r, asked, migration, out: `${r.stdout}${r.stderr}` };
+    }
+
+    it("compacts nothing at a gateway start on a box whose owner never turned maintenance on — and still records the migration status", () => {
+      for (const store of [undefined, { setup_complete: true }, { openclaw_db_maintenance: { enabled: false, time: "04:30" } }]) {
+        const { r, asked, migration, out } = realHousekeeping(store);
+        expect(r.status).toBe(0);
+        expect(asked).toEqual([]);
+        expect(out).toMatch(/\[db-maintenance\] compaction is off: the owner has not turned on nightly maintenance/);
+        expect(migration).toMatchObject({ source: "gateway-pre-start", state: "ok", core: "2026.10.6" });
+        rmSync(path.join(dir, ".openclaw"), { recursive: true, force: true });
+        rmSync(path.join(dir, "data", "config.json"), { force: true });
+      }
+    });
+
+    it("compacts at a gateway start once the owner has turned it on", () => {
+      const { r, asked, out } = realHousekeeping({ openclaw_db_maintenance: { enabled: true, time: "04:30" } });
+      expect(r.status).toBe(0);
+      expect(asked).toEqual(["doctor --session-sqlite compact --session-sqlite-agent main --json"]);
+      expect(out).not.toMatch(/compaction is off/);
+    });
   });
 
   it("does nothing on a core older than 2026.10, whose compaction commands are not verified", () => {

@@ -2062,7 +2062,7 @@ const table: Record<string, string> = {
   "dbMaintenance.runNow": "今すぐ実行",
   "dbMaintenance.running": "メンテナンス実行中 — {phase}",
   "dbMaintenance.saveFailed": "スケジュールを保存できませんでした。",
-  "dbMaintenance.scheduleHelp": "毎晩この時刻に ClawBox がデータベースを確認し、必要なものだけを圧縮します。",
+  "dbMaintenance.scheduleHelp": "オンにするまではオフです。オンの間は、毎晩この時刻とアシスタントの起動時に ClawBox がデータベースを確認し、必要なものだけを圧縮します。「今すぐ実行」はどちらの場合でも使えます。",
   "dbMaintenance.scheduleLabel": "夜間メンテナンス",
   "dbMaintenance.startFailed": "メンテナンスを開始できませんでした。",
   "dbMaintenance.started": "メンテナンスを開始しました。圧縮が必要なデータベースがある場合、アシスタントが戻るまでチャットは一時停止します。",

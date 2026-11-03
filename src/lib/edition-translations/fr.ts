@@ -1823,7 +1823,7 @@ export const fr: Record<string, string> = {
   "dbMaintenance.scheduleLabel": "Maintenance nocturne",
   "dbMaintenance.time": "Heure",
   "dbMaintenance.nextRun": "Prochaine vérification : {when}",
-  "dbMaintenance.scheduleHelp": "Chaque nuit à cette heure, ClawBox vérifie les bases de données et ne compacte que celles qui en ont besoin.",
+  "dbMaintenance.scheduleHelp": "Désactivée tant que vous ne l'activez pas. Lorsqu'elle est activée, ClawBox vérifie les bases de données chaque nuit à cette heure et à chaque démarrage de l'assistant, et ne compacte que celles qui en ont besoin. « Lancer maintenant » fonctionne dans les deux cas.",
   "dbMaintenance.runNow": "Lancer maintenant",
   "dbMaintenance.started": "Maintenance lancée. Si une base de données doit être compactée, les discussions sont en pause jusqu'au retour de l'assistant.",
   "dbMaintenance.alreadyRunning": "La maintenance est déjà en cours.",

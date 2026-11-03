@@ -1831,7 +1831,7 @@ export const zh: Record<string, string> = {
   "dbMaintenance.scheduleLabel": "夜间维护",
   "dbMaintenance.time": "时间",
   "dbMaintenance.nextRun": "下次检查：{when}",
-  "dbMaintenance.scheduleHelp": "每晚在此时间，ClawBox 会检查数据库，并只压缩需要压缩的数据库。",
+  "dbMaintenance.scheduleHelp": "在你开启之前保持关闭。开启后，ClawBox 会在每晚此时间以及每次助手启动时检查数据库，并只压缩需要压缩的数据库。“立即运行”在两种情况下都可用。",
   "dbMaintenance.runNow": "立即运行",
   "dbMaintenance.started": "维护已开始。如果有数据库需要压缩，聊天会暂停，直到助手恢复。",
   "dbMaintenance.alreadyRunning": "维护已在进行中。",

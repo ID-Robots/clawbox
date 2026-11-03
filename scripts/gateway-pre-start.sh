@@ -10270,14 +10270,19 @@ fi
 #     on the schema the installed core declares — the web server's health route
 #     reads it, so a gateway that starts with its agents degraded by an
 #     unfinished migration is reported instead of looking ready;
-#   - runs `openclaw doctor --session-sqlite compact --session-sqlite-agent <id>`
-#     (and `--state-sqlite compact`) for each database whose free pages are over
-#     30 %, or that a schema migration left a rollback copy beside, when the
-#     disk has the database's size free — a 9.x -> 10.x migration left ~48 % of
-#     a customer box's 9.8 GB agent database as free pages that incremental
-#     auto_vacuum never returns (5.0 GB after compaction, 4 min on a Nano);
+#   - ONLY when the owner turned nightly maintenance on (Settings → System →
+#     Agent databases, `openclaw_db_maintenance.enabled: true` in the device
+#     store passed below; OFF until they do): runs `openclaw doctor
+#     --session-sqlite compact --session-sqlite-agent <id>` (and `--state-sqlite
+#     compact`) for each database whose free pages are over 30 %, or that a
+#     schema migration left a rollback copy beside, when the disk has the
+#     database's size free — a 9.x -> 10.x migration left ~48 % of a customer
+#     box's 9.8 GB agent database as free pages that incremental auto_vacuum
+#     never returns (5.0 GB after compaction, 4 min on a Nano);
 #   - removes the migration's rollback copies once every database is on the
-#     declared schema and has passed the compaction's integrity checks.
+#     declared schema and has passed a compaction's integrity checks — with the
+#     switch off too, but then only on a check already recorded (a "Run now"):
+#     nothing is compacted to earn one, and an unchecked copy stays.
 #
 # LAST in the script, so it is budgeted against the time the rest of this
 # pre-start has already taken: the unit kills ExecStartPre at TimeoutStartSec
@@ -10302,6 +10307,7 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_DB_MAINTENANCE" 
     --state-dir "$OPENCLAW_STATE_DIR" \
     --config "$OPENCLAW_CONFIG" \
     --data-dir "$CLAWBOX_ROOT/data" \
+    --device-store "$CLAWBOX_ROOT/data/config.json" \
     --openclaw-bin "$OPENCLAW_BIN" \
     --core-pkg "$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json" \
     --budget-seconds "$_dbm_budget" || _dbm_rc=$?

@@ -17,11 +17,13 @@
  * compact` only when a database needs it and the disk can hold the copy, asks
  * the core whether the gateway is idle (`openclaw gateway suspend`) before it
  * stops it, holds it down with the updater's guard, and starts it again. This
- * module is the web server's side: the owner's schedule (on, 04:30 local by
- * default — `openclaw-db-maintenance-scheduler.ts` arms it), the status the
- * Settings card shows, and the launch, which goes into a transient unit of the
- * user's systemd manager so a web-server restart (an update, a crash) does not
- * take a run that holds the gateway down with it.
+ * module is the web server's side: the owner's schedule (OFF until the owner
+ * turns it on, 04:30 local suggested — `openclaw-db-maintenance-scheduler.ts`
+ * arms it, and the same switch lets the gateway pre-start compact), the status
+ * the Settings card shows, and the launch, which goes into a transient unit of
+ * the user's systemd manager so a web-server restart (an update, a crash) does
+ * not take a run that holds the gateway down with it. "Run now" and the CLI
+ * launch a run whatever the switch says.
  *
  * SERVER ONLY.
  */
@@ -40,8 +42,16 @@ export interface DbMaintenanceSchedule {
   time: string;
 }
 
-/** Off-hours, after Prime Radiant's 03:00 nightly pass and before a morning's first chat. */
-export const DEFAULT_DB_MAINTENANCE_SCHEDULE: DbMaintenanceSchedule = { enabled: true, time: "04:30" };
+/**
+ * OFF: a compaction stops the gateway for minutes and rewrites a multi-GB
+ * file, so a box does it by itself only once its owner has switched it on
+ * (Settings → System → Agent databases). Nothing seeds this key — not the
+ * installer, an update or a factory reset (which wipes it) — so a stored
+ * `enabled: true` is always the owner's own save; every box without one is
+ * off. The time is the suggestion the switch starts from: off-hours, after
+ * Prime Radiant's 03:00 nightly pass and before a morning's first chat.
+ */
+export const DEFAULT_DB_MAINTENANCE_SCHEDULE: DbMaintenanceSchedule = { enabled: false, time: "04:30" };
 
 /** The transient user unit a run goes into; one at a time, by name. */
 export const DB_MAINTENANCE_UNIT = "clawbox-openclaw-db-maintenance";

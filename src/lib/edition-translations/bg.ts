@@ -1809,7 +1809,7 @@ export const bg: Record<string, string> = {
   "dbMaintenance.scheduleLabel": "Нощна поддръжка",
   "dbMaintenance.time": "Час",
   "dbMaintenance.nextRun": "Следваща проверка: {when}",
-  "dbMaintenance.scheduleHelp": "Всяка нощ в този час ClawBox проверява базите данни и уплътнява само тези, които имат нужда.",
+  "dbMaintenance.scheduleHelp": "Изключено, докато не го включите. Докато е включено, ClawBox проверява базите данни всяка нощ в този час и при всяко стартиране на асистента и уплътнява само тези, които имат нужда. „Изпълни сега“ работи и в двата случая.",
   "dbMaintenance.runNow": "Изпълни сега",
   "dbMaintenance.started": "Поддръжката започна. Ако някоя база данни трябва да се уплътни, чатовете спират, докато асистентът се върне.",
   "dbMaintenance.alreadyRunning": "Поддръжката вече работи.",

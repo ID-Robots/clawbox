@@ -1822,7 +1822,7 @@ export const de: Record<string, string> = {
   "dbMaintenance.scheduleLabel": "Nächtliche Wartung",
   "dbMaintenance.time": "Uhrzeit",
   "dbMaintenance.nextRun": "Nächste Prüfung: {when}",
-  "dbMaintenance.scheduleHelp": "Jede Nacht zu dieser Uhrzeit prüft ClawBox die Datenbanken und verdichtet nur die, die es brauchen.",
+  "dbMaintenance.scheduleHelp": "Aus, bis Sie sie einschalten. Solange sie an ist, prüft ClawBox die Datenbanken jede Nacht zu dieser Uhrzeit und bei jedem Start des Assistenten und verdichtet nur die, die es brauchen. „Jetzt ausführen“ funktioniert in beiden Fällen.",
   "dbMaintenance.runNow": "Jetzt ausführen",
   "dbMaintenance.started": "Wartung gestartet. Muss eine Datenbank verdichtet werden, pausieren Chats, bis der Assistent wieder da ist.",
   "dbMaintenance.alreadyRunning": "Die Wartung läuft bereits.",

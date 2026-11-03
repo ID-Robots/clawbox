@@ -44,7 +44,8 @@ beforeEach(() => {
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body));
       if (body.action === "run") return new Response(JSON.stringify({ ok: true, started: true, survivesRestart: true }), { status: 202 });
-      return new Response(JSON.stringify({ ok: true, schedule: { enabled: body.enabled ?? true, time: body.time ?? "04:30" }, nextRunAt: null }), { status: 200 });
+      const enabled = body.enabled ?? true;
+      return new Response(JSON.stringify({ ok: true, schedule: { enabled, time: body.time ?? "04:30" }, nextRunAt: enabled ? STATUS.nextRunAt : null }), { status: 200 });
     }
     return new Response(JSON.stringify(STATUS), { status: 200 });
   });
@@ -102,6 +103,51 @@ describe("DbMaintenancePanel", () => {
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
     expect(fetchMock).toHaveBeenCalledWith("/setup-api/gateway/db-maintenance", expect.objectContaining({ body: JSON.stringify({ action: "schedule", enabled: false }) }));
+    expect(screen.queryByTestId("db-maintenance-next")).toBeNull();
+  });
+
+  describe("on a box whose owner never turned it on (the default)", () => {
+    const OFF = { ...STATUS, schedule: { enabled: false, time: "04:30" }, nextRunAt: null };
+
+    beforeEach(() => {
+      const base = fetchMock.getMockImplementation();
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) =>
+        init?.method === "POST" ? base!(url, init) : new Response(JSON.stringify(OFF), { status: 200 }));
+    });
+
+    it("shows the switch off, no next check and the time held, and says it is off until turned on", async () => {
+      render(<DbMaintenancePanel />);
+      const toggle = await screen.findByTestId("db-maintenance-schedule-switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      expect(screen.queryByTestId("db-maintenance-next")).toBeNull();
+      expect((screen.getByTestId("db-maintenance-time") as HTMLInputElement).disabled).toBe(true);
+      expect(screen.getByTestId("settings-db-maintenance").textContent).toContain("Off until you turn it on.");
+      expect((screen.getByTestId("db-maintenance-run") as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("never shows a next check while off, whatever time the body carries", async () => {
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ ...OFF, nextRunAt: STATUS.nextRunAt }), { status: 200 }));
+      render(<DbMaintenancePanel />);
+      await screen.findByTestId("db-maintenance-schedule-switch");
+      expect(screen.queryByTestId("db-maintenance-next")).toBeNull();
+    });
+
+    it("turns the nightly check on through the route, and only then shows the next check", async () => {
+      render(<DbMaintenancePanel />);
+      const toggle = await screen.findByTestId("db-maintenance-schedule-switch");
+      fireEvent.click(toggle);
+      await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+      expect(fetchMock).toHaveBeenCalledWith("/setup-api/gateway/db-maintenance", expect.objectContaining({ body: JSON.stringify({ action: "schedule", enabled: true }) }));
+      await screen.findByTestId("db-maintenance-next");
+    });
+
+    it("still runs maintenance on Run now", async () => {
+      render(<DbMaintenancePanel />);
+      fireEvent.click(await screen.findByTestId("db-maintenance-run"));
+      await screen.findByTestId("db-maintenance-running");
+      expect(fetchMock).toHaveBeenCalledWith("/setup-api/gateway/db-maintenance", expect.objectContaining({ method: "POST", body: JSON.stringify({ action: "run" }) }));
+      expect(screen.getByTestId("db-maintenance-notice").textContent).toMatch(/Maintenance started/);
+    });
   });
 
   it("says when the assistant did not come back after a run", async () => {
@@ -114,7 +160,7 @@ describe("DbMaintenancePanel", () => {
   it("draws nothing for a non-owner (403), on Hermes, or for a body it cannot read", async () => {
     for (const reply of [
       new Response(JSON.stringify({ ok: false, code: "owner_only" }), { status: 403 }),
-      new Response(JSON.stringify({ ok: true, available: false, databases: [], schedule: { enabled: true, time: "04:30" } }), { status: 200 }),
+      new Response(JSON.stringify({ ok: true, available: false, databases: [], schedule: { enabled: false, time: "04:30" }, nextRunAt: null }), { status: 200 }),
       new Response(JSON.stringify({ databases: [null] }), { status: 200 }),
     ]) {
       fetchMock.mockImplementationOnce(async () => reply);
