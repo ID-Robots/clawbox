@@ -4,6 +4,8 @@ import { I18nProvider } from "@/lib/i18n";
 import { ChatProgressCard } from "@/components/ChatProgressCard";
 import {
   PROGRESS_CARD_COLLAPSED_KEY,
+  PROGRESS_CARD_DISMISSED_KEY,
+  PROGRESS_CARD_REFRESH_TIMEOUT_MS,
   useGatewayProgressCard,
   type ProgressCard,
 } from "@/lib/chat-progress-card";
@@ -258,10 +260,195 @@ describe("ChatProgressCard — the fold", () => {
     expect(time.parentElement?.className).toContain("chat-progress-meta");
 
     const css = section.querySelector("style")?.textContent ?? "";
-    expect(css).toContain(".chat-progress-card { container: chat-progress / inline-size; }");
+    // Measured on the fold toggle, so the buttons beside it count against the header's room.
+    expect(css).toContain(".chat-progress-toggle { container: chat-progress / inline-size; }");
+    expect(screen.getByTestId("chat-progress-card-toggle").className).toContain("chat-progress-toggle");
     expect(css).toContain(".chat-progress-time, .chat-progress-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
-    expect(css).toContain(".chat-progress-summary { flex-shrink: 1000; }");
-    expect(css).toMatch(/@container chat-progress \(max-width: 400px\) \{[^}]*\.chat-progress-head \{ flex-direction: column;/);
+    // The summary takes only what the time leaves (no basis of its own), so the time is cut only once the summary is gone.
+    expect(css).toContain(".chat-progress-summary { flex: 1 1 0; }");
+    expect(css).toMatch(/@container chat-progress \(max-width: 374px\) \{[^}]*\.chat-progress-head \{ flex-direction: column;/);
+  });
+});
+
+describe("ChatProgressCard — putting it away (TASK-2147)", () => {
+  type Props = Partial<Parameters<typeof ChatProgressCard>[0]>;
+  const tree = (value: ProgressCard, props: Props = {}) => <I18nProvider><ChatProgressCard card={value} {...props} /></I18nProvider>;
+
+  /** Rendered in English with the catalogue loaded (the dismiss button is there on every card). */
+  async function renderWith(value: ProgressCard, props: Props = {}) {
+    stubLocale("en");
+    const view = render(tree(value, props));
+    await waitFor(() => expect(screen.getByTestId("chat-progress-card-dismiss")).toHaveAccessibleName("Dismiss progress card"));
+    return { ...view, update: (next: ProgressCard, nextProps: Props = {}) => view.rerender(tree(next, nextProps)) };
+  }
+
+  it("dismisses with the X, stays hidden after a reload, and comes back on the agent's next write", async () => {
+    const value = card();
+    const view = await renderWith(value);
+    const dismiss = screen.getByTestId("chat-progress-card-dismiss");
+    expect(dismiss).toHaveAccessibleName("Dismiss progress card");
+    expect(dismiss).toHaveAttribute("title", "Dismiss — hidden in this chat until the assistant updates it");
+    fireEvent.click(dismiss);
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+    expect(JSON.parse(window.localStorage.getItem(PROGRESS_CARD_DISMISSED_KEY) ?? "{}")).toEqual({
+      "agent:main:main": { revision: 3, updatedAt: value.updatedAt, at: expect.any(Number) },
+    });
+
+    // A reload: the same card is still put away.
+    view.unmount();
+    const again = render(tree(value));
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+
+    // The agent writes again: a new revision shows.
+    again.rerender(tree({ ...value, revision: 4, updatedAt: (value.updatedAt ?? 0) + 1000 }));
+    expect(screen.getByTestId("chat-progress-card")).toHaveAttribute("data-revision", "4");
+  });
+
+  it("keeps each session's dismissal to that session", async () => {
+    const value = card();
+    const view = await renderWith(value);
+    fireEvent.click(screen.getByTestId("chat-progress-card-dismiss"));
+    view.update({ ...value, sessionKey: "agent:main:clawbox-tab-2" });
+    expect(screen.getByTestId("chat-progress-card")).toBeInTheDocument();
+  });
+
+  it("follows a dismissal made in another tab", async () => {
+    const value = card();
+    await renderWith(value);
+    act(() => {
+      window.localStorage.setItem(
+        PROGRESS_CARD_DISMISSED_KEY,
+        JSON.stringify({ "agent:main:main": { revision: value.revision, updatedAt: value.updatedAt, at: 1 } }),
+      );
+      window.dispatchEvent(new StorageEvent("storage", { key: PROGRESS_CARD_DISMISSED_KEY }));
+    });
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+  });
+
+  it("offers only the X where the card has no server-side state to clear or refresh", async () => {
+    await renderWith(card());
+    expect(screen.getByTestId("chat-progress-card-dismiss")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-progress-card-clear")).toBeNull();
+    expect(screen.queryByTestId("chat-progress-card-refresh")).toBeNull();
+  });
+
+  it("keeps the buttons out of the fold toggle and available while the card is folded", async () => {
+    await renderWith(card(), { onClear: vi.fn(async () => true), onRefresh: vi.fn() });
+    const toggle = screen.getByTestId("chat-progress-card-toggle");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    for (const id of ["chat-progress-card-refresh", "chat-progress-card-clear", "chat-progress-card-dismiss"]) {
+      const button = screen.getByTestId(id);
+      expect(toggle.contains(button)).toBe(false);
+      expect(button.tagName).toBe("BUTTON");
+      expect(button).toHaveAttribute("type", "button");
+    }
+  });
+
+  it("clears the saved card with the trash, the card it was asked on", async () => {
+    const value = card();
+    const onClear = vi.fn(async () => true);
+    window.localStorage.setItem(PROGRESS_CARD_DISMISSED_KEY, JSON.stringify({ "agent:main:main": { revision: 1, updatedAt: 5, at: 1 } }));
+    await renderWith(value, { onClear });
+    const trash = screen.getByTestId("chat-progress-card-clear");
+    expect(trash).toHaveAccessibleName("Clear saved progress for everyone");
+    expect(trash).toHaveAttribute("title", "Clear saved progress for everyone");
+    await act(async () => { fireEvent.click(trash); });
+    expect(onClear).toHaveBeenCalledWith(value);
+    // Nothing is left to hide in that session.
+    expect(window.localStorage.getItem(PROGRESS_CARD_DISMISSED_KEY)).toBeNull();
+  });
+
+  it("says so when the clear is refused, and lets it be tried again", async () => {
+    let fail!: (error: Error) => void;
+    const onClear = vi.fn(() => new Promise<boolean>((_, reject) => { fail = reject; }));
+    await renderWith(card(), { onClear });
+    const trash = screen.getByTestId("chat-progress-card-clear");
+    fireEvent.click(trash);
+    // Busy, but still in the tab order: aria-disabled, never disabled.
+    expect(trash).toHaveAttribute("aria-disabled", "true");
+    expect(trash).not.toBeDisabled();
+    expect(trash).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(trash);
+    expect(onClear).toHaveBeenCalledTimes(1);
+    await act(async () => { fail(new Error("FORBIDDEN")); });
+    expect(screen.getByTestId("chat-progress-card")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Could not clear the saved progress card.");
+    expect(trash).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("refreshes with its own button, spinning until the newer card lands", async () => {
+    const onRefresh = vi.fn();
+    const view = await renderWith(card(), { onRefresh });
+    const refresh = screen.getByTestId("chat-progress-card-refresh");
+    expect(refresh).toHaveAccessibleName("Refresh task progress");
+    fireEvent.click(refresh);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+
+    view.update(card(), { onRefresh, refreshState: "pending" });
+    expect(refresh).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(refresh);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveAccessibleName("Refreshing task progress…");
+    expect(refresh.querySelector(".chat-progress-spinner")).not.toBeNull();
+
+    view.update(card(), { onRefresh, refreshState: "failed" });
+    expect(screen.getByRole("status")).toHaveTextContent("Could not refresh. The previous update is kept.");
+    expect(refresh).not.toHaveAttribute("aria-disabled");
+
+    view.update(card(), { onRefresh, refreshState: "timeout" });
+    expect(screen.getByRole("status")).toHaveTextContent("No new update yet. The request may still be running.");
+
+    view.update(card({ revision: 4 }), { onRefresh, refreshState: "idle" });
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("hands a keyboard user's focus on to the composer when the X or the trash takes the card away", async () => {
+    stubLocale("en");
+    const withComposer = (value: ProgressCard, props: Props = {}) => (
+      <I18nProvider>
+        <div>
+          <ChatProgressCard card={value} {...props} />
+          <input type="file" style={{ display: "none" }} />
+          <div data-testid="composer"><button type="button">Attach</button><textarea data-testid="composer-text" /></div>
+        </div>
+      </I18nProvider>
+    );
+    const view = render(withComposer(card()));
+    const dismiss = await screen.findByTestId("chat-progress-card-dismiss");
+    dismiss.focus();
+    // Enter or Space on a button is a click with no pointer press (detail 0).
+    fireEvent.click(dismiss, { detail: 0 });
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("composer-text"));
+
+    const next = card({ revision: 4 });
+    view.rerender(withComposer(next, { onClear: async () => true }));
+    const trash = await screen.findByTestId("chat-progress-card-clear");
+    trash.focus();
+    await act(async () => { fireEvent.click(trash, { detail: 0 }); });
+    expect(document.activeElement).toBe(screen.getByTestId("composer-text"));
+  });
+
+  it("leaves the focus alone for a pointer click, so a phone's keyboard does not pop up", async () => {
+    stubLocale("en");
+    render(
+      <I18nProvider>
+        <div><ChatProgressCard card={card()} /><textarea data-testid="composer-text" /></div>
+      </I18nProvider>,
+    );
+    const dismiss = await screen.findByTestId("chat-progress-card-dismiss");
+    fireEvent.click(dismiss, { detail: 1 });
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+    expect(document.activeElement).not.toBe(screen.getByTestId("composer-text"));
+  });
+
+  it("labels its buttons in the owner's language", async () => {
+    stubLocale("de");
+    render(<I18nProvider><ChatProgressCard card={card()} onClear={async () => true} onRefresh={() => {}} /></I18nProvider>);
+    await waitFor(() => expect(screen.getByTestId("chat-progress-card-dismiss")).toHaveAccessibleName("Fortschrittskarte schließen"));
+    expect(screen.getByTestId("chat-progress-card-clear")).toHaveAccessibleName("Gespeicherten Fortschritt für alle löschen");
+    expect(screen.getByTestId("chat-progress-card-refresh")).toHaveAccessibleName("Aufgabenfortschritt aktualisieren");
   });
 });
 
@@ -379,5 +566,140 @@ describe("useGatewayProgressCard", () => {
     rerender({ enabled: false });
     rerender({ enabled: true });
     expect(gw.calls).toHaveLength(2);
+  });
+
+  describe("clear (the trash) and refresh (TASK-2147)", () => {
+    async function connectedHook() {
+      const gw = fakeGateway();
+      const hook = renderHook(() => useGatewayProgressCard({ request: gw.request, sessionKey: "agent:main:main", enabled: true }));
+      await act(async () => { gw.calls[0].answer.resolve(wire()); });
+      return { gw, ...hook };
+    }
+
+    it("clears with the Control UI's revision-checked put, and drops the card once it is gone", async () => {
+      const { gw, result } = await connectedHook();
+      let cleared: Promise<boolean> | undefined;
+      act(() => { cleared = result.current.clear(result.current.card!); });
+      expect(gw.calls[1].method).toBe("progressCard.put");
+      expect(gw.calls[1].params).toEqual({ sessionKey: "agent:main:main", expectedRevision: 3 });
+      await act(async () => { gw.calls[1].answer.resolve({ card: null }); });
+      await expect(cleared).resolves.toBe(true);
+      expect(result.current.card).toBeNull();
+    });
+
+    it("keeps and shows a newer card the agent wrote in between", async () => {
+      const { gw, result } = await connectedHook();
+      let cleared: Promise<boolean> | undefined;
+      act(() => { cleared = result.current.clear(result.current.card!); });
+      await act(async () => { gw.calls[1].answer.resolve(wire({ revision: 4, markdown: "newer" })); });
+      await expect(cleared).resolves.toBe(false);
+      expect(result.current.card).toMatchObject({ revision: 4, markdown: "newer" });
+    });
+
+    it("rejects on a refusal and keeps the card", async () => {
+      const { gw, result } = await connectedHook();
+      let cleared: Promise<boolean> | undefined;
+      act(() => { cleared = result.current.clear(result.current.card!); });
+      const settled = cleared!.catch((error: Error) => error.message);
+      await act(async () => { gw.calls[1].answer.reject(new Error("FORBIDDEN")); });
+      await expect(settled).resolves.toBe("FORBIDDEN");
+      expect(result.current.card?.revision).toBe(3);
+    });
+
+    it("never sends an unchecked clear", async () => {
+      const { gw, result } = await connectedHook();
+      await expect(result.current.clear({ ...result.current.card!, revision: 0 })).rejects.toThrow();
+      expect(gw.calls).toHaveLength(1);
+    });
+
+    it("applies the clear even when a read asked after it fails", async () => {
+      const { gw, result } = await connectedHook();
+      act(() => { void result.current.clear(result.current.card!); });
+      act(() => result.current.onChanged({ sessionKey: "agent:main:main", revision: 4 }));
+      await act(async () => { gw.calls[2].answer.reject(new Error("Request timeout")); });
+      await act(async () => { gw.calls[1].answer.resolve({ card: null }); });
+      expect(result.current.card).toBeNull();
+    });
+
+    it("does not let a read asked before the clear put the card back", async () => {
+      const { gw, result } = await connectedHook();
+      act(() => result.current.onChanged({ sessionKey: "agent:main:main", revision: 4 }));
+      act(() => { void result.current.clear(result.current.card!); });
+      await act(async () => { gw.calls[2].answer.resolve({ card: null }); });
+      await act(async () => { gw.calls[1].answer.resolve(wire({ revision: 3 })); });
+      expect(result.current.card).toBeNull();
+    });
+
+    it("asks for a refresh with a fresh retry key and spins until a newer card is read", async () => {
+      const { gw, result } = await connectedHook();
+      act(() => result.current.refresh());
+      expect(gw.calls[1].method).toBe("progressCard.refresh");
+      const params = gw.calls[1].params as { sessionKey: string; idempotencyKey: string };
+      expect(params.sessionKey).toBe("agent:main:main");
+      expect(params.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+      expect(result.current.refreshState).toBe("pending");
+      await act(async () => { gw.calls[1].answer.resolve({ runId: "r1", status: "accepted", revision: 3 }); });
+      expect(result.current.refreshState).toBe("pending");
+
+      act(() => result.current.onChanged({ sessionKey: "agent:main:main", revision: 4 }));
+      await act(async () => { gw.calls[2].answer.resolve(wire({ revision: 4, markdown: "brought up to date" })); });
+      expect(result.current.refreshState).toBe("idle");
+      expect(result.current.card?.markdown).toBe("brought up to date");
+
+      act(() => result.current.refresh());
+      expect((gw.calls[3].params as { idempotencyKey: string }).idempotencyKey).not.toBe(params.idempotencyKey);
+    });
+
+    it("waits for the gateway's baseline before a newer card counts", async () => {
+      const { gw, result } = await connectedHook();
+      act(() => result.current.refresh());
+      // The agent's write lands before the gateway has answered the request...
+      act(() => result.current.onChanged({ sessionKey: "agent:main:main", revision: 4 }));
+      await act(async () => { gw.calls[2].answer.resolve(wire({ revision: 4 })); });
+      expect(result.current.refreshState).toBe("pending");
+      // ...and the gateway took the request before it: that write IS newer than its baseline.
+      await act(async () => { gw.calls[1].answer.resolve({ runId: "r1", status: "accepted", revision: 3 }); });
+      expect(result.current.refreshState).toBe("idle");
+    });
+
+    it("is not done by a card the gateway already had when it took the request", async () => {
+      const { gw, result } = await connectedHook();
+      act(() => result.current.refresh());
+      await act(async () => { gw.calls[1].answer.resolve({ runId: "r1", status: "accepted", revision: 4 }); });
+      act(() => result.current.onChanged({ sessionKey: "agent:main:main", revision: 4 }));
+      await act(async () => { gw.calls[2].answer.resolve(wire({ revision: 4 })); });
+      expect(result.current.refreshState).toBe("pending");
+    });
+
+    it("says failed when the gateway refuses, and timeout when no newer card comes", async () => {
+      vi.useFakeTimers();
+      try {
+        const { gw, result } = await connectedHook();
+        act(() => result.current.refresh());
+        await act(async () => { gw.calls[1].answer.reject(new Error("There is no progress card to refresh.")); });
+        expect(result.current.refreshState).toBe("failed");
+        expect(result.current.card?.revision).toBe(3);
+
+        act(() => result.current.refresh());
+        expect(result.current.refreshState).toBe("pending");
+        await act(async () => { gw.calls[2].answer.resolve({ runId: "r2", status: "accepted", revision: 3 }); });
+        act(() => { vi.advanceTimersByTime(PROGRESS_CARD_REFRESH_TIMEOUT_MS); });
+        expect(result.current.refreshState).toBe("timeout");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps one session's refresh out of another's", async () => {
+      const gw = fakeGateway();
+      const { result, rerender } = renderHook(
+        ({ sessionKey }) => useGatewayProgressCard({ request: gw.request, sessionKey, enabled: true }),
+        { initialProps: { sessionKey: "agent:main:main" } },
+      );
+      await act(async () => { gw.calls[0].answer.resolve(wire()); });
+      act(() => result.current.refresh());
+      rerender({ sessionKey: "agent:main:tab-2" });
+      expect(result.current.refreshState).toBe("idle");
+    });
   });
 });
