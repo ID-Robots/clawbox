@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import LocalHttpsRedirect from "@/components/LocalHttpsRedirect";
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -48,6 +49,9 @@ export default function RootLayout({
     <html lang="en" className="scroll-smooth">
       <body className="font-body flex flex-col bg-stars bg-nebula relative" style={{ minHeight: '100dvh', height: '100dvh', overflow: 'hidden' }}>
         {children}
+        {/* Moves a page on http://<IP> to the box's secure address once this
+            browser has reached it — docs/design/local-https.md. Renders nothing. */}
+        <LocalHttpsRedirect />
       </body>
     </html>
   );

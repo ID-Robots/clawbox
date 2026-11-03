@@ -23,6 +23,9 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { isLoopback } = require("./proxy-peer.js");
+// The box's own Local HTTPS hostname (`<id>.lan.clawbox.com`) while the owner
+// has it on — mirrors readLocalHttpsHostnameSync() in src/lib/local-https-state.ts.
+const { localHttpsHostname } = require("./local-https.js");
 
 const DEFAULT_ALLOWED_HOSTS = "clawbox.local,10.42.0.1,10.43.0.1,localhost";
 const DEFAULT_ORIGINS_PATH = "/home/clawbox/clawbox/data/control-ui-origins.json";
@@ -182,6 +185,7 @@ function isAllowedHostname(hostname) {
   if (hostname.endsWith(".ts.net") && isLabels(hostname.slice(0, -".ts.net".length), 2)) return true;
   if (hostname === systemHostLabel()) return true;
   if (hostname === namedTunnelHostname()) return true;
+  if (hostname === localHttpsHostname()) return true;
   return configuredOriginHosts().has(hostname);
 }
 

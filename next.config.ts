@@ -15,6 +15,11 @@ const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
 // shared by connect-src (fetch probes) and img-src (the handoff overlays'
 // <img> probes) so the two CSP directives can't drift apart.
 const LOCAL_LAN_SOURCES = "http://*.local http://*.local:* https://*.local https://*.local:*";
+// The box's own Local HTTPS name, `<id>.lan.clawbox.com` (docs/design/local-https.md):
+// a page on http://<IP> probes it with a fetch before it moves there
+// (src/lib/local-https-client.ts), and connect-src would otherwise refuse the
+// probe before it leaves the page. The zone, not one name: the header is static.
+const LOCAL_HTTPS_SOURCES = "https://*.lan.clawbox.com https://*.lan.clawbox.com:*";
 // The build's own version, "v4.3.0": package.json's number with the "v" that
 // `readClawboxVersion` (updater.ts) puts on it for /setup-api/update/versions.
 // About falls back to this until that route answers, so the two must never
@@ -240,7 +245,7 @@ const nextConfig: NextConfig = {
       // Security Policy" errors. A data: URL is inert as a network
       // destination — it carries its own bytes and reaches nothing —
       // so allowing it opens no channel out of the box.
-      `connect-src 'self' data: ws: wss: ${LOCAL_LAN_SOURCES}`,
+      `connect-src 'self' data: ws: wss: ${LOCAL_LAN_SOURCES} ${LOCAL_HTTPS_SOURCES}`,
       // Frames: code-server and the sandboxed webapp iframes are
       // same-origin, but an app the coding agent builds with its own
       // server (a Next.js app on :4199, a game with pointer lock) is

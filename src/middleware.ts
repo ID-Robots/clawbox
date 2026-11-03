@@ -266,6 +266,12 @@ const PRE_AUTH_API_PATHS = new Set([
   // it through pre-auth keeps the timer working on a freshly-booted
   // device before the user has logged in (or after they've logged out).
   "/setup-api/portal/heartbeat-tick",
+  // Local HTTPS (docs/design/local-https.md): /login asks where the box's
+  // secure address is BEFORE sign-in — a session is per origin, so moving
+  // after it would mean signing in twice — and the browser probes the same
+  // route on that address to prove it resolves. GET only (the route has no
+  // other handler); it answers a hostname that is public in CT logs anyway.
+  "/setup-api/local-https/hint",
 ]);
 
 // Loopback proxy paths used by openclaw (a separate process with no session

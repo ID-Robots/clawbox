@@ -14,6 +14,7 @@ const { Transform } = require("stream");
 const { attachAccessLog } = require("./scripts/access-log.js");
 const { attachProxyPeerGuard } = require("./scripts/proxy-peer.js");
 const { isAllowedUpgrade } = require("./scripts/host-allowlist.js");
+const { createLocalHttpsTls, publishListener: publishLocalHttpsListener } = require("./scripts/local-https.js");
 const {
   USERS_CONFIG_KEY,
   ownerUsername,
@@ -795,33 +796,89 @@ function attachUpgradeProxy(server) {
 }
 
 // ─── HTTPS + WSS server ───
+// Two certificate sources (scripts/local-https.js): the Local HTTPS pair the
+// portal issued for `<id>.lan.clawbox.com` (docs/design/local-https.md), served
+// only while it is valid, and an owner-installed data/certs/{cert,key}.pem.
+// The listener is up while at least one of them is, comes up by itself when
+// the first certificate lands, swaps contexts on a renewal without a restart,
+// and goes down when nothing valid is left.
 const CERT_DIR = path.join(__dirname, "data", "certs");
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT || "443", 10);
+// How often the certificate files are re-read. 30 s on a box; a test shortens it.
+const HTTPS_REFRESH_MS = Math.max(200, parseInt(process.env.CLAWBOX_HTTPS_REFRESH_MS || "", 10) || 30_000);
+const localHttpsTls = createLocalHttpsTls({ root: process.env.CLAWBOX_ROOT || __dirname, legacyCertDir: CERT_DIR });
+let httpsServer = null;
+let httpsListening = false;
 
 function startHttpsServer(httpServer) {
-  const certPath = path.join(CERT_DIR, "cert.pem");
-  const keyPath = path.join(CERT_DIR, "key.pem");
+  syncHttpsServer(httpServer);
+  setInterval(() => syncHttpsServer(httpServer), HTTPS_REFRESH_MS).unref();
+  publishLocalHttpsListener({
+    // Whether :443 serves the Local HTTPS certificate right now — what
+    // /setup-api/local-https/hint asks before it offers a browser the move.
+    status: () => (httpsServer && httpsListening ? localHttpsTls.status() : null),
+    port: HTTPS_PORT,
+    // The app calls this right after it wrote a certificate or switched the
+    // feature off, so neither waits for the next poll.
+    refresh: () => syncHttpsServer(httpServer),
+  });
+}
 
-  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-    console.log("[production-server] No SSL certs found at", CERT_DIR, "— HTTPS disabled.");
+function syncHttpsServer(httpServer) {
+  let changed;
+  try {
+    changed = localHttpsTls.refresh();
+  } catch (err) {
+    console.warn("[production-server] HTTPS certificates could not be read:", err.message);
     return;
   }
+  const tlsOptions = localHttpsTls.defaultOptions();
+  if (!tlsOptions) {
+    if (httpsServer) {
+      console.log("[production-server] No valid certificate left — HTTPS stopped.");
+      stopHttpsServer();
+    }
+    return;
+  }
+  if (!httpsServer) {
+    createHttpsServer(httpServer, tlsOptions);
+    return;
+  }
+  if (changed) {
+    try {
+      // The default context only: the SNICallback set at creation stays.
+      httpsServer.setSecureContext(tlsOptions);
+      console.log("[production-server] HTTPS certificate reloaded.");
+    } catch (err) {
+      console.warn("[production-server] HTTPS certificate reload failed:", err.message);
+    }
+  }
+}
 
+function stopHttpsServer() {
+  const server = httpsServer;
+  httpsServer = null;
+  httpsListening = false;
+  if (!server) return;
+  managedServers.delete(server);
+  server.close();
+  server.closeAllConnections?.();
+}
+
+function createHttpsServer(httpServer, defaultTlsOptions) {
   try {
-    const tlsOptions = {
-      cert: fs.readFileSync(certPath),
-      key: fs.readFileSync(keyPath),
-    };
+    const tlsOptions = { ...defaultTlsOptions, SNICallback: localHttpsTls.sniCallback };
 
     // HTTPS server for regular requests — proxy to the HTTP server's handler
-    const httpsServer = https.createServer(tlsOptions, (req, res) => {
+    httpsServer = https.createServer(tlsOptions, (req, res) => {
       httpServer.emit("request", req, res);
     });
+    const server = httpsServer;
 
     // WSS proxy using the ws library — handles WebSocket upgrades on HTTPS
     const wss = new WebSocket.Server({ noServer: true });
 
-    httpsServer.on("upgrade", (req, socket, head) => {
+    server.on("upgrade", (req, socket, head) => {
       if (!isAllowedUpgrade(req)) {
         return rejectForeignHostUpgrade(socket);
       }
@@ -876,19 +933,27 @@ function startHttpsServer(httpServer) {
       });
     });
 
-    managedServers.add(httpsServer);
-    httpsServer.listen(HTTPS_PORT, "0.0.0.0", () => {
+    managedServers.add(server);
+    server.listen(HTTPS_PORT, "0.0.0.0", () => {
+      if (httpsServer === server) httpsListening = true;
       console.log(`[production-server] HTTPS server listening on port ${HTTPS_PORT}`);
     });
 
-    httpsServer.on("error", (err) => {
+    server.on("error", (err) => {
       if (err.code === "EACCES") {
         console.warn(`[production-server] Cannot bind HTTPS to port ${HTTPS_PORT} (permission denied). HTTPS disabled.`);
       } else {
         console.warn("[production-server] HTTPS server error:", err.message);
       }
+      // A listener that never bound is dropped, so the next sync tries again
+      // instead of reporting a port nobody can reach.
+      if (httpsServer === server && !httpsListening) {
+        httpsServer = null;
+        managedServers.delete(server);
+      }
     });
   } catch (err) {
+    httpsServer = null;
     console.warn("[production-server] Failed to start HTTPS:", err.message);
   }
 }
@@ -899,7 +964,7 @@ http.Server.prototype.listen = function (...args) {
   managedServers.add(this);
   // Attached here, on the ONE server Next actually creates, before it starts
   // accepting. HTTPS requests are re-emitted onto this same server (see
-  // startHttpsServer), so this single call covers :80 and :443 both.
+  // createHttpsServer), so this single call covers :80 and :443 both.
   //
   // The peer guard goes on FIRST (it prepends, so it runs ahead of Next's
   // handler and ahead of the access log): a request from anywhere but loopback

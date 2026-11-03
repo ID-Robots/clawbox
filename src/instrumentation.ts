@@ -759,6 +759,18 @@ export async function register() {
     console.error('[instrumentation] Could not load the OpenClaw database maintenance scheduler:', err instanceof Error ? err.message : err)
   }
   try {
+    // Local HTTPS (docs/design/local-https.md): report a changed LAN address,
+    // order or renew the certificate, poll a pending order, re-check DNS —
+    // every 5 minutes, the first pass 20 s after boot. A pass does nothing
+    // while the owner has the feature off, except tell the portal once to
+    // drop the address. Never throws; what failed is in the state file.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { startLocalHttpsJob } = require('./lib/local-https')
+    startLocalHttpsJob()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the Local HTTPS job:', err instanceof Error ? err.message : err)
+  }
+  try {
     // The app servers that were on the desktop before the reboot (see
     // restartServerAppsAtBoot). They used to be restarted by a
     // `clawbox-app-<id>.service` the OWNER hand-wrote, uncapped and outside

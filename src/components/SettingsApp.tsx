@@ -46,6 +46,7 @@ import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
 import DbMaintenancePanel from "./DbMaintenancePanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
+import LocalHttpsPanel from "./LocalHttpsPanel";
 import PathGuardPanel from "./PathGuardPanel";
 import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
@@ -3942,6 +3943,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 </div>
               )}
             </div>
+
+            {/* Secure local address (Local HTTPS) — the owner's opt-in to an
+                https:// name for the box on the LAN; hidden for anyone else
+                (its route is owner-only). docs/design/local-https.md */}
+            <LocalHttpsPanel />
 
             {/* Hotspot toggle card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">

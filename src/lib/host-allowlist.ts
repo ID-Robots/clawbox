@@ -2,6 +2,7 @@ import { statSync } from "fs";
 import net from "net";
 import os from "os";
 import { loadConfiguredOrigins, resolveOriginsPath } from "@/lib/control-ui-origins";
+import { readLocalHttpsHostnameSync } from "@/lib/local-https-state";
 import { readNamedTunnelHostnameSync } from "@/lib/named-tunnel";
 
 /**
@@ -38,6 +39,9 @@ import { readNamedTunnelHostnameSync } from "@/lib/named-tunnel";
  *      as the portal handed it out (data/cloudflared/named-tunnel, see
  *      src/lib/named-tunnel.ts) — that one name, never the zone: another box's
  *      handle is still a foreign name here.
+ *   8. The box's OWN Local HTTPS hostname, `<id>.lan.clawbox.com`, while the
+ *      owner has Local HTTPS switched on (data/local-https/state.json, see
+ *      src/lib/local-https-state.ts) — again that one name, never the zone.
  *
  * Deliberately NOT admitted: `<nodename>.<search domain>` (`clawbox.lan`). The
  * only source of that suffix is DHCP, which is exactly the party this refuses
@@ -138,6 +142,7 @@ export function isAllowedHostname(hostname: string): boolean {
   if (hostname.endsWith(".ts.net") && isLabels(hostname.slice(0, -".ts.net".length), 2)) return true;
   if (hostname === systemHostLabel()) return true;
   if (hostname === readNamedTunnelHostnameSync()) return true;
+  if (hostname === readLocalHttpsHostnameSync()) return true;
   return configuredOriginHosts().has(hostname);
 }
 

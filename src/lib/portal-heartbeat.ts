@@ -34,7 +34,8 @@ let inFlight: Promise<void> | null = null;
 // restart re-derives it from the next answer.
 let hostnameMismatch = false;
 
-async function getOrCreateDeviceId(): Promise<string> {
+/** The box's `dev_<16 hex>` portal identity — also what Local HTTPS names itself by. */
+export async function getOrCreateDeviceId(): Promise<string> {
   // Three-tier resolution, picked so the *same physical Pi* always
   // surfaces under the same portal entry even when state gets wiped:
   //
@@ -92,7 +93,8 @@ function deriveDeviceName(deviceId: string): string {
   return `ClawBox-${suffix}`;
 }
 
-async function readClawAiToken(): Promise<string | null> {
+/** The ClawBox AI pairing token (`claw_…`) the portal authenticates the box with, or null. */
+export async function readClawAiToken(): Promise<string | null> {
   try {
     const raw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY);
     if (typeof raw !== "string") return null;

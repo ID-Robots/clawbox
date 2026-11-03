@@ -33,6 +33,7 @@ const fs = require("fs");
 const path = require("path");
 const { ownerUsername, sessionFromCookieHeader } = require("./session-cookie.js");
 const { createUpgradeSessionWatch, recheckMsFromEnv } = require("./upgrade-session-watch.js");
+const { createDualProtocolServer, createLocalHttpsTls, localHttpsHostname } = require("./local-https.js");
 const SESSION_EXPIRED_HEADER = "x-clawbox-session";
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
@@ -51,6 +52,10 @@ const PORT = envPort(process.env.HERMES_DASH_PROXY_PORT, 8090);
 // bounce back into the proxy — an infinite redirect loop. We always redirect to
 // the ClawBox origin explicitly.
 const CLAWBOX_WEB_PORT = envPort(process.env.CLAWBOX_WEB_PORT, 80);
+// The same web server over TLS (production-server.js, HTTPS_PORT). A desktop
+// on the Local HTTPS address (docs/design/local-https.md) opens the dashboard
+// from there, so that is a referring page too, and the login it is sent to.
+const CLAWBOX_HTTPS_PORT = envPort(process.env.HTTPS_PORT, 443);
 // Host-local, non-loopback: puts the dashboard in gated cookie-auth mode
 // (see file header) while staying off the LAN.
 const UPSTREAM_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
@@ -229,9 +234,12 @@ function isAllowedHostname(hostname) {
   // mDNS-only and cannot be registered by a remote attacker.
   if (hostname.endsWith(".local") && MDNS_LABEL_RE.test(hostname.slice(0, -".local".length))) return true;
   if (net.isIP(hostname)) return true; // raw LAN address
-  // The box addressed by its own bare hostname. Last of the four, so a request
-  // on `<name>.local` or the LAN IP is answered without the uname(2) call.
+  // The box addressed by its own bare hostname. After the cheap rules, so a
+  // request on `<name>.local` or the LAN IP is answered without the uname(2) call.
   if (hostname === systemHostname()) return true;
+  // The box's own Local HTTPS name while the owner has it on — that one name,
+  // never its zone (scripts/local-https.js, as the main allow-list reads it).
+  if (hostname === localHttpsHostname(CLAWBOX_ROOT)) return true;
   return false;
 }
 
@@ -254,7 +262,9 @@ function isAllowedHostname(hostname) {
 function isTrustedPeer(parsed, host) {
   if (parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "") !== host.hostname) return false;
   const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-  return port === host.port || port === String(PORT) || port === String(CLAWBOX_WEB_PORT);
+  if (port === host.port || port === String(PORT) || port === String(CLAWBOX_WEB_PORT)) return true;
+  // The desktop served over TLS on the same host (Local HTTPS).
+  return parsed.protocol === "https:" && port === String(CLAWBOX_HTTPS_PORT);
 }
 
 // A request we are willing to accept with NO Origin and NO Referer at all.
@@ -313,11 +323,17 @@ function checkRequestOrigin(req) {
 function clawboxLoginUrl(req) {
   const host = splitHost(req.headers.host);
   const hostname = host && net.isIPv6(host.hostname) ? `[${host.hostname}]` : host && host.hostname;
-  const suffix = CLAWBOX_WEB_PORT === 80 ? "" : `:${CLAWBOX_WEB_PORT}`;
   // No `redirect=` parameter: /login only honours a SAME-ORIGIN redirect target
   // (src/app/login/page.tsx), and the proxy is a different origin (:8090), so
   // any value we passed would be discarded. The user lands on the desktop and
   // re-opens the dashboard.
+  //
+  // A request that reached this port over TLS came from the Local HTTPS
+  // desktop, whose session cookie is Secure: its login is the HTTPS one.
+  if (req.socket && req.socket.encrypted) {
+    return `https://${hostname}${CLAWBOX_HTTPS_PORT === 443 ? "" : `:${CLAWBOX_HTTPS_PORT}`}/login`;
+  }
+  const suffix = CLAWBOX_WEB_PORT === 80 ? "" : `:${CLAWBOX_WEB_PORT}`;
   return `http://${hostname}${suffix}/login`;
 }
 
@@ -938,10 +954,54 @@ function createProxyServer() {
   return srv;
 }
 
+// TLS on the SAME port, for a desktop served over Local HTTPS
+// (docs/design/local-https.md): the desktop builds the dashboard's URL from
+// its own scheme, and its session cookie is Secure there, so plain HTTP on
+// :8090 would neither load from it nor see the session. A connection that
+// opens with a TLS handshake gets the box's certificate (the Local HTTPS one
+// while valid, else an owner-installed data/certs/ pair); anything else is
+// plain HTTP as before. The certificates are re-read every 30 s, so TLS comes
+// and goes without a restart; with none, a handshake is simply closed.
+function createTlsAwareListener() {
+  const plain = createProxyServer();
+  const certs = createLocalHttpsTls({ root: CLAWBOX_ROOT, legacyCertDir: path.join(CLAWBOX_ROOT, "data", "certs") });
+  let secure = null;
+  const sync = () => {
+    let changed;
+    try {
+      changed = certs.refresh();
+    } catch (err) {
+      console.warn("[hermes-dashboard-proxy] certificates could not be read:", err && err.message);
+      return;
+    }
+    const tlsOptions = certs.defaultOptions();
+    if (!tlsOptions) {
+      // close() also stops the timeout sweep `listening` armed.
+      if (secure) secure.close(() => {});
+      secure = null;
+      return;
+    }
+    if (!secure) {
+      secure = require("https").createServer({ ...tlsOptions, SNICallback: certs.sniCallback }, handleRequest);
+      secure.on("upgrade", handleUpgrade);
+      // Connections are handed over, never accepted by this server itself;
+      // `listening` is what arms Node's own request/header timeouts on it.
+      secure.emit("listening");
+    } else if (changed) {
+      secure.setSecureContext(tlsOptions);
+    }
+  };
+  sync();
+  setInterval(sync, 30_000).unref();
+  const front = createDualProtocolServer(plain, () => secure);
+  front.on("listening", () => plain.emit("listening"));
+  return front;
+}
+
 if (require.main === module) {
-  createProxyServer().listen(PORT, "0.0.0.0", () => {
-    console.log(`[hermes-dashboard-proxy] :${PORT} -> ${UPSTREAM_AUTHORITY} (clawbox_session gated, Hermes SSO)`);
+  createTlsAwareListener().listen(PORT, "0.0.0.0", () => {
+    console.log(`[hermes-dashboard-proxy] :${PORT} -> ${UPSTREAM_AUTHORITY} (clawbox_session gated, Hermes SSO; TLS when the box has a certificate)`);
   });
 }
 
-module.exports = { createProxyServer, handleRequest, handleUpgrade };
+module.exports = { createProxyServer, createTlsAwareListener, handleRequest, handleUpgrade };

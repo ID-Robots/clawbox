@@ -27,9 +27,9 @@ and routed traffic are unchanged, so hotspot internet sharing keeps working.
 | ---- | ------- |
 | 22/tcp | SSH |
 | 80/tcp | ClawBox web OS |
-| 443/tcp | ClawBox web OS over TLS, when certs are installed in `data/certs/` |
+| 443/tcp | ClawBox web OS over TLS, while the opt-in Local HTTPS certificate is valid (`<id>.lan.clawbox.com`, [docs/design/local-https.md](docs/design/local-https.md)) or certs are installed in `data/certs/` |
 | 18789/tcp | OpenClaw gateway |
-| 8090/tcp | Hermes dashboard proxy (Hermes and dual editions) |
+| 8090/tcp | Hermes dashboard proxy (Hermes and dual editions); plain HTTP, and TLS on the same port while the box has a certificate |
 | 5353/udp | mDNS, so `clawbox.local` resolves (any source) |
 | 53/tcp+udp | Captive-portal DNS, from the hotspot subnets only |
 | 67/udp | DHCP, on the access-point interface only |

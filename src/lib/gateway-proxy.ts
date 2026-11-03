@@ -8,6 +8,7 @@ import net from "net";
 import crypto from "crypto";
 import { statSync } from "node:fs";
 import { envPort } from "./port-probe";
+import { readLocalHttpsHostnameSync } from "./local-https-state";
 import {
   loadConfiguredOrigins,
   normalizeOrigin,
@@ -73,6 +74,8 @@ function isReflectableHost(rawHost: string): boolean {
   if (net.isIPv4(rawHost)) return true;
   // Last, so a listed name or a LAN IP is answered without the uname(2) call.
   if (systemHostnames().includes(rawHost)) return true;
+  // The box's own Local HTTPS name while it is on (src/lib/local-https-state.ts).
+  if (rawHost === readLocalHttpsHostnameSync()) return true;
   return false;
 }
 

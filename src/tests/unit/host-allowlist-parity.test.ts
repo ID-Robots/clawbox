@@ -170,6 +170,63 @@ describe("host allow-list parity", () => {
     });
   });
 
+  describe("the box's own Local HTTPS hostname", () => {
+    const HOST = "k3x9q2m7v4t8p1rz.lan.clawbox.com";
+    const stateFile = () => path.join(tmp, "data", "local-https", "state.json");
+    let savedRoot: string | undefined;
+
+    beforeEach(() => {
+      savedRoot = process.env.CLAWBOX_ROOT;
+      process.env.CLAWBOX_ROOT = tmp;
+      fs.mkdirSync(path.dirname(stateFile()), { recursive: true });
+    });
+    afterEach(() => {
+      if (savedRoot === undefined) delete process.env.CLAWBOX_ROOT;
+      else process.env.CLAWBOX_ROOT = savedRoot;
+    });
+
+    async function fresh() {
+      vi.resetModules();
+      const tsMod = await import("@/lib/host-allowlist");
+      delete require_.cache[CJS];
+      return { tsMod, cjsMod: require_(CJS) as CjsModule };
+    }
+
+    it.each([
+      ["switched on", { enabled: true, hostname: HOST }, true],
+      ["switched off with the name still on file", { enabled: false, hostname: HOST }, false],
+      ["a name two labels deep", { enabled: true, hostname: `x.${HOST}` }, false],
+      ["a name in another zone", { enabled: true, hostname: "box.evil.example" }, false],
+      ["no state at all", null, false],
+      ["a state that is not JSON", "{oops", false],
+    ])("both read %s the same way", async (_label, state, admitted) => {
+      if (state === null) fs.rmSync(stateFile(), { force: true });
+      else fs.writeFileSync(stateFile(), typeof state === "string" ? state : JSON.stringify(state));
+      const { tsMod, cjsMod } = await fresh();
+      expect(tsMod.isAllowedHostHeader(HOST)).toBe(admitted);
+      expect(cjsMod.isAllowedHostHeader(HOST)).toBe(admitted);
+      expect(tsMod.isAllowedHostHeader(`${HOST}:443`)).toBe(admitted);
+      expect(cjsMod.isAllowedUpgrade({ headers: { host: HOST }, socket: { remoteAddress: "192.168.1.20" } })).toBe(admitted);
+    });
+
+    it("both refuse every other name in the zone", async () => {
+      fs.writeFileSync(stateFile(), JSON.stringify({ enabled: true, hostname: HOST }));
+      const { tsMod, cjsMod } = await fresh();
+      for (const host of ["lan.clawbox.com", "aaaabbbbccccdddd.lan.clawbox.com", `x.${HOST}`, `${HOST}.evil.example`, "clawbox.com"]) {
+        expect(tsMod.isAllowedHostHeader(host), host).toBe(false);
+        expect(cjsMod.isAllowedHostHeader(host), host).toBe(false);
+      }
+    });
+
+    it("the middleware follows a switch without a restart", async () => {
+      const { tsMod } = await fresh();
+      fs.writeFileSync(stateFile(), JSON.stringify({ enabled: true, hostname: HOST }));
+      expect(tsMod.isAllowedHostHeader(HOST)).toBe(true);
+      fs.writeFileSync(stateFile(), JSON.stringify({ enabled: false, hostname: null, reportedAt: 1 }));
+      expect(tsMod.isAllowedHostHeader(HOST)).toBe(false);
+    });
+  });
+
   describe("upgrades", () => {
     const req = (remoteAddress: string | undefined, host: string | undefined) => ({
       headers: host === undefined ? {} : { host },
