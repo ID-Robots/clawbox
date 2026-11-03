@@ -1784,7 +1784,7 @@ export interface AnthropicAccountView {
 /**
  * One account's usage as Anthropic last gave it (TASK-2141) — percents and
  * resets only. `weeklyPercent` is the account's own week (`weekly_all`, or
- * `seven_day` of the old shape); `models` the ACTIVE model weeks
+ * `seven_day` of the old shape); `models` every model week
  * (`weekly_scoped`), each only for runs on that model.
  */
 export interface AccountUsageView {

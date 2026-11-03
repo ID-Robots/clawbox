@@ -13,7 +13,9 @@ import { readFirstTurn } from "@/tests/helpers/fake-harness";
 
 vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
+// The chat that queued a run hears when it ends without ever starting (TASK-2132).
+const chatNotice = vi.hoisted(() => vi.fn<(run: { id: string; status: string }) => Promise<undefined>>(async () => undefined));
+vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined), announceCodingRunToChat: chatNotice }));
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun: vi.fn(async () => 0) }));
 vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
@@ -77,6 +79,7 @@ beforeEach(async () => {
   writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true, coding_agent_default_directory: projects, coding_agent_max_parallel_runs: 1 });
   installWrapper();
   for (const name of ["alpha", "beta", "gamma", "delta"]) folder(name);
+  chatNotice.mockClear();
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -136,9 +139,13 @@ describe("a run beyond the limit", () => {
     const canceled = await lib.cancelQueuedRun(q.run.id);
     expect(canceled).toMatchObject({ status: "stopped", error: "Canceled by the owner before it started.", queued: null });
     expect(canceled.progress).toContain("Canceled by the owner before it started");
+    // The chat that was told "queued" hears it was stopped — once, as it ends.
+    expect(chatNotice.mock.calls.map(([r]) => [r.id, r.status])).toEqual([[q.run.id, "stopped"]]);
     fs.writeFileSync(flag, "go");
     await lib.pumpRunQueue();
     expect(lib.getRun(q.run.id)?.status).toBe("stopped");
+    await lib.cancelQueuedRun(q.run.id);
+    expect(chatNotice).toHaveBeenCalledTimes(1);
   });
 
   it("is started by the boot's pump when it was still waiting at the restart", async () => {
@@ -183,6 +190,8 @@ describe("a run beyond the limit", () => {
     const failed = lib.getRun(gone.run.id)!;
     expect(failed.status).toBe("failed");
     expect(failed.error).toMatch(/^Its turn in the queue came, and it could not start: /);
+    // Its chat hears it failed; the two that ran end through finishRun's notice instead.
+    expect(chatNotice.mock.calls.map(([r]) => [r.id, r.status])).toEqual([[gone.run.id, "failed"]]);
   });
 
   it("refuses what a start would refuse, at once, rather than queueing it", async () => {

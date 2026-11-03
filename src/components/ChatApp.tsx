@@ -709,8 +709,14 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   const hasLiveConnectionRef = useRef(true)
   useEffect(() => { hasLiveConnectionRef.current = caps.hasLiveConnection }, [caps])
   // The agent's "Task progress" card for this session — see ChatPopup, which
-  // reads it the same way (TASK-896).
-  const { card: progressCard, onChanged: onProgressCardChanged } = useGatewayProgressCard({
+  // reads it the same way (TASK-896), with the same trash and refresh (TASK-2147).
+  const {
+    card: progressCard,
+    onChanged: onProgressCardChanged,
+    clear: clearProgressCard,
+    refresh: refreshProgressCard,
+    refreshState: progressCardRefreshState,
+  } = useGatewayProgressCard({
     request: wsRequest,
     sessionKey: boundSessionKey,
     enabled: caps.hasLiveConnection && status === 'connected',
@@ -2325,7 +2331,14 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
 
       {/* The agent's progress card, over the composer and in the column —
           never over the messages or the text box. */}
-      {progressCard && <ChatProgressCard card={progressCard} />}
+      {progressCard && (
+        <ChatProgressCard
+          card={progressCard}
+          onClear={clearProgressCard}
+          onRefresh={refreshProgressCard}
+          refreshState={progressCardRefreshState}
+        />
+      )}
 
       {/* Hidden file inputs. The filter follows the capability, so a box that can
           look at pictures but not documents never offers one. */}

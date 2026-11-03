@@ -277,7 +277,7 @@ type PoolAccount = NonNullable<AnthropicPoolBody["accounts"]>[number];
 
 /**
  * One account's usage as the agent is told it (TASK-2141): the session and the
- * account's week, each ACTIVE model week, and the model weeks a run found
+ * account's week, each model week, and the model weeks a run found
  * spent — which keep only runs on THAT model off the account.
  */
 function accountUsage(a: PoolAccount): Record<string, unknown> {
@@ -324,11 +324,20 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       if (accounts.length === 0) {
         return text("No Anthropic account is connected on this box. The owner can connect one in Settings → Providers; until then coding runs use ClawBox AI.");
       }
+      // KEY ORDER IS LOAD-BEARING. The output cap truncates from the end, and a
+      // full pool with its model weeks outgrows it (TASK-2141): the verdict, the
+      // advice and the last move go first, the per-account detail last.
       return json({
         can_answer: `${health.healthy ?? 0} of ${health.total ?? accounts.length}`,
         all_limited: health.allLimited === true,
         ...(nextReset ? { next_reset: nextReset } : {}),
-        accounts,
+        ...(health.allLimited
+          ? {
+            advice: nextReset
+              ? `Every account is at its usage limit. Wait until ${nextReset}: runs that were cut off resume by themselves then. Do not start or retry Anthropic runs before it.`
+              : "No account can answer and none comes back by itself: the owner has to renew or re-authenticate one in Settings → Providers.",
+          }
+          : {}),
         // Every Claude consumer on the box — coding runs, the chat, its crons —
         // moves together (TASK-1260); the last move says why a queue paused.
         ...(body.lastSwap && isoOrNull(body.lastSwap.at)
@@ -341,13 +350,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
             },
           }
           : {}),
-        ...(health.allLimited
-          ? {
-            advice: nextReset
-              ? `Every account is at its usage limit. Wait until ${nextReset}: runs that were cut off resume by themselves then. Do not start or retry Anthropic runs before it.`
-              : "No account can answer and none comes back by itself: the owner has to renew or re-authenticate one in Settings → Providers.",
-          }
-          : {}),
+        accounts,
       });
     },
   );

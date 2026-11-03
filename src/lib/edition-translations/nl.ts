@@ -1733,6 +1733,18 @@ export const nl: Record<string, string> = {
   "localModels.chatBannerBody": "Het eerste antwoord kan tot een minuut duren terwijl het lokale model laadt. Daarna gaat het sneller.",
   "localModels.chatBannerDismiss": "Deze melding verbergen",
   "localModels.chatLoading": "Lokaal model laden…",
+  "localModels.chatCompacting": "Gesprek inkorten voor het lokale model…",
+  // A long conversation switched to Local AI (TASK-2127): the card and its notes.
+  "localModels.longChat.title": "Dit gesprek is te lang voor het lokale model",
+  "localModels.longChat.body": "Het bevat ongeveer {tokens} tokens; het lokale model leest er tot {window}. Een nieuwe chat antwoordt binnen seconden. Dit gesprek inkorten vat het eerst samen, en dat duurt langer.",
+  "localModels.longChat.pending": "Je bericht wacht hier en gaat naar de chat die je kiest.",
+  "localModels.longChat.newChat": "Nieuwe chat met lokale AI starten",
+  "localModels.longChat.recommended": "Aanbevolen",
+  "localModels.longChat.shorten": "Eerst dit gesprek inkorten",
+  "localModels.longChat.timeoutTitle": "Na {seconds} seconden nog steeds aan het inkorten",
+  "localModels.longChat.timeoutBody": "Het lokale model kon dit lange gesprek niet op tijd inkorten, dus het antwoord is gestopt. Start een nieuwe chat met lokale AI voor een antwoord binnen seconden.",
+  "localModels.longChat.failed": "Dit gesprek kon niet worden ingekort. Een nieuwe chat met lokale AI antwoordt binnen seconden.",
+  "localModels.longChat.shortened": "Gesprek ingekort voor het lokale model.",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Gebruikers",

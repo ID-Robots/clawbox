@@ -1169,7 +1169,14 @@ it does for stop and resume, and a browser request from another site is
 refused 403 `cross_origin` (a header-less caller such as this server is not). The summary it returns is model-authored and labelled as information,
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
-to the approved senders (`src/lib/coding-agent-notify.ts`).
+to the approved senders (`src/lib/coding-agent-notify.ts`). A run the
+assistant started from one of the owner's ClawBox chats also puts one turn into
+THAT chat when it ends (`[Coding run <id>] finished …`, the same template),
+asking the assistant to read `coding_agent_status` and tell the user — so it
+reports without being asked. This tool sends nothing extra for that: the run
+route works out which chat asked from whichever of the owner's chats has a
+turn running when the call arrives (Hermes' live turns on the box, the
+OpenClaw gateway's busy sessions).
 
 ### Memory Shard
 
@@ -1364,11 +1371,15 @@ providers → Anthropic accounts: every Anthropic account the owner connected fo
 coding runs — Claude Pro/Max sign-ins, API keys, this box's own `claude`
 sign-in — in the order the box uses them, each with its label, kind, whether it
 can answer now or is at its usage limit and when it is back, and which one a run
-starting now would use; then `can_answer` ("1 of 2"), `all_limited` and
+starting now would use; with them `can_answer` ("1 of 2"), `all_limited` and
 `next_reset`. When every account is limited it adds `advice` — wait until the
 reset; runs that were cut off resume by themselves then — because that is the
-moment a queue must stop spending attempts: `coding_agent_run` answers the
-same situation with a CONFLICT naming the reset time. Never a credential and
+moment a queue must stop spending attempts: `coding_agent_run` refuses a run
+in the same situation with a plain CONFLICT, which does not carry the reset
+time — this tool's `next_reset` does. The verdict, `advice`
+and `last_swap` come before `accounts`: the answer is capped at 3,000
+characters and cut from the end, so a full pool with its model weeks loses
+account detail first, never the advice (TASK-2141). Never a credential and
 never an email. Read-only: accounts are added, ordered and re-authenticated by
 the owner in Settings, and the route's writes refuse this bearer 403
 `owner_only`.

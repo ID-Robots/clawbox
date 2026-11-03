@@ -314,3 +314,58 @@ describe("a Hermes turn that reports what it is doing", () => {
     expect(result.text).toBe("still here");
   });
 });
+
+describe("a Hermes stream the box ends because the session did (TASK-2131)", () => {
+  /** The box's own 401 for a session it no longer accepts. */
+  const gate401 = () => new Response(JSON.stringify({ error: "Authentication required" }), {
+    status: 401,
+    headers: { "x-clawbox-session": "expired", "cache-control": "no-store" },
+  });
+
+  function adapterWith(probe: () => Response) {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      if (String(url) === "/setup-api/users/me") return probe();
+      // What the route sends a listener whose session ran out mid-answer: the
+      // first half, then the end of the stream, with no `done`.
+      return sseResponse([frame("delta", { text: "The first half" })]);
+    });
+    const adapter = new HermesAdapter(
+      STREAMING_CAPS,
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+      fetchImpl as unknown as typeof fetch,
+    );
+    return { adapter, urls };
+  }
+
+  it("asks the box whether the session still holds before calling the reply cut off", async () => {
+    const { adapter, urls } = adapterWith(gate401);
+    const err = await adapter.sendTurn({ text: "Hey", attachments: [], idempotencyKey: "k-expired" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessError);
+    expect((err as HarnessError).message).toBe("The reply was cut off before it finished.");
+    expect(urls).toEqual(["/setup-api/hermes/chat", "/setup-api/users/me"]);
+  });
+
+  it("asks the same for a re-attached page's stream", async () => {
+    const { adapter, urls } = adapterWith(() => new Response(null, { status: 204 }));
+    const err = await adapter.attachLiveTurn().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessError);
+    expect(urls.at(-1)).toBe("/setup-api/users/me");
+  });
+
+  it("never asks about a stream that ended with its answer", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return sseResponse([frame("done", { text: "ok", harness: "hermes" })]);
+    });
+    const adapter = new HermesAdapter(
+      STREAMING_CAPS,
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+      fetchImpl as unknown as typeof fetch,
+    );
+    await adapter.sendTurn({ text: "Hey", attachments: [], idempotencyKey: "k-done" });
+    expect(urls).not.toContain("/setup-api/users/me");
+  });
+});

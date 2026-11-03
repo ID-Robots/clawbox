@@ -36,7 +36,10 @@ import {
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
+vi.mock("@/lib/coding-agent-notify", () => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingRunToChat: vi.fn(async () => undefined),
+}));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 vi.mock("@/lib/project-icon", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/project-icon")>()),

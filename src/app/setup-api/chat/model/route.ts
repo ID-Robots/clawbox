@@ -25,8 +25,15 @@ import {
 } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
+import {
+  disarmLocalCompactionModel,
+  localCompactionModelArmOps,
+  localCompactionModelDisarmNeeded,
+  noteLocalCompactionModel,
+} from "@/lib/local-compaction-model";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { DEFAULT_LLAMACPP_CONTEXT_WINDOW, getLlamaCppContextWindow } from "@/lib/llamacpp";
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
@@ -232,6 +239,25 @@ function isLocalModel(model: string | null | undefined): boolean {
 }
 
 const OLLAMA_PREFIX = "ollama/";
+
+/**
+ * The window OpenClaw sizes a turn on the local model against: the `contextWindow`
+ * of its row under `models.providers`, else what the box gives llama-server
+ * (`.env`, src/lib/llamacpp.ts), else the window ClawBox writes for both local
+ * backends. The chat compares a conversation's size to it before sending
+ * (TASK-2127, src/lib/chat-local-fit.ts). Null with no local model.
+ */
+function localModelContextWindow(config: OpenClawConfig, localModel: string | null): number | null {
+  if (!localModel || !isLocalModel(localModel)) return null;
+  const slash = localModel.indexOf("/");
+  const provider = localModel.slice(0, slash);
+  const id = localModel.slice(slash + 1);
+  const rows = config.models?.providers?.[provider]?.models;
+  const row = Array.isArray(rows) ? rows.find((entry) => entry?.id === id) : undefined;
+  const fromRow = row?.contextWindow;
+  if (typeof fromRow === "number" && Number.isFinite(fromRow) && fromRow > 0) return fromRow;
+  return provider === "llamacpp" ? getLlamaCppContextWindow() : DEFAULT_LLAMACPP_CONTEXT_WINDOW;
+}
 
 function normalizeProvider(provider: unknown): string | null {
   if (typeof provider !== "string" || !provider.trim()) return null;
@@ -1033,6 +1059,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       available: localOption.available,
       label: localLabel,
       model: localModel,
+      contextWindow: localModelContextWindow(openclawConfig, localModel),
     },
     subscriptionProviders,
   };
@@ -1664,6 +1691,18 @@ async function postChatModel(request: Request) {
     // EACCES exactly as it does to a box with no config at all. An absent flag
     // IS enabled, so `{}` must stay silent; "could not read" must not.
     const configBeforeBatch = await readConfigStrict().catch(() => null);
+    // Compaction on the cloud model the owner is leaving while the primary is
+    // on the box (TASK-2127, src/lib/local-compaction-model.ts): the model that
+    // held the conversation summarizes it in seconds, where the on-device one
+    // took minutes. The primary being left, or the last cloud one remembered.
+    const previousCloudPrimary = !isLocalModel(state.activeModel) && state.activeModel
+      ? canonicalChatModel(state.activeModel)
+      : await sqliteGet(PRIMARY_MODEL_KEY).catch(() => null);
+    const compactionArmOps = await localCompactionModelArmOps(
+      configBeforeBatch,
+      targetModel,
+      typeof previousCloudPrimary === "string" ? previousCloudPrimary : null,
+    );
     try {
       await runOpenclawConfigSetBatch([
         ...enableProviderPluginOps([targetModel]),
@@ -1672,6 +1711,7 @@ async function postChatModel(request: Request) {
         // Tool Search off while the primary is the on-device model, in the
         // batch it describes (src/lib/local-tool-search.ts).
         ...(await localToolSearchArmOps(configBeforeBatch, targetModel)),
+        ...compactionArmOps,
       ]);
     } catch (err) {
       // OpenClaw 2 validates the reference against the catalogs it can see and
@@ -1729,6 +1769,11 @@ async function postChatModel(request: Request) {
     let toolSearchWarning: string | undefined;
     if (localToolSearchDisarmNeeded(configBeforeBatch, targetModel)) {
       toolSearchWarning = await disarmLocalToolSearch("chat/model");
+    }
+    // 1e. ...and OpenClaw's own compaction model back, when ClawBox set it.
+    await noteLocalCompactionModel(compactionArmOps);
+    if (await localCompactionModelDisarmNeeded(configBeforeBatch, targetModel)) {
+      await disarmLocalCompactionModel("chat/model");
     }
 
     // 2. Full sweep including sessions previously tagged

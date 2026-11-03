@@ -10,6 +10,26 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
   } as unknown as Response;
 }
 
+// A live run is /updating's: the app hands it over with `location.replace`
+// (TASK-2146), which jsdom cannot follow — so it is a spy here, and the app
+// stays mounted to show what it would if the page had not left yet.
+let replace: ReturnType<typeof vi.fn>;
+let savedLocation: PropertyDescriptor | undefined;
+
+beforeEach(() => {
+  savedLocation = Object.getOwnPropertyDescriptor(window, "location");
+  const real = window.location;
+  replace = vi.fn();
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { href: real.href, origin: real.origin, pathname: real.pathname, search: "", hash: "", replace, assign: vi.fn(), reload: vi.fn() },
+  });
+});
+
+afterEach(() => {
+  if (savedLocation) Object.defineProperty(window, "location", savedLocation);
+});
+
 // A device recovered by force-update.sh is at the current git version but may
 // still have a stale OpenClaw / systemd unit. In that "up-to-date" state the UI
 // must still offer a way to re-run the full update — behind Advanced options and
@@ -91,7 +111,7 @@ describe("SystemUpdateApp — force-full-update recovery affordance", () => {
 // belongs to that live run. `fetch` resolves for a 409, so ignoring the answer
 // left this screen offering "Update everything" over an update in progress.
 describe("SystemUpdateApp — a dismissal refused by a live update", () => {
-  it("rejoins the running update instead of showing the update controls", async () => {
+  it("rejoins the running update — on /updating — instead of showing the update controls", async () => {
     let statusCalls = 0;
     let dismissCalls = 0;
     vi.stubGlobal(
@@ -121,15 +141,18 @@ describe("SystemUpdateApp — a dismissal refused by a live update", () => {
       }),
     );
 
-    const { getByRole, queryByRole, findByText } = render(<SystemUpdateApp />);
+    const { getByRole, queryByRole, findByText, findByTestId } = render(<SystemUpdateApp />);
     await findByText("Update stopped");
 
     fireEvent.click(getByRole("button", { name: "Dismiss" }));
 
-    await findByText("In progress");
+    // The live run is joined — on /updating, where a live run is drawn.
+    await findByTestId("update-handover");
     expect(dismissCalls).toBe(1);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/updating"));
     // Nothing that could start a second update is on screen while one runs.
     expect(queryByRole("button", { name: /Advanced options/ })).toBeNull();
+    expect(queryByRole("button", { name: "Update everything" })).toBeNull();
   });
 });
 
@@ -268,21 +291,23 @@ describe("SystemUpdateApp — a poll that answers idle mid-run", () => {
       }),
     );
 
+    // The live run itself is /updating's; this window follows it only for as
+    // long as it is still open, and must not take "idle" for a verdict meanwhile.
     const view = render(<SystemUpdateApp />);
-    expect(await view.findByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
+    expect(await view.findByTestId("update-handover")).toBeTruthy();
 
-    // The first poll answers "idle": the run seen last stays on screen.
+    // The first poll answers "idle": still the run, not the update controls.
     await vi.advanceTimersByTimeAsync(2_000);
     expect(statusCalls).toBe(2);
-    expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
-    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(view.getByTestId("update-handover")).toBeTruthy();
+    expect(view.queryByRole("button", { name: "Update everything" })).toBeNull();
 
     // While the answer is "idle" the box is asked every 10 s, not every 2 s.
     await vi.advanceTimersByTimeAsync(6_000);
     expect(statusCalls).toBe(2);
     await vi.advanceTimersByTimeAsync(4_000);
     expect(statusCalls).toBe(3);
-    expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 4 steps complete");
+    expect(view.getByTestId("update-handover")).toBeTruthy();
 
     // The verdict, when it comes, is shown with its Resume.
     await vi.advanceTimersByTimeAsync(10_000);
@@ -291,6 +316,7 @@ describe("SystemUpdateApp — a poll that answers idle mid-run", () => {
     expect(view.getByRole("button", { name: "Resume update" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
     expect(view.queryByTestId("update-run-notice")).toBeNull();
+    expect(view.queryByTestId("update-handover")).toBeNull();
   });
 });
 
@@ -375,8 +401,10 @@ describe("SystemUpdateApp — a click the run route did not start", () => {
       { phase: "running", currentStepIndex: 0, steps: [{ id: "apt_update", label: "Updating system packages", status: "running" }] },
     );
     fireEvent.click(await view.findByRole("button", { name: "Update everything" }));
-    await view.findAllByText("Updating system packages");
-    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    // Joined on /updating, where a live run is drawn.
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/updating"));
+    expect(view.getByTestId("update-handover")).toBeTruthy();
+    expect(view.queryByTestId("update-run")).toBeNull();
     expect(view.queryByText("Update already in progress")).toBeNull();
   });
 });

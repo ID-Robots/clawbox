@@ -65,6 +65,80 @@ function unsets(): string[] {
   return patchMock.mock.calls.flatMap((c) => (c[0]?.unset ?? []) as string[]);
 }
 
+describe("compression on ClawBox AI while Local AI is on (TASK-2127)", () => {
+  const titler = (provider: string | null, model: string | null) => (key: string) => Promise.resolve(
+    key === "auxiliary.title_generation.provider" ? provider
+      : key === "auxiliary.title_generation.model" ? model
+        : null,
+  );
+
+  beforeEach(() => {
+    cliMock.mockReset();
+    cliMock.mockImplementation(async (args: string[]) =>
+      args?.[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "", stderr: "" });
+    patchMock.mockReset();
+    patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
+    readMock.mockReset();
+    resolveMock.mockReset();
+    resolveMock.mockImplementation(async () => ({ state: "absent" }));
+    getConfigMock.mockReset();
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  it("names ClawBox AI — the titler's provider and model — as Hermes' summarizer", async () => {
+    readMock.mockImplementation(titler("clawai", "deepseek-v4-flash"));
+    await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
+    expect(sets()).toContain("auxiliary.compression.provider=clawai");
+    expect(sets()).toContain("auxiliary.compression.model=deepseek-v4-flash");
+  });
+
+  it("leaves an owner's own summarizer alone", async () => {
+    readMock.mockImplementation(titler("clawai", "deepseek-v4-flash"));
+    resolveMock.mockImplementation(async (key: string) =>
+      key === "auxiliary.compression.provider" ? { state: "value", value: "openrouter" } : { state: "absent" });
+    await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
+    expect(sets().some((entry) => entry.startsWith("auxiliary.compression."))).toBe(false);
+
+    patchMock.mockClear();
+    resolveMock.mockImplementation(async (key: string) =>
+      key === "auxiliary.compression.model" ? { state: "value", value: "google/gemini-2.5-flash" } : { state: "absent" });
+    await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
+    expect(sets().some((entry) => entry.startsWith("auxiliary.compression."))).toBe(false);
+  });
+
+  it("names nothing on a box with no ClawBox AI titler, or a config it could not read", async () => {
+    readMock.mockImplementation(titler(null, null));
+    await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
+    expect(sets().some((entry) => entry.startsWith("auxiliary.compression."))).toBe(false);
+
+    patchMock.mockClear();
+    readMock.mockImplementation(titler("clawai", "deepseek-v4-flash"));
+    resolveMock.mockImplementation(async () => ({ state: "unreadable" }));
+    await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
+    expect(sets().some((entry) => entry.startsWith("auxiliary.compression."))).toBe(false);
+  });
+
+  it("takes back only its own value when Local AI is removed", async () => {
+    readMock.mockImplementation(async (key: string) =>
+      key === "auxiliary.compression.provider" ? "clawai"
+        : key === "auxiliary.compression.model" ? "deepseek-v4-flash"
+          : key === "model.provider" ? "clawai"
+            : null);
+    resolveMock.mockImplementation(async (key: string) =>
+      key === "model.provider" ? { state: "value", value: "clawai" } : { state: "absent" });
+    getConfigMock.mockImplementation(async (key: string) => (key === "hermes_local_compression_model" ? "deepseek-v4-flash" : undefined));
+    await removeLocalAiFromHermes();
+    expect(unsets()).toEqual(expect.arrayContaining(["auxiliary.compression.provider", "auxiliary.compression.model"]));
+
+    patchMock.mockClear();
+    getConfigMock.mockImplementation(async () => undefined);
+    await removeLocalAiFromHermes();
+    expect(unsets().some((key) => key.startsWith("auxiliary.compression."))).toBe(false);
+  });
+});
+
 describe("registering the local model with Hermes", () => {
   beforeEach(() => {
     cliMock.mockReset();

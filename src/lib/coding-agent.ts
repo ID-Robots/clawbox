@@ -271,10 +271,10 @@ import {
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
-import { nearestFull, usageForModel } from "@/lib/anthropic-usage";
+import { modelWeekOf, nearestFull, usageForModel } from "@/lib/anthropic-usage";
 import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
-import { announceCodingAgent } from "@/lib/coding-agent-notify";
+import { announceCodingAgent, announceCodingRunToChat } from "@/lib/coding-agent-notify";
 import {
   collectVisualEvidence,
   renderEvidenceSection,
@@ -10787,6 +10787,20 @@ function announceGatedRun(run: CodingRun): void {
 }
 
 /**
+ * An ending that never reaches finishRun — a stop on paper, a queued run
+ * canceled or refused its turn — told to the chat that asked for the run
+ * (TASK-2132). Only the chat: these endings sent no card and no Telegram
+ * before, and the notice module says why they still do not. A team's run is
+ * the team's to tell, as in finishRun.
+ */
+function announceEndingToChat(run: CodingRun): void {
+  if (run.team) return;
+  void announceCodingRunToChat(cloneRun(run)).catch((err: unknown) => {
+    console.error("[coding-agent] chat notice failed:", err instanceof Error ? err.message : err);
+  });
+}
+
+/**
  * Did the run leave the deliverable behind — and if not, what now?
  *
  * The last step of the settle chain, and the one that makes `completed` mean
@@ -11255,8 +11269,8 @@ async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promi
       found.until = at(near.window.resetsAt, found.until);
     }
   } else if (found.limit.resetsAt === null) {
-    // The words named the model; Anthropic gives its week's reset.
-    const week = (reading.models ?? []).find((w) => w.family === found.limit.model);
+    // The words named the model; Anthropic gives its week's reset (none of its weeks is spent here: the fullest).
+    const week = modelWeekOf(reading, found.limit.model);
     if (week) {
       found.weekName = week.name;
       found.until = at(week.resetsAt, found.until);
@@ -14200,6 +14214,14 @@ export function stopRun(id: string): CodingRun {
     // The pause kept the worktree for its Resume; the stop is where its work
     // is parked on the branch, unmerged, like any stopped run's.
     trackSettleWork(settleRunWorktree(run), run.id);
+    // A paused REVIEW PASS is what its origin's finish notice was held back
+    // for (deliverableGateApplies), and the gate that releases it skipped the
+    // pause. A running pass's Stop reaches it through finishRun; this one is
+    // the owner's Stop too, so it goes the same way — the gate announces the
+    // origin, judging nothing over a Stop.
+    if (run.reviewOf !== null) trackSettleWork(enforceDeliverable(run, "stop", "skipped"), run.id);
+    // The pause told the chat nothing (it is not an ending); this is one.
+    announceEndingToChat(run);
     return cloneRun(run);
   }
   if (run.status !== "running") return cloneRun(run);
@@ -14216,6 +14238,7 @@ export function stopRun(id: string): CodingRun {
     wakeWaiters(id);
     // It held a slot on paper: the queue's next run may have it now.
     void pumpRunQueue();
+    announceEndingToChat(run);
     return cloneRun(run);
   }
   requestEnd(run, state, "stop");
@@ -14329,6 +14352,8 @@ export function pauseRun(id: string): CodingRun {
     run.completedAt = Date.now();
     persist(true);
     wakeWaiters(id);
+    // Lost is an ending; a pause is not (the chat leg tells only endings).
+    announceEndingToChat(run);
     return cloneRun(run);
   }
   requestEnd(run, state, "pause");
@@ -14829,6 +14854,12 @@ export function pumpRunQueue(): Promise<string[]> {
           await startQueuedRun(next.id);
           started.push(next.id);
         } catch (err) {
+          // A start that took the record and then could not spawn has settled
+          // it failed itself (spawnOrSettle) and left the queue, whatever the
+          // error says about waiting: the chat that queued it hears, as it
+          // would from failQueuedRun.
+          const settled = loadRuns().find((r) => r.id === next.id);
+          if (settled?.status === "failed") announceEndingToChat(settled);
           // Every slot is taken: its turn comes when a run settles.
           if (err instanceof SlotsFullError) break;
           if (err instanceof CodingAgentError && QUEUE_WAITS.has(err.kind)) {
@@ -14868,6 +14899,8 @@ function failQueuedRun(id: string, err: unknown): void {
   pushProgress(run, RUNNER_STEP.finished("failed"));
   persist(true);
   wakeWaiters(id);
+  // The chat that queued it was told it starts by itself; it did not.
+  announceEndingToChat(run);
 }
 
 /**
@@ -14894,6 +14927,7 @@ export async function cancelQueuedRun(id: string): Promise<CodingRun> {
   persist(true);
   wakeWaiters(id);
   console.error(`[coding-agent] ${run.id} canceled in the queue by the owner`);
+  announceEndingToChat(run);
   return cloneRun(run);
 }
 

@@ -147,9 +147,16 @@ if (typeof NativeWebSocket === "function") {
   window.WebSocket = GuardedWebSocket;
 }
 
-// A tab that sat in the background makes no request to be refused.
+// A tab that sat in the background makes no request to be refused. A phone
+// shows it again before its network is back (that probe cannot reach the box),
+// so the network's return asks too; a page restored from the back/forward
+// cache changes no visibility at all.
 document.addEventListener("visibilitychange", function () {
   if (document.visibilityState === "visible") probe(Date.now());
+});
+window.addEventListener("online", function () { probe(Date.now()); });
+window.addEventListener("pageshow", function (event) {
+  if (event && event.persisted) probe(Date.now());
 });
 })();`;
 }

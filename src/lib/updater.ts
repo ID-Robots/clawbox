@@ -425,20 +425,12 @@ function errorText(err: unknown): string {
  * a whole run, so it gets the full three attempts. The VERSION CHECK is polled
  * by four surfaces: a long retry there is dead time on every poll, and the
  * refusal it is answering is caused by too many anonymous requests from this
- * address — which a blanket 3x would feed. It asks twice, briefly, and it
- * spends those two asks on the call it reads the answer from rather than
- * splitting them: hence the third budget below, which is what the advisory tag
- * fetch gets so the check's total stays where it was.
+ * address — which a blanket 3x would feed. It asks twice, briefly, and only
+ * with calls whose answer it reads: the tag `ls-remote` and the pinned
+ * branch's fetch (getTargetVersion says why there is no third).
  */
 const REMOTE_FETCH_ATTEMPTS = 3;
 const REMOTE_CHECK_ATTEMPTS = 2;
-/**
- * The advisory tag fetch asks ONCE, and the retry it used to hold is spent on
- * the `ls-remote` the tag answer is actually read from. That keeps the number
- * of anonymous requests a version check can make exactly where it was — which
- * matters, because the refusal being retried is caused by too many of them.
- */
-const REMOTE_ADVISORY_ATTEMPTS = 1;
 /**
  * An override that is not a non-negative number of milliseconds is replaced
  * with the default, and said out loud.
@@ -4580,10 +4572,10 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   const openclawAbsent = edition === "hermes";
   // One round of concurrent reads. The release remote's check used to wait
   // for the tag ls-remote to finish first for no reason (neither reads the
-  // other's answer). The pinned branch's fetch still runs AFTER the tag fetch:
-  // both are `git fetch` in the same checkout, and two at once race for the
-  // same ref locks (`origin/<branch>` is updated by the tag fetch's default
-  // refspec too), which would turn a reachable origin into a refused fetch.
+  // other's answer). The pinned branch's fetch still runs AFTER the tag
+  // ls-remote: they are this check's two anonymous requests to GitHub, and the
+  // refusal both are retried for is caused by an address sending too many, so
+  // they go one after the other rather than as a burst.
   const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
     getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
     // Nothing to read on the Hermes edition: there is no OpenClaw to report
@@ -4672,20 +4664,17 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
-    // The tag fetch is ADVISORY: `ls-remote` below asks origin directly, so the
-    // answer is not read from the local tag refs this call updates. Its refusal
-    // is logged, never promoted — reporting the remote unreachable because an
-    // advisory call was refused while the authoritative one answered is the
-    // false-failure half of the same bug.
-    const tagFetch = await reachOrigin(
-      PROJECT_DIR,
-      ["fetch", "--quiet", "--tags", "origin"],
-      // The delay is explicit even at one attempt: dropping it would fall back
-      // to the UPDATE path's 4 s budget, so raising REMOTE_ADVISORY_ATTEMPTS
-      // later would silently put a 4 s sleep on every polled version check.
-      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
-    );
-    if (!tagFetch.reachable) console.warn(`[Updater] advisory tag fetch did not land: ${tagFetch.reason}`);
+    // No `git fetch --tags origin` first. It fed the local tag refs that the
+    // old ancestry guard (below) read; since that guard went, nothing reads them
+    // — the answer comes from `ls-remote` — and the fetch had become the most
+    // expensive request of the check for no answer at all: the remote's default
+    // refspec plus `--tags` downloads every branch on origin and every tag's
+    // history, anonymously. Its 20 s timeout sat in front of every version
+    // check, so a slow link to GitHub spent all of it here before the calls that
+    // decide anything had started. Measured 2026-11-03 on the e2e-install box:
+    // the fetch hit its timeout, /setup-api/update/status answered after 28 s,
+    // and the setup wizard showed "Checking for updates..." for all of it.
+    //
     // The AUTHORITATIVE call, and so the one that is retried. It used to get a
     // single attempt: one refused ls-remote then made every surface say the
     // update server could not be reached, and TARGET_VERSION_CACHE_TTL held
