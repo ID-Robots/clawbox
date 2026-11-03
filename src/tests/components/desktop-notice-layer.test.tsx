@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
@@ -82,12 +84,15 @@ function kokoroInstall(): BackgroundTaskView {
 
 let saved: DesktopState | null = null;
 let tasks: BackgroundTaskView[] = [];
+/** Holds the saved desktop's answer back until the case lets it go. */
+let stateGate: Promise<void> | null = null;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/setup-api/desktop/state")) {
       if ((init?.method ?? "GET").toUpperCase() === "PUT") return answer({ ok: true });
+      if (stateGate) await stateGate;
       return answer({ user: "clawbox", state: saved });
     }
     if (url.includes("/setup-api/background-jobs/tasks")) return answer({ tasks });
@@ -105,6 +110,7 @@ function setViewport(w: number, h: number) {
 
 beforeEach(() => {
   saved = null;
+  stateGate = null;
   tasks = [kokoroInstall()];
   resetHarnessCache();
   _resetSessionUserForTest();
@@ -237,6 +243,44 @@ describe("the bubbles' turn in the stacking order", () => {
     await waitFor(() => expect(columnZ()).toBeGreaterThan(filesZ()));
   });
 
+  it("stays over the windows of a saved desktop that is restored after the bubble came up", async () => {
+    saved = snapshotDesktop([
+      { id: "files-1", appId: "files", zIndex: 100, minimized: false, x: 900, y: 0, width: 680, height: 500 },
+    ], { savedAt: 1 });
+    let letGo = () => {};
+    stateGate = new Promise<void>((resolve) => { letGo = resolve; });
+    await desktopWithCard();
+    expect(screen.queryByTestId("chrome-window-files")).toBeNull();
+
+    await act(async () => { letGo(); });
+    const files = await screen.findByTestId("chrome-window-files");
+    await waitFor(() => expect(files).toHaveAttribute("data-active", "true"));
+    expect(columnZ()).toBeGreaterThan(Number(files.style.zIndex));
+  });
+
+  it("a window brought forward from the shelf leaves no tie for the next press", async () => {
+    // Two Files windows under Settings: the shelf's Files entry brings both
+    // forward, and a press on the lower one must then put it over the other.
+    saved = snapshotDesktop([
+      { id: "files-1", appId: "files", zIndex: 100, minimized: false, x: 40, y: 60, width: 600, height: 400 },
+      { id: "files-2", appId: "files", zIndex: 101, minimized: false, x: 80, y: 90, width: 600, height: 400 },
+      { id: "settings-1", appId: "settings", zIndex: 102, minimized: false, x: 700, y: 80, width: 600, height: 420 },
+    ], { savedAt: 1 });
+    render(<ChromeDesktop />);
+    const settings = await screen.findByTestId("chrome-window-settings");
+    await waitFor(() => expect(settings).toHaveAttribute("data-active", "true"));
+    const win = (id: string) => document.querySelector<HTMLElement>(`[data-window-id="${id}"]`)!;
+    const z = (id: string) => Number(win(id).style.zIndex);
+
+    fireEvent.click(screen.getByTestId("shelf-app-files"));
+    await waitFor(() => expect(z("files-2")).toBeGreaterThan(z("settings-1")));
+    expect(z("files-1")).toBeGreaterThan(z("settings-1"));
+    expect(z("files-2")).toBeGreaterThan(z("files-1"));
+
+    fireEvent.mouseDown(win("files-1").querySelector('[data-testid="files-app-stub"]')!);
+    await waitFor(() => expect(z("files-1")).toBeGreaterThan(z("files-2")));
+  });
+
   it("raises itself when a running task ends — the result is news even under the chat", async () => {
     await desktopWithCard();
     await openChat();
@@ -254,23 +298,34 @@ describe("the bubbles' turn in the stacking order", () => {
 describe("on a phone", () => {
   beforeEach(() => setViewport(390, 844));
 
-  it("stays in the top-right corner over the full-screen chat until the chat is tapped, and never reaches its input", async () => {
+  it("stays at the top on the right over the full-screen chat until the chat is tapped, and never reaches its input", async () => {
     await desktopWithCard();
-    expect(place()).toEqual({ right: "16px", top: "16px", bottom: "", left: "" });
-    // Kept clear of the bottom of the screen, where the chat's composer is:
-    // a taller column scrolls instead.
-    expect(column().style.maxHeight).toContain("100dvh");
+    // Inline; on a touch phone the stylesheet moves the top under the
+    // app/chat header (below). The bottom is bounded here either way, clear
+    // of the chat's composer: a taller column scrolls instead.
+    const phonePlace = place();
+    expect(phonePlace).toMatchObject({ right: "16px", top: "16px", left: "" });
+    expect(phonePlace.bottom).toMatch(/\d+px/);
     expect(column().style.overflowY).toBe("auto");
 
     await openChat();
     expect(chatZ()).toBe(DESKTOP_LAYERS.chat);
     expect(columnZ()).toBeGreaterThan(chatZ());
-    expect(place()).toEqual({ right: "16px", top: "16px", bottom: "", left: "" });
+    expect(place()).toEqual(phonePlace);
 
     fireEvent.pointerDown(chat());
     await waitFor(() => expect(columnZ()).toBeLessThan(chatZ()));
 
     toast("Installing the voice (Kokoro)");
     await waitFor(() => expect(columnZ()).toBeGreaterThan(chatZ()));
+  });
+
+  it("has one fixed place from the stylesheet — under the header — and no layer of its own there", () => {
+    const css = fs.readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf-8");
+    const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/\.desktop-notice-stack\s*\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(rules.length).toBeGreaterThan(0);
+    // A z-index here would pin the column over (or under) the chat for good.
+    for (const rule of rules) expect(rule).not.toMatch(/z-index/);
+    expect(rules.join("\n")).toMatch(/top: calc\(60px \+ env\(safe-area-inset-top\)\) !important;/);
   });
 });

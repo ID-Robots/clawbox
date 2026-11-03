@@ -244,9 +244,9 @@ const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
 // corner and takes its turn in the stacking order (src/lib/notice-layer.ts).
 const NOTICE_MARGIN = 16;
 // On a phone, what the column leaves free under it: the full-screen chat's
-// composer and the shelf. A column taller than the rest scrolls instead of
-// reaching down over the chat's input.
-const PHONE_NOTICE_BOTTOM_RESERVE = 176;
+// composer — a grown draft and its options row open — and the shelf. A column
+// taller than the rest scrolls instead of reaching down over the chat's input.
+const PHONE_NOTICE_BOTTOM_RESERVE = 240;
 
 /**
  * Declared order for icons that have no saved slot yet.
@@ -1128,10 +1128,16 @@ function ChromeDesktopInner() {
         // stays, above the restored windows.
         setOpenWindows((prev) => [...restored, ...prev.filter((w) => !ids.has(w.id)).map((w) => ({ ...w, zIndex: w.zIndex + n }))]);
         setNextZIndex((z) => z + n);
-        // A bubble that arrived first keeps its place above them too.
+        // The top-right bubbles and the chat move up with them: a bubble that
+        // arrived first stays over the restored windows, and the order
+        // between the bubbles and a chat pressed meanwhile is kept.
         if (noticeSlotRef.current >= DESKTOP_LAYERS.window) {
           noticeSlotRef.current += n;
           setNoticeSlot(noticeSlotRef.current);
+        }
+        if (chatZIndexRef.current !== null) {
+          chatZIndexRef.current += n;
+          setChatZIndex(chatZIndexRef.current);
         }
       }
       setDesktopRestored(true);
@@ -1403,15 +1409,17 @@ function ChromeDesktopInner() {
   // bubble, or a press or hover on one, takes a slot from the counter above;
   // a press on the chat, a window or a pop-out takes a later one and stands in
   // front of the bubbles until they are raised again.
-  // Starts on the counter's last slot, so the column is "on top" until
-  // something is raised; it takes a slot of its own with its first bubble.
+  // Starts below the counter: the column takes a slot of its own with its
+  // first bubble (a window restored after that moves up past it).
   const [noticeSlot, setNoticeSlot] = useState<number>(DESKTOP_LAYERS.window - 1);
   const noticeSlotRef = useRef<number>(DESKTOP_LAYERS.window - 1);
   // Pop-outs stand in a band of their own, outside the counter.
   const [popoutOverNotices, setPopoutOverNotices] = useState(false);
   const popoutOverNoticesRef = useRef(false);
   const noticesOnTop = useCallback(
-    () => !popoutOverNoticesRef.current && noticeSlotRef.current === nextZIndexRef.current - 1,
+    () => !popoutOverNoticesRef.current
+      && noticeSlotRef.current >= DESKTOP_LAYERS.window
+      && noticeSlotRef.current === nextZIndexRef.current - 1,
     [],
   );
   const raiseNotices = useCallback(() => {
@@ -3170,15 +3178,20 @@ function ChromeDesktopInner() {
     if (getActiveWindowId() === topWindow.id) {
       appWindows.forEach(w => minimizeWindow(w.id));
     } else {
-      // Bring all to front, top window on top
-      let z = nextZIndex;
-      setOpenWindows((prev) =>
-        prev.map((w) => {
+      // Bring all to front, top window on top — on the LAST of the slots they
+      // take. It used to take `z + n` after the others had counted `z` up, so
+      // when it came last in the list it stood on or past the counter's next
+      // free slot, and the next window, chat or bubble raised tied with it.
+      const z0 = nextZIndex;
+      const n = appWindows.length;
+      setOpenWindows((prev) => {
+        let z = z0;
+        return prev.map((w) => {
           if (w.appId !== appId) return w;
-          return { ...w, zIndex: w.id === topWindow.id ? z + appWindows.length : z++ };
-        })
-      );
-      setNextZIndex((z) => z + appWindows.length + 1);
+          return { ...w, zIndex: w.id === topWindow.id ? z0 + n - 1 : z++ };
+        });
+      });
+      setNextZIndex((z) => z + n);
     }
   }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex, kioskPages, activateKioskTab, vibrate]);
 
@@ -3518,9 +3531,13 @@ function ChromeDesktopInner() {
           zIndex: noticeZIndex,
           right: NOTICE_MARGIN + mainIns.right,
           top: noticeTop,
+          // On a phone the bottom is bounded as well — wherever the top is:
+          // the touch-phone stylesheet moves it under the app/chat header
+          // (globals.css, `.desktop-notice-stack`). The box is see-through
+          // and lets every press through; only the bubbles in it take any.
           ...(isMobile
             ? {
-              maxHeight: `calc(100dvh - ${noticeTop + PHONE_NOTICE_BOTTOM_RESERVE}px - env(safe-area-inset-bottom, 0px))`,
+              bottom: `calc(${PHONE_NOTICE_BOTTOM_RESERVE}px + env(safe-area-inset-bottom, 0px))`,
               overflowY: "auto",
               overscrollBehavior: "contain",
             }
