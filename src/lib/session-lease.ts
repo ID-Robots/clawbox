@@ -154,17 +154,30 @@ export interface SessionLease {
   stillValid(): boolean;
 }
 
+/** The lease of a cookie the box no longer admits: over before it starts. */
+const ENDED_LEASE: SessionLease = { expiresAt: 0, stillValid: () => false };
+
 /**
- * The lease of the request's session cookie, or null when it carries none this
- * box honours. Null also for the agent's MCP bearer and the test harness, which
- * have no session to outlive: only a cookie-admitted response is bounded by it.
+ * The lease of the request's session cookie. Null when it carries no cookie —
+ * the agent's MCP bearer, the test harness — which has no session to outlive:
+ * only a cookie-admitted response is bounded by it.
+ *
+ * A cookie that is there but no longer admitted is a lease that has already
+ * ended, never a null: it ran out, or a password change revoked it, in the
+ * moment between the middleware's check and the route's, and "no lease" would
+ * hand that request the unbounded stream this exists to end. Except where the
+ * box judges no sessions at all — no secret yet, or the e2e-install harness's
+ * test mode, which the middleware lets through without one.
  */
 export function sessionLease(request: Request | undefined): SessionLease | null {
   if (!request || typeof request.headers?.get !== "function") return null;
   const cookie = readSessionCookie(request);
   if (!cookie) return null;
   const judged = judgeSessionCookie(cookie);
-  if (!judged || typeof judged.claims.exp !== "number") return null;
+  if (!judged || typeof judged.claims.exp !== "number") {
+    if (!sessionSecret() || process.env.CLAWBOX_TEST_MODE === "1") return null;
+    return ENDED_LEASE;
+  }
   return {
     expiresAt: judged.claims.exp * 1000,
     stillValid: () => judgeSessionCookie(cookie) !== null,

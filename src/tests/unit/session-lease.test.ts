@@ -67,12 +67,35 @@ describe("sessionLease", () => {
     expect(lease.stillValid()).toBe(false);
   });
 
-  it("is null for a request with no session this box honours — none, an expired one, the agent's bearer", () => {
+  it("is null for a request with no session cookie at all — the agent's bearer, the test harness", () => {
     expect(sessionLease(request())).toBeNull();
-    expect(sessionLease(request(`clawbox_session=${signSessionCookie({ expiresInSeconds: -1 })}`))).toBeNull();
-    expect(sessionLease(request(`clawbox_session=${signSessionCookie({ secret: "another-secret-0123456789abcdef0123" })}`))).toBeNull();
     expect(sessionLease(new Request("http://clawbox.local/x", { headers: { authorization: "Bearer mcp-token" } }))).toBeNull();
     expect(sessionLease(undefined)).toBeNull();
+  });
+
+  it("has already ended for a cookie the box no longer admits — it ran out or was revoked after the gate let it in", () => {
+    // Null here would hand that request the unbounded stream the lease exists to end.
+    for (const cookie of [
+      signSessionCookie({ expiresInSeconds: -1 }),
+      signSessionCookie({ gen: 7 }),
+      signSessionCookie({ secret: "another-secret-0123456789abcdef0123" }),
+    ]) {
+      const lease = sessionLease(request(`clawbox_session=${cookie}`));
+      expect(lease).not.toBeNull();
+      expect(lease!.stillValid()).toBe(false);
+      expect(lease!.expiresAt).toBeLessThanOrEqual(T0);
+    }
+  });
+
+  it("stays null for a rejected cookie where the box judges no sessions: the e2e-install harness's test mode", () => {
+    const saved = process.env.CLAWBOX_TEST_MODE;
+    process.env.CLAWBOX_TEST_MODE = "1";
+    try {
+      expect(sessionLease(request(`clawbox_session=${signSessionCookie({ expiresInSeconds: -1 })}`))).toBeNull();
+    } finally {
+      if (saved === undefined) delete process.env.CLAWBOX_TEST_MODE;
+      else process.env.CLAWBOX_TEST_MODE = saved;
+    }
   });
 });
 

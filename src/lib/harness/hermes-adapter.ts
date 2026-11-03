@@ -3,7 +3,12 @@ import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
-import { SESSION_EXPIRED_STREAM_CODE, confirmSessionStillValid } from "@/lib/session-expiry";
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_STREAM_CODE,
+  confirmSessionStillValid,
+  isSessionExpiredResponse,
+} from "@/lib/session-expiry";
 import { transcriptKeyIsSafe } from "./transcript-key";
 import {
   asHarnessError,
@@ -196,6 +201,19 @@ function isEventStream(res: { headers?: { get(name: string): string | null } }):
 }
 
 /**
+ * The turn's answer stopped reaching this page because the session its request
+ * was admitted on ended (TASK-2131): the box's `session_expired` frame on a
+ * stream, or the session gate's 401 on the CLI path's whole answer. Not the
+ * page's verdict yet — see `afterSessionEnded`.
+ */
+class SessionEndedError extends HarnessError {
+  constructor(message: string) {
+    super("upstream", message || SESSION_EXPIRED_CHAT_MESSAGE);
+    this.name = "SessionEndedError";
+  }
+}
+
+/**
  * Read a streamed turn, painting it as it arrives and returning what the JSON
  * path would have returned.
  *
@@ -330,11 +348,13 @@ async function readStreamedTurn(
 
   if (stopped) throw new HarnessError("aborted", "Stopped.");
   // The stream answered 200 long before it ended, so the page's fetch guard
-  // never saw a refusal: a stream the box ended because the session it was
-  // admitted on did (src/lib/harness/hermes-live-turn.ts), and one that simply
-  // stopped short, ask about the session here. A lapsed one takes the page to
-  // /login; a live one, or a box that cannot be reached, leaves the error below.
-  if (sessionEnded || (!failure && !settled)) void confirmSessionStillValid();
+  // never saw a refusal. A stream the box ended because the session it was
+  // admitted on did (src/lib/harness/hermes-live-turn.ts) is handed to the
+  // caller to ask about (`afterSessionEnded`); one that simply stopped short is
+  // asked about here — a lapsed session takes the page to /login, a live one or
+  // a box that cannot be reached leaves the error below.
+  if (sessionEnded) throw new SessionEndedError(failure);
+  if (!failure && !settled) void confirmSessionStillValid();
   if (failure) throw new HarnessError("upstream", failure);
   if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
   return settled;
@@ -550,6 +570,9 @@ export class HermesAdapter implements HarnessAdapter {
       // second window's Stop — and the route answers that with 499. A Stop, so
       // not "Hermes chat failed" under the reply that was stopped.
       if (res.status === 499) throw new HarnessError("aborted", "Stopped.");
+      if (isSessionExpiredResponse(res)) {
+        throw new SessionEndedError(typeof data?.error === "string" ? data.error : "");
+      }
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",
@@ -569,6 +592,7 @@ export class HermesAdapter implements HarnessAdapter {
       // finished.", and the surface put a red error line under the answer the
       // owner had just asked it to stop writing.
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
+      if (err instanceof SessionEndedError) return await this.afterSessionEnded(err, key, onEvent, req.signal);
       throw asHarnessError(err, "upstream");
     } finally {
       req.signal?.removeEventListener("abort", abortFromCaller);
@@ -626,9 +650,29 @@ export class HermesAdapter implements HarnessAdapter {
    */
   async attachLiveTurn(onEvent?: (event: TurnEvent) => void): Promise<TurnResult | null> {
     const key = this.context().sessionKey;
+    try {
+      return await this.followTurn(key, onEvent);
+    } catch (err) {
+      if (err instanceof SessionEndedError) return this.afterSessionEnded(err, key, onEvent);
+      throw err;
+    }
+  }
+
+  /**
+   * The re-attach itself, for the conversation `key` names — captured by the
+   * caller, since the owner may be in another tab by now.
+   */
+  private async followTurn(
+    key: string,
+    onEvent?: (event: TurnEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<TurnResult | null> {
     const resumed = this.sessions.get(key);
     const controller = new AbortController();
     this.inFlight.set(key, { controller });
+    const abortFromCaller = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener("abort", abortFromCaller, { once: true });
     try {
       const res = await this.fetchImpl(`${CHAT_ROUTE}?sessionKey=${encodeURIComponent(key)}`, {
         headers: { Accept: "text/event-stream" },
@@ -644,8 +688,32 @@ export class HermesAdapter implements HarnessAdapter {
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       throw asHarnessError(err, "upstream");
     } finally {
+      signal?.removeEventListener("abort", abortFromCaller);
       if (this.inFlight.get(key)?.controller === controller) this.inFlight.delete(key);
     }
+  }
+
+  /**
+   * The box stopped answering this page because the session the request came
+   * in on ended. Not on the box's word alone: that cookie may be one this page
+   * has since replaced — a password changed in this browser revokes it and
+   * hands the page a new one — which is the question ChatPopup asks about a
+   * socket the box closed. A lapsed session takes the page to /login and the
+   * turn ends here, as the box said. A live one follows the same turn on,
+   * once, through the re-attach, so the answer the box is still writing is not
+   * lost to a session that is in fact fine.
+   */
+  private async afterSessionEnded(
+    err: SessionEndedError,
+    key: string,
+    onEvent?: (event: TurnEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<TurnResult> {
+    if (await confirmSessionStillValid()) {
+      const followed = await this.followTurn(key, onEvent, signal);
+      if (followed) return followed;
+    }
+    throw err;
   }
 
   /**

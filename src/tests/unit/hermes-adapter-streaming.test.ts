@@ -361,6 +361,63 @@ describe("a Hermes stream whose session ended (SUP-1017, TASK-2131)", () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
+  /** An adapter whose box answers each request in turn: the POST, then the re-attach. */
+  function adapterAnswering(...answers: Response[]) {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return answers.shift() ?? new Response(null, { status: 204 });
+    });
+    const adapter = new HermesAdapter(
+      STREAMING_CAPS,
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+      fetchImpl as unknown as typeof fetch,
+    );
+    return { adapter, urls };
+  }
+
+  const replayed = () => sseResponse([
+    frame("delta", { text: "The first half, " }),
+    frame("delta", { text: "and the rest." }),
+    frame("done", { text: "The first half, and the rest.", harness: "hermes", sessionId: "20260823_190319_3e9e35" }),
+  ]);
+
+  it("follows the turn on when the page's session is still good — a password changed in this browser replaced the cookie", async () => {
+    // The box ended the stream for the OLD cookie; the page holds a new one.
+    const { replace, probes } = signedInPage(() => new Response("{}", { status: 200 }));
+    const { adapter, urls } = adapterAnswering(
+      sseResponse([
+        frame("delta", { text: "The first half, " }),
+        frame("error", { error: SESSION_EXPIRED_CHAT_MESSAGE, code: SESSION_EXPIRED_STREAM_CODE }),
+      ]),
+      replayed(),
+    );
+    const seen: TurnEvent[] = [];
+    const result = await adapter.sendTurn(turn, (e) => seen.push(e));
+    expect(result.text).toBe("The first half, and the rest.");
+    expect(urls).toEqual(["/setup-api/hermes/chat", "/setup-api/hermes/chat?sessionKey=desktop"]);
+    expect(seen.at(-1)).toEqual({ kind: "delta", text: "The first half, and the rest." });
+    expect(probes()).toBe(1);
+    expect(replace).not.toHaveBeenCalled();
+    expect(adapter.threadedSessionId).toBe("20260823_190319_3e9e35");
+  });
+
+  it("follows the turn on after the CLI path's 401, too, when the page's session is still good", async () => {
+    signedInPage(() => new Response("{}", { status: 200 }));
+    const refused = { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), body: null, json: async () => ({ error: "Authentication required" }) } as unknown as Response;
+    const { adapter, urls } = adapterAnswering(refused, replayed());
+    const result = await adapter.sendTurn(turn);
+    expect(result.text).toBe("The first half, and the rest.");
+    expect(urls).toHaveLength(2);
+  });
+
+  it("keeps the box's own answer when the session is still good but there is no turn left to follow", async () => {
+    signedInPage(() => new Response("{}", { status: 200 }));
+    const refused = { ok: false, status: 401, headers: new Headers(sessionExpiredHeaders()), body: null, json: async () => ({ error: "Authentication required" }) } as unknown as Response;
+    const { adapter } = adapterAnswering(refused);
+    await expect(adapter.sendTurn(turn)).rejects.toThrow("Authentication required");
+  });
+
   it("does not ask about a failure the stream itself explained", async () => {
     const { probes } = signedInPage(gate401);
     const { adapter } = makeAdapter(sseResponse([frame("error", { error: "the provider is rate limiting" })]));

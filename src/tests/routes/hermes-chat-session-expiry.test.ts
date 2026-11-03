@@ -178,6 +178,19 @@ describe("a Hermes answer streaming when the session runs out", () => {
   });
 });
 
+describe("a cookie that ran out between the session gate and the route", () => {
+  it("gets a stream that has already ended, never an unbounded one", async () => {
+    const turn = gatedTurn();
+    const first = await POST(post(cookieFor(12 * 3600)));
+    await first.body!.cancel();
+    // Expired a moment ago: the middleware let it in, the route no longer would.
+    const attached = await GET(attach(cookieFor(-1)));
+    await vi.advanceTimersByTimeAsync(0);
+    turn.release();
+    expect(events(await attached.text()).map(([name, data]) => data.code ?? name)).toEqual(["delta", SESSION_EXPIRED_STREAM_CODE]);
+  });
+});
+
 describe("a Hermes answer on the CLI path when the session runs out", () => {
   it("answers the session gate's 401, not the reply — which is in the transcript for the next sign-in", async () => {
     openTurnMock.mockResolvedValue(null);
