@@ -571,7 +571,14 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
       this.historyCommittedSeq = this.historyReadSeq;
     }
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-    return { tokensBefore: num(res.result?.tokensBefore), tokensAfter: num(res.result?.tokensAfter) };
+    const tokensBefore = num(res.result?.tokensBefore);
+    const tokensAfter = num(res.result?.tokensAfter);
+    // A summary that left the conversation no smaller is not a shortening
+    // (the Hermes twin, /setup-api/hermes/compress, answers 409 for the same).
+    if (tokensBefore !== undefined && tokensAfter !== undefined && tokensAfter >= tokensBefore) {
+      throw new HarnessError("upstream", "The conversation was not shortened.");
+    }
+    return { tokensBefore, tokensAfter };
   }
 
   /**
