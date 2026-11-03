@@ -435,6 +435,53 @@ between Anthropic accounts get a long list of fixes.
 - The box's web server and the libraries it uses are updated with their
   security fixes.
 
+### Fixes since the release candidate
+
+- **Only the owner can finish first setup.** The step that completes setup, and
+  hands out the owner's session, now refuses every other signed-in user and the
+  assistant's own access. Switching an update on from the chat asks the owner
+  to confirm first; the assistant can no longer start a system or OpenClaw
+  update on its own.
+- **A box that cannot read its own settings no longer looks Free.** When the
+  OpenClaw config is unreadable for a moment, the plan shows as unknown instead
+  of Free, so a paying owner no longer sees "your plan is now Free" or a false
+  upgrade celebration.
+- **Turning Local AI off keeps your other backup models.** Only the local
+  model leaves the fallback list; ClawBox AI stays as the backup.
+- **Hermes keeps the conversation after a reload.** On the Hermes runtime the
+  chat resumes the same session after F5, a restart or an update, so the next
+  message still knows what was said before.
+- **ClawKeep backs up the runtime you switched to.** A dual box switched to
+  Hermes now backs up the Hermes chats, memory and skills, and the status says
+  so. A refused cloud upload is reported in the dashboard instead of leaving a
+  backup stuck on "Uploading".
+- **First setup from a phone.** If the request that sets the owner's password
+  drops on the setup hotspot, the wizard stays on the security step with Save
+  usable instead of moving on with no password. The Update step says why a
+  start did nothing.
+- **The Coding Agent cleans up after itself.** Stale run copies and worktrees
+  in the project folder are trashed after a retention period (14 days by
+  default, in Settings → Coding Agent); your own projects and anything with
+  unsaved work are never touched. Store server apps install on a fresh box
+  without a project folder set, and the app window keeps your session.
+- **ClawBox AI sign-in.** You can sign out of the box's ClawBox AI account from
+  Settings, a failed ClawBox AI turn is shown in the chat with a way to sign in
+  again, and cloud voices appear right after an upgrade to Max without a
+  restart.
+- **Updates.** The System Update screen was redesigned around the steps it
+  runs, names the build a beta run installs and follows it until the box
+  judges it; an OpenClaw update already at the pinned version skips the
+  reinstall and keeps the assistant running. Long Settings tasks (installs,
+  model downloads) run in the background with a corner card, survive closing
+  Settings and can be cancelled.
+- **Local AI on Hermes.** Gemma runs with a 64k window and a lean mode, and
+  Local AI stays on when you swap back.
+- **Coding teams.** A team the owner stopped stays stopped, a worker's commits
+  on its own branch are brought home, and a run or team shows up the moment it
+  is asked for.
+- **OpenClaw for every user.** The owner can share the OpenClaw app with all
+  users of the box from Settings (off by default).
+
 ## Upgrade notes
 
 - Upgrade from 4.2.x, 4.1.x or 4.0.x in **Settings → System Update**, or over
