@@ -157,6 +157,15 @@ describe("formatBoxTime", () => {
     expect(formatBoxTime(T, "not_a-locale!")).toMatch(/2026/);
   });
 
+  it("speaks the page's language when the caller names none", () => {
+    vi.stubGlobal("document", { documentElement: { lang: "de" } });
+    try {
+      expect(formatBoxTime(T)).toBe(formatBoxTime(T, "de"));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("prints a dash for a time that is not a date", () => {
     expect(formatBoxTime(Number.NaN)).toBe("—");
   });
@@ -169,9 +178,10 @@ describe("the labels, held to the box's clock", () => {
   it("a backup that has just finished on a box ahead of the browser is just now, not in the future", () => {
     vi.useFakeTimers();
     vi.setSystemTime(T);
-    // The box is 45 s ahead; its backup finished 2 s ago on its own clock.
-    noteBoxClock(answerAt(T + 45_000), T - 100, T);
-    const finished = T + 45_000 - 2_000;
+    // The box is 5 min ahead — past what the tolerance alone would excuse —
+    // and its backup finished 2 s ago on its own clock.
+    noteBoxClock(answerAt(T + 5 * MINUTE), T - 100, T);
+    const finished = T + 5 * MINUTE - 2_000;
     expect(timeAgo(finished, t)).toBe("clawkeep.justNow");
     expect(progressCardAge(finished, boxNowMs())).toEqual({ unit: "now", n: 0 });
   });

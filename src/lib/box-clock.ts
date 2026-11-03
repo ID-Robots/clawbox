@@ -9,18 +9,23 @@
  * lead. So "now" is the box's: the page's polls hand their answers here, and
  * each answer's `Date` header says what the box's clock read while the request
  * was out. Until an answer has been seen the offset is zero — the browser's
- * clock, as before.
+ * clock, as before. The polls are named (the desktop's notice poll, the
+ * ClawKeep status poll, the Memory Shard and Coding Agent status reads), not
+ * every fetch the page makes: those are answered fresh every time, where an
+ * answer the browser kept in its HTTP cache carries the Date it was first
+ * sent with.
  *
  * One answer does not give the offset, only a window it lies in: the header
  * is whole seconds, cut down, and stamped somewhere between the browser's
- * send and receive. The windows of successive answers are intersected, so the
- * reading only ever narrows and a clock that ticks by the second ("running
- * 1:23") never jumps back and forth between polls. An answer whose window
- * misses the one held means a clock stepped (the browser's or the box's) and
- * starts over from it. Of the window held, the offset is the value nearest
- * zero: clocks that agree to within what the answers can tell are left
- * exactly as they were, and two that do not are corrected by no more than the
- * answers prove.
+ * send and receive. The windows of successive answers are intersected, so
+ * while the two clocks hold steady the reading only narrows, and a clock that
+ * ticks by the second ("running 1:23") does not jump back and forth between
+ * polls. An answer whose window misses the one held means a clock moved (one
+ * was stepped, or they drifted apart past what is held) and starts over from
+ * it — at most once in a long while, by about a second for a drift. Of the
+ * window held, the offset is the value nearest zero: clocks that agree to
+ * within what the answers can tell are left exactly as they were, and two
+ * that do not are corrected by no more than the answers prove.
  *
  * Client-safe and dependency-free; on the server nothing is ever noted, so
  * `boxNowMs()` is `Date.now()`.
@@ -123,12 +128,15 @@ export function boxAge(thenMs: number, nowMs: number): { unit: BoxAgeUnit; n: nu
 }
 
 /** A box time as the date and time themselves ("3 Nov 2026, 16:51"), for one
- *  that has no age to give. `locale` undefined is the browser's own. */
+ *  that has no age to give. Without a `locale`, the one the page is drawn in
+ *  (`<html lang>`, kept in step with the UI's by `useSyncHtmlLang`), else the
+ *  browser's own. */
 export function formatBoxTime(ms: number, locale?: string): string {
   const at = new Date(ms);
   if (Number.isNaN(at.getTime())) return "—";
+  const lang = locale ?? (typeof document !== "undefined" ? document.documentElement.lang || undefined : undefined);
   try {
-    return at.toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
+    return at.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
   } catch {
     return at.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   }

@@ -666,7 +666,10 @@ export default function MemoryShardApp() {
 
   const loadState = useCallback(async (signal?: AbortSignal) => {
     try {
+      const sentAt = Date.now();
       const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store", signal });
+      // The panel paints its first "finished N ago" from this answer.
+      noteBoxClock(res, sentAt);
       if (!res.ok) throw new Error("status");
       const status = await res.json() as { enabled?: boolean; setupComplete?: boolean; planGate?: unknown };
       if (signal?.aborted) return;

@@ -6,7 +6,7 @@ import { _resetBoxClockForTests } from "@/lib/box-clock";
 
 /**
  * TASK-2138: "Last backup" is a time the box wrote, and it was held against
- * the browser's clock. A laptop 45 s behind the box called the backup that had
+ * the browser's clock. A laptop 5 min behind the box called the backup that had
  * just finished "in the future"; one 10 min ahead called a 3-minute-old backup
  * 13 minutes old. The window's own status poll carries the box's clock in its
  * `Date` header, and the label is held to that.
@@ -78,7 +78,9 @@ describe("ClawKeep's last backup, on the box's clock", () => {
   });
 
   it("calls a backup that just finished on a box ahead of the browser just now, not in the future", async () => {
-    boxLeadMs = 45_000;
+    // Past the two minutes a leftover skew is excused by: only the box's
+    // clock, learnt off the poll, makes this "just now".
+    boxLeadMs = 5 * MINUTE;
     const finished = Date.now() + boxLeadMs - 2_000;
     status = { ...BASE_STATUS, lastBackupAtMs: finished, lastHeartbeatAtMs: finished };
     await lastBackupValue();
