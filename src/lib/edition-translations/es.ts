@@ -1720,6 +1720,18 @@ export const es: Record<string, string> = {
   "localModels.chatBannerBody": "La primera respuesta puede tardar hasta un minuto mientras se carga el modelo local. Después es más rápido.",
   "localModels.chatBannerDismiss": "Ocultar este aviso",
   "localModels.chatLoading": "Cargando el modelo local…",
+  "localModels.chatCompacting": "Acortando la conversación para el modelo local…",
+  // A long conversation switched to Local AI (TASK-2127): the card and its notes.
+  "localModels.longChat.title": "Esta conversación es demasiado larga para el modelo local",
+  "localModels.longChat.body": "Tiene unos {tokens} tokens; el modelo local lee hasta {window}. Un chat nuevo responde en segundos. Acortar esta primero la resume, y eso tarda más.",
+  "localModels.longChat.pending": "Tu mensaje espera aquí y va al chat que elijas.",
+  "localModels.longChat.newChat": "Empezar un chat nuevo con la IA local",
+  "localModels.longChat.recommended": "Recomendado",
+  "localModels.longChat.shorten": "Acortar antes esta conversación",
+  "localModels.longChat.timeoutTitle": "Sigue acortando después de {seconds} segundos",
+  "localModels.longChat.timeoutBody": "El modelo local no pudo acortar esta conversación larga a tiempo, así que la respuesta se detuvo. Empieza un chat nuevo con la IA local para obtener una respuesta en segundos.",
+  "localModels.longChat.failed": "No se pudo acortar esta conversación. Un chat nuevo con la IA local responde en segundos.",
+  "localModels.longChat.shortened": "Conversación acortada para el modelo local.",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Usuarios",

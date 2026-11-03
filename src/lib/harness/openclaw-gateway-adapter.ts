@@ -3,6 +3,7 @@ import { chatFailureNote, type ChatFailureWords } from "@/lib/chat-error-text";
 import { userTabKeyFor } from "@/lib/chat-scope";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
 import { commandsFromOpenClawList, type SlashCommand } from "@/lib/chat-slash-commands";
+import { openclawSessionTokens, type ConversationSize } from "@/lib/chat-local-fit";
 import {
   isInternalRoutingMessage,
   isFailedImageGenerationNotice,
@@ -527,6 +528,50 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     // A read that started before this reset must not put those rows back.
     this.historyGeneration += 1;
     this.historyCommittedSeq = this.historyReadSeq;
+  }
+
+  /**
+   * The session row's own numbers (`sessions.describe`): the last prompt as
+   * measured and the core's pre-prompt estimate, whichever is larger. The
+   * limit is left to the caller, who knows the local window; the row's
+   * `contextTokens` is the budget of whatever model the session is on NOW, and
+   * right after a switch that can still be the cloud model's.
+   */
+  async conversationSize(sessionKey: string): Promise<ConversationSize | null> {
+    if (!sessionKey) return null;
+    try {
+      const res = await this.link.request("sessions.describe", { key: sessionKey }) as { session?: unknown } | null;
+      const tokens = openclawSessionTokens(res?.session ?? null);
+      return tokens === null ? null : { tokens };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `sessions.compact` without `maxLines`: the gateway summarizes the session
+   * with its configured compaction model — the cloud model while the primary is
+   * on the box (src/lib/local-compaction-model.ts). A refusal, or an answer that
+   * says nothing was compacted, rejects: the caller offers a new chat instead.
+   */
+  async compactConversation(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }> {
+    let res: { ok?: unknown; compacted?: unknown; result?: { tokensBefore?: unknown; tokensAfter?: unknown } } | null;
+    try {
+      res = await this.link.request("sessions.compact", { key: sessionKey }) as typeof res;
+    } catch (err) {
+      throw gatewayError(err);
+    }
+    if (!res || res.ok === false || res.compacted === false) {
+      throw new HarnessError("upstream", "The conversation was not shortened.");
+    }
+    // A history read cached before the summary would graft the old rows back.
+    if (sessionKey === this.link.sessionKey()) {
+      this.historyDelta = null;
+      this.historyGeneration += 1;
+      this.historyCommittedSeq = this.historyReadSeq;
+    }
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    return { tokensBefore: num(res.result?.tokensBefore), tokensAfter: num(res.result?.tokensAfter) };
   }
 
   /**

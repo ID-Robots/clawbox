@@ -1721,6 +1721,18 @@ export const sv: Record<string, string> = {
   "localModels.chatBannerBody": "Det första svaret kan ta upp till en minut medan den lokala modellen laddas. Sedan går det snabbare.",
   "localModels.chatBannerDismiss": "Dölj den här notisen",
   "localModels.chatLoading": "Laddar den lokala modellen…",
+  "localModels.chatCompacting": "Kortar samtalet för den lokala modellen…",
+  // A long conversation switched to Local AI (TASK-2127): the card and its notes.
+  "localModels.longChat.title": "Det här samtalet är för långt för den lokala modellen",
+  "localModels.longChat.body": "Det rymmer cirka {tokens} token; den lokala modellen läser upp till {window}. En ny chatt svarar på några sekunder. Att korta det här samtalet sammanfattar det först, och det tar längre tid.",
+  "localModels.longChat.pending": "Ditt meddelande väntar här och går till den chatt du väljer.",
+  "localModels.longChat.newChat": "Starta en ny chatt med lokal AI",
+  "localModels.longChat.recommended": "Rekommenderas",
+  "localModels.longChat.shorten": "Korta det här samtalet först",
+  "localModels.longChat.timeoutTitle": "Kortar fortfarande efter {seconds} sekunder",
+  "localModels.longChat.timeoutBody": "Den lokala modellen kunde inte korta det här långa samtalet i tid, så svaret stoppades. Starta en ny chatt med lokal AI för att få svar på några sekunder.",
+  "localModels.longChat.failed": "Det här samtalet kunde inte kortas. En ny chatt med lokal AI svarar på några sekunder.",
+  "localModels.longChat.shortened": "Samtalet kortades för den lokala modellen.",
 
   // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Användare",

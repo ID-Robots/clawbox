@@ -435,3 +435,48 @@ describe("POST /setup-api/local-ai/exclusive — OpenClaw's Tool Search follows 
     expect(vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0]).not.toContainEqual(TOOL_SEARCH_OFF);
   });
 });
+
+describe("POST /setup-api/local-ai/exclusive — no cloud summary in Local-only (TASK-2127)", () => {
+  const COMPACTION = "agents.defaults.compaction.model";
+  let POST: (request: Request) => Promise<Response>;
+  let store: Record<string, unknown>;
+  const toggle = (enabled: boolean) => POST(new Request("http://localhost/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }));
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    coreAtLeastMock.mockReset().mockResolvedValue(true);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+    store = { local_ai_model: "llamacpp/gemma4-e2b-it-q4_0" };
+    vi.mocked(get).mockImplementation(async (key: string) => store[key]);
+    vi.mocked(restartGateway).mockResolvedValue(undefined);
+    POST = (await import("@/app/setup-api/local-ai/exclusive/route")).POST;
+  });
+
+  it("takes ClawBox's cloud compaction model out and never writes one", async () => {
+    store = { ...store, local_compaction_model: "deepseek/deepseek-v4-flash" };
+    vi.mocked(readConfig).mockResolvedValue({
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0", fallbacks: ["deepseek/deepseek-v4-flash"] }, compaction: { model: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const response = await toggle(true);
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigUnset).toHaveBeenCalledWith(COMPACTION);
+    const written = vi.mocked(runOpenclawConfigSetBatch).mock.calls.flatMap((call) => call[0] as string[][]);
+    expect(written.some((op) => op[0] === COMPACTION)).toBe(false);
+  });
+
+  it("leaves an owner's own compaction model alone", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" }, compaction: { model: "anthropic/claude-haiku-4-5" } } },
+    } as never);
+    await toggle(true);
+    expect(runOpenclawConfigUnset).not.toHaveBeenCalledWith(COMPACTION);
+  });
+});

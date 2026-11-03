@@ -27,6 +27,7 @@ import {
 import { CONFIG_BUSY_ERROR_CODE, isConfigMutationConflict } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
+import { disarmLocalCompactionModel, isClawboxCompactionModel } from "@/lib/local-compaction-model";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { clawboxAiNonChatModelReason, isClawboxAiNonChatModelRef } from "@/lib/clawbox-ai-models";
 
@@ -447,6 +448,10 @@ export async function POST(request: Request) {
         ...(await localToolSearchArmOps(config, localModel)),
       ]);
       settlement = await settleConfigWrite({ before: config, after: await readConfig(), baseline, label: "local-only" });
+      // Local-only means nothing of this box's conversations goes to a cloud
+      // model — a summary included: ClawBox's cloud compaction model comes out
+      // (src/lib/local-compaction-model.ts). An owner's own value stays theirs.
+      if (await isClawboxCompactionModel(config)) await disarmLocalCompactionModel("local-only");
 
       // 2. Sweep every existing session's per-session override. Without
       //    this step the toggle only affects sessions born after the
