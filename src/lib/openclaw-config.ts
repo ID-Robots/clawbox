@@ -2333,7 +2333,9 @@ export interface OpenClawConfig {
       // `imageGenerationModel`; nothing aliases the two.
       imageModel?: ToolModelSlot;
       workspace?: string;
-      compaction?: { reserveTokensFloor?: number };
+      // `model`: OpenClaw 2026.10's summarization model, written while the
+      // primary is on the box (src/lib/local-compaction-model.ts).
+      compaction?: { reserveTokensFloor?: number; model?: string };
     };
   };
 }

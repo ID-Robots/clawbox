@@ -1,6 +1,7 @@
 import type { ChatMessage, ChatToolSummary } from "@/lib/chat-history-cache";
 import type { SlashCommand } from "@/lib/chat-slash-commands";
 import type { ChatFailureWords } from "@/lib/chat-error-text";
+import type { ConversationSize } from "@/lib/chat-local-fit";
 
 /**
  * The one contract the chat surface talks to.
@@ -312,6 +313,12 @@ export type TurnEvent =
    */
   | { kind: "status"; text: string }
   /**
+   * The harness is compacting the conversation — Hermes' "compacting" status —
+   * from `start` to `end` (TASK-2127). The surface says "Shortening the
+   * conversation…" while it lasts; a surface that ignores it loses nothing.
+   */
+  | { kind: "compaction"; phase: "start" | "end" }
+  /**
    * The agent has STOPPED and is waiting for the customer to answer.
    *
    * An event rather than a delta because it is not part of the answer: a delta
@@ -491,6 +498,26 @@ export interface HarnessAdapter {
    * conversation to a model leaves this out.
    */
   conversationModel?(sessionKey: string): ConversationModel | null;
+
+  /**
+   * How large the conversation on `sessionKey` is (TASK-2127): the tokens its
+   * next prompt carries as the harness last measured or estimated them, and,
+   * when the harness knows it, the count above which it would compact before a
+   * Local AI reply. Null when nothing can be said — no turn yet, a socket that
+   * is down. Never rejects: the answer only decides whether the chat offers a
+   * new chat before sending. A harness that cannot tell leaves this out, and
+   * its chat sends as it always did.
+   */
+  conversationSize?(sessionKey: string): Promise<ConversationSize | null>;
+
+  /**
+   * Shorten the conversation on `sessionKey` now, with the harness's own
+   * compaction (OpenClaw `sessions.compact`, Hermes `/compress`) — the "Shorten
+   * this conversation first" of a long chat on Local AI. Resolves with the
+   * token counts the harness reported, when it did; rejects when nothing was
+   * shortened.
+   */
+  compactConversation?(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }>;
 
   /**
    * A fresh session key beside `mainSessionKey`, for a second conversation

@@ -796,6 +796,9 @@ async function runStreamedTurn(
           case "status":
             send("status", { text: activity.text });
             break;
+          case "compaction":
+            send("compaction", { phase: activity.phase });
+            break;
           case "clarify":
             send("clarify", {
               requestId: activity.requestId,

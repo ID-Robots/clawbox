@@ -9,6 +9,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 import { CLAWBOX_AI_DEFAULT_TIER, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
+import { readChatModelStateUnfiltered, POST as setChatModel } from "@/app/setup-api/chat/model/route";
 
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 
@@ -30,6 +31,32 @@ async function clawboxAiFallback(config: Awaited<ReturnType<typeof readOpenClawC
   if (typeof apiKey !== "string" || !apiKey.startsWith("claw_")) return null;
   if (parseDisabledProviders(await get(DISABLED_PROVIDERS_KEY)).has("clawai")) return null;
   return CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
+}
+
+/**
+ * Move a local PRIMARY back to the cloud model the box was on — the chat
+ * picker's remembered primary row — through chat/model's own POST, the
+ * delegation providers/default makes, so the session sweep, Tool Search and
+ * the compaction model follow the primary as on any pick. True when it moved
+ * (a 502 carrying a warning is a write that landed while the gateway settles).
+ */
+async function movePrimaryOffLocal(): Promise<boolean> {
+  try {
+    const target = (await readChatModelStateUnfiltered()).primary?.model;
+    if (typeof target !== "string" || !target || isLocalModelRef(target)) return false;
+    const res = await setChatModel(new Request("http://localhost/setup-api/chat/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // `automatic`: the owner turned Local AI off, they did not pick this model.
+      body: JSON.stringify({ model: target, automatic: true }),
+    }));
+    if (res.ok) return true;
+    const data = (await res.json().catch(() => ({}))) as { warning?: unknown };
+    return res.status === 502 && typeof data.warning === "string" && data.warning !== "";
+  } catch (err) {
+    console.error("[local-ai] Moving the chat off the local model failed:", err);
+    return false;
+  }
 }
 
 export async function POST(request: Request) {
@@ -124,6 +151,18 @@ export async function POST(request: Request) {
         // one as primary with no local fallback is never told about an entry
         // that was never there.
         warning = "Local AI is stopped, but clearing OpenClaw's fallback model list failed. Turn it off again to finish.";
+      }
+    }
+
+    // A local PRIMARY goes back to the cloud model (TASK-2127). Stopping the
+    // server and clearing the flags is not enough while
+    // `agents.defaults.model.primary` still names it: the Local AI proxy wakes
+    // llama-server on the next turn, and a board measured the chat going on
+    // answering on Gemma after "Turn off Local AI".
+    if (openclawPresent && isLocalModelRef(config.agents?.defaults?.model?.primary)) {
+      if (!(await movePrimaryOffLocal())) {
+        const stuck = "Local AI is stopped, but the chat could not be moved back to the cloud model. Pick one in the chat header.";
+        warning = warning ? `${warning} ${stuck}` : stuck;
       }
     }
 

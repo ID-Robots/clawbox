@@ -475,6 +475,29 @@ export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecor
   });
 }
 
+/**
+ * How much the conversation the agent will read back carries, in UTF-8 bytes:
+ * its LIVE rows' text and tool calls. `active = 0` rows are what an in-place
+ * compaction soft-archived (Hermes' `compression.in_place`), and the model no
+ * longer sees them. Bytes rather than characters, because a token is closer to
+ * a byte than to a character for every script the owner may write in (TASK-2127:
+ * the long-chat check for Local AI). Null when the store could not be read.
+ */
+export async function readHermesSessionBytes(sessionId: string): Promise<number | null> {
+  if (!sessionId) return null;
+  return withStateDb<number | null>("the conversation's size", null, (db) => {
+    const [row] = db
+      .prepare(
+        "SELECT COALESCE(SUM(LENGTH(CAST(COALESCE(content, '') AS BLOB))"
+        + " + LENGTH(CAST(COALESCE(tool_calls, '') AS BLOB))), 0) AS bytes"
+        + " FROM messages WHERE session_id = ? AND COALESCE(active, 1) = 1",
+      )
+      .all(sessionId) as Array<{ bytes?: unknown }>;
+    const bytes = Number(row?.bytes);
+    return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+  });
+}
+
 /** The four columns both billing reads select, so their marks are comparable. */
 const USAGE_COLUMNS = "model, billing_provider, api_call_count, last_seen";
 

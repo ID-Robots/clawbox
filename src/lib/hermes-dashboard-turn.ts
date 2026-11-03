@@ -150,6 +150,14 @@ const EVENT = {
    * hour-long window this frame's absence justified.
    */
   clarifyExpire: "clarify.expire",
+  /**
+   * The agent's transient status line. Hermes re-tags its compaction progress
+   * (auto, preflight or `/compress`) as `{ kind: "compacting", text }` for the
+   * whole pause (tui_gateway `_status_update`) so a driver can show it is
+   * summarizing rather than hung. Read for that kind alone (TASK-2127): the
+   * chat says "Shortening the conversation…" while it lasts.
+   */
+  statusUpdate: "status.update",
   error: "error",
 } as const;
 
@@ -292,6 +300,12 @@ export type DashboardActivity =
    * stay true: liveness here, monologue nowhere near here.
    */
   | { kind: "status"; text: string }
+  /**
+   * Hermes is compacting the conversation (`status.update` kind "compacting")
+   * — `start` on the first such frame, `end` on the first frame of the turn
+   * that is not one (TASK-2127).
+   */
+  | { kind: "compaction"; phase: "start" | "end" }
   /**
    * The agent has stopped and is asking the customer something.
    *
@@ -1367,6 +1381,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
           if (!forwarded) submitPrompt();
           let answer = "";
           let reasoning = "";
+          let compacting = false;
           let truncated = false;
           for (;;) {
             // The one place the two windows are chosen between. While a person
@@ -1438,6 +1453,11 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
             // window back the moment the agent resumes is what keeps a turn
             // that wedges AFTER a clarify from holding the response for an hour.
             if (pendingClarifyId && TURN_PROGRESS.has(type)) pendingClarifyId = "";
+            // The turn moving on is the end of a compaction it was in.
+            if (compacting && TURN_PROGRESS.has(type)) {
+              compacting = false;
+              if (onActivity) onActivity({ kind: "compaction", phase: "end" });
+            }
             switch (type) {
               case EVENT.messageDelta: {
                 const chunk = payloadText(frame);
@@ -1631,6 +1651,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 const payload = (frame.params?.payload || {}) as Record<string, unknown>;
                 const message = typeof payload.message === "string" ? payload.message : "";
                 throw new Error(message || "the agent reported an error");
+              }
+              case EVENT.statusUpdate: {
+                const payload = (frame.params?.payload || {}) as Record<string, unknown>;
+                const now = payload.kind === "compacting";
+                if (now !== compacting && onActivity) onActivity({ kind: "compaction", phase: now ? "start" : "end" });
+                compacting = now;
+                break;
               }
               default:
                 // Every other frame is display detail this route does not
