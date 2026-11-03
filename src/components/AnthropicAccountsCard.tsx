@@ -397,9 +397,10 @@ export default function AnthropicAccountsCard() {
     const pct = (value: number) => String(Math.round(value));
     if (usage?.sessionPercent != null) chips.push({ key: "session", text: t("settings.anthropicAccounts.usageSession", { percent: pct(usage.sessionPercent) }), amber: usage.sessionPercent >= 90 });
     if (usage?.weeklyPercent != null) chips.push({ key: "week", text: t("settings.anthropicAccounts.usageWeek", { percent: pct(usage.weeklyPercent) }), amber: usage.weeklyPercent >= 90 });
-    for (const week of usage?.models ?? []) {
+    // Keyed by position too: Anthropic may send two weeks under one name.
+    for (const [index, week] of (usage?.models ?? []).entries()) {
       if (week.family && waiting.some((l) => l.family === week.family)) continue;
-      chips.push({ key: `model-${week.name}`, text: t("settings.anthropicAccounts.usageModelWeek", { model: week.name, percent: pct(week.percent) }), amber: week.spent || week.percent >= 90 });
+      chips.push({ key: `model-${index}-${week.name}`, text: t("settings.anthropicAccounts.usageModelWeek", { model: week.name, percent: pct(week.percent) }), amber: week.spent || week.percent >= 90 });
     }
     for (const limit of waiting) {
       chips.push({ key: `wait-${limit.family}`, text: t("settings.anthropicAccounts.modelLimited", { model: limit.name, time: formatReset(limit.until, locale, now) }), amber: true });

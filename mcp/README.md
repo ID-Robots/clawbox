@@ -1364,7 +1364,7 @@ providers → Anthropic accounts: every Anthropic account the owner connected fo
 coding runs — Claude Pro/Max sign-ins, API keys, this box's own `claude`
 sign-in — in the order the box uses them, each with its label, kind, whether it
 can answer now or is at its usage limit and when it is back, and which one a run
-starting now would use; then `can_answer` ("1 of 2"), `all_limited` and
+starting now would use; with them `can_answer` ("1 of 2"), `all_limited` and
 `next_reset`. When every account is limited it adds `advice` — wait until the
 reset; runs that were cut off resume by themselves then — because that is the
 moment a queue must stop spending attempts: `coding_agent_run` refuses a run

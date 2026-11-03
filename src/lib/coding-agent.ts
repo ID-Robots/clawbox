@@ -11255,7 +11255,7 @@ async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promi
       found.until = at(near.window.resetsAt, found.until);
     }
   } else if (found.limit.resetsAt === null) {
-    // The words named the model; Anthropic gives its week's reset (of two, the one that frees the model).
+    // The words named the model; Anthropic gives its week's reset (none of its weeks is spent here: the fullest).
     const week = modelWeekOf(reading, found.limit.model);
     if (week) {
       found.weekName = week.name;
