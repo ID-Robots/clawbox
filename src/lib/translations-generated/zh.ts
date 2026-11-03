@@ -3652,6 +3652,7 @@ const table: Record<string, string> = {
   "settings.providers.changeFailed": "无法更改提供商。",
   "settings.providers.changeModel": "更换模型",
   "settings.providers.connected": "已连接",
+  "settings.providers.connecting": "正在连接…",
   "settings.providers.default": "默认",
   "settings.providers.defaultFailed": "无法更改默认提供商：{message}",
   "settings.providers.degraded": "无法连接到代理 — 部分状态可能已过期",

@@ -67,3 +67,38 @@ describe("the ClawBox AI device login relays what the save could not do", () => 
     expect(await completionFromPoll({ status: "complete", warning: "   " })).toEqual([undefined]);
   });
 });
+
+describe("the ClawBox AI device login names the box's sign-in task (TASK-2148)", () => {
+  /** Run poll ticks against a `/clawai/poll` that answers `configuring`, and what the host was told. */
+  async function configuringFromPoll(pollBody: unknown): Promise<unknown[][]> {
+    const onConfiguring = vi.fn();
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/clawai/start")) {
+        return jsonResponse({ user_code: "ABCD-1234", verification_url: "https://example.test", interval: 1 });
+      }
+      return jsonResponse(pollBody);
+    }) as unknown as typeof fetch;
+
+    const { result, unmount } = renderHook(() => useClawaiDeviceLogin({
+      getTier: () => "flash",
+      onConfiguring,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    await result.current.start();
+    await waitFor(() => expect(onConfiguring).toHaveBeenCalled(), { timeout: 5000 });
+    unmount();
+    return onConfiguring.mock.calls;
+  }
+
+  it("hands the task the box finishes the sign-in in to the host, once", async () => {
+    // The host follows that task rather than taking it up a second time.
+    expect(await configuringFromPoll({ status: "configuring", taskId: "task-9" })).toEqual([["task-9"]]);
+  });
+
+  it("says configuring with no task from a box that named none", async () => {
+    expect(await configuringFromPoll({ status: "configuring" })).toEqual([[undefined]]);
+  });
+});

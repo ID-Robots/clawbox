@@ -50,6 +50,7 @@ export const zh: Record<string, string> = {
   "settings.providers.signOut": "退出 {name}",
   "settings.providers.signOutConfirm": "退出 — 再点一次",
   "settings.providers.signingOut": "正在退出…",
+  "settings.providers.connecting": "正在连接…",
   "settings.providers.signOutRestarting": "助手正在重启以完成退出 — 大约一分钟后恢复。",
   "settings.providers.signOutFailed": "无法退出 {name}。",
   "settings.providers.signOutTimedOut": "这台 ClawBox 未能及时响应。列表已重新读取 — 如果 {name} 不再列出，说明已成功退出。",

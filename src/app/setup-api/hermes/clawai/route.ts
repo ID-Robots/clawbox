@@ -95,9 +95,24 @@ export async function GET() {
 // Configure Hermes to use ClawBox AI from the stored device token. Optional
 // { tier } override — accepts the UI's three-tier vocabulary ("free"/"flash"/
 // "pro") as well as the device's two ("flash"/"pro").
-export async function POST(request: Request) {
+export async function POST(request: Request): Promise<Response> {
   const blocked = await requireHermes();
   if (blocked) return blocked;
+
+  // Settings' ask (TASK-2148): the link as a background task of the box
+  // (src/lib/provider-auth-tasks.ts), answered 202 at once and followed by the
+  // panel and the desktop's corner card; the task ends with this route's own
+  // answer below.
+  const tasks = await import("@/lib/provider-auth-tasks");
+  const background = await tasks.backgroundAskOf(request);
+  if (background) {
+    return tasks.providerAuthStartResponse(tasks.startProviderSignInTask({
+      provider: "clawai",
+      label: "ClawBox AI",
+      ask: background,
+      save: async () => tasks.saveOutcomeOf(await POST(tasks.saveRequest("/setup-api/hermes/clawai", background))),
+    }));
+  }
 
   let tier: ClawboxAiTier = (await readStoredTier()) ?? "flash";
   let body: unknown = null;

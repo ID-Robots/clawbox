@@ -24,8 +24,11 @@ export function notifyBackgroundTaskStarted(taskId?: string): void {
   window.dispatchEvent(new CustomEvent(BACKGROUND_TASK_EVENT, { detail: { taskId: taskId ?? null } }));
 }
 
-export async function fetchBackgroundTasks(filter: { kind?: string } = {}): Promise<BackgroundTaskView[] | null> {
-  const query = filter.kind ? `?kind=${encodeURIComponent(filter.kind)}` : "";
+export async function fetchBackgroundTasks(filter: { kind?: string; group?: string } = {}): Promise<BackgroundTaskView[] | null> {
+  const params = new URLSearchParams();
+  if (filter.kind) params.set("kind", filter.kind);
+  if (filter.group) params.set("group", filter.group);
+  const query = params.toString() ? `?${params.toString()}` : "";
   try {
     const sentAt = Date.now();
     const res = await fetch(`${BACKGROUND_TASKS_URL}${query}`, { cache: "no-store" });
@@ -158,6 +161,42 @@ export async function fetchBackgroundTask(id: string): Promise<BackgroundTaskVie
     return body.task && typeof body.task === "object" ? (body.task as BackgroundTaskView) : null;
   } catch {
     return null;
+  }
+}
+
+/** How often {@link waitForBackgroundTaskEnd} reads the task again. */
+const FOLLOW_POLL_MS = 1_500;
+
+/**
+ * Read a task again until it has ended, and answer it as it ended — or null
+ * when the box answers that it does not know the task (404), or once
+ * `signal` aborts. A read that fails (the web server restarting, a dropped
+ * tunnel) is tried again: the work is the box's and goes on regardless.
+ * `onUpdate` hears every read, the last one included.
+ */
+export async function waitForBackgroundTaskEnd(
+  id: string,
+  options: { signal?: AbortSignal; intervalMs?: number; onUpdate?: (task: BackgroundTaskView) => void } = {},
+): Promise<BackgroundTaskView | null> {
+  const { signal, onUpdate } = options;
+  const interval = options.intervalMs ?? FOLLOW_POLL_MS;
+  for (;;) {
+    if (signal?.aborted) return null;
+    try {
+      const res = await fetch(`${BACKGROUND_TASKS_URL}?id=${encodeURIComponent(id)}`, { cache: "no-store", signal });
+      if (res.status === 404) return null;
+      if (res.ok) {
+        const body = (await res.json()) as { task?: unknown };
+        const task = body.task && typeof body.task === "object" ? (body.task as BackgroundTaskView) : null;
+        if (task) {
+          onUpdate?.(task);
+          if (task.state !== "running") return task;
+        }
+      }
+    } catch {
+      // Not answered: ask again below.
+    }
+    await pause(interval, signal);
   }
 }
 

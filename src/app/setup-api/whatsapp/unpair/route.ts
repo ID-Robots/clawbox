@@ -1,3 +1,5 @@
+import { CHANNEL_SETUP_GROUP, CHANNEL_SETUP_KIND } from "@/lib/background-task-kinds";
+import { routeAsSettingsJob } from "@/lib/settings-jobs";
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { whatsappSessionDirs } from "@/lib/hermes-whatsapp";
@@ -25,7 +27,28 @@ export const dynamic = "force-dynamic";
  * the phone stays until the owner removes it in WhatsApp → Linked Devices,
  * which is the honest thing to tell them rather than implying a remote revoke.
  */
-export async function POST() {
+export async function POST(request: Request) {
+  // `?background=1` (Settings, TASK-2148): the same unlink as a job of the box
+  // (src/lib/settings-jobs.ts).
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/whatsapp/unpair",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: () => ({
+      subject: "whatsapp",
+      action: "disconnect",
+      label: "WhatsApp",
+      title: "Unlinking WhatsApp",
+      status: "Unlinking the phone and restarting the assistant…",
+      done: "WhatsApp is unlinked.",
+    }),
+    handler: unlinkWhatsapp,
+  });
+  return job ?? unlinkWhatsapp();
+}
+
+async function unlinkWhatsapp(): Promise<Response> {
   try {
     const harness = await getActiveHarness();
 

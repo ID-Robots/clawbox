@@ -3652,6 +3652,7 @@ const table: Record<string, string> = {
   "settings.providers.changeFailed": "Det gick inte att ändra leverantören.",
   "settings.providers.changeModel": "Byt modell",
   "settings.providers.connected": "Ansluten",
+  "settings.providers.connecting": "Ansluter…",
   "settings.providers.default": "Standard",
   "settings.providers.defaultFailed": "Det gick inte att byta standard: {message}",
   "settings.providers.degraded": "Kunde inte nå agenten – vissa statusar kan vara inaktuella",

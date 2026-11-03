@@ -25,6 +25,19 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(async (values: Record<string, unknown>) => {
     for (const [key, value] of Object.entries(values)) store[key] = value;
   }),
+  // Where Settings' background link (TASK-2148) keeps its task record.
+  resolveConfigRoot: () => process.env.CLAWBOX_ROOT || "/tmp",
+}));
+// The background link reads the row back once it is done.
+vi.mock("@/lib/provider-status", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/provider-status")>()),
+  readProviderStatus: vi.fn(async () => ({
+    harness: "hermes",
+    providers: [{ id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, enabled: true, section: "ai" }],
+    defaultProvider: "clawai",
+    unrunnable: [],
+    degraded: false,
+  })),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 // Key-aware: the GET now answers with the harness's OWN `model.default` while
@@ -146,6 +159,21 @@ beforeEach(() => {
 });
 
 describe("POST /setup-api/hermes/clawai", () => {
+  it("links as a background task of the box when Settings asks (TASK-2148): 202 at once, the same link at its end", async () => {
+    const { getBackgroundTask, resetBackgroundTasksForTests } = await import("@/lib/background-tasks");
+    resetBackgroundTasksForTests();
+    const response = await POST(post({ token: PASTED, tier: "flash", background: true }));
+    expect(response.status).toBe(202);
+    const { taskId, task } = await response.json();
+    expect(task).toMatchObject({ kind: "provider-sign-in", meta: { subject: "clawai", action: "sign-in", label: "ClawBox AI" } });
+    await vi.waitFor(() => expect(getBackgroundTask(taskId)?.state).toBe("succeeded"));
+    expect(getBackgroundTask(taskId)?.result).toMatchObject({ ok: true, verified: true, status: "Connected to ClawBox AI." });
+    // The same link: the pasted token is the box's, and the tools heard it.
+    expect(store.clawai_token).toBe(PASTED);
+    expect(reloadCount()).toBe(1);
+    resetBackgroundTasksForTests();
+  });
+
   it("re-advertises the coding-agent tools when a pasted token is what connected the box", async () => {
     const response = await POST(post({ token: PASTED, tier: "flash" }));
     expect(response.status).toBe(200);

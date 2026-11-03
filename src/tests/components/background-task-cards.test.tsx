@@ -20,6 +20,7 @@ import {
   type BackgroundTaskView,
 } from "@/lib/background-task-client";
 import { _resetBoxClockForTests } from "@/lib/box-clock";
+import { PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
 
 function task(over: Partial<BackgroundTaskView> = {}): BackgroundTaskView {
   return {
@@ -102,6 +103,100 @@ describe("BackgroundTaskCards", () => {
   it("reads a success's own closing line", () => {
     renderCards([task({ state: "succeeded", finishedAt: 5_000, result: { status: "Speech on this box is installed." } })]);
     expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Speech on this box is installed.");
+  });
+});
+
+// A provider sign-in or sign-out (TASK-2148): the same card as the installs,
+// with a turning ring for a change that measures nothing it could fill a bar
+// with, then its ending — the error said in full when it failed.
+describe("BackgroundTaskCards — a provider sign-in or sign-out", () => {
+  const providerTask = (over: Partial<BackgroundTaskView> = {}) => task({
+    id: "p1",
+    kind: "provider-sign-in",
+    group: "provider-auth",
+    title: "Connecting OpenAI",
+    meta: { subject: "openai", action: "sign-in", label: "OpenAI" },
+    steps: [
+      { id: "save", label: "Save the sign-in on the box", state: "done", weight: 3 },
+      { id: "restart", label: "Restart the assistant", state: "running", weight: 2 },
+      { id: "verify", label: "Check the connection", state: "pending", weight: 1 },
+    ],
+    status: "Restarting the assistant to use the new sign-in…",
+    percent: 50,
+    etaSeconds: null,
+    ...over,
+  });
+
+  it("turns a ring while it runs, with its current step", async () => {
+    renderCards([providerTask()]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-kind", "provider-sign-in");
+    expect(card).toHaveTextContent("Connecting OpenAI");
+    const ring = screen.getByTestId("background-task-spinner");
+    expect(ring).toHaveTextContent("progress_activity");
+    expect(ring).toHaveClass("motion-safe:animate-spin");
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Restarting the assistant to use the new sign-in…");
+    expect(screen.getByTestId("background-task-steps")).toHaveTextContent("Restart the assistant");
+    // Words from the English table, a chunk of its own.
+    await waitFor(() => expect(screen.getByTestId("background-task-percent")).toHaveTextContent("Step 2 of 3"));
+    expect(screen.queryByTestId("background-task-dismiss")).toBeNull();
+  });
+
+  it("says done in the box's own words, and a failure with its error", () => {
+    renderCards([providerTask({ state: "succeeded", result: { status: "Connected to OpenAI." }, finishedAt: Date.now() })]);
+    expect(screen.queryByTestId("background-task-spinner")).toBeNull();
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Connected to OpenAI.");
+    cleanup();
+    renderCards([providerTask({ kind: "provider-sign-out", title: "Signing out of OpenAI", state: "failed", error: "OpenAI is the default provider.", finishedAt: Date.now() })]);
+    expect(screen.getByTestId("background-task-card")).toHaveAttribute("data-task-state", "failed");
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("OpenAI is the default provider.");
+    expect(screen.getByTestId("background-task-dismiss")).toBeInTheDocument();
+  });
+
+  it("keeps the install cards' own mark", () => {
+    renderCards([task()]);
+    expect(screen.queryByTestId("background-task-spinner")).toBeNull();
+  });
+
+  it("tells them too about a provider change that ran and ended between two of its reads", async () => {
+    const done = providerTask({ state: "succeeded", finishedAt: Date.now() });
+    const answers = [[], [done]];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ tasks: answers.shift() ?? [done] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      renderHook(() => useBackgroundTasks(true));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+      // Seen ended once is no news the next time.
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+      expect(changed).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    }
+  });
+
+  it("tells every provider surface on the desktop when a provider change it saw running has ended", async () => {
+    const running = providerTask();
+    const answers = [[running], [running], [{ ...running, state: "succeeded", finishedAt: Date.now() }]];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ tasks: answers.shift() ?? [] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      renderHook(() => useBackgroundTasks(true));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      expect(changed).not.toHaveBeenCalled();
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    } finally {
+      window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    }
   });
 });
 

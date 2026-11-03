@@ -54,6 +54,9 @@ vi.mock("@/lib/config-store", () => ({
   // this file goes on passing over a gate that never ran.
   get: vi.fn(async () => undefined),
   set: vi.fn(async () => {}),
+  // Where Settings' background save keeps its task record (TASK-2148): the
+  // test root the vitest config points CLAWBOX_ROOT at.
+  resolveConfigRoot: () => process.env.CLAWBOX_ROOT || "/tmp",
 }));
 
 vi.mock("@/lib/clawkeep", () => ({
@@ -141,6 +144,18 @@ vi.mock("@/lib/openclaw-api-key-paste", () => ({ apiKeyPasteChangesNothing: vi.f
 // classification real, gateway I/O mocked — see the helper.
 vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
   (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
+// Settings' background save (TASK-2148) reads the provider's row back once it
+// is done; the route itself uses only this module's pure helpers.
+vi.mock("@/lib/provider-status", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/provider-status")>()),
+  readProviderStatus: vi.fn(async () => ({
+    harness: "openclaw",
+    providers: [{ id: "anthropic", label: "Anthropic", state: "connected", isDefault: false, enabled: true, section: "ai" }],
+    defaultProvider: null,
+    unrunnable: [],
+    degraded: false,
+  })),
+}));
 vi.mock("@/lib/openclaw-config", async () => ({
   ...(await import("./config-write-passthrough")).configWritePassthrough,
   // Spies over the passthrough, for "one openclaw.json write per save" below:
@@ -499,6 +514,86 @@ describe("POST /setup-api/ai-models/configure", () => {
         ai_model_provider: "anthropic",
       })
     );
+  });
+
+  // Settings asks for its save as a background task of the box (TASK-2148):
+  // the same save, answered 202 at once, its ending the task's.
+  describe("background: true", () => {
+    async function settled(taskId: string) {
+      const { getBackgroundTask } = await import("@/lib/background-tasks");
+      await vi.waitFor(() => expect(getBackgroundTask(taskId)?.state).not.toBe("running"));
+      return getBackgroundTask(taskId)!;
+    }
+
+    beforeEach(async () => {
+      (await import("@/lib/background-tasks")).resetBackgroundTasksForTests();
+    });
+
+    it("runs the save as the box's provider sign-in task: 202 at once, the route's own answer at its end", async () => {
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }));
+      expect(res.status).toBe(202);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        started: true,
+        task: { kind: "provider-sign-in", group: "provider-auth", meta: { subject: "anthropic", action: "sign-in" } },
+      });
+      const task = await settled(body.taskId);
+      expect(task.state).toBe("succeeded");
+      expect(task.result).toMatchObject({ success: true, gatewayRestarting: false, verified: true });
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ ai_model_configured: true, ai_model_provider: "anthropic" }));
+    });
+
+    it("ends the task failed with the route's own sentence and status when the save is refused", async () => {
+      const res = await configurePost(jsonRequest({ provider: "unknown-provider", apiKey: "test", background: true }));
+      expect(res.status).toBe(202);
+      const task = await settled((await res.json()).taskId);
+      expect(task.state).toBe("failed");
+      expect(task.error).toContain("Unknown provider");
+      expect(task.result).toMatchObject({ httpStatus: 400 });
+    });
+
+    it("answers a second save of the same provider with the task already running", async () => {
+      let release!: () => void;
+      mockSetMany.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+      const first = await (await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }))).json();
+      const again = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }));
+      expect(again.status).toBe(202);
+      expect(await again.json()).toMatchObject({ taskId: first.taskId, started: false });
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      release();
+      expect((await settled(first.taskId)).state).toBe("succeeded");
+    });
+
+    it("refuses a different save of the SAME provider while one runs, rather than reporting the first as its own", async () => {
+      let release!: () => void;
+      mockSetMany.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+      const first = await (await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }))).json();
+      const other = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-another-key", background: true }));
+      expect(other.status).toBe(409);
+      expect(await other.json()).toMatchObject({ code: "provider_change_running", taskId: first.taskId });
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      release();
+      await settled(first.taskId);
+    });
+
+    it("refuses a save of another provider while one runs", async () => {
+      let release!: () => void;
+      mockSetMany.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+      const first = await (await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }))).json();
+      const other = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key", background: true }));
+      expect(other.status).toBe(409);
+      expect(await other.json()).toMatchObject({ code: "provider_change_running", taskId: first.taskId });
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      release();
+      await settled(first.taskId);
+    });
+
+    it("saves an on-device model in the request, as before — it is no sign-in", async () => {
+      const res = await configurePost(jsonRequest({ provider: "ollama", apiKey: "llama3.2:3b", authMode: "local", background: true }));
+      expect(res.status).not.toBe(202);
+      const { listBackgroundTasks } = await import("@/lib/background-tasks");
+      expect(listBackgroundTasks({ group: "provider-auth" }).filter((task) => task.meta?.subject === "ollama")).toEqual([]);
+    });
   });
 
   // The one thing this file DOES assert about the out-of-band refresh (see the

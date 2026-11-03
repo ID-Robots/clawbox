@@ -169,6 +169,9 @@ vi.mock("@/lib/config-store", () => ({
   set: store.set,
   getKnown: store.getKnown,
   setMany: store.setMany,
+  // Where the box's background tasks are recorded (a device login's sign-in
+  // task, TASK-2148): the test root.
+  resolveConfigRoot: () => process.env.CLAWBOX_ROOT || "/tmp",
 }));
 const credentials = vi.hoisted(() => ({
   forgetClawaiCredentialRefusal: vi.fn(async () => undefined),
@@ -236,7 +239,8 @@ vi.mock("@/lib/hermes-bounce-claim", () => bounce);
 const messaging = vi.hoisted(() => ({ restartHermesGatewayIfRunning: vi.fn(async () => null) }));
 vi.mock("@/lib/clawbox-mcp-registration", () => messaging);
 
-import { signOutOfProvider } from "@/lib/provider-sign-out";
+import { resolveSignOutTarget, signOutOfProvider, signOutRefusal } from "@/lib/provider-sign-out";
+import { resetBackgroundTasksForTests, startBackgroundTask } from "@/lib/background-tasks";
 import { withProviderChangeLock } from "@/lib/provider-change-lock";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -529,6 +533,44 @@ describe("signOutOfProvider — ClawBox AI on OpenClaw (#1369's sign-out, genera
     expect(cli.spawnOpenclawCli).not.toHaveBeenCalled();
     expect(store.setMany).not.toHaveBeenCalled();
     expect(box.store.clawai_token).toBe(TOKEN);
+  });
+
+  it("goes ahead over a session whose sign-in task has ended — a web server that restarted under it never wrote the session", async () => {
+    resetBackgroundTasksForTests();
+    // A recent `configuring` naming a task the box no longer runs.
+    box.session = { status: "configuring", createdAt: Date.now(), configuringStartedAt: Date.now(), taskId: "gone" } as typeof box.session;
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: true, changed: true });
+  });
+
+  it("still refuses while the session's sign-in task runs", async () => {
+    resetBackgroundTasksForTests();
+    let release!: () => void;
+    const running = startBackgroundTask({
+      kind: "provider-sign-in",
+      group: "provider-auth",
+      title: "Connecting ClawBox AI",
+      meta: { subject: "clawai", action: "sign-in", label: "ClawBox AI" },
+      run: () => new Promise((resolve) => { release = () => resolve({}); }),
+    });
+    if (!running.started) throw new Error("not started");
+    box.session = { status: "configuring", createdAt: Date.now(), configuringStartedAt: Date.now(), taskId: running.task.id } as typeof box.session;
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "sign_in_in_progress" });
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release();
+    resetBackgroundTasksForTests();
+  });
+
+  it("says why it would refuse, before the route starts a task: the row, then the refusal", async () => {
+    const target = await resolveSignOutTarget("clawai");
+    expect(target).toMatchObject({ ok: true, harness: "openclaw", row: "clawai", label: "ClawBox AI" });
+    if (!target.ok) throw new Error("no target");
+    expect(await signOutRefusal(target)).toBeNull();
+    box.session = { status: "configuring", createdAt: Date.now() };
+    expect(await signOutRefusal(target)).toMatchObject({ kind: "sign_in_in_progress" });
+    expect(await resolveSignOutTarget("llamacpp")).toMatchObject({ ok: false, kind: "unknown_provider" });
+    // Nothing was touched by asking.
+    expect(cli.spawnOpenclawCli).not.toHaveBeenCalled();
+    expect(store.setMany).not.toHaveBeenCalled();
   });
 
   it("goes ahead over a configure the poll has already given up on", async () => {

@@ -34,6 +34,7 @@ export const es: Record<string, string> = {
   "settings.providers.signOut": "Cerrar sesión en {name}",
   "settings.providers.signOutConfirm": "Cerrar sesión — toca de nuevo",
   "settings.providers.signingOut": "Cerrando sesión…",
+  "settings.providers.connecting": "Conectando…",
   "settings.providers.signOutRestarting": "El asistente se está reiniciando para terminar: vuelve en un minuto aproximadamente.",
   "settings.providers.signOutFailed": "No se pudo cerrar la sesión en {name}.",
   "settings.providers.signOutTimedOut": "La caja tardó demasiado en responder. Se ha vuelto a leer la lista: si {name} ya no aparece, la sesión se cerró.",

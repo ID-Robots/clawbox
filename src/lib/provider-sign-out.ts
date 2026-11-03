@@ -59,7 +59,7 @@ import { CLAWAI_PLAN_TIER_KEY } from "@/lib/clawai-plan-tier";
 import { clearClawAiSession, isClawAiSessionConfiguring, readClawAiSession } from "@/lib/clawai-connect";
 import { get as getConfigValue, getKnown, setMany } from "@/lib/config-store";
 import { EXPLICIT_MODEL_PICKS_KEY, explicitPicksFrom, forgetProviderPicks } from "@/lib/explicit-model-pick";
-import { getActiveHarnessSource, type Harness } from "@/lib/harness";
+import { getActiveHarnessSource, type Edition, type Harness } from "@/lib/harness";
 import { forgetClawaiCredentialRefusal, hasClawaiToken, resolveClawaiToken } from "@/lib/harness/credentials";
 import { resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { HERMES_AUTO_PROVIDER } from "@/lib/hermes-providers";
@@ -200,7 +200,14 @@ async function refusalBeforeSignOut(harness: Harness, row: string, label: string
     // A device login that is writing its token right now would land it after
     // this sign-out, and the box would be signed in to that account after all.
     const session = await readClawAiSession().catch(() => null);
-    if (session && isClawAiSessionConfiguring(session)) {
+    // A session whose sign-in task has ended is not writing anything, whatever
+    // the file still says (a web server that restarted under the task).
+    const taskEnded = session?.taskId
+      ? await import("@/lib/background-tasks")
+        .then(({ getBackgroundTask }) => getBackgroundTask(session.taskId as string)?.state !== "running")
+        .catch(() => false)
+      : false;
+    if (session && !taskEnded && isClawAiSessionConfiguring(session)) {
       return {
         ok: false,
         kind: "sign_in_in_progress",
@@ -230,12 +237,22 @@ async function refusalBeforeSignOut(harness: Harness, row: string, label: string
   return null;
 }
 
-/** Sign the box out of the provider behind row `providerId` — see the file header. Never throws. */
-export async function signOutOfProvider(providerId: string): Promise<ProviderSignOutResult> {
+/** The row a sign-out of `providerId` is about, on the active harness. */
+export interface SignOutTarget {
+  ok: true;
+  harness: Harness;
+  edition: Edition;
+  row: string;
+  label: string;
+}
+
+/** The row `providerId` names on the active harness, or why there is no row to sign out of. */
+export async function resolveSignOutTarget(
+  providerId: string,
+): Promise<SignOutTarget | { ok: false; kind: "unknown_provider"; error: string }> {
   const source = await getActiveHarnessSource();
   const harness = source.active;
   const row = canonicalProviderId(harness, typeof providerId === "string" ? providerId : null) ?? "";
-  const label = providerRowLabel(harness, row);
   if (!ROW_ID.test(row) || isLocalProviderRow(row) || row === "auto") {
     return {
       ok: false,
@@ -245,6 +262,27 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
         : "There is no such provider to sign out of.",
     };
   }
+  return { ok: true, harness, edition: source.edition, row, label: providerRowLabel(harness, row) };
+}
+
+/**
+ * Why a sign-out of this target would be refused right now, or null — the
+ * route's answer before it starts the sign-out as a background task
+ * (src/lib/provider-auth-tasks.ts), so a refusal the owner can act on at once
+ * is said at once rather than as a failed task. Read WITHOUT the change lock:
+ * the sign-out asks again under it, and that answer is the one that counts.
+ */
+export async function signOutRefusal(target: SignOutTarget): Promise<{ kind: ProviderSignOutRefusal; error: string } | null> {
+  const refusal = await refusalBeforeSignOut(target.harness, target.row, target.label);
+  return refusal && !refusal.ok ? { kind: refusal.kind, error: refusal.error } : null;
+}
+
+/** Sign the box out of the provider behind row `providerId` — see the file header. Never throws. */
+export async function signOutOfProvider(providerId: string): Promise<ProviderSignOutResult> {
+  const target = await resolveSignOutTarget(providerId);
+  if (!target.ok) return target;
+  const { harness, row, label } = target;
+  const source = { edition: target.edition };
 
   // From the default check until the removal has landed, nothing may move
   // the default (src/lib/provider-change-lock.ts): a second browser making

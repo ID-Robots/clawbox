@@ -76,7 +76,8 @@ export interface ClawaiDeviceLoginOptions {
   /** Kick-off in flight. Mirrors the five places OpenClaw toggled `saving`. */
   onBusyChange?: (busy: boolean) => void;
   /** Token landed; the device is finishing configuration. */
-  onConfiguring?: () => void;
+  /** The token landed and the box is finishing; `taskId` is its sign-in task (TASK-2148) when the box named one. */
+  onConfiguring?: (taskId?: string) => void;
   /**
    * The save landed. `warning` is what it could NOT do — the configure route's
    * own sentence, carried through the session record because the configure
@@ -169,7 +170,7 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         // `unknown` on `error`, deliberately: the poll route relays a failure
         // raised four hops upstream, and the type here was never a guarantee
         // about what is in the field — only about what this file expected.
-        const body = await res.json().catch(() => ({})) as { status?: string; error?: unknown; warning?: unknown };
+        const body = await res.json().catch(() => ({})) as { status?: string; error?: unknown; warning?: unknown; taskId?: unknown };
         return { response: res, data: body };
       })(), controller, CLAWAI_POLL_REQUEST_TIMEOUT_MS);
       if (controller.signal.aborted) return;
@@ -187,7 +188,7 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
           setVerificationUrl(null);
           setPolling(false);
           cbRef.current.onBusyChange?.(false);
-          cbRef.current.onConfiguring?.();
+          cbRef.current.onConfiguring?.(typeof data.taskId === "string" && data.taskId ? data.taskId : undefined);
         }
         again();
         return;

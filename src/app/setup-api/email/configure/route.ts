@@ -18,6 +18,8 @@
 // running server stays invisible to the agent. See email-mcp-refresh.ts for the
 // whole story, including why the reload is not fired on an ordinary save.
 
+import { CHANNEL_SETUP_GROUP, CHANNEL_SETUP_KIND } from "@/lib/background-task-kinds";
+import { routeAsSettingsJob } from "@/lib/settings-jobs";
 import { NextResponse } from "next/server";
 import {
   clearEmailSettings,
@@ -49,7 +51,27 @@ import { SmtpError, verifySmtp } from "@/lib/smtp-client";
 
 export const dynamic = "force-dynamic";
 
+/** POST — connect the mailbox. With `background: true` (Settings, TASK-2148) a job of the box (src/lib/settings-jobs.ts). */
 export async function POST(request: Request) {
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/email/configure",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: () => ({
+      subject: "email",
+      action: "configure",
+      label: "Email",
+      title: "Connecting Email",
+      status: "Checking the mailbox and saving it…",
+      done: "Email is connected.",
+    }),
+    handler: connectEmail,
+  });
+  return job ?? connectEmail(request);
+}
+
+async function connectEmail(request: Request): Promise<Response> {
   try {
     let body: Record<string, unknown>;
     try {
@@ -241,7 +263,28 @@ export async function POST(request: Request) {
 
 // No `Request` parameter: disconnecting is not a reason to abandon the teardown
 // half-done, so nothing here takes the client's abort signal.
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  // `?background=1` (Settings, TASK-2148): the same teardown as a job of the box.
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/email/configure",
+    method: "DELETE",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: () => ({
+      subject: "email",
+      action: "disconnect",
+      label: "Email",
+      title: "Disconnecting Email",
+      status: "Removing the mailbox from the box…",
+      done: "Email is disconnected.",
+    }),
+    handler: disconnectEmail,
+  });
+  return job ?? disconnectEmail();
+}
+
+async function disconnectEmail(): Promise<Response> {
   try {
     // Asked before the account is dropped, for the same reason POST asks: this
     // is the other direction of the same flip. An agent whose box no longer has

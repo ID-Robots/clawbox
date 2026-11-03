@@ -55,6 +55,10 @@ import MonitorsPanel from "./MonitorsPanel";
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import { BackgroundTaskInline } from "./BackgroundTaskProgress";
+import { useSettingsJobs } from "@/hooks/useSettingsJobs";
+import { CHANNEL_SETUP_GROUP } from "@/lib/background-task-kinds";
+import { settingsJobFetch, type SettingsJob } from "@/lib/settings-job-client";
 import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
@@ -1778,7 +1782,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setTgStreamingNotice(null);
     setTgStreaming(next); // optimistic
     try {
-      const res = await fetch("/setup-api/telegram/streaming", {
+      const res = await settingsJobFetch("/setup-api/telegram/streaming", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: next }),
@@ -1883,7 +1887,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setTgConfigurePromise(configurePromise);
 
     try {
-      const res = await fetch("/setup-api/telegram/configure", {
+      const res = await settingsJobFetch("/setup-api/telegram/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ botToken: tgToken.trim() }),
@@ -2345,7 +2349,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setEmailSaving(true);
     setEmailMsg(null);
     try {
-      const res = await fetch("/setup-api/email/configure", {
+      const res = await settingsJobFetch("/setup-api/email/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2410,7 +2414,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setEmailSaving(true);
     setEmailMsg(null);
     try {
-      const res = await fetch("/setup-api/email/configure", { method: "DELETE" });
+      const res = await settingsJobFetch("/setup-api/email/configure", { method: "DELETE" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.success) {
         setEmailMsg({ type: "error", message: data?.error || t("settings.failedSave") });
@@ -2499,7 +2503,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       setWaSaving(true);
       setWaMsg(null);
       try {
-        const res = await fetch("/setup-api/whatsapp/configure", {
+        const res = await settingsJobFetch("/setup-api/whatsapp/configure", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -2650,7 +2654,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setWaPairBusy(true);
     setWaMsg(null);
     try {
-      const res = await fetch("/setup-api/whatsapp/unpair", { method: "POST" });
+      const res = await settingsJobFetch("/setup-api/whatsapp/unpair", { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         setWaMsg({ type: "error", message: t("settings.whatsappUnpairFailed") });
@@ -2810,6 +2814,36 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     }
   }, [markChannelSettled, claimChannelRead]);
 
+  /*
+   * The channel's setup is the BOX's work (TASK-2148): every save, connect and
+   * disconnect above goes through `settingsJobFetch`, which asks its route for
+   * a job of the box (src/lib/settings-jobs.ts) and follows it — so closing
+   * Settings half-way loses neither the work nor its verdict, and the
+   * desktop's corner card shows it meanwhile. Reopened (or opened in another
+   * tab, on another device), Settings reads the channel jobs the box runs:
+   * the channel shows as being set up, its section draws the job's progress
+   * and holds its controls, and the channel's own status is read again the
+   * moment the job ends.
+   */
+  const onChannelJobsEnded = useCallback((ended: SettingsJob[]) => {
+    const subjects = new Set(ended.map((job) => job.subject));
+    // One the box no longer keeps ended too, and says nothing of which.
+    const every = subjects.size === 0;
+    if (every || subjects.has("telegram")) {
+      void refreshTelegramStatus();
+      void refreshPairing();
+    }
+    if (every || subjects.has("email")) void refreshEmailStatus();
+    if (every || subjects.has("whatsapp")) void refreshWhatsapp();
+    if (every || subjects.has("discord")) void refreshDiscordStatus();
+  }, [refreshTelegramStatus, refreshPairing, refreshEmailStatus, refreshWhatsapp, refreshDiscordStatus]);
+  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { onEnded: onChannelJobsEnded });
+  const channelJobFor = (subject: string): SettingsJob | null => (channelJob?.subject === subject ? channelJob : null);
+  const telegramJob = channelJobFor("telegram");
+  const emailJob = channelJobFor("email");
+  const whatsappJob = channelJobFor("whatsapp");
+  const discordJob = channelJobFor("discord");
+
   // The member list costs Discord API calls, so it is fetched only while the
   // Discord section is actually open — never from the status poll that backs
   // the sidebar subtitle.
@@ -2922,7 +2956,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setDcStatus(null);
     setDcIntentsMissing(null);
     try {
-      const res = await fetch("/setup-api/discord/configure", {
+      const res = await settingsJobFetch("/setup-api/discord/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ botToken: dcToken.trim() }),
@@ -3004,7 +3038,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setDcMembersSaving(true);
     setDcStatus(null);
     try {
-      const res = await fetch("/setup-api/discord/configure", {
+      const res = await settingsJobFetch("/setup-api/discord/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ allowedUserIds: dcSelected }),
@@ -4363,6 +4397,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
                 {CHANNEL_ITEMS.map((item) => {
                   const state = channelState(item.id);
+                  // A setup the box is running for this channel (TASK-2148):
+                  // said on the row, with the turning ring, over whatever
+                  // the channel answered before it.
+                  const job = channelJobFor(item.id);
                   // The account IS set up in both states; only one of them is
                   // carrying traffic. The icon follows the account, the dot
                   // follows the traffic.
@@ -4396,7 +4434,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         ref={(el) => { channelRowRefs.current[item.id] = el; }}
                         onClick={() => setSectionGated(item.id)}
                         data-testid={`settings-channel-${item.id}`}
-                        data-state={state}
+                        data-state={job ? "configuring" : state}
                         className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer"
                       >
                         {/* The ligature IS the glyph's text, so without this the
@@ -4420,7 +4458,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                               screen reader — a live region that appears already
                               populated does not reliably announce. */}
                           <span className="block text-[11px] text-[var(--text-muted)] truncate">
-                            {state === "unknown"
+                            {job
+                              ? (job.status ?? job.title)
+                              : state === "unknown"
                               ? t("settings.checking")
                               : state === "unreachable"
                                 ? t("settings.statusUnavailable")
@@ -4436,7 +4476,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             same row. The dot is decoration (`aria-hidden`), so
                             the state reaches assistive tech through the
                             subtitle above it, which every branch words. */}
-                        {state === "connected" ? (
+                        {job ? (
+                          <span
+                            className="material-symbols-rounded text-[var(--coral-bright)] shrink-0 motion-safe:animate-spin"
+                            style={{ fontSize: 14 }}
+                            aria-hidden="true"
+                            data-testid={`settings-channel-job-spinner-${item.id}`}
+                          >
+                            progress_activity
+                          </span>
+                        ) : state === "connected" ? (
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
                         ) : state === "silent" ? (
                           /* Full opacity, like the emerald beside it: the two
@@ -4523,6 +4572,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Telegram ─── */}
         {activeSection === "telegram" && (
           <div className="max-w-xl space-y-5">
+            <BackgroundTaskInline taskId={telegramJob?.id ?? null} testId="settings-channel-job-telegram" />
 
             {/* Status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -4605,7 +4655,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         aria-label={t("settings.telegramProgress")}
                         aria-checked={!!tgStreaming}
                         aria-busy={tgStreamingPending}
-                        disabled={tgStreamingPending || tgStreaming === null}
+                        disabled={tgStreamingPending || telegramJob !== null || tgStreaming === null}
                         onClick={() => toggleTelegramStreaming(!tgStreaming)}
                         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
                           tgStreaming ? "bg-[var(--coral-bright)]" : "bg-gray-600"
@@ -4857,7 +4907,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 <div className="flex items-center gap-3 mt-5">
                   <button
                     onClick={saveTelegram}
-                    disabled={tgSaving || !tgToken.trim()}
+                    disabled={tgSaving || telegramJob !== null || !tgToken.trim()}
                     className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                   >
                     {tgSaving ? (
@@ -4891,6 +4941,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Email ─── */}
         {activeSection === "email" && (
           <div className="max-w-xl space-y-5" data-testid="settings-section-email">
+            <BackgroundTaskInline taskId={emailJob?.id ?? null} testId="settings-channel-job-email" />
 
             {/* Status */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -4948,7 +4999,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     <button
                       type="button"
                       onClick={disconnectEmail}
-                      disabled={emailSaving}
+                      disabled={emailSaving || emailJob !== null}
                       className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50"
                     >
                       {t("settings.emailDisconnect")}
@@ -5374,7 +5425,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   <button
                     type="button"
                     onClick={saveEmail}
-                    disabled={emailSaving || !emailAddress.trim() || !emailPassword}
+                    disabled={emailSaving || emailJob !== null || !emailAddress.trim() || !emailPassword}
                     className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                   >
                     {emailSaving ? (
@@ -5409,6 +5460,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           /* `tabIndex={-1}` is not a tab stop; it is somewhere for focus to
              land when the status card's Retry replaces itself. */
           <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp" ref={whatsappPaneRef} tabIndex={-1}>
+            <BackgroundTaskInline taskId={whatsappJob?.id ?? null} testId="settings-channel-job-whatsapp" />
 
             {/* Upstream's ban-risk warning, shown before anything else rather
                 than hidden behind a docs link — it is the single most important
@@ -5539,7 +5591,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={unpairWhatsappPhone}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-red-500/15 border border-red-500/40 text-sm font-semibold text-red-300 cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappUnpairConfirm")}
@@ -5547,7 +5599,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => setWaUnpairConfirm(false)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappUnpairCancel")}
@@ -5558,7 +5610,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => setWaUnpairConfirm(true)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappUnpair")}
@@ -5566,7 +5618,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => startWhatsappPairing(true)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappPairRelink")}
@@ -5606,7 +5658,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => startWhatsappPairing(false)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               data-testid="whatsapp-pair-start"
                               className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
                             >
@@ -5680,7 +5732,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={cancelWhatsappPairing}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="mt-3 px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappPairCancel")}
@@ -5752,7 +5804,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         <button
                           type="button"
                           onClick={() => removeWhatsappNumber(number)}
-                          disabled={waSaving}
+                          disabled={waSaving || whatsappJob !== null}
                           aria-label={t("settings.whatsappRemoveNumber")}
                           className="text-xs text-[var(--text-muted)] hover:text-red-300 bg-transparent border-none cursor-pointer disabled:opacity-50"
                         >
@@ -5777,7 +5829,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     <button
                       type="button"
                       onClick={addWhatsappNumber}
-                      disabled={waSaving || !waNumber.trim()}
+                      disabled={waSaving || whatsappJob !== null || !waNumber.trim()}
                       className="px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
                     >
                       {t("settings.whatsappAddNumber")}
@@ -5794,7 +5846,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         key={mode}
                         type="button"
                         onClick={() => saveWhatsapp({ mode })}
-                        disabled={waSaving}
+                        disabled={waSaving || whatsappJob !== null}
                         aria-pressed={waStatus?.mode === mode}
                         className={`flex w-full items-start gap-3 rounded-xl px-4 py-3 text-left border cursor-pointer disabled:opacity-50 ${
                           waStatus?.mode === mode
@@ -5828,7 +5880,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     role="switch"
                     aria-label={t("settings.whatsappEnable")}
                     aria-checked={!!waStatus?.enabled}
-                    disabled={waSaving || waStatus === null || (!waStatus.paired && !waStatus.enabled)}
+                    disabled={waSaving || whatsappJob !== null || waStatus === null || (!waStatus.paired && !waStatus.enabled)}
                     onClick={() => saveWhatsapp({ enabled: !waStatus?.enabled })}
                     className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
                       waStatus?.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
@@ -5859,6 +5911,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Discord ─── */}
         {activeSection === "discord" && (
           <div className="max-w-xl space-y-5">
+            <BackgroundTaskInline taskId={discordJob?.id ?? null} testId="settings-channel-job-discord" />
 
             {/* Status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -6080,7 +6133,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             type="checkbox"
                             checked={checked}
                             onChange={() => toggleDiscordMember(member.id)}
-                            disabled={dcMembersSaving}
+                            disabled={dcMembersSaving || discordJob !== null}
                             className="shrink-0 accent-[var(--coral-bright)]"
                           />
                           <span className="min-w-0 flex-1">
@@ -6111,7 +6164,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   <button
                     type="button"
                     onClick={saveDiscordMembers}
-                    disabled={dcMembersSaving || dcSelected.length === 0}
+                    disabled={dcMembersSaving || discordJob !== null || dcSelected.length === 0}
                     className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
                   >
                     {t("settings.discordMembersSave")}
@@ -6190,7 +6243,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 <div className="flex items-center gap-3 mt-5">
                   <button
                     onClick={saveDiscord}
-                    disabled={dcSaving || !dcToken.trim()}
+                    disabled={dcSaving || discordJob !== null || !dcToken.trim()}
                     className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                   >
                     {dcSaving ? (

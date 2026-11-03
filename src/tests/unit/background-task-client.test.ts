@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readTaskStream } from "@/lib/background-task-client";
+import { fetchBackgroundTasks, readTaskStream, waitForBackgroundTaskEnd } from "@/lib/background-task-client";
 
 /**
  * A background task's stream that is cut short is not the work's ending: the
@@ -100,5 +100,75 @@ describe("readTaskStream", () => {
     const outcome = await settle(pending);
     expect(outcome.ok).toBe(false);
     expect(follows.length).toBeLessThanOrEqual(1);
+  });
+});
+
+/**
+ * Following a task by its record rather than a stream (TASK-2148): how
+ * Settings watches a provider sign-in or sign-out the box runs. The work is the
+ * box's; a read that fails is asked again, and only the box saying it does not
+ * know the task — or the reader leaving — ends the follow without an ending.
+ */
+describe("waitForBackgroundTaskEnd", () => {
+  const task = (state: string, step?: string) => ({
+    id: "t1",
+    state,
+    steps: [{ id: "remove", state: step === "remove" ? "running" : "done" }, { id: "restart", state: step === "restart" ? "running" : state === "running" ? "pending" : "done" }],
+  });
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+  it("reads the task until it has ended, through a box that did not answer, and answers it as it ended", async () => {
+    stubFollow([
+      json({ task: task("running", "remove") }),
+      new Error("connection refused"),
+      new Response("Bad Gateway", { status: 502 }),
+      json({ task: task("running", "restart") }),
+      json({ task: task("succeeded") }),
+    ]);
+    const seen: string[] = [];
+    const ended = await settle(waitForBackgroundTaskEnd("t1", {
+      onUpdate: (t) => seen.push(`${t.state}:${t.steps.find((s) => s.state === "running")?.id ?? "-"}`),
+    }));
+    expect(ended).toMatchObject({ id: "t1", state: "succeeded" });
+    expect(seen).toEqual(["running:remove", "running:restart", "succeeded:-"]);
+    expect(follows).toEqual(Array(5).fill("/setup-api/background-jobs/tasks?id=t1"));
+  });
+
+  it("answers a failed ending as such", async () => {
+    stubFollow([json({ task: { ...task("failed"), error: "It did not sign out." } })]);
+    expect(await settle(waitForBackgroundTaskEnd("t1"))).toMatchObject({ state: "failed", error: "It did not sign out." });
+  });
+
+  it("answers null once the box says it does not know the task", async () => {
+    stubFollow([json({ task: task("running", "remove") }), json({ error: "No such task." }, 404)]);
+    expect(await settle(waitForBackgroundTaskEnd("t1"))).toBeNull();
+  });
+
+  it("stops when its reader leaves, the task still running on the box", async () => {
+    const abort = new AbortController();
+    stubFollow(Array.from({ length: 10 }, () => json({ task: task("running", "remove") })));
+    const following = waitForBackgroundTaskEnd("t1", { signal: abort.signal });
+    await vi.advanceTimersByTimeAsync(3_100);
+    abort.abort();
+    expect(await settle(following)).toBeNull();
+    expect(follows.length).toBeLessThan(10);
+  });
+});
+
+describe("fetchBackgroundTasks", () => {
+  it("narrows the list by kind and by group", async () => {
+    stubFollow([
+      new Response(JSON.stringify({ tasks: [] }), { status: 200 }),
+      new Response(JSON.stringify({ tasks: [] }), { status: 200 }),
+      new Response(JSON.stringify({ tasks: [] }), { status: 200 }),
+    ]);
+    await fetchBackgroundTasks({ group: "provider-auth" });
+    await fetchBackgroundTasks({ kind: "provider-sign-in", group: "provider-auth" });
+    await fetchBackgroundTasks();
+    expect(follows).toEqual([
+      "/setup-api/background-jobs/tasks?group=provider-auth",
+      "/setup-api/background-jobs/tasks?kind=provider-sign-in&group=provider-auth",
+      "/setup-api/background-jobs/tasks",
+    ]);
   });
 });

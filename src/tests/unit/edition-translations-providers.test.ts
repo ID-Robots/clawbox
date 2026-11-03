@@ -63,6 +63,9 @@ const RENDERED = [
   "settings.providers.signingOut",
   "settings.providers.signOutRestarting",
   "settings.providers.signOutTimedOut",
+  // A provider the box is connecting as a background task (TASK-2148): the
+  // spinner's words on its row, also after Settings was closed and reopened.
+  "settings.providers.connecting",
 ];
 
 /** The sign-out strings that name the row they are on. */

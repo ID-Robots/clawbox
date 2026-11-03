@@ -3652,6 +3652,7 @@ const table: Record<string, string> = {
   "settings.providers.changeFailed": "Non è stato possibile cambiare il provider.",
   "settings.providers.changeModel": "Cambia modello",
   "settings.providers.connected": "Connesso",
+  "settings.providers.connecting": "Connessione in corso…",
   "settings.providers.default": "Predefinito",
   "settings.providers.defaultFailed": "Impossibile cambiare il predefinito: {message}",
   "settings.providers.degraded": "Agente non raggiungibile: alcuni stati potrebbero non essere aggiornati",
