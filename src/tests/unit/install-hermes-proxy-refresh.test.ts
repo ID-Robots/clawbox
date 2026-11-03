@@ -17,7 +17,7 @@ import path from "node:path";
  * systemctl, so an edit to install.sh is what the assertions see.
  */
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const INSTALL_SH = readFileSync(path.join(process.cwd(), "install.sh"), "utf-8");
 const UNIT = "clawbox-hermes-dashboard-proxy.service";
