@@ -214,10 +214,22 @@ describe("the updating screen tells the truth about escaping", () => {
   it("holds the screen when a poll fails, instead of taking it down", () => {
     // The inverse of the usual rule. do_rebuild stops the web server for
     // minutes; a failed poll is the normal course of an update, not evidence
-    // that it ended.
-    expect(PAGE).toContain("setOffline(true)");
-    const catchAt = PAGE.indexOf("} catch {");
-    expect(PAGE.slice(catchAt, catchAt + 400)).not.toContain("window.location");
+    // that it ended. The poll is the run view's (TASK-2111), which the page
+    // follows with `hold`; updating-run-view.test.tsx drives it through an
+    // outage.
+    const RUN = readFileSync(path.join(REPO, "src/components/UpdateRunView.tsx"), "utf-8");
+    expect(PAGE).toMatch(/useUpdateRun\(\{ hold: true \}\)/);
+    const noAnswer = RUN.slice(RUN.indexOf("const noAnswer = () => {"));
+    expect(noAnswer).toContain("setOffline(true)");
+    expect(noAnswer.slice(0, noAnswer.indexOf("};"))).not.toContain("window.location");
+  });
+
+  it("leaves only on an answer the middleware did not mark with the lock", () => {
+    // A navigation to "/" while the lock is set is redirected straight back
+    // here; the header is the middleware's own reading of the lock.
+    const RUN = readFileSync(path.join(REPO, "src/components/UpdateRunView.tsx"), "utf-8");
+    expect(RUN).toContain("res.headers?.get(UPDATE_LOCK_HEADER)");
+    expect(PAGE).toMatch(/!answer\.locked/);
   });
 });
 

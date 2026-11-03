@@ -618,6 +618,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "The page will reload once the device is back up.",
     "update.stuckHint": "This is taking longer than an update usually does. Nothing has been lost. If the device does not come back on its own, restart it — the desktop unlocks by itself on the next start.",
     "update.offlineHint": "The device is restarting and is not answering yet. This screen will return to the desktop on its own.",
+    "update.notAnswering": "Restarting — not answering yet",
+    "update.returningToDesktop": "Update complete. Returning to the desktop…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "What's new in ClawBox {version}",
     "update.whatsNewTitleGeneric": "What's new in this update",
@@ -1542,6 +1544,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "Страницата ще се презареди, щом устройството се върне.",
     "update.stuckHint": "Това отнема повече време от обичайното за актуализация. Нищо не е загубено. Ако устройството не се върне само, рестартирайте го — работният плот се отключва сам при следващото стартиране.",
     "update.offlineHint": "Устройството се рестартира и още не отговаря. Този екран ще се върне към работния плот сам.",
+    "update.notAnswering": "Рестартира се — още не отговаря",
+    "update.returningToDesktop": "Актуализацията завърши. Връщане към работния плот…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Какво е новото в ClawBox {version}",
     "update.whatsNewTitleGeneric": "Какво е новото в тази актуализация",
@@ -2462,6 +2466,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "Die Seite wird neu geladen, sobald das Gerät wieder erreichbar ist.",
     "update.stuckHint": "Das dauert länger, als ein Update normalerweise braucht. Es ist nichts verloren gegangen. Falls das Gerät nicht von selbst zurückkommt, starten Sie es neu — der Desktop entsperrt sich beim nächsten Start von allein.",
     "update.offlineHint": "Das Gerät startet neu und antwortet noch nicht. Dieser Bildschirm kehrt von selbst zum Desktop zurück.",
+    "update.notAnswering": "Neustart — antwortet noch nicht",
+    "update.returningToDesktop": "Update abgeschlossen. Zurück zum Desktop…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Neu in ClawBox {version}",
     "update.whatsNewTitleGeneric": "Neu in diesem Update",
@@ -3385,6 +3391,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "La página se recargará cuando el dispositivo vuelva a estar disponible.",
     "update.stuckHint": "Esto está tardando más de lo que suele tardar una actualización. No se ha perdido nada. Si el dispositivo no vuelve por sí solo, reinícialo: el escritorio se desbloquea solo en el siguiente arranque.",
     "update.offlineHint": "El dispositivo se está reiniciando y todavía no responde. Esta pantalla volverá al escritorio por sí sola.",
+    "update.notAnswering": "Reiniciando: aún no responde",
+    "update.returningToDesktop": "Actualización completada. Volviendo al escritorio…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Novedades de ClawBox {version}",
     "update.whatsNewTitleGeneric": "Novedades de esta actualización",
@@ -4305,6 +4313,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "La page se rechargera dès que l'appareil sera de nouveau accessible.",
     "update.stuckHint": "Cela prend plus de temps qu'une mise à jour habituelle. Rien n'a été perdu. Si l'appareil ne revient pas de lui-même, redémarrez-le — le bureau se déverrouille tout seul au démarrage suivant.",
     "update.offlineHint": "L'appareil redémarre et ne répond pas encore. Cet écran reviendra au bureau tout seul.",
+    "update.notAnswering": "Redémarrage — ne répond pas encore",
+    "update.returningToDesktop": "Mise à jour terminée. Retour au bureau…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Nouveautés de ClawBox {version}",
     "update.whatsNewTitleGeneric": "Nouveautés de cette mise à jour",
@@ -5225,6 +5235,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "La pagina si ricaricherà appena il dispositivo sarà di nuovo raggiungibile.",
     "update.stuckHint": "Sta impiegando più tempo di quanto ne serva di solito a un aggiornamento. Non è andato perso nulla. Se il dispositivo non torna da solo, riavvialo: il desktop si sblocca da sé al prossimo avvio.",
     "update.offlineHint": "Il dispositivo si sta riavviando e non risponde ancora. Questa schermata tornerà al desktop da sola.",
+    "update.notAnswering": "Riavvio in corso — non risponde ancora",
+    "update.returningToDesktop": "Aggiornamento completato. Ritorno al desktop…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Novità di ClawBox {version}",
     "update.whatsNewTitleGeneric": "Novità di questo aggiornamento",
@@ -6145,6 +6157,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "端末が起動し直したら、このページは自動で再読み込みされます。",
     "update.stuckHint": "通常の更新より時間がかかっています。データは失われていません。端末が自分で戻ってこない場合は再起動してください。次回の起動時にデスクトップのロックは自動で解除されます。",
     "update.offlineHint": "端末は再起動中で、まだ応答していません。この画面は自動でデスクトップに戻ります。",
+    "update.notAnswering": "再起動中 — まだ応答がありません",
+    "update.returningToDesktop": "更新が完了しました。デスクトップに戻ります…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "ClawBox {version} の新機能",
     "update.whatsNewTitleGeneric": "このアップデートの新機能",
@@ -7065,6 +7079,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "De pagina wordt opnieuw geladen zodra het apparaat weer bereikbaar is.",
     "update.stuckHint": "Dit duurt langer dan een update normaal doet. Er is niets verloren gegaan. Komt het apparaat niet vanzelf terug, start het dan opnieuw op — het bureaublad ontgrendelt zichzelf bij de volgende start.",
     "update.offlineHint": "Het apparaat start opnieuw op en antwoordt nog niet. Dit scherm keert vanzelf terug naar het bureaublad.",
+    "update.notAnswering": "Herstarten — reageert nog niet",
+    "update.returningToDesktop": "Update voltooid. Terug naar het bureaublad…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Nieuw in ClawBox {version}",
     "update.whatsNewTitleGeneric": "Nieuw in deze update",
@@ -7985,6 +8001,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "Sidan laddas om så snart enheten är uppe igen.",
     "update.stuckHint": "Det här tar längre tid än en uppdatering brukar göra. Inget har gått förlorat. Om enheten inte kommer tillbaka av sig själv, starta om den — skrivbordet låses upp automatiskt vid nästa start.",
     "update.offlineHint": "Enheten startar om och svarar inte än. Den här skärmen återvänder till skrivbordet av sig själv.",
+    "update.notAnswering": "Startar om — svarar inte än",
+    "update.returningToDesktop": "Uppdateringen är klar. Återgår till skrivbordet…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "Nytt i ClawBox {version}",
     "update.whatsNewTitleGeneric": "Nytt i den här uppdateringen",
@@ -8905,6 +8923,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.reloadOnRestart": "设备恢复后页面会自动重新加载。",
     "update.stuckHint": "这比一次更新通常需要的时间更久。没有任何内容丢失。如果设备没有自行恢复，请重启它——桌面会在下次启动时自动解锁。",
     "update.offlineHint": "设备正在重启，尚未响应。此界面会自行回到桌面。",
+    "update.notAnswering": "正在重启 — 暂无响应",
+    "update.returningToDesktop": "更新完成，正在返回桌面…",
     // The /updating screen's "What's new" panel (TASK-1205).
     "update.whatsNewTitle": "ClawBox {version} 新功能",
     "update.whatsNewTitleGeneric": "本次更新的新内容",

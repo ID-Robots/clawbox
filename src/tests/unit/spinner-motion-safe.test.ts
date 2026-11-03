@@ -22,8 +22,8 @@ const SWEPT = [
   "src/components/AppStore.tsx",
   "src/components/FilesApp.tsx",
   "src/components/SettingsApp.tsx",
-  "src/components/SystemUpdateApp.tsx",
   "src/components/TerminalApp.tsx",
+  "src/components/UpdateRunView.tsx",
 ];
 
 describe("swept spinners", () => {

@@ -47,6 +47,9 @@ const UPDATE_KEYS = [
   // The /updating screen, the one page guaranteed to be open while the box is
   // offline.
   "update.stuckHint", "update.offlineHint",
+  // The run view both screens draw (TASK-2111): a box that is not answering,
+  // and /updating handing back to the desktop.
+  "update.notAnswering", "update.returningToDesktop",
   // Its "What's new" panel (TASK-1205).
   "update.whatsNewTitle", "update.whatsNewTitleGeneric", "update.whatsNewIntro",
   "update.whatsNewGeneric", "update.whatsNewReleaseNotes", "update.whatsNewChannel",
