@@ -3667,6 +3667,7 @@ const table: Record<string, string> = {
   "settings.providers.signOutConfirm": "Afmelden — tik nogmaals",
   "settings.providers.signOutFailed": "Afmelden bij {name} is mislukt.",
   "settings.providers.signOutRestarting": "De assistent start opnieuw om dit af te ronden — over ongeveer een minuut terug.",
+  "settings.providers.signOutTimedOut": "De box reageerde niet op tijd. De lijst is opnieuw gelezen — staat {name} er niet meer in, dan is het afmelden gelukt.",
   "settings.providers.signedOut": "Afgemeld bij {name}. Meld je hieronder opnieuw aan om het te gebruiken.",
   "settings.providers.signingOut": "Afmelden…",
   "settings.providers.strandedPlugins": "Plug-ins die reparatie nodig hebben",

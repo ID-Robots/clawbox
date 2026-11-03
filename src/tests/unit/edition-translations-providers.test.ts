@@ -57,10 +57,12 @@ const RENDERED = [
   "settings.providers.signOutConfirm",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
-  // The sign-out in hand (TASK-2126): the spinner's words, and the line under
-  // it while the gateway restarts behind the sign-out.
+  // The sign-out in hand (TASK-2126): the spinner's words, the line under it
+  // while the gateway restarts behind the sign-out, and what a request that
+  // never answered left behind.
   "settings.providers.signingOut",
   "settings.providers.signOutRestarting",
+  "settings.providers.signOutTimedOut",
 ];
 
 /** The sign-out strings that name the row they are on. */
@@ -68,6 +70,7 @@ const NAMED_SIGN_OUT = [
   "settings.providers.signOut",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
+  "settings.providers.signOutTimedOut",
 ] as const;
 
 describe("the cloud-provider list is translated everywhere", () => {

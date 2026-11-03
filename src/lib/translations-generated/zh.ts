@@ -3667,6 +3667,7 @@ const table: Record<string, string> = {
   "settings.providers.signOutConfirm": "退出 — 再点一次",
   "settings.providers.signOutFailed": "无法退出 {name}。",
   "settings.providers.signOutRestarting": "助手正在重启以完成退出 — 大约一分钟后恢复。",
+  "settings.providers.signOutTimedOut": "这台 ClawBox 未能及时响应。列表已重新读取 — 如果 {name} 不再列出，说明已成功退出。",
   "settings.providers.signedOut": "已退出 {name}。如需使用，请在下方重新登录。",
   "settings.providers.signingOut": "正在退出…",
   "settings.providers.strandedPlugins": "需要修复的插件",

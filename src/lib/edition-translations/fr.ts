@@ -41,6 +41,7 @@ export const fr: Record<string, string> = {
   "settings.providers.signingOut": "Déconnexion…",
   "settings.providers.signOutRestarting": "L'assistant redémarre pour terminer — de retour dans une minute environ.",
   "settings.providers.signOutFailed": "Impossible de se déconnecter de {name}.",
+  "settings.providers.signOutTimedOut": "La box a mis trop de temps à répondre. La liste a été relue — si {name} n'y figure plus, la déconnexion a abouti.",
   "settings.providers.signedOut": "Déconnecté de {name}. Reconnectez-vous ci-dessous pour l'utiliser.",
   "settings.providers.empty": "Aucun fournisseur n'est encore connecté — connectez-en un ci-dessous.",
 

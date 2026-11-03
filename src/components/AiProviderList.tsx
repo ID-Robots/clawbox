@@ -11,7 +11,7 @@ import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
 import { notifyProvidersChanged } from "@/lib/ui-events";
 import { waitForGatewayAfterRestart } from "@/lib/wait-for-gateway";
-import type { ProviderStatusRow, ProviderStatusSummary } from "@/lib/provider-status";
+import type { ProviderStatusRow } from "@/lib/provider-status";
 
 /**
  * The cloud providers the owner has connected, each row with its state,
@@ -46,11 +46,17 @@ const SIGNED_OUT_NOTE_MS = 3_000;
  */
 const SIGNED_OUT_ROW_MS = 600;
 /**
- * The longest a sign-out that landed waits on the box's re-read before it lets
- * the row go: a read that fails right after another failed changes nothing
- * this list can see.
+ * The longest the sign-out's own request is waited for. On a board it takes
+ * tens of seconds (the harness CLI runs, the credential copies are scrubbed);
+ * a request that never answers must not hold every row's controls for good.
  */
-const SIGN_OUT_SETTLE_MS = 10_000;
+export const SIGN_OUT_REQUEST_MS = 150_000;
+/**
+ * The longest a sign-out that landed waits on the box's re-read before it lets
+ * the row go — for a read that never finishes at all. A read that finishes,
+ * answered or failed, ends the wait itself; on a board one takes seconds.
+ */
+export const SIGN_OUT_SETTLE_MS = 30_000;
 
 /** A row as it was when its sign-out was tapped, and where it stood in the list. */
 interface HeldRow {
@@ -61,10 +67,11 @@ interface HeldRow {
 /**
  * A sign-out in flight: the request (`request`), the gateway restart behind it
  * when the route says one is underway (`restarting`), and the box's re-read
- * after it (`settling`).
+ * after it (`settling`, with the number of that read — `useProviderStatus`).
  */
 interface SignOutFlow extends HeldRow {
   phase: "request" | "restarting" | "settling";
+  read?: number;
 }
 
 /** The class each sign-out state puts on its row (globals.css). */
@@ -94,7 +101,7 @@ interface AiProviderListProps {
 
 export default function AiProviderList({ showAnthropicAccounts = false, onAnthropicAccountsShown }: AiProviderListProps = {}) {
   const { t } = useT();
-  const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh } = useProviderStatus();
+  const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh, readNonce, summaryNonce } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
   /**
@@ -155,14 +162,14 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
    * The provider just signed out of, for the note above the list — said in
    * the reader's language at render, for SIGNED_OUT_NOTE_MS. Set only once the
    * box's own answer has landed, so it never runs ahead of the rows; cleared
-   * early if that answer shows the provider connected (a new sign-in).
+   * early if a read made after the sign-out shows the provider connected (a
+   * new sign-in). `read`: the number of the first such read — an older list,
+   * still on screen when the re-read failed, says nothing about it.
    */
-  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string } | null>(null);
+  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string; read: number } | null>(null);
   const signOutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Stops a gateway wait this list is no longer on screen for. */
-  const gatewayWait = useRef<AbortController | null>(null);
-  /** The answer on screen when the re-read was asked for: the next one is the box's verdict. */
-  const settleFrom = useRef<{ flow: SignOutFlow; summary: ProviderStatusSummary | null; error: boolean } | null>(null);
+  /** Stops a sign-out request or gateway wait this list is no longer on screen for. */
+  const signOutAbort = useRef<AbortController | null>(null);
   const disarmSignOut = useCallback(() => {
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
     signOutTimer.current = null;
@@ -170,27 +177,37 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   }, []);
   useEffect(() => () => {
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
-    gatewayWait.current?.abort();
+    signOutAbort.current?.abort();
   }, []);
 
   const signOutOf = useCallback(async (row: ProviderStatusRow, index: number) => {
     disarmSignOut();
-    gatewayWait.current?.abort();
-    const wait = new AbortController();
-    gatewayWait.current = wait;
+    signOutAbort.current?.abort();
+    const abort = new AbortController();
+    signOutAbort.current = abort;
     setSigningOut({ row, index, phase: "request" });
     setToggleError(null);
     setSignOutError(null);
     setSignOutNote(null);
     const failed = t("settings.providers.signOutFailed", { name: row.label });
     let signedOut = false;
+    let timedOut = false;
+    // Bounds the request and the reading of its answer, not the restart wait
+    // after it (that has its own budget).
+    const requestTimer = setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, SIGN_OUT_REQUEST_MS);
     try {
       const res = await fetch("/setup-api/providers/sign-out", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: row.id }),
+        signal: abort.signal,
       });
       const data = (await res.json().catch(() => ({}))) as { error?: unknown; gatewayRestarting?: unknown };
+      clearTimeout(requestTimer);
+      if (timedOut) throw new Error(failed);
       if (!res.ok) {
         throw new Error(typeof data.error === "string" && data.error ? data.error : failed);
       }
@@ -199,25 +216,33 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
       // read now, the box would still be answering from the old process.
       if (data.gatewayRestarting === true) {
         setSigningOut((flow) => (flow?.row.id === row.id ? { ...flow, phase: "restarting" } : flow));
-        await waitForGatewayAfterRestart({ signal: wait.signal });
+        await waitForGatewayAfterRestart({ signal: abort.signal });
       }
       signedOut = true;
     } catch (e) {
-      setSignOutError({ id: row.id, message: e instanceof Error && e.message ? e.message : failed });
+      // A request that never answered may still have signed out on the box:
+      // say so, and let the re-read below show which.
+      const message = timedOut
+        ? t("settings.providers.signOutTimedOut", { name: row.label })
+        : e instanceof Error && e.message ? e.message : failed;
+      setSignOutError({ id: row.id, message });
     } finally {
+      clearTimeout(requestTimer);
       // Re-read either way: a refusal can come after part of the sign-in was
-      // removed, and the rows are the box's answer, not this click's.
-      refresh();
+      // removed, and the rows are the box's answer, not this click's. The
+      // number of THIS read is what the row waits for below.
+      const read = refresh();
       notifyProvidersChanged();
       // A sign-out that landed holds the row until that re-read has; a refused
       // one gives it back now, with the reason under its button.
-      setSigningOut((flow) => (flow?.row.id !== row.id ? flow : signedOut ? { ...flow, phase: "settling" } : null));
+      setSigningOut((flow) => (flow?.row.id !== row.id ? flow : signedOut ? { ...flow, phase: "settling", read } : null));
     }
   }, [disarmSignOut, refresh, t]);
 
   const onSignOutClick = useCallback((row: ProviderStatusRow, index: number) => {
-    // One sign-out at a time; the button is disabled meanwhile, and this is
-    // the guard behind it.
+    // One sign-out at a time. The button in hand stays focusable (so a
+    // keyboard keeps its place through a minute-long sign-out) and says it is
+    // disabled; this is what makes that true.
     if (signingOut) return;
     if (signOutArmed === row.id) {
       void signOutOf(row, index);
@@ -235,31 +260,24 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   /** The box has answered the re-read: let the row go, and say so. */
   const finishSignOut = useCallback((flow: SignOutFlow) => {
     setSigningOut((current) => (current === flow ? null : current));
-    setSignOutNote({ id: flow.row.id, label: flow.row.label });
+    setSignOutNote({ id: flow.row.id, label: flow.row.label, read: flow.read ?? 0 });
     setSignedOutRow(prefersReducedMotion() ? null : { row: flow.row, index: flow.index });
   }, []);
 
-  // The first answer after the re-read was asked for is the verdict: a new
-  // summary, or a read that failed where the last one had not. The timer is
-  // for the read that fails right after another failed, which changes nothing
-  // here — the row is not held for ever on a box that stopped answering.
+  // The verdict is the re-read the sign-out asked for, by its number — never
+  // an answer that was already on its way when the sign-out finished. Once it
+  // has finished, answered or failed, the row is let go: answered, the list
+  // is the box's word on it; failed, the list says it could not be read and is
+  // the last known state, and the note still says what the sign-out did. The
+  // timer is for a read that never finishes at all.
   // A LAYOUT effect: the answer that drops the row and the note that says why
   // are painted together, never a frame of a list with the row gone and
   // nothing said.
   const settling = signingOut?.phase === "settling" ? signingOut : null;
   useLayoutEffect(() => {
-    if (!settling) {
-      settleFrom.current = null;
-      return;
-    }
-    const from = settleFrom.current;
-    if (from?.flow !== settling) {
-      settleFrom.current = { flow: settling, summary, error };
-      return;
-    }
     // The box's re-read is external state this flow waits on.
-    if (summary !== from.summary || (error && !from.error)) finishSignOut(settling);
-  }, [settling, summary, error, finishSignOut]);
+    if (settling && readNonce >= (settling.read ?? 0)) finishSignOut(settling);
+  }, [settling, readNonce, finishSignOut]);
   useEffect(() => {
     if (!settling) return;
     const timer = setTimeout(() => finishSignOut(settling), SIGN_OUT_SETTLE_MS);
@@ -344,8 +362,10 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
     : null;
 
   // Said once the box's own answer shows the provider signed out, and gone
-  // again once a sign-in has connected it.
-  const noteRowConnected = !!signOutNote && rows.some((row) => row.id === signOutNote.id && row.state === "connected");
+  // again once a sign-in has connected it — by a list read after the
+  // sign-out, not one left on screen by a re-read that failed.
+  const noteRowConnected = !!signOutNote && summaryNonce >= signOutNote.read
+    && rows.some((row) => row.id === signOutNote.id && row.state === "connected");
   const signedOutNote = signOutNote && !noteRowConnected
     ? t("settings.providers.signedOut", { name: signOutNote.label })
     : null;
@@ -410,7 +430,9 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
       )}
       {(defaultError || toggleError || strandedSignOutError) && (
         <div role="alert" className="mb-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-[11px] text-red-300">
-          {defaultError ?? toggleError ?? strandedSignOutError}
+          {/* Each said: a refusal whose row has gone has nowhere else to be. */}
+          {(defaultError ?? toggleError) && <p>{defaultError ?? toggleError}</p>}
+          {strandedSignOutError && <p>{strandedSignOutError}</p>}
         </div>
       )}
       {/* A default that WAS written, with the box qualifying it — the gateway
@@ -428,8 +450,17 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
           reason the warning below is. The note inside it is what comes and
           goes: it opens out, stands for SIGNED_OUT_NOTE_MS and folds away
           (globals.css `provider-sign-out-note`), so the list below it slides
-          rather than jumps. */}
+          rather than jumps. While the sign-out runs it says so to assistive
+          tech, which the spinner's own words — on a button, in no live region —
+          would not. */}
       <div role="status" aria-live="polite" data-testid="ai-provider-sign-out-note">
+        {signingOut && !signedOutNote && (
+          <span className="sr-only" data-testid="ai-provider-sign-out-progress">
+            {signingOut.phase === "restarting"
+              ? `${t("settings.providers.signingOut")} ${t("settings.providers.signOutRestarting")}`
+              : t("settings.providers.signingOut")}
+          </span>
+        )}
         {signedOutNote && (
           <p
             className="provider-sign-out-note mb-3 flex items-center gap-1.5 rounded-xl border border-[var(--cyan-bright)]/25 bg-[var(--cyan-bright)]/[0.06] px-3 py-2 text-[11px] text-[var(--text-primary)]"
@@ -570,7 +601,9 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                 inert={signOutState === "leaving" || undefined}
               >
                 <span className="flex items-center gap-3 min-w-0 @md:flex-1">
-                  <span className="provider-sign-out-dim shrink-0">
+                  {/* A switched-off provider's icon is already faded; dimmed
+                      again on top it would all but vanish. */}
+                  <span className={`shrink-0 ${row.enabled ? "provider-sign-out-dim" : ""}`}>
                     <span className={`flex items-center justify-center w-9 h-9 rounded-lg bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
                       <AIProviderIcon provider={row.id} size={20} />
                     </span>
@@ -622,7 +655,12 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                         type="button"
                         onClick={() => onSignOutClick(row, index)}
                         onBlur={armed ? disarmSignOut : undefined}
-                        disabled={busy || settingDefault !== null || signOutLocked}
+                        // The one in hand is disabled by `aria-disabled` and the
+                        // guard in onSignOutClick, not by `disabled`: that would
+                        // drop the focus it has from the second tap onto the
+                        // page for the whole sign-out.
+                        disabled={!pending && (busy || settingDefault !== null || signOutLocked)}
+                        aria-disabled={pending || undefined}
                         aria-busy={pending}
                         aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
                         title={signOutLocked ? t("settings.providers.lockedHint") : undefined}
@@ -677,8 +715,10 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                         Shown even for a provider the owner has SWITCHED OFF —
                         that switch and this failure are different facts, and
                         hiding the second behind the first is how the owner ends
-                        up switching a provider on and watching nothing happen. */}
-                    {row.needsRepair && (
+                        up switching a provider on and watching nothing happen.
+                        Not on a held row: its Retry would repair a provider the
+                        box no longer lists. */}
+                    {row.needsRepair && !isHeld && (
                       <PluginRepairNotice
                         repair={row.needsRepair}
                         onRepaired={refresh}

@@ -42,6 +42,7 @@ export const settingsSecurityEn: Record<string, string> = {
   "settings.providers.signingOut": "Signing out…",
   "settings.providers.signOutRestarting": "The assistant is restarting to finish — back in about a minute.",
   "settings.providers.signOutFailed": "Could not sign out of {name}.",
+  "settings.providers.signOutTimedOut": "The box took too long to answer. The list has been read again — if {name} is no longer in it, the sign-out went through.",
   "settings.providers.signedOut": "Signed out of {name}. Sign in again below to use it.",
   "settings.providers.empty": "No provider is connected yet — connect one below.",
 

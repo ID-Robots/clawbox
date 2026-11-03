@@ -17,9 +17,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
-import AiProviderList from "@/components/AiProviderList";
+import AiProviderList, { SIGN_OUT_REQUEST_MS } from "@/components/AiProviderList";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid="icon" /> }));
@@ -60,6 +60,10 @@ function stubBox(opts: {
   refuse?: { status: number; error: string };
   answer?: Promise<void>;
   restarting?: boolean;
+  /** The sign-out request never answers; it fails only when the page aborts it. */
+  hang?: boolean;
+  /** Every status read after a sign-out fails. */
+  readFailsAfterSignOut?: boolean;
 } = {}): Box {
   const rows = opts.rows ?? OPENCLAW_ROWS;
   const box: Box = { posts: [], statusReads: 0, signedOut: new Set() };
@@ -70,6 +74,7 @@ function stubBox(opts: {
     if (url.startsWith("/setup-api/preferences")) return json({});
     if (url.startsWith("/setup-api/providers/status")) {
       box.statusReads += 1;
+      if (opts.readFailsAfterSignOut && box.signedOut.size > 0) return json({ error: "busy" }, 503);
       // Signed out: the default stays listed with no credential, any other
       // row leaves this list.
       const now = rows.flatMap((row) => !box.signedOut.has(row.id)
@@ -80,6 +85,11 @@ function stubBox(opts: {
     if (url === "/setup-api/providers/sign-out" && init?.method === "POST") {
       const { provider } = JSON.parse(String(init.body)) as { provider: string };
       box.posts.push(provider);
+      if (opts.hang) {
+        return new Promise<Response>((_, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+        });
+      }
       await opts.answer;
       if (opts.refuse) return json({ error: opts.refuse.error, kind: "still_signed_in" }, opts.refuse.status);
       box.signedOut.add(provider);
@@ -132,11 +142,16 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     const answer = held();
     const box = stubBox({ answer: answer.promise });
     renderList();
+    const ready = await screen.findByRole("button", { name: "Sign out of OpenAI GPT" }, { timeout: 5_000 });
+    ready.focus();
     const button = await signOut("OpenAI GPT");
     await waitFor(() => expect(box.posts).toEqual(["openai"]));
 
     expect(button).toHaveTextContent("Signing out…");
-    expect(button).toBeDisabled();
+    // Disabled for every purpose but focus: a keyboard keeps its place
+    // through the whole sign-out.
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveFocus();
     expect(button).toHaveAttribute("aria-busy", "true");
     expect(screen.getByTestId("ai-provider-sign-out-spinner-openai")).toHaveAttribute("aria-hidden", "true");
     // The spinner's ligature is not part of the button's name.
@@ -153,8 +168,11 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     fireEvent.click(button);
     fireEvent.click(button);
     expect(box.posts).toEqual(["openai"]);
-    // Nothing is said before the box has answered.
-    expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
+    // "Signed out" is not said before the box has answered; that it is
+    // running is, to assistive tech, in the status region.
+    expect(screen.queryByTestId("ai-provider-signed-out")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("Signing out…");
+    expect(screen.getByTestId("ai-provider-sign-out-progress")).toHaveClass("sr-only");
 
     answer.release();
     await waitFor(() => expect(screen.getByTestId("ai-provider-signed-out")).toHaveTextContent("Signed out of OpenAI GPT."));
@@ -169,11 +187,13 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     expect(restarting).toHaveTextContent("The assistant is restarting to finish — back in about a minute.");
     expect(gateway.waits).toBe(1);
     expect(button).toHaveTextContent("Signing out…");
-    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByTestId("ai-provider-openai")).toHaveAttribute("data-sign-out", "pending");
     // The box is not re-read against a gateway that is still coming back.
     const readsDuringRestart = box.statusReads;
-    expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
+    expect(screen.queryByTestId("ai-provider-signed-out")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ai-provider-sign-out-progress"))
+      .toHaveTextContent("Signing out… The assistant is restarting to finish — back in about a minute.");
 
     gateway.back?.();
     await waitFor(() => expect(screen.getByTestId("ai-provider-signed-out")).toHaveTextContent("Signed out of OpenAI GPT."));
@@ -262,6 +282,48 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     expect(box.posts).toEqual(["openai"]);
   });
 
+  it("a re-read that fails still lets the row go, and keeps 'Signed out' up against the list it could not replace", async () => {
+    stubBox({ readFailsAfterSignOut: true });
+    renderList();
+    await signOut("OpenAI GPT");
+    await waitFor(() => expect(screen.getByTestId("ai-provider-signed-out")).toHaveTextContent("Signed out of OpenAI GPT."));
+    // The list says it is the last known state...
+    expect(screen.getByRole("alert")).toHaveTextContent("The provider list could not be read from the box.");
+    // ...which still shows the row signed in — and that older list does not
+    // take back what the sign-out did.
+    const row = screen.getByTestId("ai-provider-openai");
+    expect(row).not.toHaveAttribute("data-sign-out", "pending");
+    expect(screen.getByTestId("ai-provider-signed-out")).toBeInTheDocument();
+    // Nothing is held: the rest of the list is free again.
+    expect(screen.getByTestId("ai-provider-switch-xai")).toBeEnabled();
+    expect(screen.getByTestId("ai-provider-sign-out-xai")).toBeEnabled();
+  });
+
+  it("a request that never answers gives every row back after SIGN_OUT_REQUEST_MS, and says the sign-out may have gone through", async () => {
+    const box = stubBox({ hang: true });
+    renderList();
+    const button = await screen.findByRole("button", { name: "Sign out of OpenAI GPT" }, { timeout: 5_000 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(button);
+      fireEvent.click(button);
+      expect(box.posts).toEqual(["openai"]);
+      expect(button).toHaveTextContent("Signing out…");
+      await act(async () => { await vi.advanceTimersByTimeAsync(SIGN_OUT_REQUEST_MS - 1_000); });
+      // Still in hand a second before the bound.
+      expect(button).toHaveTextContent("Signing out…");
+      expect(screen.getByTestId("ai-provider-switch-xai")).toBeDisabled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    } finally {
+      vi.useRealTimers();
+    }
+    const error = await screen.findByTestId("ai-provider-sign-out-error-openai");
+    expect(error).toHaveTextContent("The box took too long to answer. The list has been read again — if OpenAI GPT is no longer in it, the sign-out went through.");
+    await waitFor(() => expect(screen.getByTestId("ai-provider-switch-xai")).toBeEnabled());
+    expect(screen.getByTestId("ai-provider-sign-out-openai")).toHaveTextContent("Sign out of OpenAI GPT");
+    expect(screen.queryByTestId("ai-provider-signed-out")).not.toBeInTheDocument();
+  });
+
   it("reduced motion: the same states and words, with no fold and no wash", async () => {
     reduceMotion();
     const answer = held();
@@ -269,7 +331,7 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     renderList();
     const button = await signOut("OpenAI GPT");
     await waitFor(() => expect(button).toHaveTextContent("Signing out…"));
-    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByTestId("ai-provider-openai")).toHaveAttribute("data-sign-out", "pending");
     answer.release();
     await waitFor(() => expect(screen.getByTestId("ai-provider-signed-out")).toHaveTextContent("Signed out of OpenAI GPT."));

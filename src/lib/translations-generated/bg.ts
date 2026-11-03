@@ -3667,6 +3667,7 @@ const table: Record<string, string> = {
   "settings.providers.signOutConfirm": "Изход — докоснете отново",
   "settings.providers.signOutFailed": "Изходът от {name} не бе успешен.",
   "settings.providers.signOutRestarting": "Асистентът се рестартира, за да довърши — връща се след около минута.",
+  "settings.providers.signOutTimedOut": "Кутията не отговори навреме. Списъкът е прочетен отново — ако {name} вече не е в него, изходът е успешен.",
   "settings.providers.signedOut": "Излязохте от {name}. Влезте отново по-долу, за да го използвате.",
   "settings.providers.signingOut": "Излизане…",
   "settings.providers.strandedPlugins": "Приставки, нуждаещи се от поправка",

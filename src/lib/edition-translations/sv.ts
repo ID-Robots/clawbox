@@ -37,6 +37,7 @@ export const sv: Record<string, string> = {
   "settings.providers.signingOut": "Loggar ut…",
   "settings.providers.signOutRestarting": "Assistenten startar om för att slutföra — tillbaka om ungefär en minut.",
   "settings.providers.signOutFailed": "Det gick inte att logga ut från {name}.",
+  "settings.providers.signOutTimedOut": "Boxen svarade inte i tid. Listan har lästs om — finns {name} inte längre med har utloggningen gått igenom.",
   "settings.providers.signedOut": "Utloggad från {name}. Logga in igen nedan för att använda det.",
   "settings.providers.empty": "Ingen leverantör är ansluten ännu — anslut en nedan.",
 
