@@ -2420,7 +2420,7 @@ const table: Record<string, string> = {
   "login.showKey": "Show key",
   "login.showPassword": "Show password",
   "login.showToken": "Show token",
-  "login.signinUnavailable": "This box cannot check other users' passwords yet. Ask the owner to open Settings → Users, which shows the one-time repair.",
+  "login.signinUnavailable": "This box cannot check other users' passwords yet. Ask the owner to open Settings → System → Users, which shows the one-time repair.",
   "login.subtitle": "Enter your password to continue",
   "login.tooManyAttempts": "Too many failed attempts. Try again in a few minutes.",
   "login.username": "Username",

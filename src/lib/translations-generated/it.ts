@@ -2420,7 +2420,7 @@ const table: Record<string, string> = {
   "login.showKey": "Mostra la chiave",
   "login.showPassword": "Mostra password",
   "login.showToken": "Mostra il token",
-  "login.signinUnavailable": "Questo dispositivo non può ancora verificare le password degli altri utenti. Chiedi al proprietario di aprire Impostazioni → Utenti, dove trova la riparazione da fare una volta sola.",
+  "login.signinUnavailable": "Questo dispositivo non può ancora verificare le password degli altri utenti. Chiedi al proprietario di aprire Impostazioni → Sistema → Utenti, dove trova la riparazione da fare una volta sola.",
   "login.subtitle": "Inserisci la password per continuare",
   "login.tooManyAttempts": "Troppi tentativi non riusciti. Riprova tra qualche minuto.",
   "login.username": "Nome utente",

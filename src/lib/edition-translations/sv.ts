@@ -1778,7 +1778,7 @@ export const sv: Record<string, string> = {
   "login.incorrectPassword": "Fel lösenord",
   "login.incorrectCredentials": "Fel användarnamn eller lösenord",
   "login.tooManyAttempts": "För många misslyckade försök. Försök igen om några minuter.",
-  "login.signinUnavailable": "Den här boxen kan ännu inte kontrollera andra användares lösenord. Be ägaren öppna Inställningar → Användare, där engångsreparationen visas.",
+  "login.signinUnavailable": "Den här boxen kan ännu inte kontrollera andra användares lösenord. Be ägaren öppna Inställningar → System → Användare, där engångsreparationen visas.",
   "tray.signedInAs": "Inloggad som",
   "tray.signedInAsName": "Inloggad som {name}",
   "tray.switchUser": "Byt användare",

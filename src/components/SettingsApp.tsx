@@ -49,6 +49,7 @@ import ClawboxMcpPanel from "./ClawboxMcpPanel";
 import PathGuardPanel from "./PathGuardPanel";
 import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
+import { useSettledSessionUser } from "@/lib/use-session-user";
 import MonitorsPanel from "./MonitorsPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
@@ -235,7 +236,30 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "users", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+
+/**
+ * Users is a part of System now — System → Users, beside the device's own
+ * figures — rather than a sidebar row of its own (TASK-2130). The name it had
+ * as a section still opens it, so every link written before the move
+ * (`dispatchOpenSettingsSection("users")`, `/app/settings?section=users`)
+ * lands where the page went.
+ */
+const USERS_LINK = "users";
+
+/** The two views System holds: the device's figures, and who can sign in. */
+type SystemView = "device" | "users";
+
+/** System's tabs, in order; each named by the key that already names it elsewhere in Settings. */
+const SYSTEM_VIEWS: { id: SystemView; icon: string; labelKey: string }[] = [
+  { id: "device", icon: "computer", labelKey: "settings.device" },
+  { id: "users", icon: "group", labelKey: "settings.users" },
+];
+
+/** The System view a deep-link value asks for: Users for the old Users link, the device's figures for any other. */
+function toSystemView(value: unknown): SystemView {
+  return value === USERS_LINK ? "users" : "device";
+}
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -359,10 +383,8 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
-  // Who can sign in to the box — each a real Linux account. Every signed-in
-  // person gets Settings, this page with it; the owner's own account cannot
-  // be removed by anyone, and the route behind the panel checks too.
-  { id: "users", icon: "group", labelKey: "settings.users" },
+  // Who can sign in to the box — each a real Linux account — is System →
+  // Users, the owner's alone; it had a row of its own here until TASK-2130.
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   // The whole system update — versions, the run, beta channel, branch pin,
   // force — is a Settings page now; the About tile only points here.
@@ -377,10 +399,17 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
 const DEFAULT_SECTION: Section = "appearance";
 
 /** A deep-link value as a Section, or null. The old Local Models section is
- *  part of Local AI now. */
+ *  part of Local AI now, and the old Users section part of System. */
 function toSection(value: unknown): Section | null {
+  if (value === USERS_LINK) return "system";
   if (typeof value !== "string" || !(SECTIONS as readonly string[]).includes(value)) return null;
   return value === "localModels" ? "localAi" : (value as Section);
+}
+
+/** The deep-link value a cold open left on `window`, untouched. */
+function pendingLink(): unknown {
+  if (typeof window === "undefined") return undefined;
+  return (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
 }
 
 // The section a cold open was asked for, read BEFORE the first render so the
@@ -388,8 +417,12 @@ function toSection(value: unknown): Section | null {
 // a tick later. A peek, not a take: the mount effect still deletes the slot,
 // because React may run a state initializer twice.
 function peekPendingSection(): Section | null {
-  if (typeof window === "undefined") return null;
-  return toSection((window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection);
+  return toSection(pendingLink());
+}
+
+/** The System view a cold open was asked for, read the same way for the same reason. */
+function peekPendingSystemView(): SystemView {
+  return toSystemView(pendingLink());
 }
 
 /* ── Discord ── */
@@ -620,6 +653,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const anthropicAccountsShown = useCallback(() => setShowAnthropicAccounts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
+  // Which of System's two views is open (System → Users or the device's
+  // figures). Only the owner has the choice: anyone else signed in is never
+  // shown Users, wherever a link asked to go — so until /users/me has said who
+  // this is, a link to Users waits rather than drawing the list for a moment.
+  // No answer at all is the owner's, as it is on the desktop (page.tsx); the
+  // route behind the panel judges each request itself either way.
+  const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
+  const sessionUser = useSettledSessionUser();
+  const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
+  const systemShows: SystemView | null = systemView === "device" ? "device" : usersAllowed === null ? null : usersAllowed ? "users" : "device";
   useEffect(() => {
     let alive = true;
     const answer = (available: boolean) => {
@@ -704,6 +747,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (next === "remote" && requireLoginFor("remote")) return;
     // The old Local Models section is part of Local AI now.
     if (next === "localModels") next = "localAi";
+    // The System row opens System itself; Users is one tab further in.
+    if (next === "system") setSystemView("device");
     setSection(next);
     // Both, so one navigation call works on either layout: the mobile view
     // reads `mobileSection`, and a hub row that only set `section` would
@@ -728,6 +773,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       // A later link to anywhere else wins over one still waiting.
       monitorsLink.current = false;
+      // `users` (the old Users section) opens System on Users; `system` on
+      // the device's figures, which is what its links are about.
+      if (next === "system") setSystemView(toSystemView(s));
       setSection(next);
       setMobileSection(next);
       // The one block inside a section a link may also ask for
@@ -875,24 +923,27 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // `processes` has always been the by-CPU list, so a server that predates the
   // second ordering simply has no memory view to switch to.
   const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
+  // System's figures are on screen in its device view only: System → Users
+  // draws none of them, so it polls for none.
+  const systemFiguresShown = section === "system" && systemShows === "device";
   useEffect(() => {
-    if (section !== "system" && section !== "about") return;
+    if (!systemFiguresShown && section !== "about") return;
     // Ask only for what is on screen. About draws neither block, and on System
     // each one is behind its own button — so a collapsed panel costs no `ps`
     // and no /proc/stat diff on the box, not merely a hidden <div> here.
     // Re-running on each toggle is deliberate: expanding fetches at once rather
     // than showing an empty card until the next 3 s tick.
     const query = new URLSearchParams({
-      processes: section === "system" && processesOpen ? "1" : "0",
-      perCore: section === "system" && perCoreOpen ? "1" : "0",
+      processes: systemFiguresShown && processesOpen ? "1" : "0",
+      perCore: systemFiguresShown && perCoreOpen ? "1" : "0",
     });
     const url = `/setup-api/system/stats?${query}`;
     const poll = () => fetch(url, { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
     poll();
-    if (section !== "system") return;
+    if (!systemFiguresShown) return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
-  }, [section, processesOpen, perCoreOpen]);
+  }, [section, systemFiguresShown, processesOpen, perCoreOpen]);
 
   /* ── Versions, for About's rows and the sidebar subtitles. The update
      itself — its run, the beta channel, the branch pin, the force — is the
@@ -3219,6 +3270,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // Per instance: the desktop can have this window open beside the standalone
   // page in another tab, and the region's name is resolved by id.
   const panelTitleId = useId();
+  // System's tabs and their panels are named by id, per instance for the same reason.
+  const systemTabsId = useId();
   const resetProgressSteps = [
     {
       id: "erase",
@@ -3458,6 +3511,62 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const MobileTitle = asPage ? "h1" : "h2";
   /** What names that region when it is a section: the panel's own heading. */
   const panelRegionProps = asPage ? {} : { "aria-labelledby": panelTitleId };
+
+  /**
+   * System's two views, a choice only the owner is given: the device's own
+   * figures, where System opens, and Users — who can sign in to the box, the
+   * list, the add-user form and the owner's "Share OpenClaw with all users" —
+   * which had a sidebar row of its own until TASK-2130. Anyone else signed in
+   * gets System without the tabs, and no Users anywhere.
+   */
+  const systemTabId = (view: SystemView) => `${systemTabsId}-tab-${view}`;
+  const systemPanelId = (view: SystemView) => `${systemTabsId}-panel-${view}`;
+  /** A view's container is a tab panel where there are tabs, and a plain block where there are none. */
+  const systemPanelProps = (view: SystemView) => usersAllowed === true
+    ? { role: "tabpanel", id: systemPanelId(view), "aria-labelledby": systemTabId(view) }
+    : {};
+  // The tabs pattern's keys: the arrows move between the two (and open the
+  // one they land on), Home and End go to the first and the last.
+  const onSystemTabKey = (e: React.KeyboardEvent) => {
+    const at = SYSTEM_VIEWS.findIndex((v) => v.id === systemShows);
+    const last = SYSTEM_VIEWS.length - 1;
+    const to = e.key === "ArrowRight" ? (at + 1) % SYSTEM_VIEWS.length
+      : e.key === "ArrowLeft" ? (at + last) % SYSTEM_VIEWS.length
+        : e.key === "Home" ? 0
+          : e.key === "End" ? last
+            : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    const next = SYSTEM_VIEWS[to].id;
+    setSystemView(next);
+    document.getElementById(systemTabId(next))?.focus();
+  };
+  const systemTabs = usersAllowed === true && (
+    <div role="tablist" aria-label={t("settings.system")} onKeyDown={onSystemTabKey} className="max-w-xl flex gap-1 bg-white/[0.04] rounded-xl p-1 mb-5" data-testid="settings-system-tabs">
+      {SYSTEM_VIEWS.map((view) => {
+        const selected = systemShows === view.id;
+        return (
+          <button
+            key={view.id}
+            type="button"
+            role="tab"
+            id={systemTabId(view.id)}
+            aria-selected={selected}
+            aria-controls={selected ? systemPanelId(view.id) : undefined}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => setSystemView(view.id)}
+            data-testid={`settings-system-tab-${view.id}`}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer border-none ${
+              selected ? "bg-orange-500/15 text-[var(--coral-bright)] shadow-sm" : "bg-transparent text-white/35 hover:text-[var(--text-secondary)] hover:bg-white/[0.04]"
+            }`}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{view.icon}</span>
+            {t(view.labelKey)}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   const renderContent = () => (
     <>
@@ -6141,9 +6250,20 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── System ─── */}
-        {activeSection === "system" && (
-          <div className="max-w-xl space-y-5">
+        {/* ─── System: the device's figures and, for the owner, Users ─── */}
+        {activeSection === "system" && systemTabs}
+        {activeSection === "system" && systemShows === null && (
+          <div className="flex items-center justify-center py-8">
+            <div className="spinner" role="status" aria-label={t("loading")} />
+          </div>
+        )}
+        {activeSection === "system" && systemShows === "users" && (
+          <div {...systemPanelProps("users")}>
+            <UsersPanel />
+          </div>
+        )}
+        {activeSection === "system" && systemShows === "device" && (
+          <div className="max-w-xl space-y-5" {...systemPanelProps("device")}>
 
             {stats ? (
               <>
@@ -6542,8 +6662,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Remote Control ─── */}
         {activeSection === "remote" && renderRemoteSection()}
 
-        {/* ─── Users (multi-user ClawBox OS) ─── */}
-        {activeSection === "users" && <UsersPanel />}
         {activeSection === "monitors" && monitorsAvailable && <MonitorsPanel />}
 
         {/* ─── About ─── */}
@@ -6899,6 +7017,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     key={item.id}
                     onClick={() => {
                       if (item.id === "remote" && requireLoginFor("remote")) return;
+                      if (item.id === "system") setSystemView("device");
                       setSection(item.id);
                       setMobileSection(item.id);
                     }}

@@ -1777,7 +1777,7 @@ export const es: Record<string, string> = {
   "login.incorrectPassword": "Contraseña incorrecta",
   "login.incorrectCredentials": "Nombre de usuario o contraseña incorrectos",
   "login.tooManyAttempts": "Demasiados intentos fallidos. Vuelve a intentarlo en unos minutos.",
-  "login.signinUnavailable": "Esta caja todavía no puede comprobar las contraseñas de otros usuarios. Pide al propietario que abra Configuración → Usuarios, donde se muestra la reparación única.",
+  "login.signinUnavailable": "Esta caja todavía no puede comprobar las contraseñas de otros usuarios. Pide al propietario que abra Configuración → Sistema → Usuarios, donde se muestra la reparación única.",
   "tray.signedInAs": "Sesión iniciada como",
   "tray.signedInAsName": "Sesión iniciada como {name}",
   "tray.switchUser": "Cambiar de usuario",

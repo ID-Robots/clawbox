@@ -1,5 +1,5 @@
 /**
- * Multi-user ClawBox OS: Settings → Users, the login screen's user picker and
+ * Multi-user ClawBox OS: Settings → System → Users, the login screen's user picker and
  * error lines, and the tray's "signed in as". Every locale carries its own
  * copy of each key (edition-translations.test.ts holds it to that).
  */
@@ -62,7 +62,7 @@ export const usersEn: Record<string, string> = {
   "login.incorrectPassword": "Incorrect password",
   "login.incorrectCredentials": "Incorrect username or password",
   "login.tooManyAttempts": "Too many failed attempts. Try again in a few minutes.",
-  "login.signinUnavailable": "This box cannot check other users' passwords yet. Ask the owner to open Settings → Users, which shows the one-time repair.",
+  "login.signinUnavailable": "This box cannot check other users' passwords yet. Ask the owner to open Settings → System → Users, which shows the one-time repair.",
   "tray.signedInAs": "Signed in as",
   "tray.signedInAsName": "Signed in as {name}",
   "tray.switchUser": "Switch user",

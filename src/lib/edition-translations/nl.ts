@@ -1782,7 +1782,7 @@ export const nl: Record<string, string> = {
   "login.incorrectPassword": "Onjuist wachtwoord",
   "login.incorrectCredentials": "Onjuiste gebruikersnaam of wachtwoord",
   "login.tooManyAttempts": "Te veel mislukte pogingen. Probeer het over een paar minuten opnieuw.",
-  "login.signinUnavailable": "Deze box kan de wachtwoorden van andere gebruikers nog niet controleren. Vraag de eigenaar om Instellingen → Gebruikers te openen; daar staat de eenmalige reparatie.",
+  "login.signinUnavailable": "Deze box kan de wachtwoorden van andere gebruikers nog niet controleren. Vraag de eigenaar om Instellingen → Systeem → Gebruikers te openen; daar staat de eenmalige reparatie.",
   "tray.signedInAs": "Aangemeld als",
   "tray.signedInAsName": "Aangemeld als {name}",
   "tray.switchUser": "Andere gebruiker",

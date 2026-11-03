@@ -1790,7 +1790,7 @@ export const zh: Record<string, string> = {
   "login.incorrectPassword": "密码不正确",
   "login.incorrectCredentials": "用户名或密码不正确",
   "login.tooManyAttempts": "失败次数过多，请几分钟后再试。",
-  "login.signinUnavailable": "这台设备暂时无法检查其他用户的密码。请让所有者打开“设置 → 用户”，那里显示了一次性修复方法。",
+  "login.signinUnavailable": "这台设备暂时无法检查其他用户的密码。请让所有者打开“设置 → 系统 → 用户”，那里显示了一次性修复方法。",
   "tray.signedInAs": "当前登录",
   "tray.signedInAsName": "已以 {name} 身份登录",
   "tray.switchUser": "切换用户",

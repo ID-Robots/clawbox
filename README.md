@@ -88,7 +88,7 @@ Full detail, and how to upgrade: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.
 
 | | |
 |---|---|
-| 👥 **Several people, one ClawBox** | The owner adds users in **Settings → Users**. Each person signs in with their own name and password and gets a desktop and a Terminal of their own; settings and installed apps stay with the owner. |
+| 👥 **Several people, one ClawBox** | The owner adds users in **Settings → System → Users**. Each person signs in with their own name and password and gets a desktop and a Terminal of their own; settings and installed apps stay with the owner. |
 | 🖥️ **Monitor mode, with a drop-down terminal** | With the ClawBox desktop session, one desktop spans a row of monitors, arranged in **Settings → Monitors**. **Win+Down** drops a terminal down from the top of the screen. |
 | ☁️ **Back up project folders to GitHub** | **Files → Projects → Back up** copies a folder to a private GitHub repository, with an optional daily backup. Likely secrets and very large files are left out, and listed. |
 | 🧭 **Kiosk mode** | When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field. |

@@ -2420,7 +2420,7 @@ const table: Record<string, string> = {
   "login.showKey": "Sleutel tonen",
   "login.showPassword": "Wachtwoord tonen",
   "login.showToken": "Token tonen",
-  "login.signinUnavailable": "Deze box kan de wachtwoorden van andere gebruikers nog niet controleren. Vraag de eigenaar om Instellingen → Gebruikers te openen; daar staat de eenmalige reparatie.",
+  "login.signinUnavailable": "Deze box kan de wachtwoorden van andere gebruikers nog niet controleren. Vraag de eigenaar om Instellingen → Systeem → Gebruikers te openen; daar staat de eenmalige reparatie.",
   "login.subtitle": "Voer je wachtwoord in om door te gaan",
   "login.tooManyAttempts": "Te veel mislukte pogingen. Probeer het over een paar minuten opnieuw.",
   "login.username": "Gebruikersnaam",

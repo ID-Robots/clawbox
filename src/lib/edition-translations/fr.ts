@@ -1782,7 +1782,7 @@ export const fr: Record<string, string> = {
   "login.incorrectPassword": "Mot de passe incorrect",
   "login.incorrectCredentials": "Nom d’utilisateur ou mot de passe incorrect",
   "login.tooManyAttempts": "Trop de tentatives échouées. Réessayez dans quelques minutes.",
-  "login.signinUnavailable": "Cette box ne peut pas encore vérifier les mots de passe des autres utilisateurs. Demandez au propriétaire d’ouvrir Réglages → Utilisateurs, qui indique la réparation à faire une seule fois.",
+  "login.signinUnavailable": "Cette box ne peut pas encore vérifier les mots de passe des autres utilisateurs. Demandez au propriétaire d’ouvrir Réglages → Système → Utilisateurs, qui indique la réparation à faire une seule fois.",
   "tray.signedInAs": "Connecté en tant que",
   "tray.signedInAsName": "Connecté en tant que {name}",
   "tray.switchUser": "Changer d’utilisateur",

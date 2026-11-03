@@ -167,7 +167,7 @@ export async function POST(request: Request) {
 
   // No name, or the owner's name, is the owner — the single-user login every
   // box had before multi-user, unchanged. A name that is not the owner's must
-  // be a user Settings → Users created; anything else is refused exactly like
+  // be a user Settings → System → Users created; anything else is refused exactly like
   // a wrong password, so the answer never says which names exist.
   const requested = typeof body.username === "string" ? body.username.trim() : "";
   const target = await resolveLoginTarget(requested);
@@ -190,7 +190,7 @@ export async function POST(request: Request) {
   if (verdict === "unavailable" && !isTunnelRequest(request.headers)) {
     await padResponseTime(startedAt);
     return NextResponse.json(
-      { error: "This box cannot check other users' passwords yet. Ask the owner to open Settings → Users, which shows the one-time repair.", code: "signin_unavailable" },
+      { error: "This box cannot check other users' passwords yet. Ask the owner to open Settings → System → Users, which shows the one-time repair.", code: "signin_unavailable" },
       { status: 503 },
     );
   }

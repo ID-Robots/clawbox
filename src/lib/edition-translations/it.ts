@@ -1793,7 +1793,7 @@ export const it: Record<string, string> = {
   "login.incorrectPassword": "Password errata",
   "login.incorrectCredentials": "Nome utente o password errati",
   "login.tooManyAttempts": "Troppi tentativi non riusciti. Riprova tra qualche minuto.",
-  "login.signinUnavailable": "Questo dispositivo non può ancora verificare le password degli altri utenti. Chiedi al proprietario di aprire Impostazioni → Utenti, dove trova la riparazione da fare una volta sola.",
+  "login.signinUnavailable": "Questo dispositivo non può ancora verificare le password degli altri utenti. Chiedi al proprietario di aprire Impostazioni → Sistema → Utenti, dove trova la riparazione da fare una volta sola.",
   "tray.signedInAs": "Accesso effettuato come",
   "tray.signedInAsName": "Accesso effettuato come {name}",
   "tray.switchUser": "Cambia utente",
