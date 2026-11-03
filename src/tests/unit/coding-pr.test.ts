@@ -39,7 +39,7 @@ import {
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
+vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce, announceCodingRunToChat: vi.fn(async () => undefined) }));
 const github = vi.hoisted(() => ({
   startRunBranch: vi.fn(),
   openPullRequest: vi.fn(),

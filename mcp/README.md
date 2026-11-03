@@ -1174,7 +1174,9 @@ assistant started from one of the owner's ClawBox chats also puts one turn into
 THAT chat when it ends (`[Coding run <id>] finished …`, the same template),
 asking the assistant to read `coding_agent_status` and tell the user — so it
 reports without being asked. This tool sends nothing extra for that: the run
-route works out which chat asked from the box's own chat registries.
+route works out which chat asked from whichever of the owner's chats has a
+turn running when the call arrives (Hermes' live turns on the box, the
+OpenClaw gateway's busy sessions).
 
 ### Memory Shard
 

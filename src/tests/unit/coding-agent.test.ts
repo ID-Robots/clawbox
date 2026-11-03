@@ -31,7 +31,8 @@ import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
+const chatNotice = vi.hoisted(() => vi.fn<(run: { id: string; status: string }) => Promise<undefined>>(async () => undefined));
+vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce, announceCodingRunToChat: chatNotice }));
 // A roomy box unless a test says otherwise: the team's spawn slot reads it.
 const memAvailable = vi.hoisted(() => vi.fn(async (): Promise<number | null> => 8000));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: memAvailable }));
@@ -202,6 +203,7 @@ beforeEach(async () => {
   process.env.CLAWBOX_MCP_TOKEN = "the-mcp-bearer-token-value";
   writeConfig({});
   announce.mockClear();
+  chatNotice.mockClear();
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -931,8 +933,13 @@ describe("a run", () => {
       await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
       lib.pauseRun(started.id);
       await finished(started.id);
+      // The pause is no ending: the chat that asked for the run hears nothing yet.
+      expect(chatNotice).not.toHaveBeenCalled();
       const stopped = lib.stopRun(started.id);
       expect(stopped.status).toBe("stopped");
+      // The stop never reaches finishRun, so it tells the chat itself (TASK-2132).
+      expect(chatNotice.mock.calls.map(([r]) => [r.id, r.status])).toEqual([[started.id, "stopped"]]);
+      expect(announce).not.toHaveBeenCalled();
     });
 
     it("refuses to resume a run whose folder is gone, naming the folder instead of blaming the wrapper", async () => {

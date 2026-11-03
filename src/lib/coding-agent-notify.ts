@@ -37,13 +37,12 @@
  * never turn a finished run into a failed one.
  */
 
-import fs from "fs";
-import path, { untraced } from "@/lib/runtime-path";
 import { pushPendingAction } from "@/lib/pending-actions";
-import { DATA_DIR, get as configGet } from "@/lib/config-store";
+import { get as configGet } from "@/lib/config-store";
+import { kvGet, kvUpdateStrict } from "@/lib/kv-store";
 import { PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 import { getActiveHarness, type Harness } from "@/lib/harness";
-import { isOwnerChatTabKey } from "@/lib/chat-tabs";
+import { isOwnerChatTabKey, type ChatActiveRecord } from "@/lib/chat-tabs";
 import { DESKTOP_TRANSCRIPT_KEY } from "@/lib/harness/transcript-key";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
@@ -267,12 +266,26 @@ async function notifyTelegramUnlessOff(what: string, message: string): Promise<v
  * Hermes CLI path alone can take seconds) or on the chat (a Hermes turn takes
  * as long as the assistant's answer), which is why it is `void`ed from the
  * run's completion handler — both of its call sites in coding-agent.ts, the
- * settle and the deliverable gate, which between them see every run end once.
+ * settle and the deliverable gate, which between them see every run that ends
+ * through its process end once.
  */
 export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
   await notifyDesktop(run, message);
   await Promise.all([notifyTelegramUnlessOff(run.id, message), notifyOriginChat(run)]);
+}
+
+/**
+ * The chat leg alone, for the endings that never reach the settle: a paused or
+ * orphaned run the owner stops, a queued run canceled or refused its turn, a
+ * queued start that could not spawn (coding-agent.ts). They sent no card and no
+ * Telegram before this leg existed and send none now — each is the owner's own
+ * gesture or shows on the run's page — but the chat that asked for the run was
+ * told "started" or "queued", and would otherwise say so until asked. Never
+ * throws; `void` it like {@link announceCodingAgent}.
+ */
+export async function announceCodingRunToChat(run: CodingRun): Promise<void> {
+  await notifyOriginChat(run);
 }
 
 // ── The chat that started the run ────────────────────────────────────────────
@@ -285,26 +298,29 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
 //
 // WHICH CHAT. A tool call carries no chat identity on either harness — the MCP
 // server's requests hold the bearer and nothing else; OpenClaw spawns one per
-// session key without telling it the key, and Hermes runs one for every
-// session — so the run route asks the box's own registries at the moment the
-// call arrives (`findChatOrigin`), and this module keeps the answer beside the
-// run id until the run ends:
-//   - Hermes: the ClawBox chat whose turn is running right now. The turn that
-//     called the tool IS running while the call is made, and every ClawBox
+// session key and calls its tools with no `_meta` and no session in the
+// environment (read off the 2026.10.9 core), and Hermes runs one for every
+// session — so the run route asks at the moment the call arrives, while the
+// turn that made it is still running (`findChatOrigin`), and this module keeps
+// the answer beside the run id in the kv-store until the run ends:
+//   - Hermes: the ClawBox chat whose turn is running right now. Every ClawBox
 //     Hermes turn is registered by its transcript key (hermes-live-turn.ts).
-//     Two at once: the one the owner last sent in, else the newest.
-//   - OpenClaw: the gateway runs the turns, so the box sees no turn of its
-//     own; the conversation the owner last sent a turn in (the chat-tab
-//     registry's `active`, stamped when the chat sends) stands for it, within
+//   - OpenClaw: the owner's chat session the GATEWAY says has a turn running
+//     (`sessions.list` with `activeOnly`, openclaw-gateway-ws.ts) — the main
+//     conversation or one of their tabs. Only when the gateway cannot answer,
+//     the conversation the owner last sent a turn in (the chat-tab registry's
+//     `active`, stamped when the chat sends) stands for it, within
 //     CHAT_ORIGIN_WINDOW_MS of that send.
-// Only the OWNER's chats: their main conversation and their tabs. Both are
-// evidence, not proof. A run the assistant starts from Telegram, a cron job or
-// a ClawBox user's chat gets no chat notice while no owner turn is in flight
-// (Hermes) and no owner send is recent (OpenClaw), and its owner still gets the
-// card and Telegram. Started while the owner IS busy in a chat, it is told in
-// that chat, which is where the owner is. An OpenClaw turn that works past the
-// window before it starts the run is told nowhere but the card and Telegram,
-// which is what every run got before.
+//   Two owner chats busy at once, on either: the one the owner last sent in,
+//   else the newest.
+// Only the OWNER's chats. This is evidence, not proof. A run the assistant
+// starts from a cron job or a ClawBox user's chat gets no chat notice while no
+// owner chat has a turn in flight, and its owner still gets the card and
+// Telegram. Started while the owner IS busy in a chat, it is told in that chat,
+// which is where the owner is. (On OpenClaw a Telegram DM shares the main
+// session by default, so a run asked for there is told in the main chat; the
+// reply stays in the box's chat, `deliver: false`, and Telegram gets its own
+// template from the leg above.)
 //
 // WHAT IT SAYS. The same rule as the card: ClawBox's template — status, run id,
 // counts — never the task or the summary. The assistant reads those itself
@@ -316,6 +332,10 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
 // second announce of the same ending (a restart's recovery, two settle paths)
 // sends nothing. Per ending rather than per run: a run that gave up and was
 // resumed in place ends a second time, and that ending is news.
+//
+// WHEN. After the run's settle chain has committed its work (`waitForRun`),
+// boundedly: the assistant answers the notice by reading coding_agent_status,
+// and a status read before the commit describes a branch without the work.
 
 /** Which ClawBox chat asked for a run, as the run route recorded it. */
 export interface RunChatOrigin {
@@ -332,7 +352,8 @@ interface ChatNoticeRecord extends RunChatOrigin {
   told: string[];
 }
 
-const CHAT_NOTICE_PATH = path.join(DATA_DIR, "coding-agent-chat-notices.json");
+/** One kv-store entry per run, named after it: `coding-run-chat:<runId>`. */
+export const CHAT_NOTICE_KEY_PREFIX = "coding-run-chat:";
 /** Runs are kept a while; their chat records need not outlive them by much. */
 const MAX_CHAT_NOTICE_RECORDS = 500;
 const RUN_ID_RE = /^run-[a-z0-9]{1,32}$/;
@@ -353,6 +374,8 @@ function endingOf(run: CodingRun): string {
  * for somewhere else (Telegram, a cron job) while the desktop sat idle.
  */
 export const CHAT_ORIGIN_WINDOW_MS = 30 * 60_000;
+/** How long the notice waits for the run's work to be committed (coding-agent.ts caps a wait at 2 min). */
+const SETTLE_WAIT_MS = 120_000;
 /** Hermes: how long the notice waits for a turn already running in the chat before it goes anyway. */
 export const HERMES_BUSY_WAIT_MS = 20 * 60_000;
 /** Hermes: the notice's own turn — the route answers when the assistant has. */
@@ -365,55 +388,41 @@ function isOriginKey(key: unknown): key is string | null {
   return key === null || isOwnerChatTabKey(key);
 }
 
-/**
- * The records on disk. No file, or one that is not JSON, is no records — the
- * next write puts a whole one in its place. A file that is there and cannot be
- * READ throws instead: writing the next record over it would forget every
- * ending already told, and each of those chats would be told again.
- */
-function readChatNotices(): Record<string, ChatNoticeRecord> {
-  let text: string;
+/** One run's entry as the kv-store holds it, or null for none or one this module did not write. */
+function parseChatNotice(raw: string | null | undefined): ChatNoticeRecord | null {
+  if (!raw) return null;
+  let r: Partial<ChatNoticeRecord> | null;
   try {
-    text = fs.readFileSync(CHAT_NOTICE_PATH, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw err;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
+    r = JSON.parse(raw) as Partial<ChatNoticeRecord> | null;
   } catch {
-    return {};
+    return null;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-  const out: Record<string, ChatNoticeRecord> = {};
-  for (const [id, raw] of Object.entries(parsed as Record<string, unknown>)) {
-    const r = raw as Partial<ChatNoticeRecord> | null;
-    if (!RUN_ID_RE.test(id) || !r || typeof r !== "object") continue;
-    if ((r.harness !== "openclaw" && r.harness !== "hermes") || !isOriginKey(r.key ?? null)) continue;
-    if (typeof r.at !== "number" || !Number.isFinite(r.at)) continue;
-    const told = Array.isArray(r.told) ? r.told.filter((s): s is string => typeof s === "string" && ENDING_RE.test(s)) : [];
-    out[id] = { harness: r.harness, key: r.key ?? null, at: r.at, told };
-  }
-  return out;
+  if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+  if ((r.harness !== "openclaw" && r.harness !== "hermes") || !isOriginKey(r.key ?? null)) return null;
+  if (typeof r.at !== "number" || !Number.isFinite(r.at)) return null;
+  const told = Array.isArray(r.told) ? r.told.filter((s): s is string => typeof s === "string" && ENDING_RE.test(s)) : [];
+  return { harness: r.harness, key: r.key ?? null, at: r.at, told };
 }
 
-/** Synchronous, so no other request's read can land between the read and this write. */
-function writeChatNotices(all: Record<string, ChatNoticeRecord>): void {
-  const ids = Object.keys(all).sort((a, b) => all[b].at - all[a].at);
-  const kept: Record<string, ChatNoticeRecord> = {};
-  for (const id of ids.slice(0, MAX_CHAT_NOTICE_RECORDS)) kept[id] = all[id];
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = untraced(`${CHAT_NOTICE_PATH}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify(kept), { mode: 0o600 });
-  // `mode` applies only to a file the write creates; a temp file left behind
-  // by a crash keeps whatever mode it had.
-  try {
-    fs.chmodSync(tmp, 0o600);
-  } catch {
-    /* best effort: a temp file the write created is 0600 already */
-  }
-  fs.renameSync(tmp, CHAT_NOTICE_PATH);
+/**
+ * Change the kv-store's entries for runs, in one read-modify-write. The
+ * STRICT update: a store that is there and cannot be read throws instead of
+ * reading as empty — written back, that empty store would forget every ending
+ * already told (and everything else kv.json holds), and each of those chats
+ * would be told again. Synchronous from read to rename, so no other request in
+ * this process lands in between. Past MAX_CHAT_NOTICE_RECORDS the oldest go.
+ */
+function updateChatNotices<T>(mutate: (data: Record<string, string>) => T): T {
+  return kvUpdateStrict((data) => {
+    const result = mutate(data);
+    const entries = Object.keys(data).filter((name) => name.startsWith(CHAT_NOTICE_KEY_PREFIX));
+    if (entries.length > MAX_CHAT_NOTICE_RECORDS) {
+      const age = (name: string) => parseChatNotice(data[name])?.at ?? 0;
+      entries.sort((a, b) => age(a) - age(b));
+      for (const name of entries.slice(0, entries.length - MAX_CHAT_NOTICE_RECORDS)) delete data[name];
+    }
+    return result;
+  });
 }
 
 /**
@@ -427,14 +436,19 @@ export async function findChatOrigin(now = Date.now()): Promise<RunChatOrigin | 
     const { active } = readOwnerChatTabs();
     if (harness === "hermes") {
       const { liveTurnKeys } = await import("@/lib/harness/hermes-live-turn");
-      const live = liveTurnKeys()
+      const busy = liveTurnKeys()
         .map((turn) => turn.sessionKey)
-        .filter((key) => key === DESKTOP_TRANSCRIPT_KEY || isOwnerChatTabKey(key));
-      if (live.length === 0) return null;
-      const last = active ? active.key ?? DESKTOP_TRANSCRIPT_KEY : null;
-      const key = last !== null && live.includes(last) ? last : live[0];
-      return { harness, key: key === DESKTOP_TRANSCRIPT_KEY ? null : key, at: now };
+        .filter((key) => key === DESKTOP_TRANSCRIPT_KEY || isOwnerChatTabKey(key))
+        .map((key) => (key === DESKTOP_TRANSCRIPT_KEY ? null : key));
+      const key = busiestChat(busy, active);
+      return key === undefined ? null : { harness, key, at: now };
     }
+    const busy = await openClawBusyChats();
+    if (busy !== null) {
+      const key = busiestChat(busy, active);
+      return key === undefined ? null : { harness, key, at: now };
+    }
+    // The gateway could not say: the owner's last send stands for the turn.
     if (!active || now - active.at > CHAT_ORIGIN_WINDOW_MS || !isOriginKey(active.key)) return null;
     // One strip serves both harnesses on a dual box: a Hermes tab the owner
     // was in before a swap is no session the gateway has.
@@ -446,13 +460,52 @@ export async function findChatOrigin(now = Date.now()): Promise<RunChatOrigin | 
   }
 }
 
+/**
+ * Of the owner's chats with a turn running (null is the main conversation,
+ * newest first), the one the owner last sent in, else the newest; undefined
+ * when none is running.
+ */
+function busiestChat(busy: Array<string | null>, active: ChatActiveRecord | null): string | null | undefined {
+  if (busy.length === 0) return undefined;
+  if (active && busy.includes(active.key ?? null)) return active.key ?? null;
+  return busy[0];
+}
+
+/** How long the run's start waits for the gateway to say which session is busy. */
+const ACTIVE_SESSIONS_TIMEOUT_MS = 4_000;
+
+/**
+ * OpenClaw: the owner's chats the gateway says have a turn running — null for
+ * the main conversation, a tab's key otherwise; a channel's, a cron job's or a
+ * ClawBox user's session is none of them. Null when the gateway could not be
+ * asked (down, restarting, a core without `activeOnly`).
+ */
+async function openClawBusyChats(): Promise<Array<string | null> | null> {
+  try {
+    const { gatewayWsActiveSessions } = await import("@/lib/openclaw-gateway-ws");
+    const { mainSessionKey, sessionKeys } = await gatewayWsActiveSessions({ timeoutMs: ACTIVE_SESSIONS_TIMEOUT_MS });
+    const busy: Array<string | null> = [];
+    for (const key of sessionKeys) {
+      if (key === mainSessionKey) busy.push(null);
+      else if (key.startsWith("agent:") && isOwnerChatTabKey(key)) busy.push(key);
+    }
+    return busy;
+  } catch (err) {
+    console.warn("[coding-agent] the gateway did not say which chat is busy; going by the owner's last send:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
 /** Keep `origin` beside the run until the run ends. Best effort; never throws. */
 export function recordRunChatOrigin(runId: string, origin: RunChatOrigin): void {
   if (!RUN_ID_RE.test(runId) || !isOriginKey(origin.key)) return;
   try {
-    const all = readChatNotices();
-    all[runId] = { harness: origin.harness, key: origin.key, at: origin.at, told: all[runId]?.told ?? [] };
-    writeChatNotices(all);
+    updateChatNotices((data) => {
+      const entry = `${CHAT_NOTICE_KEY_PREFIX}${runId}`;
+      const told = parseChatNotice(data[entry])?.told ?? [];
+      const record: ChatNoticeRecord = { harness: origin.harness, key: origin.key, at: origin.at, told };
+      data[entry] = JSON.stringify(record);
+    });
   } catch (err) {
     console.warn(`[coding-agent] could not record which chat asked for ${runId}:`, err instanceof Error ? err.message : err);
   }
@@ -466,12 +519,18 @@ export function recordRunChatOrigin(runId: string, origin: RunChatOrigin): void 
  * place a few times, not hundreds.
  */
 function claimChatNotice(runId: string, ending: string): RunChatOrigin | null {
-  const all = readChatNotices();
-  const record = all[runId];
-  if (!record || record.told.includes(ending)) return null;
-  record.told = [...record.told, ending].slice(-20);
-  writeChatNotices(all);
-  return { harness: record.harness, key: record.key, at: record.at };
+  const entry = `${CHAT_NOTICE_KEY_PREFIX}${runId}`;
+  // Most runs were never asked for from a chat: a plain look first, so their
+  // ending writes nothing. A store that cannot be read answers null here too —
+  // no notice, which is the safe direction.
+  if (kvGet(entry) === null) return null;
+  return updateChatNotices((data) => {
+    const record = parseChatNotice(data[entry]);
+    if (!record || record.told.includes(ending)) return null;
+    record.told = [...record.told, ending].slice(-20);
+    data[entry] = JSON.stringify(record);
+    return { harness: record.harness, key: record.key, at: record.at };
+  });
 }
 
 /**
@@ -593,6 +652,11 @@ async function notifyOriginChat(run: CodingRun): Promise<void> {
       console.info(`[coding-agent] ${run.id} was asked for from a ${origin.harness} chat and the box now runs ${harness}; chat notice not sent`);
       return;
     }
+    // After the settle chain has committed the run's work — see WHEN above. A
+    // run that never reached the settle (a queue, a stop on paper) answers at
+    // once; the wait is capped, and a notice late by that much still goes.
+    const { waitForRun } = await import("@/lib/coding-agent");
+    await waitForRun(run.id, SETTLE_WAIT_MS);
     // Loaded here, as everything this leg reads: the module's other legs, and
     // the many tests that import it for them, need none of it. A tab the owner
     // has closed since is not where they will look; their main chat is.

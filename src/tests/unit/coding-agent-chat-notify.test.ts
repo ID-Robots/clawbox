@@ -5,18 +5,16 @@
  * user without being asked.
  *
  * Pins which chat is taken for the run on each harness (the live Hermes turn,
- * the owner's last OpenClaw send), that the notice reaches it once per ending,
- * that it carries ClawBox's template and never the task or the summary, and
- * that no failure on the way reaches the caller.
+ * the OpenClaw session the gateway says is busy, the owner's last send when it
+ * cannot say), that the record lives in the kv-store beside the run's id, that
+ * the notice reaches the chat once per ending and after the run's work is
+ * committed, that it carries ClawBox's template and never the task or the
+ * summary, and that no failure on the way reaches the caller.
  */
 import fs from "fs";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingRun } from "@/lib/coding-agent";
-
-const kvGet = vi.hoisted(() => vi.fn());
-const kvSet = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/kv-store", () => ({ kvGet, kvSet }));
 
 const getActiveHarness = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/harness", () => ({ getActiveHarness, getEdition: vi.fn(() => "openclaw") }));
@@ -29,29 +27,38 @@ const gateway = vi.hoisted(() => {
     GatewayRpcError,
     gatewayWsCall: vi.fn(),
     gatewayWsChatSendMain: vi.fn(),
+    gatewayWsActiveSessions: vi.fn(),
   };
 });
 vi.mock("@/lib/openclaw-gateway-ws", () => gateway);
 
 vi.mock("@/lib/mcp-token", () => ({ getMcpToken: () => "mcp-bearer-for-the-test" }));
 
+// The settle chain's wake, which the notice waits for (coding-agent.ts).
+const waitForRun = vi.hoisted(() => vi.fn<(id: string, ms: number) => Promise<null>>(async () => null));
+vi.mock("@/lib/coding-agent", () => ({ waitForRun }));
+
 import { DATA_DIR } from "@/lib/config-store";
 import {
   announceCodingAgent,
+  announceCodingRunToChat,
   buildChatNotice,
+  CHAT_NOTICE_KEY_PREFIX,
   findChatOrigin,
   GATEWAY_RETRY_DELAYS_MS,
   recordRunChatOrigin,
 } from "@/lib/coding-agent-notify";
+import { kvGet, kvGetAll } from "@/lib/kv-store";
 import { beginLiveTurn } from "@/lib/harness/hermes-live-turn";
 import { appendTranscript } from "@/lib/harness/transcript-store";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
+const MAIN = "agent:main:main";
 const TAB = "agent:main:clawbox-abc123def456";
 const CLOSED_TAB = "agent:main:clawbox-0c105ed00001";
 const HERMES_TAB = "desktop-a1b2c3d4e5f6";
-const NOTICES = path.join(DATA_DIR, "coding-agent-chat-notices.json");
+const KV = path.join(DATA_DIR, "kv.json");
 const TABS = path.join(DATA_DIR, "chat-tabs.json");
 const TRANSCRIPTS = path.join(DATA_DIR, "chat-transcripts");
 
@@ -96,7 +103,7 @@ const endTurns: Array<() => void> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
-  fs.rmSync(NOTICES, { recursive: true, force: true });
+  fs.rmSync(KV, { recursive: true, force: true });
   fs.rmSync(TABS, { force: true });
   fs.rmSync(TRANSCRIPTS, { recursive: true, force: true });
   // The Telegram leg is coding-agent-notify.test.ts's; off here, so the only
@@ -104,7 +111,9 @@ beforeEach(() => {
   process.env.CLAWBOX_CODING_AGENT_TELEGRAM = "off";
   getActiveHarness.mockResolvedValue("openclaw");
   gateway.gatewayWsCall.mockResolvedValue({});
-  gateway.gatewayWsChatSendMain.mockResolvedValue({ sessionKey: "agent:main:main" });
+  gateway.gatewayWsChatSendMain.mockResolvedValue({ sessionKey: MAIN });
+  gateway.gatewayWsActiveSessions.mockResolvedValue({ mainSessionKey: MAIN, sessionKeys: [] });
+  waitForRun.mockResolvedValue(null);
   fetchMock.mockResolvedValue(new Response(JSON.stringify({ reply: "done" }), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -122,8 +131,57 @@ function liveTurn(key: string, now: number): void {
   endTurns.push(() => turn.end());
 }
 
+/** What the gateway answers `sessions.list` with `activeOnly`: the sessions with a turn running. */
+function gatewayBusy(...sessionKeys: string[]): void {
+  gateway.gatewayWsActiveSessions.mockResolvedValue({ mainSessionKey: MAIN, sessionKeys });
+}
+
+/** A gateway that cannot be asked — down, restarting, or a core that refuses `activeOnly`. */
+function gatewaySilent(): void {
+  gateway.gatewayWsActiveSessions.mockRejectedValue(new gateway.GatewayWsUnavailableError("not listening"));
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+}
+
 describe("which chat asked for the run", () => {
-  it("OpenClaw: the conversation the owner last sent a turn in, while that send is recent", async () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("OpenClaw: the owner's chat the gateway says is running a turn — the main conversation or a tab", async () => {
+    const now = 50_000_000;
+    gatewayBusy(MAIN);
+    await expect(findChatOrigin(now)).resolves.toEqual({ harness: "openclaw", key: null, at: now });
+    gatewayBusy(TAB);
+    await expect(findChatOrigin(now)).resolves.toEqual({ harness: "openclaw", key: TAB, at: now });
+    expect(gateway.gatewayWsActiveSessions).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: expect.any(Number) }));
+  });
+
+  it("OpenClaw: the busy chat wins over the owner's last send, however recent", async () => {
+    const now = 50_000_000;
+    ownerSentIn(TAB, now - 1_000);
+    gatewayBusy(MAIN);
+    await expect(findChatOrigin(now)).resolves.toMatchObject({ key: null });
+  });
+
+  it("OpenClaw: of two busy chats, the one the owner last sent in, else the newest", async () => {
+    const now = 50_000_000;
+    gatewayBusy(TAB, MAIN);
+    await expect(findChatOrigin(now)).resolves.toMatchObject({ key: TAB });
+    ownerSentIn(null, now - 60_000);
+    await expect(findChatOrigin(now)).resolves.toMatchObject({ key: null });
+  });
+
+  it("OpenClaw: no chat when only a channel's, a cron job's or a ClawBox user's session is busy — even right after an owner send", async () => {
+    const now = 50_000_000;
+    ownerSentIn(TAB, now - 1_000);
+    gatewayBusy("agent:main:telegram:direct:123456789", "agent:main:cron:nightly-report", "agent:main:clawbox-utab-0a1b2c3d-bob");
+    await expect(findChatOrigin(now)).resolves.toBeNull();
+    gatewayBusy();
+    await expect(findChatOrigin(now)).resolves.toBeNull();
+  });
+
+  it("OpenClaw, when the gateway cannot say: the conversation the owner last sent a turn in, while that send is recent", async () => {
+    gatewaySilent();
     const now = 50_000_000;
     ownerSentIn(TAB, now - 90_000);
     await expect(findChatOrigin(now)).resolves.toEqual({ harness: "openclaw", key: TAB, at: now });
@@ -131,7 +189,8 @@ describe("which chat asked for the run", () => {
     await expect(findChatOrigin(now)).resolves.toEqual({ harness: "openclaw", key: null, at: now });
   });
 
-  it("OpenClaw: none when the owner's last send is long gone, or never happened", async () => {
+  it("OpenClaw, when the gateway cannot say: none when the owner's last send is long gone, or never happened", async () => {
+    gatewaySilent();
     const now = 50_000_000;
     await expect(findChatOrigin(now)).resolves.toBeNull();
     ownerSentIn(TAB, now - 31 * 60_000);
@@ -172,6 +231,8 @@ describe("which chat asked for the run", () => {
     await expect(findChatOrigin(now)).resolves.toBeNull();
     liveTurn("desktop-user-bob", now - 1_000);
     await expect(findChatOrigin(now)).resolves.toBeNull();
+    // Hermes never asks the OpenClaw gateway.
+    expect(gateway.gatewayWsActiveSessions).not.toHaveBeenCalled();
   });
 
   it("never throws: a harness that cannot be read is no chat", async () => {
@@ -227,12 +288,82 @@ describe("the notice, on OpenClaw", () => {
     ]);
   });
 
-  it("keeps what it has told when the record cannot be read, and sends nothing rather than twice", async () => {
-    fs.mkdirSync(NOTICES, { recursive: true });
-    expect(() => recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 })).not.toThrow();
-    await expect(announceCodingAgent(run())).resolves.toBeUndefined();
-    expect(fs.statSync(NOTICES).isDirectory()).toBe(true);
+  it("keeps its record in the kv-store under the run's id, with the endings told", async () => {
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 7 });
+    expect(JSON.parse(kvGet(`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`) ?? "null")).toEqual({ harness: "openclaw", key: TAB, at: 7, told: [] });
+    await announceCodingAgent(run());
+    expect(JSON.parse(kvGet(`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`) ?? "null")).toMatchObject({ told: ["completed@1095000"] });
+    // Never a key for a run that is no run id, nor a key for a chat that is not the owner's.
+    recordRunChatOrigin("../../etc", { harness: "openclaw", key: TAB, at: 8 });
+    recordRunChatOrigin("run-other001", { harness: "openclaw", key: "agent:main:telegram:direct:1", at: 8 });
+    expect(Object.keys(kvGetAll(CHAT_NOTICE_KEY_PREFIX))).toEqual([`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`]);
+  });
+
+  it("keeps the newest records and lets the oldest go, leaving the rest of the store alone", async () => {
+    const seeded: Record<string, string> = { "ui:something-else": "kept" };
+    for (let i = 0; i < 500; i++) {
+      seeded[`${CHAT_NOTICE_KEY_PREFIX}run-old${i}`] = JSON.stringify({ harness: "openclaw", key: null, at: 1_000 + i, told: [] });
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(KV, JSON.stringify(seeded));
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 9_000 });
+    const kept = kvGetAll(CHAT_NOTICE_KEY_PREFIX);
+    expect(Object.keys(kept)).toHaveLength(500);
+    expect(kept).not.toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-old0`);
+    expect(kept).toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-old1`);
+    expect(kept).toHaveProperty(`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`);
+    expect(kvGet("ui:something-else")).toBe("kept");
+  });
+
+  it("keeps what it has told when the store cannot be read, and sends nothing rather than twice", async () => {
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 });
+    await announceCodingAgent(run());
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
+    const told = fs.readFileSync(KV, "utf8");
+    // Half a file: what a crash mid-write elsewhere would leave.
+    fs.writeFileSync(KV, told.slice(0, 40));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() => recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 2 })).not.toThrow();
+    // The chat leg alone: the desktop card's own lenient write is the ring's business, not this leg's.
+    await expect(announceCodingRunToChat(run({ status: "gave_up", completedAt: 2_000_000 }))).resolves.toBeUndefined();
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
+    // Not written over: the endings already told are still there to be read once the store is whole.
+    expect(fs.readFileSync(KV, "utf8")).toBe(told.slice(0, 40));
+    fs.writeFileSync(KV, told);
+    await announceCodingRunToChat(run());
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
+    error.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("tells the chat only once the run's work is committed — the settle chain's wake", async () => {
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 });
+    let wake: (value: null) => void = () => {};
+    waitForRun.mockImplementationOnce(() => new Promise((resolve) => { wake = resolve; }));
+    const done = announceCodingAgent(run());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(waitForRun).toHaveBeenCalledWith("run-k3x9q2ab", 120_000);
     expect(gateway.gatewayWsCall).not.toHaveBeenCalled();
+    wake(null);
+    await done;
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("the chat leg alone, for an ending that never reached the settle: no desktop card, and still once", async () => {
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 });
+    const stopped = run({ status: "stopped", completedAt: 3_000_000 });
+    await announceCodingRunToChat(stopped);
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
+    expect(gateway.gatewayWsCall.mock.calls[0][1].message).toContain("[Coding run run-k3x9q2ab] was stopped");
+    expect(kvGet("ui:pending-actions")).toBeNull();
+    // The same ending through the full notice as well: the chat hears it once.
+    await announceCodingAgent(stopped);
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
+    // A run no chat asked for, and a queued or paused record: nothing.
+    await announceCodingRunToChat(run({ id: "run-nochat01", status: "failed" }));
+    await announceCodingRunToChat(run({ status: "queued" }));
+    expect(gateway.gatewayWsCall).toHaveBeenCalledTimes(1);
   });
 
   it("sends nothing for a run no chat asked for, for a pause, or once the box runs the other harness", async () => {
