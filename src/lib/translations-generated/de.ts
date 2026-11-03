@@ -2420,7 +2420,7 @@ const table: Record<string, string> = {
   "login.showKey": "Schlüssel anzeigen",
   "login.showPassword": "Passwort anzeigen",
   "login.showToken": "Token anzeigen",
-  "login.signinUnavailable": "Diese Box kann die Passwörter anderer Benutzer noch nicht prüfen. Bitten Sie den Eigentümer, Einstellungen → Benutzer zu öffnen; dort steht die einmalige Reparatur.",
+  "login.signinUnavailable": "Diese Box kann die Passwörter anderer Benutzer noch nicht prüfen. Bitten Sie den Eigentümer, Einstellungen → System → Benutzer zu öffnen; dort steht die einmalige Reparatur.",
   "login.subtitle": "Geben Sie Ihr Passwort ein, um fortzufahren",
   "login.tooManyAttempts": "Zu viele Fehlversuche. Versuchen Sie es in ein paar Minuten erneut.",
   "login.username": "Benutzername",

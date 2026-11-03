@@ -2420,7 +2420,7 @@ const table: Record<string, string> = {
   "login.showKey": "Visa nyckeln",
   "login.showPassword": "Visa lösenord",
   "login.showToken": "Visa token",
-  "login.signinUnavailable": "Den här boxen kan ännu inte kontrollera andra användares lösenord. Be ägaren öppna Inställningar → Användare, där engångsreparationen visas.",
+  "login.signinUnavailable": "Den här boxen kan ännu inte kontrollera andra användares lösenord. Be ägaren öppna Inställningar → System → Användare, där engångsreparationen visas.",
   "login.subtitle": "Ange ditt lösenord för att fortsätta",
   "login.tooManyAttempts": "För många misslyckade försök. Försök igen om några minuter.",
   "login.username": "Användarnamn",

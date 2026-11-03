@@ -9,8 +9,9 @@ import { sessionIdentity } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
 
-// Settings → Users: list, create and remove the box's ClawBox users, each a
-// real Linux account (src/lib/clawbox-users.ts).
+// Settings → System → Users: list, create and remove the box's ClawBox users,
+// each a real Linux account (src/lib/clawbox-users.ts). Settings draws that tab
+// for the owner only (TASK-2130); this route still answers any person's cookie.
 //
 // A PERSON'S COOKIE ONLY — the owner's or any other ClawBox user's, who all get
 // the owner's Settings — and same-origin for the writes, the harness/swap

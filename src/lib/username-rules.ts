@@ -3,7 +3,7 @@
 // Every ClawBox user is a real Linux account, so a name that reaches
 // `useradd` has to be one the OS would create AND one that cannot be mistaken
 // for, or collide with, an account the box already depends on. Pure and
-// dependency-free: the Settings → Users form checks a name as it is typed with
+// dependency-free: the Settings → System → Users form checks a name as it is typed with
 // the same rule the route enforces, and install.sh's step_user_add repeats the
 // regex in root-owned code (the route's word is never the last one).
 //

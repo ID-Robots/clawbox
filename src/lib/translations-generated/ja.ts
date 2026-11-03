@@ -2420,7 +2420,7 @@ const table: Record<string, string> = {
   "login.showKey": "キーを表示",
   "login.showPassword": "パスワードを表示",
   "login.showToken": "トークンを表示",
-  "login.signinUnavailable": "このボックスはまだほかのユーザーのパスワードを確認できません。オーナーに「設定 → ユーザー」を開いてもらってください。一度だけ行う修復方法が表示されます。",
+  "login.signinUnavailable": "このボックスはまだほかのユーザーのパスワードを確認できません。オーナーに「設定 → システム → ユーザー」を開いてもらってください。一度だけ行う修復方法が表示されます。",
   "login.subtitle": "パスワードを入力して続行",
   "login.tooManyAttempts": "失敗した試行が多すぎます。数分後にもう一度お試しください。",
   "login.username": "ユーザー名",

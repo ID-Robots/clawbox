@@ -1726,7 +1726,7 @@ export const nl: Record<string, string> = {
   "localModels.chatBannerDismiss": "Deze melding verbergen",
   "localModels.chatLoading": "Lokaal model laden…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Gebruikers",
   "users.title": "Gebruikers",
   "users.intro": "Iedereen die zich aanmeldt op deze ClawBox heeft een eigen Linux-account en wachtwoord, en dezelfde apps en instellingen. Alleen het account van de eigenaar zelf — het wachtwoord en de fabrieksreset — blijft van de eigenaar.",
@@ -1785,7 +1785,7 @@ export const nl: Record<string, string> = {
   "login.incorrectPassword": "Onjuist wachtwoord",
   "login.incorrectCredentials": "Onjuiste gebruikersnaam of wachtwoord",
   "login.tooManyAttempts": "Te veel mislukte pogingen. Probeer het over een paar minuten opnieuw.",
-  "login.signinUnavailable": "Deze box kan de wachtwoorden van andere gebruikers nog niet controleren. Vraag de eigenaar om Instellingen → Gebruikers te openen; daar staat de eenmalige reparatie.",
+  "login.signinUnavailable": "Deze box kan de wachtwoorden van andere gebruikers nog niet controleren. Vraag de eigenaar om Instellingen → Systeem → Gebruikers te openen; daar staat de eenmalige reparatie.",
   "tray.signedInAs": "Aangemeld als",
   "tray.signedInAsName": "Aangemeld als {name}",
   "tray.switchUser": "Andere gebruiker",

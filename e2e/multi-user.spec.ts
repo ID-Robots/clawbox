@@ -6,10 +6,10 @@ import * as relay from "../scripts/gateway-user-relay.js";
 /**
  * A second person on the box, end to end in two browsers:
  *
- *   the owner adds a user in Settings → Users → the user signs in with their
- *   own password → they get the owner's desktop: every app and Settings →
- *   they chat, and the owner's conversation is nowhere on their screen or
- *   their socket → the owner removes them.
+ *   the owner adds a user in Settings → System → Users → the user signs in
+ *   with their own password → they get the owner's desktop: every app and
+ *   Settings, without Users → they chat, and the owner's conversation is
+ *   nowhere on their screen or their socket → the owner removes them.
  *
  * One stand-in box behind both browsers: the users registry, the login check,
  * and a gateway that files a transcript per session key and broadcasts every
@@ -111,7 +111,7 @@ class Box {
     }, 60);
   }
 
-  /** The routes one browser sees: who it is signed in as, Settings → Users, /login. */
+  /** The routes one browser sees: who it is signed in as, Settings → System → Users, /login. */
   async mount(page: Page, session: Session) {
     await page.route("**/setup-api/users/me", (route) => {
       if (!session.username) return route.fulfill({ status: 401, json: { error: "Authentication required" } });
@@ -185,11 +185,23 @@ const SETUP = {
   preferences: { desktop_apps: ["clawbox", "files", "settings"], wp_id: "clawbox" },
 };
 
-async function openUsersSettings(page: Page) {
+/** Settings → System. Users is a tab of System (TASK-2130), never a sidebar row of its own. */
+async function openSystemSettings(page: Page) {
   await page.getByTestId("shelf-app-settings").click();
   const settings = page.getByTestId("chrome-window-settings");
   await expect(settings).toBeVisible();
-  await settings.getByRole("navigation").getByRole("button", { name: /Users/ }).click();
+  const nav = settings.getByRole("navigation");
+  await expect(nav.getByRole("button", { name: /Users/ })).toHaveCount(0);
+  // A row is named by its icon's ligature, its label and its status line;
+  // the ligature tells System from System Update.
+  await nav.getByRole("button").filter({ hasText: "monitor_heart" }).click();
+  return settings;
+}
+
+/** Settings → System → Users, the owner's. */
+async function openUsersSettings(page: Page) {
+  const settings = await openSystemSettings(page);
+  await settings.getByRole("tab", { name: /Users/ }).click();
   await expect(settings.getByTestId("settings-users-section")).toBeVisible();
   return settings;
 }
@@ -246,8 +258,18 @@ test("a second person gets the whole box, their own chat, and can be removed by 
   }
   await expect(app("OpenClaw")).toHaveCount(0);
   await user.keyboard.press("Escape");
-  const userSettings = await openUsersSettings(user);
-  await expect(userSettings.getByTestId(`users-row-${USER}`)).toBeVisible();
+  // Settings, but not Users: System has no tabs for anyone but the owner, and
+  // the old link to Users opens System's own page instead.
+  const userSettings = await openSystemSettings(user);
+  await expect(userSettings.getByRole("heading", { name: "System", level: 2 })).toBeAttached();
+  await expect(userSettings.getByTestId("settings-system-tabs")).toHaveCount(0);
+  await user.evaluate(() => {
+    (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = "users";
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "users" } }));
+  });
+  await expect(userSettings.getByRole("heading", { name: "System", level: 2 })).toBeAttached();
+  await expect(userSettings.getByTestId("settings-users-section")).toHaveCount(0);
+  await expect(userSettings.getByTestId("settings-system-tabs")).toHaveCount(0);
 
   // ── carol's own chat: their main key, never the owner's history.
   await openChatPopup(user);

@@ -12,7 +12,7 @@ interface SharingStatus {
   available: boolean;
 }
 
-// The owner's "Share OpenClaw with all users" switch (Settings → Users). Off
+// The owner's "Share OpenClaw with all users" switch (Settings → System → Users). Off
 // unless the owner turns it on; src/lib/non-owner-scope.ts is what it opens.
 //
 // SHAPE-CHECKED, not cast: a body without the fields hides the card.

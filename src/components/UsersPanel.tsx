@@ -1,9 +1,10 @@
 "use client";
 
-// Settings → Users (multi-user ClawBox OS). Every signed-in person lists,
-// creates and removes the box's users here; every one of them is a real Linux
-// account with its own password (src/lib/clawbox-users.ts). The owner's own
-// account and the one you are signed in as cannot be removed.
+// Settings → System → Users (multi-user ClawBox OS; a sidebar row of its own
+// until TASK-2130). The owner lists, creates and removes the box's users here
+// — SettingsApp draws the tab for the owner only — and every one of them is a
+// real Linux account with its own password (src/lib/clawbox-users.ts). The
+// owner's own account and the one you are signed in as cannot be removed.
 //
 // A failure says WHY: each route code has its own translated sentence, the
 // box's own reason (the root step's "Error:" line) is shown under it, and a

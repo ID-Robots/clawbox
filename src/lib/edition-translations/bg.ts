@@ -1712,7 +1712,7 @@ export const bg: Record<string, string> = {
   "localModels.chatBannerDismiss": "Скрий тази бележка",
   "localModels.chatLoading": "Зареждане на локалния модел…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Потребители",
   "users.title": "Потребители",
   "users.intro": "Всеки, който влиза в този ClawBox, има собствен Linux акаунт и парола, както и същите приложения и настройки. Само акаунтът на собственика — неговата парола и връщането към фабричните настройки — остава за собственика.",
@@ -1771,7 +1771,7 @@ export const bg: Record<string, string> = {
   "login.incorrectPassword": "Грешна парола",
   "login.incorrectCredentials": "Грешно потребителско име или парола",
   "login.tooManyAttempts": "Твърде много неуспешни опити. Опитайте отново след няколко минути.",
-  "login.signinUnavailable": "Това устройство все още не може да проверява паролите на други потребители. Помолете собственика да отвори Настройки → Потребители, където е показана еднократната поправка.",
+  "login.signinUnavailable": "Това устройство все още не може да проверява паролите на други потребители. Помолете собственика да отвори Настройки → Система → Потребители, където е показана еднократната поправка.",
   "tray.signedInAs": "Влезли сте като",
   "tray.signedInAsName": "Влезли сте като {name}",
   "tray.switchUser": "Смяна на потребител",

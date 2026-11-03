@@ -1722,7 +1722,7 @@ export const sv: Record<string, string> = {
   "localModels.chatBannerDismiss": "Dölj den här notisen",
   "localModels.chatLoading": "Laddar den lokala modellen…",
 
-  // === Multi-user ClawBox OS (TASK-1256): Settings → Users, login picker, tray ===
+  // === Multi-user ClawBox OS (TASK-1256): Settings → System → Users, login picker, tray ===
   "settings.users": "Användare",
   "users.title": "Användare",
   "users.intro": "Alla som loggar in på den här ClawBoxen har ett eget Linux-konto och ett eget lösenord, och samma appar och inställningar. Bara ägarens eget konto — lösenordet och fabriksåterställningen — förblir ägarens.",
@@ -1781,7 +1781,7 @@ export const sv: Record<string, string> = {
   "login.incorrectPassword": "Fel lösenord",
   "login.incorrectCredentials": "Fel användarnamn eller lösenord",
   "login.tooManyAttempts": "För många misslyckade försök. Försök igen om några minuter.",
-  "login.signinUnavailable": "Den här boxen kan ännu inte kontrollera andra användares lösenord. Be ägaren öppna Inställningar → Användare, där engångsreparationen visas.",
+  "login.signinUnavailable": "Den här boxen kan ännu inte kontrollera andra användares lösenord. Be ägaren öppna Inställningar → System → Användare, där engångsreparationen visas.",
   "tray.signedInAs": "Inloggad som",
   "tray.signedInAsName": "Inloggad som {name}",
   "tray.switchUser": "Byt användare",
