@@ -126,6 +126,12 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** The chat route's streamed answer: one named event per frame, as hermes-live-turn.ts writes them. */
+function sse(...frames: Array<[string, unknown]>): Response {
+  const body = frames.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 /** A ClawBox Hermes turn running in `key` — what the chat route registers. */
 function liveTurn(key: string, now: number): void {
   const turn = beginLiveTurn(key, { now });
@@ -432,6 +438,8 @@ describe("the notice, on Hermes", () => {
     expect(String(url)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/setup-api\/hermes\/chat$/);
     expect(init.method).toBe("POST");
     expect(init.headers.authorization).toBe("Bearer mcp-bearer-for-the-test");
+    // Streamed, as the desktop chat sends its own turns: the session is resumed over the transport that opened it.
+    expect(init.headers.accept).toBe("text/event-stream");
     const body = JSON.parse(init.body);
     expect(body).toMatchObject({ sessionKey: HERMES_TAB, sessionId: "20261103_101500_a1b2c3" });
     expect(body.message).toContain("coding_agent_status");
@@ -470,6 +478,50 @@ describe("the notice, on Hermes", () => {
     await expect(announceCodingAgent(run())).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("still running"));
     expect(error).not.toHaveBeenCalled();
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it("reads the stream to its end: done is told, an error before any answer is not", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "hermes", key: HERMES_TAB, at: 1 });
+    fetchMock.mockResolvedValueOnce(sse(["status", { text: "thinking" }], ["delta", { text: "It finished." }], ["done", { text: "It finished." }]));
+    await announceCodingAgent(run());
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("told the chat that asked for run-k3x9q2ab"));
+
+    recordRunChatOrigin("run-second01", { harness: "hermes", key: HERMES_TAB, at: 1 });
+    fetchMock.mockResolvedValueOnce(sse(["error", { error: "The assistant could not answer." }]));
+    await announceCodingAgent(run({ id: "run-second01" }));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("run-second01 was not told"), expect.stringContaining("The assistant could not answer."));
+    info.mockRestore();
+    error.mockRestore();
+  });
+
+  it("tries a session that would not take the turn once more, in a new session — never after an answer", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await appendTranscript({ role: "assistant", text: "Started run-k3x9q2ab.", timestamp: 2, sessionId: "20261103_101500_a1b2c3" }, HERMES_TAB);
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "hermes", key: HERMES_TAB, at: 1 });
+    // What the board answered when the notice went the CLI way into a session the dashboard held.
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "hermes-refusal-reason: SESSION_NOT_OWNED" }), { status: 502 }));
+    fetchMock.mockResolvedValueOnce(sse(["delta", { text: "Done." }], ["done", { text: "Done." }]));
+    await announceCodingAgent(run());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [first, second] = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body));
+    expect(first).toMatchObject({ sessionKey: HERMES_TAB, sessionId: "20261103_101500_a1b2c3" });
+    expect(second.sessionKey).toBe(HERMES_TAB);
+    expect(second).not.toHaveProperty("sessionId");
+    expect(second.message).toBe(first.message);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("SESSION_NOT_OWNED"));
+    expect(error).not.toHaveBeenCalled();
+
+    // A turn that failed AFTER it answered is not asked again: the chat would hear the run twice.
+    recordRunChatOrigin("run-second01", { harness: "hermes", key: HERMES_TAB, at: 1 });
+    fetchMock.mockResolvedValueOnce(sse(["delta", { text: "It finished, and" }], ["error", { error: "connection lost" }]));
+    await announceCodingAgent(run({ id: "run-second01" }));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error).toHaveBeenCalledTimes(1);
     warn.mockRestore();
     error.mockRestore();
   });

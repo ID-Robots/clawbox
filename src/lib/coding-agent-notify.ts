@@ -619,6 +619,9 @@ async function sendOpenClawChatNotice(key: string | null, message: string, idemp
   }
 }
 
+/** A notice turn that failed before the assistant answered anything. */
+class HermesTurnRefused extends Error {}
+
 /**
  * Hermes: a turn through the box's own chat route, as the chat's own turns
  * go — the route records the question and the answer in the transcript the
@@ -633,6 +636,13 @@ async function sendOpenClawChatNotice(key: string | null, message: string, idemp
  * Resolves "late" when the route had not answered within its timeout: the turn
  * belongs to the box and goes on without this request, so that is not a
  * notice lost.
+ *
+ * A resumed session the turn could not use — Hermes refuses one another of
+ * its transports holds (`SESSION_NOT_OWNED`, seen on a board when the notice
+ * went the CLI way into a session the dashboard had opened) — is tried once
+ * more in a fresh session, but only when nothing was answered yet: the notice
+ * names the run and asks for its status, so it stands without the
+ * conversation before it.
  */
 async function sendHermesChatNotice(key: string, notice: { message: string; display: string }): Promise<"sent" | "late"> {
   const { whenLiveTurnsSettle } = await import("@/lib/harness/hermes-live-turn");
@@ -640,22 +650,70 @@ async function sendHermesChatNotice(key: string, notice: { message: string; disp
   const { readTranscript } = await import("@/lib/harness/transcript-store");
   // Read after the wait: the turn just waited for may have moved the chat onto a new session.
   const sessionId = (await readTranscript(50, key)).findLast((record) => record.sessionId)?.sessionId;
+  const body = { message: notice.message, displayText: notice.display, sessionKey: key };
+  if (!sessionId) return hermesChatTurn(body);
+  try {
+    return await hermesChatTurn({ ...body, sessionId });
+  } catch (err) {
+    if (!(err instanceof HermesTurnRefused)) throw err;
+    console.warn(`[coding-agent] the chat's session would not take the notice (${err.message}); sending it in a new session`);
+    return hermesChatTurn(body);
+  }
+}
+
+/**
+ * One turn through the chat route, STREAMED, as the desktop chat sends its own
+ * (`Accept: text/event-stream`): the route then resumes the session over the
+ * same transport the chat's turns used, and the open chat follows the turn
+ * live. The answer is read to its end — the stream's `done` or `error` frame
+ * is the only word on how the turn went, its status being spent on the first
+ * byte. A JSON answer is the route's CLI fallback when the dashboard is not up.
+ */
+async function hermesChatTurn(body: Record<string, unknown>): Promise<"sent" | "late"> {
   const { getMcpToken } = await import("@/lib/mcp-token");
   const port = /^\d{1,5}$/.test(process.env.PORT ?? "") ? process.env.PORT : "80";
   let res: Response;
+  let text: string;
   try {
     res = await fetch(`http://127.0.0.1:${port}/setup-api/hermes/chat`, {
       method: "POST",
-      headers: { authorization: `Bearer ${getMcpToken()}`, "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ message: notice.message, displayText: notice.display, sessionKey: key, ...(sessionId ? { sessionId } : {}) }),
+      headers: { authorization: `Bearer ${getMcpToken()}`, "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(HERMES_TURN_TIMEOUT_MS),
     });
+    text = await res.text();
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") return "late";
     throw err;
   }
-  if (!res.ok) throw new Error(`the chat answered ${res.status}`);
-  return "sent";
+  if (!res.ok) throw new HermesTurnRefused(`the chat answered ${res.status}${errorOf(parseJson(text))}`);
+  if (!(res.headers.get("content-type") ?? "").includes("text/event-stream")) return "sent";
+  let answered = false;
+  for (const block of text.split("\n\n")) {
+    const event = /^event: (\S+)$/m.exec(block)?.[1];
+    if (event === "delta") answered = true;
+    if (event === "done") return "sent";
+    if (event === "error") {
+      const why = `the chat's turn failed${errorOf(parseJson(/^data: (.*)$/m.exec(block)?.[1] ?? ""))}`;
+      throw answered ? new Error(why) : new HermesTurnRefused(why);
+    }
+  }
+  // Cut off before it said how the turn went: the turn is the box's and goes on.
+  return "late";
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** `: <the route's own sentence>`, or nothing — the route has already made it safe to show. */
+function errorOf(data: unknown): string {
+  const error = data && typeof data === "object" ? (data as { error?: unknown }).error : undefined;
+  return typeof error === "string" && error ? `: ${error.slice(0, 200)}` : "";
 }
 
 /** The chat leg; never throws. */
