@@ -82,6 +82,21 @@ describe("the 90-second bound", () => {
     expect(result.current.offer).toMatchObject({ kind: "timeout", pending: { text: "Колко е 17 × 23?" } });
   });
 
+  it("infers nothing on a harness that reports its own compaction (Hermes)", async () => {
+    const adapter = adapterWith(100460);
+    const { result, rerender, base } = setup(adapter, { inferCompaction: false });
+    await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
+    act(() => { result.current.dismiss(); });
+    act(() => { result.current.admitTurn(KEY, pending); });
+    rerender({ ...base, inferCompaction: false, sending: true, turnStartedAt: Date.now() });
+    expect(result.current.phase).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(95_000); });
+    expect(adapter.abortTurn).not.toHaveBeenCalled();
+    // Its own frames still say so, and still bound it.
+    act(() => { result.current.noteAgentFrame({ stream: "compaction", data: { phase: "start" } }); });
+    expect(result.current.phase).toBe("shortening");
+  });
+
   it("follows the core's compaction frames: a summary that ends in time is never stopped", async () => {
     const adapter = adapterWith(9000);
     const { result, rerender, base } = setup(adapter);

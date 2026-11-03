@@ -68,6 +68,7 @@ const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
 const IMAGES_ROUTE = "/setup-api/chat/images";
 const COMMANDS_ROUTE = "/setup-api/hermes/commands";
 const SIZE_ROUTE = "/setup-api/hermes/session-size";
+const COMPRESS_ROUTE = "/setup-api/hermes/compress";
 
 /**
  * How long the command catalogue may take.
@@ -776,29 +777,31 @@ export class HermesAdapter implements HarnessAdapter {
   }
 
   /**
-   * Hermes' own `/compress`, run on the conversation's session through the
-   * chat route's slash-command path — the summary runs on the auxiliary
+   * Hermes' own manual compression (`session.compress`) on the conversation's
+   * session, through the compress route — the summary runs on the auxiliary
    * compression model, which is ClawBox AI while Local AI is on
-   * (src/lib/hermes-local-ai.ts). Recorded in the transcript as any command is.
+   * (src/lib/hermes-local-ai.ts). Resolves only when Hermes says it
+   * compressed: a "nothing to compress" is a refusal, never a success.
    */
   async compactConversation(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }> {
     const sessionId = this.sessions.get(sessionKey);
     if (!sessionId) throw new HarnessError("invalid-input", "This conversation has no session to shorten yet.");
     let res: Response;
     try {
-      res = await this.fetchImpl(CHAT_ROUTE, {
+      res = await this.fetchImpl(COMPRESS_ROUTE, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: "/compress", sessionKey, sessionId }),
+        body: JSON.stringify({ sessionId }),
       });
     } catch (err) {
       throw asHarnessError(err, "upstream");
     }
     const data = await readJsonBody(res);
-    if (!res.ok) {
+    if (!res.ok || data.compressed !== true) {
       throw new HarnessError("upstream", typeof data.error === "string" && data.error ? data.error : "The conversation was not shortened.");
     }
-    return {};
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    return { tokensBefore: num(data.tokensBefore), tokensAfter: num(data.tokensAfter) };
   }
 
   /**

@@ -2556,6 +2556,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // can also be an Ollama model, which has no readiness probe.
     llamaCpp: harnessId === 'hermes' || (chatModelState?.local?.model ?? '').startsWith('llamacpp/'),
     localWindow: chatModelState?.local?.contextWindow ?? null,
+    inferCompaction: harnessId !== 'hermes',
     activeKey: activeTabKey ?? mainSessionKey,
     connected: !caps.hasLiveConnection || status === 'connected',
     sending,

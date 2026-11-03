@@ -64,6 +64,16 @@ export interface LocalAiLongChatOptions {
   llamaCpp: boolean;
   /** The local model's window, when the harness's size answer does not carry one. */
   localWindow: number | null;
+  /**
+   * Whether a turn sent into a conversation known to be too long counts as
+   * shortening until it is heard from. True for OpenClaw, which compacts such a
+   * prompt before the model reads it and whose compaction frames for it arrive
+   * under an internal session key. False for Hermes, which reports its own
+   * compaction (`status.update` kind `compacting`) and, measured on a board,
+   * may instead read the whole history into the local window without
+   * compacting — "shortening" would be the wrong word for that wait.
+   */
+  inferCompaction?: boolean;
   /** The conversation on screen. */
   activeKey: string;
   /** The harness can be asked (the gateway socket is open, where there is one). */
@@ -251,7 +261,7 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
 
   // Shortening without a frame to say so: a turn sent into a conversation
   // known to be too long, until the harness is heard from.
-  const inferred = turnLong && !framesSeen && !turnHeardFrom;
+  const inferred = options.inferCompaction !== false && turnLong && !framesSeen && !turnHeardFrom;
   const compacting = compactingSince > 0 || inferred;
   const phase = onLocalAi && sending
     ? localTurnPhase({ compacting, serverReady, llamaCpp, heardFrom: turnHeardFrom })

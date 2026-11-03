@@ -55,22 +55,24 @@ describe("HermesAdapter on a long conversation", () => {
     await expect(adapter.conversationSize("desktop")).resolves.toBeNull();
   });
 
-  it("shortens with Hermes' own /compress on the threaded session", async () => {
-    const { adapter, calls } = makeAdapter(() => ({ ok: true, status: 200, payload: { text: "Compressed 120 → 14 messages", sessionId: SESSION } }));
+  it("shortens with Hermes' own session.compress on the threaded session", async () => {
+    const { adapter, calls } = makeAdapter((url) => url === "/setup-api/hermes/compress"
+      ? { ok: true, status: 200, payload: { compressed: true, tokensBefore: 52000, tokensAfter: 9000 } }
+      : { ok: true, status: 200, payload: { text: "ok", sessionId: SESSION } });
     await thread(adapter);
-    await expect(adapter.compactConversation("desktop")).resolves.toEqual({});
-    expect(calls.at(-1)).toEqual({
-      url: "/setup-api/hermes/chat",
-      body: { message: "/compress", sessionKey: "desktop", sessionId: SESSION },
-    });
+    await expect(adapter.compactConversation("desktop")).resolves.toEqual({ tokensBefore: 52000, tokensAfter: 9000 });
+    expect(calls.at(-1)).toEqual({ url: "/setup-api/hermes/compress", body: { sessionId: SESSION } });
   });
 
-  it("rejects a shorten the route refused, and one with no session to shorten", async () => {
-    const { adapter } = makeAdapter((_url, init) => (String(init?.body ?? "").includes("/compress")
-      ? { ok: false, status: 502, payload: { error: "compression timed out" } }
+  it("rejects a shorten that compressed nothing, the route refused, or had no session", async () => {
+    let answer = { ok: false, status: 409, payload: { error: "Nothing to compress." } as Record<string, unknown> };
+    const { adapter } = makeAdapter((url) => (url === "/setup-api/hermes/compress"
+      ? answer
       : { ok: true, status: 200, payload: { text: "ok", sessionId: SESSION } }));
     await expect(adapter.compactConversation("desktop")).rejects.toThrow(/no session/);
     await thread(adapter);
-    await expect(adapter.compactConversation("desktop")).rejects.toThrow("compression timed out");
+    await expect(adapter.compactConversation("desktop")).rejects.toThrow("Nothing to compress.");
+    answer = { ok: true, status: 200, payload: { compressed: false } };
+    await expect(adapter.compactConversation("desktop")).rejects.toThrow(/not shortened/);
   });
 });
