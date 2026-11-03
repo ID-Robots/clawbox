@@ -6325,6 +6325,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         else if (event.kind === 'status' && runIdRef.current === idempotencyKey) {
           setTurnStatus(event.text?.trim() ? event.text.trim() : null)
         }
+        // Hermes compacting the conversation: the same words the gateway's
+        // compaction frames give an OpenClaw turn (TASK-2127).
+        else if (event.kind === 'compaction' && runIdRef.current === idempotencyKey) {
+          longChatRef.current.noteAgentFrame({ stream: 'compaction', data: { phase: event.phase } })
+        }
         // The agent has parked on a question. Held by `requestId`, so a
         // reconnect's REPLAY of a prompt still being waited on folds into the
         // card already on screen instead of drawing a second one beside it —

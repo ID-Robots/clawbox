@@ -44,6 +44,8 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: vi.fn(async () => undefined) }));
+// A local PRIMARY is moved back through chat/model (TASK-2127); nothing here has one.
+vi.mock("@/app/setup-api/chat/model/route", () => ({ readChatModelStateUnfiltered: vi.fn(), POST: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
 vi.mock("@/lib/hermes-local-ai", () => ({
   removeLocalAiFromHermes: vi.fn(),

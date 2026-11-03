@@ -44,7 +44,14 @@ vi.mock("@/lib/hermes-local-ai", () => ({
   },
 }));
 
+// A local PRIMARY is moved back through chat/model's own POST (TASK-2127).
+vi.mock("@/app/setup-api/chat/model/route", () => ({
+  readChatModelStateUnfiltered: vi.fn(),
+  POST: vi.fn(),
+}));
+
 import { get, setMany } from "@/lib/config-store";
+import { readChatModelStateUnfiltered, POST as setChatModel } from "@/app/setup-api/chat/model/route";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { inferConfiguredLocalModel, openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
@@ -90,6 +97,45 @@ describe("POST /setup-api/local-ai", () => {
 
     const mod = await import("@/app/setup-api/local-ai/route");
     localAiPost = mod.POST;
+  });
+
+  describe("with Local AI as the primary (TASK-2127)", () => {
+    beforeEach(() => {
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0", fallbacks: ["deepseek/deepseek-v4-flash"] } } },
+      });
+      vi.mocked(readChatModelStateUnfiltered).mockResolvedValue({ primary: { model: "deepseek/deepseek-v4-flash" } } as never);
+      vi.mocked(setChatModel).mockResolvedValue(new Response("{}", { status: 200 }) as never);
+    });
+
+    it("moves the chat back to the cloud model it was on, as an automatic pick", async () => {
+      const res = await localAiPost(jsonRequest({ action: "disable" }));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true });
+      expect(setChatModel).toHaveBeenCalledTimes(1);
+      const sent = vi.mocked(setChatModel).mock.calls[0][0] as Request;
+      expect(await sent.json()).toEqual({ model: "deepseek/deepseek-v4-flash", automatic: true });
+    });
+
+    it("says so when the chat could not be moved, instead of claiming it was", async () => {
+      vi.mocked(setChatModel).mockResolvedValue(new Response(JSON.stringify({ error: "busy" }), { status: 409 }) as never);
+      const body = await (await localAiPost(jsonRequest({ action: "disable" }))).json();
+      expect(body.success).toBe(true);
+      expect(body.warning).toMatch(/could not be moved back to the cloud model/);
+    });
+
+    it("never moves it onto another local model", async () => {
+      vi.mocked(readChatModelStateUnfiltered).mockResolvedValue({ primary: { model: "ollama/llama3.2:3b" } } as never);
+      const body = await (await localAiPost(jsonRequest({ action: "disable" }))).json();
+      expect(setChatModel).not.toHaveBeenCalled();
+      expect(body.warning).toMatch(/could not be moved back/);
+    });
+  });
+
+  it("leaves a cloud primary where it is", async () => {
+    await localAiPost(jsonRequest({ action: "disable" }));
+    expect(setChatModel).not.toHaveBeenCalled();
   });
 
   it("disables llama.cpp local AI and clears stored setup flags", async () => {

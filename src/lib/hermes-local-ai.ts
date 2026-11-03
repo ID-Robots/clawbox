@@ -1,6 +1,7 @@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
-import { get } from "@/lib/config-store";
+import { get, set as setStored } from "@/lib/config-store";
+import { CLAWAI_PROVIDER } from "@/lib/hermes-providers";
 import {
   patchHermesConfig,
   readHermesConfigValue,
@@ -39,6 +40,72 @@ export const HERMES_LOCAL_PROVIDER = "clawlocal";
 export type LocalAiProviderId = "llamacpp" | "ollama";
 
 export class HermesLocalApplyError extends Error {}
+
+/** Hermes' summarizer, `auxiliary.compression` (its configuration guide, "Context Compression"). */
+export const HERMES_COMPRESSION_PROVIDER_KEY = "auxiliary.compression.provider";
+export const HERMES_COMPRESSION_MODEL_KEY = "auxiliary.compression.model";
+/** Device-store key: the compression model ClawBox named while Local AI is on, and nothing else. */
+export const HERMES_LOCAL_COMPRESSION_KEY = "hermes_local_compression_model";
+
+/**
+ * Compression on ClawBox AI while Local AI is wired (TASK-2127).
+ *
+ * WHY. Hermes summarizes a long conversation with the session's own model
+ * unless `auxiliary.compression` names another ("Empty = use main chat
+ * model"). A conversation the chat moved to `clawlocal` would have its history
+ * summarized by the ~2B model that history no longer fits — the same minutes
+ * a long chat on Local AI cost on OpenClaw (src/lib/local-compaction-model.ts
+ * is that twin). ClawBox already names `clawai` for the session titler
+ * (hermes-clawai.ts), with the model the proxy serves this box; the summary
+ * takes the same provider and model.
+ *
+ * Only where the owner has not chosen: the provider unset or `auto`, the model
+ * empty. Nothing on a box with no ClawBox AI titler — there is no cloud model
+ * to name — or one whose keys could not be read.
+ */
+async function localCompressionSet(): Promise<Record<string, string>> {
+  const [provider, model, titleProvider, titleModel] = await Promise.all([
+    resolveHermesConfigValue(HERMES_COMPRESSION_PROVIDER_KEY),
+    resolveHermesConfigValue(HERMES_COMPRESSION_MODEL_KEY),
+    readHermesConfigValue("auxiliary.title_generation.provider"),
+    readHermesConfigValue("auxiliary.title_generation.model"),
+  ]);
+  if (provider.state === "unreadable" || provider.state === "present") return {};
+  if (model.state === "unreadable" || model.state === "present") return {};
+  const providerValue = provider.state === "value" ? provider.value.trim() : "";
+  const modelValue = model.state === "value" ? model.value.trim() : "";
+  if ((providerValue && providerValue !== "auto") || modelValue) return {};
+  const summarizer = titleModel?.trim() ?? "";
+  if (titleProvider?.trim() !== CLAWAI_PROVIDER || !summarizer || summarizer.startsWith("-")) return {};
+  return { [HERMES_COMPRESSION_PROVIDER_KEY]: CLAWAI_PROVIDER, [HERMES_COMPRESSION_MODEL_KEY]: summarizer };
+}
+
+/** The ownership record, read and written best effort: a store that fails costs only the take-back. */
+async function readCompressionRecord(): Promise<unknown> {
+  try {
+    return await get(HERMES_LOCAL_COMPRESSION_KEY);
+  } catch {
+    return undefined;
+  }
+}
+async function writeCompressionRecord(value: string | undefined): Promise<void> {
+  try {
+    await setStored(HERMES_LOCAL_COMPRESSION_KEY, value);
+  } catch (err) {
+    console.warn("[hermes-local-ai] the compression record could not be written:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** The compression keys to take out with Local AI: ClawBox's own value, exactly, and never the owner's. */
+async function localCompressionUnset(): Promise<string[]> {
+  const [provider, model, recorded] = await Promise.all([
+    readHermesConfigValue(HERMES_COMPRESSION_PROVIDER_KEY),
+    readHermesConfigValue(HERMES_COMPRESSION_MODEL_KEY),
+    readCompressionRecord(),
+  ]);
+  if (provider !== CLAWAI_PROVIDER || typeof recorded !== "string" || model !== recorded) return [];
+  return [HERMES_COMPRESSION_PROVIDER_KEY, HERMES_COMPRESSION_MODEL_KEY];
+}
 
 /**
  * A removal that did not land, carrying the selection state read BEFORE it ran.
@@ -140,6 +207,8 @@ async function applyLocalAi(options: {
     set["model.provider"] = HERMES_LOCAL_PROVIDER;
     set["model.default"] = model;
   }
+  const compression = await localCompressionSet();
+  Object.assign(set, compression);
 
   // One read-merge-write instead of three-to-five `hermes config set` calls.
   // Each of those re-serialised config.yaml and took every comment in it with
@@ -160,6 +229,10 @@ async function applyLocalAi(options: {
   }
 
   invalidateModelOptions();
+  // The ownership record the removal reads; best effort — an unrecorded value
+  // is merely one ClawBox will not take back.
+  const named = compression[HERMES_COMPRESSION_MODEL_KEY];
+  if (named) await writeCompressionRecord(named);
   return { provider: HERMES_LOCAL_PROVIDER, model };
 }
 
@@ -479,6 +552,9 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   if (wasDefault) {
     unset.push("model.provider", "model.default");
   }
+  // The summarizer ClawBox named for Local AI goes with it (TASK-2127).
+  const compressionUnset = await localCompressionUnset();
+  unset.push(...compressionUnset);
   // `finally`, and BEFORE the proof. `withProviderMcpRefresh` samples the
   // provider set either side of this call and re-reads it in a `finally`
   // precisely because "the write threw" is not "nothing was written" — and that
@@ -577,5 +653,6 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     );
   }
 
+  if (compressionUnset.length > 0) await writeCompressionRecord(undefined);
   return { wasDefault, model };
 }

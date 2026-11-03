@@ -313,6 +313,12 @@ export type TurnEvent =
    */
   | { kind: "status"; text: string }
   /**
+   * The harness is compacting the conversation — Hermes' "compacting" status —
+   * from `start` to `end` (TASK-2127). The surface says "Shortening the
+   * conversation…" while it lasts; a surface that ignores it loses nothing.
+   */
+  | { kind: "compaction"; phase: "start" | "end" }
+  /**
    * The agent has STOPPED and is waiting for the customer to answer.
    *
    * An event rather than a delta because it is not part of the answer: a delta

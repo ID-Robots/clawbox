@@ -617,6 +617,31 @@ describe("reporting what a turn is DOING while it does it", () => {
     expect(JSON.stringify(seen)).not.toContain("musing");
   });
 
+  it("says when Hermes is compacting the conversation, and when it is done (TASK-2127)", async () => {
+    // Hermes re-tags its compaction progress as status.update kind "compacting"
+    // for the whole pause; the chat says "Shortening the conversation…" for it.
+    const { turn, socket } = await connect();
+    const seen: DashboardActivity[] = [];
+    const running = turn!.run(
+      () => {},
+      (activity) => seen.push(activity),
+    );
+    await Promise.resolve();
+    socket.event("status.update", { kind: "compacting", text: "Compacting context…" });
+    socket.event("status.update", { kind: "compacting", text: "Compressed 120 → 14 messages" });
+    socket.event("status.update", { kind: "goal", text: "a goal note" });
+    socket.event("status.update", { kind: "compacting", text: "Compacting context…" });
+    socket.event("message.delta", { text: "391" });
+    socket.event("message.complete", { text: "391", status: "complete" });
+    await running;
+    expect(seen.filter((a) => a.kind === "compaction")).toEqual([
+      { kind: "compaction", phase: "start" },
+      { kind: "compaction", phase: "end" },
+      { kind: "compaction", phase: "start" },
+      { kind: "compaction", phase: "end" },
+    ]);
+  });
+
   it("runs exactly as it did for a caller that passes no onActivity", async () => {
     // `onActivity` is optional and every caller written before it omits it. A
     // turn that needed a second argument to survive its own tool frames would
