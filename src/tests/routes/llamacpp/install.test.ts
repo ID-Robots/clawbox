@@ -235,17 +235,33 @@ describe("POST /setup-api/llamacpp/install", () => {
       expect(b).toContain("\"success\":true");
     });
 
-    it("refuses different settings while one runs, naming the running task", async () => {
+    it("queues different settings while one runs — never a refusal — and starts them when it ends", async () => {
+      // Resolves the LATEST configure call each time it is called.
       const finish = slowConfigure();
       const first = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
-      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalledTimes(1));
       const primary = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local", activate: true }));
-      expect(primary.status).toBe(409);
-      const body = await primary.json();
-      expect(body.code).toBe("busy");
-      expect(typeof body.taskId).toBe("string");
+      expect(primary.status).toBe(200);
+      const queuedText = readStream(primary);
+      // A third press of the same "make primary" follows the queued one.
+      const again = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local", activate: true }));
+      const againText = readStream(again);
+
       finish();
-      await readStream(first);
+      expect(await readStream(first)).toContain("\"success\":true");
+      // Its turn: the queued install starts by itself and configures with ITS settings.
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalledTimes(2));
+      const second = mockConfigureAiModel.mock.calls[1][0] as Request;
+      expect(await second.clone().json()).toMatchObject({ activate: true, scope: "local" });
+      finish();
+
+      const lines = (await queuedText).trim().split("\n").map((line) => JSON.parse(line));
+      expect(lines[0]).toMatchObject({ queued: true, behind: { kind: "llamacpp-install", label: "Gemma 4" } });
+      expect(lines.some((line) => line.queued === false)).toBe(true);
+      expect(lines.at(-1)).toMatchObject({ success: true });
+      const taskOf = (text: string) => (JSON.parse(text.split("\n")[0]) as { taskId: string }).taskId;
+      expect(taskOf(await againText)).toBe(lines[0].taskId);
+      expect(mockConfigureAiModel).toHaveBeenCalledTimes(2);
     });
   });
 

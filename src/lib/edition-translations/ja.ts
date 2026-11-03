@@ -1482,6 +1482,8 @@ export const ja: Record<string, string> = {
   "localModels.install.diskNeed": "ダウンロード {need}",
   "localModels.install.diskShort": "空き容量が足りません。{need} 必要ですが、空きは {free} です。",
   "localModels.install.refusal.busy": "今は別のものをダウンロード中です。",
+  "localModels.install.refusal.removing": "現在削除中です。少し待ってからもう一度お試しください。",
+  "localModels.uninstall.switchChatFirst": "先にチャットを別のモデルに切り替えてください",
   "localModels.install.refusal.notInstalled": "その部分はまだこの本体にインストールされていません。",
   "localModels.install.refusal.noDownloader": "ダウンロード用のツールがまだこの本体にありません。先にローカルモデルをインストールしてください。",
   "localModels.install.refusal.alreadyHere": "それはすでにこの本体にあります。",

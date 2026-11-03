@@ -3,6 +3,8 @@ import fs from "fs";
 import { resolveConfigRoot } from "./config-store";
 import path from "./runtime-path";
 import { processStore } from "./process-store";
+import { decideQueue, systemQueueMeasure, type BackgroundTaskNeeds, type QueueMeasure } from "./background-task-queue";
+import { isJournalNoise } from "./journal-noise";
 import {
   followRootStep,
   followRootStepRun,
@@ -51,12 +53,36 @@ import {
  * cancellable: the web server may only start the launcher's steps, not stop
  * them, and none of them has a safe stop half-way through.
  *
+ * Waiting its turn. A task that names LANES (and what it needs free) is
+ * accepted at once even when it cannot start yet: it is `queued` — its own
+ * record, its own card, its own Cancel — behind the work it waits for, and it
+ * starts by itself when that work ends, however it ends. Which tasks may run
+ * together is src/lib/background-task-queue.ts. A queued task's work is still
+ * a closure of the process that accepted it; one that a restart finds queued
+ * is rebuilt from its kind and `meta` (src/lib/background-task-starters.ts),
+ * so the queue survives a restart the way an adopted root step does.
+ *
  * One process, many module copies: the registry lives in {@link processStore},
  * keyed by the file it persists, for the reason that module documents.
  */
 
-export type BackgroundTaskState = "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
+export type BackgroundTaskState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 export type BackgroundTaskStepState = "pending" | "running" | "done" | "failed";
+export type { BackgroundTaskNeeds };
+
+/** Not ended yet: working, or waiting its turn. */
+export function isLiveBackgroundTask(task: Pick<BackgroundTask, "state">): boolean {
+  return task.state === "running" || task.state === "queued";
+}
+
+/** The task a queued one waits for, as its "Queued — starts after …" names it. */
+export interface BackgroundTaskQueuedBehind {
+  id: string;
+  kind: string;
+  title: string;
+  /** That task's short name (its `label`). */
+  label: string;
+}
 
 export interface BackgroundTaskStep {
   id: string;
@@ -70,9 +96,22 @@ export interface BackgroundTask {
   id: string;
   /** What kind of work: the key Settings re-attaches by. */
   kind: string;
-  /** Tasks in one group never run together (they would write the same files). */
+  /**
+   * The same work: a second start in a group with a live task (running or
+   * queued) follows that one instead of starting a copy over it.
+   */
   group: string;
   title: string;
+  /** A short name for what it installs ("Kokoro"), as a task queued behind it names it. */
+  label: string;
+  /** What the work holds while it runs; tasks sharing a lane never run together. */
+  lanes: string[];
+  /** What it needs free to start beside running work, or null for no check. */
+  needs: BackgroundTaskNeeds | null;
+  /** When it was accepted into the queue; null for a task that started at once. */
+  queuedAt: number | null;
+  /** While queued: the task it waits for. */
+  queuedBehind: BackgroundTaskQueuedBehind | null;
   /** What the starting request asked for, so a second request can tell whether it is the same work. */
   meta: Record<string, unknown> | null;
   state: BackgroundTaskState;
@@ -142,6 +181,8 @@ export type BackgroundTaskEvent =
   | { type: "log"; line: string }
   | { type: "progress"; completed: number; total: number }
   | { type: "step"; step: string }
+  /** Queued behind another task (`behind`), or — `queued: false` — started. */
+  | { type: "queue"; queued: boolean; behind: BackgroundTaskQueuedBehind | null; line: string }
   | { type: "end"; task: BackgroundTaskView };
 
 export interface BackgroundTaskContext {
@@ -151,6 +192,13 @@ export interface BackgroundTaskContext {
    * cancelled; its work stops what it started and rejects.
    */
   readonly signal: AbortSignal;
+  /**
+   * The work waited its turn in the queue before it started (or was rebuilt
+   * after a restart found it queued): what its starting request measured —
+   * the free disk, above all — may have been spent by the work before it, and
+   * is worth measuring again.
+   */
+  readonly waited: boolean;
   /** Close the running step and start `id`. A headline may come with it. */
   step(id: string, status?: string): void;
   /** A new headline; it also goes to the log. */
@@ -190,6 +238,16 @@ export interface StartBackgroundTaskSpec {
   status?: string;
   /** The owner may stop it half-way: `run` honours `ctx.signal`. */
   cancellable?: boolean;
+  /** See {@link BackgroundTask.label}. Defaults to `title`. */
+  label?: string;
+  /**
+   * What the work holds while it runs (src/lib/background-task-queue.ts). A
+   * task that shares one with running work is accepted and waits `queued`.
+   * None (the default): it never waits for a lane.
+   */
+  lanes?: string[];
+  /** What it needs free to start beside running work. None: no check. */
+  needs?: BackgroundTaskNeeds;
   /**
    * The work. Resolve with the payload the route used to close its stream
    * with; throw (or reject) to fail it — the message is what the owner reads.
@@ -197,8 +255,13 @@ export interface StartBackgroundTaskSpec {
   run(ctx: BackgroundTaskContext): Promise<Record<string, unknown> | void>;
 }
 
+/**
+ * `started: true` — a new task, running or (`queued`) waiting its turn.
+ * `started: false` — its group already has a live task (`running`, which may
+ * itself still be queued): follow that one.
+ */
 export type StartBackgroundTaskResult =
-  | { started: true; task: BackgroundTaskView }
+  | { started: true; queued: boolean; task: BackgroundTaskView }
   | { started: false; running: BackgroundTaskView };
 
 /** Raise from `run` to fail with a code the route's old error answer carried. */
@@ -254,6 +317,14 @@ export const ADOPTED_UNFINISHED_MESSAGE =
   "The install itself finished while the ClawBox web server restarted, but what comes after it did not run. Start it again to finish.";
 export const CANCELLED_STATUS = "Cancelled.";
 const CANCELLING_STATUS = "Stopping…";
+/** A queued task's work whose kind cannot be rebuilt after a restart. */
+export const QUEUE_LOST_MESSAGE =
+  "The ClawBox web server restarted before this could start, and it could not be started again. Start it again.";
+
+/** The headline a queued task carries (the corner card and Settings say it in the owner's language). */
+export function queuedStatus(behind: BackgroundTaskQueuedBehind | null): string {
+  return behind ? `Queued — starts after ${behind.label}` : "Queued — starts when the work before it ends";
+}
 /**
  * How long an adopted unit is followed: config/clawbox-root-update@.service's
  * TimeoutStartSec (2 h) from the run's own start, so systemd, not this
@@ -276,7 +347,17 @@ interface Registry {
   listeners: Map<string, Set<(event: BackgroundTaskEvent) => void>>;
   /** The abort behind each running task of THIS process, for Cancel. */
   controllers: Map<string, AbortController>;
+  /** The work of each task queued in THIS process, until it starts. */
+  specs: Map<string, StartBackgroundTaskSpec>;
   persistTimer: ReturnType<typeof setTimeout> | null;
+}
+
+/** What the queue measures free memory and disk with; the tests' figures replace it. */
+let queueMeasure: QueueMeasure = systemQueueMeasure;
+
+/** For tests: the memory and disk the queue sees. Null puts the box's own back. */
+export function setBackgroundTaskQueueMeasureForTests(measure: QueueMeasure | null): void {
+  queueMeasure = measure ?? systemQueueMeasure;
 }
 
 /** The process's registry for the current file, as it is: not loaded here. */
@@ -289,11 +370,13 @@ function rawRegistry(): Registry {
     tasks: new Map(),
     listeners: new Map(),
     controllers: new Map(),
+    specs: new Map(),
     persistTimer: null,
   }));
   // A registry an older copy of this module made (a dev server's hot reload)
-  // predates the map.
+  // predates the maps.
   reg.controllers ??= new Map();
+  reg.specs ??= new Map();
   return reg;
 }
 
@@ -321,6 +404,19 @@ function adoptable(task: BackgroundTask): boolean {
   return task.unit.taskStep === running;
 }
 
+function isNeeds(value: unknown): value is BackgroundTaskNeeds {
+  if (!value || typeof value !== "object") return false;
+  const n = value as Partial<BackgroundTaskNeeds>;
+  return typeof n.memoryBytes === "number" && typeof n.diskBytes === "number"
+    && (n.diskPath === null || typeof n.diskPath === "string");
+}
+
+function isBehind(value: unknown): value is BackgroundTaskQueuedBehind {
+  if (!value || typeof value !== "object") return false;
+  const b = value as Partial<BackgroundTaskQueuedBehind>;
+  return typeof b.id === "string" && typeof b.kind === "string" && typeof b.title === "string" && typeof b.label === "string";
+}
+
 function isTask(value: unknown): value is BackgroundTask {
   if (!value || typeof value !== "object") return false;
   const t = value as Partial<BackgroundTask>;
@@ -345,14 +441,22 @@ function load(reg: Registry): void {
   if (!Array.isArray(list)) return;
   const now = Date.now();
   let orphaned = false;
+  let requeued = false;
   const adopted: BackgroundTask[] = [];
   const cleanedUp: string[] = [];
   for (const entry of list) {
     if (!isTask(entry)) continue;
     const unit = (entry as { unit?: unknown }).unit;
+    // Fields a record written before the queue does not carry.
+    const queued = entry as Partial<Pick<BackgroundTask, "label" | "lanes" | "needs" | "queuedAt" | "queuedBehind">>;
     const task: BackgroundTask = {
       ...entry,
       group: typeof entry.group === "string" ? entry.group : entry.kind,
+      label: typeof queued.label === "string" && queued.label ? queued.label : entry.title,
+      lanes: Array.isArray(queued.lanes) ? queued.lanes.filter((l): l is string => typeof l === "string") : [],
+      needs: isNeeds(queued.needs) ? queued.needs : null,
+      queuedAt: typeof queued.queuedAt === "number" ? queued.queuedAt : null,
+      queuedBehind: isBehind(queued.queuedBehind) ? queued.queuedBehind : null,
       meta: entry.meta && typeof entry.meta === "object" ? entry.meta : null,
       dismissed: entry.dismissed === true,
       logCount: typeof entry.logCount === "number" ? entry.logCount : entry.log.length,
@@ -384,11 +488,21 @@ function load(reg: Registry): void {
         closeOrphan(task, now);
         cleanedUp.push(task.kind);
       }
+    } else if (task.state === "queued" && task.runner !== reg.runner) {
+      // Still waiting, now in this process's queue. Nothing of it had started,
+      // so nothing was lost: its work is rebuilt from its kind when its turn
+      // comes (see `begin`).
+      requeued = true;
+      task.runner = reg.runner;
+      task.updatedAt = now;
     }
     reg.tasks.set(task.id, task);
   }
-  if (orphaned) persistNow(reg);
+  if (orphaned || requeued) persistNow(reg);
   for (const task of adopted) setImmediate(() => { void adopt(reg, task); });
+  // What the restart ended (an orphan closed above) may have been what a
+  // queued task was waiting for; the adopted ones still hold their lanes.
+  if (requeued) setImmediate(() => pump(reg));
   // What a cut-off task of these kinds left half-done is undone once, here —
   // the work that would have done it died with the old process.
   for (const kind of new Set(cleanedUp)) {
@@ -440,7 +554,7 @@ async function adopt(reg: Registry, task: BackgroundTask): Promise<void> {
   try {
     outcome = await followRootStepRun(
       { step: unit.step, sinceMs: unit.sinceMs, invocationId: unit.invocationId },
-      { timeoutMs: budget, label: task.title, onStatus: (line) => ctx.status(line) },
+      { timeoutMs: budget, label: task.title, onStatus: (line) => ctx.status(line), onLog: (line) => ctx.log(line) },
     );
   } catch (err) {
     outcome = { ok: false, lost: true, error: err instanceof Error ? err.message : undefined };
@@ -469,7 +583,7 @@ async function adopt(reg: Registry, task: BackgroundTask): Promise<void> {
 
 function prune(reg: Registry, now: number): void {
   const finished = [...reg.tasks.values()]
-    .filter((t) => t.state !== "running")
+    .filter((t) => !isLiveBackgroundTask(t))
     .sort((a, b) => (b.finishedAt ?? b.updatedAt) - (a.finishedAt ?? a.updatedAt));
   finished.forEach((task, index) => {
     const age = now - (task.finishedAt ?? task.updatedAt);
@@ -608,7 +722,7 @@ export function getBackgroundTask(id: string): BackgroundTaskView | null {
   return task ? viewBackgroundTask(task) : null;
 }
 
-/** The task of this group that is running now, if any. */
+/** The task of this group that is running now, if any — a queued one is not. */
 export function runningBackgroundTask(group: string): BackgroundTaskView | null {
   for (const task of registry().tasks.values()) {
     if (task.group === group && task.state === "running") return viewBackgroundTask(task);
@@ -617,18 +731,60 @@ export function runningBackgroundTask(group: string): BackgroundTaskView | null 
 }
 
 /**
- * Start `spec.run` as a task of the server, or — when its group already has
- * one running — answer that one, so the caller can re-attach instead of
- * starting a second copy over the first.
+ * The live task of this group — running, or queued to run — if any: the work
+ * a second start of the same thing follows, and what a removal of it must not
+ * run under.
+ */
+export function liveBackgroundTask(group: string): BackgroundTaskView | null {
+  for (const task of registry().tasks.values()) {
+    if (task.group === group && isLiveBackgroundTask(task)) return viewBackgroundTask(task);
+  }
+  return null;
+}
+
+/** Every live task of these kinds (or holding this lane), oldest first. */
+export function liveBackgroundTasks(filter: { kinds?: readonly string[]; lane?: string } = {}): BackgroundTaskView[] {
+  return [...registry().tasks.values()]
+    .filter((t) => isLiveBackgroundTask(t)
+      && (filter.kinds ? filter.kinds.includes(t.kind) : true)
+      && (filter.lane ? t.lanes.includes(filter.lane) : true))
+    .sort((a, b) => a.startedAt - b.startedAt)
+    .map((t) => viewBackgroundTask(t));
+}
+
+function behindOf(task: BackgroundTask): BackgroundTaskQueuedBehind {
+  return { id: task.id, kind: task.kind, title: task.title, label: task.label };
+}
+
+/** Queue order: accepted first, starts first. */
+function queueOrder(a: BackgroundTask, b: BackgroundTask): number {
+  return (a.queuedAt ?? a.startedAt) - (b.queuedAt ?? b.startedAt);
+}
+
+/** May `task` start now? `ahead` is what is queued before it. */
+function decide(reg: Registry, task: BackgroundTask, ahead: readonly BackgroundTask[]) {
+  const running = [...reg.tasks.values()]
+    .filter((t) => t.state === "running" && t !== task)
+    .sort((a, b) => a.startedAt - b.startedAt);
+  return decideQueue(task, running, ahead, queueMeasure);
+}
+
+/**
+ * Start `spec.run` as a task of the server, or — when its group already has a
+ * live one — answer that one, so the caller can re-attach instead of starting
+ * a second copy over the first. A task that may not run beside the work
+ * already running (src/lib/background-task-queue.ts) is accepted all the same
+ * and waits `queued`; it starts by itself once that work has ended.
  *
  * Synchronous up to the start: two requests that arrive together cannot both
- * pass the group check, because nothing awaits between it and the insert.
+ * pass the group check, or both take a lane, because nothing awaits between
+ * the checks and the insert.
  */
 export function startBackgroundTask(spec: StartBackgroundTaskSpec): StartBackgroundTaskResult {
   const reg = registry();
   const group = spec.group ?? spec.kind;
-  const running = runningBackgroundTask(group);
-  if (running) return { started: false, running };
+  const live = liveBackgroundTask(group);
+  if (live) return { started: false, running: live };
 
   const now = Date.now();
   const task: BackgroundTask = {
@@ -636,6 +792,11 @@ export function startBackgroundTask(spec: StartBackgroundTaskSpec): StartBackgro
     kind: spec.kind,
     group,
     title: spec.title,
+    label: spec.label ?? spec.title,
+    lanes: [...new Set(spec.lanes ?? [])],
+    needs: spec.needs ?? null,
+    queuedAt: null,
+    queuedBehind: null,
     meta: spec.meta ?? null,
     state: "running",
     steps: (spec.steps ?? []).map((s) => ({ id: s.id, label: s.label, state: "pending", weight: s.weight ?? 1 })),
@@ -657,10 +818,106 @@ export function startBackgroundTask(spec: StartBackgroundTaskSpec): StartBackgro
     unit: null,
     adoptedAt: null,
   };
+  const queued = [...reg.tasks.values()].filter((t) => t.state === "queued").sort(queueOrder);
+  const decision = decide(reg, task, queued);
+  if (!decision.start) {
+    task.state = "queued";
+    task.queuedAt = now;
+    task.queuedBehind = behindOf(decision.behind);
+    task.status = queuedStatus(task.queuedBehind);
+    appendLog(task, task.status);
+    reg.tasks.set(task.id, task);
+    reg.specs.set(task.id, spec);
+    persistNow(reg);
+    return { started: true, queued: true, task: viewBackgroundTask(task, now) };
+  }
   if (task.status) appendLog(task, task.status);
   reg.tasks.set(task.id, task);
   persistNow(reg);
+  launch(reg, task, spec);
+  return { started: true, queued: false, task: viewBackgroundTask(task, now) };
+}
 
+/**
+ * Start what can start. Called whenever a task ends (however it ends), when a
+ * queued one is cancelled, and once after a restart. In queue order, so a
+ * lane hands over in the order the owner pressed; a task that still waits has
+ * its "starts after" moved on to whatever it now waits for.
+ */
+function pump(reg: Registry): void {
+  const queued = [...reg.tasks.values()].filter((t) => t.state === "queued").sort(queueOrder);
+  let moved = false;
+  queued.forEach((task, index) => {
+    const ahead = queued.slice(0, index).filter((t) => t.state === "queued");
+    const decision = decide(reg, task, ahead);
+    if (decision.start) {
+      begin(reg, task);
+      return;
+    }
+    const behind = behindOf(decision.behind);
+    if (task.queuedBehind?.id === behind.id) return;
+    task.queuedBehind = behind;
+    task.status = queuedStatus(behind);
+    appendLog(task, task.status);
+    task.updatedAt = Date.now();
+    moved = true;
+    emit(reg, task.id, { type: "queue", queued: true, behind, line: task.status });
+  });
+  if (moved) persistNow(reg);
+}
+
+/**
+ * A queued task's turn: it is `running` from here (and holds its lanes), then
+ * its work starts — the closure the starting request gave, or, for a task a
+ * restart found queued, the same work rebuilt from its kind and `meta`.
+ */
+function begin(reg: Registry, task: BackgroundTask): void {
+  const spec = reg.specs.get(task.id) ?? null;
+  reg.specs.delete(task.id);
+  const now = Date.now();
+  task.state = "running";
+  task.queuedBehind = null;
+  task.startedAt = now;
+  task.stepStartedAt = now;
+  task.updatedAt = now;
+  const open = (first: string | null) => {
+    task.status = first ?? task.title;
+    appendLog(task, task.status);
+    persistNow(reg);
+    emit(reg, task.id, { type: "queue", queued: false, behind: null, line: task.status });
+  };
+  if (spec) {
+    open(spec.status ?? null);
+    launch(reg, task, spec);
+    return;
+  }
+  open(null);
+  void import("./background-task-starters")
+    .then(({ startSpecFor }) => startSpecFor(task.kind, task.meta ?? {}))
+    .then(
+      (rebuilt) => {
+        if (task.state !== "running") return;
+        if (!rebuilt) {
+          finishTask(reg, task, "interrupted", { error: QUEUE_LOST_MESSAGE });
+          return;
+        }
+        task.cancellable = rebuilt.cancellable === true;
+        if (rebuilt.status) {
+          task.status = cleanLine(rebuilt.status) || task.status;
+          emit(reg, task.id, { type: "status", line: task.status ?? "" });
+        }
+        launch(reg, task, rebuilt);
+      },
+      (err: unknown) => {
+        finishTask(reg, task, "failed", {
+          error: err instanceof Error && err.message ? err.message : `${task.title} did not finish.`,
+        });
+      },
+    );
+}
+
+/** Run `spec`'s work as `task`, which is running and in the registry. */
+function launch(reg: Registry, task: BackgroundTask, spec: StartBackgroundTaskSpec): void {
   const controller = new AbortController();
   reg.controllers.set(task.id, controller);
   const ctx = contextFor(reg, task, controller.signal);
@@ -690,8 +947,6 @@ export function startBackgroundTask(spec: StartBackgroundTaskSpec): StartBackgro
       },
     );
   });
-
-  return { started: true, task: viewBackgroundTask(task, now) };
 }
 
 /** The handle a task's work (or its adoption) writes the record through. */
@@ -704,6 +959,7 @@ function contextFor(reg: Registry, task: BackgroundTask, signal: AbortSignal): B
   const ctx: BackgroundTaskContext = {
     id: task.id,
     signal,
+    waited: task.queuedAt !== null,
     step(stepId, status) {
       if (!live()) return;
       const target = task.steps.find((s) => s.id === stepId);
@@ -732,6 +988,12 @@ function contextFor(reg: Registry, task: BackgroundTask, signal: AbortSignal): B
       if (!live()) return;
       const clean = cleanLine(line);
       if (!clean) return;
+      // A root step's plumbing (su's and PAM's session lines, systemd's own)
+      // is never the headline the row and the card show; it stays in the log.
+      if (isJournalNoise(clean)) {
+        ctx.log(clean);
+        return;
+      }
       task.status = clean;
       appendLog(task, clean);
       touch();
@@ -767,6 +1029,7 @@ function contextFor(reg: Registry, task: BackgroundTask, signal: AbortSignal): B
         timeoutMs: opts.timeoutMs,
         label: opts.label,
         onStatus: (line) => ctx.status(line),
+        onLog: (line) => ctx.log(line),
         onRunning: (run) => {
           if (!live()) return;
           task.unit = { ...run, taskStep, finishes: opts.finishes ?? null, bootId: currentBootId() };
@@ -793,7 +1056,7 @@ function finishTask(
   state: EndState,
   outcome: { result?: Record<string, unknown> | null; error?: string },
 ): void {
-  if (task.state !== "running") return;
+  if (!isLiveBackgroundTask(task)) return;
   // A record this registry no longer holds (a test's reset; never a running
   // task in production) is not the one any follower is listening to.
   if (reg.tasks.get(task.id) !== task) return;
@@ -804,6 +1067,7 @@ function finishTask(
   task.result = outcome.result ?? null;
   task.error = outcome.error ?? null;
   task.unit = null;
+  task.queuedBehind = null;
   for (const s of task.steps) {
     // A cancelled step is not a failed one: it stops where the owner stopped it.
     if (s.state === "running") s.state = state === "succeeded" ? "done" : state === "cancelled" ? "pending" : "failed";
@@ -815,6 +1079,9 @@ function finishTask(
   emit(reg, task.id, { type: "end", task: viewBackgroundTask(task, end) });
   reg.listeners.delete(task.id);
   reg.controllers.delete(task.id);
+  reg.specs.delete(task.id);
+  // Done, failed or cancelled: whatever waited for it may start now.
+  pump(reg);
 }
 
 export type CancelBackgroundTaskResult =
@@ -826,11 +1093,18 @@ export type CancelBackgroundTaskResult =
  * started and rejects; the task then ends `cancelled`. Answering is immediate —
  * the record says `cancelRequested` until the work has really stopped, so a
  * card can say "Stopping…" rather than claim a stop that has not happened.
+ *
+ * A QUEUED task always can be: nothing of it has started, so it simply ends
+ * `cancelled`, and the queue behind it moves up.
  */
 export function cancelBackgroundTask(id: string): CancelBackgroundTaskResult {
   const reg = registry();
   const task = reg.tasks.get(id);
   if (!task) return { ok: false, code: "unknown_task" };
+  if (task.state === "queued") {
+    finishTask(reg, task, "cancelled", { result: { status: CANCELLED_STATUS } });
+    return { ok: true, task: viewBackgroundTask(task) };
+  }
   if (task.state !== "running") return { ok: false, code: "not_running" };
   const controller = reg.controllers.get(id);
   if (!task.cancellable || !controller) return { ok: false, code: "not_cancellable" };
@@ -856,7 +1130,7 @@ export function subscribeBackgroundTask(
 ): (() => void) | null {
   const reg = registry();
   const task = reg.tasks.get(id);
-  if (!task || task.state !== "running") return null;
+  if (!task || !isLiveBackgroundTask(task)) return null;
   let set = reg.listeners.get(id);
   if (!set) {
     set = new Set();
@@ -868,11 +1142,11 @@ export function subscribeBackgroundTask(
   };
 }
 
-/** Hide an ENDED task's card. A running one cannot be dismissed, only collapsed. */
+/** Hide an ENDED task's card. A live one (running or queued) cannot be dismissed, only cancelled. */
 export function dismissBackgroundTask(id: string): BackgroundTaskView | null {
   const reg = registry();
   const task = reg.tasks.get(id);
-  if (!task || task.state === "running") return null;
+  if (!task || isLiveBackgroundTask(task)) return null;
   task.dismissed = true;
   task.updatedAt = Date.now();
   persistNow(reg);
@@ -881,12 +1155,21 @@ export function dismissBackgroundTask(id: string): BackgroundTaskView | null {
 
 const encoder = new TextEncoder();
 
+/** What a stream line says about the task a queued one waits for: enough to name it, no ids. */
+function queuedPayload(behind: BackgroundTaskQueuedBehind | null): { behind?: { kind: string; label: string } } {
+  return behind ? { behind: { kind: behind.kind, label: behind.label } } : {};
+}
+
 /**
  * One task as the NDJSON stream every install route already answers with —
  * `{status}` lines, `{completed,total}` lines, and ONE closing `{success:true,
  * …result}` or `{error, …payload}` — so the panels that read those streams read
  * this one unchanged. The first line carries `taskId`, which is all a reader
  * needs to follow the same work again after it lost the stream.
+ *
+ * A queued task says so: `{status, queued: true, behind: {kind, label}}` while
+ * it waits (again whenever what it waits for changes), `{status, queued:
+ * false}` once it starts, then the work's own lines.
  *
  * Cancelling the stream (the window closed) only unsubscribes. The work is not
  * the stream's to stop.
@@ -921,15 +1204,17 @@ export function backgroundTaskStream(id: string): ReadableStream<Uint8Array> {
         taskId: current.id,
         kind: current.kind,
         status: current.status ?? current.title,
+        ...(current.state === "queued" ? { queued: true, ...queuedPayload(current.queuedBehind) } : {}),
         ...(current.total ? { completed: current.completed ?? 0, total: current.total } : {}),
       });
-      if (current.state !== "running") {
+      if (!isLiveBackgroundTask(current)) {
         ending(current);
         return;
       }
       unsubscribe = subscribeBackgroundTask(id, (event) => {
         if (event.type === "status") send({ status: event.line });
         else if (event.type === "progress") send({ completed: event.completed, total: event.total });
+        else if (event.type === "queue") send({ status: event.line, queued: event.queued, ...queuedPayload(event.behind) });
         else if (event.type === "end") ending(event.task);
       });
       if (!unsubscribe) {
@@ -962,6 +1247,16 @@ export function resetBackgroundTasksForTests(): void {
   reg.tasks.clear();
   reg.listeners.clear();
   reg.controllers.clear();
+  reg.specs.clear();
   reg.loaded = false;
   reg.runner = randomUUID();
+}
+
+/**
+ * Read the persisted tasks now rather than at the first request that asks:
+ * the server's boot calls this, so a root step left running is adopted and a
+ * queue left waiting moves on even when no browser is open to ask.
+ */
+export function resumeBackgroundTasks(): void {
+  registry();
 }

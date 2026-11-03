@@ -79,6 +79,7 @@ function kokoroInstall(): BackgroundTaskView {
     log: ["Downloading the voice…"], logCount: 1,
     runner: "r", dismissed: false, percent: 40, etaSeconds: 120,
     cancellable: false, cancelRequested: false, unit: null, adoptedAt: null,
+    label: "Kokoro", lanes: [], needs: null, queuedAt: null, queuedBehind: null,
   };
 }
 

@@ -20,8 +20,9 @@ const ROOT_UPDATE_UNIT = readFileSync(
   path.join(REPO, "config/clawbox-root-update@.service"),
   "utf-8",
 );
+// The install (and its follow timeout) lives with its task since TASK-2128.
 const LLAMACPP_ROUTE = readFileSync(
-  path.join(REPO, "src/app/setup-api/llamacpp/install/route.ts"),
+  path.join(REPO, "src/lib/llamacpp-install-task.ts"),
   "utf-8",
 );
 const GATEWAY_UNIT = readFileSync(

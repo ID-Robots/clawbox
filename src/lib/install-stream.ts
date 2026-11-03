@@ -23,6 +23,13 @@ export interface InstallProgress {
   completed?: number;
   /** Bytes in total, when the route can say. */
   total?: number;
+  /**
+   * The work is waiting its turn behind another (true), or has just started
+   * after waiting (false). Absent from every line that says neither.
+   */
+  queued?: boolean;
+  /** While queued: what it waits for — that task's kind and short name. */
+  behind?: { kind: string; label: string };
 }
 
 export interface InstallOutcome {
@@ -54,6 +61,12 @@ function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function readBehind(value: unknown): { kind: string; label: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { kind, label } = value as { kind?: unknown; label?: unknown };
+  return typeof kind === "string" && typeof label === "string" ? { kind, label } : undefined;
+}
+
 /**
  * Consume one line. Answers the outcome when the line was the closing one,
  * `null` while the stream goes on — including for a line that is not JSON,
@@ -79,8 +92,16 @@ function consume(
   const status = typeof payload.status === "string" ? payload.status : undefined;
   const completed = readNumber(payload.completed);
   const total = readNumber(payload.total);
-  if (status !== undefined || completed !== undefined || total !== undefined) {
-    onProgress({ status, completed, total });
+  const queued = typeof payload.queued === "boolean" ? payload.queued : undefined;
+  const behind = readBehind(payload.behind);
+  if (status !== undefined || completed !== undefined || total !== undefined || queued !== undefined) {
+    onProgress({
+      status,
+      completed,
+      total,
+      ...(queued !== undefined ? { queued } : {}),
+      ...(behind ? { behind } : {}),
+    });
   }
   if (payload.cancelled === true) return { ok: false, cancelled: true, error: typeof payload.error === "string" ? payload.error : undefined };
   if (typeof payload.error === "string") return { ok: false, error: payload.error };

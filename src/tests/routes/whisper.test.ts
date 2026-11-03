@@ -267,7 +267,7 @@ describe("POST /setup-api/whisper", () => {
     expect(restarted).not.toHaveBeenCalled();
   });
 
-  it("follows a download of the same size already running, and refuses another size naming it", async () => {
+  it("follows a download of the same size already running, and QUEUES another size behind it — never a refusal", async () => {
     child.hold = true;
     const { POST } = await load();
     const first = await POST(post({ size: "small" }));
@@ -276,18 +276,32 @@ describe("POST /setup-api/whisper", () => {
     await reader.cancel();
     await vi.waitFor(() => expect(heldClose).not.toBeNull());
 
+    // Another size: accepted, waiting its turn behind the running download.
     const other = await POST(post({ size: "medium" }));
-    expect(other.status).toBe(409);
-    expect(await other.json()).toMatchObject({ code: "busy", taskId: firstLine.taskId });
+    expect(other.status).toBe(200);
+    const otherLines = readStream(other);
 
     const again = await POST(post({ size: "small" }));
     // The fetcher "finishes": the weights land and the stream closes.
     for (const size of state.sizes) if (size.id === "small") size.cached = true;
-    heldClose?.(0);
+    const closeFirst = heldClose!;
+    heldClose = null;
+    closeFirst(0);
     const lines = await readStream(again);
     expect(lines[0].taskId).toBe(firstLine.taskId);
     expect(lines.at(-1)).toMatchObject({ success: true, size: "small", taskId: firstLine.taskId });
-    expect(spawned).toHaveLength(1);
+
+    // Its turn came by itself: the queued size starts its own fetch.
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+    for (const size of state.sizes) if (size.id === "medium") size.cached = true;
+    heldClose!(0);
+    const queued = await otherLines;
+    expect(queued[0]).toMatchObject({ queued: true, behind: { kind: "whisper-size-download", label: "Whisper small" } });
+    expect(queued[0].taskId).not.toBe(firstLine.taskId);
+    expect(queued.some((l) => l.queued === false)).toBe(true);
+    expect(queued.at(-1)).toMatchObject({ success: true, size: "medium" });
+    expect(spawned).toHaveLength(2);
+    expect(pointed.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["small", "medium"]);
   });
 
   it("follows a running download of the same size before measuring the disk it is filling", async () => {
@@ -548,12 +562,14 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
       POST(post({ action: "install-engine" })),
       POST(post({ action: "install-engine" })),
     ]);
-    expect([a.status, b.status].sort()).toEqual([200, 409]);
-    const refused = a.status === 409 ? a : b;
-    expect((await refused.json()).code).toBe("busy");
+    // Both answered — the second press follows the first's install, the same
+    // task, rather than being refused or starting a second build under it.
+    expect([a.status, b.status]).toEqual([200, 200]);
     await vi.waitFor(() => expect(followMock).toHaveBeenCalledTimes(1));
     finish();
-    await readStream(a.status === 200 ? a : b);
+    const [first, second] = await Promise.all([readStream(a), readStream(b)]);
+    expect(second[0].taskId).toBe(first[0].taskId);
+    expect(followMock).toHaveBeenCalledTimes(1);
   });
 
   it("gives the reservation back when the engine is already installed", async () => {
@@ -763,7 +779,8 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     await vi.waitFor(() => expect(uninstalled).toHaveBeenCalled());
     const res = await POST(post({ action: "install-engine" }));
     expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe("busy");
+    // Its own code: a removal in progress, not "another install is running".
+    expect((await res.json()).code).toBe("removing");
     expect(followMock).not.toHaveBeenCalled();
     finish();
     expect((await removing).status).toBe(200);

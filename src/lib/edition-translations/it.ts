@@ -1492,6 +1492,8 @@ export const it: Record<string, string> = {
   "localModels.install.diskNeed": "{need} da scaricare",
   "localModels.install.diskShort": "Spazio insufficiente: servono {need}, liberi solo {free}.",
   "localModels.install.refusal.busy": "In questo momento si sta già scaricando qualcos'altro.",
+  "localModels.install.refusal.removing": "È in corso la rimozione. Riprova tra un momento.",
+  "localModels.uninstall.switchChatFirst": "Prima passa la chat a un altro modello",
   "localModels.install.refusal.notInstalled": "Quella parte non è ancora installata su questa scatola.",
   "localModels.install.refusal.noDownloader": "Lo strumento di download non è ancora su questa scatola. Installa prima il modello locale.",
   "localModels.install.refusal.alreadyHere": "È già su questa scatola.",

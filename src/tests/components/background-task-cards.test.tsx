@@ -9,7 +9,7 @@
  * asks at once when a surface says it started something.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import BackgroundTaskCards, { useBackgroundTasks } from "@/components/BackgroundTaskCards";
 import {
@@ -33,7 +33,7 @@ function task(over: Partial<BackgroundTaskView> = {}): BackgroundTaskView {
     startedAt: 1_000, updatedAt: 2_000, stepStartedAt: 1_000, finishedAt: null, error: null, result: null,
     log: ["Installing speech on this box (faster-whisper)…", "Building CTranslate2 (cmake)"], logCount: 2,
     runner: "r", dismissed: false, percent: 42.5, etaSeconds: 300,
-    cancellable: false, cancelRequested: false, unit: null, adoptedAt: null,
+    cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, label: "Whisper", lanes: [], needs: null, queuedAt: null, queuedBehind: null,
     ...over,
   };
 }
@@ -268,5 +268,71 @@ describe("the success card on a browser whose clock is off the box's", () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(result.current.tasks).toHaveLength(1);
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+});
+
+describe("a queued install's card (TASK-2128)", () => {
+  const queued = (over: Partial<BackgroundTaskView> = {}) => task({
+    id: "q1",
+    state: "queued",
+    status: "Queued — starts after Kokoro",
+    steps: [
+      { id: "install", label: "Build faster-whisper", state: "pending", weight: 9 },
+      { id: "wire", label: "Switch voice notes to it", state: "pending", weight: 1 },
+    ],
+    percent: 0,
+    etaSeconds: null,
+    queuedAt: 1_500,
+    queuedBehind: { id: "k1", kind: "voice-kokoro-install", title: "Installing the voice (Kokoro)", label: "Kokoro" },
+    ...over,
+  });
+
+  it("is its own card: says what it waits for, has no bar and no close button, and offers Cancel", async () => {
+    renderCards([queued()]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-state", "queued");
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Queued — starts after Kokoro"));
+    expect(within(card).getByText("schedule")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.queryByTestId("background-task-dismiss")).toBeNull();
+    // Nothing of it has started, so it can always be dropped — even work that
+    // could not be stopped once running.
+    expect(screen.getByTestId("background-task-cancel")).toBeInTheDocument();
+    expect(screen.queryByTestId("background-task-no-cancel")).toBeNull();
+  });
+
+  it("names the memory-search model in the owner's language, and says no name when the box gave none", async () => {
+    renderCards([queued({ queuedBehind: { id: "e1", kind: "embed-model-download", title: "Downloading", label: "Memory search" } })]);
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Queued — starts after Memory search"));
+    cleanup();
+    renderCards([queued({ queuedBehind: null })]);
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Queued — starts when the install before it ends"));
+  });
+
+  it("cancels a queued install with the same POST as a running one", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    renderCards([queued()]);
+    fireEvent.click(screen.getByTestId("background-task-cancel"));
+    await waitFor(() => expect((fetchMock.mock.calls as unknown as [string, RequestInit?][])
+      .some(([url, init]) => url === "/setup-api/background-jobs/tasks" && JSON.parse(String(init?.body ?? "{}")).action === "cancel")).toBe(true));
+  });
+
+  it("is drawn while it waits, and polled like running work", () => {
+    expect(visibleBackgroundTasks([queued({ dismissed: true })], Date.now()).map((t) => t.id)).toEqual(["q1"]);
+  });
+});
+
+describe("work that has no Cancel (TASK-2128)", () => {
+  it("says it cannot be stopped half-way where the button would be, so nobody looks for it", async () => {
+    renderCards([task({ cancellable: false })]);
+    await waitFor(() => expect(screen.getByTestId("background-task-no-cancel")).toHaveTextContent("This step can't be stopped half-way"));
+    cleanup();
+    renderCards([task({ cancellable: true })]);
+    expect(screen.queryByTestId("background-task-no-cancel")).toBeNull();
+    cleanup();
+    // An ending is not a step in progress.
+    renderCards([task({ state: "failed", error: "boom", finishedAt: 3_000 })]);
+    expect(screen.queryByTestId("background-task-no-cancel")).toBeNull();
   });
 });

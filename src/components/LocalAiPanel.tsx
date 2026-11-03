@@ -5,12 +5,12 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
-import { fetchBackgroundTasks, followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
+import { fetchBackgroundTasks, followBackgroundTask, isLiveTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
 import { EMBED_MODEL_DOWNLOAD_KIND, KOKORO_INSTALL_KIND, LLAMACPP_INSTALL_KIND, WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { isConfigBusyPayload } from "@/lib/config-conflict";
 import { ConfirmDialog } from "@/components/clawkeep-ui";
 import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
-import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
+import { BackgroundTaskInline, queuedLine } from "@/components/BackgroundTaskProgress";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
 
@@ -145,6 +145,12 @@ interface Action {
   destructive?: boolean;
   /** The route streams progress (see readTaskStream) instead of answering JSON. */
   streams?: true;
+  /**
+   * Shown, but not available yet — and the sentence (a catalogue key) saying
+   * what to do first. A verb the owner cannot find reads as missing; one that
+   * says why it is greyed out reads as a step.
+   */
+  blockedKey?: string;
 }
 
 /**
@@ -179,6 +185,14 @@ const BACKGROUND_TASK_ROWS: Record<string, string> = {
   // on a model that is here is the card under the row, which follows its own.
   [EMBED_MODEL_DOWNLOAD_KIND]: "embeddings",
 };
+
+/** `record` without `key`, or `record` itself when it has none (no re-render for nothing). */
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const rest = { ...record };
+  delete rest[key];
+  return rest;
+}
 
 /** An engine whose extra settings are worth drawing: here, and not switched off. */
 const usable = (entry: LocalModelEntry) => entry.installed && entry.enabled !== false;
@@ -241,6 +255,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // The last progress line of a streaming action, by row.
   const [progress, setProgress] = useState<Record<string, string>>({});
+  // Rows whose install is waiting its turn behind another (TASK-2128), with
+  // what it waits for — kept as facts and said at render time, so the line is
+  // in the owner's language whenever the catalogue arrives.
+  const [queuedRows, setQueuedRows] = useState<Record<string, { kind: string; label: string } | null>>({});
   // Rows whose action is a background task of the server, with the task: it
   // runs on with Settings closed, the row says so, and draws the task's steps,
   // time left and log (BackgroundTaskInline).
@@ -300,12 +318,20 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   }, []);
 
   const refresh = useCallback(async () => {
-    if (pendingRef.current.size > 0) return;
     try {
       const res = await fetch("/setup-api/local-models", { cache: "no-store" });
       const data = res.ok ? await res.json() : null;
       if (isSnapshot(data)) {
-        applySnapshot(data);
+        // A row with an action in flight keeps what it showed — the poll must
+        // not flip it mid-flight. Every OTHER row takes the new reading: with
+        // several installs going at once (one running, others queued), the one
+        // that just finished has to read "installed" now, not when the last of
+        // them ends — or its Install button comes back and starts it again.
+        const busy = pendingRef.current;
+        const prev = snapshotRef.current;
+        applySnapshot(busy.size > 0 && prev
+          ? { ...data, models: data.models.map((m) => (busy.has(m.id) ? prev.models.find((p) => p.id === m.id) ?? m : m)) }
+          : data);
         return;
       }
     } catch {
@@ -418,6 +444,13 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       if (action.streams) {
         // Follows the task again if the stream is cut short (a restart).
         const outcome = await readTaskStream(res, (line) => {
+          // Waiting its turn behind another install: the row names what it
+          // waits for. Once it starts, the work's own lines take over.
+          if (line.queued === true) {
+            setQueuedRows((q) => ({ ...q, [entry.id]: line.behind ?? null }));
+            return;
+          }
+          if (line.queued === false || line.status) setQueuedRows((q) => withoutKey(q, entry.id));
           if (line.status) setProgress((p) => ({ ...p, [entry.id]: line.status as string }));
         }, (taskId) => {
           followedTasksRef.current.add(taskId);
@@ -457,19 +490,16 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         next.delete(entry.id);
         return next;
       });
-      setProgress((p) => {
-        if (!(entry.id in p)) return p;
-        const rest = { ...p };
-        delete rest[entry.id];
-        return rest;
-      });
+      setProgress((p) => withoutKey(p, entry.id));
+      setQueuedRows((q) => withoutKey(q, entry.id));
       setBackgroundRows((rows) => {
         if (!rows.has(entry.id)) return rows;
         const next = new Map(rows);
         next.delete(entry.id);
         return next;
       });
-      // refresh() waits for the last in-flight action; roles are cheap.
+      // This row is no longer in flight, so the re-read updates it even while
+      // other rows still are (refresh keeps only theirs); roles are cheap.
       void refresh();
       void refreshRoles();
     }
@@ -492,7 +522,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       if (cancelled || !tasks) return;
       for (const task of tasks) {
         const rowId = BACKGROUND_TASK_ROWS[task.kind];
-        if (task.state !== "running" || !rowId) continue;
+        // Running, or still queued behind another install: either way the
+        // row is busy with it and shows it.
+        if (!isLiveTask(task) || !rowId) continue;
         if (followedTasksRef.current.has(task.id) || pendingRef.current.has(rowId)) continue;
         const entry = snapshotRef.current?.models.find((m) => m.id === rowId);
         if (!entry) continue;
@@ -609,8 +641,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         }
         // Not while Gemma is the model the box answers with: the route refuses
         // that (409 `in_use`), and the menu's "Use as fallback" is the step
-        // that comes first. A button that can only be refused is a dead end.
-        if (roles.llm !== "primary") uninstall = removal("/setup-api/llamacpp/models?engine=1");
+        // that comes first. A button that can only be refused is a dead end —
+        // and a button that is simply missing reads as "this cannot be
+        // uninstalled", so it is shown greyed out, saying what to do first.
+        uninstall = roles.llm === "primary"
+          ? { ...removal("/setup-api/llamacpp/models?engine=1"), blockedKey: "localModels.uninstall.switchChatFirst" }
+          : removal("/setup-api/llamacpp/models?engine=1");
         break;
       }
       case "tts": {
@@ -817,9 +853,18 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                         {memory ? ` · ${t("localModels.memoryInUse", { size: memory })}` : ""}
                       </p>
                       <p className="text-xs text-[var(--text-secondary)] mt-1">{detail}</p>
-                      {busy && progress[entry.id] && (
+                      {controls.uninstall?.blockedKey && (
+                        <p
+                          id={`local-model-blocked-${entry.id}`}
+                          className="text-xs text-[var(--text-secondary)] mt-1"
+                          data-testid={`local-model-blocked-${entry.id}`}
+                        >
+                          {t(controls.uninstall.blockedKey)}
+                        </p>
+                      )}
+                      {busy && (entry.id in queuedRows || progress[entry.id]) && (
                         <p className="text-xs text-[var(--text-secondary)] mt-1 break-words" data-testid={`local-model-progress-${entry.id}`}>
-                          {progress[entry.id]}
+                          {entry.id in queuedRows ? queuedLine(t, queuedRows[entry.id]) : progress[entry.id]}
                         </p>
                       )}
                       {busy && backgroundRows.has(entry.id) && (
@@ -892,8 +937,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                       {controls.uninstall && (
                         <button
                           type="button"
-                          aria-disabled={busy}
-                          onClick={() => { if (!busy && controls.uninstall) setConfirm({ entry, action: controls.uninstall }); }}
+                          aria-disabled={busy || !!controls.uninstall.blockedKey}
+                          aria-describedby={controls.uninstall.blockedKey ? `local-model-blocked-${entry.id}` : undefined}
+                          title={controls.uninstall.blockedKey ? t(controls.uninstall.blockedKey) : undefined}
+                          onClick={() => {
+                            if (!busy && controls.uninstall && !controls.uninstall.blockedKey) setConfirm({ entry, action: controls.uninstall });
+                          }}
                           className={`${BUTTON} text-red-300 aria-disabled:opacity-50 aria-disabled:cursor-default`}
                           data-testid={`local-model-action-${entry.id}-uninstall`}
                         >

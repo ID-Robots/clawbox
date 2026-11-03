@@ -98,6 +98,29 @@ describe("LocalAiPanel re-attaching to a background install", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("follows an install that is still QUEUED behind another, on its row, until it runs and ends (TASK-2128)", async () => {
+    const stream = controlledStream();
+    const calls = stubFetch({
+      // (The Kokoro install it waits for runs too; one stream is all this fake follows.)
+      tasks: [{ ...runningTask("whisper-engine-install", "task-w"), state: "queued", status: "Queued — starts after Kokoro" }],
+      follow: () => stream.response,
+    });
+    renderPanel();
+
+    stream.send({ taskId: "task-w", kind: "whisper-engine-install", status: "Queued — starts after Kokoro", queued: true, behind: { kind: "voice-kokoro-install", label: "Kokoro" } });
+    await waitFor(() => expect(screen.getByTestId("local-model-progress-whisper")).toHaveTextContent("Queued — starts after Kokoro"));
+    expect(calls.some((c) => c.url === "/setup-api/background-jobs/tasks/follow?id=task-w")).toBe(true);
+    // Followed, never started again.
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+
+    stream.send({ status: "Installing speech on this box (faster-whisper)…", queued: false });
+    await waitFor(() => expect(screen.getByTestId("local-model-progress-whisper")).toHaveTextContent("Installing speech on this box (faster-whisper)…"));
+    stream.send({ success: true, status: "Speech on this box is installed.", taskId: "task-w" });
+    stream.close();
+    await waitFor(() => expect(screen.queryByTestId("local-model-progress-whisper")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("follows the memory model's first download on its row, and leaves an installed one's to the card", async () => {
     const embeddings = (installed: boolean) => model({
       id: "embeddings", name: "Memory search", kind: "embedding", runtime: "llama.cpp", installed,

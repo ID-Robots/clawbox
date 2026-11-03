@@ -109,6 +109,8 @@ export const localModelsEn: Record<string, string> = {
   // sentence that sends somebody to look at the wrong disk.
   "localModels.install.diskShort": "Not enough room: needs {need}, only {free} free.",
   "localModels.install.refusal.busy": "Something else is being downloaded right now.",
+  "localModels.install.refusal.removing": "That is being removed right now. Try again in a moment.",
+  "localModels.uninstall.switchChatFirst": "Switch the chat to another model first",
   "localModels.install.refusal.notInstalled": "That part is not installed on this box yet.",
   "localModels.install.refusal.noDownloader": "The downloader is not on this box yet. Install the local model first.",
   "localModels.install.refusal.alreadyHere": "That is already on this box.",

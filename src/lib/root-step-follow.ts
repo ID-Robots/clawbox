@@ -13,6 +13,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { startRootStep } from "@/lib/root-step-runner";
+import { isJournalNoise } from "@/lib/journal-noise";
 import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const execFile = promisify(execFileCb);
@@ -28,8 +29,13 @@ const MAX_UNKNOWN_POLLS = 20;
 export interface FollowRootStepOptions {
   /** How long the whole step may take before it is reported as timed out. */
   timeoutMs: number;
-  /** Every new last line of the unit's journal, as it appears. */
+  /**
+   * Every new last line of the unit's journal that says what the step is
+   * doing, as it appears — never the root step's plumbing (journal-noise.ts).
+   */
   onStatus: (line: string) => void;
+  /** The plumbing lines {@link onStatus} skips, for a log that keeps every line. */
+  onLog?: (line: string) => void;
   /** What to call the step in the messages nobody else wrote. */
   label: string;
   /**
@@ -155,9 +161,10 @@ async function journalLines(
   }
 }
 
+/** The newest line that is not the root step's plumbing (journal-noise.ts). */
 async function lastJournalLine(step: string, sinceMs: number, lines: number): Promise<string | null> {
   const all = await journalLines(step, sinceMs, lines);
-  return all.length > 0 ? all[all.length - 1] : null;
+  return [...all].reverse().find((line) => !isJournalNoise(line)) ?? null;
 }
 
 /** How often a watched step's journal is re-read for a new headline. */
@@ -243,7 +250,9 @@ export function watchRootStepProgress(
  * marker; else nothing.
  */
 export function failureReason(lines: readonly string[]): string | null {
-  const said = lines.filter((line) => !DISPATCH_VERDICT_LINE.test(line));
+  // Nor su's or PAM's session lines: "session closed for user clawbox" is the
+  // last thing a failed pip run leaves, and it is no one's reason.
+  const said = lines.filter((line) => !DISPATCH_VERDICT_LINE.test(line) && !isJournalNoise(line));
   const telling = [...said].reverse().find((line) => /error|kokoro/i.test(line));
   return telling ?? (said.length > 0 ? said[said.length - 1] : null);
 }
@@ -297,6 +306,7 @@ async function followLoop(
   const unit = rootStepUnit(step);
   const deadline = Date.now() + opts.timeoutMs;
   let lastLine: string | null = null;
+  let lastSeen: string | null = null;
   // An adopted run that carries its invocation WAS seen running by whoever
   // dispatched it, so an inactive unit now is its ending, not a slow start.
   let sawRunning = adopted && run.invocationId !== null;
@@ -341,13 +351,23 @@ async function followLoop(
       return { ok: false, lost: true, error: `${opts.label} is not running any more, and how it ended was not recorded.` };
     }
 
-    const line = await lastJournalLine(step, startedAt, 5);
-    if (line && line !== lastLine) {
-      lastLine = line;
+    const recent = await journalLines(step, startedAt, 5);
+    const newest = recent.at(-1) ?? null;
+    if (newest && newest !== lastSeen) {
+      lastSeen = newest;
+      // The headline is the newest line that says what the step is doing;
+      // su's and PAM's session lines around every command go to the log only.
+      const line = [...recent].reverse().find((l) => !isJournalNoise(l)) ?? null;
       // A listener that is gone (the stream's client cancelled) must not
       // end the follow: the root unit runs on regardless, and whoever holds
       // the "one install at a time" flag needs its real end.
-      try { opts.onStatus(line); } catch { /* nobody listening */ }
+      if (isJournalNoise(newest)) {
+        try { opts.onLog?.(newest); } catch { /* nobody listening */ }
+      }
+      if (line && line !== lastLine) {
+        lastLine = line;
+        try { opts.onStatus(line); } catch { /* nobody listening */ }
+      }
     }
 
     if (active === "failed") {
