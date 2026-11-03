@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   PROGRESS_CARD_COLLAPSED_KEY,
   PROGRESS_CARD_CHANGED_EVENT,
+  PROGRESS_CARD_DISMISSED_KEY,
   PROGRESS_CARD_GET_METHOD,
+  PROGRESS_CARD_PUT_METHOD,
+  PROGRESS_CARD_REFRESH_METHOD,
+  MAX_PROGRESS_CARD_DISMISSALS,
+  forgetProgressCardDismissal,
+  isProgressCardDismissed,
   parseProgressCard,
   parseProgressCardChanged,
   parseProgressCardResponse,
@@ -10,10 +16,13 @@ import {
   progressCardAge,
   progressCardCounts,
   progressCardCurrentStep,
+  progressCardDismissKey,
   progressCardEventMatches,
   progressCardScopeKey,
   readProgressCardCollapsed,
+  readProgressCardDismissals,
   writeProgressCardCollapsed,
+  writeProgressCardDismissal,
 } from "@/lib/chat-progress-card";
 
 /**
@@ -39,6 +48,8 @@ describe("the wire names", () => {
   it("are the gateway's own", () => {
     expect(PROGRESS_CARD_GET_METHOD).toBe("progressCard.get");
     expect(PROGRESS_CARD_CHANGED_EVENT).toBe("progressCard.changed");
+    expect(PROGRESS_CARD_PUT_METHOD).toBe("progressCard.put");
+    expect(PROGRESS_CARD_REFRESH_METHOD).toBe("progressCard.refresh");
   });
 });
 
@@ -201,5 +212,75 @@ describe("the fold survives a reload", () => {
     const throwing = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("quota"); } };
     expect(readProgressCardCollapsed(throwing)).toBe(false);
     expect(() => writeProgressCardCollapsed(true, throwing)).not.toThrow();
+  });
+});
+
+describe("a dismissed card stays put away until the agent writes again (TASK-2147)", () => {
+  function memoryStorage() {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => { store.set(key, value); },
+      removeItem: (key: string) => { store.delete(key); },
+      store,
+    };
+  }
+  const shown = { sessionKey: "agent:main:main", revision: 4, updatedAt: 1_758_200_000_000 };
+
+  it("hides exactly the revision and write time it was dismissed at", () => {
+    const storage = memoryStorage();
+    expect(isProgressCardDismissed(shown, readProgressCardDismissals(storage))).toBe(false);
+    writeProgressCardDismissal(shown, storage, 1);
+    const dismissals = readProgressCardDismissals(storage);
+    expect(dismissals).toEqual({ "agent:main:main": { revision: 4, updatedAt: 1_758_200_000_000, at: 1 } });
+    expect(isProgressCardDismissed(shown, dismissals)).toBe(true);
+    // The agent's next write: a new revision, or a card that restarted its count after a clear.
+    expect(isProgressCardDismissed({ ...shown, revision: 5, updatedAt: shown.updatedAt + 1 }, dismissals)).toBe(false);
+    expect(isProgressCardDismissed({ ...shown, updatedAt: shown.updatedAt + 60_000 }, dismissals)).toBe(false);
+    // Another session's card is not this one.
+    expect(isProgressCardDismissed({ ...shown, sessionKey: "agent:main:clawbox-tab" }, dismissals)).toBe(false);
+  });
+
+  it("files a bare key and its agent-qualified form as one session", () => {
+    expect(progressCardDismissKey({ sessionKey: "Main" })).toBe("agent:main:main");
+    expect(progressCardDismissKey({ sessionKey: "agent:main:main" })).toBe("agent:main:main");
+    expect(progressCardDismissKey({ sessionKey: "  " })).toBe("");
+    const storage = memoryStorage();
+    writeProgressCardDismissal({ ...shown, sessionKey: "main" }, storage);
+    expect(isProgressCardDismissed(shown, readProgressCardDismissals(storage))).toBe(true);
+  });
+
+  it("keeps one entry per session, the newest sessions only", () => {
+    const storage = memoryStorage();
+    writeProgressCardDismissal(shown, storage, 1);
+    writeProgressCardDismissal({ ...shown, revision: 5 }, storage, 2);
+    expect(Object.keys(readProgressCardDismissals(storage))).toEqual(["agent:main:main"]);
+    for (let i = 0; i < MAX_PROGRESS_CARD_DISMISSALS + 5; i++) {
+      writeProgressCardDismissal({ ...shown, sessionKey: `agent:main:tab-${i}` }, storage, 10 + i);
+    }
+    const kept = readProgressCardDismissals(storage);
+    expect(Object.keys(kept)).toHaveLength(MAX_PROGRESS_CARD_DISMISSALS);
+    expect(kept["agent:main:main"]).toBeUndefined();
+    expect(kept[`agent:main:tab-${MAX_PROGRESS_CARD_DISMISSALS + 4}`]).toBeDefined();
+  });
+
+  it("forgets a session's dismissal, and the key when nothing is left", () => {
+    const storage = memoryStorage();
+    writeProgressCardDismissal(shown, storage);
+    expect(forgetProgressCardDismissal({ sessionKey: "agent:main:other" }, storage)).toHaveProperty(["agent:main:main"]);
+    expect(forgetProgressCardDismissal(shown, storage)).toEqual({});
+    expect(storage.store.has(PROGRESS_CARD_DISMISSED_KEY)).toBe(false);
+  });
+
+  it("reads nothing from missing, throwing or malformed storage", () => {
+    expect(readProgressCardDismissals(null)).toEqual({});
+    const throwing = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("quota"); }, removeItem: () => {} };
+    expect(readProgressCardDismissals(throwing)).toEqual({});
+    expect(() => writeProgressCardDismissal(shown, throwing)).not.toThrow();
+    const storage = memoryStorage();
+    storage.setItem(PROGRESS_CARD_DISMISSED_KEY, "not json");
+    expect(readProgressCardDismissals(storage)).toEqual({});
+    storage.setItem(PROGRESS_CARD_DISMISSED_KEY, JSON.stringify({ a: { revision: "4" }, b: null, c: { revision: 2, updatedAt: "x" } }));
+    expect(readProgressCardDismissals(storage)).toEqual({ c: { revision: 2, updatedAt: null, at: 0 } });
   });
 });

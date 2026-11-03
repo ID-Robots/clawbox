@@ -26,7 +26,8 @@
 //     token the gateway mints for the relay.
 //   * Every request names the session it acts on, and only the user's own
 //     keys pass (chat.send, chat.history, sessions.reset/patch/delete, the
-//     message subscription, the progress card). The few the chat sends with no
+//     message subscription, the progress card and its refresh and clear —
+//     a clear only, never a write). The few the chat sends with no
 //     key (the slash-command catalogue, answering an approval or a question
 //     the user was shown) pass as they are; everything else is refused with
 //     the gateway's own error frame shape, so the chat reports it like any
@@ -66,6 +67,8 @@ const KEYED_METHODS = Object.freeze({
   "chat.abort": "sessionKey",
   "chat.history": "sessionKey",
   "progressCard.get": "sessionKey",
+  "progressCard.put": "sessionKey",
+  "progressCard.refresh": "sessionKey",
   "sessions.reset": "key",
   "sessions.patch": "key",
   "sessions.delete": "key",
@@ -147,6 +150,21 @@ function filterClientFrame(state, frame) {
       const resetParams = { key: params.key };
       if (typeof params.reason === "string") resetParams.reason = params.reason.slice(0, 32);
       return { reset: { id, params: resetParams } };
+    }
+    if (method === "progressCard.put") {
+      // The chat's only write to the card is the trash: a clear of the user's
+      // own card, checked against the revision they saw. A note or a plan
+      // never travels — what the card says is the agent's to write.
+      const putParams = { sessionKey: params.sessionKey };
+      if (Number.isInteger(params.expectedRevision) && params.expectedRevision >= 1) putParams.expectedRevision = params.expectedRevision;
+      state.pending.set(id, method);
+      return { toGateway: { type: "req", id, method, params: putParams } };
+    }
+    if (method === "progressCard.refresh") {
+      // Just the session and the retry key: the refresh carries no prompt of the caller's.
+      const refreshParams = { sessionKey: params.sessionKey, idempotencyKey: typeof params.idempotencyKey === "string" ? params.idempotencyKey.slice(0, 128) : "" };
+      state.pending.set(id, method);
+      return { toGateway: { type: "req", id, method, params: refreshParams } };
     }
   } else if (!KEYLESS_METHODS.has(method)) {
     return { toClient: refusalFrame(id, `"${method}" is not available to this ClawBox user's chat.`) };

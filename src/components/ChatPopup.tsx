@@ -2595,8 +2595,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // The agent's "Task progress" card for the conversation on screen — the
   // gateway's `progressCard.get`, re-read on (re)connect, on a tab switch and
   // on every `progressCard.changed` for this session (TASK-896). Only the
-  // gateway keeps one, so a box with no live connection never asks.
-  const { card: progressCard, onChanged: onProgressCardChanged } = useGatewayProgressCard({
+  // gateway keeps one, so a box with no live connection never asks. The card's
+  // trash and refresh are the gateway's too (TASK-2147).
+  const {
+    card: progressCard,
+    onChanged: onProgressCardChanged,
+    clear: clearProgressCard,
+    refresh: refreshProgressCard,
+    refreshState: progressCardRefreshState,
+  } = useGatewayProgressCard({
     request: wsRequest,
     sessionKey: activeTabKey ?? mainSessionKey,
     enabled: caps.hasLiveConnection && status === 'connected',
@@ -8775,7 +8782,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       {/* The agent's progress card, pinned at the top of the composer stack —
           in the column, so the transcript above gives up the height and the
           text box below is never covered. */}
-      {progressCard && <ChatProgressCard card={progressCard} />}
+      {progressCard && (
+        <ChatProgressCard
+          card={progressCard}
+          onClear={clearProgressCard}
+          onRefresh={refreshProgressCard}
+          refreshState={progressCardRefreshState}
+        />
+      )}
 
       {/* Attachment strip.
 

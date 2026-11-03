@@ -54,6 +54,24 @@ describe("requests from a user's chat", () => {
     expect(relay.filterClientFrame(connected(), frame)).toEqual({ toGateway: frame });
   });
 
+  it("passes a clear of the user's own progress card, and never a note or a plan", () => {
+    const out = relay.filterClientFrame(connected(), {
+      type: "req", id: "p1", method: "progressCard.put",
+      params: { sessionKey: ALICE_TAB, expectedRevision: 3, markdown: "written by the user", plan: [{ step: "x", status: "pending" }], agentId: "other" },
+    });
+    expect(out).toEqual({ toGateway: { type: "req", id: "p1", method: "progressCard.put", params: { sessionKey: ALICE_TAB, expectedRevision: 3 } } });
+    const unchecked = relay.filterClientFrame(connected(), { type: "req", id: "p2", method: "progressCard.put", params: { sessionKey: ALICE_MAIN, expectedRevision: "3" } });
+    expect(unchecked.toGateway?.params).toEqual({ sessionKey: ALICE_MAIN });
+  });
+
+  it("passes a refresh of the user's own progress card with just its session and retry key", () => {
+    const out = relay.filterClientFrame(connected(), {
+      type: "req", id: "p3", method: "progressCard.refresh",
+      params: { sessionKey: ALICE_MAIN, idempotencyKey: "k-1", prompt: "do something else" },
+    });
+    expect(out).toEqual({ toGateway: { type: "req", id: "p3", method: "progressCard.refresh", params: { sessionKey: ALICE_MAIN, idempotencyKey: "k-1" } } });
+  });
+
   it("hands a reset of the user's own session to the relay's admin socket, with only key and reason", () => {
     const out = relay.filterClientFrame(connected(), { type: "req", id: "r9", method: "sessions.reset", params: { key: ALICE_TAB, reason: "new", extra: "x" } });
     expect(out).toEqual({ reset: { id: "r9", params: { key: ALICE_TAB, reason: "new" } } });
@@ -70,6 +88,11 @@ describe("requests from a user's chat", () => {
     ["chat.history", { sessionKey: "agent:main:clawbox-user-bob" }],
     ["sessions.delete", { key: "agent:main:main" }],
     ["sessions.messages.subscribe", { key: "agent:main:main" }],
+    ["progressCard.get", { sessionKey: "agent:main:main" }],
+    ["progressCard.put", { sessionKey: "agent:main:main", expectedRevision: 2 }],
+    ["progressCard.put", { sessionKey: "agent:main:clawbox-user-bob" }],
+    ["progressCard.put", {}],
+    ["progressCard.refresh", { sessionKey: "agent:main:main", idempotencyKey: "k" }],
   ])("refuses %s on someone else's session", (method, params) => {
     const out = relay.filterClientFrame(connected(), { type: "req", id: "r2", method, params });
     expect(out.toGateway).toBeUndefined();

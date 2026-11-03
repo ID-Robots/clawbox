@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import ChatApp from "@/components/ChatApp";
 import { resetHarnessCache } from "@/lib/client-harness";
@@ -50,6 +50,21 @@ class FakeGatewayWs {
         return;
       case "progressCard.get":
         this.respond(id, { card: serverCard });
+        return;
+      case "progressCard.put": {
+        // The gateway's revision-checked clear: a newer card is kept and answered.
+        const expected = (frame.params as { expectedRevision?: number }).expectedRevision;
+        if (serverCard && expected !== undefined && serverCard.revision !== expected) {
+          this.respond(id, { card: serverCard });
+          return;
+        }
+        serverCard = null;
+        this.respond(id, { card: null });
+        setTimeout(() => this.emit({ type: "event", event: "progressCard.changed", payload: { sessionKey: "agent:main:main", revision: null } }), 0);
+        return;
+      }
+      case "progressCard.refresh":
+        this.respond(id, { runId: "run-1", status: "accepted", revision: serverCard?.revision ?? 1 });
         return;
       default:
         this.respond(id, {});
@@ -102,6 +117,7 @@ function installFetch() {
 }
 
 const cardGets = () => sent.filter((frame) => frame.method === "progressCard.get");
+const sentOf = (method: string) => sent.filter((frame) => frame.method === method);
 
 function wireCard(revision: number, markdown: string, steps: Array<{ step: string; status: string }> = []) {
   return { sessionKey: "agent:main:main", revision, updatedAt: Date.now() - 5 * 60_000, markdown, steps };
@@ -183,6 +199,56 @@ describe("ChatPopup — the task progress card", () => {
   });
 });
 
+describe("ChatPopup — putting the card away (TASK-2147)", () => {
+  it("dismisses with the X, stays hidden after a reload, and shows the agent's next write", async () => {
+    const view = render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitForChatSession();
+    await screen.findByTestId("chat-progress-card");
+    fireEvent.click(screen.getByTestId("chat-progress-card-dismiss"));
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+    // Nothing went to the gateway: the X is this chat's alone.
+    expect(sentOf("progressCard.put")).toHaveLength(0);
+
+    // A reload reads the same card and keeps it put away.
+    view.unmount();
+    const before = cardGets().length;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitForChatSession();
+    await waitFor(() => expect(cardGets().length).toBeGreaterThan(before));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+
+    serverCard = { ...wireCard(2, "Next step started."), updatedAt: Date.now() };
+    socket().changed("agent:main:main", 2);
+    await waitFor(() => expect(screen.getByTestId("chat-progress-card")).toHaveAttribute("data-revision", "2"));
+  });
+
+  it("clears the session's saved card with the trash, checked against the revision on screen", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitForChatSession();
+    await screen.findByTestId("chat-progress-card");
+    fireEvent.click(screen.getByTestId("chat-progress-card-clear"));
+    await waitFor(() => expect(screen.queryByTestId("chat-progress-card")).toBeNull());
+    expect(sentOf("progressCard.put").map((frame) => frame.params)).toEqual([{ sessionKey: "agent:main:main", expectedRevision: 1 }]);
+    expect(serverCard).toBeNull();
+  });
+
+  it("asks the agent to refresh the card", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitForChatSession();
+    await screen.findByTestId("chat-progress-card");
+    fireEvent.click(screen.getByTestId("chat-progress-card-refresh"));
+    await waitFor(() => expect(sentOf("progressCard.refresh")).toHaveLength(1));
+    expect(sentOf("progressCard.refresh")[0].params).toMatchObject({ sessionKey: "agent:main:main", idempotencyKey: expect.any(String) });
+    expect(screen.getByTestId("chat-progress-card-refresh")).toBeDisabled();
+
+    serverCard = wireCard(2, "Brought up to date.");
+    socket().changed("agent:main:main", 2);
+    await waitFor(() => expect(screen.getByTestId("chat-progress-card-refresh")).toBeEnabled());
+    expect(screen.getByTestId("chat-progress-card")).toHaveTextContent("Brought up to date.");
+  });
+});
+
 describe("ChatApp — the task progress card", () => {
   it("reads the card after the handshake, follows changes, and sits between the messages and the text box", async () => {
     render(<ChatApp />);
@@ -199,5 +265,20 @@ describe("ChatApp — the task progress card", () => {
     serverCard = null;
     socket().changed("agent:main:main", null);
     await waitFor(() => expect(screen.queryByTestId("chat-progress-card")).toBeNull());
+  });
+
+  it("dismisses with the X and clears with the trash, like the popup (TASK-2147)", async () => {
+    const view = render(<ChatApp />);
+    await screen.findByTestId("chat-progress-card");
+    fireEvent.click(screen.getByTestId("chat-progress-card-dismiss"));
+    expect(screen.queryByTestId("chat-progress-card")).toBeNull();
+    view.unmount();
+
+    serverCard = wireCard(2, "A new card.");
+    render(<ChatApp />);
+    await screen.findByTestId("chat-progress-card");
+    fireEvent.click(screen.getByTestId("chat-progress-card-clear"));
+    await waitFor(() => expect(screen.queryByTestId("chat-progress-card")).toBeNull());
+    expect(sentOf("progressCard.put").map((frame) => frame.params)).toEqual([{ sessionKey: "agent:main:main", expectedRevision: 2 }]);
   });
 });
