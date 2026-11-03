@@ -53,6 +53,7 @@ import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { personSession } from "@/lib/owner-session";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
@@ -1417,6 +1418,9 @@ export async function POST(request: Request) {
   // ends itself when it settles: a live turn that never ended would leave every
   // later page load waiting on an answer that is not coming.
   const turnId = typeof body.turnId === "string" && TURN_ID_RE.test(body.turnId) ? body.turnId : undefined;
+  // Read before the turn opens: nothing between the hand-off and the stream
+  // may be left to fail with a turn already running (see `listenerSession`).
+  const listening = await listenerSession(request);
   const live = beginLiveTurn(sessionKey, { turnId });
   let handedOff = false;
   try {
@@ -1576,7 +1580,7 @@ export async function POST(request: Request) {
       // harness's own record is precisely the answer to what it decided.
       if (turn) {
         handedOff = true;
-        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, await listenerSession(request));
+        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, listening);
       }
     }
 
@@ -1610,6 +1614,12 @@ export async function POST(request: Request) {
       // box knows the model of is a false unknown, not modesty.
       const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
       live.emit("done", answered);
+      // The one-shot answer is held to the same rule as the stream: a session
+      // that ran out while the CLI was answering is signed out rather than
+      // handed the reply, which is on the transcript for after the sign-in.
+      if (listening.stillSignedIn && !(await listening.stillSignedIn())) {
+        return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
+      }
       return NextResponse.json(answered);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {

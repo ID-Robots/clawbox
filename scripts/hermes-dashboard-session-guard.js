@@ -36,9 +36,15 @@ const CLOSE_PROBE_GAP_MS = 3_000;
 /** The proxy's own answer to "is this session still good": 204, or the marked 401. */
 const SESSION_PROBE_PATH = "/__clawbox/session";
 
-/** A value for an inline script: JSON, with nothing that can end the element. */
+/**
+ * A value for an inline script: JSON, with nothing that can end the element —
+ * and pure ASCII, so the proxy can splice the program into a page's bytes
+ * without re-encoding them.
+ */
 function forScript(value) {
-  return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+    .replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
 }
 
 /**

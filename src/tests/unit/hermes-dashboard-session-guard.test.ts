@@ -242,6 +242,10 @@ beforeAll(async () => {
     if (p === "/chat" || p === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", ETag: "\"v1\"", "Content-Length": Buffer.byteLength(PAGE) });
       res.end(PAGE);
+    } else if (p === "/latin1") {
+      const bytes = Buffer.concat([Buffer.from("<html><head><meta charset=iso-8859-1></head><body>caf"), Buffer.from([0xe9]), Buffer.from("</body></html>")]);
+      res.writeHead(200, { "Content-Type": "text/html; charset=iso-8859-1", "Content-Length": bytes.length });
+      res.end(bytes);
     } else if (p === "/gz") {
       const gz = zlib.gzipSync(PAGE);
       res.writeHead(200, { "Content-Type": "text/html", "Content-Encoding": "gzip", "Content-Length": gz.length });
@@ -301,6 +305,16 @@ describe("hermes-dashboard-proxy — the session guard in the dashboard's pages"
     const asked = seen.filter((r) => r.url === "/chat").at(-1)!;
     expect(asked.headers["accept-encoding"]).toBe("identity");
     expect(asked.headers["if-none-match"]).toBeUndefined();
+  });
+
+  it("keeps every byte of a page that is not UTF-8 around the guard", async () => {
+    const res = await get("/latin1", { session: mint(nowS() + 600), accept: NAVIGATION });
+    const guardBytes = Buffer.from(guard.sessionGuardScript({ loginUrl: "http://localhost/login" }), "ascii");
+    const start = res.body.indexOf(guardBytes);
+    expect(start).toBeGreaterThan(0);
+    const without = Buffer.concat([res.body.subarray(0, start), res.body.subarray(start + guardBytes.length)]);
+    expect(without.includes(Buffer.from([0x63, 0x61, 0x66, 0xe9]))).toBe(true);
+    expect(Number(res.headers["content-length"])).toBe(res.body.length);
   });
 
   it("relays a compressed page, an oversized page, a script and an API answer as they came", async () => {

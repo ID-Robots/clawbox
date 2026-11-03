@@ -37,7 +37,8 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
   openDashboardTurn: openTurnMock,
 }));
-vi.mock("child_process", () => ({ spawn: vi.fn() }));
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
   readHermesTurn: async () => null,
@@ -208,5 +209,43 @@ describe("a Hermes answer streaming past the session that asked for it", () => {
       text += new TextDecoder().decode(value);
     }
     expect(text).toContain("event: done");
+  });
+});
+
+describe("the one-shot (CLI) answer to a session that ran out while it was written", () => {
+  /** A `hermes chat -q` that answers once `finish` is called. */
+  function slowCli() {
+    let finish: () => void = () => {};
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    spawnMock.mockImplementation(() => ({
+      stdout: { on: (e: string, cb: (c: Buffer) => void) => { if (e === "data") void done.then(() => cb(Buffer.from("the answer"))); } },
+      stderr: { on: () => {} },
+      on: (e: string, cb: (code: number) => void) => { if (e === "close") void done.then(() => setTimeout(() => cb(0), 0)); },
+      kill: () => {},
+    }));
+    openTurnMock.mockResolvedValue(null);
+    return { finish: () => finish() };
+  }
+
+  it("is the session gate's marked 401, not the reply — which is still recorded", async () => {
+    const cli = slowCli();
+    const pending = POST(post(mint(nowS() + 600)));
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalled());
+    writeConfig(1);
+    cli.finish();
+    const res = await pending;
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-clawbox-session")).toBe("expired");
+    await vi.waitFor(() => expect(records().some((r) => r.role === "assistant")).toBe(true));
+  });
+
+  it("is the reply while the session holds", async () => {
+    const cli = slowCli();
+    const pending = POST(post(mint(nowS() + 600)));
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalled());
+    cli.finish();
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ harness: "hermes" });
   });
 });

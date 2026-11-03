@@ -733,7 +733,9 @@ function guardedPage(res, up, headers, guard) {
   });
   up.on("end", () => {
     if (relayed) return;
-    const body = Buffer.from(injectAtHeadStart(Buffer.concat(chunks).toString("utf8"), guard), "utf8");
+    // latin1 both ways: one char per byte, so the page's own bytes come back
+    // exactly as they were whatever its charset — the guard is pure ASCII.
+    const body = Buffer.from(injectAtHeadStart(Buffer.concat(chunks).toString("latin1"), guard), "latin1");
     const out = { ...headers };
     delete out["content-length"];
     delete out["transfer-encoding"];
