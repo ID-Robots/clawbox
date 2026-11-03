@@ -960,8 +960,12 @@ function createProxyServer() {
 // :8090 would neither load from it nor see the session. A connection that
 // opens with a TLS handshake gets the box's certificate (the Local HTTPS one
 // while valid, else an owner-installed data/certs/ pair); anything else is
-// plain HTTP as before. The certificates are re-read every 30 s, so TLS comes
-// and goes without a restart; with none, a handshake is simply closed.
+// plain HTTP as before. The certificate files are looked at every 5 s (a few
+// stat calls; they are read only when one changed), so TLS comes and goes
+// without a restart — and is there by the time the owner, who just switched
+// Local HTTPS on and moved to the secure address, opens the dashboard. With no
+// certificate, a handshake is simply closed.
+const CERT_REFRESH_MS = 5_000;
 function createTlsAwareListener() {
   const plain = createProxyServer();
   const certs = createLocalHttpsTls({ root: CLAWBOX_ROOT, legacyCertDir: path.join(CLAWBOX_ROOT, "data", "certs") });
@@ -992,7 +996,7 @@ function createTlsAwareListener() {
     }
   };
   sync();
-  setInterval(sync, 30_000).unref();
+  setInterval(sync, CERT_REFRESH_MS).unref();
   const front = createDualProtocolServer(plain, () => secure);
   front.on("listening", () => plain.emit("listening"));
   return front;
