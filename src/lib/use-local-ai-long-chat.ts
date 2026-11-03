@@ -169,14 +169,19 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
       const window = size?.window ?? localWindow;
       const long = tooLongForLocal(size, window);
       const tokens = size?.tokens ?? null;
+      // What the card names as the local model's room: the harness's own line
+      // when it gives one (Hermes compresses at half its 64k window, so "reads
+      // up to 65k" over a 52k conversation called too long would contradict
+      // itself), the window otherwise.
+      const room = size?.limit ?? window ?? null;
       const prevVerdict = fitRef.current.get(activeKey);
       if (prevVerdict?.dismissed) return;
-      fitRef.current.set(activeKey, { long, tokens, window: window ?? null });
+      fitRef.current.set(activeKey, { long, tokens, window: room });
       setOffers((prev) => {
         const current = prev[activeKey];
         if (long) {
           if (current && current.kind !== "fit") return prev;
-          return { ...prev, [activeKey]: { key: activeKey, kind: "fit", tokens, window: window ?? null, pending: current?.pending ?? null } };
+          return { ...prev, [activeKey]: { key: activeKey, kind: "fit", tokens, window: room, pending: current?.pending ?? null } };
         }
         // It fits now: a plain card goes; one holding a message stays for its choice.
         return current && current.kind === "fit" && !current.pending ? without(prev, activeKey) : prev;

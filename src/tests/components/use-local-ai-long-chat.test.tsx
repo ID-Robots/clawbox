@@ -161,6 +161,14 @@ describe("loading, only while llama-server is not ready", () => {
 });
 
 describe("the card", () => {
+  it("names the harness's own line as the local model's room when it gives one", async () => {
+    const adapter = adapterWith(52000);
+    (adapter.conversationSize as ReturnType<typeof vi.fn>).mockResolvedValue({ tokens: 52000, window: 65536, limit: 32768 });
+    const { result } = setup(adapter);
+    await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
+    expect(result.current.offer).toMatchObject({ tokens: 52000, window: 32768 });
+  });
+
   it("is gone once the chat is not on Local AI, and comes back with it", async () => {
     const adapter = adapterWith(100460);
     const { result, rerender, base } = setup(adapter);
