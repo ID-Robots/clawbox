@@ -29,14 +29,22 @@
  * notice is ClawBox speaking to the owner, not a channel for anyone else. The
  * summary is one tool call (or one Settings click) away.
  *
+ * A third leg, for a run the ASSISTANT started from a ClawBox chat: a turn in
+ * that chat, so the assistant wakes and tells the user how the run ended
+ * instead of waiting to be asked — see "The chat that started the run" below.
+ *
  * Every failure is swallowed and logged: a notice that does not arrive must
  * never turn a finished run into a failed one.
  */
 
+import fs from "fs";
+import path, { untraced } from "@/lib/runtime-path";
 import { pushPendingAction } from "@/lib/pending-actions";
-import { get as configGet } from "@/lib/config-store";
+import { DATA_DIR, get as configGet } from "@/lib/config-store";
 import { PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarness, type Harness } from "@/lib/harness";
+import { isOwnerChatTabKey } from "@/lib/chat-tabs";
+import { DESKTOP_TRANSCRIPT_KEY } from "@/lib/harness/transcript-key";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
@@ -255,14 +263,307 @@ async function notifyTelegramUnlessOff(what: string, message: string): Promise<v
 }
 
 /**
- * Fire both legs. Never throws; never blocks the caller on Telegram (the
- * Hermes CLI path alone can take seconds), which is why it is `void`ed from
- * the run's completion handler.
+ * Fire every leg. Never throws; never blocks the caller on Telegram (the
+ * Hermes CLI path alone can take seconds) or on the chat (a Hermes turn takes
+ * as long as the assistant's answer), which is why it is `void`ed from the
+ * run's completion handler — both of its call sites in coding-agent.ts, the
+ * settle and the deliverable gate, which between them see every run end once.
  */
 export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
   await notifyDesktop(run, message);
-  await notifyTelegramUnlessOff(run.id, message);
+  await Promise.all([notifyTelegramUnlessOff(run.id, message), notifyOriginChat(run)]);
+}
+
+// ── The chat that started the run ────────────────────────────────────────────
+//
+// The assistant starts a run with `coding_agent_run`, answers "started", and
+// its turn ends. The desktop card and Telegram tell the OWNER when the run
+// ends; nothing told the assistant, so the chat stayed silent until the user
+// asked "is it done?" (TASK-2132). This leg posts one turn into the chat that
+// asked for the run, and the assistant answers it there.
+//
+// WHICH CHAT. A tool call carries no chat identity on either harness — the MCP
+// server's requests hold the bearer and nothing else; OpenClaw spawns one per
+// session key without telling it the key, and Hermes runs one for every
+// session — so the run route asks the box's own registries at the moment the
+// call arrives (`findChatOrigin`), and this module keeps the answer beside the
+// run id until the run ends:
+//   - Hermes: the ClawBox chat whose turn is running right now. The turn that
+//     called the tool IS running while the call is made, and every ClawBox
+//     Hermes turn is registered by its transcript key (hermes-live-turn.ts).
+//     Two at once: the one the owner last sent in, else the newest.
+//   - OpenClaw: the gateway runs the turns, so the box sees no turn of its
+//     own; the conversation the owner last sent a turn in (the chat-tab
+//     registry's `active`, stamped when the chat sends) stands for it, within
+//     CHAT_ORIGIN_WINDOW_MS of that send.
+// Only the OWNER's chats: their main conversation and their tabs. A run the
+// assistant starts from Telegram, a cron job or a ClawBox user's chat has no
+// owner turn in flight (Hermes) or no recent owner send (OpenClaw) and gets no
+// chat notice — its owner still gets the card and Telegram.
+//
+// WHAT IT SAYS. The same rule as the card: ClawBox's template — status, run id,
+// counts — never the task or the summary. The assistant reads those itself
+// with `coding_agent_status`, as a tool result rather than as words ClawBox
+// put in its mouth.
+//
+// ONCE. The record also holds the statuses the chat has been told of, written
+// BEFORE the turn is sent, so a second announce of the same ending — a
+// restart's recovery, two settle paths — sends nothing. Per status rather than
+// per run: a run that gave up and was resumed in place ends a second time, and
+// that ending is news.
+
+/** Which ClawBox chat asked for a run, as the run route recorded it. */
+export interface RunChatOrigin {
+  /** The harness the chat ran on: a session key means nothing to the other one. */
+  harness: Harness;
+  /** The owner's tab, or null for their main conversation (whatever key the harness names it by). */
+  key: string | null;
+  /** When it was recorded — the box's clock. */
+  at: number;
+}
+
+interface ChatNoticeRecord extends RunChatOrigin {
+  /** The endings this run's chat has been told of. */
+  told: string[];
+}
+
+const CHAT_NOTICE_PATH = path.join(DATA_DIR, "coding-agent-chat-notices.json");
+/** Runs are kept a while; their chat records need not outlive them by much. */
+const MAX_CHAT_NOTICE_RECORDS = 500;
+const RUN_ID_RE = /^run-[a-z0-9]{1,32}$/;
+/** The endings a chat hears of. A pause is the owner's own gesture, a queue is not an ending. */
+const CHAT_NOTICE_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "gave_up", "stopped"]);
+
+/**
+ * OpenClaw: how long after the owner's last send in a chat a run the assistant
+ * starts still counts as asked from that chat. The send opens the assistant's
+ * turn and the tool call comes inside it — seconds later, or minutes when the
+ * assistant scaffolds a project first. Longer than that, and the run was asked
+ * for somewhere else (Telegram, a cron job) while the desktop sat idle.
+ */
+export const CHAT_ORIGIN_WINDOW_MS = 30 * 60_000;
+/** Hermes: how long the notice waits for a turn already running in the chat before it goes anyway. */
+export const HERMES_BUSY_WAIT_MS = 20 * 60_000;
+/** Hermes: the notice's own turn — the route answers when the assistant has. */
+const HERMES_TURN_TIMEOUT_MS = 15 * 60_000;
+const GATEWAY_SEND_TIMEOUT_MS = 15_000;
+/** OpenClaw: a gateway that is restarting gets two more tries, this far apart. */
+export const GATEWAY_RETRY_DELAYS_MS: readonly number[] = [5_000, 20_000];
+
+function isOriginKey(key: unknown): key is string | null {
+  return key === null || isOwnerChatTabKey(key);
+}
+
+function readChatNotices(): Record<string, ChatNoticeRecord> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(CHAT_NOTICE_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const out: Record<string, ChatNoticeRecord> = {};
+  for (const [id, raw] of Object.entries(parsed as Record<string, unknown>)) {
+    const r = raw as Partial<ChatNoticeRecord> | null;
+    if (!RUN_ID_RE.test(id) || !r || typeof r !== "object") continue;
+    if ((r.harness !== "openclaw" && r.harness !== "hermes") || !isOriginKey(r.key ?? null)) continue;
+    if (typeof r.at !== "number" || !Number.isFinite(r.at)) continue;
+    const told = Array.isArray(r.told) ? r.told.filter((s): s is string => typeof s === "string" && CHAT_NOTICE_STATUSES.has(s)) : [];
+    out[id] = { harness: r.harness, key: r.key ?? null, at: r.at, told };
+  }
+  return out;
+}
+
+/** Synchronous, so no other request's read can land between the read and this write. */
+function writeChatNotices(all: Record<string, ChatNoticeRecord>): void {
+  const ids = Object.keys(all).sort((a, b) => all[b].at - all[a].at);
+  const kept: Record<string, ChatNoticeRecord> = {};
+  for (const id of ids.slice(0, MAX_CHAT_NOTICE_RECORDS)) kept[id] = all[id];
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = untraced(`${CHAT_NOTICE_PATH}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(kept), { mode: 0o600 });
+  fs.renameSync(tmp, CHAT_NOTICE_PATH);
+}
+
+/**
+ * Which of the owner's chats is asking, right now, for a run the assistant is
+ * starting — see the section comment above. Null when none is; never throws.
+ */
+export async function findChatOrigin(now = Date.now()): Promise<RunChatOrigin | null> {
+  try {
+    const harness = await getActiveHarness();
+    const { readOwnerChatTabs } = await import("@/lib/chat-tab-store");
+    const { active } = readOwnerChatTabs();
+    if (harness === "hermes") {
+      const { liveTurnKeys } = await import("@/lib/harness/hermes-live-turn");
+      const live = liveTurnKeys()
+        .map((turn) => turn.sessionKey)
+        .filter((key) => key === DESKTOP_TRANSCRIPT_KEY || isOwnerChatTabKey(key));
+      if (live.length === 0) return null;
+      const last = active ? active.key ?? DESKTOP_TRANSCRIPT_KEY : null;
+      const key = last !== null && live.includes(last) ? last : live[0];
+      return { harness, key: key === DESKTOP_TRANSCRIPT_KEY ? null : key, at: now };
+    }
+    if (!active || now - active.at > CHAT_ORIGIN_WINDOW_MS || !isOriginKey(active.key)) return null;
+    // One strip serves both harnesses on a dual box: a Hermes tab the owner
+    // was in before a swap is no session the gateway has.
+    if (active.key !== null && !active.key.startsWith("agent:")) return null;
+    return { harness, key: active.key, at: now };
+  } catch (err) {
+    console.warn("[coding-agent] could not tell which chat asked for the run:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/** Keep `origin` beside the run until the run ends. Best effort; never throws. */
+export function recordRunChatOrigin(runId: string, origin: RunChatOrigin): void {
+  if (!RUN_ID_RE.test(runId) || !isOriginKey(origin.key)) return;
+  try {
+    const all = readChatNotices();
+    all[runId] = { harness: origin.harness, key: origin.key, at: origin.at, told: all[runId]?.told ?? [] };
+    writeChatNotices(all);
+  } catch (err) {
+    console.warn(`[coding-agent] could not record which chat asked for ${runId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Mark `status` as told for `runId` and answer the chat to tell — or null when
+ * no chat asked for this run, or it has already been told of this ending.
+ * Written before anything is sent: a notice lost to a crash is better than one
+ * sent twice.
+ */
+function claimChatNotice(runId: string, status: string): RunChatOrigin | null {
+  const all = readChatNotices();
+  const record = all[runId];
+  if (!record || record.told.includes(status)) return null;
+  record.told = [...record.told, status];
+  writeChatNotices(all);
+  return { harness: record.harness, key: record.key, at: record.at };
+}
+
+/**
+ * The turn the chat is sent. `message` is what the assistant reads; `display`
+ * is the first sentence alone, for a transcript that shows a turn the way it
+ * was meant for the user (Hermes' `displayText`).
+ *
+ * `NO_REPLY` only on OpenClaw, where the chat hides that answer: an assistant
+ * the user asked to wait with them has told them already. Hermes' transcript
+ * would show the word itself.
+ */
+export function buildChatNotice(run: CodingRun, harness: Harness): { message: string; display: string } {
+  const where = run.projectId ? ` in project "${run.projectId}"` : "";
+  const files = run.filesTouched.length;
+  const counts = `${run.numTurns} turn${run.numTurns === 1 ? "" : "s"}, ${files} file${files === 1 ? "" : "s"} changed, ${duration(run)}`;
+  const tag = `[Coding run ${run.id}]`;
+  let display: string;
+  let ask: string;
+  switch (run.status) {
+    case "completed":
+      display = `${tag} finished${where} (${counts}).`;
+      ask = `Read coding_agent_status for ${run.id} and tell the user how it went, in a few lines.`;
+      break;
+    case "stopped":
+      display = `${tag} was stopped${where} (${counts}).`;
+      ask = `Tell the user it was stopped, and do not start it again unless they ask you to. coding_agent_status for ${run.id} says what it did.`;
+      break;
+    case "gave_up":
+      display = `${tag} gave up before finishing${where} (${counts}).`;
+      ask = `Read coding_agent_status for ${run.id} and tell the user why, in a few lines.`;
+      break;
+    default:
+      display = `${tag} did not finish${where} (${counts}).`;
+      ask = `Read coding_agent_status for ${run.id} and tell the user what went wrong, in a few lines.`;
+  }
+  const already = harness === "openclaw"
+    ? "If you have already told them how this run ended, reply NO_REPLY."
+    : "If you have already told them how this run ended, say so in one line.";
+  return { message: `${display} ${ask} ${already}`, display };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+}
+
+async function sendOpenClawChatNotice(key: string | null, message: string, idempotencyKey: string): Promise<void> {
+  const gateway = await import("@/lib/openclaw-gateway-ws");
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      // The same `chat.send` the chat's own turns are, so the gateway answers it
+      // in that session and every chat open on it shows both; `deliver: false`
+      // keeps the reply off any channel. The idempotency key is the run's and
+      // the ending's, so a retry after a lost answer is the same turn.
+      if (key === null) {
+        await gateway.gatewayWsChatSendMain(message, { idempotencyKey, timeoutMs: GATEWAY_SEND_TIMEOUT_MS });
+      } else {
+        await gateway.gatewayWsCall("chat.send", { sessionKey: key, message, deliver: false, idempotencyKey }, { timeoutMs: GATEWAY_SEND_TIMEOUT_MS });
+      }
+      return;
+    } catch (err) {
+      const delay = GATEWAY_RETRY_DELAYS_MS[attempt];
+      if (!(err instanceof gateway.GatewayWsUnavailableError) || delay === undefined) throw err;
+      await sleep(delay);
+    }
+  }
+}
+
+/**
+ * Hermes: a turn through the box's own chat route, as the chat's own turns
+ * go — the route records the question and the answer in the transcript the
+ * chat shows, resumes the Hermes session the chat is on, and registers the
+ * turn live so an open chat follows it. Called with the agent's bearer, which
+ * that route serves as the owner, the only person this leg writes to.
+ *
+ * After any turn already running in that chat: a second `hermes chat --resume`
+ * on a busy session is a second agent beside the first, not a turn after it.
+ */
+async function sendHermesChatNotice(key: string, notice: { message: string; display: string }): Promise<void> {
+  const { whenLiveTurnsSettle } = await import("@/lib/harness/hermes-live-turn");
+  await Promise.race([whenLiveTurnsSettle(key), sleep(HERMES_BUSY_WAIT_MS)]);
+  const { readTranscript } = await import("@/lib/harness/transcript-store");
+  // Read after the wait: the turn just waited for may have moved the chat onto a new session.
+  const sessionId = (await readTranscript(50, key)).findLast((record) => record.sessionId)?.sessionId;
+  const { getMcpToken } = await import("@/lib/mcp-token");
+  const port = /^\d{1,5}$/.test(process.env.PORT ?? "") ? process.env.PORT : "80";
+  const res = await fetch(`http://127.0.0.1:${port}/setup-api/hermes/chat`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${getMcpToken()}`, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ message: notice.message, displayText: notice.display, sessionKey: key, ...(sessionId ? { sessionId } : {}) }),
+    signal: AbortSignal.timeout(HERMES_TURN_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`the chat answered ${res.status}`);
+}
+
+/** The chat leg; never throws. */
+async function notifyOriginChat(run: CodingRun): Promise<void> {
+  try {
+    if (!CHAT_NOTICE_STATUSES.has(run.status)) return;
+    const origin = claimChatNotice(run.id, run.status);
+    if (!origin) return;
+    const harness = await getActiveHarness();
+    if (harness !== origin.harness) {
+      console.info(`[coding-agent] ${run.id} was asked for from a ${origin.harness} chat and the box now runs ${harness}; chat notice not sent`);
+      return;
+    }
+    // Loaded here, as everything this leg reads: the module's other legs, and
+    // the many tests that import it for them, need none of it. A tab the owner
+    // has closed since is not where they will look; their main chat is.
+    const { readOwnerChatTabs } = await import("@/lib/chat-tab-store");
+    const key = origin.key !== null && readOwnerChatTabs().closed.includes(origin.key) ? null : origin.key;
+    const notice = buildChatNotice(run, harness);
+    if (harness === "openclaw") {
+      await sendOpenClawChatNotice(key, notice.message, `coding-run-${run.id}-${run.status}`);
+    } else {
+      await sendHermesChatNotice(key ?? DESKTOP_TRANSCRIPT_KEY, notice);
+    }
+    console.info(`[coding-agent] told the chat that asked for ${run.id} that it ended ${run.status}`);
+  } catch (err) {
+    console.error(`[coding-agent] the chat that asked for ${run.id} was not told it ended:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**

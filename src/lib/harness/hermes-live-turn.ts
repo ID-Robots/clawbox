@@ -46,6 +46,8 @@ type Listener = (frame: LiveTurnFrame | null) => void;
 interface LiveTurnState {
   readonly id: string;
   readonly sessionKey: string;
+  /** When the route began it — which of two running turns is the newer. */
+  readonly startedAt: number;
   readonly controller: AbortController;
   readonly frames: LiveTurnFrame[];
   readonly listeners: Set<Listener>;
@@ -200,6 +202,7 @@ export function beginLiveTurn(sessionKey: string, opts: { turnId?: string; now?:
   const state: LiveTurnState = {
     id: opts.turnId || newTurnId(),
     sessionKey,
+    startedAt: opts.now ?? Date.now(),
     controller: new AbortController(),
     frames: [],
     listeners: new Set(),
@@ -284,6 +287,34 @@ function latest(sessionKey: string): LiveTurnState | null {
  */
 export function hasLiveTurn(sessionKey: string): boolean {
   return (registry().get(sessionKey) ?? []).some((turn) => !turn.ended && !turn.controller.signal.aborted);
+}
+
+/**
+ * Every conversation with a turn running right now, the newest-started first.
+ *
+ * What a tool call from Hermes has no other way to say: the MCP server is one
+ * shared process called with no session id, so when the assistant starts a
+ * coding run, the turn running in a ClawBox chat at that moment is the best
+ * evidence of which chat asked (src/lib/coding-agent-notify.ts). A turn the
+ * owner has stopped is not running, as in {@link hasLiveTurn}.
+ */
+export function liveTurnKeys(): Array<{ sessionKey: string; startedAt: number }> {
+  const out: Array<{ sessionKey: string; startedAt: number }> = [];
+  for (const [sessionKey, turns] of registry()) {
+    const running = turns.filter((turn) => !turn.ended && !turn.controller.signal.aborted);
+    if (running.length === 0) continue;
+    out.push({ sessionKey, startedAt: Math.max(...running.map((turn) => turn.startedAt)) });
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/**
+ * Resolves once every turn running under `sessionKey` now has ended — at
+ * once when none is. A turn begun after the call is not waited for.
+ */
+export function whenLiveTurnsSettle(sessionKey: string): Promise<void> {
+  const running = (registry().get(sessionKey) ?? []).filter((turn) => !turn.ended);
+  return Promise.all(running.map((turn) => turn.settled)).then(() => undefined);
 }
 
 /**

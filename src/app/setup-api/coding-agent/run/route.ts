@@ -5,6 +5,7 @@ import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoice
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { ownerStopRefusal, ownerStopWorkForRun, releaseOwnerStopHold } from "@/lib/coding-team";
 import { pushPendingAction } from "@/lib/pending-actions";
+import { findChatOrigin, recordRunChatOrigin } from "@/lib/coding-agent-notify";
 
 export const dynamic = "force-dynamic";
 
@@ -131,6 +132,14 @@ export async function POST(request: Request) {
   const runId = newRunId();
   notifyDesktop({ type: "coding_run", phase: "starting", runId }, `coding-run-start:${runId}`);
 
+  // Which of the owner's chats the assistant is answering while it asks for
+  // this run — asked NOW, while that chat's turn is still running — so the
+  // chat hears when the run ends (coding-agent-notify.ts). Never for the
+  // owner's own click: the app they clicked in is where they look. Kept under
+  // the id before the start, which a run that fails at once can end inside.
+  const chatOrigin = source === "agent" ? await findChatOrigin() : null;
+  if (chatOrigin) recordRunChatOrigin(runId, chatOrigin);
+
   try {
     const { run, queued } = await startOrQueueRun({
       runId,
@@ -168,6 +177,7 @@ export async function POST(request: Request) {
       // its own record of the named run — never the caller's.
       ...(body.fixCi === true ? { fixCi: true } : {}),
     });
+    if (chatOrigin && run.id !== runId) recordRunChatOrigin(run.id, chatOrigin);
     // Every open desktop hears that a run began — the ROUTE says so, not the
     // MCP tool, so a run started from another device, the owner's own click
     // or the review pass shows up as a chat card within one poll. The
