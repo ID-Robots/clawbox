@@ -90,6 +90,16 @@ const COMMANDS_TIMEOUT_MS = 6_000;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 
 /**
+ * How long a Stop may take to reach the box. The route answers once the
+ * stopped turn has written its ending, which it waits on for at most five
+ * seconds (`STOP_SETTLE_TIMEOUT_MS`), so this is that and a margin.
+ */
+const STOP_TIMEOUT_MS = 10_000;
+
+/** The turn ids the route accepts — the chat's own uuids, and nothing that could be a path or a flag. */
+const TURN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
  * Tool steps off the wire, re-validated rather than trusted.
  *
  * The route builds these from the agent's own database, but they arrive here as
@@ -219,6 +229,7 @@ async function readStreamedTurn(
   let answer = "";
   let settled: Record<string, unknown> | null = null;
   let failure = "";
+  let stopped = false;
 
   const consume = (frame: string) => {
     let name = "message";
@@ -292,6 +303,10 @@ async function readStreamedTurn(
       settled = payload;
     } else if (name === "error") {
       failure = typeof payload.error === "string" && payload.error ? payload.error : "Hermes chat failed";
+    } else if (name === "stopped") {
+      // The box stopped the turn on the owner's word — this page's Stop or
+      // another window's. Not a dropped stream, so not "cut off".
+      stopped = true;
     }
   };
 
@@ -310,6 +325,7 @@ async function readStreamedTurn(
   }
   if (buffer.trim()) consume(buffer);
 
+  if (stopped) throw new HarnessError("aborted", "Stopped.");
   if (failure) throw new HarnessError("upstream", failure);
   if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
   return settled;
@@ -354,8 +370,14 @@ export class HermesAdapter implements HarnessAdapter {
    * The in-flight turn per conversation, so Stop aborts the one the owner is
    * looking at and closing a tab aborts its own. A turn left running in
    * another tab is the point of a second tab, not collateral.
+   *
+   * Aborting one only stops THIS PAGE reading it. The turn itself runs on the
+   * box, outlives the request (a reload must not stop it — TASK-2117), and is
+   * stopped by `stopOnBox`, which is what Stop and closing a tab also call.
+   * `turnId` is the one this page sent, so a Stop that beats the request to
+   * the box still lands on it.
    */
-  private readonly inFlight = new Map<string, AbortController>();
+  private readonly inFlight = new Map<string, { controller: AbortController; turnId?: string }>();
   private readonly statusListeners = new Set<(s: HarnessStatus, detail?: string) => void>();
 
   constructor(
@@ -379,8 +401,13 @@ export class HermesAdapter implements HarnessAdapter {
     this.emit("connected");
   }
 
+  /**
+   * Stop READING: the page is going away. The turns themselves go on on the box
+   * and are recorded there, which is the whole point — a page that unmounts on
+   * a reload must not be what ends an answer. Only `abortTurn` stops one.
+   */
   disconnect(): void {
-    for (const controller of this.inFlight.values()) controller.abort();
+    for (const { controller } of this.inFlight.values()) controller.abort();
     this.inFlight.clear();
   }
 
@@ -408,7 +435,10 @@ export class HermesAdapter implements HarnessAdapter {
     const key = ctx.sessionKey;
     const resumed = this.sessions.get(key);
     const controller = new AbortController();
-    this.inFlight.set(key, controller);
+    // Sent with the turn, so a Stop pressed before the route has registered it
+    // is still matched to it. Only a value the route will accept is sent.
+    const turnId = TURN_ID_RE.test(req.idempotencyKey) ? req.idempotencyKey : undefined;
+    this.inFlight.set(key, { controller, ...(turnId ? { turnId } : {}) });
     const abortFromCaller = () => controller.abort();
     // A signal that is ALREADY aborted never fires its event again, so a Stop
     // that landed between building the turn and sending it would otherwise be
@@ -481,6 +511,7 @@ export class HermesAdapter implements HarnessAdapter {
           // turn — otherwise a follow-up like "is it removed now?" reaches an
           // agent with no idea what "it" is.
           ...(resumed ? { sessionId: resumed } : {}),
+          ...(turnId ? { turnId } : {}),
         }),
         signal: controller.signal,
       });
@@ -506,40 +537,17 @@ export class HermesAdapter implements HarnessAdapter {
       // of `readStreamedTurn` — so the same question is asked again in the
       // catch below, which is what covers both.
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
+      // The box stopped the turn on the owner's word from somewhere else — a
+      // second window's Stop — and the route answers that with 499. A Stop, so
+      // not "Hermes chat failed" under the reply that was stopped.
+      if (res.status === 499) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",
           typeof data?.error === "string" && data.error ? data.error : "Hermes chat failed",
         );
       }
-      if (typeof data.sessionId === "string" && data.sessionId) {
-        this.sessions.set(key, data.sessionId);
-      }
-      this.holdSessionModel(key, resumed, data);
-      // Same MEDIA: split as the gateway path, so a picture renders the same
-      // way whichever edition answered.
-      const reply = splitAssistantMedia(typeof data.text === "string" ? data.text : "");
-      // Thinking and tool steps ride BESIDE the answer. The route separated
-      // them from the CLI's console output (or, where it could, read them
-      // straight out of the agent's own record); folding them back into `text`
-      // here would put the monologue right back in the bubble.
-      // Named for what it IS — the monologue that came BACK — because
-      // `reasoning` in this scope is already the effort level we sent.
-      const thinking = typeof data.reasoning === "string" && data.reasoning ? data.reasoning : "";
-      const toolCalls = toToolSummaries(data.toolCalls);
-      return {
-        text: reply.text,
-        media: reply.images,
-        audio: reply.audio,
-        ...(thinking ? { reasoning: thinking } : {}),
-        ...(toolCalls.length ? { toolCalls } : {}),
-        // What answered, as the route recorded it — the dashboard's own
-        // session info after any switch, or the argv the CLI ran with. Not
-        // `req.model`: that is what was ASKED for, and the two disagreeing is
-        // the whole reason the record exists.
-        ...(typeof data.model === "string" && data.model ? { model: data.model } : {}),
-        ...(typeof data.provider === "string" && data.provider ? { provider: data.provider } : {}),
-      };
+      return this.settledTurn(key, resumed, data);
     } catch (err) {
       // A STOP IS NOT AN UPSTREAM FAILURE, whichever way the body ended.
       //
@@ -555,14 +563,114 @@ export class HermesAdapter implements HarnessAdapter {
       throw asHarnessError(err, "upstream");
     } finally {
       req.signal?.removeEventListener("abort", abortFromCaller);
-      if (this.inFlight.get(key) === controller) this.inFlight.delete(key);
+      if (this.inFlight.get(key)?.controller === controller) this.inFlight.delete(key);
     }
   }
 
-  /** Aborting the fetch makes the route see `request.signal` fire, which kills
-   *  the child process and answers 499. Already wired end to end. */
+  /**
+   * The settled turn the route sent — on `done`, or as the JSON body — as the
+   * result the chat paints, with the session it ran on remembered for the
+   * conversation's next turn.
+   */
+  private settledTurn(key: string, resumed: string | undefined, data: Record<string, unknown>): TurnResult {
+    if (typeof data.sessionId === "string" && data.sessionId) {
+      this.sessions.set(key, data.sessionId);
+    }
+    this.holdSessionModel(key, resumed, data);
+    // Same MEDIA: split as the gateway path, so a picture renders the same
+    // way whichever edition answered.
+    const reply = splitAssistantMedia(typeof data.text === "string" ? data.text : "");
+    // Thinking and tool steps ride BESIDE the answer. The route separated
+    // them from the CLI's console output (or, where it could, read them
+    // straight out of the agent's own record); folding them back into `text`
+    // here would put the monologue right back in the bubble.
+    // Named for what it IS — the monologue that came BACK — because
+    // `reasoning` in `sendTurn` is already the effort level we sent.
+    const thinking = typeof data.reasoning === "string" && data.reasoning ? data.reasoning : "";
+    const toolCalls = toToolSummaries(data.toolCalls);
+    return {
+      text: reply.text,
+      media: reply.images,
+      audio: reply.audio,
+      ...(thinking ? { reasoning: thinking } : {}),
+      ...(toolCalls.length ? { toolCalls } : {}),
+      // What answered, as the route recorded it — the dashboard's own
+      // session info after any switch, or the argv the CLI ran with. Not
+      // `req.model`: that is what was ASKED for, and the two disagreeing is
+      // the whole reason the record exists.
+      ...(typeof data.model === "string" && data.model ? { model: data.model } : {}),
+      ...(typeof data.provider === "string" && data.provider ? { provider: data.provider } : {}),
+    };
+  }
+
+  /**
+   * Follow the turn the box is still running for the conversation on screen —
+   * the one a reload cut this page off from (TASK-2117).
+   *
+   * The route replays what the turn has said so far and then streams the rest,
+   * in the same frames `sendTurn` reads, so the result is exactly the one the
+   * page that sent it would have had. Null when nothing is running (204), and
+   * also when the route will not say (an older box, a refusal): the transcript
+   * then shows the answer once it is written, on the chat's next read.
+   *
+   * Registered as this conversation's in-flight turn, so Stop reaches it.
+   */
+  async attachLiveTurn(onEvent?: (event: TurnEvent) => void): Promise<TurnResult | null> {
+    const key = this.context().sessionKey;
+    const resumed = this.sessions.get(key);
+    const controller = new AbortController();
+    this.inFlight.set(key, { controller });
+    try {
+      const res = await this.fetchImpl(`${CHAT_ROUTE}?sessionKey=${encodeURIComponent(key)}`, {
+        headers: { Accept: "text/event-stream" },
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
+      if (!res.ok || res.status === 204 || !isEventStream(res)) return null;
+      const data = await readStreamedTurn(res, onEvent);
+      if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
+      return this.settledTurn(key, resumed, data);
+    } catch (err) {
+      if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
+      throw asHarnessError(err, "upstream");
+    } finally {
+      if (this.inFlight.get(key)?.controller === controller) this.inFlight.delete(key);
+    }
+  }
+
+  /**
+   * Stop the conversation's turn: this page stops reading at once, and the box
+   * is asked to stop the turn itself — which it no longer does just because a
+   * request went away (TASK-2117). The route records what was streamed and the
+   * "Stopped." marker itself.
+   *
+   * Not awaited: the page has already stopped, and a box slow to confirm must
+   * not hold the button. `deleteSession` is the caller that does wait.
+   */
   async abortTurn(): Promise<void> {
-    this.inFlight.get(this.context().sessionKey)?.abort();
+    const key = this.context().sessionKey;
+    const running = this.inFlight.get(key);
+    running?.controller.abort();
+    void this.stopOnBox(key, running?.turnId);
+  }
+
+  /**
+   * Ask the route to stop every turn running under `key`. Best effort and never
+   * rejects: Stop is a button, and a box that cannot be reached has nothing to
+   * stop that this page could act on.
+   */
+  private async stopOnBox(key: string, turnId?: string): Promise<void> {
+    const query = `sessionKey=${encodeURIComponent(key)}${turnId ? `&turnId=${encodeURIComponent(turnId)}` : ""}`;
+    try {
+      const res = await this.fetchImpl(`${CHAT_ROUTE}?${query}`, {
+        method: "DELETE",
+        signal: AbortSignal.timeout(STOP_TIMEOUT_MS),
+      });
+      if (!res.ok) console.warn("[hermes-adapter] the box did not take the Stop:", res.status);
+    } catch {
+      console.warn("[hermes-adapter] could not reach the box to stop the turn");
+    }
   }
 
   /**
@@ -579,6 +687,13 @@ export class HermesAdapter implements HarnessAdapter {
    */
   async resetSession(): Promise<void> {
     const key = this.context().sessionKey;
+    // A turn still answering the conversation being forgotten is stopped
+    // first — here, and on the box, where it would otherwise go on to write
+    // its answer into the transcript this is about to clear: it no longer ends
+    // with the request that sent it (TASK-2117). Never rejects either.
+    const running = this.inFlight.get(key);
+    running?.controller.abort();
+    await this.stopOnBox(key, running?.turnId);
     this.sessions.delete(key);
     this.sessionModels.delete(key);
     // …and the replay log with it. Clearing only the session id would make the
@@ -611,7 +726,14 @@ export class HermesAdapter implements HarnessAdapter {
    * best-effort call a reset makes.
    */
   async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
-    if (opts.running) this.inFlight.get(key)?.abort();
+    const running = this.inFlight.get(key);
+    if (opts.running) running?.controller.abort();
+    // Stopped on the box BEFORE the transcript goes, and whatever this page
+    // thinks: a turn can be running there that no page is following — one
+    // left across a reload in a tab nobody re-opened, or sent from another
+    // device. The stopped turn writes its own ending and the route answers
+    // only once it has, so no write of it can land on the deleted transcript.
+    await this.stopOnBox(key, running?.turnId);
     this.sessions.delete(key);
     this.sessionModels.delete(key);
     await this.deleteTranscript(key);
@@ -706,6 +828,9 @@ export class HermesAdapter implements HarnessAdapter {
         // OpenClaw failure notice this reports is a gateway artefact with no
         // Hermes equivalent, so the honest answer is always "no verdict".
         imageGenerationFailed: false,
+        // The box is still answering this conversation — a reload landed
+        // mid-turn. The chat follows it through `attachLiveTurn`.
+        ...(data?.liveTurn === true ? { liveTurn: true } : {}),
       };
     } catch (err) {
       throw asHarnessError(err, "upstream");

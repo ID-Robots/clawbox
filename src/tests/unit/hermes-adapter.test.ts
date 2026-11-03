@@ -332,7 +332,12 @@ describe("HermesAdapter", () => {
     });
     const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
     await adapter.resetSession();
-    expect(seen).toEqual([{ url: "/setup-api/chat/history?sessionKey=desktop", method: "DELETE" }]);
+    // The box is told to stop anything still answering the conversation first,
+    // so no answer lands in the transcript after it was cleared (TASK-2117).
+    expect(seen).toEqual([
+      { url: "/setup-api/hermes/chat?sessionKey=desktop", method: "DELETE" },
+      { url: "/setup-api/chat/history?sessionKey=desktop", method: "DELETE" },
+    ]);
   });
 
   it("still forgets the session when the transcript cannot be cleared", async () => {
@@ -494,7 +499,12 @@ describe("HermesAdapter", () => {
       await adapter.sendTurn({ text: "two", attachments: [], idempotencyKey: "b" });
       seen.length = 0;
       await adapter.deleteSession("desktop-0123456789ab", { running: false });
-      expect(seen).toEqual([{ url: "/setup-api/chat/history?sessionKey=desktop-0123456789ab", method: "DELETE" }]);
+      // Its own turn stopped on the box first — one this page may not even be
+      // following (TASK-2117) — and then its transcript. Nothing of main's.
+      expect(seen).toEqual([
+        { url: "/setup-api/hermes/chat?sessionKey=desktop-0123456789ab", method: "DELETE" },
+        { url: "/setup-api/chat/history?sessionKey=desktop-0123456789ab", method: "DELETE" },
+      ]);
       // Main still remembers its thread.
       context.sessionKey = "desktop";
       expect(adapter.threadedSessionId).toBe("s1");

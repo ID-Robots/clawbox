@@ -41,6 +41,13 @@ import {
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
+import {
+  beginLiveTurn,
+  liveTurnResponse,
+  liveTurnResponseFor,
+  stopLiveTurns,
+  type LiveTurn,
+} from "@/lib/harness/hermes-live-turn";
 import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
@@ -149,8 +156,9 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
     };
-    // The user hit Stop (or the request was aborted) — kill the process so the
-    // model doesn't keep running for a reply nobody will read.
+    // The owner hit Stop — kill the process so the model doesn't keep running
+    // for a reply nobody wants. Not a reload: the caller passes the live
+    // turn's signal, which a request going away does not fire (TASK-2117).
     const onAbort = () => {
       if (settled) return;
       cleanup();
@@ -326,6 +334,9 @@ interface TurnPayload {
   model?: string;
   provider?: string;
 }
+
+/** A page's turn id: its own uuid, and nothing that could be a path or a flag. */
+const TURN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** Did the caller ask to be streamed to, rather than handed a finished turn? */
 function wantsStream(request: Request): boolean {
@@ -707,215 +718,238 @@ async function billedProviderFor(
   return billed;
 }
 
+/**
+ * The streamed turn, run so that it OUTLIVES the request that asked for it.
+ *
+ * The turn runs on its own (`runStreamedTurn`, not awaited) and writes every
+ * frame into the live turn; the response is only a listener on it. When the
+ * browser goes away — a reload, a closed window — the listener detaches and the
+ * turn carries on to record its answer, which the reloaded page then re-attaches
+ * to through GET below, or reads off the transcript once it is done. Only the
+ * owner's Stop (DELETE below) aborts it: `live.signal` fires for that and
+ * nothing else. It used to be `request.signal`, which also fires for every
+ * reload, and so every reload mid-answer was recorded as "Stopped." (TASK-2117).
+ */
 function streamTurn(
   turn: DashboardTurn,
   fallbackSessionId: string,
   sessionKey: string,
   /** Whether the REQUEST named a provider — see `billedProviderFor`. */
   requestNamedProvider: boolean,
+  live: LiveTurn,
 ): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (event: string, data: unknown) => {
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-      };
-      const threaded = turn.sessionId || fallbackSessionId;
-      // The session's billing rows BEFORE this turn writes any, so that
-      // afterwards the ones it wrote can be told from the ones it did not —
-      // see `pickBillingProvider`. Taken only for a turn that could need it,
-      // and null means "do not ask": the request already named a provider, or
-      // the store could not be read, and a missing baseline is not a baseline.
-      // One small read against a store this route opens once more anyway.
-      const usageBefore = requestNamedProvider ? null : await readHermesUsageMarks(threaded);
-      // The answer so far, so that a Stop can record what the owner had
-      // already been shown (see the abort branch below).
-      let streamed = "";
-      try {
-        const final = await turn.run(
-          (chunk) => {
-            streamed += chunk;
-            send("delta", { text: chunk });
-          },
-          // Exhaustive on `kind`, deliberately, rather than "tool or else".
-          // The `else` branch was an assumption that every non-tool activity is
-          // a status line, and the day a third kind arrived it emitted one as
-          // `status` with `text: undefined` — a question the customer needed to
-          // answer, rendered as a blank spinner caption. A switch with a case
-          // per kind makes the next addition a compile error instead.
-          (activity) => {
-            switch (activity.kind) {
-              case "tool":
-                send("tool", activity);
-                break;
-              case "status":
-                send("status", { text: activity.text });
-                break;
-              case "clarify":
-                send("clarify", {
-                  requestId: activity.requestId,
-                  questions: activity.questions,
-                  // Only when something really is already answered — a replay
-                  // of a half-filled batch, or the question this turn's own
-                  // message answered. An empty map would read as "nothing
-                  // filled in", which is what it means, so it is not sent.
-                  ...(activity.answered ? { answered: activity.answered } : {}),
-                });
-                break;
-              case "clarifyExpire":
-                send("clarifyExpire", { requestId: activity.requestId });
-                break;
-              default: {
-                // The line that makes the promise above TRUE rather than
-                // aspirational. A switch with no `default` over a callback
-                // returning `void` compiles perfectly happily when a fifth
-                // DashboardActivity member appears — it just drops it on the
-                // floor at runtime, which is the exact failure this switch
-                // replaced. Assigning the narrowed value to `never` turns that
-                // into a build error naming the kind nobody handled.
-                const unhandled: never = activity;
-                void unhandled;
-                break;
-              }
-            }
-          },
-        );
-        if (final.status === "error") {
-          // The dashboard's `payload.error` is Python-authored text off a
-          // socket, no different in kind from the CLI's stderr — so it takes
-          // the same road out. `final.text` is NOT a fallback for it: the
-          // answer body is not an error message, and the transport caps it at
-          // MAX_TEXT_BYTES (2,000,000), so using it wrote up to a two-megabyte
-          // `Error: …` row into a customer's durable transcript where the CLI
-          // branch would have capped the same failure at 400 characters.
-          //
-          // The raw frame stays in the journal, the pattern the provider-key
-          // route already uses: the diagnosis is not lost, it just stops being
-          // published.
-          if (final.error) console.error("[hermes chat] dashboard turn failed", final.error);
-          const detail = safeHermesFailureMessage("", final.error || "") || "Hermes chat failed";
-          await appendTranscript({
-            role: "system",
-            text: `Error: ${detail}`,
-            timestamp: Date.now(),
-            variant: "error",
-          }, sessionKey);
-          send("error", { error: detail });
-        } else {
-          send(
-            "done",
-            await settleTurn(
-              threaded,
-              sessionKey,
-              final.text,
-              final.reasoning,
-              await servedPair(final, turn, threaded, usageBefore),
-            ),
-          );
-        }
-      } catch (err) {
-        // The sibling of the branch above, and it carries the SAME text from
-        // the SAME place: hermes-dashboard-turn.ts rethrows the transport's
-        // `error` frame as `new Error(payload.message)`. ClawBox-authored
-        // failures thrown here (a quiet stream, a cancelled call) pass through
-        // the parser unchanged — nothing in them looks like a traceback or a
-        // path — so one treatment is right for both.
-        const raw = err instanceof Error ? err.message : "";
-        // Not for an abort: the socket died because the customer pressed Stop,
-        // and a journal line per cancelled turn is noise, not diagnosis.
-        if (raw && !isAbort(err)) console.error("[hermes chat] dashboard stream failed", raw);
-        const detail = safeHermesFailureMessage("", raw) || "Hermes chat failed";
-        // ── Silence is not failure: ask the agent before saying so ─────────
-        //
-        // A quiet stream means this socket stopped hearing. It does NOT mean
-        // the turn did not happen, and on the live box the difference was the
-        // whole bug. From the customer's own transcript: they asked a question
-        // at 20:10:44, the agent ran two tools and wrote its 582-character
-        // answer to `state.db` at 20:11:12, and its `message.complete` never
-        // reached us. This route waited out the idle window and wrote "Error:
-        // dashboard stream went quiet" into their transcript at 20:14:13 — a
-        // finished answer thrown away and replaced with a failure, three
-        // minutes after it was ready.
-        //
-        // So before reporting silence, read the record. `readHermesTurn` is
-        // the same source `settleTurn` already trusts for every turn's
-        // reasoning and tool steps, and it is self-guarding here: it slices
-        // from the LAST user row, which is this turn's question, and returns
-        // null unless an assistant answer follows it. A turn that really is
-        // still thinking has no such row and still reports the failure.
-        //
-        // ONE EXCEPTION, named rather than hidden: a message delivered as the
-        // answer to a pending clarify (see hermes-dashboard-turn.ts) writes no
-        // user row of its own — that is what answering by `clarify.respond`
-        // means — so on that turn the slice starts at the EARLIER prompt and
-        // can already hold whatever the agent said before it asked its
-        // question. When such a turn goes quiet before the resumed agent has
-        // written anything, this recovery can therefore hand back that earlier
-        // sentence as though it were the reply. It is bounded — the customer
-        // sees the agent's own words, never another session's, and the same
-        // rows are what the settled turn shows when the stream does complete
-        // (which is why `settleTurn` is left alone: on the normal path those
-        // words belong to the answer and are otherwise never stored at all) —
-        // but it is not the guard the paragraph above describes. Telling the
-        // two apart needs a snapshot of the record taken before the answer was
-        // forwarded, which is a change to this route's read pattern rather
-        // than to the transport, and it is deliberately not made here.
-        if (isQuietStreamError(err) && !isAbort(err)) {
-          const recovered = await readHermesTurn(threaded).catch(() => null);
-          if (recovered?.text) {
-            send(
-              "done",
-              await settleTurn(
-                threaded,
-                sessionKey,
-                recovered.text,
-                "",
-                await servedPair(null, turn, threaded, usageBefore),
-              ),
-            );
-            return;
+  // Attach BEFORE the run starts, so the response hears the first frame live
+  // rather than out of the replay. Either would be correct; this is cheaper.
+  const response = liveTurnResponse((listener) => live.attach(listener));
+  runStreamedTurn(turn, fallbackSessionId, sessionKey, requestNamedProvider, live).catch((err) => {
+    // Nobody awaits the turn any more, so nothing above may escape as an
+    // unhandled rejection — a transcript write failing on the error path is
+    // the one way left to get here. The turn has ended either way.
+    console.error("[hermes chat] streamed turn failed", err instanceof Error ? err.message : err);
+  });
+  return response;
+}
+
+async function runStreamedTurn(
+  turn: DashboardTurn,
+  fallbackSessionId: string,
+  sessionKey: string,
+  requestNamedProvider: boolean,
+  live: LiveTurn,
+): Promise<void> {
+  const send = (event: string, data: unknown) => live.emit(event, data);
+  const threaded = turn.sessionId || fallbackSessionId;
+  // The session's billing rows BEFORE this turn writes any, so that
+  // afterwards the ones it wrote can be told from the ones it did not —
+  // see `pickBillingProvider`. Taken only for a turn that could need it,
+  // and null means "do not ask": the request already named a provider, or
+  // the store could not be read, and a missing baseline is not a baseline.
+  // One small read against a store this route opens once more anyway.
+  // The answer so far, so that a Stop can record what the owner had
+  // already been shown (see the abort branch below).
+  let streamed = "";
+  let usageBefore: ReadonlySet<string> | null = null;
+  try {
+    // Inside the `try`: a throw here used to be the stream's own problem,
+    // and now it would be an unhandled rejection on a turn nobody awaits.
+    usageBefore = requestNamedProvider ? null : await readHermesUsageMarks(threaded);
+    const final = await turn.run(
+      (chunk) => {
+        streamed += chunk;
+        send("delta", { text: chunk });
+      },
+      // Exhaustive on `kind`, deliberately, rather than "tool or else".
+      // The `else` branch was an assumption that every non-tool activity is
+      // a status line, and the day a third kind arrived it emitted one as
+      // `status` with `text: undefined` — a question the customer needed to
+      // answer, rendered as a blank spinner caption. A switch with a case
+      // per kind makes the next addition a compile error instead.
+      (activity) => {
+        switch (activity.kind) {
+          case "tool":
+            send("tool", activity);
+            break;
+          case "status":
+            send("status", { text: activity.text });
+            break;
+          case "clarify":
+            send("clarify", {
+              requestId: activity.requestId,
+              questions: activity.questions,
+              // Only when something really is already answered — a replay
+              // of a half-filled batch, or the question this turn's own
+              // message answered. An empty map would read as "nothing
+              // filled in", which is what it means, so it is not sent.
+              ...(activity.answered ? { answered: activity.answered } : {}),
+            });
+            break;
+          case "clarifyExpire":
+            send("clarifyExpire", { requestId: activity.requestId });
+            break;
+          default: {
+            // The line that makes the promise above TRUE rather than
+            // aspirational. A switch with no `default` over a callback
+            // returning `void` compiles perfectly happily when a fifth
+            // DashboardActivity member appears — it just drops it on the
+            // floor at runtime, which is the exact failure this switch
+            // replaced. Assigning the narrowed value to `never` turns that
+            // into a build error naming the kind nobody handled.
+            const unhandled: never = activity;
+            void unhandled;
+            break;
           }
         }
-        // A failure is recorded too — see the non-streaming path's note. The one
-        // exception is a caller who hung up: the socket dies as a consequence of
-        // their own Stop, and their unanswered question is already recorded.
-        if (!isAbort(err)) {
-          await appendTranscript({
-            role: "system",
-            text: `Error: ${detail}`,
-            timestamp: Date.now(),
-            variant: "error",
-          }, sessionKey);
-          send("error", { error: detail });
-        } else {
-          // The owner pressed Stop. The chat keeps the fragment it was
-          // showing and marks the stop; without the same two records here a
-          // reload showed the bare question, as if the reply had been lost.
-          await recordStoppedTurn(sessionKey, streamed);
-        }
-      } finally {
-        turn.close();
-        try {
-          controller.close();
-        } catch {
-          /* the caller already went away */
-        }
+      },
+    );
+    if (live.signal.aborted) {
+      // Stopped in the moment between the transport's last frame and the
+      // settle — which can take a while (the record, a spoken clip). The owner
+      // has been shown the stop, so the record says so too, and nothing more
+      // is spent on an answer they stopped.
+      await recordStoppedTurn(sessionKey, streamed);
+      send("stopped", {});
+    } else if (final.status === "error") {
+      // The dashboard's `payload.error` is Python-authored text off a
+      // socket, no different in kind from the CLI's stderr — so it takes
+      // the same road out. `final.text` is NOT a fallback for it: the
+      // answer body is not an error message, and the transport caps it at
+      // MAX_TEXT_BYTES (2,000,000), so using it wrote up to a two-megabyte
+      // `Error: …` row into a customer's durable transcript where the CLI
+      // branch would have capped the same failure at 400 characters.
+      //
+      // The raw frame stays in the journal, the pattern the provider-key
+      // route already uses: the diagnosis is not lost, it just stops being
+      // published.
+      if (final.error) console.error("[hermes chat] dashboard turn failed", final.error);
+      const detail = safeHermesFailureMessage("", final.error || "") || "Hermes chat failed";
+      await appendTranscript({
+        role: "system",
+        text: `Error: ${detail}`,
+        timestamp: Date.now(),
+        variant: "error",
+      }, sessionKey);
+      send("error", { error: detail });
+    } else {
+      send(
+        "done",
+        await settleTurn(
+          threaded,
+          sessionKey,
+          final.text,
+          final.reasoning,
+          await servedPair(final, turn, threaded, usageBefore),
+        ),
+      );
+    }
+  } catch (err) {
+    // The sibling of the branch above, and it carries the SAME text from
+    // the SAME place: hermes-dashboard-turn.ts rethrows the transport's
+    // `error` frame as `new Error(payload.message)`. ClawBox-authored
+    // failures thrown here (a quiet stream, a cancelled call) pass through
+    // the parser unchanged — nothing in them looks like a traceback or a
+    // path — so one treatment is right for both.
+    const raw = err instanceof Error ? err.message : "";
+    // Not for an abort: the socket died because the customer pressed Stop,
+    // and a journal line per cancelled turn is noise, not diagnosis.
+    if (raw && !isAbort(err)) console.error("[hermes chat] dashboard stream failed", raw);
+    const detail = safeHermesFailureMessage("", raw) || "Hermes chat failed";
+    // ── Silence is not failure: ask the agent before saying so ─────────
+    //
+    // A quiet stream means this socket stopped hearing. It does NOT mean
+    // the turn did not happen, and on the live box the difference was the
+    // whole bug. From the customer's own transcript: they asked a question
+    // at 20:10:44, the agent ran two tools and wrote its 582-character
+    // answer to `state.db` at 20:11:12, and its `message.complete` never
+    // reached us. This route waited out the idle window and wrote "Error:
+    // dashboard stream went quiet" into their transcript at 20:14:13 — a
+    // finished answer thrown away and replaced with a failure, three
+    // minutes after it was ready.
+    //
+    // So before reporting silence, read the record. `readHermesTurn` is
+    // the same source `settleTurn` already trusts for every turn's
+    // reasoning and tool steps, and it is self-guarding here: it slices
+    // from the LAST user row, which is this turn's question, and returns
+    // null unless an assistant answer follows it. A turn that really is
+    // still thinking has no such row and still reports the failure.
+    //
+    // ONE EXCEPTION, named rather than hidden: a message delivered as the
+    // answer to a pending clarify (see hermes-dashboard-turn.ts) writes no
+    // user row of its own — that is what answering by `clarify.respond`
+    // means — so on that turn the slice starts at the EARLIER prompt and
+    // can already hold whatever the agent said before it asked its
+    // question. When such a turn goes quiet before the resumed agent has
+    // written anything, this recovery can therefore hand back that earlier
+    // sentence as though it were the reply. It is bounded — the customer
+    // sees the agent's own words, never another session's, and the same
+    // rows are what the settled turn shows when the stream does complete
+    // (which is why `settleTurn` is left alone: on the normal path those
+    // words belong to the answer and are otherwise never stored at all) —
+    // but it is not the guard the paragraph above describes. Telling the
+    // two apart needs a snapshot of the record taken before the answer was
+    // forwarded, which is a change to this route's read pattern rather
+    // than to the transport, and it is deliberately not made here.
+    if (isQuietStreamError(err) && !isAbort(err)) {
+      const recovered = await readHermesTurn(threaded).catch(() => null);
+      if (recovered?.text) {
+        send(
+          "done",
+          await settleTurn(
+            threaded,
+            sessionKey,
+            recovered.text,
+            "",
+            await servedPair(null, turn, threaded, usageBefore),
+          ),
+        );
+        return;
       }
-    },
-    cancel() {
-      turn.close();
-    },
-  });
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      // Nginx and friends buffer a proxied response by default, which would
-      // hold every fragment until the turn ended and undo the whole point.
-      "x-accel-buffering": "no",
-    },
-  });
+    }
+    // A failure is recorded too — see the non-streaming path's note. The one
+    // exception is a caller who hung up: the socket dies as a consequence of
+    // their own Stop, and their unanswered question is already recorded.
+    if (!isAbort(err)) {
+      await appendTranscript({
+        role: "system",
+        text: `Error: ${detail}`,
+        timestamp: Date.now(),
+        variant: "error",
+      }, sessionKey);
+      send("error", { error: detail });
+    } else {
+      // The owner pressed Stop — and ONLY the owner: `live.signal` is
+      // not the request's, so a reload never lands here. The chat keeps
+      // the fragment it was showing and marks the stop; without the same
+      // two records here a reload showed the bare question, as if the
+      // reply had been lost. `stopped` tells whoever is still attached —
+      // another window on the same chat — that this was a Stop and not a
+      // dropped stream.
+      await recordStoppedTurn(sessionKey, streamed);
+      send("stopped", {});
+    }
+  } finally {
+    turn.close();
+    live.end();
+  }
 }
 
 function isAbort(err: unknown): boolean {
@@ -996,6 +1030,39 @@ async function cliServedPair(
   };
 }
 
+// GET /setup-api/hermes/chat?sessionKey=… → the turn still running for that
+// conversation, as the same server-sent events the POST streams (what it has
+// said so far, then the rest live), or 204 when nothing is running.
+//
+// What a reloaded page re-attaches through (TASK-2117). The history route says
+// whether there is a turn to follow; the page asks here only then.
+export async function GET(request: Request) {
+  const which = await transcriptKeyFor(request, new URL(request.url).searchParams.get("sessionKey"));
+  if (!which.ok) {
+    return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
+  }
+  return liveTurnResponseFor(which.key) ?? new NextResponse(null, { status: 204 });
+}
+
+// DELETE /setup-api/hermes/chat?sessionKey=…[&turnId=…] → { stopped }
+//
+// The owner's Stop. The ONLY thing that ends a running turn early: a request
+// going away (a reload, a closed window) no longer does. Answers once the
+// stopped turn has written down what was streamed and the "Stopped." marker,
+// within `STOP_SETTLE_TIMEOUT_MS`, so a caller that deletes the conversation
+// next cannot have that write land after it.
+export async function DELETE(request: Request) {
+  const params = new URL(request.url).searchParams;
+  const which = await transcriptKeyFor(request, params.get("sessionKey"));
+  if (!which.ok) {
+    return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
+  }
+  const rawTurnId = params.get("turnId") || "";
+  const turnId = TURN_ID_RE.test(rawTurnId) ? rawTurnId : undefined;
+  const stopped = await stopLiveTurns(which.key, { turnId });
+  return NextResponse.json({ stopped });
+}
+
 export async function POST(request: Request) {
   let body: {
     message?: string;
@@ -1027,6 +1094,11 @@ export async function POST(request: Request) {
      * desktop thread, or one of the tabs the chat opened beside it.
      */
     sessionKey?: string;
+    /**
+     * The page's own id for this turn, so its Stop can name it even when the
+     * Stop reaches the box before the turn does (see `stopLiveTurns`).
+     */
+    turnId?: string;
   };
   try {
     body = await request.json();
@@ -1313,204 +1385,238 @@ export async function POST(request: Request) {
     ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
   }, sessionKey);
 
-  // ── A slash command ─────────────────────────────────────────────────────
+  // ── The turn belongs to the box, not to this request ────────────────────
   //
-  // `/status` is not a prompt. Down the ordinary paths — `prompt.submit`, or
-  // `hermes chat -q "/status"` — the text reaches the MODEL, which answers with
-  // its opinion of the word rather than the session's status: the composer's
-  // popover would offer the harness's own commands and then none of them would
-  // do anything. Hermes runs a command through `slash.exec`, which is what
-  // `runHermesSlashCommand` opens, and which is the same door this route's
-  // sibling already uses for the internal `/model … --session` switch.
+  // Everything below runs on `live.signal`, never on `request.signal`. The
+  // request's signal fires whenever the browser's connection ends — a reload
+  // mid-answer, a window closing — and handing it to the turn made every
+  // reload kill the run and record "Stopped." (TASK-2117). The live turn's
+  // signal fires for the owner's Stop (DELETE below) and nothing else, which is
+  // how OpenClaw's gateway already treats its runs. While it runs, the history
+  // route reports it and a reloaded page re-attaches (GET below).
   //
-  // Placed AFTER the question is recorded and BEFORE both transports, because
-  // it replaces them rather than layering on one: a command has no streaming to
-  // do (the output arrives whole) and nothing for `--image` to carry.
-  //
-  // Null means the dashboard could not be reached, and the turn falls through
-  // to the CLI below exactly as any other turn on such a box does. That is a
-  // deliberate fall-through and not a silent failure: what the owner then gets
-  // is the model's answer, which is what they got before this branch existed.
-  // The popover, for its part, is fed by the same dashboard and is already
-  // absent on a box where it is down.
-  //
-  // A turn CARRYING A PICTURE is left to the ordinary transports even when its
-  // text is command-shaped: `runHermesSlashCommand` has nowhere to put an
-  // attachment, the user turn above has already been recorded WITH its media,
-  // and a branch that ran the command and dropped the file would show the owner
-  // their screenshot in the transcript over an answer that never saw it.
-  if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
-    const ran = await runHermesSlashCommand({
-      command: message.trim(),
-      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
-      ...(rawModel ? { model: rawModel } : {}),
-      ...(wantsProvider ? { provider: rawProvider } : {}),
-      signal: request.signal,
-    });
-    if (ran) {
-      // A command that changed THIS CONVERSATION's model is a change this
-      // surface cannot keep, and the owner is told so rather than left to find
-      // out: the next ordinary turn re-points a resumed session at the model
-      // the chat carries (`openDashboardTurn`), which is the box's CONFIGURED
-      // one, and Hermes' own contract is that a plain or `--session` `/model`
-      // is session-scoped and never written to config.yaml. Hermes answers
-      // with its own success line either way, so without this the switch
-      // happened, was reported, and was silently undone one message later —
-      // false success over an operation that really did run.
-      //
-      // The note is MEASURED, not predicted: it compares Hermes' own
-      // `session.info` announcement with `rawModel`, which is exactly what the
-      // next turn will assert. A `--global` switch writes config.yaml, the two
-      // agree, and nothing is said — no `/model` flag is parsed here and no
-      // copy of Hermes' persist rule exists in this repo.
-      //
-      // Recorded in the transcript WITH the note, because the transcript is
-      // what the owner re-reads and a bubble that loses the caveat on a refresh
-      // would be the same false success one reload later.
-      const text = withSessionModelNote(ran, rawModel);
-      noteHermesSession(ran.sessionId, sessionKey);
-      await appendTranscript(
-        { role: "assistant", text, timestamp: Date.now(), ...(ran.sessionId ? { sessionId: ran.sessionId } : {}) },
-        sessionKey,
-      );
-      return NextResponse.json({
-        text,
-        harness: "hermes",
-        sessionId: ran.sessionId,
-      } satisfies TurnPayload);
-    }
-  }
-
-  const args = ["chat", "-q", promptWithImages, "-Q"];
-  if (firstImage) args.push("--image", firstImage);
-  // The creation flags below go on a NEW conversation only. From Hermes v0.22.4
-  // `hermes chat` runs through the gateway, and a resume keeps the session's
-  // frozen launch: a `-m`, `--provider`, `--reasoning` or `-t` that differs
-  // from it is refused before the turn — exit 2, "Resume retains gateway
-  // session policy; creation overrides are unsupported on resume"
-  // (hermes_cli/gateway_chat.py check_resume_policy). A session the dashboard
-  // created has no frozen launch at all, so every flag differs from it, and a
-  // picture sent into an ongoing chat failed outright. Hermes' own way forward
-  // is to resume without them; switching a resumed session is the dashboard
-  // turn's `/model … --session`, and on this path the session's own route
-  // answers.
-  const creating = !rawSessionId;
-  // No model → omit -m and let hermes use config.yaml's model.default, which is
-  // by definition valid for the configured provider. (The previous hardcoded
-  // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
-  // model.provider=clawai only accepts BARE deepseek ids and answers a
-  // vendor-prefixed one with HTTP 400 "Model not allowed".)
-  if (creating && rawModel) args.push("-m", rawModel);
-  // Names are charset-checked in smallLocalModelToolsets(), so this can never
-  // carry a leading "-" into argv.
-  if (creating && slimToolsets) args.push("-t", slimToolsets.join(","));
-  if (creating && wantsProvider) args.push("--provider", rawProvider);
-  if (creating && rawReasoning) args.push("--reasoning", rawReasoning);
-  // Continue the SAME conversation. Without this every turn is a fresh `-z`
-  // run with its own session, so the agent has no idea what "it" refers to in
-  // a follow-up — asking "is it removed now?" got "what are we trying to
-  // remove?". We resume by explicit ID, never `--continue <name>`: that flag
-  // ignores the name and silently resumes the most recent session in the
-  // workspace, which would splice unrelated chats (and the agent's own cron
-  // runs) into each other.
-  if (rawSessionId) args.push("--resume", rawSessionId);
-
-  // ── The fast path ───────────────────────────────────────────────────────
-  //
-  // Try the already-running dashboard first, and only when the caller asked to
-  // be streamed to. Opening the socket and settling the session costs about a
-  // tenth of a second and answers "can this box stream?" honestly, so a box
-  // where it cannot falls through to the spawn below having lost nothing.
-  //
-  // Attachments stay on the CLI path deliberately: `--image` is a flag on that
-  // command, and `prompt.submit` takes its attachments through a separate
-  // `image.attach` handshake this route has not been taught. A turn carrying a
-  // picture is rare and already slow; correctness first.
-  //
-  // What the CLI path CANNOT do, stated where the choice is made: answer a
-  // question the agent is parked on. `hermes chat -q --resume` starts a second,
-  // independent agent from the session's stored row (`--resume` is a database
-  // read, not a live attach), while the parked prompt is a `threading.Event` in
-  // the gateway process — no CLI subcommand and no HTTP endpoint can reach it,
-  // only the JSON-RPC socket the branch below opens. So a turn that falls to
-  // the CLI while a clarify is outstanding leaves it outstanding; what bounds
-  // that is the `agent.clarify_timeout: 300` this device seeds
-  // (scripts/register-mcp.sh), after which the agent gives up on its own.
-  if (wantsStream(request) && imagePaths.length === 0) {
-    // The catalogue knows which providers are user-defined; the transport
-    // needs that one bit to read the dashboard's provider KIND honestly. Only
-    // the LIVE catalogue knows it: the catalog-file fallback writes `false`
-    // for every row (the manifest has no such column) and cold-start writes
-    // `true` for its own — neither is the dashboard's `is_user_defined`, and a
-    // wrong `false` would blank the label on the box's own provider.
-    const providerRow = wantsProvider && payload?.source === "dashboard"
-      ? payload.providers.find((row) => row.id === rawProvider)
-      : undefined;
-    // `source === "dashboard"` says where the payload came from, not that the
-    // dashboard reported this field. A row that simply omits `is_user_defined`
-    // normalises to null, and passing that on as `false` would blank the label
-    // on the box's own provider — the hazard the comment above names.
-    const reportedUserDefined = typeof providerRow?.isUserDefined === "boolean"
-      ? providerRow.isUserDefined
-      : undefined;
-    const turn = await openDashboardTurn({
-      text: promptWithImages,
-      ...(rawModel ? { model: rawModel } : {}),
-      ...(wantsProvider ? { provider: rawProvider } : {}),
-      ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
-      ...(rawReasoning ? { reasoning: rawReasoning } : {}),
-      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
-      signal: request.signal,
-    });
-    // `wantsProvider` and not `rawProvider`: "auto" is ClawBox's word for "let
-    // Hermes decide", so a turn that sent it named no provider either, and the
-    // harness's own record is precisely the answer to what it decided.
-    if (turn) return streamTurn(turn, rawSessionId, sessionKey, wantsProvider);
-  }
-
-  // Read BEFORE the run, not after: the default this turn used is the one on
-  // disk when it was spawned, and a switch made during the turn — ai_set_model
-  // does exactly that when told "switch to X" — must not become the record of
-  // the turn that was told. A resumed run names no pair in argv (see above), so
-  // it records none: the session's own route answered, and unknown beats wrong.
-  const cliServed = await cliServedPair(
-    creating ? rawModel : "",
-    creating && wantsProvider ? rawProvider : "",
-    !creating,
-  );
-
+  // Ended on every way out of this handler but the streamed one, whose turn
+  // ends itself when it settles: a live turn that never ended would leave every
+  // later page load waiting on an answer that is not coming.
+  const turnId = typeof body.turnId === "string" && TURN_ID_RE.test(body.turnId) ? body.turnId : undefined;
+  const live = beginLiveTurn(sessionKey, { turnId });
+  let handedOff = false;
   try {
-    const { out: text, err } = await runHermes(args, request.signal);
-    // The run reports its own session id on stderr — no DB race, no guessing
-    // from `sessions list`. Hand it back so the next turn can resume it.
-    const threaded = parseSessionId(err) || rawSessionId;
-    // A NEW conversation on the CLI path runs exactly what argv asked for — `-m`
-    // and `--provider` are passed straight to the command, with no session to
-    // drift from — so the request IS the record here. What it did NOT ask for, the run took from
-    // config.yaml's pairing, which is the same read the validation above makes
-    // when it has a reason to: recorded too, because a blank under a reply the
-    // box knows the model of is a false unknown, not modesty.
-    const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
-    return NextResponse.json(answered);
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      // Client hit Stop / disconnected; the child was already killed. The CLI
-      // answers whole, so there is no fragment to keep — only the marker, so
-      // the question does not read as a reply that got lost.
-      await recordStoppedTurn(sessionKey, "");
-      return new NextResponse(null, { status: 499 });
+    // ── A slash command ─────────────────────────────────────────────────────
+    //
+    // `/status` is not a prompt. Down the ordinary paths — `prompt.submit`, or
+    // `hermes chat -q "/status"` — the text reaches the MODEL, which answers with
+    // its opinion of the word rather than the session's status: the composer's
+    // popover would offer the harness's own commands and then none of them would
+    // do anything. Hermes runs a command through `slash.exec`, which is what
+    // `runHermesSlashCommand` opens, and which is the same door this route's
+    // sibling already uses for the internal `/model … --session` switch.
+    //
+    // Placed AFTER the question is recorded and BEFORE both transports, because
+    // it replaces them rather than layering on one: a command has no streaming to
+    // do (the output arrives whole) and nothing for `--image` to carry.
+    //
+    // Null means the dashboard could not be reached, and the turn falls through
+    // to the CLI below exactly as any other turn on such a box does. That is a
+    // deliberate fall-through and not a silent failure: what the owner then gets
+    // is the model's answer, which is what they got before this branch existed.
+    // The popover, for its part, is fed by the same dashboard and is already
+    // absent on a box where it is down.
+    //
+    // A turn CARRYING A PICTURE is left to the ordinary transports even when its
+    // text is command-shaped: `runHermesSlashCommand` has nowhere to put an
+    // attachment, the user turn above has already been recorded WITH its media,
+    // and a branch that ran the command and dropped the file would show the owner
+    // their screenshot in the transcript over an answer that never saw it.
+    if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
+      const ran = await runHermesSlashCommand({
+        command: message.trim(),
+        ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+        ...(rawModel ? { model: rawModel } : {}),
+        ...(wantsProvider ? { provider: rawProvider } : {}),
+        signal: live.signal,
+      });
+      if (ran) {
+        // A command that changed THIS CONVERSATION's model is a change this
+        // surface cannot keep, and the owner is told so rather than left to find
+        // out: the next ordinary turn re-points a resumed session at the model
+        // the chat carries (`openDashboardTurn`), which is the box's CONFIGURED
+        // one, and Hermes' own contract is that a plain or `--session` `/model`
+        // is session-scoped and never written to config.yaml. Hermes answers
+        // with its own success line either way, so without this the switch
+        // happened, was reported, and was silently undone one message later —
+        // false success over an operation that really did run.
+        //
+        // The note is MEASURED, not predicted: it compares Hermes' own
+        // `session.info` announcement with `rawModel`, which is exactly what the
+        // next turn will assert. A `--global` switch writes config.yaml, the two
+        // agree, and nothing is said — no `/model` flag is parsed here and no
+        // copy of Hermes' persist rule exists in this repo.
+        //
+        // Recorded in the transcript WITH the note, because the transcript is
+        // what the owner re-reads and a bubble that loses the caveat on a refresh
+        // would be the same false success one reload later.
+        const text = withSessionModelNote(ran, rawModel);
+        noteHermesSession(ran.sessionId, sessionKey);
+        await appendTranscript(
+          { role: "assistant", text, timestamp: Date.now(), ...(ran.sessionId ? { sessionId: ran.sessionId } : {}) },
+          sessionKey,
+        );
+        const answered = {
+          text,
+          harness: "hermes",
+          sessionId: ran.sessionId,
+        } satisfies TurnPayload;
+        live.emit("done", answered);
+        return NextResponse.json(answered);
+      }
     }
-    const detail = err instanceof Error ? err.message : "Hermes chat failed";
-    // A failure is recorded too. Without this a refresh shows a question with
-    // nothing under it and no hint that the box tried and failed — the same
-    // screen a still-running turn produces, which is the worse of the two to
-    // be wrong about.
-    await appendTranscript({
-      role: "system",
-      text: `Error: ${detail}`,
-      timestamp: Date.now(),
-      variant: "error",
-    }, sessionKey);
-    return NextResponse.json({ error: detail }, { status: 502 });
+
+    const args = ["chat", "-q", promptWithImages, "-Q"];
+    if (firstImage) args.push("--image", firstImage);
+    // The creation flags below go on a NEW conversation only. From Hermes v0.22.4
+    // `hermes chat` runs through the gateway, and a resume keeps the session's
+    // frozen launch: a `-m`, `--provider`, `--reasoning` or `-t` that differs
+    // from it is refused before the turn — exit 2, "Resume retains gateway
+    // session policy; creation overrides are unsupported on resume"
+    // (hermes_cli/gateway_chat.py check_resume_policy). A session the dashboard
+    // created has no frozen launch at all, so every flag differs from it, and a
+    // picture sent into an ongoing chat failed outright. Hermes' own way forward
+    // is to resume without them; switching a resumed session is the dashboard
+    // turn's `/model … --session`, and on this path the session's own route
+    // answers.
+    const creating = !rawSessionId;
+    // No model → omit -m and let hermes use config.yaml's model.default, which is
+    // by definition valid for the configured provider. (The previous hardcoded
+    // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
+    // model.provider=clawai only accepts BARE deepseek ids and answers a
+    // vendor-prefixed one with HTTP 400 "Model not allowed".)
+    if (creating && rawModel) args.push("-m", rawModel);
+    // Names are charset-checked in smallLocalModelToolsets(), so this can never
+    // carry a leading "-" into argv.
+    if (creating && slimToolsets) args.push("-t", slimToolsets.join(","));
+    if (creating && wantsProvider) args.push("--provider", rawProvider);
+    if (creating && rawReasoning) args.push("--reasoning", rawReasoning);
+    // Continue the SAME conversation. Without this every turn is a fresh `-z`
+    // run with its own session, so the agent has no idea what "it" refers to in
+    // a follow-up — asking "is it removed now?" got "what are we trying to
+    // remove?". We resume by explicit ID, never `--continue <name>`: that flag
+    // ignores the name and silently resumes the most recent session in the
+    // workspace, which would splice unrelated chats (and the agent's own cron
+    // runs) into each other.
+    if (rawSessionId) args.push("--resume", rawSessionId);
+
+    // ── The fast path ───────────────────────────────────────────────────────
+    //
+    // Try the already-running dashboard first, and only when the caller asked to
+    // be streamed to. Opening the socket and settling the session costs about a
+    // tenth of a second and answers "can this box stream?" honestly, so a box
+    // where it cannot falls through to the spawn below having lost nothing.
+    //
+    // Attachments stay on the CLI path deliberately: `--image` is a flag on that
+    // command, and `prompt.submit` takes its attachments through a separate
+    // `image.attach` handshake this route has not been taught. A turn carrying a
+    // picture is rare and already slow; correctness first.
+    //
+    // What the CLI path CANNOT do, stated where the choice is made: answer a
+    // question the agent is parked on. `hermes chat -q --resume` starts a second,
+    // independent agent from the session's stored row (`--resume` is a database
+    // read, not a live attach), while the parked prompt is a `threading.Event` in
+    // the gateway process — no CLI subcommand and no HTTP endpoint can reach it,
+    // only the JSON-RPC socket the branch below opens. So a turn that falls to
+    // the CLI while a clarify is outstanding leaves it outstanding; what bounds
+    // that is the `agent.clarify_timeout: 300` this device seeds
+    // (scripts/register-mcp.sh), after which the agent gives up on its own.
+    if (wantsStream(request) && imagePaths.length === 0) {
+      // The catalogue knows which providers are user-defined; the transport
+      // needs that one bit to read the dashboard's provider KIND honestly. Only
+      // the LIVE catalogue knows it: the catalog-file fallback writes `false`
+      // for every row (the manifest has no such column) and cold-start writes
+      // `true` for its own — neither is the dashboard's `is_user_defined`, and a
+      // wrong `false` would blank the label on the box's own provider.
+      const providerRow = wantsProvider && payload?.source === "dashboard"
+        ? payload.providers.find((row) => row.id === rawProvider)
+        : undefined;
+      // `source === "dashboard"` says where the payload came from, not that the
+      // dashboard reported this field. A row that simply omits `is_user_defined`
+      // normalises to null, and passing that on as `false` would blank the label
+      // on the box's own provider — the hazard the comment above names.
+      const reportedUserDefined = typeof providerRow?.isUserDefined === "boolean"
+        ? providerRow.isUserDefined
+        : undefined;
+      const turn = await openDashboardTurn({
+        text: promptWithImages,
+        ...(rawModel ? { model: rawModel } : {}),
+        ...(wantsProvider ? { provider: rawProvider } : {}),
+        ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
+        ...(rawReasoning ? { reasoning: rawReasoning } : {}),
+        ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+        signal: live.signal,
+      });
+      // `wantsProvider` and not `rawProvider`: "auto" is ClawBox's word for "let
+      // Hermes decide", so a turn that sent it named no provider either, and the
+      // harness's own record is precisely the answer to what it decided.
+      if (turn) {
+        handedOff = true;
+        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live);
+      }
+    }
+
+    // Read BEFORE the run, not after: the default this turn used is the one on
+    // disk when it was spawned, and a switch made during the turn — ai_set_model
+    // does exactly that when told "switch to X" — must not become the record of
+    // the turn that was told. A resumed run names no pair in argv (see above), so
+    // it records none: the session's own route answered, and unknown beats wrong.
+    const cliServed = await cliServedPair(
+      creating ? rawModel : "",
+      creating && wantsProvider ? rawProvider : "",
+      !creating,
+    );
+
+    try {
+      // `live.signal`, not `request.signal` — see the note where `live` is made.
+      // A reload while the CLI is answering leaves the child running; its answer
+      // is recorded below and handed to whoever re-attached.
+      const { out: text, err } = await runHermes(args, live.signal);
+      // The child exited in the instant the owner stopped it: the same ending
+      // as a Stop that caught it running.
+      if (live.signal.aborted) throw new DOMException("aborted", "AbortError");
+      // The run reports its own session id on stderr — no DB race, no guessing
+      // from `sessions list`. Hand it back so the next turn can resume it.
+      const threaded = parseSessionId(err) || rawSessionId;
+      // A NEW conversation on the CLI path runs exactly what argv asked for — `-m`
+      // and `--provider` are passed straight to the command, with no session to
+      // drift from — so the request IS the record here. What it did NOT ask for, the run took from
+      // config.yaml's pairing, which is the same read the validation above makes
+      // when it has a reason to: recorded too, because a blank under a reply the
+      // box knows the model of is a false unknown, not modesty.
+      const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
+      live.emit("done", answered);
+      return NextResponse.json(answered);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // The owner hit Stop; the child was already killed. The CLI answers
+        // whole, so there is no fragment to keep — only the marker, so the
+        // question does not read as a reply that got lost.
+        await recordStoppedTurn(sessionKey, "");
+        live.emit("stopped", {});
+        return new NextResponse(null, { status: 499 });
+      }
+      const detail = err instanceof Error ? err.message : "Hermes chat failed";
+      // A failure is recorded too. Without this a refresh shows a question with
+      // nothing under it and no hint that the box tried and failed — the same
+      // screen a still-running turn produces, which is the worse of the two to
+      // be wrong about.
+      await appendTranscript({
+        role: "system",
+        text: `Error: ${detail}`,
+        timestamp: Date.now(),
+        variant: "error",
+      }, sessionKey);
+      live.emit("error", { error: detail });
+      return NextResponse.json({ error: detail }, { status: 502 });
+    }
+  } finally {
+    if (!handedOff) live.end();
   }
 }

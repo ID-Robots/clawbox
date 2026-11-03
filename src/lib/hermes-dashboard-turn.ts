@@ -1190,6 +1190,16 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       ): Promise<DashboardTurnFinal> {
         if (started) throw new Error("this turn has already run");
         started = true;
+        // A Stop that landed while the turn was being OPENED — the ticket, the
+        // socket, `session.resume`, a model switch — has already fired, and an
+        // abort event never fires twice. Before anything is submitted, so the
+        // agent is never started on a prompt the owner already stopped. The
+        // turn outlives its request now (TASK-2117), so nothing else would end
+        // it: closing the request no longer closes this socket.
+        if (req.signal?.aborted) {
+          close();
+          throw new DOMException("aborted", "AbortError");
+        }
         // Name the abort BEFORE closing. Closing alone made `run` reject with
         // `dashboard socket closed (<code>)`, which the route's `isAbort` check
         // cannot match — so a user pressing Stop was recorded in the customer's

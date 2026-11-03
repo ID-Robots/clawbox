@@ -365,6 +365,19 @@ describe("running a dashboard turn", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("submits nothing for a turn stopped while it was still being opened (TASK-2117)", async () => {
+    // The turn outlives its request now, so nothing closes this socket for a
+    // Stop that landed during the open — and an abort event never fires twice.
+    const controller = new AbortController();
+    const { turn, socket } = await connect({ signal: controller.signal });
+    controller.abort();
+    const err = await turn!.run(() => {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+    expect(socket.method("prompt.submit")).toBeUndefined();
+    expect(socket.closed).toBe(true);
+  });
+
   it("closes the socket once the turn has settled", async () => {
     const { turn, socket } = await connect();
     const running = turn!.run(() => {});
