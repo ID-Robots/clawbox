@@ -34,6 +34,8 @@ export const sv: Record<string, string> = {
   "settings.providers.lockedHint": "Gör först en annan leverantör till standard.",
   "settings.providers.signOut": "Logga ut från {name}",
   "settings.providers.signOutConfirm": "Logga ut — tryck igen",
+  "settings.providers.signingOut": "Loggar ut…",
+  "settings.providers.signOutRestarting": "Assistenten startar om för att slutföra — tillbaka om ungefär en minut.",
   "settings.providers.signOutFailed": "Det gick inte att logga ut från {name}.",
   "settings.providers.signedOut": "Utloggad från {name}. Logga in igen nedan för att använda det.",
   "settings.providers.empty": "Ingen leverantör är ansluten ännu — anslut en nedan.",

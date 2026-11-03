@@ -57,6 +57,10 @@ const RENDERED = [
   "settings.providers.signOutConfirm",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
+  // The sign-out in hand (TASK-2126): the spinner's words, and the line under
+  // it while the gateway restarts behind the sign-out.
+  "settings.providers.signingOut",
+  "settings.providers.signOutRestarting",
 ];
 
 /** The sign-out strings that name the row they are on. */

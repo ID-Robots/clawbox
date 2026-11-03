@@ -37,6 +37,8 @@ export const de: Record<string, string> = {
   "settings.providers.lockedHint": "Machen Sie zuerst einen anderen Anbieter zum Standard.",
   "settings.providers.signOut": "Von {name} abmelden",
   "settings.providers.signOutConfirm": "Abmelden — nochmal tippen",
+  "settings.providers.signingOut": "Abmelden läuft…",
+  "settings.providers.signOutRestarting": "Der Assistent startet neu, um das abzuschließen – in etwa einer Minute wieder da.",
   "settings.providers.signOutFailed": "Die Abmeldung von {name} ist fehlgeschlagen.",
   "settings.providers.signedOut": "Von {name} abgemeldet. Melden Sie sich unten erneut an, um es zu nutzen.",
   "settings.providers.empty": "Noch kein Anbieter verbunden — verbinden Sie unten einen.",

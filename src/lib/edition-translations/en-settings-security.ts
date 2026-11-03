@@ -39,6 +39,8 @@ export const settingsSecurityEn: Record<string, string> = {
   "settings.providers.lockedHint": "Make another provider the default first.",
   "settings.providers.signOut": "Sign out of {name}",
   "settings.providers.signOutConfirm": "Sign out — tap again",
+  "settings.providers.signingOut": "Signing out…",
+  "settings.providers.signOutRestarting": "The assistant is restarting to finish — back in about a minute.",
   "settings.providers.signOutFailed": "Could not sign out of {name}.",
   "settings.providers.signedOut": "Signed out of {name}. Sign in again below to use it.",
   "settings.providers.empty": "No provider is connected yet — connect one below.",

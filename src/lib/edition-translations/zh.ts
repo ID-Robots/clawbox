@@ -49,6 +49,8 @@ export const zh: Record<string, string> = {
   "settings.providers.lockedHint": "请先将另一个提供商设为默认。",
   "settings.providers.signOut": "退出 {name}",
   "settings.providers.signOutConfirm": "退出 — 再点一次",
+  "settings.providers.signingOut": "正在退出…",
+  "settings.providers.signOutRestarting": "助手正在重启以完成退出 — 大约一分钟后恢复。",
   "settings.providers.signOutFailed": "无法退出 {name}。",
   "settings.providers.signedOut": "已退出 {name}。如需使用，请在下方重新登录。",
   "settings.providers.empty": "尚未连接任何提供商 — 请在下方连接一个。",

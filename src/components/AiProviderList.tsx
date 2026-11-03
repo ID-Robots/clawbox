@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import AIProviderIcon from "./AIProviderIcon";
 import AnthropicAccountsCard from "./AnthropicAccountsCard";
@@ -10,7 +10,8 @@ import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
 import { notifyProvidersChanged } from "@/lib/ui-events";
-import type { ProviderStatusRow } from "@/lib/provider-status";
+import { waitForGatewayAfterRestart } from "@/lib/wait-for-gateway";
+import type { ProviderStatusRow, ProviderStatusSummary } from "@/lib/provider-status";
 
 /**
  * The cloud providers the owner has connected, each row with its state,
@@ -32,6 +33,50 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
 
 /** How long the armed "Sign out — tap again" waits for the second tap. */
 const SIGN_OUT_CONFIRM_MS = 5_000;
+/**
+ * How long "Signed out of …" stays up once the box's answer shows the row
+ * signed out. globals.css `provider-sign-out-note` folds it away over the last
+ * quarter second of the same span — keep the two together.
+ */
+const SIGNED_OUT_NOTE_MS = 3_000;
+/**
+ * How long a row just signed out is held: the fold of one the box no longer
+ * lists (`provider-row-leave`, 320 ms) or the brightening of one it still does
+ * (`provider-row-settle`), and a little over.
+ */
+const SIGNED_OUT_ROW_MS = 600;
+/**
+ * The longest a sign-out that landed waits on the box's re-read before it lets
+ * the row go: a read that fails right after another failed changes nothing
+ * this list can see.
+ */
+const SIGN_OUT_SETTLE_MS = 10_000;
+
+/** A row as it was when its sign-out was tapped, and where it stood in the list. */
+interface HeldRow {
+  row: ProviderStatusRow;
+  index: number;
+}
+
+/**
+ * A sign-out in flight: the request (`request`), the gateway restart behind it
+ * when the route says one is underway (`restarting`), and the box's re-read
+ * after it (`settling`).
+ */
+interface SignOutFlow extends HeldRow {
+  phase: "request" | "restarting" | "settling";
+}
+
+/** The class each sign-out state puts on its row (globals.css). */
+const SIGN_OUT_ROW_CLASS = {
+  pending: "provider-sign-out-pending",
+  leaving: "provider-sign-out-leaving",
+  settled: "provider-sign-out-settled",
+} as const;
+
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+}
 
 interface AiProviderListProps {
   /**
@@ -83,56 +128,99 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
    * at a time. The list then re-reads the box, and every other surface hears
    * it through `notifyProvidersChanged` — the row drops to its signed-out
    * state from the box's own answer, never an optimistic one.
+   *
+   * WHAT THE OWNER SEES MEANWHILE (TASK-2126). The second tap used to change
+   * nothing on screen until the row finally did, which on a sign-out that
+   * restarts the gateway is a minute of a page that looks as if the tap was
+   * lost. Now the tapped row is visibly in hand from the second tap to the
+   * box's own answer: its button is a spinner reading "Signing out…" (and
+   * takes no second submit), the rest of the row dims under a slow sheen, and
+   * that holds through the request, through the restart behind it when the
+   * route says one is underway (`gatewayRestarting`, waited out against
+   * /setup-api/gateway/health like the configure overlay does), and through
+   * the re-read after it. Then a row the box no longer lists folds away, one
+   * it still lists — ClawBox AI as the default, now "Needs sign-in" —
+   * brightens into its new state, and "Signed out of …" stands above the list
+   * for a few seconds. A refusal gives the row back as it was, with the box's
+   * reason under its own button. Reduced motion keeps every state and every
+   * word and drops the movement: no sheen, no fold, no fade.
    */
   const [signOutArmed, setSignOutArmed] = useState<string | null>(null);
-  const [signingOut, setSigningOut] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState<SignOutFlow | null>(null);
+  /** The row just signed out, held for its fold or its brightening — never under reduced motion. */
+  const [signedOutRow, setSignedOutRow] = useState<HeldRow | null>(null);
+  /** A refused sign-out, said on the row that was tapped. */
+  const [signOutError, setSignOutError] = useState<{ id: string; message: string } | null>(null);
   /**
-   * The provider just signed out of, for the note below — said in the
-   * reader's language at render. `seen`: the box's own answer has shown it
-   * signed out since, so the next time it reads Connected is a NEW sign-in,
-   * and the note is done with (a later refusal of that sign-in turns the row
-   * to "Needs sign-in" again, and must not bring back "Signed out").
+   * The provider just signed out of, for the note above the list — said in
+   * the reader's language at render, for SIGNED_OUT_NOTE_MS. Set only once the
+   * box's own answer has landed, so it never runs ahead of the rows; cleared
+   * early if that answer shows the provider connected (a new sign-in).
    */
-  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string; seen: boolean } | null>(null);
+  const [signOutNote, setSignOutNote] = useState<{ id: string; label: string } | null>(null);
   const signOutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Stops a gateway wait this list is no longer on screen for. */
+  const gatewayWait = useRef<AbortController | null>(null);
+  /** The answer on screen when the re-read was asked for: the next one is the box's verdict. */
+  const settleFrom = useRef<{ flow: SignOutFlow; summary: ProviderStatusSummary | null; error: boolean } | null>(null);
   const disarmSignOut = useCallback(() => {
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
     signOutTimer.current = null;
     setSignOutArmed(null);
   }, []);
-  useEffect(() => () => { if (signOutTimer.current) clearTimeout(signOutTimer.current); }, []);
+  useEffect(() => () => {
+    if (signOutTimer.current) clearTimeout(signOutTimer.current);
+    gatewayWait.current?.abort();
+  }, []);
 
-  const signOutOf = useCallback(async (row: ProviderStatusRow) => {
+  const signOutOf = useCallback(async (row: ProviderStatusRow, index: number) => {
     disarmSignOut();
-    setSigningOut(row.id);
+    gatewayWait.current?.abort();
+    const wait = new AbortController();
+    gatewayWait.current = wait;
+    setSigningOut({ row, index, phase: "request" });
     setToggleError(null);
+    setSignOutError(null);
     setSignOutNote(null);
     const failed = t("settings.providers.signOutFailed", { name: row.label });
+    let signedOut = false;
     try {
       const res = await fetch("/setup-api/providers/sign-out", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: row.id }),
       });
-      const data = (await res.json().catch(() => ({}))) as { error?: unknown };
+      const data = (await res.json().catch(() => ({}))) as { error?: unknown; gatewayRestarting?: unknown };
       if (!res.ok) {
         throw new Error(typeof data.error === "string" && data.error ? data.error : failed);
       }
-      setSignOutNote({ id: row.id, label: row.label, seen: false });
+      // The credential is off the box and the harness is restarting to drop
+      // the copy it had loaded. The row stays in hand through that as well:
+      // read now, the box would still be answering from the old process.
+      if (data.gatewayRestarting === true) {
+        setSigningOut((flow) => (flow?.row.id === row.id ? { ...flow, phase: "restarting" } : flow));
+        await waitForGatewayAfterRestart({ signal: wait.signal });
+      }
+      signedOut = true;
     } catch (e) {
-      setToggleError(e instanceof Error && e.message ? e.message : failed);
+      setSignOutError({ id: row.id, message: e instanceof Error && e.message ? e.message : failed });
     } finally {
       // Re-read either way: a refusal can come after part of the sign-in was
       // removed, and the rows are the box's answer, not this click's.
       refresh();
       notifyProvidersChanged();
-      setSigningOut(null);
+      // A sign-out that landed holds the row until that re-read has; a refused
+      // one gives it back now, with the reason under its button.
+      setSigningOut((flow) => (flow?.row.id !== row.id ? flow : signedOut ? { ...flow, phase: "settling" } : null));
     }
   }, [disarmSignOut, refresh, t]);
 
-  const onSignOutClick = useCallback((row: ProviderStatusRow) => {
+  const onSignOutClick = useCallback((row: ProviderStatusRow, index: number) => {
+    // One sign-out at a time; the button is disabled meanwhile, and this is
+    // the guard behind it.
+    if (signingOut) return;
     if (signOutArmed === row.id) {
-      void signOutOf(row);
+      void signOutOf(row, index);
       return;
     }
     if (signOutTimer.current) clearTimeout(signOutTimer.current);
@@ -141,7 +229,53 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
       setSignOutArmed(null);
     }, SIGN_OUT_CONFIRM_MS);
     setSignOutArmed(row.id);
-  }, [signOutArmed, signOutOf]);
+    setSignOutError(null);
+  }, [signOutArmed, signingOut, signOutOf]);
+
+  /** The box has answered the re-read: let the row go, and say so. */
+  const finishSignOut = useCallback((flow: SignOutFlow) => {
+    setSigningOut((current) => (current === flow ? null : current));
+    setSignOutNote({ id: flow.row.id, label: flow.row.label });
+    setSignedOutRow(prefersReducedMotion() ? null : { row: flow.row, index: flow.index });
+  }, []);
+
+  // The first answer after the re-read was asked for is the verdict: a new
+  // summary, or a read that failed where the last one had not. The timer is
+  // for the read that fails right after another failed, which changes nothing
+  // here — the row is not held for ever on a box that stopped answering.
+  // A LAYOUT effect: the answer that drops the row and the note that says why
+  // are painted together, never a frame of a list with the row gone and
+  // nothing said.
+  const settling = signingOut?.phase === "settling" ? signingOut : null;
+  useLayoutEffect(() => {
+    if (!settling) {
+      settleFrom.current = null;
+      return;
+    }
+    const from = settleFrom.current;
+    if (from?.flow !== settling) {
+      settleFrom.current = { flow: settling, summary, error };
+      return;
+    }
+    // The box's re-read is external state this flow waits on.
+    if (summary !== from.summary || (error && !from.error)) finishSignOut(settling);
+  }, [settling, summary, error, finishSignOut]);
+  useEffect(() => {
+    if (!settling) return;
+    const timer = setTimeout(() => finishSignOut(settling), SIGN_OUT_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [settling, finishSignOut]);
+
+  useEffect(() => {
+    if (!signOutNote) return;
+    const timer = setTimeout(() => setSignOutNote(null), SIGNED_OUT_NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [signOutNote]);
+  useEffect(() => {
+    if (!signedOutRow) return;
+    const timer = setTimeout(() => setSignedOutRow(null), SIGNED_OUT_ROW_MS);
+    return () => clearTimeout(timer);
+  }, [signedOutRow]);
 
   const setEnabled = useCallback(async (row: ProviderStatusRow, enabled: boolean) => {
     setToggling(row.id);
@@ -194,24 +328,35 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // (TASK-663). Only while the list would be EMPTY, though: ClawBox AI's link
   // is read from our own store and needs no dashboard, so a row we already
   // know about is shown rather than hidden behind everyone else's spinner.
+  // The row being signed out — or just signed out — that the box's answer no
+  // longer lists, held in the place it had: while the sign-out still runs, so
+  // nothing jumps under the owner's pointer, and after it so it can fold away
+  // rather than vanish.
+  const held = signingOut ?? signedOutRow;
+  const shown = rows.map((row, index) => ({ row, index, held: false }));
+  if (held && !rows.some((row) => row.id === held.row.id)) {
+    shown.splice(Math.min(held.index, shown.length), 0, { row: held.row, index: held.index, held: true });
+  }
+  // A refusal is said on its row; one whose row has left the list (part of
+  // the sign-in was removed before the refusal) is said above it instead.
+  const strandedSignOutError = signOutError && !rows.some((row) => row.id === signOutError.id)
+    ? signOutError.message
+    : null;
+
   // Said once the box's own answer shows the provider signed out, and gone
   // again once a sign-in has connected it.
   const noteRowConnected = !!signOutNote && rows.some((row) => row.id === signOutNote.id && row.state === "connected");
   const signedOutNote = signOutNote && !noteRowConnected
     ? t("settings.providers.signedOut", { name: signOutNote.label })
     : null;
-  // The note follows the box's answers: marked seen once they show the
-  // provider signed out, and cleared — not only hidden — once they show it
-  // connected again after that.
+  // Cleared — not only hidden — once the box shows it connected again, so a
+  // refusal of that new sign-in ("Needs sign-in") cannot bring "Signed out"
+  // back.
   useEffect(() => {
-    if (!signOutNote) return;
-    const next = !signOutNote.seen && !noteRowConnected
-      ? { ...signOutNote, seen: true }
-      : signOutNote.seen && noteRowConnected ? null : signOutNote;
-    if (next !== signOutNote) setSignOutNote(next);
+    if (signOutNote && noteRowConnected) setSignOutNote(null);
   }, [signOutNote, noteRowConnected]);
 
-  const awaitingProbe = rows.length === 0
+  const awaitingProbe = shown.length === 0
     && (summary?.providers ?? []).some((row) => row.state === "checking");
 
   const hasAnthropicRow = rows.some((row) => row.id === "anthropic");
@@ -242,9 +387,8 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // panel: aligned to the row's top, the card under it comes into view with it.
   useEffect(() => {
     if (!revealRequest) return;
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
     // Guarded: jsdom ships an Element without it.
-    anthropicRowRef.current?.scrollIntoView?.({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
+    anthropicRowRef.current?.scrollIntoView?.({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" });
   }, [revealRequest]);
 
   return (
@@ -264,9 +408,9 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
           {t("settings.providers.readError")}
         </div>
       )}
-      {(defaultError || toggleError) && (
+      {(defaultError || toggleError || strandedSignOutError) && (
         <div role="alert" className="mb-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-[11px] text-red-300">
-          {defaultError ?? toggleError}
+          {defaultError ?? toggleError ?? strandedSignOutError}
         </div>
       )}
       {/* A default that WAS written, with the box qualifying it — the gateway
@@ -281,16 +425,20 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
           is the only thing on screen saying the change landed at all. The
           chrome is what is conditional, not the node. */}
       {/* The sign-out's outcome, in a region mounted in every state for the
-          reason the warning below is. */}
-      <div
-        role="status"
-        aria-live="polite"
-        data-testid="ai-provider-sign-out-note"
-        className={signedOutNote
-          ? "mb-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] text-[var(--text-secondary)]"
-          : ""}
-      >
-        {signedOutNote ?? ""}
+          reason the warning below is. The note inside it is what comes and
+          goes: it opens out, stands for SIGNED_OUT_NOTE_MS and folds away
+          (globals.css `provider-sign-out-note`), so the list below it slides
+          rather than jumps. */}
+      <div role="status" aria-live="polite" data-testid="ai-provider-sign-out-note">
+        {signedOutNote && (
+          <p
+            className="provider-sign-out-note mb-3 flex items-center gap-1.5 rounded-xl border border-[var(--cyan-bright)]/25 bg-[var(--cyan-bright)]/[0.06] px-3 py-2 text-[11px] text-[var(--text-primary)]"
+            data-testid="ai-provider-signed-out"
+          >
+            <span aria-hidden="true" className="material-symbols-rounded shrink-0 text-[var(--cyan-bright)]" style={{ fontSize: 16 }}>check_circle</span>
+            <span className="min-w-0 break-words">{signedOutNote}</span>
+          </p>
+        )}
       </div>
       <div
         role="status"
@@ -341,12 +489,29 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
            the name, the Default pill, the Make-default button and the 44 px
            switch cannot share a line without the name giving way. */
         <ul className="@container rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
-          {rows.map((row) => {
+          {shown.map(({ row, index, held: isHeld }) => {
+            // Where this row is in a sign-out: running (`pending`), just
+            // signed out and no longer listed (`leaving`, folding away), or
+            // just signed out and still listed (`settled`, brightening into
+            // its new state).
+            const pending = signingOut?.row.id === row.id;
+            const signOutState = pending
+              ? "pending"
+              : signedOutRow?.row.id === row.id ? (isHeld ? "leaving" : "settled") : undefined;
+            // A leaving row keeps its spinner to the end: a label flipping
+            // back to "Sign out of …" for the length of the fold reads as the
+            // sign-out having been undone.
+            const showPending = pending || signOutState === "leaving";
             // A sign-out in flight holds every row's Make default and switch:
             // the server refuses the default's sign-out, and a default moved
             // onto the provider being signed out would leave the chat on it
             // (the server serialises the two as well — provider-change-lock.ts).
-            const busy = toggling === row.id || settingDefault === row.id || signingOut !== null;
+            // A held row is a picture of one the box no longer lists: nothing
+            // on it can be pressed.
+            const busy = toggling === row.id || settingDefault === row.id || signingOut !== null || isHeld;
+            // ...and it answers to none of the row's test ids: those are the
+            // box's answer, and that has let the row go.
+            const tid = (id: string) => (isHeld ? undefined : id);
             const canMakeDefault = row.enabled && row.state === "connected" && !row.isDefault;
             // The ClawBox AI allowances belong to ONE row and hang off it here
             // rather than standing as a card of their own further down the page
@@ -359,7 +524,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // drawing on. And the row itself is only ever here for a provider
             // that holds a sign-in — so on a box with no ClawBox AI credential
             // there is no row, and therefore no button either.
-            const hasUsage = row.id === "clawai" && row.enabled;
+            const hasUsage = row.id === "clawai" && row.enabled && !isHeld;
             // The Anthropic accounts the coding agent spends, in the owner's
             // order (TASK-902), likewise hang off their provider's row instead
             // of standing open as a card below the connect panel. Same gate on
@@ -367,7 +532,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // means no accounts UI — but NOT on `row.enabled`: that switch only
             // takes Anthropic out of the CHAT's routing, and coding runs go on
             // drawing on this pool with it off.
-            const hasAccounts = row.id === "anthropic";
+            const hasAccounts = row.id === "anthropic" && !isHeld;
             // The sign-out, on the row of every sign-in the box holds, on
             // either harness — a dead one too (a refused ClawBox AI token, a
             // Claude sign-in the gateway fenced off), which is still on the
@@ -392,19 +557,28 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                   could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
                   The controls go under the name at phone widths instead, and
                   the name is allowed to wrap there rather than be clipped. */}
+              {/* A held row answers to a test id of its own (see `tid`). The
+                  parts that dim while a row is in hand carry
+                  `provider-sign-out-dim`; the button and its words do not. */}
               <li
                 ref={hasAccounts ? anthropicRowRef : undefined}
-                className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5"
-                data-testid={`ai-provider-${row.id}`}
+                className={`flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5 ${signOutState ? SIGN_OUT_ROW_CLASS[signOutState] : ""}`}
+                data-testid={isHeld ? `ai-provider-held-${row.id}` : `ai-provider-${row.id}`}
+                data-sign-out={signOutState}
+                aria-busy={pending || undefined}
+                aria-hidden={signOutState === "leaving" || undefined}
+                inert={signOutState === "leaving" || undefined}
               >
                 <span className="flex items-center gap-3 min-w-0 @md:flex-1">
-                  <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
-                    <AIProviderIcon provider={row.id} size={20} />
+                  <span className="provider-sign-out-dim shrink-0">
+                    <span className={`flex items-center justify-center w-9 h-9 rounded-lg bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
+                      <AIProviderIcon provider={row.id} size={20} />
+                    </span>
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="flex flex-wrap @md:flex-nowrap items-center gap-2">
+                    <span className="provider-sign-out-dim flex flex-wrap @md:flex-nowrap items-center gap-2">
                       <span
-                        data-testid={`ai-provider-name-${row.id}`}
+                        data-testid={tid(`ai-provider-name-${row.id}`)}
                         /* `break-words` beside the wrap: on Hermes the label is
                            whatever the dashboard reports, so an unbroken one
                            has to be allowed to break rather than be hard-clipped
@@ -418,22 +592,22 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                         {row.label}
                       </span>
                       {row.isDefault && (
-                        <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40" data-testid={`ai-provider-default-${row.id}`}>
+                        <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40" data-testid={tid(`ai-provider-default-${row.id}`)}>
                           {t("settings.providers.default")}
                         </span>
                       )}
                     </span>
                     {row.enabled
-                      ? <ProviderConnectionLabel state={row.state} className="text-[11px]" />
-                      : <span className="block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
+                      ? <ProviderConnectionLabel state={row.state} className="provider-sign-out-dim text-[11px]" />
+                      : <span className="provider-sign-out-dim block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
                     {/* Visible, not only a hover title: on a phone there is no
                         hover, and a dimmed switch with no reason looks broken.
                         The switch names this line as its description. */}
                     {row.isDefault && (
                       <span
                         id={`ai-provider-locked-${row.id}`}
-                        className="block text-[11px] text-[var(--text-secondary)]"
-                        data-testid={`ai-provider-locked-hint-${row.id}`}
+                        className="provider-sign-out-dim block text-[11px] text-[var(--text-secondary)]"
+                        data-testid={tid(`ai-provider-locked-hint-${row.id}`)}
                       >
                         {t("settings.providers.lockedHint")}
                       </span>
@@ -446,19 +620,56 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                     {canSignOut && (
                       <button
                         type="button"
-                        onClick={() => onSignOutClick(row)}
+                        onClick={() => onSignOutClick(row, index)}
                         onBlur={armed ? disarmSignOut : undefined}
                         disabled={busy || settingDefault !== null || signOutLocked}
-                        aria-busy={signingOut === row.id}
+                        aria-busy={pending}
                         aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
                         title={signOutLocked ? t("settings.providers.lockedHint") : undefined}
-                        data-testid={`ai-provider-sign-out-${row.id}`}
-                        className={`mt-1 text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                          armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                        data-testid={tid(`ai-provider-sign-out-${row.id}`)}
+                        // In hand it is a label, not a dead control: full
+                        // strength, while the rest of the row dims around it.
+                        className={`mt-1 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg border transition-colors ${
+                          showPending
+                            ? "border-white/15 text-[var(--text-primary)] cursor-progress"
+                            : `disabled:opacity-50 disabled:cursor-not-allowed ${armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"}`
                         }`}
                       >
-                        {armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut", { name: row.label })}
+                        {showPending ? (
+                          <>
+                            <span
+                              aria-hidden="true"
+                              className="material-symbols-rounded motion-safe:animate-spin"
+                              style={{ fontSize: 14 }}
+                              data-testid={tid(`ai-provider-sign-out-spinner-${row.id}`)}
+                            >
+                              progress_activity
+                            </span>
+                            {t("settings.providers.signingOut")}
+                          </>
+                        ) : armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut", { name: row.label })}
                       </button>
+                    )}
+                    {/* A minute is long enough to need saying: the chat is
+                        being restarted to drop the sign-in, not the page
+                        stuck. */}
+                    {pending && signingOut?.phase === "restarting" && (
+                      <span
+                        className="block mt-1 text-[11px] text-[var(--text-muted)]"
+                        data-testid={tid(`ai-provider-sign-out-restarting-${row.id}`)}
+                      >
+                        {t("settings.providers.signOutRestarting")}
+                      </span>
+                    )}
+                    {/* The box's refusal, on the row it refused, in its own words. */}
+                    {signOutError?.id === row.id && !isHeld && (
+                      <span
+                        role="alert"
+                        className="block mt-1 text-[11px] text-red-300 break-words"
+                        data-testid={`ai-provider-sign-out-error-${row.id}`}
+                      >
+                        {signOutError.message}
+                      </span>
                     )}
                     {/* "Not connected" is true here and useless on its own: the
                         boot script could not install or consent this provider's
@@ -483,7 +694,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                     together than a 300 px window's row, and a line that cannot
                     wrap is clipped by the list's `overflow-hidden`. A wide pane
                     keeps them on one line — this span does not shrink there. */}
-                <span className="flex flex-wrap items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
+                <span className="provider-sign-out-dim flex flex-wrap items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={tid(`ai-provider-controls-${row.id}`)}>
                   {hasUsage && (
                     <SettingsDisclosureButton
                       open={usageOpen}
@@ -515,7 +726,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                       type="button"
                       onClick={() => void setDefault(row.id)}
                       disabled={busy}
-                      data-testid={`ai-provider-make-default-${row.id}`}
+                      data-testid={tid(`ai-provider-make-default-${row.id}`)}
                       className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 shrink-0"
                     >
                       {t("settings.providers.makeDefault")}
@@ -533,7 +744,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                     disabled={busy || row.isDefault}
                     title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
                     onClick={() => void setEnabled(row, !row.enabled)}
-                    data-testid={`ai-provider-switch-${row.id}`}
+                    data-testid={tid(`ai-provider-switch-${row.id}`)}
                     className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
                       row.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
                     }`}
@@ -564,7 +775,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
               </Fragment>
             );
           })}
-          {rows.length === 0 && (
+          {shown.length === 0 && (
             <li className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
               {t("settings.providers.empty")}
             </li>

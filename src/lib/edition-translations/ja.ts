@@ -40,6 +40,8 @@ export const ja: Record<string, string> = {
   "settings.providers.lockedHint": "先に別のプロバイダーを既定にしてください。",
   "settings.providers.signOut": "{name} からサインアウト",
   "settings.providers.signOutConfirm": "サインアウト — もう一度タップ",
+  "settings.providers.signingOut": "サインアウト中…",
+  "settings.providers.signOutRestarting": "完了のためアシスタントを再起動しています — 1分ほどで戻ります。",
   "settings.providers.signOutFailed": "{name} からサインアウトできませんでした。",
   "settings.providers.signedOut": "{name} からサインアウトしました。使うには下で再度サインインしてください。",
   "settings.providers.empty": "まだプロバイダーが接続されていません。下から接続してください。",

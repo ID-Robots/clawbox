@@ -33,6 +33,8 @@ export const es: Record<string, string> = {
   "settings.providers.lockedHint": "Primero haz que otro proveedor sea el predeterminado.",
   "settings.providers.signOut": "Cerrar sesión en {name}",
   "settings.providers.signOutConfirm": "Cerrar sesión — toca de nuevo",
+  "settings.providers.signingOut": "Cerrando sesión…",
+  "settings.providers.signOutRestarting": "El asistente se está reiniciando para terminar: vuelve en un minuto aproximadamente.",
   "settings.providers.signOutFailed": "No se pudo cerrar la sesión en {name}.",
   "settings.providers.signedOut": "Sesión cerrada en {name}. Vuelve a iniciar sesión abajo para usarlo.",
   "settings.providers.empty": "Aún no hay ningún proveedor conectado — conecta uno más abajo.",

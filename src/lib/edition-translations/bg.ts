@@ -25,6 +25,8 @@ export const bg: Record<string, string> = {
   "settings.providers.lockedHint": "Първо направете друг доставчик по подразбиране.",
   "settings.providers.signOut": "Изход от {name}",
   "settings.providers.signOutConfirm": "Изход — докоснете отново",
+  "settings.providers.signingOut": "Излизане…",
+  "settings.providers.signOutRestarting": "Асистентът се рестартира, за да довърши — връща се след около минута.",
   "settings.providers.signOutFailed": "Изходът от {name} не бе успешен.",
   "settings.providers.signedOut": "Излязохте от {name}. Влезте отново по-долу, за да го използвате.",
   "settings.providers.empty": "Все още няма свързан доставчик — свържете един по-долу.",
