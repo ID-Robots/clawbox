@@ -1368,7 +1368,10 @@ starting now would use; then `can_answer` ("1 of 2"), `all_limited` and
 `next_reset`. When every account is limited it adds `advice` — wait until the
 reset; runs that were cut off resume by themselves then — because that is the
 moment a queue must stop spending attempts: `coding_agent_run` answers the
-same situation with a CONFLICT naming the reset time. Never a credential and
+same situation with a CONFLICT naming the reset time. The verdict, `advice`
+and `last_swap` come before `accounts`: the answer is capped at 3,000
+characters and cut from the end, so a full pool with its model weeks loses
+account detail first, never the advice (TASK-2141). Never a credential and
 never an email. Read-only: accounts are added, ordered and re-authenticated by
 the owner in Settings, and the route's writes refuse this bearer 403
 `owner_only`.
