@@ -85,6 +85,9 @@ export interface ProgressCardChange {
   revision: number | null;
 }
 
+/** The latest time a JavaScript Date can hold. */
+const MAX_DATE_MS = 8.64e15;
+
 // Zero-width and bidirectional controls: the gateway strips them before it
 // stores a card, and a card written by an older gateway is cleaned here.
 const INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
@@ -137,7 +140,8 @@ export function parseProgressCard(raw: unknown): ProgressCard | null {
   const markdown = typeof raw.markdown === "string" ? raw.markdown.slice(0, MAX_MARKDOWN_CHARS) : "";
   if (markdown.trim() === "" && steps.length === 0) return null;
   const revision = typeof raw.revision === "number" && Number.isFinite(raw.revision) ? raw.revision : 0;
-  const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0
+  // Past 8.64e15 ms a Date is invalid and `toISOString` throws, so such a time is no time at all.
+  const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 && raw.updatedAt <= MAX_DATE_MS
     ? raw.updatedAt
     : null;
   return {
@@ -380,9 +384,9 @@ export type ProgressCardRefreshState = "idle" | "pending" | "failed" | "timeout"
  *
  * Reads the card whenever the socket is (re)connected or the chat moves to
  * another session, and again on every `progressCard.changed` that names this
- * session — the caller hands those events in through `onChanged`. Only the
- * newest read is ever applied, so a slow answer cannot put back a card a
- * later write replaced. A read that fails keeps the card already on screen
+ * session — the caller hands those events in through `onChanged`. An answer
+ * older than the one on screen is never applied, so a slow answer cannot put
+ * back a card a later write (or a clear) replaced. A read that fails keeps the card already on screen
  * (the docs' "transient refresh failures retain the last loaded card"); a
  * gateway that predates the method simply never shows one.
  *
@@ -406,10 +410,18 @@ export function useGatewayProgressCard({
   refreshState: ProgressCardRefreshState;
 } {
   const [loaded, setLoaded] = useState<{ key: string; card: ProgressCard | null }>({ key: "", card: null });
-  const [refreshing, setRefreshing] = useState<{ key: string; state: ProgressCardRefreshState; baseline: number; attempt: number }>(
-    { key: "", state: "idle", baseline: 0, attempt: 0 },
-  );
+  // `accepted`: the gateway has answered the request with its own baseline;
+  // until then no card can count as the refresh done.
+  const [refreshing, setRefreshing] = useState<{
+    key: string;
+    state: ProgressCardRefreshState;
+    baseline: number;
+    attempt: number;
+    accepted: boolean;
+  }>({ key: "", state: "idle", baseline: 0, attempt: 0, accepted: false });
   const sequenceRef = useRef(0);
+  /** The sequence of the newest answer shown: an older one landing later is never applied. */
+  const appliedRef = useRef(0);
   const scopeKeyRef = useRef<string | null>(null);
   const liveRef = useRef({ request, sessionKey, enabled });
   const revisionRef = useRef<number | null>(null);
@@ -426,16 +438,24 @@ export function useGatewayProgressCard({
     if (refreshTimerRef.current !== null) clearTimeout(refreshTimerRef.current);
   }, []);
 
-  /** Show what the gateway answered for `key`, and settle a refresh it answers. */
-  const apply = useCallback((key: string, card: ProgressCard | null) => {
+  /**
+   * Show what the gateway answered for `key` — unless a newer answer is on
+   * screen already — and settle a refresh it answers.
+   */
+  const apply = useCallback((sequence: number, key: string, card: ProgressCard | null) => {
+    if (sequence <= appliedRef.current || liveRef.current.sessionKey !== key) return;
+    appliedRef.current = sequence;
     if (card?.sessionKey) scopeKeyRef.current = card.sessionKey;
     revisionRef.current = card?.revision ?? null;
     setLoaded({ key, card });
-    // A newer card than the one the refresh started from is the refresh done
-    // (or the agent moving on, which answers it as well); so is a clear.
-    setRefreshing((prev) =>
-      prev.key === key && prev.state !== "idle" && (card === null || card.revision > prev.baseline) ? { ...prev, state: "idle" } : prev,
-    );
+    // A card newer than the gateway's baseline is the refresh done (or the
+    // agent moving on, which answers it as well); so is a clear. Before the
+    // gateway has named its baseline, a newer card may be a write it already
+    // had, so a pending refresh waits for that answer.
+    setRefreshing((prev) => {
+      if (prev.key !== key || prev.state === "idle" || (prev.state === "pending" && !prev.accepted)) return prev;
+      return card === null || card.revision > prev.baseline ? { ...prev, state: "idle" } : prev;
+    });
   }, []);
 
   const read = useCallback(() => {
@@ -449,10 +469,7 @@ export function useGatewayProgressCard({
     const waiting = new AbortController();
     waitRef.current = waiting;
     retryWhileAgentStarting(() => send(PROGRESS_CARD_GET_METHOD, { sessionKey: key }), { signal: waiting.signal }).then(
-      (payload) => {
-        if (sequence !== sequenceRef.current || liveRef.current.sessionKey !== key) return;
-        apply(key, parseProgressCardResponse(payload));
-      },
+      (payload) => apply(sequence, key, parseProgressCardResponse(payload)),
       () => {
         /* keep what is on screen; the next change or reconnect reads again */
       },
@@ -486,23 +503,15 @@ export function useGatewayProgressCard({
   const clear = useCallback(async (shown: ProgressCard): Promise<boolean> => {
     const { request: send, sessionKey: key, enabled: on } = liveRef.current;
     if (!on || key === "") throw new Error("Not connected");
-    const params: Record<string, unknown> = { sessionKey: key };
-    if (Number.isInteger(shown.revision) && shown.revision >= 1) params.expectedRevision = shown.revision;
-    // A read still in flight was asked before the clear: its answer must not put the card back.
+    // Never an unchecked clear: without the revision the owner saw, a newer card could be erased.
+    if (!Number.isInteger(shown.revision) || shown.revision < 1) throw new Error("The card has no revision to clear");
+    // Numbered with the reads: one asked before the clear and answered after it cannot put the card back.
     const sequence = ++sequenceRef.current;
-    waitRef.current?.abort();
-    let payload: unknown;
-    try {
-      payload = await send(PROGRESS_CARD_PUT_METHOD, params);
-    } catch (error) {
-      // The read this call superseded never landed; read again so the card on screen is the gateway's.
-      if (sequence === sequenceRef.current && liveRef.current.sessionKey === key) read();
-      throw error;
-    }
+    const payload = await send(PROGRESS_CARD_PUT_METHOD, { sessionKey: key, expectedRevision: shown.revision });
     const card = parseProgressCardResponse(payload);
-    if (sequence === sequenceRef.current && liveRef.current.sessionKey === key) apply(key, card);
+    apply(sequence, key, card);
     return card === null;
-  }, [apply, read]);
+  }, [apply]);
 
   /** Ask the agent to bring the card up to date; done when a newer card is read. */
   const refresh = useCallback(() => {
@@ -510,7 +519,7 @@ export function useGatewayProgressCard({
     if (!on || key === "") return;
     const attempt = ++refreshAttemptRef.current;
     const baseline = revisionRef.current ?? 0;
-    setRefreshing({ key, state: "pending", baseline, attempt });
+    setRefreshing({ key, state: "pending", baseline, attempt, accepted: false });
     if (refreshTimerRef.current !== null) clearTimeout(refreshTimerRef.current);
     // A timeout does not cancel the agent's work; it only stops the spinner.
     refreshTimerRef.current = setTimeout(() => {
@@ -520,7 +529,15 @@ export function useGatewayProgressCard({
       (payload) => {
         // The gateway's own baseline: a card it had that this chat had not read yet is not the refresh.
         const revision = isRecord(payload) && typeof payload.revision === "number" && Number.isFinite(payload.revision) ? payload.revision : 0;
-        setRefreshing((prev) => (prev.attempt === attempt && prev.state === "pending" && revision > prev.baseline ? { ...prev, baseline: revision } : prev));
+        // What is on screen may already be past it (the agent wrote while this answer travelled).
+        const shownKey = liveRef.current.sessionKey;
+        const shown = revisionRef.current;
+        setRefreshing((prev) => {
+          if (prev.attempt !== attempt || prev.state !== "pending") return prev;
+          const settled = Math.max(prev.baseline, revision);
+          const done = shownKey === prev.key && shown !== null && shown > settled;
+          return { ...prev, accepted: true, baseline: settled, state: done ? "idle" : "pending" };
+        });
       },
       () => {
         setRefreshing((prev) => (prev.attempt === attempt && prev.state === "pending" ? { ...prev, state: "failed" } : prev));

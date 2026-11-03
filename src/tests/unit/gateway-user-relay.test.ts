@@ -60,8 +60,12 @@ describe("requests from a user's chat", () => {
       params: { sessionKey: ALICE_TAB, expectedRevision: 3, markdown: "written by the user", plan: [{ step: "x", status: "pending" }], agentId: "other" },
     });
     expect(out).toEqual({ toGateway: { type: "req", id: "p1", method: "progressCard.put", params: { sessionKey: ALICE_TAB, expectedRevision: 3 } } });
-    const unchecked = relay.filterClientFrame(connected(), { type: "req", id: "p2", method: "progressCard.put", params: { sessionKey: ALICE_MAIN, expectedRevision: "3" } });
-    expect(unchecked.toGateway?.params).toEqual({ sessionKey: ALICE_MAIN });
+  });
+
+  it.each([undefined, "3", 0, -1, 2.5])("refuses a clear of the user's own card without a usable revision (%s)", (expectedRevision) => {
+    const out = relay.filterClientFrame(connected(), { type: "req", id: "p2", method: "progressCard.put", params: { sessionKey: ALICE_MAIN, expectedRevision } });
+    expect(out.toGateway).toBeUndefined();
+    expect(out.toClient).toMatchObject({ type: "res", id: "p2", ok: false, error: { code: "FORBIDDEN" } });
   });
 
   it("passes a refresh of the user's own progress card with just its session and retry key", () => {

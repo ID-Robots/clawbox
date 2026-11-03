@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { boxNowMs, formatBoxTime } from "@/lib/box-clock";
 import {
@@ -83,9 +83,9 @@ const CARD_CSS = `
 .chat-progress-toggle { container: chat-progress / inline-size; }
 .chat-progress-actions { display: flex; align-items: center; gap: 2px; padding-right: 6px; flex-shrink: 0; }
 .chat-progress-action { width: 28px; height: 28px; padding: 0; border: none; border-radius: 8px; background: none; color: ${MUTED_FG}; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.15s, color 0.15s; }
-.chat-progress-action:hover:not(:disabled) { background: rgba(249,115,22,0.15); color: ${CORAL}; }
-.chat-progress-action.chat-progress-danger:hover:not(:disabled) { background: rgba(239,68,68,0.15); color: #f87171; }
-.chat-progress-action:disabled { cursor: default; }
+.chat-progress-action:hover:not([aria-disabled="true"]) { background: rgba(249,115,22,0.15); color: ${CORAL}; }
+.chat-progress-action.chat-progress-danger:hover:not([aria-disabled="true"]) { background: rgba(239,68,68,0.15); color: #f87171; }
+.chat-progress-action[aria-disabled="true"] { cursor: default; }
 @media (pointer: coarse) { .chat-progress-action { width: 34px; height: 34px; } }
 .chat-progress-head { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
 .chat-progress-title { flex-shrink: 0; }
@@ -125,6 +125,7 @@ export function ChatProgressCard({
   // The box's clock (src/lib/box-clock.ts): the gateway stamped `updatedAt`.
   const [now, setNow] = useState(() => boxNowMs());
   const { dismissed, dismiss, forget } = useProgressCardDismissal(card);
+  const sectionRef = useRef<HTMLElement>(null);
   // A clear in flight, or the one that failed — for the revision it was asked on.
   const [clearing, setClearing] = useState<{ revision: number; state: "pending" | "failed" } | null>(null);
 
@@ -182,18 +183,30 @@ export function ChatProgressCard({
     writeProgressCardCollapsed(next);
   };
 
+  // Busy buttons stay focusable (aria-disabled, not disabled), so a keyboard
+  // user's focus is not dropped while a request is out; a button that takes
+  // the card away hands that focus on past it, to the composer.
   const clearPending = clearing?.state === "pending";
-  const clear = () => {
+  const clear = (event: MouseEvent<HTMLButtonElement>) => {
     if (!onClear || clearPending) return;
+    const next = viaKeyboard(event) ? focusTargetAfter(sectionRef.current) : null;
     const revision = card.revision;
     setClearing({ revision, state: "pending" });
     onClear(card).then(
       (gone) => {
-        if (gone) forget();
+        if (gone) {
+          forget();
+          next?.focus();
+        }
         setClearing(null);
       },
       () => setClearing({ revision, state: "failed" }),
     );
+  };
+  const putAway = (event: MouseEvent<HTMLButtonElement>) => {
+    const next = viaKeyboard(event) ? focusTargetAfter(sectionRef.current) : null;
+    dismiss();
+    next?.focus();
   };
 
   // What the last clear or refresh came to, when it did not do what was asked.
@@ -217,6 +230,7 @@ export function ChatProgressCard({
 
   return (
     <section
+      ref={sectionRef}
       className="chat-progress-card"
       data-testid="chat-progress-card"
       data-collapsed={collapsed ? "true" : "false"}
@@ -317,8 +331,8 @@ export function ChatProgressCard({
                 aria-label={refreshLabel}
                 aria-busy={refreshPending || undefined}
                 title={refreshLabel}
-                disabled={refreshPending}
-                onClick={() => onRefresh()}
+                aria-disabled={refreshPending || undefined}
+                onClick={() => { if (!refreshPending) onRefresh(); }}
               >
                 <span
                   className={refreshPending ? "material-symbols-rounded chat-progress-spinner" : "material-symbols-rounded"}
@@ -337,7 +351,7 @@ export function ChatProgressCard({
                 aria-label={t("chat.progressCard.clear")}
                 aria-busy={clearPending || undefined}
                 title={t("chat.progressCard.clear")}
-                disabled={clearPending}
+                aria-disabled={clearPending || undefined}
                 onClick={clear}
               >
                 <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 17 }}>delete</span>
@@ -349,7 +363,7 @@ export function ChatProgressCard({
               data-testid="chat-progress-card-dismiss"
               aria-label={t("chat.progressCard.dismiss")}
               title={t("chat.progressCard.dismissHint")}
-              onClick={dismiss}
+              onClick={putAway}
             >
               <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>close</span>
             </button>
@@ -414,6 +428,31 @@ export function ChatProgressCard({
       </div>
     </section>
   );
+}
+
+/** A click made with Enter or Space (no pointer press), where moving the focus is expected. */
+function viaKeyboard(event: MouseEvent): boolean {
+  return event.detail === 0;
+}
+
+const TEXT_ENTRY = "textarea, [contenteditable='true']";
+const FOCUSABLE = "textarea, input:not([type=hidden]):not([type=file]), button, select, [contenteditable='true'], [tabindex]:not([tabindex='-1'])";
+
+/**
+ * Where the focus goes when the card is taken away from under it: the first
+ * text box after the card (the composer), else the first control there.
+ */
+function focusTargetAfter(section: HTMLElement | null): HTMLElement | null {
+  const usable = (el: HTMLElement) =>
+    !el.matches(":disabled") && !el.closest("[hidden], [aria-hidden='true']") && getComputedStyle(el).display !== "none" && getComputedStyle(el).visibility !== "hidden";
+  for (const selector of [TEXT_ENTRY, FOCUSABLE]) {
+    for (let sibling = section?.nextElementSibling ?? null; sibling; sibling = sibling.nextElementSibling) {
+      const found = [sibling, ...Array.from(sibling.querySelectorAll(selector))]
+        .find((el): el is HTMLElement => el instanceof HTMLElement && el.matches(selector) && usable(el));
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 function StepIcon({ status }: { status: ProgressStepStatus }) {

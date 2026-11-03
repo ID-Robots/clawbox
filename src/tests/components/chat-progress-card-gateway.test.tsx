@@ -240,11 +240,11 @@ describe("ChatPopup — putting the card away (TASK-2147)", () => {
     fireEvent.click(screen.getByTestId("chat-progress-card-refresh"));
     await waitFor(() => expect(sentOf("progressCard.refresh")).toHaveLength(1));
     expect(sentOf("progressCard.refresh")[0].params).toMatchObject({ sessionKey: "agent:main:main", idempotencyKey: expect.any(String) });
-    expect(screen.getByTestId("chat-progress-card-refresh")).toBeDisabled();
+    expect(screen.getByTestId("chat-progress-card-refresh")).toHaveAttribute("aria-disabled", "true");
 
     serverCard = wireCard(2, "Brought up to date.");
     socket().changed("agent:main:main", 2);
-    await waitFor(() => expect(screen.getByTestId("chat-progress-card-refresh")).toBeEnabled());
+    await waitFor(() => expect(screen.getByTestId("chat-progress-card-refresh")).not.toHaveAttribute("aria-disabled"));
     expect(screen.getByTestId("chat-progress-card")).toHaveTextContent("Brought up to date.");
   });
 });

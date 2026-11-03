@@ -154,11 +154,13 @@ function filterClientFrame(state, frame) {
     if (method === "progressCard.put") {
       // The chat's only write to the card is the trash: a clear of the user's
       // own card, checked against the revision they saw. A note or a plan
-      // never travels — what the card says is the agent's to write.
-      const putParams = { sessionKey: params.sessionKey };
-      if (Number.isInteger(params.expectedRevision) && params.expectedRevision >= 1) putParams.expectedRevision = params.expectedRevision;
+      // never travels — what the card says is the agent's to write — and
+      // neither does a clear without the revision, which could erase a newer card.
+      if (!Number.isInteger(params.expectedRevision) || params.expectedRevision < 1) {
+        return { toClient: refusalFrame(id, "A progress card is cleared only against the revision on screen.") };
+      }
       state.pending.set(id, method);
-      return { toGateway: { type: "req", id, method, params: putParams } };
+      return { toGateway: { type: "req", id, method, params: { sessionKey: params.sessionKey, expectedRevision: params.expectedRevision } } };
     }
     if (method === "progressCard.refresh") {
       // Just the session and the retry key: the refresh carries no prompt of the caller's.

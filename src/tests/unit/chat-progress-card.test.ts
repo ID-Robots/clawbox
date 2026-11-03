@@ -80,6 +80,9 @@ describe("parseProgressCard", () => {
     const card = parseProgressCard({ ...CARD, revision: "4", updatedAt: Number.NaN });
     expect(card?.revision).toBe(0);
     expect(card?.updatedAt).toBeNull();
+    // Past the last time a Date can hold, `toISOString` would throw in the header.
+    expect(parseProgressCard({ ...CARD, updatedAt: 8.64e15 + 1 })?.updatedAt).toBeNull();
+    expect(parseProgressCard({ ...CARD, updatedAt: 8.64e15 })?.updatedAt).toBe(8.64e15);
   });
 
   it("is null for anything that is not an object", () => {
