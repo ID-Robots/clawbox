@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { boxAge } from "@/lib/box-clock";
 import { MAX_MARKDOWN_CHARS } from "@/lib/progress-card-markdown";
 import { retryWhileAgentStarting } from "@/lib/chat-gateway-starting";
 
@@ -180,16 +181,16 @@ export type ProgressCardAgeUnit = "now" | "minutes" | "hours" | "days";
 
 /**
  * How long ago the agent last wrote the card, in the one unit the header
- * says ("Updated 2h ago"). A time in the future — the browser's clock behind
- * the box's — reads as just now rather than as a negative age.
+ * says ("Updated 2h ago"): the desktop's `boxAge`, so `now` is the box's clock
+ * (`boxNow()`). A time in the future reads as just now rather than as a
+ * negative age — within `boxAge`'s tolerance that is the clocks' leftover
+ * disagreement, and beyond it the card has no "in the future" to say.
  */
 export function progressCardAge(updatedAt: number | null, now: number): { unit: ProgressCardAgeUnit; n: number } | null {
-  if (updatedAt === null || !Number.isFinite(updatedAt) || !Number.isFinite(now)) return null;
-  const elapsed = Math.max(0, now - updatedAt);
-  if (elapsed < 60_000) return { unit: "now", n: 0 };
-  if (elapsed < 3_600_000) return { unit: "minutes", n: Math.floor(elapsed / 60_000) };
-  if (elapsed < 86_400_000) return { unit: "hours", n: Math.floor(elapsed / 3_600_000) };
-  return { unit: "days", n: Math.floor(elapsed / 86_400_000) };
+  if (updatedAt === null) return null;
+  const age = boxAge(updatedAt, now);
+  if (age === null) return null;
+  return age.unit === "future" ? { unit: "now", n: 0 } : { unit: age.unit, n: age.n };
 }
 
 /** Whether the owner folded the card. Absent or unreadable storage means open. */

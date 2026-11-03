@@ -6,6 +6,7 @@ import type { TeamStatus } from "@/lib/coding-team-status";
 import type { TeamStartStep } from "@/lib/coding-start-phase";
 import { isSettledTeamStatus } from "@/lib/coding-team-status";
 import { taskTitle } from "@/lib/task-title";
+import { boxNow } from "@/lib/box-clock";
 import { teamModelsLabel } from "@/lib/coding-model-names";
 import CodingModelChip from "./CodingModelChip";
 
@@ -130,10 +131,11 @@ export default function CodingTeamActivityCard(
   const settled = isSettledTeamStatus(team.status);
   const live = !settled && team.status !== "queued";
   // A queued team's clock runs too: it is time the owner is waiting.
-  const [now, setNow] = useState(() => Date.now());
+  // On the box's clock: `team.startedAt` is the box's stamp.
+  const [now, setNow] = useState(() => boxNow());
   useEffect(() => {
     if (settled) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(boxNow()), 1000);
     return () => clearInterval(id);
   }, [settled]);
   const [expanded, setExpanded] = useState(false);

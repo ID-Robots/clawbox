@@ -8,6 +8,7 @@ import {
   type Protection,
   type ProtectionInput,
 } from "@/lib/clawkeep-protection";
+import { boxNow, noteBoxClock, noteBoxTime } from "@/lib/box-clock";
 import { monotonicNow } from "@/lib/visible-interval";
 
 /** How often the desktop asks the box how its backup is doing. Fast, because
@@ -86,7 +87,9 @@ function startStatusRequest(): Promise<ClawkeepStatusResult> {
   const promise = (async (): Promise<ClawkeepStatusResult> => {
     let answer: ClawkeepStatusAnswer;
     try {
+      const sentAtMs = Date.now();
       const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
+      const receivedAtMs = Date.now();
       let body: unknown;
       let bodyError: unknown;
       let parsed = false;
@@ -96,6 +99,11 @@ function startStatusRequest(): Promise<ClawkeepStatusResult> {
       } catch (err) {
         bodyError = err;
       }
+      // Every "how long ago" and every verdict drawn from this answer compares
+      // a time the box wrote with "now", which has to be the box's: the body's
+      // reading to the millisecond, else the answer's Date header (box-clock).
+      const boxTimeMs = body && typeof body === "object" ? (body as { serverNowMs?: unknown }).serverNowMs : undefined;
+      if (!noteBoxTime(boxTimeMs, sentAtMs, receivedAtMs)) noteBoxClock(res, sentAtMs, receivedAtMs);
       answer = {
         response: {
           ok: res.ok,
@@ -251,7 +259,7 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      if (facts.current) publish(facts.current, Date.now());
+      if (facts.current) publish(facts.current, boxNow());
     }, AGE_MS);
     return () => window.clearInterval(id);
   }, [publish]);
@@ -312,7 +320,8 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
       // explicit `paired: false` counts — a response missing the field keeps
       // the old alert fallback rather than silencing a real overdue backup.
       const notPaired = data.paired === false;
-      const now = Date.now();
+      // The box's clock: every time below is one the box wrote.
+      const now = boxNow();
       const input: ProtectionInput = {
         lastBackupAtMs: data.lastBackupAtMs ?? 0,
         lastHeartbeatAtMs: data.lastHeartbeatAtMs,

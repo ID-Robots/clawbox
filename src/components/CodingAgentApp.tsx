@@ -34,6 +34,7 @@ import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
 import { timeAgo } from "./clawkeep-ui";
+import { boxNow } from "@/lib/box-clock";
 import { formatBytes } from "@/lib/format-bytes";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import AnimatedNumber from "./AnimatedNumber";
@@ -302,7 +303,7 @@ const CONFIRM_MS = 5_000;
 
 /** Elapsed time, readable at every scale a run can reach — seconds to days. */
 function duration(run: Run): string {
-  const total = Math.max(0, Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000));
+  const total = Math.max(0, Math.round(((run.completedAt ?? boxNow()) - run.startedAt) / 1000));
   if (total < 60) return `${total}s`;
   const d = Math.floor(total / 86400);
   const h = Math.floor((total % 86400) / 3600);
@@ -932,13 +933,17 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
   // edge sets it at once. The live poll's reads above wait there likewise,
   // and for the same reason need no exemption: the visible edge re-reads all
   // four, and nothing they bring acts on the screen while it is away.
-  const [now, setNow] = useState(() => Date.now());
+  //
+  // The BOX's clock (`boxNow()`): every time it is held against — a run's
+  // start, a team's, a start's request — is one the box wrote, and a browser
+  // a few seconds behind showed "0s" for a run the box had started already.
+  const [now, setNow] = useState(() => boxNow());
   useEffect(() => {
     // A start on its way ticks by the second too: Now's "Starting…" row shows its clock.
     const every = anyLive || anyStarting ? NOW_LIVE_TICK_MS : NOW_IDLE_TICK_MS;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      if (id === null) id = setInterval(() => setNow(Date.now()), every);
+      if (id === null) id = setInterval(() => setNow(boxNow()), every);
     };
     const stop = () => {
       if (id !== null) clearInterval(id);
@@ -949,7 +954,7 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
         stop();
         return;
       }
-      setNow(Date.now());
+      setNow(boxNow());
       start();
     };
     if (document.visibilityState !== "hidden") start();

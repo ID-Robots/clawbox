@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { boxAge, boxNow } from "@/lib/box-clock";
 import { CARD as KIT_CARD } from "./coding-agent-ui";
 
 // The pieces ClawKeep and Memory Shard draw with in common.
@@ -25,18 +26,19 @@ export const CARD = KIT_CARD;
 export type Translator = (key: string, params?: Record<string, string | number>) => string;
 
 /** `nowMs` lets a caller share the clock it already sampled, so a verdict and
- *  the "when" printed beside it cannot be drawn from two different reads. */
+ *  the "when" printed beside it cannot be drawn from two different reads; it
+ *  is the box's clock (`boxNow()`), which is also the default, because `ms` is
+ *  a time the box wrote. A time a little ahead of it — what is left of the
+ *  browser's clock disagreeing with the box's — is "just now" (`boxAge`). */
 export function timeAgo(ms: number, t: Translator, nowMs?: number): string {
   if (!ms) return t("clawkeep.never");
-  const diff = (nowMs ?? Date.now()) - ms;
-  if (diff < 0) return t("clawkeep.inFuture");
-  const minutes = Math.floor(diff / 60_000);
-  const hours = Math.floor(diff / 3_600_000);
-  const days = Math.floor(diff / 86_400_000);
-  if (minutes < 1) return t("clawkeep.justNow");
-  if (minutes < 60) return t("clawkeep.minutesAgo", { count: minutes });
-  if (hours < 24) return t("clawkeep.hoursAgo", { count: hours });
-  return t("clawkeep.daysAgo", { count: days });
+  const age = boxAge(ms, nowMs ?? boxNow());
+  if (!age) return t("clawkeep.never");
+  if (age.unit === "future") return t("clawkeep.inFuture");
+  if (age.unit === "now") return t("clawkeep.justNow");
+  if (age.unit === "minutes") return t("clawkeep.minutesAgo", { count: age.n });
+  if (age.unit === "hours") return t("clawkeep.hoursAgo", { count: age.n });
+  return t("clawkeep.daysAgo", { count: age.n });
 }
 
 /** `locale` is the caller's UI locale (`useT().locale`): "24.1 GB" on a German
@@ -91,9 +93,10 @@ export const WEEKDAY_LABEL_KEYS = [
   "clawkeep.weekday.sat",
 ];
 
+/** `ms` is the box's schedule, so the time left is counted on the box's clock. */
 export function formatNextRun(ms: number, t: Translator): string {
   if (!ms) return "—";
-  const diff = ms - Date.now();
+  const diff = ms - boxNow();
   if (diff <= 0) return t("clawkeep.anyMoment");
   const totalMin = Math.round(diff / 60_000);
   const days = Math.floor(totalMin / (60 * 24));

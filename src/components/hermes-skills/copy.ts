@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react';
 import { useT } from '@/lib/i18n';
+import { boxNow } from '@/lib/box-clock';
 
 // Every user-facing string of the Hermes Skills store, resolved through `t()`.
 //
@@ -319,7 +320,9 @@ export function useCopy() {
         if (!iso) return undefined;
         const parsed = Date.parse(iso);
         if (Number.isNaN(parsed)) return undefined;
-        const seconds = Math.round((Date.now() - parsed) / 1000);
+        // Against the box's clock (the lock is the box's file); a time ahead
+        // of it rounds into "just now" below rather than a negative age.
+        const seconds = Math.round((boxNow() - parsed) / 1000);
         if (seconds < 60) return t('skills.relative.justNow');
         const minutes = Math.round(seconds / 60);
         if (minutes < 60) return t('skills.relative.minutes', { n: minutes });

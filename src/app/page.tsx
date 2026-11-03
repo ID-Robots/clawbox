@@ -7,6 +7,7 @@ import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
+import { fetchWithBoxClock } from "@/lib/box-clock";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import WhatsNewCard from "@/components/WhatsNewCard";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, OPEN_CHAT_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail, notifyCodingTeamChanged, handoffCodingTeam, openNewAppCard, dispatchOpenApp } from "@/lib/ui-events";
@@ -743,7 +744,10 @@ function ChromeDesktopInner() {
   const kioskPages = useMemo(() => kioskPageTabs(kiosk.tabs), [kiosk.tabs]);
 
   const syncSetupStatus = useCallback(async () => {
-    const data = await fetch("/setup-api/setup/status").then((r) => r.json());
+    // Every desktop asks this on load, owner or not, so its Date header is the
+    // page's first reading of the box's clock (box-clock): the "x ago" labels
+    // of windows that poll nothing of their own are judged against the box's.
+    const data = await fetchWithBoxClock("/setup-api/setup/status").then((r) => r.json());
     setSetupRequired(!data.setup_complete);
     return data;
   }, []);

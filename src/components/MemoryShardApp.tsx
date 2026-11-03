@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+// The status polls read the box's clock off their answers, so the index run's
+// "finished 3m ago" (`timeAgo`) is judged against the clock that wrote it.
+import { fetchWithBoxClock } from "@/lib/box-clock";
 import { TIME_OF_DAY } from "@/lib/memory-shard-state";
 import { onMemoryShardChanged } from "@/lib/ui-events";
 import MemoryShardArt from "./MemoryShardArt";
@@ -231,7 +234,7 @@ function MemoryIndexCard({ initial, onError }: {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
     try {
-      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
+      const body = await jsonOrError<unknown>(await fetchWithBoxClock("/setup-api/clawkeep/memory"));
       // Anything that is not a memory status is ignored outright rather than
       // rendered. The panel keeps its last good reading, or stays on its
       // loading line, and the rest of the window is untouched.
@@ -660,7 +663,7 @@ export default function MemoryShardApp() {
 
   const loadState = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store", signal });
+      const res = await fetchWithBoxClock("/setup-api/clawkeep/memory", { cache: "no-store", signal });
       if (!res.ok) throw new Error("status");
       const status = await res.json() as { enabled?: boolean; setupComplete?: boolean; planGate?: unknown };
       if (signal?.aborted) return;

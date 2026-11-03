@@ -48,6 +48,14 @@ describe("GET /setup-api/clawkeep", () => {
     expect(body.server.length).toBeGreaterThan(0);
   });
 
+  it("carries the box's clock as it answers, for the page to measure its own against (TASK-2138)", async () => {
+    const before = Date.now();
+    const body = await (await GET()).json();
+    expect(typeof body.serverNowMs).toBe("number");
+    expect(body.serverNowMs).toBeGreaterThanOrEqual(before);
+    expect(body.serverNowMs).toBeLessThanOrEqual(Date.now());
+  });
+
   it("carries what the last archive left out and the snapshot-sized archives it carried", async () => {
     // Written by the daemon (clawkeep/state.py) once the archive is built and
     // before the upload, read by the dashboard and by `backup_status`.
