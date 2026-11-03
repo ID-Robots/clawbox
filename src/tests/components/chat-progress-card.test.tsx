@@ -264,7 +264,8 @@ describe("ChatProgressCard — the fold", () => {
     expect(css).toContain(".chat-progress-toggle { container: chat-progress / inline-size; }");
     expect(screen.getByTestId("chat-progress-card-toggle").className).toContain("chat-progress-toggle");
     expect(css).toContain(".chat-progress-time, .chat-progress-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
-    expect(css).toContain(".chat-progress-summary { flex-shrink: 1000; }");
+    // The summary takes only what the time leaves (no basis of its own), so the time is cut only once the summary is gone.
+    expect(css).toContain(".chat-progress-summary { flex: 1 1 0; }");
     expect(css).toMatch(/@container chat-progress \(max-width: 374px\) \{[^}]*\.chat-progress-head \{ flex-direction: column;/);
   });
 });

@@ -66,7 +66,9 @@ const AGE_TICK_MS = 30_000;
 // has to keep most of the height. Anything taller scrolls inside the card.
 // The header's break point is measured on the fold toggle, not the card, so
 // the buttons beside it count against the room the title and time have; the
-// buttons grow to a finger's size on a touch screen.
+// buttons grow to a finger's size on a touch screen. The summary has no width
+// of its own (`flex: 1 1 0`): it fills what the time leaves, so on a phone the
+// time stays whole while any summary is left to give up.
 const CARD_CSS = `
 .chat-progress-body { max-height: min(300px, 34dvh); }
 @media (max-height: 760px) { .chat-progress-body { max-height: min(220px, 28dvh); } }
@@ -93,7 +95,7 @@ const CARD_CSS = `
 .chat-progress-sep { flex-shrink: 0; }
 .chat-progress-time, .chat-progress-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chat-progress-time { flex-shrink: 1; }
-.chat-progress-summary { flex-shrink: 1000; }
+.chat-progress-summary { flex: 1 1 0; }
 @container chat-progress (max-width: 374px) {
   .chat-progress-head { flex-direction: column; align-items: stretch; gap: 1px; }
   .chat-progress-title { overflow: hidden; text-overflow: ellipsis; }
