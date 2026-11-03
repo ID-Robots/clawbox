@@ -365,6 +365,11 @@ function featureOf(key: string): Feature {
  * stage's foot (Talk's at its head, over nothing it shows). The link demo's
  * second cursor, which points at the dialog's desktop place, is left out.
  * With motion off that camera stands where the demo ends.
+ *
+ * On /updating, on a computer's screen, the run view's UPDATE_SCREEN_CSS
+ * sizes the wide layout by its `.wns-*` marks to fill the column it is given
+ * (TASK-2137): the stage is then the largest 16:10 that fits its cell, so the
+ * picture grows with the height as well as the width.
  */
 const SHOWCASE_CSS = `
 @keyframes wns-up{from{opacity:0;transform:translateY(12px)}}
@@ -761,7 +766,7 @@ export default function UpdateWhatsNewShowcase({
           data-testid="whats-new-showcase-glow"
         />
 
-        <div className={`relative flex items-center gap-2 ${narrow ? "px-4 pt-4" : "px-[30px] pt-6"}`} aria-hidden="true" data-testid="whats-new-showcase-logo">
+        <div className={`wns-logo relative flex items-center gap-2 ${narrow ? "px-4 pt-4" : "px-[30px] pt-6"}`} aria-hidden="true" data-testid="whats-new-showcase-logo">
           {/* eslint-disable-next-line @next/next/no-img-element -- the box's own crab from public/, loaded with the panel */}
           <img src="/clawbox-icon.png" alt="" width={28} height={28} loading="eager" draggable={false} className="h-7 w-7 object-contain" onError={(event) => { event.currentTarget.style.display = "none"; }} />
           <span className="font-display text-lg font-bold tracking-[-0.01em] text-[#f97316]">ClawBox</span>
@@ -772,16 +777,16 @@ export default function UpdateWhatsNewShowcase({
           id={`${id}-panel`}
           aria-labelledby={`${id}-tab-${current}`}
           tabIndex={0}
-          className={`relative grid flex-1 grid-cols-1 items-center rounded-xl pb-0 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-orange-300/70 @min-[44rem]:grid-cols-[minmax(0,330px)_minmax(0,1fr)] ${
+          className={`wns-panel relative grid flex-1 grid-cols-1 items-center rounded-xl pb-0 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-orange-300/70 @min-[44rem]:grid-cols-[minmax(0,330px)_minmax(0,1fr)] ${
             narrow ? "touch-pan-y gap-4 px-4 pt-3" : "gap-[22px] pl-[30px] pr-[26px] pt-[18px]"
           }`}
           data-testid="whats-new-showcase-panel"
         >
           <div className="min-w-0">
-            <p className="m-0 font-mono text-xs font-extrabold uppercase tracking-[0.2em] text-[#8d99ae]" data-testid="whats-new-showcase-count">
+            <p className="wns-count m-0 font-mono text-xs font-extrabold uppercase tracking-[0.2em] text-[#8d99ae]" data-testid="whats-new-showcase-count">
               <b className="text-[#e8edf5]">{pad(current + 1)}</b> / {pad(count)} · {tr("update.showcase.newIn", "New in {release}", { release })}
             </p>
-            <Heading className={`font-display font-bold leading-[1.12] tracking-[-0.01em] text-[#e8edf5] ${narrow ? "mb-2 mt-2.5 text-[24px]" : "mb-2.5 mt-3.5 min-h-[68px] text-[30px]"}`}>
+            <Heading className={`wns-title font-display font-bold leading-[1.12] tracking-[-0.01em] text-[#e8edf5] ${narrow ? "mb-2 mt-2.5 text-[24px]" : "mb-2.5 mt-3.5 min-h-[68px] text-[30px]"}`}>
               <span className="sr-only">{item.title}</span>
               {/* Narrow, the screenshot sits under the text: it is sized by the
                   longest title and body, so it stays put as the features turn. */}
@@ -795,7 +800,7 @@ export default function UpdateWhatsNewShowcase({
                 <p key={current} className="wns-up col-start-1 row-start-1 m-0">{item.body}</p>
               </div>
             ) : (
-              <p key={current} className="wns-up m-0 text-[13.5px] leading-normal text-[#b9c3d5]">{item.body}</p>
+              <p key={current} className="wns-body wns-up m-0 text-[13.5px] leading-normal text-[#b9c3d5]">{item.body}</p>
             )}
           </div>
           <div className="wns-scene relative min-w-0">
@@ -825,7 +830,7 @@ export default function UpdateWhatsNewShowcase({
           ref={tablist}
           role="tablist"
           aria-label={tr("update.showcase.label", "New features")}
-          className={`relative flex gap-1.5 ${
+          className={`wns-chips relative flex gap-1.5 ${
             narrow
               ? "flex-wrap px-4 pb-4 pt-5 pointer-coarse:snap-x pointer-coarse:scroll-px-4 pointer-coarse:flex-nowrap pointer-coarse:overflow-x-auto pointer-coarse:overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               : "flex-wrap pb-[18px] pl-[30px] pr-[26px] pt-[26px]"
@@ -851,7 +856,7 @@ export default function UpdateWhatsNewShowcase({
                   // here, not held by the focus a phone's browser gives the chip.
                   if (Date.now() - touchedAt.current <= TOUCH_MOUSE_MS) event.currentTarget.blur();
                 }}
-                className={`inline-flex cursor-pointer items-center gap-[5px] rounded-full border leading-snug focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 ${
+                className={`wns-chip inline-flex cursor-pointer items-center gap-[5px] rounded-full border leading-snug focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 ${
                   narrow ? "shrink-0 whitespace-nowrap px-3 py-1.5 text-[12px] pointer-coarse:snap-start pointer-coarse:focus-visible:-outline-offset-2" : "px-[9px] py-1 text-[10.5px]"
                 } ${
                   on ? "border-[#f97316] bg-[#f97316] font-bold text-[#111]" : "border-[#26334a] bg-[#0d1420cc] text-[#8d99ae] hover:text-[#e8edf5]"
@@ -872,7 +877,7 @@ export default function UpdateWhatsNewShowcase({
         </p>
 
       </div>
-      <div className="mt-3">{releaseLink}</div>
+      <div className="wns-more mt-3">{releaseLink}</div>
     </>
   );
 }
