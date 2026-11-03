@@ -124,14 +124,6 @@ export interface LocalAiLongChat {
 export const LLAMACPP_STATUS_ROUTE = "/setup-api/llamacpp/status";
 /** How often a local turn waiting for its first token asks whether llama-server is up. */
 export const LLAMACPP_READY_POLL_MS = 2500;
-/** How long the measure after a shorten may take before its answer counts as unknown. */
-export const SHORTEN_REMEASURE_MS = 15_000;
-
-function bounded<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
-  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
-}
 
 function without<T>(record: Record<string, T>, key: string): Record<string, T> {
   if (!(key in record)) return record;
@@ -319,28 +311,10 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
       timer = setTimeout(() => resolve("timeout"), LOCAL_COMPACTION_DEADLINE_MS);
     });
     void Promise.race([compact(key).then(() => "done" as const), deadline])
-      .then(async (outcome) => {
+      .then((outcome) => {
         if (outcome === "timeout") {
           // A card the owner closed (×, or a new chat) meanwhile stays closed.
           setOffers((prev) => (prev[key] ? { ...prev, [key]: { ...prev[key], kind: "timeout" } } : prev));
-          return;
-        }
-        // A compaction can fold a little and still leave more than the local
-        // model reads (a board: Hermes folded one exchange of seven, 53k → 50k
-        // tokens over its 32k line). Measured again, that is not "shortened for
-        // the local model": the card says it could not be, and keeps the message.
-        // A measure that does not answer in time is unknown, as before.
-        const size = await bounded(
-          opts.adapter.conversationSize?.(key).catch(() => null) ?? Promise.resolve(null),
-          SHORTEN_REMEASURE_MS,
-          null,
-        );
-        const sizeWindow = size?.window ?? optsRef.current.localWindow;
-        if (size && tooLongForLocal(size, sizeWindow)) {
-          const tokens = size.tokens ?? null;
-          const room = size.limit ?? sizeWindow ?? null;
-          if (!fitRef.current.get(key)?.dismissed) fitRef.current.set(key, { long: true, tokens, window: room });
-          setOffers((prev) => (prev[key] ? { ...prev, [key]: { ...prev[key], kind: "failed", tokens, window: room } } : prev));
           return;
         }
         const pending = offersRef.current[key]?.pending ?? null;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { SHORTEN_REMEASURE_MS, useLocalAiLongChat, type LocalAiLongChatOptions } from "@/lib/use-local-ai-long-chat";
+import { useLocalAiLongChat, type LocalAiLongChatOptions } from "@/lib/use-local-ai-long-chat";
 import type { HarnessAdapter } from "@/lib/harness/transport";
 
 /**
@@ -146,26 +146,7 @@ describe("the 90-second bound", () => {
     expect(result.current.shorteningSince).toBe(0);
   });
 
-  it("does not call a conversation shortened that is still too long for the local model, and keeps the message on the card", async () => {
-    // A board: Hermes folded one exchange of seven, 52k → 50k over its 32k line.
-    const adapter = adapterWith(52770, async () => ({ tokensBefore: 52770, tokensAfter: 49726 }));
-    adapter.conversationSize.mockResolvedValue({ tokens: 52770, window: 65536, limit: 32768 });
-    const { result, base } = setup(adapter);
-    await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
-    let held = false;
-    act(() => { held = result.current.admitTurn(KEY, pending); });
-    expect(held).toBe(true);
-
-    adapter.conversationSize.mockResolvedValue({ tokens: 49726, window: 65536, limit: 32768 });
-    await act(async () => { result.current.shorten(); });
-    await waitFor(() => expect(result.current.offer?.kind).toBe("failed"));
-    expect(result.current.offer).toMatchObject({ tokens: 49726, window: 32768, pending: { text: "Колко е 17 × 23?" } });
-    expect(result.current.shorteningSince).toBe(0);
-    expect(base.noteSystem).not.toHaveBeenCalled();
-    expect(base.queueSend).not.toHaveBeenCalled();
-  });
-
-  it("calls it shortened, and sends the waiting message, once it fits", async () => {
+  it("calls a shorten that worked shortened, and sends the waiting message here", async () => {
     const adapter = adapterWith(100460, async () => ({ tokensBefore: 100460, tokensAfter: 9000 }));
     const { result, base } = setup(adapter);
     await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
@@ -176,21 +157,6 @@ describe("the 90-second bound", () => {
     await waitFor(() => expect(base.noteSystem).toHaveBeenCalledWith(KEY, "Conversation shortened for the local model."));
     expect(base.queueSend).toHaveBeenCalledWith(KEY, expect.objectContaining({ text: "Колко е 17 × 23?" }));
     expect(result.current.offer).toBeNull();
-  });
-
-  it("takes the harness's word when the size after a shorten is unknown, or does not come in time", async () => {
-    for (const after of [Promise.resolve(null), new Promise(() => {})]) {
-      const adapter = adapterWith(100460, async () => ({}));
-      const { result, base, unmount } = setup(adapter);
-      await waitFor(() => expect(result.current.offer?.kind).toBe("fit"));
-      adapter.conversationSize.mockReturnValue(after);
-      await act(async () => { result.current.shorten(); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(SHORTEN_REMEASURE_MS + 500); });
-      await waitFor(() => expect(base.noteSystem).toHaveBeenCalledWith(KEY, "Conversation shortened for the local model."));
-      expect(result.current.offer).toBeNull();
-      expect(result.current.shorteningSince).toBe(0);
-      unmount();
-    }
   });
 
   it("does not bring back a card the owner closed while the shorten ran past the bound", async () => {
