@@ -598,9 +598,9 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     "Check whether a newer ClawBox version is available and report the installed one. Only reports, never installs; if an update is waiting, offer update_run (the owner confirms with a button). If `remote.reachable` is false the device could not reach GitHub for this check, so say the check failed and quote `remote.reason` — do NOT report the device as up to date.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, profile: "core" },
-    // Shaped, not raw: the route always carries an `openclaw` component and
-    // fills its target from the ClawBox pin, so the raw payload names an
-    // OpenClaw version for a device that ships no OpenClaw. Same strip
+    // Shaped, not raw: the route always carries an `openclaw` component — on a
+    // device that ships no OpenClaw an empty one now, where it used to name the
+    // ClawBox pin — and that block is about nothing this device has. Same strip
     // device_status applies to the same payload — see mcp/lib/versions.ts.
     async () =>
       json(

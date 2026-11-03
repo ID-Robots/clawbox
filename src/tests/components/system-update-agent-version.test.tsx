@@ -19,8 +19,11 @@ function jsonResponse(body: unknown): Response {
 const clawbox = { current: "4.0.0", target: null, updateAvailable: false };
 
 /**
- * What `getVersionInfo()` really answers, per SKU — the SHAPES, not tidied
- * ones. `openclaw.current` is `openclaw --version` stdout, banner and all (the
+ * What `getVersionInfo()` answers, per SKU — the SHAPES, not tidied ones. On
+ * the Hermes SKU the OpenClaw component keeps the pin as its target, as older
+ * servers sent it: the rows must follow the edition, never rest on the
+ * producer having emptied that component (it does now).
+ * `openclaw.current` is `openclaw --version` stdout, banner and all (the
  * same fixture the About suite uses); `hermes.current` has already been through
  * `parseHermesVersion` server-side, which is why it must not be parsed again
  * here.

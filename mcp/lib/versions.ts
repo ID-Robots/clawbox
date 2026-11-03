@@ -4,13 +4,15 @@
  *
  * Two tools read that route — `update_check` (mcp/tools/system.ts) and
  * `device_status` (mcp/tools/orientation.ts). TASK-543 was the two of them
- * answering differently: `getVersionInfo()` fills `openclaw.target` from the
- * ClawBox pin even where `openclaw.current` is null, so the raw payload offers
- * a Hermes box an OpenClaw version to converge on for a harness it does not
- * ship. One predicate here, imported by both, so those two cannot diverge
- * again. The same rule is written out once more for the browser in
- * `SettingsApp.tsx`'s About panel (a client component, which cannot import the
- * fs-backed edition modules) — that is the prior art this matches.
+ * answering differently: `getVersionInfo()` filled `openclaw.target` from the
+ * ClawBox pin even where `openclaw.current` was null, so the raw payload
+ * offered a Hermes box an OpenClaw version to converge on for a harness it does
+ * not ship. (On the Hermes edition that component is empty now — no version,
+ * no target; this stays the gate, failing closed on an unreadable lock.) One
+ * predicate here, imported by both, so those two cannot diverge again. The same rule is
+ * written out once more for the browser as `shipsOpenclaw` in
+ * `src/lib/version-utils.ts` (the browser cannot import the fs-backed edition
+ * modules) — that is the prior art this matches.
  */
 
 import type { McpContext } from "./context";
