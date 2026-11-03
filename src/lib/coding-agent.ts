@@ -271,7 +271,7 @@ import {
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
-import { nearestFull, usageForModel } from "@/lib/anthropic-usage";
+import { modelWeekOf, nearestFull, usageForModel } from "@/lib/anthropic-usage";
 import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
@@ -11255,8 +11255,8 @@ async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promi
       found.until = at(near.window.resetsAt, found.until);
     }
   } else if (found.limit.resetsAt === null) {
-    // The words named the model; Anthropic gives its week's reset.
-    const week = (reading.models ?? []).find((w) => w.family === found.limit.model);
+    // The words named the model; Anthropic gives its week's reset (none of its weeks is spent here: the fullest).
+    const week = modelWeekOf(reading, found.limit.model);
     if (week) {
       found.weekName = week.name;
       found.until = at(week.resetsAt, found.until);

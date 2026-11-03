@@ -223,7 +223,6 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
   function boxWithRefusedFetch(): void {
     install({
       "fetch --quiet origin beta": new Error(ANON_REFUSAL),
-      "fetch --quiet --tags origin": new Error(ANON_REFUSAL),
       "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\n", stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -257,7 +256,6 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
   it("reports a reachable remote on a box whose fetch succeeds", async () => {
     install({
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\n", stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -295,7 +293,6 @@ describe("a box whose origin is not the update repository is not 'up to date'", 
       "remote get-url origin": { stdout: `${BUNDLE}\n`, stderr: "" },
       // A bundle answers all of these, and answers them fast.
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
       // The bundle cannot be ahead of the box: it was cut from this commit.
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
@@ -348,7 +345,6 @@ describe("a box whose origin is not the update repository is not 'up to date'", 
     install({
       "remote get-url origin": { stdout: `${origin}\n`, stderr: "" },
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -374,7 +370,6 @@ describe("a pinned branch the box could not resolve is not 'up to date'", () => 
     install({
       "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": new Error(
@@ -399,7 +394,6 @@ describe("a pinned branch the box could not resolve is not 'up to date'", () => 
     install({
       "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
       "rev-parse HEAD": { stdout: "\n", stderr: "" },
       "rev-parse origin/beta": { stdout: "\n", stderr: "" },
@@ -427,7 +421,6 @@ describe("a box with no update branch to compare against is not 'up to date'", (
   function boxWithNoPin(pin: Result | Error): void {
     install({
       "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       openclaw: { stdout: "1.0.0", stderr: "" },
@@ -490,7 +483,6 @@ describe("a box with NO recorded update branch still sees its releases (TASK-121
   }): void {
     install({
       "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       [`fetch --quiet origin ${opts.checkout}`]: { stdout: "", stderr: "" },
       "ls-remote": { stdout: opts.tags.map((t) => `${SHA}\trefs/tags/${t}\n`).join(""), stderr: "" },
       "symbolic-ref --short HEAD": { stdout: `${opts.checkout}\n`, stderr: "" },
@@ -622,15 +614,14 @@ describe("a retry delay an operator got wrong", () => {
 describe("the call the answer depends on is the one that is retried", () => {
   /**
    * `ls-remote` is the AUTHORITATIVE half of the version check: the tag list is
-   * read from origin's answer, not from the local refs the tag fetch updates.
-   * It got one attempt while the advisory fetch above it got two, so a single
+   * read from origin's answer, never from local tag refs. It once got one
+   * attempt while an advisory tag fetch in front of it got two, so a single
    * refused `ls-remote` made every surface say "couldn't reach the update
    * server" — and `TARGET_VERSION_CACHE_TTL` kept that answer for 60 s.
    */
   it("retries a refused ls-remote instead of reporting no target version", async () => {
     install({
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": [new Error(ANON_REFUSAL), { stdout: `${SHA}\trefs/tags/v1.2.3\n`, stderr: "" }],
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -644,13 +635,20 @@ describe("the call the answer depends on is the one that is retried", () => {
     expect(countArgv("ls-remote")).toBe(2);
   });
 
-  it("spends the retry on ls-remote rather than on the advisory tag fetch", async () => {
-    // The anonymous allowance is what is being refused, so the budget stays
-    // where it was: the discarded call asks once, the one the answer is read
-    // from asks twice.
+  it("spends no request on a tag fetch whose answer nothing reads", async () => {
+    // Measured 2026-11-03 on the e2e-install box: the advisory
+    // `git fetch --tags origin` (every branch and every tag's history) ran
+    // into its 20 s timeout on a slow link to GitHub, /setup-api/update/status
+    // answered after 28 s, and the setup wizard sat on "Checking for
+    // updates..." for all of it. The tags come from ls-remote; a tag fetch
+    // that would hang again must not even be asked.
+    const killedByTimeout = Object.assign(new Error("Command failed: git fetch --quiet --tags origin"), {
+      killed: true,
+      signal: "SIGTERM",
+    });
     install({
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": new Error(ANON_REFUSAL),
+      "fetch --quiet --tags origin": killedByTimeout,
       "ls-remote": { stdout: `${SHA}\trefs/tags/v1.2.3\n`, stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -658,17 +656,20 @@ describe("the call the answer depends on is the one that is retried", () => {
     });
     const updater = await import("@/lib/updater");
 
-    const target = await updater.getTargetVersion();
+    const info = await updater.getVersionInfo();
 
-    expect(target).toBe("v1.2.3");
-    expect(countArgv("fetch --quiet --tags origin")).toBe(1);
+    expect(info.remote?.reachable).toBe(true);
+    expect(await updater.getTargetVersion()).toBe("v1.2.3");
+    expect(argvLog.filter((line) => / fetch /.test(line) && line.includes("--tags"))).toEqual([]);
+    // Exactly the two requests whose answers the check reads.
     expect(countArgv("ls-remote")).toBe(1);
+    expect(argvLog.filter((line) => / fetch /.test(line))).toHaveLength(1);
+    expect(countArgv("fetch --quiet origin beta")).toBe(1);
   });
 
   it("still says the remote is unreachable when every ls-remote is refused", async () => {
     install({
       "fetch --quiet origin beta": { stdout: "", stderr: "" },
-      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
       "ls-remote": new Error(ANON_REFUSAL),
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -773,7 +774,6 @@ describe("what the refusal is called", () => {
     it(`calls ${name} what it is`, async () => {
       install({
         "fetch --quiet origin beta": new Error(gitSays),
-        "fetch --quiet --tags origin": new Error(gitSays),
         "ls-remote": new Error(gitSays),
         "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
         "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
@@ -795,7 +795,6 @@ describe("what the refusal is called", () => {
     // making too many anonymous requests, so a blanket retry feeds it.
     install({
       "fetch --quiet origin beta": new Error("fatal: unable to access 'https://github.com/': Could not resolve host: github.com"),
-      "fetch --quiet --tags origin": new Error("fatal: unable to access 'https://github.com/': Could not resolve host: github.com"),
       "ls-remote": new Error("Could not resolve host: github.com"),
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },

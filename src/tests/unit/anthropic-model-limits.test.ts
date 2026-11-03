@@ -38,8 +38,9 @@ function answer(week: number, fable: number | null): Record<string, unknown> {
     seven_day_opus: null,
     seven_day_sonnet: null,
     limits: [
-      { kind: "weekly_all", group: "weekly", percent: week, severity: "normal", resets_at: resets, scope: null, is_active: true },
-      { kind: "weekly_scoped", group: "weekly", percent: fable ?? 0, severity: "normal", resets_at: new Date(Date.now() + 50 * H).toISOString(), scope: { model: { id: null, display_name: "Fable" } }, is_active: fable !== null },
+      // `is_active` is the server's headline pick, on the fuller meter; null: the plan has no Fable week.
+      { kind: "weekly_all", group: "weekly", percent: week, severity: "normal", resets_at: resets, scope: null, is_active: fable === null || week >= fable },
+      ...(fable === null ? [] : [{ kind: "weekly_scoped", group: "weekly", percent: fable, severity: "normal", resets_at: new Date(Date.now() + 50 * H).toISOString(), scope: { model: { id: null, display_name: "Fable" } }, is_active: fable > week }]),
     ],
     weekly_scoped_shares: [{ limit_index: 1, used_percent_of_weekly: 17, allowance_percent_of_weekly: 50 }],
     extra_usage: { is_enabled: false, spend_limit_reached: false },
@@ -193,8 +194,8 @@ describe("\"most room\" on the meters of 2026-11", () => {
 });
 
 describe("the owner's view of each account's usage", () => {
-  it("says the weekly percent and the ACTIVE model weeks from Anthropic's answer, and never calls the account limited for a model week", async () => {
-    const asked = usage({ "sk-ant-oat01-a": answer(56, 100), "sk-ant-oat01-b": answer(56, null) });
+  it("says the weekly percent and every model week from Anthropic's answer, and never calls the account limited for a model week", async () => {
+    const asked = usage({ "sk-ant-oat01-a": answer(56, 100), "sk-ant-oat01-b": answer(56, 34) });
     const { a, b } = await twoAccounts();
     expect((await pool.describePool()).accounts.every((x) => x.usage === null)).toBe(true);
     expect(asked).toEqual([]);
@@ -204,8 +205,8 @@ describe("the owner's view of each account's usage", () => {
     const first = view.accounts.find((x) => x.id === a.id);
     expect(first?.status).toBe("ok");
     expect(first?.usage).toMatchObject({ sessionPercent: null, weeklyPercent: 56, models: [{ name: "Fable", family: "fable", percent: 100, spent: true }], extraUsage: { enabled: false, spendLimitReached: false } });
-    // B's Fable week is inactive: not shown.
-    expect(view.accounts.find((x) => x.id === b.id)?.usage).toMatchObject({ weeklyPercent: 56, models: [] });
+    // B's Fable week is not the headline (`is_active: false`): still B's week for Fable runs, and shown.
+    expect(view.accounts.find((x) => x.id === b.id)?.usage).toMatchObject({ weeklyPercent: 56, models: [{ name: "Fable", family: "fable", percent: 34, spent: false }] });
     expect(view.health).toMatchObject({ healthy: 2, limited: 0, allLimited: false });
 
     // Asked once per ten minutes, not per view.

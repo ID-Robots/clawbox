@@ -255,7 +255,7 @@ describe("anthropic_accounts on the meters of 2026-11 (TASK-2141)", () => {
   const FABLE_RESET = Date.UTC(2026, 10, 8, 17, 0);
   const WEEK_RESET = Date.UTC(2026, 10, 9, 8, 0);
 
-  it("asks the route for Anthropic's percents and says each account's week, its active model weeks, and which model's runs wait — never calling the account limited for a model week", async () => {
+  it("asks the route for Anthropic's percents and says each account's week, its model weeks, and which model's runs wait — never calling the account limited for a model week", async () => {
     apiGet.mockResolvedValue(pool([
       account({
         id: "a",
@@ -287,6 +287,32 @@ describe("anthropic_accounts on the meters of 2026-11 (TASK-2141)", () => {
     });
     expect(body.accounts[1]).toMatchObject({ status: "can answer", session_used: "12%", week_used: "30%" });
     expect(body.accounts[1].model_weeks).toBeUndefined();
+  });
+
+  it("keeps the advice and the last move when a full pool outgrows the answer's cap — the accounts are what is cut", async () => {
+    // Eight accounts (MAX_ANTHROPIC_ACCOUNTS), every one at its week, each with
+    // its Fable week: an answer past the tool's 3,000 characters, cut from the end.
+    const full = pool(Array.from({ length: 8 }, (_, i) => account({
+      id: `acct-${i}`,
+      label: `Team account ${i + 1}`,
+      priority: i + 1,
+      status: "limited",
+      limitedUntil: WEEK_RESET + i * 60_000,
+      limitKind: "weekly",
+      modelLimits: [{ family: "fable", name: "Fable", until: FABLE_RESET }],
+      usage: { at: NOW, sessionPercent: null, weeklyPercent: 100, weeklyResetsAt: WEEK_RESET, models: [{ name: "Fable", family: "fable", percent: 100, resetsAt: FABLE_RESET, spent: true }], extraUsage: { enabled: false, spendLimitReached: true } },
+    })));
+    full.lastSwap = {
+      id: "swap-1", at: NOW, fromId: "acct-0", fromLabel: "Team account 1", toId: null, toLabel: null,
+      cause: "limit", source: "coding", limitKind: "weekly", limitedUntil: WEEK_RESET, nextResetAt: WEEK_RESET,
+    } as unknown as AnthropicPoolView["lastSwap"];
+    apiGet.mockResolvedValue(full);
+    const out = await harness("openclaw").call("anthropic_accounts", {});
+    if (out.isError) throw new Error("expected an answer");
+    expect(out.text).toContain("…[truncated,"); // the cap did bite
+    expect(out.text).toContain("Do not start or retry Anthropic runs before it.");
+    expect(out.text).toContain('"last_swap"');
+    expect(out.text.indexOf('"advice"')).toBeLessThan(out.text.indexOf('"accounts"'));
   });
 
   it("says nothing about usage an older server did not answer", async () => {
