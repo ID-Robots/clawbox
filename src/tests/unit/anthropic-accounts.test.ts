@@ -624,6 +624,56 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     expect((await pool.readAccounts())[0].status).toBe("revoked");
   });
 
+  it("asks once for an account however many callers ask together, and every one gets that answer (TASK-2139)", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("stale-access", 8 * 3_600_000) });
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return new Response(JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const answers = await Promise.all([1, 2, 3].map(() => pool.probeAccountCredential(account.id, async () => "ok", {}, "stale-access")));
+    expect(answers).toEqual(["ok", "ok", "ok"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Done asking: the next caller is asked afresh, not handed the old answer.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{\"error\":\"invalid_grant\"}", { status: 400 })));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", {}, "fresh-access")).toBe("dead");
+  });
+
+  it("renews nothing when the store already holds a fresher token than the refused one", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("renewed-access", 8 * 3_600_000) });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", {}, "refused-access")).toBe("ok");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "renewed-access" });
+  });
+
+  it("checks no key when the owner has put another one in since the refused one was handed out", async () => {
+    const account = await pool.addApiKeyAccount({ label: "Key", key: SECOND_KEY });
+    const verify = vi.fn(async () => "rejected" as const);
+    expect(await pool.probeAccountCredential(account.id, verify, {}, LEGACY_KEY)).toBe("ok");
+    expect(verify).not.toHaveBeenCalled();
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
+  it("names the run that joined a probe another consumer started on the mark it comes to", async () => {
+    const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("dead-access", 8 * 3_600_000) });
+    await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access", 8 * 3_600_000) });
+    const changes: { source?: string; runId?: string | null }[] = [];
+    pool.onActiveChange((change) => changes.push(change));
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return new Response("{\"error\":\"invalid_grant\"}", { status: 400 });
+    }));
+    const answers = await Promise.all([
+      pool.probeAccountCredential(work.id, async () => "ok", { source: "chat" }),
+      pool.probeAccountCredential(work.id, async () => "ok", { source: "coding", runId: "run-joined" }),
+    ]);
+    expect(answers).toEqual(["dead", "dead"]);
+    // The swap counts the run it names as moved (applyCodingSwap).
+    await vi.waitFor(() => expect(changes).toEqual([expect.objectContaining({ cause: "auth", source: "coding", runId: "run-joined" })]));
+  });
+
   it("takes the Terminal sign-in out until the owner signs in again", async () => {
     signInWithClaude();
     const [login] = await pool.readAccounts();
@@ -634,6 +684,35 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     const later = new Date(Date.now() + 5_000);
     fs.utimesSync(credentials, later, later);
     expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+});
+
+describe("going back on the account a run was refused on (TASK-2139)", () => {
+  const tokens = (access: string) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + 8 * 3_600_000 });
+
+  it("hands out the preferred account ahead of the active one", async () => {
+    await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work-access") });
+    const personal = await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access") });
+    const { prepared } = await pool.prepareAccount({ prefer: { id: personal.id, refused: "personal-old" } });
+    expect(prepared).toMatchObject({ account: { id: personal.id }, credential: { secret: "personal-access" } });
+  });
+
+  it("never hands out the credential the run was refused with: the next account in the order instead", async () => {
+    const work = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const personal = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const { prepared } = await pool.prepareAccount({ prefer: { id: work.id, refused: LEGACY_KEY } });
+    expect(prepared).toMatchObject({ account: { id: personal.id }, credential: { secret: SECOND_KEY } });
+    // Nothing else to go to: nothing is handed out rather than the refused copy.
+    expect((await pool.prepareAccount({ prefer: { id: work.id, refused: LEGACY_KEY }, exclude: new Set([personal.id]) })).prepared).toBeNull();
+    // Passed over, not marked.
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+  });
+
+  it("skips an excluded preferred account", async () => {
+    const work = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const personal = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const { prepared } = await pool.prepareAccount({ prefer: { id: work.id, refused: null }, exclude: new Set([work.id]) });
+    expect(prepared?.account.id).toBe(personal.id);
   });
 });
 

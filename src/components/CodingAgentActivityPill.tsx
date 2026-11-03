@@ -8,6 +8,7 @@ import { describeProgressLine, estimateRunProgress, type ProgressDescription, ty
 import { taskTitle } from "@/lib/task-title";
 import { runModelId } from "@/lib/coding-model-names";
 import { notifyCodingRunStarted } from "@/lib/ui-events";
+import { boxNowMs } from "@/lib/box-clock";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 import { RunModelChip } from "./CodingModelChip";
 
@@ -403,12 +404,13 @@ export default function CodingAgentActivityPill(
   // says which step, and the run's id, instead of a progress it has none of.
   const startStep = live ? (run.startStep ?? null) : null;
   const startFailed = status === "failed" && run.announced === true;
-  // A queued run's clock runs too: it is time the owner is waiting.
+  // A queued run's clock runs too: it is time the owner is waiting. It is the
+  // box's clock (src/lib/box-clock.ts), as the run's start is stamped on it.
   const ticking = live || status === "queued";
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState(() => boxNowMs());
   useEffect(() => {
     if (!ticking) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(boxNowMs()), 1000);
     return () => clearInterval(id);
   }, [ticking]);
   const [expanded, setExpanded] = useState(false);

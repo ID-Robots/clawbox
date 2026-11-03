@@ -19,6 +19,7 @@ import {
   visibleBackgroundTasks,
   type BackgroundTaskView,
 } from "@/lib/background-task-client";
+import { _resetBoxClockForTests } from "@/lib/box-clock";
 
 function task(over: Partial<BackgroundTaskView> = {}): BackgroundTaskView {
   return {
@@ -243,5 +244,29 @@ describe("Cancel on the corner card", () => {
     const stale = task({ id: "s", state: "cancelled", finishedAt: now - 11 * 60_000 });
     const failed = task({ id: "f", state: "failed", finishedAt: now - 11 * 60_000, error: "boom" });
     expect(visibleBackgroundTasks([cancelled, stale, failed], now).map((t) => t.id)).toEqual(["c", "f"]);
+  });
+});
+
+describe("the success card on a browser whose clock is off the box's", () => {
+  afterEach(() => {
+    _resetBoxClockForTests();
+  });
+
+  it("keeps a success the box just finished up for its 30 s, with the browser two minutes ahead", async () => {
+    // On the browser's clock the box's `finishedAt` was already two minutes
+    // old, so its 30 s timer ran out the moment the card arrived.
+    const skewMs = -2 * 60_000;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return new Response("{}");
+      const boxNow = Date.now() + skewMs;
+      const done = task({ state: "succeeded", finishedAt: boxNow - 1_000, result: { status: "Speech on this box is installed." } });
+      return new Response(JSON.stringify({ tasks: [done] }), { headers: { date: new Date(boxNow).toUTCString() } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useBackgroundTasks(true));
+    await waitFor(() => expect(result.current.tasks).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(result.current.tasks).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 });
