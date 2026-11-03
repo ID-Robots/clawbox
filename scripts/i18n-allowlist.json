@@ -135,6 +135,10 @@
     { "key": "tray.internet", "locales": ["de", "es", "fr", "it", "nl", "sv"], "reason": "\"Internet\" is the same word, and \"ms\" is a unit." },
     { "key": "update.agent", "locales": ["de", "fr", "nl", "sv"], "reason": "\"Agent\" is the same word in these languages." },
     { "key": "update.badgeUpdate", "locales": ["de"], "reason": "\"UPDATE\" is the loanword German uses on the badge." },
+    { "key": "update.showcase.chipGrok", "locales": "*", "reason": "xAI Grok is the product name." },
+    { "key": "update.showcase.chipPrimeRadiant", "locales": "*", "reason": "Prime Radiant is the app's name." },
+    { "key": "update.showcase.cursorAssistant", "locales": ["fr"], "reason": "\"Assistant\" is the French word." },
+    { "key": "update.showcase.linkPassword", "locales": ["it"], "reason": "\"Password\" is the word Italian uses." },
     { "key": "updateNotification.later", "locales": ["nl"], "reason": "\"Later\" is the Dutch word." },
     { "key": "wifi.ethernet", "locales": "*", "reason": "Ethernet is a standard's name." },
     { "key": "wifi.password", "locales": ["it"], "reason": "Italian uses \"Password\"." }

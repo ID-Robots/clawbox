@@ -1,0 +1,691 @@
+"use client";
+
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type ReactNode } from "react";
+
+/** The panel's `tr`: the catalogue's text, else the English floor — never the raw key. */
+export type Floor = (key: string, english: string, params?: Record<string, string>) => string;
+
+/** One highlight of the release, already in the owner's language. */
+export interface ShowcaseItem {
+  /** The catalogue's title key: what picks the feature's live demo. */
+  key: string;
+  title: string;
+  body: string;
+  /** The full-resolution screenshot (`fullImage`, 16:10) from public/. */
+  image: string;
+}
+
+/** How long one feature stays on screen before the next. */
+export const SHOWCASE_ADVANCE_MS = 7500;
+/** One letter of the title per this many ms. */
+export const SHOWCASE_TYPE_MS = 34;
+/** The live demo's timeline, the keyframes' `7s`: it settles before the next feature comes. */
+const DEMO_MS = 7000;
+
+/*
+ * Inline SVG only: this panel stays on screen while the box restarts, and an
+ * icon font it had not loaded before the server went down could not be
+ * fetched then (a ligature without its font draws its literal name).
+ */
+function Glyph({ children }: { children: ReactNode }) {
+  return (
+    <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
+      {children}
+    </svg>
+  );
+}
+
+const ICONS = {
+  shot: <Glyph><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></Glyph>,
+  browser: <Glyph><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></Glyph>,
+  link: <Glyph><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" /><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" /></Glyph>,
+  grok: <Glyph><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" /></Glyph>,
+  talk: <Glyph><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></Glyph>,
+  chart: <Glyph><rect x="9" y="3" width="6" height="5" rx="1" /><rect x="3" y="16" width="6" height="5" rx="1" /><rect x="15" y="16" width="6" height="5" rx="1" /><path d="M12 8v4M6 16v-2h12v2" /></Glyph>,
+  wiki: <Glyph><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM8 7h7M8 11h5" /></Glyph>,
+  sparkle: <Glyph><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" /></Glyph>,
+  speaker: <Glyph><path d="M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" /></Glyph>,
+  chat: <Glyph><path d="M4 5h16v11H9l-5 4z" /></Glyph>,
+};
+
+/* ── prefers-reduced-motion, live ──────────────────────────────────────── */
+
+const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
+
+function reducedMotionQuery(): MediaQueryList | null {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
+  return window.matchMedia(REDUCED_MOTION) ?? null;
+}
+
+function subscribeReducedMotion(onChange: () => void) {
+  const query = reducedMotionQuery();
+  query?.addEventListener?.("change", onChange);
+  return () => query?.removeEventListener?.("change", onChange);
+}
+
+function usePrefersReducedMotion(): boolean {
+  return useSyncExternalStore(subscribeReducedMotion, () => reducedMotionQuery()?.matches === true, () => false);
+}
+
+/** How many of `at` (ms since mount) have passed; all of them with motion off. */
+function useSteps(at: readonly number[], reduced: boolean): number {
+  const [passed, setPassed] = useState(0);
+  useEffect(() => {
+    if (reduced) return;
+    const timers = at.map((ms, index) => setTimeout(() => setPassed(index + 1), ms));
+    return () => timers.forEach(clearTimeout);
+  }, [at, reduced]);
+  return reduced ? at.length : passed;
+}
+
+/** Letters of a `length`-letter text typed so far: one per `perMs`, from `startMs`; all of it with motion off. */
+function useTyping(length: number, startMs: number, perMs: number, reduced: boolean): number {
+  const [typed, setTyped] = useState(0);
+  useEffect(() => {
+    if (reduced || length === 0) return;
+    let interval: ReturnType<typeof setInterval> | undefined;
+    let count = 0;
+    const start = setTimeout(() => {
+      interval = setInterval(() => {
+        count += 1;
+        setTyped(count);
+        if (count >= length) clearInterval(interval);
+      }, perMs);
+    }, startMs);
+    return () => {
+      clearTimeout(start);
+      clearInterval(interval);
+    };
+  }, [length, startMs, perMs, reduced]);
+  return reduced ? length : Math.min(typed, length);
+}
+
+/* ── the live demos, in the screenshot's own % space ───────────────────── */
+
+interface DemoProps {
+  tr: Floor;
+  reduced: boolean;
+}
+
+function Cursor({ className = "", color = "#fff", label, light = false }: { className?: string; color?: string; label?: string; light?: boolean }) {
+  return (
+    <div className={`wns-o wns-cur ${className}`}>
+      <svg viewBox="0 0 12 19" aria-hidden="true">
+        <path d="M0 0v16.5l4-3.8 2.6 6 2.6-1.1-2.6-5.9H12z" fill={color} stroke="#000" strokeWidth=".8" />
+      </svg>
+      {label && <span className={`wns-tag${light ? " wns-tag-w" : ""}`}>{label}</span>}
+    </div>
+  );
+}
+
+/** Screenshot: click Region, drag a region with its size, flash, saved. */
+function ShotCam() {
+  return (
+    <>
+      <div className="wns-o wns-dim" />
+      <div className="wns-o wns-sel" />
+      <div className="wns-o wns-sz">1040 × 504</div>
+      <div className="wns-o wns-rip" />
+      <Cursor />
+      <div className="wns-o wns-flash" />
+    </>
+  );
+}
+
+function ShotFrame({ tr }: DemoProps) {
+  return (
+    <div className="wns-o wns-toast">
+      <b>✓ {tr("update.showcase.shotSaved", "Screenshot saved")}</b>
+      <small>{tr("update.showcase.shotPath", "Files › Screenshots › Screenshot 2026-11-03 09-41-12.png")}</small>
+    </div>
+  );
+}
+
+/** Agent Browser: the assistant's cursor types in the docs search while yours watches. */
+function BrowserCam({ tr, reduced }: DemoProps) {
+  const query = Array.from(tr("update.showcase.browserQuery", "switching editions"));
+  // Typed between 24% and 52% of the demo, as the box it types in comes up.
+  const typed = useTyping(query.length, DEMO_MS * 0.24, (DEMO_MS * 0.28) / Math.max(1, query.length), reduced);
+  return (
+    <>
+      <div className="wns-o wns-live" />
+      <div className="wns-o wns-typed"><span>{query.slice(0, typed).join("")}</span></div>
+      <div className="wns-o wns-ring" />
+      <Cursor className="wns-cur-a" color="#f97316" label={tr("update.showcase.cursorAssistant", "Assistant")} />
+      <Cursor className="wns-cur-y" label={tr("update.showcase.cursorYou", "You")} light />
+    </>
+  );
+}
+
+/** Public link: click "Create public link", the link's dialog, "Copied". */
+function LinkCam() {
+  return (
+    <>
+      <div className="wns-o wns-ring" />
+      <div className="wns-o wns-rip" />
+      <Cursor className="wns-cur-1" />
+      <Cursor className="wns-cur-2" />
+    </>
+  );
+}
+
+const COPIED_AT = [DEMO_MS * 0.75];
+
+function LinkFrame({ tr, reduced }: DemoProps) {
+  const copied = useSteps(COPIED_AT, reduced) > 0;
+  return (
+    <div className="wns-o wns-toast">
+      <b>{ICONS.browser} {tr("update.showcase.linkTitle", "Public link for {app}", { app: "Recipe Book" })}</b>
+      <small>{tr("update.showcase.linkNote", "Anyone with the link reaches only this app.")}</small>
+      <div className="wns-urlp">
+        https://jade-swan.clawbox.tech/a/recipe-book
+        <span className="wns-copy">{copied ? `✓ ${tr("update.showcase.linkCopied", "Copied")}` : tr("update.showcase.linkCopy", "Copy")}</span>
+      </div>
+      <div className="wns-row"><span>{tr("update.showcase.linkExpires", "Expires")}</span><b>{tr("update.showcase.linkExpiresIn", "in 7 days")}</b></div>
+      <div className="wns-row"><span>{tr("update.showcase.linkPassword", "Password")}</span><b>{tr("update.showcase.linkPasswordOn", "On")}</b></div>
+    </div>
+  );
+}
+
+/** Model picker: the highlight walks down to xAI Grok, no restart. */
+function GrokCam() {
+  return (
+    <>
+      <div className="wns-o wns-hl" />
+      <div className="wns-o wns-rip" />
+      <Cursor />
+    </>
+  );
+}
+
+function GrokFrame({ tr }: DemoProps) {
+  return (
+    <div className="wns-o wns-toast">
+      <b>✓ {tr("update.showcase.grokSwitched", "Switched to xAI Grok")}</b>
+      <small>{tr("update.showcase.grokNoRestart", "No restart — the chat carries on.")}</small>
+    </div>
+  );
+}
+
+/** Hold to talk: F8 held, the waveform, a ticking timer. */
+const RECORDING_TICKS = [DEMO_MS * 0.25, DEMO_MS * 0.45, DEMO_MS * 0.65];
+
+function TalkCam({ tr, reduced }: DemoProps) {
+  const seconds = 1 + useSteps(RECORDING_TICKS, reduced);
+  return (
+    <>
+      <div className="wns-o wns-tm"><span>{tr("update.showcase.talkRecording", "Recording {time}", { time: `0:0${seconds}` })}</span></div>
+      <div className="wns-o wns-wave">{Array.from({ length: 18 }, (_, index) => <i key={index} />)}</div>
+      <div className="wns-o wns-mic" />
+    </>
+  );
+}
+
+function TalkFrame({ tr }: DemoProps) {
+  return (
+    <>
+      <div className="wns-o wns-key">
+        <span className="wns-kbd">F8</span> <span className="wns-hint">{tr("update.showcase.talkHint", "hold to talk · release to send")}</span>
+      </div>
+      <div className="wns-o wns-toast">
+        <b>{ICONS.speaker} {tr("update.showcase.talkReadAloud", "Replies read aloud")}</b>
+        <small>{tr("update.showcase.talkReadAloudNote", "Settings → Voice · several times smaller downloads")}</small>
+      </div>
+    </>
+  );
+}
+
+/** Coding Agent: helpers at work, the tester finishes, the counters and the clock move. */
+const CHART_TICKS = [0.14, 0.28, 0.42, 0.57, 0.71, 0.85, 1].map((share) => DEMO_MS * share);
+
+function ChartCam({ tr, reduced }: DemoProps) {
+  const seconds = 3 + useSteps(CHART_TICKS, reduced);
+  return (
+    <>
+      <div className="wns-o wns-flow" />
+      <div className="wns-o wns-spin wns-s1" />
+      <div className="wns-o wns-spin wns-s2" />
+      <div className="wns-o wns-spin wns-s3" />
+      <div className="wns-o wns-done3">✓</div>
+      <div className="wns-o wns-tmr">{tr("update.showcase.chartElapsed", "{minutes}m {seconds}s", { minutes: "4", seconds: String(seconds) })}</div>
+      <div className="wns-o wns-cn">
+        <span>◌ {tr("update.showcase.chartWorking", "Working")} <b>2</b></span>
+        <span>✓ {tr("update.showcase.chartDone", "Done")} <b>3</b></span>
+      </div>
+    </>
+  );
+}
+
+function ChartFrame({ tr }: DemoProps) {
+  return (
+    <div className="wns-o wns-toast">
+      <b>{ICONS.chat} {tr("update.showcase.chartMessage", "Message the run")}</b>
+      <small>{tr("update.showcase.chartMessageText", "“Use the same card style as the home page.”")}</small>
+    </div>
+  );
+}
+
+/** Prime Radiant: facts land, their confidence fills, one is stamped verified. */
+function WikiCam({ tr }: DemoProps) {
+  return (
+    <>
+      <div className="wns-o wns-cover wns-c1" />
+      <div className="wns-o wns-cover wns-c2" />
+      <div className="wns-o wns-cover wns-c3" />
+      <div className="wns-o wns-bar wns-b1"><i /></div>
+      <div className="wns-o wns-bar wns-b2"><i /></div>
+      <div className="wns-o wns-bar wns-b3"><i /></div>
+      <div className="wns-o wns-ring" />
+      <div className="wns-o wns-ver"><span>✓ {tr("update.showcase.wikiVerified", "Verified")}</span></div>
+      <div className="wns-o wns-cnt"><span>1</span></div>
+    </>
+  );
+}
+
+interface Feature {
+  /** The CSS scene: `wns-<id>` binds the camera and the demo's keyframes. */
+  id: string;
+  /** The background glow while this feature is on. */
+  glow: string;
+  chip: [key: string, english: string] | null;
+  icon: ReactNode;
+  /** Drawn inside the camera, so it zooms with the screenshot. */
+  Cam?: (props: DemoProps) => ReactNode;
+  /** Drawn over the frame, at a size the zoom does not change. */
+  Frame?: (props: DemoProps) => ReactNode;
+}
+
+/** The demo of each catalogue highlight, keyed by its title key. */
+export const SHOWCASE_FEATURES: Readonly<Record<string, Feature>> = {
+  "whatsNew.screenshotTitle": { id: "shot", glow: "#f97316", chip: ["update.showcase.chipScreenshot", "Screenshots"], icon: ICONS.shot, Cam: ShotCam, Frame: ShotFrame },
+  "whatsNew.sharedBrowserTitle": { id: "br", glow: "#2dd4bf", chip: ["update.showcase.chipBrowser", "One browser for you"], icon: ICONS.browser, Cam: BrowserCam },
+  "whatsNew.publicLinksTitle": { id: "link", glow: "#38bdf8", chip: ["update.showcase.chipPublicLink", "Share an app with a public link"], icon: ICONS.link, Cam: LinkCam, Frame: LinkFrame },
+  "whatsNew.grokTitle": { id: "grok", glow: "#a78bfa", chip: ["update.showcase.chipGrok", "xAI Grok"], icon: ICONS.grok, Cam: GrokCam, Frame: GrokFrame },
+  "whatsNew.holdToTalkTitle": { id: "talk", glow: "#ef4444", chip: ["update.showcase.chipHoldToTalk", "Hold to talk"], icon: ICONS.talk, Cam: TalkCam, Frame: TalkFrame },
+  "whatsNew.agentChartTitle": { id: "chart", glow: "#f59e0b", chip: ["update.showcase.chipCodingAgent", "The Coding Agent"], icon: ICONS.chart, Cam: ChartCam, Frame: ChartFrame },
+  "whatsNew.primeRadiantTitle": { id: "wiki", glow: "#facc15", chip: ["update.showcase.chipPrimeRadiant", "Prime Radiant"], icon: ICONS.wiki, Cam: WikiCam },
+};
+
+/** A highlight a later catalogue adds before it has a demo: its screenshot, still, and its title as the chip. */
+const PLAIN: Feature = { id: "plain", glow: "#f97316", chip: null, icon: ICONS.sparkle };
+
+function featureOf(key: string): Feature {
+  return SHOWCASE_FEATURES[key] ?? PLAIN;
+}
+
+/*
+ * The design's own CSS, scoped under `.wns`: the camera, the floating frame
+ * and every demo's keyframes. The overlays are placed in the screenshot's %
+ * space and their text is sized from the stage's width (1.15cqw), so a demo
+ * reads the same in any window size. With motion off every one-shot keyframe
+ * is held at its end (the demo's result), the loops stand still, and the
+ * camera, the float and the fade-in are dropped.
+ */
+const SHOWCASE_CSS = `
+@keyframes wns-up{from{opacity:0;transform:translateY(12px)}}
+@keyframes wns-blink{50%{opacity:0}}
+@keyframes wns-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+.wns-up{animation:wns-up .8s .8s both}
+.wns-caret{display:inline-block;width:3px;height:28px;background:#f97316;vertical-align:-4px;margin-left:3px;animation:wns-blink 1s steps(1) infinite}
+.wns-float{animation:wns-float 6s ease-in-out infinite}
+.wns-scene{container-type:inline-size}
+.wns-scr{position:relative;overflow:hidden;width:100%;aspect-ratio:16/10;border-radius:10px;background:#000;box-shadow:0 24px 60px #0008;font-size:1.15cqw;line-height:1.5;color:#e8edf5}
+.wns-cam{position:absolute;inset:0;transform-origin:50% 50%}
+.wns-cam>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.wns-o{position:absolute;pointer-events:none}
+.wns-cur{width:2.1%;aspect-ratio:12/19;z-index:9;filter:drop-shadow(0 2px 3px #000b)}
+.wns-cur svg{width:100%;height:100%;display:block}
+.wns-tag{position:absolute;left:85%;top:95%;font-weight:700;font-size:.8em;line-height:1.5;padding:.15em .55em;border-radius:9px;white-space:nowrap;background:#f97316;color:#111}
+.wns-tag-w{background:#fff}
+.wns-rip{width:4%;aspect-ratio:1;border-radius:50%;border:2px solid #f97316;margin:-2% 0 0 -2%;opacity:0}
+.wns-ring{border:2px solid #f97316;border-radius:8px;box-shadow:0 0 0 4px #f9731630,0 0 24px #f9731666;opacity:0}
+.wns-toast{z-index:10;background:#151d2b;border:1px solid #33435f;border-radius:10px;box-shadow:0 20px 50px #000c;color:#e8edf5;font-size:.95em;padding:1.4% 1.8%;opacity:0}
+.wns-toast b{display:flex;align-items:center;gap:.35em;margin-bottom:3px}
+.wns-toast small{display:block;color:#8d99ae;font-size:.85em}
+.wns-urlp{display:flex;gap:8px;align-items:center;margin-top:8px;background:#0c1320;border:1px solid #2dd4bf;border-radius:999px;padding:5px 10px;font:.85em ui-monospace,monospace;color:#2dd4bf;white-space:nowrap;overflow:hidden}
+.wns-kbd{display:inline-block;border:1px solid #475673;border-bottom-width:3px;border-radius:6px;padding:1px 8px;font:700 .95em ui-monospace,monospace;background:#1b2537;color:#e8edf5}
+.wns-hint{color:#cbd3e0}
+@keyframes wns-rip{0%,21%{opacity:0;transform:scale(.3)}23%{opacity:1}30%{opacity:0;transform:scale(2.4)}100%{opacity:0}}
+@keyframes wns-live{70%{box-shadow:0 0 0 12px #22c55e00}}
+@keyframes wns-ringon{0%,78%{opacity:0}82%,100%{opacity:1}}
+@keyframes wns-stamp{0%,52%{opacity:0;transform:scale(1.8)}56%,100%{opacity:1;transform:none}}
+@keyframes wns-cnt{0%,55%{opacity:0}56%,100%{opacity:1}}
+@keyframes wns-tkt{0%,80%{opacity:0;transform:translateY(-20%)}86%,100%{opacity:1;transform:none}}
+
+.wns-shot .wns-cam{animation:wns-shotcam 7s ease-in-out both}
+@keyframes wns-shotcam{0%{transform:none}18%,38%{transform:scale(1.35) translate(-14%,15%)}52%,100%{transform:none}}
+.wns-shot .wns-cur{left:40%;top:60%;animation:wns-shotcur 7s ease-in-out both}
+@keyframes wns-shotcur{0%{left:40%;top:60%}18%,24%{left:70%;top:33%}46%{left:22%;top:20%}60%,100%{left:76%;top:62%}}
+.wns-shot .wns-rip{left:70%;top:33%;animation:wns-rip 7s both}
+.wns-shot .wns-dim{inset:0;background:#0007;opacity:0;animation:wns-dim 7s both}
+@keyframes wns-dim{0%,44%{opacity:0}47%,72%{opacity:1}74%,100%{opacity:0}}
+.wns-shot .wns-sel{left:22%;top:20%;width:0;height:0;border:2px solid #f97316;background:#f973160d;box-shadow:0 0 0 9999px #0006;opacity:0;animation:wns-sel 7s both}
+@keyframes wns-sel{0%,45%{opacity:0;width:0;height:0}47%{opacity:1}60%,72%{opacity:1;width:54%;height:42%}74%,100%{opacity:0;width:54%;height:42%}}
+.wns-shot .wns-sz{left:58%;top:15.5%;background:#f97316;color:#111;font:700 .85em ui-monospace,monospace;padding:2px 7px;border-radius:5px;white-space:nowrap;opacity:0;animation:wns-sz 7s both}
+@keyframes wns-sz{0%,58%{opacity:0}61%,72%{opacity:1}74%,100%{opacity:0}}
+.wns-shot .wns-flash{inset:0;background:#fff;opacity:0;animation:wns-flash 7s both}
+@keyframes wns-flash{0%,73%{opacity:0}74.5%{opacity:.85}82%,100%{opacity:0}}
+.wns-shot .wns-toast{right:3%;bottom:4%;width:34%;animation:wns-toast 7s both}
+@keyframes wns-toast{0%,78%{opacity:0;transform:translateY(30%)}83%,100%{opacity:1;transform:none}}
+
+.wns-br .wns-cam{animation:wns-brcam 7s ease-in-out both}
+@keyframes wns-brcam{0%{transform:none}20%,62%{transform:scale(1.45) translate(0,22%)}80%,100%{transform:none}}
+.wns-br .wns-cur-a{left:62%;top:55%;animation:wns-bra 7s ease-in-out both}
+@keyframes wns-bra{0%{left:62%;top:55%}20%,64%{left:47%;top:19.4%}80%,100%{left:20%;top:90%}}
+.wns-br .wns-cur-y{left:86%;top:70%;animation:wns-bry 7s ease-in-out both}
+@keyframes wns-bry{0%{left:86%;top:70%}50%{left:80%;top:52%}100%{left:84%;top:62%}}
+.wns-br .wns-typed{left:40.4%;top:17.1%;width:17%;height:4.3%;background:#fff;color:#111;display:flex;align-items:center;padding-left:.4%;white-space:nowrap;overflow:hidden;opacity:0;animation:wns-typedbox 7s both}
+@keyframes wns-typedbox{0%,22%{opacity:0}23%,100%{opacity:1}}
+.wns-br .wns-typed span{border-right:2px solid #f97316;min-height:1.2em}
+.wns-br .wns-ring{left:11%;top:86.6%;width:16.5%;height:4.6%;animation:wns-ringon 7s both}
+.wns-br .wns-live{left:12.8%;top:9.8%;width:1%;aspect-ratio:1;border-radius:50%;background:#22c55e;box-shadow:0 0 0 0 #22c55e88;animation:wns-live 1.4s ease-out infinite}
+
+.wns-link .wns-cam{animation:wns-lkcam 7s ease-in-out both}
+@keyframes wns-lkcam{0%{transform:scale(1.15) translate(14%,8%)}35%{transform:scale(1.25) translate(18%,0)}55%,100%{transform:none}}
+.wns-link .wns-cur-1{left:50%;top:80%;animation:wns-lkcur 7s ease-in-out both}
+@keyframes wns-lkcur{0%{left:50%;top:80%}25%,100%{left:25%;top:46.6%}}
+.wns-link .wns-ring{left:9.2%;top:42.4%;width:26.4%;height:8.4%;border-radius:4px;animation:wns-lkring 7s both}
+@keyframes wns-lkring{0%,24%{opacity:0}27%,44%{opacity:1}48%,100%{opacity:0}}
+.wns-link .wns-rip{left:25%;top:46.6%;animation:wns-rip2 7s both}
+@keyframes wns-rip2{0%,37%{opacity:0;transform:scale(.3)}39%{opacity:1}46%{opacity:0;transform:scale(2.4)}100%{opacity:0}}
+.wns-link .wns-toast{left:46%;top:24%;width:44%;padding:2.2% 2.4%;animation:wns-lkt 7s both}
+@keyframes wns-lkt{0%,48%{opacity:0;transform:scale(.94)}54%,100%{opacity:1;transform:none}}
+.wns-link .wns-row{display:flex;justify-content:space-between;color:#8d99ae;margin-top:8px;font-size:.92em}
+.wns-link .wns-row b{display:inline;color:#e8edf5;margin:0}
+.wns-link .wns-copy{margin-left:auto;color:#fff}
+.wns-link .wns-cur-2{left:92%;top:80%;opacity:0;animation:wns-lkcur2 7s ease-in-out both}
+@keyframes wns-lkcur2{0%,52%{left:92%;top:80%;opacity:0}54%{opacity:1}70%,100%{left:84.5%;top:49.5%;opacity:1}}
+
+.wns-grok .wns-cam{animation:wns-gkcam 7s ease-in-out both}
+@keyframes wns-gkcam{0%{transform:none}22%,72%{transform:scale(1.55) translate(-24%,-20%)}90%,100%{transform:none}}
+.wns-grok .wns-hl{left:76.6%;top:66.5%;width:18.4%;height:4.6%;border-radius:5px;background:#f9731638;outline:1px solid #f97316aa;opacity:0;animation:wns-gkhl 7s ease-in-out both}
+@keyframes wns-gkhl{0%,14%{top:66.5%;opacity:0}18%{top:66.5%;opacity:1}30%{top:71.3%;opacity:1}44%{top:76.1%;opacity:1}58%,100%{top:80.9%;opacity:1}}
+.wns-grok .wns-cur{left:60%;top:50%;animation:wns-gkcur 7s ease-in-out both}
+@keyframes wns-gkcur{0%{left:60%;top:50%}18%{left:88%;top:69%}30%{left:88%;top:73.8%}44%{left:88%;top:78.6%}58%,100%{left:88%;top:83.4%}}
+.wns-grok .wns-rip{left:88%;top:83.4%;animation:wns-rip3 7s both}
+@keyframes wns-rip3{0%,58%{opacity:0;transform:scale(.3)}60%{opacity:1}67%{opacity:0;transform:scale(2.4)}100%{opacity:0}}
+.wns-grok .wns-toast{left:56%;top:24%;width:38%;animation:wns-gkt 7s both}
+@keyframes wns-gkt{0%,64%{opacity:0;transform:translateY(-20%)}70%,100%{opacity:1;transform:none}}
+
+.wns-talk .wns-cam{animation:wns-tkcam 7s ease-in-out both}
+@keyframes wns-tkcam{0%{transform:none}20%,76%{transform:scale(1.55) translate(-20%,-24%)}92%,100%{transform:none}}
+.wns-talk .wns-wave{left:66%;top:77%;width:22%;height:2.6%;display:flex;gap:2.5%;align-items:center;background:#0f1216}
+.wns-talk .wns-wave i{flex:1;height:30%;background:#ef4444;border-radius:2px;animation:wns-wv .5s ease-in-out infinite alternate}
+.wns-talk .wns-wave i:nth-child(3n){animation-delay:.12s}
+.wns-talk .wns-wave i:nth-child(3n+1){animation-delay:.25s}
+.wns-talk .wns-wave i:nth-child(4n){animation-delay:.37s}
+@keyframes wns-wv{to{height:100%}}
+.wns-talk .wns-tm{left:54.6%;top:76.6%;width:10.5%;height:3%;background:#0f1216;color:#f87171;white-space:nowrap;display:flex;align-items:center;gap:6%}
+.wns-talk .wns-tm:before{content:"";flex:none;width:9%;aspect-ratio:1;border-radius:50%;background:#ef4444;animation:wns-blink 1s steps(1) infinite}
+.wns-talk .wns-mic{left:58.6%;top:91%;width:3.6%;aspect-ratio:1;border-radius:8px;box-shadow:0 0 0 0 #ef444499;animation:wns-micp 1.1s ease-out infinite}
+@keyframes wns-micp{70%{box-shadow:0 0 0 14px #ef444400}}
+.wns-talk .wns-key{left:30%;top:80%;white-space:nowrap;opacity:0;animation:wns-keyin 7s both}
+@keyframes wns-keyin{0%,8%{opacity:0;transform:translateY(20%)}14%,80%{opacity:1;transform:none}86%,100%{opacity:0}}
+.wns-talk .wns-toast{left:4%;top:8%;width:34%;animation:wns-tkt 7s both}
+
+.wns-chart .wns-cam{animation:wns-chcam 7s ease-in-out both}
+@keyframes wns-chcam{0%{transform:none}20%,78%{transform:scale(1.45) translate(-13%,6%)}95%,100%{transform:none}}
+.wns-chart .wns-spin{width:4.7%;aspect-ratio:1;border-radius:50%;border:2px solid transparent;border-top-color:#f97316;border-right-color:#f97316;margin:-2.35% 0 0 -2.35%;animation:wns-spin 1.1s linear infinite}
+@keyframes wns-spin{to{transform:rotate(360deg)}}
+.wns-chart .wns-s1{left:45.3%;top:36%}
+.wns-chart .wns-s2{left:68.3%;top:44.8%}
+.wns-chart .wns-s3{left:76.8%;top:44.8%}
+.wns-chart .wns-flow{left:61.8%;top:44.7%;width:13%;height:.45%;background:repeating-linear-gradient(90deg,#f97316 0 6px,transparent 6px 12px);opacity:.95;mask:linear-gradient(90deg,#000 0 40%,transparent 40% 60%,#000 60%);animation:wns-flow .6s linear infinite}
+@keyframes wns-flow{to{background-position:12px 0}}
+.wns-chart .wns-done3{left:77.1%;top:45.7%;width:2%;aspect-ratio:1;border-radius:50%;background:#38bdf8;color:#071019;font-weight:900;font-size:.75em;line-height:1;display:grid;place-items:center;opacity:0;animation:wns-stamp 7s .6s both}
+.wns-chart .wns-cn{left:33.2%;top:27%;width:14%;height:3.1%;background:#15171c;font-size:.95em;white-space:nowrap;color:#a5adba;display:flex;gap:14%;align-items:center;opacity:0;animation:wns-cnt 7s steps(1) .6s both}
+.wns-chart .wns-tmr{left:55.4%;top:23.3%;width:4.6%;height:2.9%;background:#1f2329;color:#c6ccd6;font-size:.9em;display:flex;align-items:center;border-radius:4px;white-space:nowrap;padding-left:.3%}
+.wns-chart .wns-toast{right:4%;top:6%;width:30%;animation:wns-tkt 7s -1.2s both}
+
+.wns-wiki .wns-cam{animation:wns-wkcam 7s ease-in-out both}
+@keyframes wns-wkcam{0%{transform:none}25%,70%{transform:scale(1.3) translate(-6%,-12%)}90%,100%{transform:none}}
+.wns-wiki .wns-cover{left:12.5%;width:75%;height:11.6%;background:#1a1d22;animation:wns-uncover 7s both}
+@keyframes wns-uncover{0%,6%{opacity:1;transform:none}14%,100%{opacity:0;transform:translateY(-30%)}}
+.wns-wiki .wns-c1{top:55.2%}
+.wns-wiki .wns-c2{top:67.2%;animation-delay:.45s}
+.wns-wiki .wns-c3{top:79.2%;animation-delay:.9s}
+.wns-wiki .wns-bar{left:64.4%;width:4%;height:.55%;background:#2a2f38}
+.wns-wiki .wns-bar i{display:block;height:100%;width:0;background:#facc15;animation:wns-conf 7s both}
+@keyframes wns-conf{0%,16%{width:0}30%,100%{width:70%}}
+.wns-wiki .wns-b1{top:60.1%}
+.wns-wiki .wns-b2{top:72.1%}
+.wns-wiki .wns-b2 i{animation-delay:.45s}
+.wns-wiki .wns-b3{top:84.1%}
+.wns-wiki .wns-b3 i{animation-delay:.9s}
+.wns-wiki .wns-ver{left:76.1%;top:59.2%;width:6%;height:2.7%;background:#1a1d22;display:flex;align-items:center;opacity:0;animation:wns-stamp 7s both}
+.wns-wiki .wns-ver span{font-weight:700;font-size:.8em;color:#2dd4bf;border:1px solid #2dd4bf88;border-radius:9px;padding:0 6px;background:#2dd4bf14;white-space:nowrap}
+.wns-wiki .wns-ring{left:12.6%;top:55%;width:75%;height:11.9%;animation:wns-wring 7s both}
+@keyframes wns-wring{0%,44%{opacity:0}48%,66%{opacity:1}72%,100%{opacity:0}}
+.wns-wiki .wns-cnt{left:80.2%;top:9.4%;width:3.4%;height:2.8%;background:#1a1d22;font-size:.9em;color:#2dd4bf;font-weight:700;display:flex;align-items:center;opacity:0;animation:wns-cnt 7s steps(1) both}
+
+.wns[data-motion="reduce"] .wns-scr *,.wns[data-motion="reduce"] .wns-scr *::before{animation-delay:-7s!important;animation-play-state:paused!important}
+.wns[data-motion="reduce"] .wns-cam,.wns[data-motion="reduce"] .wns-float,.wns[data-motion="reduce"] .wns-up{animation:none}
+.wns[data-motion="reduce"] .wns-talk .wns-wave i{animation:none;height:55%}
+.wns[data-motion="reduce"] .wns-talk .wns-wave i:nth-child(2n){height:85%}
+.wns[data-motion="reduce"] .wns-talk .wns-wave i:nth-child(3n){height:35%}
+`;
+
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** The title, typed in a letter at a time; whole at once with motion off. Sized by the whole title from the start. */
+function TypedTitle({ title, reduced }: { title: string; reduced: boolean }) {
+  const letters = Array.from(title);
+  const typed = useTyping(letters.length, 0, SHOWCASE_TYPE_MS, reduced);
+  return (
+    <span aria-hidden="true" className="grid" data-testid="whats-new-showcase-typed">
+      <span className="invisible col-start-1 row-start-1">{title}</span>
+      <span className="col-start-1 row-start-1">
+        {letters.slice(0, typed).join("")}
+        {!reduced && <span className="wns-caret" />}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * One feature's screenshot in its frame. Every feature has one, drawn from
+ * the start and kept: the one on show is displayed, the rest are hidden.
+ * Each picture is fetched once, the moment the panel is drawn, and never
+ * asked for again — a feature reached while the box restarts still has it.
+ * Hiding a stage stops its camera; showing it starts it again from the top,
+ * and its demo is mounted afresh.
+ */
+function Stage({ item, feature, active, tr, reduced, onBroken }: { item: ShowcaseItem; feature: Feature; active: boolean; tr: Floor; reduced: boolean; onBroken: () => void }) {
+  const { Cam, Frame } = feature;
+  return (
+    <div className="wns-float" aria-hidden="true" hidden={!active}>
+      <div className={`wns-scr wns-${feature.id}`} data-testid={active ? "whats-new-showcase-stage" : undefined} data-feature={feature.id}>
+        <div className="wns-cam">
+          {/* eslint-disable-next-line @next/next/no-img-element -- a fixed asset from public/, kept loaded for the whole show */}
+          <img
+            src={item.image}
+            alt=""
+            width={1920}
+            height={1200}
+            loading="eager"
+            decoding="async"
+            draggable={false}
+            onError={onBroken}
+            data-showcase-image=""
+            data-testid={active ? "update-whats-new-image" : undefined}
+          />
+          {active && Cam && <Cam tr={tr} reduced={reduced} />}
+        </div>
+        {active && Frame && <Frame tr={tr} reduced={reduced} />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The System Update window's "What's new" (TASK-2121): the release as a
+ * cinematic hero — ONE feature at a time, its title typed in beside its real
+ * screenshot, a live demo drawn over the screenshot, chips to pick one. It
+ * moves on every {@link SHOWCASE_ADVANCE_MS}, and holds while the pointer is
+ * over it or the focus is in it; ←/→ (Home/End) turn it.
+ *
+ * It must keep working while the box restarts: no font or icon font of its
+ * own, every screenshot and the logo loaded the moment it is drawn and kept
+ * (see Stage), nothing fetched after that.
+ */
+export default function UpdateWhatsNewShowcase({
+  items,
+  release,
+  tr,
+  headingLevel,
+  releaseLink,
+}: {
+  items: readonly ShowcaseItem[];
+  release: string;
+  tr: Floor;
+  headingLevel: "h3" | "h4";
+  releaseLink: ReactNode;
+}) {
+  const Heading = headingLevel;
+  const count = items.length;
+  const [index, setIndex] = useState(0);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
+  const reduced = usePrefersReducedMotion();
+  const id = useId();
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const current = Math.max(0, Math.min(index, count - 1));
+  const paused = hovered || focused;
+  const item = items[current] as ShowcaseItem | undefined;
+  const feature = featureOf(item?.key ?? "");
+
+  useEffect(() => {
+    if (count < 2 || paused) return;
+    const timer = setTimeout(() => setIndex((current + 1) % count), SHOWCASE_ADVANCE_MS);
+    return () => clearTimeout(timer);
+  }, [current, count, paused]);
+
+  const markBroken = (src: string) => setBroken((prev) => (prev.has(src) ? prev : new Set(prev).add(src)));
+
+  const show = (next: number, focusChip: boolean) => {
+    const target = (next + count) % count;
+    setIndex(target);
+    if (focusChip) tabs.current[target]?.focus();
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const next = event.key === "ArrowRight" ? current + 1
+      : event.key === "ArrowLeft" ? current - 1
+        : event.key === "Home" ? 0
+          : event.key === "End" ? count - 1
+            : null;
+    if (next === null) return;
+    event.preventDefault();
+    show(next, (event.target as HTMLElement).getAttribute("role") === "tab");
+  };
+
+  const onBlur = (event: FocusEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+  };
+
+  if (!item) return null;
+
+  return (
+    <>
+      {/* Its own container: the two columns follow the hero's width, not the window's. */}
+      <div
+        className="wns @container relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[#26334a] bg-[#0a0f19]"
+        data-testid="whats-new-showcase"
+        data-index={current}
+        data-feature={feature.id}
+        data-motion={reduced ? "reduce" : "full"}
+        data-paused={paused ? "true" : "false"}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setFocused(true)}
+        onBlur={onBlur}
+        onKeyDown={onKeyDown}
+      >
+        <style>{SHOWCASE_CSS}</style>
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute left-[-12%] top-[-25%] h-[80%] w-[60%] rounded-full opacity-[0.38] blur-[100px] transition-[background-color] duration-[1200ms]"
+          style={{ backgroundColor: feature.glow }}
+          data-testid="whats-new-showcase-glow"
+        />
+
+        <div className="relative flex items-center gap-2 px-[30px] pt-6" aria-hidden="true" data-testid="whats-new-showcase-logo">
+          {/* eslint-disable-next-line @next/next/no-img-element -- the box's own crab from public/, loaded with the panel */}
+          <img src="/clawbox-icon.png" alt="" width={28} height={28} loading="eager" draggable={false} className="h-7 w-7 object-contain" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+          <span className="font-display text-lg font-bold tracking-[-0.01em] text-[#f97316]">ClawBox</span>
+        </div>
+
+        <div
+          role="tabpanel"
+          id={`${id}-panel`}
+          aria-labelledby={`${id}-tab-${current}`}
+          tabIndex={0}
+          className="relative grid flex-1 grid-cols-1 items-center gap-[22px] rounded-xl pb-0 pl-[30px] pr-[26px] pt-[18px] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-orange-300/70 @2xl:grid-cols-[minmax(0,330px)_minmax(0,1fr)]"
+        >
+          <div className="min-w-0">
+            <p className="m-0 font-mono text-xs font-extrabold uppercase tracking-[0.2em] text-[#8d99ae]" data-testid="whats-new-showcase-count">
+              <b className="text-[#e8edf5]">{pad(current + 1)}</b> / {pad(count)} · {tr("update.showcase.newIn", "New in {release}", { release })}
+            </p>
+            <Heading className="mb-2.5 mt-3.5 min-h-[68px] font-display text-[30px] font-bold leading-[1.12] tracking-[-0.01em] text-[#e8edf5]">
+              <span className="sr-only">{item.title}</span>
+              <TypedTitle key={`${current}:${item.title}`} title={item.title} reduced={reduced} />
+            </Heading>
+            <p key={current} className="wns-up m-0 text-[13.5px] leading-normal text-[#b9c3d5]">{item.body}</p>
+          </div>
+          <div className="wns-scene min-w-0">
+            {items.map((entry, at) => !broken.has(entry.image) && (
+              <Stage
+                key={entry.key}
+                item={entry}
+                feature={featureOf(entry.key)}
+                active={at === current}
+                tr={tr}
+                reduced={reduced}
+                onBroken={() => markBroken(entry.image)}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div role="tablist" aria-label={tr("update.showcase.label", "New features")} className="relative flex flex-wrap gap-1.5 pb-[18px] pl-[30px] pr-[26px] pt-[26px]">
+          {items.map((entry, at) => {
+            const on = at === current;
+            const chip = featureOf(entry.key);
+            return (
+              <button
+                key={entry.key}
+                ref={(element) => { tabs.current[at] = element; }}
+                type="button"
+                role="tab"
+                id={`${id}-tab-${at}`}
+                aria-selected={on}
+                aria-controls={`${id}-panel`}
+                tabIndex={on ? 0 : -1}
+                onClick={() => show(at, false)}
+                className={`inline-flex cursor-pointer items-center gap-[5px] rounded-full border px-[9px] py-1 text-[10.5px] leading-snug focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 ${
+                  on ? "border-[#f97316] bg-[#f97316] font-bold text-[#111]" : "border-[#26334a] bg-[#0d1420cc] text-[#8d99ae] hover:text-[#e8edf5]"
+                }`}
+                data-testid="whats-new-showcase-chip"
+              >
+                {chip.icon}
+                {chip.chip ? tr(chip.chip[0], chip.chip[1]) : entry.title}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Said once per feature, and only while the owner is driving: a show
+            that turns by itself every few seconds would talk over everything. */}
+        <p className="sr-only" aria-live={paused ? "polite" : "off"} aria-atomic="true" data-testid="whats-new-showcase-live">
+          {item.title}
+        </p>
+
+      </div>
+      <div className="mt-3">{releaseLink}</div>
+    </>
+  );
+}
