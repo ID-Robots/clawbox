@@ -36,7 +36,17 @@ describe("POST /setup-api/hermes/compress", () => {
     expect(runHermesSlashCommand).toHaveBeenCalledWith(expect.objectContaining({ sessionId: SESSION, rpc: "session.compress" }));
   });
 
+  it("takes an in-process compression's own status as the success it is", async () => {
+    vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({ status: "compressed", removed: 9, before_tokens: 52000, after_tokens: 30000 }));
+    const res = await post({ sessionId: SESSION });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ compressed: true, tokensBefore: 52000, tokensAfter: 30000 });
+  });
+
   it("is a refusal, not a success, when Hermes compressed nothing", async () => {
+    vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({ status: "pending" }));
+    expect((await post({ sessionId: SESSION })).status).toBe(409);
+
     vi.mocked(runHermesSlashCommand).mockResolvedValue(ran({ compressed: false, message: "Nothing to compress." }));
     const res = await post({ sessionId: SESSION });
     expect(res.status).toBe(409);

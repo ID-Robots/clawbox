@@ -8681,9 +8681,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
             <span>{(!sending && longChat.shorteningSince > 0) || longChat.phase === 'shortening'
               ? tr('localModels.chatCompacting', localModelsEn['localModels.chatCompacting'])
+              // Ahead of the harness's own words: Hermes says "Thinking…" from
+              // the moment it is asked, over a llama-server still loading.
+              : longChat.phase === 'loading' ? localAiLoadingLabel
               : turnStatus ?? (
-                longChat.phase === 'loading' ? localAiLoadingLabel
-                : sending && turnVerbRef.current ? `${turnVerbRef.current}…`
+                sending && turnVerbRef.current ? `${turnVerbRef.current}…`
                 : t("chat.working")
               )}</span>
             {sending && turnStartedAt > 0

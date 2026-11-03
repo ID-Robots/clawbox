@@ -46,7 +46,11 @@ export async function POST(request: Request) {
   const ran = await runHermesSlashCommand({ command: "/compress", sessionId, rpc: "session.compress", signal: request.signal });
   if (!ran) return NextResponse.json({ error: "Hermes could not be reached." }, { status: 503 });
   const result = ran.result;
-  if (!result || result.compressed !== true) {
+  // `status: "compressed"` is how an in-process compression answers (a board's
+  // did, with no `compressed` flag); `compressed: true` how a compute host's
+  // passes through. "pending", "aborted", a noop or a held lock compressed nothing yet.
+  const compressed = result?.compressed === true || (result?.status === "compressed" && result.compressed !== false);
+  if (!result || !compressed) {
     const message = typeof result?.message === "string" && result.message ? result.message : ran.output;
     return NextResponse.json({ error: message || "Nothing was compressed." }, { status: 409 });
   }
