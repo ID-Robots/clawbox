@@ -435,6 +435,8 @@ interface PoolRuntime {
   /** Every change runs after the previous one: a read-modify-write of one config key, reachable from two tabs and the runner. */
   chain: Promise<unknown>;
   credentialLocks: Map<string, SerialLock>;
+  /** Per account, the refused-credential probe in flight — every caller awaits the one (probeAccountCredential). */
+  probes: Map<string, CredentialProbeInFlight>;
   wakeListeners: Set<() => void>;
   changeListeners: Set<(change: ActiveChange) => void>;
   wakeTimer: ReturnType<typeof setTimeout> | null;
@@ -450,6 +452,7 @@ function runtime(): PoolRuntime {
     snapshot: null,
     chain: Promise.resolve(),
     credentialLocks: new Map(),
+    probes: new Map(),
     wakeListeners: new Set(),
     changeListeners: new Set(),
     wakeTimer: null,
@@ -1339,19 +1342,57 @@ export type KeyCheck = (key: string) => Promise<"ok" | "rejected" | "unreachable
  * caller's, since that check lives above this module). The `claude` sign-in
  * cannot be asked — this box never reads it — and a refusal that reached a
  * run is one Claude Code could not renew its way out of, so it is marked.
+ *
+ * ONE PROBE PER ACCOUNT AT A TIME, and every caller that asks while it runs
+ * awaits that one's answer (TASK-2139). On 2026-11-03 a burst of refusals on
+ * one account reached several runs within seconds, and each asked on its own:
+ * every probe renewed the grant again, so each run was handed a token the next
+ * renewal had already replaced, was refused again, and asked again — until all
+ * of them had failed. `held` is the credential the caller was refused with:
+ * when the store already holds a different one (another probe, or a spawn,
+ * renewed it since), that one is the fresh copy and nothing is spent on asking.
+ *
+ * A run that joins a probe another consumer started (the chat, the swap) is
+ * named on the mark if it comes to one: the swap counts the run it names as
+ * moved (applyCodingSwap), and a mark naming no run would leave this one out.
  */
-export async function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}): Promise<CredentialProbe> {
+export function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}, held: string | null = null): Promise<CredentialProbe> {
+  const probes = runtime().probes;
+  const inFlight = probes.get(id);
+  if (inFlight) {
+    if (context.runId && !inFlight.context.runId) inFlight.context = { ...context };
+    return inFlight.answer;
+  }
+  const entry: CredentialProbeInFlight = { answer: Promise.resolve("unknown"), context: { ...context } };
+  entry.answer = askAboutCredential(id, verifyKey, entry, held).finally(() => {
+    if (probes.get(id) === entry) probes.delete(id);
+  });
+  probes.set(id, entry);
+  return entry.answer;
+}
+
+/** One account's probe in flight, and the context its mark (if any) is recorded with. */
+interface CredentialProbeInFlight {
+  answer: Promise<CredentialProbe>;
+  context: FailureContext;
+}
+
+/** `probeAccountCredential`'s body: the one probe in flight for this account. */
+async function askAboutCredential(id: string, verifyKey: KeyCheck, probe: CredentialProbeInFlight, held: string | null): Promise<CredentialProbe> {
   const account = (await readAccounts()).find((a) => a.id === id);
   if (!account) return "unknown";
   return credentialLock(account.id)(async (): Promise<CredentialProbe> => {
     const dead = async (status: "expired" | "revoked"): Promise<CredentialProbe> => {
-      await markCredentialProblem(account.id, status, context).catch(() => {});
+      // Read when the mark is made: a run may have joined since this began.
+      await markCredentialProblem(account.id, status, probe.context).catch(() => {});
       return "dead";
     };
     if (account.kind === "login") return dead(hasAnthropicLogin() ? "revoked" : "expired");
     const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
     if (!stored.found) return stored.reason === "unavailable" ? "unknown" : dead("revoked");
     if (account.kind === "api_key") {
+      // The owner put another key in since the refused one was handed out.
+      if (held && stored.value !== held) return "ok";
       const verdict = await verifyKey(stored.value).catch(() => "unreachable" as const);
       if (verdict === "rejected") return dead("revoked");
       return verdict === "ok" ? "ok" : "unknown";
@@ -1359,6 +1400,10 @@ export async function probeAccountCredential(id: string, verifyKey: KeyCheck, co
     const tokens = parseOAuthSecret(stored.value);
     if (!tokens) return dead("revoked");
     const now = Date.now();
+    // Renewed since the refused copy was handed out, and still good: that
+    // renewal is the answer. Renewing AGAIN would only replace the token other
+    // runs have just been handed.
+    if (held && tokens.access !== held && (tokens.expires === null || tokens.expires > now)) return "ok";
     if (!tokens.refresh) {
       // Nothing to renew with: a token past its end is dead, one with life in
       // it cannot be told apart from a stale copy without spending a request.
@@ -1406,15 +1451,25 @@ export async function gatewayCredentialFor(id: string): Promise<{ access: string
  * has to spawn something on a path that has already committed to a spawn, and
  * the honest thing to spawn is the preferred account, which will refuse with
  * its limit — and that refusal is what pauses the run until the reset.
+ *
+ * `prefer` is tried first when it can answer and is not excluded: the account
+ * a run was refused on whose credential turned out only stale (TASK-2139) —
+ * the run goes back on IT, with the credential read again from the store,
+ * rather than on whichever account happens to be active. Only on a FRESHER
+ * credential, though: when the store still holds `refused` — the very copy the
+ * run was refused with — nothing has changed that could make the next try go
+ * any differently, so the pick goes on past it as if it had not been preferred.
  */
-export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
+export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean; prefer?: { id: string; refused: string | null } | null } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
   const tried = new Set(opts.exclude ?? []);
+  const prefer = opts.prefer ?? null;
   await readRoom(tried);
   for (;;) {
     const now = Date.now();
     const file = await serialised(loadLocked);
     const accounts = file.accounts.map((a) => ({ ...a }));
-    const next = pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? {} : { mode: file.pickMode, fullness: roomNow(now) });
+    const preferred = prefer && !tried.has(prefer.id) ? accounts.find((a) => a.id === prefer.id && isUsable(a, now)) : undefined;
+    const next = preferred ?? pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? {} : { mode: file.pickMode, fullness: roomNow(now) });
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
@@ -1428,6 +1483,7 @@ export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fall
     tried.add(next.id);
     const credential = await credentialFor(next, now).catch(() => null);
     if (!credential) continue;
+    if (next === preferred && prefer?.refused && credential.secret === prefer.refused) continue;
     void noteUsed(next.id);
     return { prepared: { account: next, credential }, health: poolHealth(accounts, now) };
   }
@@ -1678,6 +1734,7 @@ export function _resetAnthropicAccountsForTests(): void {
   state.snapshot = null;
   state.chain = Promise.resolve();
   state.credentialLocks.clear();
+  state.probes.clear();
   if (state.wakeTimer) clearTimeout(state.wakeTimer);
   state.wakeTimer = null;
   state.wakeAt = null;
