@@ -45,6 +45,7 @@ import {
   buildChatNotice,
   CHAT_NOTICE_KEY_PREFIX,
   findChatOrigin,
+  forgetRunChatOrigin,
   GATEWAY_RETRY_DELAYS_MS,
   recordRunChatOrigin,
 } from "@/lib/coding-agent-notify";
@@ -297,6 +298,17 @@ describe("the notice, on OpenClaw", () => {
     recordRunChatOrigin("../../etc", { harness: "openclaw", key: TAB, at: 8 });
     recordRunChatOrigin("run-other001", { harness: "openclaw", key: "agent:main:telegram:direct:1", at: 8 });
     expect(Object.keys(kvGetAll(CHAT_NOTICE_KEY_PREFIX))).toEqual([`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`]);
+  });
+
+  it("forgets the record of a start that never happened, and only that one", async () => {
+    recordRunChatOrigin("run-k3x9q2ab", { harness: "openclaw", key: TAB, at: 1 });
+    recordRunChatOrigin("run-refused1", { harness: "openclaw", key: null, at: 2 });
+    forgetRunChatOrigin("run-refused1");
+    forgetRunChatOrigin("run-neverwas");
+    expect(Object.keys(kvGetAll(CHAT_NOTICE_KEY_PREFIX))).toEqual([`${CHAT_NOTICE_KEY_PREFIX}run-k3x9q2ab`]);
+    await announceCodingRunToChat(run({ id: "run-refused1", status: "failed" }));
+    expect(gateway.gatewayWsCall).not.toHaveBeenCalled();
+    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
   });
 
   it("keeps the newest records and lets the oldest go, leaving the rest of the store alone", async () => {

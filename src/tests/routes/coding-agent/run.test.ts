@@ -32,7 +32,7 @@ const hold = vi.hoisted(() => ({
 vi.mock("@/lib/coding-team", () => hold);
 
 // Which chat asked (coding-agent-notify.ts, tested there): none unless a case says so.
-const chat = vi.hoisted(() => ({ findChatOrigin: vi.fn(), recordRunChatOrigin: vi.fn() }));
+const chat = vi.hoisted(() => ({ findChatOrigin: vi.fn(), recordRunChatOrigin: vi.fn(), forgetRunChatOrigin: vi.fn() }));
 vi.mock("@/lib/coding-agent-notify", async () => ({
   ...(await vi.importActual<typeof import("@/lib/coding-agent-notify")>("@/lib/coding-agent-notify")),
   ...chat,
@@ -133,6 +133,16 @@ describe("the chat that asked (TASK-2132)", () => {
     await POST(req({ auth: "bearer" }));
     expect(chat.findChatOrigin).toHaveBeenCalledTimes(1);
     expect(chat.recordRunChatOrigin).not.toHaveBeenCalled();
+    expect(chat.forgetRunChatOrigin).not.toHaveBeenCalled();
+  });
+
+  it("forgets the record of a start the route refused — the refusal was the tool's answer", async () => {
+    chat.findChatOrigin.mockResolvedValue(ORIGIN);
+    startRun.mockRejectedValue(new CodingAgentError("invalid", "That folder does not exist."));
+    const res = await POST(req({ auth: "bearer" }));
+    expect(res.status).toBe(400);
+    const [runId] = chat.recordRunChatOrigin.mock.calls[0];
+    expect(chat.forgetRunChatOrigin).toHaveBeenCalledWith(runId);
   });
 });
 

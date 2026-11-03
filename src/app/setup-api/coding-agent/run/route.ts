@@ -5,7 +5,7 @@ import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoice
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { ownerStopRefusal, ownerStopWorkForRun, releaseOwnerStopHold } from "@/lib/coding-team";
 import { pushPendingAction } from "@/lib/pending-actions";
-import { findChatOrigin, recordRunChatOrigin } from "@/lib/coding-agent-notify";
+import { findChatOrigin, forgetRunChatOrigin, recordRunChatOrigin } from "@/lib/coding-agent-notify";
 
 export const dynamic = "force-dynamic";
 
@@ -192,6 +192,9 @@ export async function POST(request: Request) {
     // The start the desktops were told of will not happen: they re-read, and
     // the runs list's `starting` says why (startOrQueueRun listed it failed).
     notifyDesktop({ type: "coding_run", phase: "failed", runId }, `coding-run-failed:${runId}`);
+    // The assistant has the refusal as this call's answer; no notice will
+    // ever be due under this id, so its chat record goes with it.
+    if (chatOrigin) forgetRunChatOrigin(runId);
     if (err instanceof CodingAgentError) {
       // The provider/model refusal carries a `code` beside the shared 400, so a
       // caller can tell "that pair is not on this box" from "that folder is not

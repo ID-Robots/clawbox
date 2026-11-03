@@ -512,6 +512,24 @@ export function recordRunChatOrigin(runId: string, origin: RunChatOrigin): void 
 }
 
 /**
+ * Drop the record of a start that did not happen: the route refused it after
+ * recording which chat asked, and the caller had the refusal as the tool's own
+ * answer, so no run will ever end under that id. Best effort; never throws.
+ */
+export function forgetRunChatOrigin(runId: string): void {
+  if (!RUN_ID_RE.test(runId)) return;
+  const entry = `${CHAT_NOTICE_KEY_PREFIX}${runId}`;
+  try {
+    if (kvGet(entry) === null) return;
+    updateChatNotices((data) => {
+      delete data[entry];
+    });
+  } catch (err) {
+    console.warn(`[coding-agent] could not forget which chat asked for ${runId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Mark `ending` as told for `runId` and answer the chat to tell — or null when
  * no chat asked for this run, or it has already been told of this ending.
  * Written before anything is sent: a notice lost to a crash is better than one
