@@ -1018,6 +1018,8 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.stepAccountMoved": "Anthropic account \"{from}\" can no longer answer; carrying on with \"{to}\" in the same session",
   "codingAgent.stepAccountsWaiting": "Every Anthropic account is at its usage limit; waiting for the reset at {time}",
   "codingAgent.stepResumedAfterLimit": "The usage limit reset; carrying on where it left off",
+  "codingAgent.stepUsageLimitContinuing": "Anthropic usage limit reached; Claude Code is continuing automatically on the same account",
+  "codingAgent.stepUsageLimitGrace": "Anthropic usage limit reached; Claude Code is in its grace window and carries on on the same account",
   "codingAgent.stepTeamMessageToRun": "Team message to {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Team message to the lead: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Team message to the assistant: {text}",
