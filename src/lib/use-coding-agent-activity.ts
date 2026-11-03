@@ -559,10 +559,11 @@ export function useCodingAgentActivity(active: boolean): {
       openedAtRef.current = 0;
       return;
     }
-    // On the box's clock (src/lib/box-clock.ts): every `startedAt` /
-    // `requestedAt` the RECENT_MS window is held against below the box wrote,
-    // and a browser minutes off the box would move the window by as much.
-    if (openedAtRef.current === 0) openedAtRef.current = boxNowMs();
+    // The browser's clock here; each poll turns it into the box's
+    // (`boxNowMs`, src/lib/box-clock.ts) with the offset known by then, so the
+    // first answer already counts even when no poll had told the page the
+    // box's clock before the chat opened.
+    if (openedAtRef.current === 0) openedAtRef.current = Date.now();
 
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -604,6 +605,10 @@ export function useCodingAgentActivity(active: boolean): {
           fetch("/setup-api/coding-agent/team?slim=1", { cache: "no-store" }).catch(() => null),
         ]);
         if (!res.ok) throw new Error("runs");
+        // Where "recent" starts, on the box's clock: every `startedAt` /
+        // `requestedAt` held against it below the box wrote, and a browser
+        // minutes off the box would move the window by as much.
+        const recentFrom = boxNowMs(openedAtRef.current) - RECENT_MS;
         const data = await res.json() as { runs?: RunPayload[]; starting?: unknown };
         let fetchedTeams: TeamPayload[] | null = null;
         if (teamRes && teamRes.ok) {
@@ -635,14 +640,14 @@ export function useCodingAgentActivity(active: boolean): {
             // time the chat opened; yesterday's teams are the app's history.
             const mine = known !== undefined
               || !isSettledTeamStatus(team.status)
-              || team.startedAt >= openedAtRef.current - RECENT_MS;
+              || team.startedAt >= recentFrom;
             if (mine) byId.set(team.id, known && samePlainData(known, team) ? known : team);
           }
           // A team the box refused to start has no board: its card says why.
           for (const start of starts) {
             if (start.kind !== "team") continue;
             const known = byId.get(start.id);
-            if (known === undefined && start.requestedAt < openedAtRef.current - RECENT_MS) continue;
+            if (known === undefined && start.requestedAt < recentFrom) continue;
             const team = startTeamActivity(start);
             byId.set(start.id, known && samePlainData(known, team) ? known : team);
           }
@@ -677,7 +682,7 @@ export function useCodingAgentActivity(active: boolean): {
             const known = byId.get(run.id);
             const mine = known !== undefined
               || run.status === "running"
-              || run.startedAt >= openedAtRef.current - RECENT_MS;
+              || run.startedAt >= recentFrom;
             // A run whose record has not moved keeps the object already on
             // screen, so its card is handed the same props it drew last time.
             if (mine) byId.set(run.id, known && samePlainData(known, run) ? known : run);
@@ -690,7 +695,7 @@ export function useCodingAgentActivity(active: boolean): {
             const known = byId.get(start.id);
             const mine = known !== undefined
               || start.failedAt === null
-              || start.requestedAt >= openedAtRef.current - RECENT_MS;
+              || start.requestedAt >= recentFrom;
             if (!mine) continue;
             const run = startActivity(start);
             requestedAt.current.set(start.id, start.requestedAt);

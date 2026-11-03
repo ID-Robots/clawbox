@@ -5,7 +5,7 @@ import CodingAgentApp from "@/components/CodingAgentApp";
 import { I18nProvider } from "@/lib/i18n";
 import { useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
 import { fetchBackgroundTasks } from "@/lib/background-task-client";
-import { _resetBoxClockForTests, boxClockOffsetMs, noteBoxClock } from "@/lib/box-clock";
+import { _resetBoxClockForTests, boxClockOffsetMs } from "@/lib/box-clock";
 
 /**
  * TASK-2138: a window opened on its own page (/app/<id>) has no desktop
@@ -113,10 +113,9 @@ describe("the chat's coding runs poll", () => {
   });
 
   it("holds the recent-runs window on the box's clock: a run the box finished a minute ago is this chat's", async () => {
-    // A desktop poll has already told the page the box's clock. On the
-    // browser's, ten minutes ahead, the window opened at box + 8 min and the
-    // run was dropped as old.
-    noteBoxClock(answer({}), Date.now(), Date.now());
+    // Nothing has told the page the box's clock before the chat opens: the
+    // runs answer itself does. On the browser's clock, ten minutes ahead, the
+    // window opened at box + 8 min and the run was dropped as old.
     const boxNow = Date.now() + BOX_LEAD_MS;
     const run = {
       id: "run-k3x9q2ab",
