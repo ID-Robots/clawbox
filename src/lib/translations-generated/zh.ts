@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "开",
   "settings.localHttps.open": "打开",
   "settings.localHttps.preparing": "正在获取证书…",
-  "settings.localHttps.privacy": "开启后,ClawBox 会把本设备在家庭网络中的地址(例如 192.168.1.20)发送到 ClawBox 门户,门户以 lan.clawbox.com 下的随机名称将其发布到公共 DNS。该名称也会出现在公开的证书日志中。除此之外不会有任何信息离开设备,关闭后 DNS 记录会被删除。", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "开启后,ClawBox 会把本设备在家庭网络中的地址(例如 192.168.1.20)发送到 ClawBox 门户,门户以 lan.clawbox.com 下的随机名称将其发布到公共 DNS,并为该名称获取证书;此后该名称会出现在公开的证书日志中。证书私钥绝不会离开设备,关闭后 DNS 记录会被删除。", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "门户发送的证书与本设备不匹配,未被使用。设备会重试。",
   "settings.localHttps.problemNoLanIp": "设备当前在家庭网络中没有地址。",
   "settings.localHttps.problemNotPaired": "请先登录 ClawBox AI——安全地址通过你的 ClawBox 账户签发。",

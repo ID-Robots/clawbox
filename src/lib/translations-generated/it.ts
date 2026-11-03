@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "Attivo",
   "settings.localHttps.open": "Apri",
   "settings.localHttps.preparing": "Richiesta del certificato…",
-  "settings.localHttps.privacy": "Quando è attivo, ClawBox invia l'indirizzo di questo dispositivo nella rete di casa (ad esempio 192.168.1.20) al portale ClawBox, che lo pubblica nel DNS pubblico con un nome casuale in lan.clawbox.com. Quel nome compare anche nei registri pubblici dei certificati. Nient'altro lascia il dispositivo, e disattivandolo il record DNS viene rimosso.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "Quando è attivo, ClawBox invia l'indirizzo di questo dispositivo nella rete di casa (ad esempio 192.168.1.20) al portale ClawBox, che lo pubblica nel DNS pubblico con un nome casuale in lan.clawbox.com e ottiene un certificato per quel nome; il nome compare poi nei registri pubblici dei certificati. La chiave privata del certificato non lascia mai il dispositivo, e disattivandolo il record DNS viene rimosso.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "Il certificato inviato dal portale non corrispondeva a questo dispositivo e non è stato usato. Il dispositivo riproverà.",
   "settings.localHttps.problemNoLanIp": "Al momento il dispositivo non ha un indirizzo nella rete di casa.",
   "settings.localHttps.problemNotPaired": "Accedi prima a ClawBox AI: l'indirizzo sicuro viene rilasciato tramite il tuo account ClawBox.",

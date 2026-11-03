@@ -9,26 +9,36 @@
  *   certificate  order one with a fresh key when there is none, it names
  *              another host, or a third of its lifetime is left; poll a
  *              pending order; install what the portal issued only after it
- *              matches the key, the hostname and the clock.
- *   DNS        ask the router's resolver and a public one whether the name
- *              answers with this box, which is how DNS-rebind protection is
- *              told apart from a record that is not published yet.
+ *              passes the same rules the TLS listener serves by (the key, the
+ *              hostname, the dates, a chain to a trusted root).
+ *   DNS        ask the router's resolver — what the owner's browsers ask —
+ *              whether the name answers with this box. The portal's own answer
+ *              says the record is published, so a router that answers nothing
+ *              long after that is filtering it (DNS-rebind protection); no
+ *              third-party resolver is ever asked.
  *
- * Passes run one at a time (the job's timer and the Settings route share
- * one queue on globalThis, since they live in different bundles), every 5
- * minutes — an IP change is noticed within that — and sooner while an order is
+ * Passes run one at a time (the job's timer and the Settings route share one
+ * queue on globalThis, since they live in different bundles), every 5 minutes
+ * — an IP change is noticed within that — and sooner while an order is
  * pending. A pass never throws: what went wrong is the state's `problem`, and
  * whatever certificate is still valid keeps being served.
+ *
+ * The owner's switch wins over any pass: every switch bumps an epoch under the
+ * same lock every state write takes, and a pass from an older epoch stops
+ * before its next side effect (a portal call, a key, a certificate) and writes
+ * nothing.
  */
 
 import crypto from "crypto";
 import dns from "dns";
 import fsp from "fs/promises";
+import tls from "tls";
 import {
   EMPTY_LOCAL_HTTPS_STATE,
   type LocalHttpsDnsVerdict,
   type LocalHttpsState,
   isPrivateLanIpv4,
+  localHttpsDir,
   localHttpsOrderKeyPath,
   localHttpsTlsPath,
   readLocalHttpsState,
@@ -44,12 +54,17 @@ import {
   localHttpsPortal,
 } from "./local-https-portal";
 import { buildCsr, generatePrivateKeyPem } from "./local-https-x509";
+import path from "./runtime-path";
 import { getReachableIpv4 } from "./system-info";
 
 export const PASS_INTERVAL_MS = 5 * 60_000;
 /** Re-report an unchanged address this often, so the portal knows the box is alive. */
 export const REREGISTER_MS = 24 * 3600_000;
 export const DNS_RECHECK_MS = 6 * 3600_000;
+/** A router answer that is not settled yet (pending, unknown) is asked again this soon. */
+export const DNS_UNSETTLED_RECHECK_MS = 10 * 60_000;
+/** How long after the portal published an address a router may still answer nothing (negative caching). */
+export const DNS_PUBLISH_GRACE_MS = 10 * 60_000;
 /** An order the portal has not finished in this long is abandoned and retried. */
 export const ORDER_TIMEOUT_MS = 15 * 60_000;
 /**
@@ -60,11 +75,16 @@ export const ORDER_TIMEOUT_MS = 15 * 60_000;
 export const ORDER_RETRY_MS = 3600_000;
 const FIRST_PASS_DELAY_MS = 20_000;
 
+/** What the router's resolver answered for the box's name. */
+export type RouterAnswer = string[] | "nxdomain" | "error";
+
 export interface LocalHttpsDeps {
   portal: LocalHttpsPortal;
   lanIp: () => Promise<string | null>;
   now: () => number;
-  checkDns: (hostname: string, ip: string) => Promise<LocalHttpsDnsVerdict>;
+  lookup: (hostname: string) => Promise<RouterAnswer>;
+  /** The roots a certificate must chain to — what scripts/local-https.js serves by. */
+  trustedRoots: () => Promise<crypto.X509Certificate[]>;
   refreshListener: () => void;
 }
 
@@ -73,40 +93,93 @@ export function defaultLocalHttpsDeps(): LocalHttpsDeps {
     portal: localHttpsPortal(),
     lanIp: getReachableIpv4,
     now: Date.now,
-    checkDns: checkLocalHttpsDns,
+    lookup: lookupRouter,
+    trustedRoots: defaultTrustedRoots,
     refreshListener: refreshLocalHttpsListener,
   };
 }
 
 // ── Certificates ──
 
+let nodeRoots: crypto.X509Certificate[] | null = null;
+
+function nodeRootStore(): crypto.X509Certificate[] {
+  if (!nodeRoots) {
+    nodeRoots = [];
+    for (const pem of tls.rootCertificates) {
+      try {
+        nodeRoots.push(new crypto.X509Certificate(pem));
+      } catch {
+        // A root OpenSSL will not parse is no root of ours.
+      }
+    }
+  }
+  return nodeRoots;
+}
+
+/** Node's store, plus the stub portal's CA in stub mode — the listener's rule exactly. */
+export async function defaultTrustedRoots(): Promise<crypto.X509Certificate[]> {
+  if (!isStubPortalMode()) return nodeRootStore();
+  try {
+    const pem = await fsp.readFile(path.join(localHttpsDir(), "stub-ca.pem"), "utf-8");
+    return [...nodeRootStore(), new crypto.X509Certificate(pem)];
+  } catch {
+    return nodeRootStore();
+  }
+}
+
+function signedBy(cert: crypto.X509Certificate, issuer: crypto.X509Certificate): boolean {
+  try {
+    return Boolean(cert.checkIssued(issuer)) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
 export type CertificateVerdict =
   | { ok: true; notBefore: number; notAfter: number; fingerprint256: string }
   | { ok: false; reason: string };
 
 /**
- * Does this chain serve `hostname` with `keyPem` at `now`? The box-side half of
- * the check scripts/local-https.js repeats before it serves (that one also
- * walks the chain to a trusted root).
+ * Would scripts/local-https.js serve this chain for `hostname` with `keyPem`
+ * at `now`? The same rules, so the job never installs a certificate the
+ * listener then silently refuses: a server certificate for exactly that
+ * name, inside its dates, matching the key, every link signed by the next and
+ * the last one a root of `roots` or signed by one.
  */
-export function inspectCertificate(certPem: string, keyPem: string, hostname: string, now: number): CertificateVerdict {
-  let leaf: crypto.X509Certificate;
+export function inspectCertificate(
+  certPem: string,
+  keyPem: string,
+  hostname: string,
+  now: number,
+  roots: crypto.X509Certificate[],
+): CertificateVerdict {
+  let certs: crypto.X509Certificate[];
   let key: crypto.KeyObject;
   try {
-    const first = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/.exec(certPem);
-    if (!first) return { ok: false, reason: "no certificate in the answer" };
-    leaf = new crypto.X509Certificate(first[0]);
+    const pems = certPem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
+    if (!pems.length) return { ok: false, reason: "no certificate in the answer" };
+    certs = pems.map((pem) => new crypto.X509Certificate(pem));
     key = crypto.createPrivateKey(keyPem);
   } catch {
     return { ok: false, reason: "unreadable certificate or key" };
   }
+  const leaf = certs[0];
   if (leaf.ca) return { ok: false, reason: "a CA certificate, not a server certificate" };
   if (leaf.checkHost(hostname) !== hostname) return { ok: false, reason: "issued for another name" };
   if (!leaf.checkPrivateKey(key)) return { ok: false, reason: "does not match the box's key" };
   const notBefore = Date.parse(leaf.validFrom);
   const notAfter = Date.parse(leaf.validTo);
   if (!Number.isFinite(notBefore) || !Number.isFinite(notAfter)) return { ok: false, reason: "unreadable dates" };
+  if (now < notBefore) return { ok: false, reason: "not valid yet (is the box's clock right?)" };
   if (now >= notAfter) return { ok: false, reason: "already expired" };
+  for (let i = 0; i + 1 < certs.length; i++) {
+    if (!signedBy(certs[i], certs[i + 1])) return { ok: false, reason: "a broken chain" };
+  }
+  const last = certs[certs.length - 1];
+  if (!roots.some((root) => root.fingerprint256 === last.fingerprint256 || signedBy(last, root))) {
+    return { ok: false, reason: "not issued by a trusted authority" };
+  }
   return { ok: true, notBefore, notAfter, fingerprint256: leaf.fingerprint256 };
 }
 
@@ -115,11 +188,15 @@ export function renewAt(notBefore: number, notAfter: number): number {
   return notAfter - Math.floor((notAfter - notBefore) / 3);
 }
 
-async function readInstalled(hostname: string, now: number): Promise<(CertificateVerdict & { ok: true }) | null> {
+async function readInstalled(
+  hostname: string,
+  now: number,
+  roots: crypto.X509Certificate[],
+): Promise<(CertificateVerdict & { ok: true }) | null> {
   try {
     const stored = JSON.parse(await fsp.readFile(localHttpsTlsPath(), "utf-8")) as { hostname?: unknown; key?: unknown; cert?: unknown };
     if (stored.hostname !== hostname || typeof stored.key !== "string" || typeof stored.cert !== "string") return null;
-    const verdict = inspectCertificate(stored.cert, stored.key, hostname, now);
+    const verdict = inspectCertificate(stored.cert, stored.key, hostname, now, roots);
     return verdict.ok ? verdict : null;
   } catch {
     return null;
@@ -134,47 +211,57 @@ async function removeSecrets(): Promise<void> {
 // ── DNS ──
 
 const DNS_TIMEOUT_MS = 5_000;
-const PUBLIC_RESOLVERS = ["1.1.1.1", "8.8.8.8"];
 
-type Answer = string[] | "nxdomain" | "error";
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms).unref())]);
-}
-
-function classify(err: unknown): Answer {
-  const code = (err as { code?: unknown })?.code;
-  return code === "ENOTFOUND" || code === "ENODATA" ? "nxdomain" : "error";
-}
-
-/** The rule, apart from the lookups: what the two answers mean for this box at `ip`. */
-export function dnsVerdict(router: Answer, publicDns: Answer, ip: string): LocalHttpsDnsVerdict {
-  if (Array.isArray(router) && router.includes(ip)) return "ok";
-  if (Array.isArray(publicDns)) {
-    if (!publicDns.includes(ip)) return "stale";
-    // Public DNS has the right answer: a router that answers something else is
-    // caching the old one; a router that answers nothing is filtering it.
-    return Array.isArray(router) ? "stale" : "rebind_blocked";
+/** The system resolver's answer for `hostname`: what the router — and so the owner's browsers — say. */
+export async function lookupRouter(hostname: string): Promise<RouterAnswer> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error("timeout"), { code: "ETIMEOUT" })), DNS_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    const list = await Promise.race([dns.promises.lookup(hostname, { all: true, family: 4 }), timeout]);
+    return list.map((a) => a.address);
+  } catch (err) {
+    const code = (err as { code?: unknown })?.code;
+    return code === "ENOTFOUND" || code === "ENODATA" ? "nxdomain" : "error";
+  } finally {
+    clearTimeout(timer);
   }
-  if (publicDns === "nxdomain") return "pending";
-  return "unknown";
 }
 
 /**
- * Ask the system resolver (the router, normally — what the owner's browser
- * asks too) and a public resolver for `hostname`.
+ * What the router's answer means for this box at `ip`, given that the portal
+ * published `ip` `publishedForMs` ago. Only a definite "no such name" counts
+ * as filtering, and only once the grace for negative caching has passed — a
+ * lookup that merely failed says nothing about the router's settings.
  */
-export async function checkLocalHttpsDns(hostname: string, ip: string): Promise<LocalHttpsDnsVerdict> {
-  const router: Promise<Answer> = withTimeout(dns.promises.lookup(hostname, { all: true, family: 4 }), DNS_TIMEOUT_MS)
-    .then((list) => list.map((a) => a.address))
-    .catch(classify);
-  const resolver = new dns.promises.Resolver({ timeout: 2_000, tries: 1 });
-  resolver.setServers(PUBLIC_RESOLVERS);
-  const publicDns: Promise<Answer> = withTimeout(resolver.resolve4(hostname), DNS_TIMEOUT_MS).catch(classify);
-  return dnsVerdict(await router, await publicDns, ip);
+export function dnsVerdict(router: RouterAnswer, ip: string, publishedForMs: number): LocalHttpsDnsVerdict {
+  if (Array.isArray(router)) return router.includes(ip) ? "ok" : "stale";
+  if (router === "nxdomain") return publishedForMs >= DNS_PUBLISH_GRACE_MS ? "rebind_blocked" : "pending";
+  return "unknown";
+}
+
+function dnsDue(state: LocalHttpsState, ip: string, now: number): boolean {
+  if (!state.dns || state.dns.ip !== ip) return true;
+  const settled = state.dns.verdict === "ok" || state.dns.verdict === "rebind_blocked" || state.dns.verdict === "stale";
+  return now - state.dns.at >= (settled ? DNS_RECHECK_MS : DNS_UNSETTLED_RECHECK_MS);
 }
 
 // ── One pass ──
+
+/** The owner switched the feature while this pass ran: its answer is no longer theirs to write. */
+class Superseded extends Error {}
+
+interface PassContext {
+  deps: LocalHttpsDeps;
+  now: number;
+  /** Throws Superseded once the owner has switched since the pass began. */
+  guard: () => void;
+  /** Run `fn` under the state lock, after the guard. */
+  commit: <T>(fn: () => Promise<T>) => Promise<T>;
+  save: (state: LocalHttpsState) => Promise<void>;
+}
 
 function problemFrom(err: unknown, now: number): Pick<LocalHttpsState, "problem" | "retryAt"> {
   if (err instanceof LocalHttpsPortalError) {
@@ -189,7 +276,8 @@ function problemFrom(err: unknown, now: number): Pick<LocalHttpsState, "problem"
   return { problem: { code: fsError ? "write_failed" : "portal_error", at: now, detail: message.slice(0, 300) }, retryAt: null };
 }
 
-async function applyOrderAnswer(state: LocalHttpsState, answer: OrderAnswer, hostname: string, now: number): Promise<LocalHttpsState> {
+async function applyOrderAnswer(state: LocalHttpsState, answer: OrderAnswer, hostname: string, ctx: PassContext): Promise<LocalHttpsState> {
+  const { now } = ctx;
   if (answer.status === "pending") {
     const startedAt = state.order?.id === answer.orderId ? state.order.startedAt : now;
     if (now - startedAt > ORDER_TIMEOUT_MS) {
@@ -208,26 +296,19 @@ async function applyOrderAnswer(state: LocalHttpsState, answer: OrderAnswer, hos
   } catch {
     return { ...state, order: null, problem: { code: "order_failed", at: now, detail: "the order's key is gone; ordering again" } };
   }
-  const verdict = inspectCertificate(answer.certificate, key, hostname, now);
+  const verdict = inspectCertificate(answer.certificate, key, hostname, now, await ctx.deps.trustedRoots());
   if (!verdict.ok) {
     await fsp.rm(localHttpsOrderKeyPath(), { force: true });
     return { ...state, order: null, retryAt: now + ORDER_RETRY_MS, problem: { code: "bad_certificate", at: now, detail: verdict.reason } };
   }
-  await writeFileAtomic0600(localHttpsTlsPath(), JSON.stringify({ hostname, key, cert: answer.certificate }));
+  await ctx.commit(() => writeFileAtomic0600(localHttpsTlsPath(), JSON.stringify({ hostname, key, cert: answer.certificate })));
   await fsp.rm(localHttpsOrderKeyPath(), { force: true });
   console.log(`[local-https] certificate installed for ${hostname}, valid until ${new Date(verdict.notAfter).toISOString()}`);
   return { ...state, order: null, certNotBefore: verdict.notBefore, certNotAfter: verdict.notAfter };
 }
 
-/** The owner switched the feature while this pass ran: its answer is no longer theirs to write. */
-class Superseded extends Error {}
-
-async function passWhileOn(
-  start: LocalHttpsState,
-  deps: LocalHttpsDeps,
-  now: number,
-  save: (state: LocalHttpsState) => Promise<void>,
-): Promise<LocalHttpsState> {
+async function passWhileOn(start: LocalHttpsState, ctx: PassContext): Promise<LocalHttpsState> {
+  const { deps, now, guard } = ctx;
   let state = start;
   const ip = await deps.lanIp();
   if (!isPrivateLanIpv4(ip)) {
@@ -238,67 +319,68 @@ async function passWhileOn(
   const stub = deps.portal.kind === "stub";
   const due = !state.hostname || state.reportedIp !== ip || !state.reportedAt || now - state.reportedAt >= REREGISTER_MS || state.stubPortal !== stub;
   if (due) {
+    guard();
     const { hostname } = await deps.portal.register(ip);
     if (state.hostname && state.hostname !== hostname) {
       // A new name: the old certificate and order are worthless now.
-      await removeSecrets();
+      await ctx.commit(removeSecrets);
       state = { ...state, order: null, certNotBefore: null, certNotAfter: null };
     }
-    state = { ...state, hostname, reportedIp: ip, reportedAt: now, dns: null, stubPortal: stub };
+    const moved = state.reportedIp !== ip || state.hostname !== hostname;
+    state = {
+      ...state,
+      hostname,
+      reportedIp: ip,
+      reportedAt: now,
+      addressSince: moved || state.addressSince === null ? now : state.addressSince,
+      dns: moved ? null : state.dns,
+      stubPortal: stub,
+    };
     // On disk before the slow part, so the Host allow-list knows the name.
-    await save(state);
+    await ctx.save(state);
     deps.refreshListener();
   }
   const hostname = state.hostname!;
 
   // The certificate.
-  const installed = await readInstalled(hostname, now);
+  const roots = await deps.trustedRoots();
+  const installed = await readInstalled(hostname, now, roots);
   state = { ...state, certNotBefore: installed?.notBefore ?? null, certNotAfter: installed?.notAfter ?? null };
   if (state.order) {
     if (now >= state.order.nextPollAt) {
-      state = await applyOrderAnswer(state, await deps.portal.pollOrder(state.order.id), hostname, now);
+      guard();
+      state = await applyOrderAnswer(state, await deps.portal.pollOrder(state.order.id), hostname, ctx);
     }
   } else if (!installed || now >= renewAt(installed.notBefore, installed.notAfter)) {
+    guard();
     const key = generatePrivateKeyPem();
-    await writeFileAtomic0600(localHttpsOrderKeyPath(), key);
-    state = await applyOrderAnswer({ ...state, order: null }, await deps.portal.order(hostname, buildCsr(key, hostname)), hostname, now);
+    await ctx.commit(() => writeFileAtomic0600(localHttpsOrderKeyPath(), key));
+    state = await applyOrderAnswer({ ...state, order: null }, await deps.portal.order(hostname, buildCsr(key, hostname)), hostname, ctx);
   }
 
   // DNS: meaningless for the stub, whose name is in no zone.
-  if (!stub && (!state.dns || state.dns.ip !== ip || now - state.dns.at >= DNS_RECHECK_MS)) {
-    state = { ...state, dns: { at: now, ip, verdict: await deps.checkDns(hostname, ip) } };
+  if (!stub && dnsDue(state, ip, now)) {
+    const verdict = dnsVerdict(await deps.lookup(hostname), ip, now - (state.addressSince ?? now));
+    state = { ...state, dns: { at: now, ip, verdict } };
   }
   return state;
 }
 
-/** One pass. Never throws; the outcome, problem included, is the saved state. */
-export async function runLocalHttpsPass(deps: LocalHttpsDeps = defaultLocalHttpsDeps()): Promise<LocalHttpsState> {
-  const now = deps.now();
-  const epoch = slot().epoch;
-  const save = async (next: LocalHttpsState) => {
-    if (slot().epoch !== epoch) throw new Superseded();
-    await writeLocalHttpsState(next);
-  };
-  try {
-    return await passFrom(await readLocalHttpsState(), deps, now, save);
-  } catch (err) {
-    if (!(err instanceof Superseded)) throw err;
-    // The pass the switch queued runs next and sees the owner's choice.
-    return readLocalHttpsState();
-  }
+/** Nothing on file and nothing owed to the portal: an off pass has nothing to do. */
+function isQuietOff(state: LocalHttpsState): boolean {
+  return !state.enabled && !state.unregisterPending && state.hostname === null && state.order === null && state.certNotAfter === null;
 }
 
-async function passFrom(
-  initial: LocalHttpsState,
-  deps: LocalHttpsDeps,
-  now: number,
-  save: (state: LocalHttpsState) => Promise<void>,
-): Promise<LocalHttpsState> {
+async function passFrom(initial: LocalHttpsState, ctx: PassContext): Promise<LocalHttpsState> {
+  const { deps, now } = ctx;
   let state = initial;
 
   if (!state.enabled) {
+    // The common case on every box that never turned it on: no write, no call.
+    if (isQuietOff(state)) return state;
     let unregisterPending = state.unregisterPending;
     if (unregisterPending) {
+      ctx.guard();
       try {
         await deps.portal.unregister();
         unregisterPending = false;
@@ -311,34 +393,56 @@ async function passFrom(
       }
     }
     const next = { ...EMPTY_LOCAL_HTTPS_STATE, unregisterPending, lastCheckAt: now };
-    await save(next).catch((err) => {
-      if (err instanceof Superseded) throw err;
-    });
-    await removeSecrets().catch(() => {});
+    await ctx.commit(removeSecrets);
+    await ctx.save(next);
     deps.refreshListener();
     return next;
   }
 
   if (state.retryAt && now < state.retryAt) return state;
 
-  let problemBefore = state.problem;
+  const problemBefore = state.problem;
   try {
-    state = await passWhileOn({ ...state, problem: null, retryAt: null }, deps, now, save);
-    problemBefore = null;
+    state = await passWhileOn({ ...state, problem: null, retryAt: null }, ctx);
   } catch (err) {
     if (err instanceof Superseded) throw err;
     state = { ...state, ...problemFrom(err, now) };
-    if (problemBefore?.code === state.problem?.code) state = { ...state, problem: { ...state.problem!, at: problemBefore!.at } };
+    // The same trouble as last time keeps the time it began.
+    if (problemBefore && problemBefore.code === state.problem?.code) state = { ...state, problem: { ...state.problem, at: problemBefore.at } };
   }
   state = { ...state, lastCheckAt: now };
   try {
-    await save(state);
+    await ctx.save(state);
   } catch (err) {
     if (err instanceof Superseded) throw err;
     state = { ...state, ...problemFrom(err, now) };
   }
   deps.refreshListener();
   return state;
+}
+
+/** One pass. Never throws; the outcome, problem included, is the saved state. */
+export async function runLocalHttpsPass(deps: LocalHttpsDeps = defaultLocalHttpsDeps()): Promise<LocalHttpsState> {
+  const now = deps.now();
+  const epoch = slot().epoch;
+  const guard = () => {
+    if (slot().epoch !== epoch) throw new Superseded();
+  };
+  const commit = <T>(fn: () => Promise<T>) =>
+    withStateLock(async () => {
+      guard();
+      return fn();
+    });
+  const ctx: PassContext = { deps, now, guard, commit, save: (next) => commit(() => writeLocalHttpsState(next)) };
+  try {
+    return await passFrom(await readLocalHttpsState(), ctx);
+  } catch (err) {
+    if (!(err instanceof Superseded)) {
+      console.error("[local-https] pass failed:", err instanceof Error ? err.message : err);
+    }
+    // Superseded: the pass the switch queued runs next and sees the owner's choice.
+    return readLocalHttpsState();
+  }
 }
 
 // ── The schedule ──
@@ -348,6 +452,8 @@ const JOB_KEY = Symbol.for("clawbox.local-https.job");
 interface JobSlot {
   /** Bumped by every switch of the feature; a pass from an older epoch writes nothing. */
   epoch: number;
+  /** Every state write, and every switch, runs behind this. */
+  lock: Promise<unknown>;
   started: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   tail: Promise<LocalHttpsState> | null;
@@ -356,8 +462,15 @@ interface JobSlot {
 
 function slot(): JobSlot {
   const g = globalThis as unknown as { [JOB_KEY]?: JobSlot };
-  g[JOB_KEY] ??= { epoch: 0, started: false, timer: null, tail: null, queued: null };
+  g[JOB_KEY] ??= { epoch: 0, lock: Promise.resolve(), started: false, timer: null, tail: null, queued: null };
   return g[JOB_KEY];
+}
+
+function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+  const s = slot();
+  const run = s.lock.then(fn, fn);
+  s.lock = run.catch(() => undefined);
+  return run;
 }
 
 /** When the next pass should run after one that left `state`. */
@@ -458,26 +571,32 @@ export async function localHttpsStatus(): Promise<LocalHttpsStatus> {
  * the certificate and key are deleted and the listener re-reads before this
  * returns, so the box stops answering on the name at once; the pass that
  * tells the portal to drop the DNS record follows. Either way a pass already
- * running for the old choice writes nothing (the epoch).
+ * running for the old choice stops before its next side effect (the epoch,
+ * bumped under the state lock).
  */
 export async function setLocalHttpsEnabled(
   enabled: boolean,
   opts: { waitMs?: number; deps?: LocalHttpsDeps } = {},
 ): Promise<LocalHttpsStatus> {
-  const s = slot();
-  s.epoch += 1;
-  const state = await readLocalHttpsState();
-  if (enabled) {
-    await writeLocalHttpsState({ ...state, enabled: true, problem: null, retryAt: null, unregisterPending: false });
-  } else {
+  await withStateLock(async () => {
+    const s = slot();
+    s.epoch += 1;
+    const state = await readLocalHttpsState();
+    if (enabled) {
+      await writeLocalHttpsState({ ...state, enabled: true, problem: null, retryAt: null, unregisterPending: false });
+      return;
+    }
+    // The secrets first: should that fail, the switch has not moved either.
+    await removeSecrets();
     await writeLocalHttpsState({
       ...EMPTY_LOCAL_HTTPS_STATE,
-      unregisterPending: state.unregisterPending || state.hostname !== null,
+      // `enabled`, not just a hostname on file: a pass may have published the
+      // address and not yet saved the name it got back. DELETE is idempotent.
+      unregisterPending: state.unregisterPending || state.enabled || state.hostname !== null,
       lastCheckAt: state.lastCheckAt,
     });
-    await removeSecrets();
-    (opts.deps?.refreshListener ?? refreshLocalHttpsListener)();
-  }
+  });
+  if (!enabled) (opts.deps?.refreshListener ?? refreshLocalHttpsListener)();
   const pass = triggerLocalHttpsPass(opts.deps).catch(() => null);
   const waitMs = opts.waitMs ?? (enabled ? 20_000 : 10_000);
   await Promise.race([pass, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())]);
@@ -490,6 +609,7 @@ export function resetLocalHttpsJobForTests(): void {
   if (s.timer) clearTimeout(s.timer);
   s.started = false;
   s.epoch = 0;
+  s.lock = Promise.resolve();
   s.timer = null;
   s.tail = null;
   s.queued = null;

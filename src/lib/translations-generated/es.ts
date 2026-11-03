@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "Activado",
   "settings.localHttps.open": "Abrir",
   "settings.localHttps.preparing": "Obteniendo el certificado…",
-  "settings.localHttps.privacy": "Con esto activado, ClawBox envía la dirección de esta caja en tu red doméstica (por ejemplo 192.168.1.20) al portal de ClawBox, que la publica en el DNS público con un nombre aleatorio en lan.clawbox.com. Ese nombre también aparece en los registros públicos de certificados. Nada más sale de la caja, y al desactivarlo se elimina el registro DNS.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "Con esto activado, ClawBox envía la dirección de esta caja en tu red doméstica (por ejemplo 192.168.1.20) al portal de ClawBox, que la publica en el DNS público con un nombre aleatorio en lan.clawbox.com y obtiene un certificado para ese nombre; después el nombre aparece en los registros públicos de certificados. La clave privada del certificado nunca sale de la caja, y al desactivarlo se elimina el registro DNS.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "El certificado del portal no coincidía con esta caja y no se usó. La caja lo intentará de nuevo.",
   "settings.localHttps.problemNoLanIp": "La caja no tiene ahora una dirección en tu red doméstica.",
   "settings.localHttps.problemNotPaired": "Inicia sesión primero en ClawBox AI: la dirección segura se emite a través de tu cuenta de ClawBox.",

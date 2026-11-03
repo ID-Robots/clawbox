@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "Включено",
   "settings.localHttps.open": "Отвори",
   "settings.localHttps.preparing": "Получаване на сертификата…",
-  "settings.localHttps.privacy": "Когато това е включено, ClawBox изпраща адреса на устройството в домашната ви мрежа (например 192.168.1.20) до портала на ClawBox, който го публикува в публичния DNS под случайно име в lan.clawbox.com. Това име се вписва и в публичните регистри на сертификати. Нищо друго не напуска устройството, а изключването премахва DNS записа.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "Когато това е включено, ClawBox изпраща адреса на устройството в домашната ви мрежа (например 192.168.1.20) до портала на ClawBox, който го публикува в публичния DNS под случайно име в lan.clawbox.com и получава сертификат за това име; след това името се вписва в публичните регистри на сертификати. Частният ключ на сертификата никога не напуска устройството, а изключването премахва DNS записа.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "Сертификатът от портала не съответства на това устройство и не беше използван. Устройството ще опита отново.",
   "settings.localHttps.problemNoLanIp": "В момента устройството няма адрес в домашната ви мрежа.",
   "settings.localHttps.problemNotPaired": "Първо влезте в ClawBox AI — защитеният адрес се издава чрез профила ви в ClawBox.",

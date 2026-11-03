@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "An",
   "settings.localHttps.open": "Öffnen",
   "settings.localHttps.preparing": "Zertifikat wird abgerufen…",
-  "settings.localHttps.privacy": "Wenn dies aktiviert ist, sendet ClawBox die Adresse dieser Box in deinem Heimnetz (z. B. 192.168.1.20) an das ClawBox-Portal, das sie im öffentlichen DNS unter einem zufälligen Namen in lan.clawbox.com veröffentlicht. Dieser Name steht außerdem in öffentlichen Zertifikatsprotokollen. Sonst verlässt nichts die Box, und beim Ausschalten wird der DNS-Eintrag entfernt.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "Wenn dies aktiviert ist, sendet ClawBox die Adresse dieser Box in deinem Heimnetz (z. B. 192.168.1.20) an das ClawBox-Portal, das sie im öffentlichen DNS unter einem zufälligen Namen in lan.clawbox.com veröffentlicht und ein Zertifikat für diesen Namen besorgt; der Name steht dann in öffentlichen Zertifikatsprotokollen. Der private Schlüssel des Zertifikats verlässt die Box nie, und beim Ausschalten wird der DNS-Eintrag entfernt.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "Das Zertifikat vom Portal passte nicht zu dieser Box und wurde nicht verwendet. Die Box versucht es erneut.",
   "settings.localHttps.problemNoLanIp": "Die Box hat gerade keine Adresse in deinem Heimnetz.",
   "settings.localHttps.problemNotPaired": "Melde dich zuerst bei ClawBox AI an — die sichere Adresse wird über dein ClawBox-Konto ausgestellt.",

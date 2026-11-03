@@ -83,6 +83,31 @@ function retryAfterMs(res: Response): number | undefined {
   return Number.isFinite(at) ? Math.max(0, Math.min(at - Date.now(), 24 * 3600 * 1000)) : undefined;
 }
 
+/** Every answer of the contract is small; one that is not is refused before it is held in memory. */
+const MAX_ANSWER_BYTES = 256 * 1024;
+
+async function readJsonCapped(res: Response): Promise<unknown> {
+  if (!res.body) return null;
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_ANSWER_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw new LocalHttpsPortalError("portal_error", "the portal's answer is too large");
+    }
+    chunks.push(value);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+  } catch {
+    return null;
+  }
+}
+
 function isCertificateChain(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_CERTIFICATE_BYTES && value.includes("-----BEGIN CERTIFICATE-----");
 }
@@ -146,7 +171,7 @@ export function createHttpPortal(opts: HttpPortalOptions = {}): LocalHttpsPortal
     if (res.status === 429) {
       throw new LocalHttpsPortalError("rate_limited", "the portal asked the box to wait", retryAfterMs(res) ?? 15 * 60_000);
     }
-    const json: unknown = res.status === 204 ? null : await res.json().catch(() => null);
+    const json: unknown = res.status === 204 ? null : await readJsonCapped(res);
     if (res.status >= 500) {
       throw new LocalHttpsPortalError("portal_error", `the portal failed (${res.status})`, retryAfterMs(res));
     }

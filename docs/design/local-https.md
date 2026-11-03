@@ -71,8 +71,8 @@ A dedicated registrable domain (`clawbox.direct`, in the plex.direct manner) giv
 - **Key**: an ECDSA P-256 key, generated on the box for every order (`generatePrivateKeyPem`). It never leaves the box. Until the order completes it waits in `data/local-https/order-key.pem` (0600).
 - **Request**: a PKCS#10 CSR with the hostname as CN and as the only SAN, signed with that key (`buildCsr` in `src/lib/local-https-x509.ts` — DER written with `crypto` alone, because Node cannot build a CSR and the box must not depend on an `openssl` binary or a new package for it; the tests read the bytes back with Node's X509 parser and with `openssl req -verify`).
 - **Issuance**: the portal holds the ACME account and the DNS credential. It checks the CSR (below), creates the order at Let's Encrypt, publishes `_acme-challenge.<label>.lan.clawbox.com TXT`, lets the CA validate, removes the record, and finalizes with the box's CSR. The box polls the order.
-- **Install**: before anything is written the box checks the certificate against its own key, the hostname and the clock, and refuses a CA certificate (`inspectCertificate`). The key and the chain then go into ONE file, `data/local-https/tls.json` (0600), written temp-file-then-rename, so a renewal swaps the pair in a single step and a reader never sees a new certificate beside an old key.
-- **Serving**: `production-server.js` and the Hermes dashboard proxy re-read `tls.json` every 30 s and serve it only while it is *valid* (`scripts/local-https.js`): the box's own name, inside its dates, the key matching, and the chain ending at a root in Node's store. An expired or foreign certificate takes HTTPS down rather than serving something a browser will refuse. A renewal is picked up with `setSecureContext()` — no restart, no dropped connections.
+- **Install**: before anything is written the box applies the same rules the TLS listener serves by (`inspectCertificate`): a server certificate (not a CA) for exactly the hostname, matching its own key, inside its dates, every link of the chain signed by the next and the last one a root in Node's store or signed by one. A certificate that fails — Let's Encrypt staging, a broken chain, a clock far off — is refused and counted as a failed order, and an installed one that stops passing is ordered again. The key and the chain then go into ONE file, `data/local-https/tls.json` (0600), written temp-file-then-rename, so a renewal swaps the pair in a single step and a reader never sees a new certificate beside an old key.
+- **Serving**: `production-server.js` and the Hermes dashboard proxy re-read `tls.json` every 30 s and serve it only while it is *valid* (`scripts/local-https.js`, the same rules). An expired or foreign certificate takes HTTPS down rather than serving something a browser will refuse. A renewal is picked up with `setSecureContext()` — no restart, no dropped connections. A browser that names the host (SNI) gets this certificate; a client that sends no SNI (an IP literal) gets an owner-installed `data/certs/` pair when there is one, as before — a Local HTTPS certificate can never match an IP.
 - **Renewal**: when a third of the lifetime is left (30 days of Let's Encrypt's current 90; still right as lifetimes shrink toward 45 days), with a new key. The old certificate is served until the new one is installed. ARI (RFC 9773) can replace the fixed third later; the portal would pass the CA's window through the order answer.
 - **Failure handling**: an order the portal has not finished in 15 minutes is abandoned. After a failed order, or a certificate the box refused, the box waits an hour before ordering again (Let's Encrypt allows 5 certificates per week for one exact name); a 429 is honoured to its `Retry-After`; a portal that answers 401/403 is asked again after an hour, one that answers 404/405/501 (no Local HTTPS yet) after six. Switching the feature on in Settings retries at once. A certificate that is still valid keeps being served through all of it.
 
@@ -135,8 +135,8 @@ Until these endpoints exist, `CLAWBOX_LOCAL_HTTPS_PORTAL=stub` (in the box's `.e
 | The portal client and the stub | `src/lib/local-https-portal.ts` |
 | Key, CSR and the stub's certificates | `src/lib/local-https-x509.ts` |
 | What the TLS processes read and serve; the one-port HTTP+TLS front | `scripts/local-https.js` |
-| :443 | `production-server.js` (`startHttpsServer`): up while a valid certificate exists, SNI picks the Local HTTPS one for its name and an owner's `data/certs/` pair for any other, down when nothing valid is left; publishes its state to the app in the same process (`src/lib/local-https-listener.ts`) |
-| :8090 (Hermes dashboard) | `scripts/hermes-dashboard-proxy.js`: TLS and plain HTTP on the same port (first byte `0x16` → TLS), so the dashboard opens from the HTTPS desktop, whose session cookie is `Secure`; the HTTPS desktop is a trusted referrer; a request without a session goes to the login on its own scheme |
+| :443 | `production-server.js` (`startHttpsServer`): up while a valid certificate exists, SNI picks the Local HTTPS one for its name, an owner's `data/certs/` pair for any other name and for clients without SNI, down when nothing valid is left; publishes its state to the app in the same process (`src/lib/local-https-listener.ts`) |
+| :8090 (Hermes dashboard) | `scripts/hermes-dashboard-proxy.js`: TLS and plain HTTP on the same port (first byte `0x16` → TLS; a connection that sends nothing for 10 s is closed), so the dashboard opens from the HTTPS desktop, whose session cookie is `Secure` (Next marks `x-forwarded-proto: https` for a request on a TLS socket, and `login-api` sets `Secure` from it); the HTTPS desktop is a trusted referrer; a request without a session goes to the login on its own scheme. The proxy reads the certificate files itself, but it is restarted only by a Hermes upgrade or a reboot — an update that ships this change should restart it once, or :8090 speaks TLS only after the next reboot |
 | Host allow-list | rule 8 in `src/lib/host-allowlist.ts` and its CommonJS mirror `scripts/host-allowlist.js` (held together by `host-allowlist-parity.test.ts`), the Hermes proxy's own list, and the gateway proxy's setup redirect: the box's own Local HTTPS name, while the feature is on — that one name, never the zone |
 | Routes | `GET/POST /setup-api/local-https` (owner only, POST same-origin) and `GET /setup-api/local-https/hint` (before sign-in, see below) |
 | CSP | `connect-src` gains `https://*.lan.clawbox.com` so the probe can leave the page (`next.config.ts`) |
@@ -144,7 +144,7 @@ Until these endpoints exist, `CLAWBOX_LOCAL_HTTPS_PORTAL=stub` (in the box's `.e
 
 Files under `data/local-https/` (directory 0700, every file 0600): `state.json`, `tls.json`, `order-key.pem` while an order is pending, and the stub's `stub-ca.json` / `stub-ca.pem`. The web server is the only writer; it runs as `clawbox` with `CAP_NET_BIND_SERVICE` already, and `scripts/clawbox-firewall.sh` already opens 443 on the LAN — nothing in `install.sh` or a root step changes.
 
-A pass never throws: what went wrong is the state's `problem`, which the card words. Passes run one at a time; a pass that was running when the owner flipped the switch writes nothing (an epoch on the process-wide job slot), so a slow "on" cannot undo an "off".
+A pass never throws: what went wrong is the state's `problem`, which the card words. Passes run one at a time, and a box with the feature off and nothing owed to the portal does nothing at all — no write, no call. The owner's switch always wins: it bumps an epoch on the process-wide job slot under the same lock every state write takes, and a pass from an older epoch stops before its next side effect (a portal call, a key, a certificate) and writes nothing, so a slow "on" can neither undo an "off" nor order a certificate after it. Switching off from a box that was on always queues the DNS removal, even if the pass that published the address had not saved the name yet.
 
 ## 5. Moving the browser, and the DNS-rebind fallback
 
@@ -156,15 +156,15 @@ A pass never throws: what went wrong is the state's `problem`, which the card wo
 
 The owner signs in once more on the new origin — cookies do not cross origins — after which the browser stays there.
 
-**What the owner is told.** The box asks two resolvers for its name every 6 hours and after every change: the system one (normally the router — what the owner's browsers ask) and a public one (1.1.1.1, 8.8.8.8):
+**What the owner is told.** The box asks the system resolver for its name — normally the router, which is what the owner's browsers ask — after every address change and then every 6 hours (every 10 minutes while the answer is not settled). The portal's own `200` to the `PUT` says the record is published, so no third-party resolver needs to be asked:
 
-| Router | Public DNS | Verdict | Card |
-|---|---|---|---|
-| this box's IP | — | `ok` | nothing to say |
-| nothing | this box's IP | `rebind_blocked` | the router blocks the name; `http://<IP>` keeps working; how to allow `lan.clawbox.com` on OpenWrt/dnsmasq (`rebind-domain-ok=/lan.clawbox.com/`), FRITZ!Box (DNS rebind protection exceptions) and pfSense/OPNsense (private domains) |
-| another IP | this box's IP | `stale` | DNS still has an older address; minutes |
-| nothing | nothing | `pending` | not published yet; minutes |
-| — | unreachable | `unknown` | nothing |
+| Router answers | Verdict | Card |
+|---|---|---|
+| this box's IP | `ok` | nothing to say |
+| no such name, 10 min or more after the portal published it | `rebind_blocked` | the router blocks the name; `http://<IP>` keeps working; how to allow `lan.clawbox.com` on OpenWrt/dnsmasq (`rebind-domain-ok=/lan.clawbox.com/`), FRITZ!Box (DNS rebind protection exceptions) and pfSense/OPNsense (private domains) |
+| no such name, within those 10 min | `pending` | not published yet; minutes (negative answers are cached for a while) |
+| another IP | `stale` | DNS still has an older address; minutes |
+| the lookup failed (timeout, SERVFAIL) | `unknown` | nothing — a failed lookup says nothing about the router's settings |
 
 The card also runs the same probe as the redirect, so it can say "This browser reaches the secure address" or "This browser cannot reach the secure address. http://<IP> keeps working" — the box's own resolver cannot speak for a phone on mobile data's DNS.
 
@@ -179,7 +179,7 @@ What leaves the box, and only while the owner has the switch on:
 | a CSR (public key + hostname) | the portal, Let's Encrypt | to issue the certificate |
 | the hostname | **public Certificate Transparency logs**, forever | every publicly trusted certificate is logged |
 
-What follows from that, and is said in the card before the switch: anyone who learns the name can resolve it and learn a private address (low value — it is the same `192.168.x.y` thousands of homes use — but a disclosure); the CT logs show that a ClawBox exists under that random name and when its certificates were issued, not who owns it or where. Switching off deletes the key and certificate on the box at once, stops serving the name, and asks the portal to remove the DNS record (retried until it answers); CT entries cannot be removed by anyone. The portal knows account ↔ device ↔ LAN address; it should keep only the current address, not a history.
+The box's own DNS checks go to the router only, never to a public resolver. What follows from the table, and is said in the card before the switch: anyone who learns the name can resolve it and learn a private address (low value — it is the same `192.168.x.y` thousands of homes use — but a disclosure); the CT logs show that a ClawBox exists under that random name and when its certificates were issued, not who owns it or where. Switching off deletes the key and certificate on the box at once, stops serving the name, and asks the portal to remove the DNS record (retried until it answers); CT entries cannot be removed by anyone. The portal knows account ↔ device ↔ LAN address; it should keep only the current address, not a history.
 
 Security notes:
 
@@ -198,7 +198,7 @@ Security notes:
 Testing:
 
 - Unit and integration tests (vitest): the DER (read back by Node and openssl), the CommonJS validator and listener refresh, the one-port HTTP+TLS front (bodies, keep-alive, WebSockets), the job's whole cycle against a fake portal and against the stub, every portal status, the epoch race, the Host allow-list parity, both routes, the client's probe rules, the Hermes proxy over TLS, the Settings card, and `production-server.js` started for real (listener up, renewed, down, back).
-- On a lab board, in stub mode, on the OpenClaw and the Hermes edition: the switch, the certificate, :443 and :8090 over TLS with `--cacert` the stub CA, the hint, switching off.
+- On a lab board, in stub mode, on the OpenClaw and the Hermes edition: the switch, the certificate, :443 and :8090 over TLS with `--cacert` the stub CA, WebSockets over TLS, the hint, a reboot with the feature on, switching off.
 - Not testable before the portal exists: a real Let's Encrypt chain, real DNS, and a real router's rebind protection.
 
 Known limits, for later:

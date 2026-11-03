@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "オン",
   "settings.localHttps.open": "開く",
   "settings.localHttps.preparing": "証明書を取得しています…",
-  "settings.localHttps.privacy": "オンにすると、ClawBoxはホームネットワーク上のこの機器のアドレス(例: 192.168.1.20)をClawBoxポータルに送信し、ポータルはそれを lan.clawbox.com 内のランダムな名前で公開DNSに登録します。その名前は公開の証明書ログにも記載されます。それ以外の情報は機器の外に出ず、オフにするとDNSレコードは削除されます。", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "オンにすると、ClawBoxはホームネットワーク上のこの機器のアドレス(例: 192.168.1.20)をClawBoxポータルに送信し、ポータルはそれを lan.clawbox.com 内のランダムな名前で公開DNSに登録して、その名前の証明書を取得します。その後、名前は公開の証明書ログに記載されます。証明書の秘密鍵が機器の外に出ることはなく、オフにするとDNSレコードは削除されます。", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "ポータルから届いた証明書がこの機器と一致しなかったため、使用しませんでした。機器は再試行します。",
   "settings.localHttps.problemNoLanIp": "現在、この機器にはホームネットワーク上のアドレスがありません。",
   "settings.localHttps.problemNotPaired": "まずClawBox AIにサインインしてください。安全なアドレスはClawBoxアカウントを通じて発行されます。",

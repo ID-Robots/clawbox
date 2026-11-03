@@ -35,7 +35,7 @@ type Lib = {
     sniCallback: (name: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void;
     status: () => { hostname: string; notAfter: number; fingerprint256: string } | null;
   };
-  createDualProtocolServer: (plain: http.Server, secure: () => https.Server | null) => net.Server;
+  createDualProtocolServer: (plain: http.Server, secure: () => https.Server | null, opts?: { firstByteTimeoutMs?: number }) => net.Server;
   publishListener: (l: unknown) => void;
 };
 const lib = require_(path.resolve(process.cwd(), "scripts/local-https.js")) as Lib;
@@ -193,7 +193,7 @@ describe("createLocalHttpsTls", () => {
     expect(t.status()).toBeNull();
   });
 
-  it("serves an owner's data/certs pair for other names, and the Local HTTPS one for its own", () => {
+  it("serves an owner's data/certs pair for other names and to clients without SNI, the Local HTTPS one for its own", () => {
     install();
     const legacyDir = path.join(root, "data", "certs");
     fs.mkdirSync(legacyDir, { recursive: true });
@@ -208,9 +208,25 @@ describe("createLocalHttpsTls", () => {
     expect(contexts[0]).toBeDefined();
     expect(contexts[1]).toBeDefined();
     expect(contexts[0]).not.toBe(contexts[1]);
-    // The Local HTTPS pair is the default for a client that sends no SNI.
-    expect(String(t.defaultOptions()?.cert)).toContain("BEGIN CERTIFICATE");
+    // An IP literal sends no SNI: the owner's pair, which may well be for that IP,
+    // stays the default — a Local HTTPS certificate can never match an IP.
+    expect(String(t.defaultOptions()?.cert)).toBe(legacy.certPem);
     expect(t.status()?.hostname).toBe(HOST);
+  });
+
+  it("follows an owner's data/certs pair being replaced", () => {
+    const legacyDir = path.join(root, "data", "certs");
+    fs.mkdirSync(legacyDir, { recursive: true });
+    const first = createCa("box.example", new Date(Date.now() - DAY), new Date(Date.now() + DAY));
+    fs.writeFileSync(path.join(legacyDir, "cert.pem"), first.certPem);
+    fs.writeFileSync(path.join(legacyDir, "key.pem"), first.keyPem);
+    const t = lib.createLocalHttpsTls({ root, legacyCertDir: legacyDir, log: quiet });
+    t.refresh();
+    const second = createCa("box.example", new Date(Date.now() - DAY), new Date(Date.now() + 2 * DAY));
+    fs.writeFileSync(path.join(legacyDir, "cert.pem"), second.certPem);
+    fs.writeFileSync(path.join(legacyDir, "key.pem"), second.keyPem);
+    expect(t.refresh()).toBe(true);
+    expect(String(t.defaultOptions()?.cert)).toBe(second.certPem);
   });
 });
 
@@ -271,7 +287,8 @@ describe("createDualProtocolServer", () => {
 
   it("carries WebSocket upgrades on both", async () => {
     const { port, ca } = await listen(true);
-    for (const [url, extra] of [[`ws://127.0.0.1:${port}/x`, {}], [`wss://127.0.0.1:${port}/x`, { ca, servername: HOST }]] as const) {
+    const dials: [string, WebSocket.ClientOptions & tls.ConnectionOptions][] = [[`ws://127.0.0.1:${port}/x`, {}], [`wss://127.0.0.1:${port}/x`, { ca, servername: HOST }]];
+    for (const [url, extra] of dials) {
       const ws = new WebSocket(url, extra);
       const got = await new Promise<string>((resolve, reject) => {
         ws.on("open", () => ws.send("hi"));
@@ -281,6 +298,22 @@ describe("createDualProtocolServer", () => {
       ws.close();
       expect(got).toBe("echo:hi");
     }
+  });
+
+  it("closes a connection that never sends a byte", async () => {
+    const plain = http.createServer((_req, res) => res.end("x"));
+    const front = lib.createDualProtocolServer(plain, () => null, { firstByteTimeoutMs: 150 });
+    await new Promise<void>((resolve) => front.listen(0, "127.0.0.1", resolve));
+    servers.push(front);
+    const port = (front.address() as net.AddressInfo).port;
+    const closedAfter = await new Promise<number>((resolve) => {
+      const started = Date.now();
+      const socket = net.connect(port, "127.0.0.1");
+      socket.on("close", () => resolve(Date.now() - started));
+      socket.on("error", () => {});
+    });
+    expect(closedAfter).toBeGreaterThanOrEqual(100);
+    expect(closedAfter).toBeLessThan(5_000);
   });
 
   it("closes a TLS handshake when there is no certificate, and still answers HTTP", async () => {

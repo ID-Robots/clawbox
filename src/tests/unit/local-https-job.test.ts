@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import { createRequire } from "module";
 import os from "os";
@@ -6,9 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   type LocalHttpsDeps,
+  DNS_PUBLISH_GRACE_MS,
+  DNS_UNSETTLED_RECHECK_MS,
   ORDER_RETRY_MS,
   ORDER_TIMEOUT_MS,
   PASS_INTERVAL_MS,
+  defaultTrustedRoots,
   dnsVerdict,
   inspectCertificate,
   localHttpsStatus,
@@ -65,6 +69,8 @@ function fakePortal(ca: TestCa, over: Partial<LocalHttpsPortal> = {}) {
   let issued = "";
   const portal = {
     kind: "portal" as const,
+    /** The CA the test trusts for it (see depsFor). */
+    ca,
     register: vi.fn(async (ip: string) => {
       expect(ip).toMatch(/^192\.168\./);
       return { hostname: HOST };
@@ -85,20 +91,24 @@ function fakePortal(ca: TestCa, over: Partial<LocalHttpsPortal> = {}) {
     }),
     pollOrder: vi.fn(async (orderId: string) => ({ status: "valid" as const, orderId, certificate: issued })),
     unregister: vi.fn(async () => {}),
-    ...over,
   };
-  return portal;
+  // `over` replaces some of the mocks; the result keeps their mock types.
+  return { ...portal, ...over } as typeof portal;
 }
 
-function depsFor(portal: LocalHttpsPortal, over: Partial<LocalHttpsDeps> = {}): LocalHttpsDeps & { refreshListener: ReturnType<typeof vi.fn>; checkDns: ReturnType<typeof vi.fn> } {
+type TestDeps = LocalHttpsDeps & { refreshListener: ReturnType<typeof vi.fn>; lookup: ReturnType<typeof vi.fn> };
+
+/** The box's deps around `portal`: the router answers this box's address, and the portal's CA is trusted. */
+function depsFor(portal: LocalHttpsPortal & { ca?: TestCa }, over: Partial<LocalHttpsDeps> = {}): TestDeps {
   return {
     portal,
     lanIp: async () => LAN_IP,
     now: () => clock,
-    checkDns: vi.fn(async () => "ok" as const),
+    lookup: vi.fn(async () => [LAN_IP]),
+    trustedRoots: async () => (portal.ca ? [new crypto.X509Certificate(portal.ca.certPem)] : []),
     refreshListener: vi.fn(),
     ...over,
-  } as LocalHttpsDeps & { refreshListener: ReturnType<typeof vi.fn>; checkDns: ReturnType<typeof vi.fn> };
+  } as TestDeps;
 }
 
 async function turnOnAndInstall(deps: LocalHttpsDeps) {
@@ -145,10 +155,10 @@ describe("switching on", () => {
     expect(fs.statSync(path.join(dir(), "state.json")).mode & 0o777).toBe(0o600);
     const stored = JSON.parse(fs.readFileSync(tlsFile(), "utf-8"));
     expect(stored.hostname).toBe(HOST);
-    expect(inspectCertificate(stored.cert, stored.key, HOST, clock).ok).toBe(true);
-    // Checked on the first pass, as soon as the name was known.
+    expect(inspectCertificate(stored.cert, stored.key, HOST, clock, await deps.trustedRoots()).ok).toBe(true);
+    // Checked on the first pass, as soon as the name was known — the router only.
     expect(state.dns).toMatchObject({ ip: LAN_IP, verdict: "ok" });
-    expect(deps.checkDns).toHaveBeenCalledWith(HOST, LAN_IP);
+    expect(deps.lookup).toHaveBeenCalledWith(HOST);
     expect(deps.refreshListener).toHaveBeenCalled();
   });
 
@@ -158,12 +168,12 @@ describe("switching on", () => {
     await turnOnAndInstall(deps);
     portal.register.mockClear();
     portal.order.mockClear();
-    deps.checkDns.mockClear();
+    deps.lookup.mockClear();
     clock += PASS_INTERVAL_MS;
     await runLocalHttpsPass(deps);
     expect(portal.register).not.toHaveBeenCalled();
     expect(portal.order).not.toHaveBeenCalled();
-    expect(deps.checkDns).not.toHaveBeenCalled();
+    expect(deps.lookup).not.toHaveBeenCalled();
   });
 
   it("re-reports an unchanged address once a day", async () => {
@@ -318,6 +328,30 @@ describe("problems", () => {
     expect(portal.order).toHaveBeenCalledTimes(2);
   });
 
+  it("refuses a certificate no trusted authority issued — Let's Encrypt staging, say — and orders again later", async () => {
+    const portal = fakePortal(testCa());
+    const deps = depsFor(portal, { trustedRoots: async () => [] });
+    await setLocalHttpsEnabled(true, { deps, waitMs: 5_000 });
+    clock += 2_001;
+    const state = await runLocalHttpsPass(deps);
+    expect(state.problem).toMatchObject({ code: "bad_certificate", detail: "not issued by a trusted authority" });
+    expect(state.retryAt).toBe(clock + ORDER_RETRY_MS);
+    expect(fs.existsSync(tlsFile())).toBe(false);
+  });
+
+  it("replaces an installed certificate that stopped passing the listener's rules", async () => {
+    const portal = fakePortal(testCa());
+    let roots: crypto.X509Certificate[] = [new crypto.X509Certificate(portal.ca.certPem)];
+    const deps = depsFor(portal, { trustedRoots: async () => roots });
+    await turnOnAndInstall(deps);
+    portal.order.mockClear();
+    roots = [new crypto.X509Certificate(testCa("another root").certPem)];
+    clock += PASS_INTERVAL_MS;
+    const state = await runLocalHttpsPass(deps);
+    expect(portal.order).toHaveBeenCalledTimes(1);
+    expect(state.certNotAfter).toBeNull();
+  });
+
   it("records an order the portal could not fill", async () => {
     const portal = fakePortal(testCa(), {
       pollOrder: vi.fn(async (orderId: string) => ({ status: "invalid" as const, orderId, error: "dns-01 challenge failed" })),
@@ -393,6 +427,27 @@ describe("switching off", () => {
     expect((await readLocalHttpsState()).unregisterPending).toBe(false);
   });
 
+  it("asks the portal to drop the address even when the switch came before the name was saved", async () => {
+    const portal = fakePortal(testCa());
+    const deps = depsFor(portal);
+    // On, a register in flight, nothing saved back yet.
+    await writeLocalHttpsState({ ...EMPTY_LOCAL_HTTPS_STATE, enabled: true });
+    await setLocalHttpsEnabled(false, { deps, waitMs: 5_000 });
+    expect(portal.unregister).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes nothing and asks nothing on a box that never turned it on", async () => {
+    const portal = fakePortal(testCa());
+    const deps = depsFor(portal);
+    for (let i = 0; i < 3; i++) {
+      clock += PASS_INTERVAL_MS;
+      await runLocalHttpsPass(deps);
+    }
+    expect(fs.existsSync(path.join(dir(), "state.json"))).toBe(false);
+    expect(portal.unregister).not.toHaveBeenCalled();
+    expect(deps.refreshListener).not.toHaveBeenCalled();
+  });
+
   it("is not undone by a pass that was already running for 'on'", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -414,7 +469,39 @@ describe("switching off", () => {
     expect(state.enabled).toBe(false);
     expect(state.hostname).toBeNull();
     expect(fs.existsSync(tlsFile())).toBe(false);
+    // Stopped before its next side effect: no order (no certificate in CT), no key.
     expect(portal.order).not.toHaveBeenCalled();
+    expect(fs.existsSync(orderKeyFile())).toBe(false);
+    // …and the address it had published is taken down.
+    expect(portal.unregister).toHaveBeenCalled();
+  });
+});
+
+describe("DNS", () => {
+  it("is pending right after publishing, rebind protection once a router still says no after the grace", async () => {
+    const portal = fakePortal(testCa());
+    const deps = depsFor(portal, { lookup: vi.fn(async () => "nxdomain" as const) });
+    await turnOnAndInstall(deps);
+    expect((await readLocalHttpsState()).dns?.verdict).toBe("pending");
+    clock += DNS_UNSETTLED_RECHECK_MS + DNS_PUBLISH_GRACE_MS;
+    const state = await runLocalHttpsPass(deps);
+    expect(state.dns?.verdict).toBe("rebind_blocked");
+    expect((await localHttpsStatus()).dns).toBe("rebind_blocked");
+  });
+
+  it("asks again soon while the answer is unsettled, and rarely once it is", async () => {
+    const portal = fakePortal(testCa());
+    const lookup = vi.fn(async (): Promise<string[] | "error"> => "error");
+    const deps = depsFor(portal, { lookup });
+    await turnOnAndInstall(deps);
+    expect((await readLocalHttpsState()).dns?.verdict).toBe("unknown");
+    lookup.mockResolvedValue([LAN_IP]);
+    clock += DNS_UNSETTLED_RECHECK_MS;
+    expect((await runLocalHttpsPass(deps)).dns?.verdict).toBe("ok");
+    lookup.mockClear();
+    clock += DNS_UNSETTLED_RECHECK_MS;
+    await runLocalHttpsPass(deps);
+    expect(lookup).not.toHaveBeenCalled();
   });
 });
 
@@ -450,14 +537,15 @@ describe("with the stub portal", () => {
   it("runs the whole cycle on the box, and scripts/local-https.js serves the result", async () => {
     process.env.CLAWBOX_LOCAL_HTTPS_PORTAL = "stub";
     const portal = createStubPortal({ deviceId: async () => "dev_0123456789abcdef", now: () => clock });
-    const deps = depsFor(portal);
+    // The box's own roots: Node's store plus the stub CA, read from stub-ca.pem.
+    const deps = depsFor(portal, { trustedRoots: defaultTrustedRoots });
     await setLocalHttpsEnabled(true, { deps, waitMs: 5_000 });
     clock += 2_001;
     const state = await runLocalHttpsPass(deps);
     expect(state.problem).toBeNull();
     expect(state.stubPortal).toBe(true);
     expect(state.dns).toBeNull();
-    expect(deps.checkDns).not.toHaveBeenCalled();
+    expect(deps.lookup).not.toHaveBeenCalled();
     expect((await localHttpsStatus()).portal).toBe("stub");
 
     const lib = createRequire(import.meta.url)(path.resolve(process.cwd(), "scripts/local-https.js")) as {
@@ -469,15 +557,14 @@ describe("with the stub portal", () => {
 });
 
 describe("rules", () => {
-  it("dnsVerdict tells rebind protection apart from a record that is not there", () => {
-    expect(dnsVerdict([LAN_IP], [LAN_IP], LAN_IP)).toBe("ok");
-    expect(dnsVerdict([LAN_IP], "error", LAN_IP)).toBe("ok");
-    expect(dnsVerdict("nxdomain", [LAN_IP], LAN_IP)).toBe("rebind_blocked");
-    expect(dnsVerdict("error", [LAN_IP], LAN_IP)).toBe("rebind_blocked");
-    expect(dnsVerdict(["192.168.1.5"], [LAN_IP], LAN_IP)).toBe("stale");
-    expect(dnsVerdict("nxdomain", ["192.168.1.5"], LAN_IP)).toBe("stale");
-    expect(dnsVerdict("nxdomain", "nxdomain", LAN_IP)).toBe("pending");
-    expect(dnsVerdict("error", "error", LAN_IP)).toBe("unknown");
+  it("dnsVerdict calls it rebind protection only for a definite no, long after publishing", () => {
+    const later = DNS_PUBLISH_GRACE_MS;
+    expect(dnsVerdict([LAN_IP], LAN_IP, 0)).toBe("ok");
+    expect(dnsVerdict(["192.168.1.5"], LAN_IP, later)).toBe("stale");
+    expect(dnsVerdict("nxdomain", LAN_IP, later)).toBe("rebind_blocked");
+    expect(dnsVerdict("nxdomain", LAN_IP, later - 1)).toBe("pending");
+    // A lookup that merely failed says nothing about the router's settings.
+    expect(dnsVerdict("error", LAN_IP, later)).toBe("unknown");
   });
 
   it("renewAt is a third of the lifetime before the end", () => {
@@ -493,15 +580,22 @@ describe("rules", () => {
     expect(nextPassDelay({ ...base, retryAt: 60_000 }, 0)).toBe(60_000);
   });
 
-  it("inspectCertificate names what is wrong", () => {
+  it("inspectCertificate applies the listener's rules and names what is wrong", () => {
     const ca = testCa();
+    const roots = [new crypto.X509Certificate(ca.certPem)];
     const leaf = leafFor(ca);
     const now = Date.now();
-    expect(inspectCertificate(leaf.chainPem, leaf.keyPem, HOST, now).ok).toBe(true);
-    expect(inspectCertificate(leaf.chainPem, leaf.keyPem, OTHER_HOST, now)).toEqual({ ok: false, reason: "issued for another name" });
-    expect(inspectCertificate(leaf.chainPem, generatePrivateKeyPem(), HOST, now)).toEqual({ ok: false, reason: "does not match the box's key" });
-    expect(inspectCertificate(leaf.chainPem, leaf.keyPem, HOST, now + 100 * DAY)).toEqual({ ok: false, reason: "already expired" });
-    expect(inspectCertificate("nope", leaf.keyPem, HOST, now)).toEqual({ ok: false, reason: "no certificate in the answer" });
-    expect(inspectCertificate(ca.certPem, ca.keyPem, HOST, now).ok).toBe(false);
+    const check = (cert: string, key: string, host = HOST, at = now, r = roots) => inspectCertificate(cert, key, host, at, r);
+    expect(check(leaf.chainPem, leaf.keyPem).ok).toBe(true);
+    // The leaf alone also chains: its issuer is the trusted root itself.
+    expect(check(leaf.certPem, leaf.keyPem).ok).toBe(true);
+    expect(check(leaf.chainPem, leaf.keyPem, OTHER_HOST)).toEqual({ ok: false, reason: "issued for another name" });
+    expect(check(leaf.chainPem, generatePrivateKeyPem())).toEqual({ ok: false, reason: "does not match the box's key" });
+    expect(check(leaf.chainPem, leaf.keyPem, HOST, now + 100 * DAY)).toEqual({ ok: false, reason: "already expired" });
+    expect(check(leaf.chainPem, leaf.keyPem, HOST, now - DAY)).toEqual({ ok: false, reason: expect.stringMatching(/^not valid yet/) });
+    expect(check(leaf.chainPem, leaf.keyPem, HOST, now, [])).toEqual({ ok: false, reason: "not issued by a trusted authority" });
+    expect(check(leaf.certPem + testCa("stranger").certPem, leaf.keyPem)).toEqual({ ok: false, reason: "a broken chain" });
+    expect(check("nope", leaf.keyPem)).toEqual({ ok: false, reason: "no certificate in the answer" });
+    expect(check(ca.certPem, ca.keyPem).ok).toBe(false);
   });
 });

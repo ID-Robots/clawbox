@@ -192,7 +192,11 @@ function fileSignature(file) {
  *           always was (no validation: the owner put it there).
  *
  * `refresh()` answers whether what is served changed; `defaultOptions()` is the
- * pair for a client that sends no SNI (an IP literal): Local HTTPS first.
+ * pair for a client that sends no SNI (an IP literal): the owner's pair when
+ * there is one — a Local HTTPS certificate can never match an IP, and an
+ * owner who installed a certificate for `https://<LAN IP>` keeps it working —
+ * else the Local HTTPS one. A client naming the Local HTTPS host by SNI always
+ * gets that certificate.
  */
 function createLocalHttpsTls(opts) {
   const root = opts && opts.root;
@@ -212,7 +216,9 @@ function createLocalHttpsTls(opts) {
     if (!legacyCert || !fs.existsSync(legacyCert) || !fs.existsSync(legacyKey)) return null;
     try {
       const pair = { key: fs.readFileSync(legacyKey), cert: fs.readFileSync(legacyCert) };
-      return { ...pair, context: tls.createSecureContext(pair) };
+      // The files' identity, so a pair the owner REPLACES counts as a change.
+      const signature = `${fileSignature(legacyCert)}/${fileSignature(legacyKey)}`;
+      return { ...pair, signature, context: tls.createSecureContext(pair) };
     } catch (err) {
       log.warn("[local-https] the certificate in data/certs/ could not be loaded:", err && err.message);
       return null;
@@ -228,7 +234,7 @@ function createLocalHttpsTls(opts) {
     if (sig === signature && !expired) return false;
     signature = sig;
 
-    const before = `${local ? local.fingerprint256 : "-"}|${legacy ? "legacy" : "-"}`;
+    const before = `${local ? local.fingerprint256 : "-"}|${legacy ? legacy.signature : "-"}`;
     const material = loadLocalHttpsMaterial({ root, now });
     if (material.ok) {
       local = {
@@ -249,12 +255,12 @@ function createLocalHttpsTls(opts) {
       lastReason = material.reason;
     }
     legacy = readLegacy();
-    return before !== `${local ? local.fingerprint256 : "-"}|${legacy ? "legacy" : "-"}`;
+    return before !== `${local ? local.fingerprint256 : "-"}|${legacy ? legacy.signature : "-"}`;
   }
 
   function defaultOptions() {
-    if (local) return { key: local.key, cert: local.cert };
     if (legacy) return { key: legacy.key, cert: legacy.cert };
+    if (local) return { key: local.key, cert: local.cert };
     return null;
   }
 
@@ -293,11 +299,17 @@ function publishListener(listener) {
  * on the box's IP while the desktop on the HTTPS address opens it over TLS.
  * `getHttpsServer()` is read per connection, so TLS can come and go.
  */
-function createDualProtocolServer(httpServer, getHttpsServer) {
+function createDualProtocolServer(httpServer, getHttpsServer, opts) {
   const net = require("net");
+  // Until the first byte, no server owns the socket and none of Node's own
+  // header timeouts run: a client that connects and says nothing is closed
+  // here instead of being held forever.
+  const firstByteMs = (opts && opts.firstByteTimeoutMs) || 10_000;
   return net.createServer((socket) => {
     socket.once("error", () => socket.destroy());
+    socket.setTimeout(firstByteMs, () => socket.destroy());
     socket.once("readable", () => {
+      socket.setTimeout(0);
       const first = socket.read(1);
       if (first === null) {
         socket.destroy();

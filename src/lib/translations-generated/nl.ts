@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "Aan",
   "settings.localHttps.open": "Openen",
   "settings.localHttps.preparing": "Certificaat ophalen…",
-  "settings.localHttps.privacy": "Als dit aan staat, stuurt ClawBox het adres van dit apparaat op je thuisnetwerk (zoals 192.168.1.20) naar het ClawBox-portaal, dat het in de openbare DNS publiceert onder een willekeurige naam in lan.clawbox.com. Die naam staat ook in openbare certificaatlogboeken. Verder verlaat niets het apparaat, en uitschakelen verwijdert het DNS-record.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "Als dit aan staat, stuurt ClawBox het adres van dit apparaat op je thuisnetwerk (zoals 192.168.1.20) naar het ClawBox-portaal, dat het in de openbare DNS publiceert onder een willekeurige naam in lan.clawbox.com en een certificaat voor die naam ophaalt; de naam staat daarna in openbare certificaatlogboeken. De privésleutel van het certificaat verlaat het apparaat nooit, en uitschakelen verwijdert het DNS-record.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "Het certificaat van het portaal paste niet bij dit apparaat en is niet gebruikt. Het apparaat probeert het opnieuw.",
   "settings.localHttps.problemNoLanIp": "Het apparaat heeft nu geen adres op je thuisnetwerk.",
   "settings.localHttps.problemNotPaired": "Meld je eerst aan bij ClawBox AI — het veilige adres wordt uitgegeven via je ClawBox-account.",

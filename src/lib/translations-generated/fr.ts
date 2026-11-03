@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "Activé",
   "settings.localHttps.open": "Ouvrir",
   "settings.localHttps.preparing": "Obtention du certificat…",
-  "settings.localHttps.privacy": "Lorsque c'est activé, ClawBox envoie l'adresse de ce boîtier sur votre réseau domestique (par exemple 192.168.1.20) au portail ClawBox, qui la publie dans le DNS public sous un nom aléatoire dans lan.clawbox.com. Ce nom figure aussi dans les journaux publics de certificats. Rien d'autre ne quitte le boîtier, et la désactivation supprime l'enregistrement DNS.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "Lorsque c'est activé, ClawBox envoie l'adresse de ce boîtier sur votre réseau domestique (par exemple 192.168.1.20) au portail ClawBox, qui la publie dans le DNS public sous un nom aléatoire dans lan.clawbox.com et obtient un certificat pour ce nom ; ce nom figure ensuite dans les journaux publics de certificats. La clé privée du certificat ne quitte jamais le boîtier, et la désactivation supprime l'enregistrement DNS.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "Le certificat envoyé par le portail ne correspondait pas à ce boîtier et n'a pas été utilisé. Le boîtier réessaie.",
   "settings.localHttps.problemNoLanIp": "Le boîtier n'a pas d'adresse sur votre réseau domestique pour le moment.",
   "settings.localHttps.problemNotPaired": "Connectez-vous d'abord à ClawBox AI — l'adresse sécurisée est délivrée via votre compte ClawBox.",

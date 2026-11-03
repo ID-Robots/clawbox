@@ -11,7 +11,7 @@ import type { Locale } from "./i18n";
 const en = {
   "settings.localHttps.title": "Secure local address",
   "settings.localHttps.intro": "Gives this ClawBox an https:// address on your home network, so your browser allows voice input, screen capture, the clipboard and notifications here.",
-  "settings.localHttps.privacy": "When this is on, ClawBox sends this box's address on your home network (like 192.168.1.20) to the ClawBox portal, which publishes it in public DNS under a random name in lan.clawbox.com. That name is also listed in public certificate logs. Nothing else leaves the box, and switching this off removes the DNS record.",
+  "settings.localHttps.privacy": "When this is on, ClawBox sends this box's address on your home network (like 192.168.1.20) to the ClawBox portal, which publishes it in public DNS under a random name in lan.clawbox.com and gets a certificate for that name; the name is then listed in public certificate logs. The certificate's private key never leaves the box, and switching this off removes the DNS record.",
   "settings.localHttps.switchLabel": "Use a secure local address",
   "settings.localHttps.on": "On",
   "settings.localHttps.off": "Off",
@@ -46,7 +46,7 @@ type Table = Record<keyof typeof en, string>;
 const bg: Table = {
   "settings.localHttps.title": "Защитен локален адрес",
   "settings.localHttps.intro": "Дава на този ClawBox адрес с https:// в домашната мрежа, така че браузърът да разрешава гласово въвеждане, заснемане на екрана, клипборда и известия тук.",
-  "settings.localHttps.privacy": "Когато това е включено, ClawBox изпраща адреса на устройството в домашната ви мрежа (например 192.168.1.20) до портала на ClawBox, който го публикува в публичния DNS под случайно име в lan.clawbox.com. Това име се вписва и в публичните регистри на сертификати. Нищо друго не напуска устройството, а изключването премахва DNS записа.",
+  "settings.localHttps.privacy": "Когато това е включено, ClawBox изпраща адреса на устройството в домашната ви мрежа (например 192.168.1.20) до портала на ClawBox, който го публикува в публичния DNS под случайно име в lan.clawbox.com и получава сертификат за това име; след това името се вписва в публичните регистри на сертификати. Частният ключ на сертификата никога не напуска устройството, а изключването премахва DNS записа.",
   "settings.localHttps.switchLabel": "Използвай защитен локален адрес",
   "settings.localHttps.on": "Включено",
   "settings.localHttps.off": "Изключено",
@@ -79,7 +79,7 @@ const bg: Table = {
 const de: Table = {
   "settings.localHttps.title": "Sichere lokale Adresse",
   "settings.localHttps.intro": "Gibt dieser ClawBox eine https://-Adresse in deinem Heimnetz, damit dein Browser hier Spracheingabe, Bildschirmaufnahme, die Zwischenablage und Benachrichtigungen erlaubt.",
-  "settings.localHttps.privacy": "Wenn dies aktiviert ist, sendet ClawBox die Adresse dieser Box in deinem Heimnetz (z. B. 192.168.1.20) an das ClawBox-Portal, das sie im öffentlichen DNS unter einem zufälligen Namen in lan.clawbox.com veröffentlicht. Dieser Name steht außerdem in öffentlichen Zertifikatsprotokollen. Sonst verlässt nichts die Box, und beim Ausschalten wird der DNS-Eintrag entfernt.",
+  "settings.localHttps.privacy": "Wenn dies aktiviert ist, sendet ClawBox die Adresse dieser Box in deinem Heimnetz (z. B. 192.168.1.20) an das ClawBox-Portal, das sie im öffentlichen DNS unter einem zufälligen Namen in lan.clawbox.com veröffentlicht und ein Zertifikat für diesen Namen besorgt; der Name steht dann in öffentlichen Zertifikatsprotokollen. Der private Schlüssel des Zertifikats verlässt die Box nie, und beim Ausschalten wird der DNS-Eintrag entfernt.",
   "settings.localHttps.switchLabel": "Sichere lokale Adresse verwenden",
   "settings.localHttps.on": "An",
   "settings.localHttps.off": "Aus",
@@ -112,7 +112,7 @@ const de: Table = {
 const es: Table = {
   "settings.localHttps.title": "Dirección local segura",
   "settings.localHttps.intro": "Da a esta ClawBox una dirección https:// en tu red doméstica, para que tu navegador permita aquí la entrada de voz, la captura de pantalla, el portapapeles y las notificaciones.",
-  "settings.localHttps.privacy": "Con esto activado, ClawBox envía la dirección de esta caja en tu red doméstica (por ejemplo 192.168.1.20) al portal de ClawBox, que la publica en el DNS público con un nombre aleatorio en lan.clawbox.com. Ese nombre también aparece en los registros públicos de certificados. Nada más sale de la caja, y al desactivarlo se elimina el registro DNS.",
+  "settings.localHttps.privacy": "Con esto activado, ClawBox envía la dirección de esta caja en tu red doméstica (por ejemplo 192.168.1.20) al portal de ClawBox, que la publica en el DNS público con un nombre aleatorio en lan.clawbox.com y obtiene un certificado para ese nombre; después el nombre aparece en los registros públicos de certificados. La clave privada del certificado nunca sale de la caja, y al desactivarlo se elimina el registro DNS.",
   "settings.localHttps.switchLabel": "Usar una dirección local segura",
   "settings.localHttps.on": "Activado",
   "settings.localHttps.off": "Desactivado",
@@ -145,7 +145,7 @@ const es: Table = {
 const fr: Table = {
   "settings.localHttps.title": "Adresse locale sécurisée",
   "settings.localHttps.intro": "Donne à cette ClawBox une adresse https:// sur votre réseau domestique, pour que votre navigateur autorise ici la saisie vocale, la capture d'écran, le presse-papiers et les notifications.",
-  "settings.localHttps.privacy": "Lorsque c'est activé, ClawBox envoie l'adresse de ce boîtier sur votre réseau domestique (par exemple 192.168.1.20) au portail ClawBox, qui la publie dans le DNS public sous un nom aléatoire dans lan.clawbox.com. Ce nom figure aussi dans les journaux publics de certificats. Rien d'autre ne quitte le boîtier, et la désactivation supprime l'enregistrement DNS.",
+  "settings.localHttps.privacy": "Lorsque c'est activé, ClawBox envoie l'adresse de ce boîtier sur votre réseau domestique (par exemple 192.168.1.20) au portail ClawBox, qui la publie dans le DNS public sous un nom aléatoire dans lan.clawbox.com et obtient un certificat pour ce nom ; ce nom figure ensuite dans les journaux publics de certificats. La clé privée du certificat ne quitte jamais le boîtier, et la désactivation supprime l'enregistrement DNS.",
   "settings.localHttps.switchLabel": "Utiliser une adresse locale sécurisée",
   "settings.localHttps.on": "Activé",
   "settings.localHttps.off": "Désactivé",
@@ -178,7 +178,7 @@ const fr: Table = {
 const it: Table = {
   "settings.localHttps.title": "Indirizzo locale sicuro",
   "settings.localHttps.intro": "Assegna a questa ClawBox un indirizzo https:// nella rete di casa, così il browser consente qui l'input vocale, l'acquisizione dello schermo, gli appunti e le notifiche.",
-  "settings.localHttps.privacy": "Quando è attivo, ClawBox invia l'indirizzo di questo dispositivo nella rete di casa (ad esempio 192.168.1.20) al portale ClawBox, che lo pubblica nel DNS pubblico con un nome casuale in lan.clawbox.com. Quel nome compare anche nei registri pubblici dei certificati. Nient'altro lascia il dispositivo, e disattivandolo il record DNS viene rimosso.",
+  "settings.localHttps.privacy": "Quando è attivo, ClawBox invia l'indirizzo di questo dispositivo nella rete di casa (ad esempio 192.168.1.20) al portale ClawBox, che lo pubblica nel DNS pubblico con un nome casuale in lan.clawbox.com e ottiene un certificato per quel nome; il nome compare poi nei registri pubblici dei certificati. La chiave privata del certificato non lascia mai il dispositivo, e disattivandolo il record DNS viene rimosso.",
   "settings.localHttps.switchLabel": "Usa un indirizzo locale sicuro",
   "settings.localHttps.on": "Attivo",
   "settings.localHttps.off": "Disattivo",
@@ -211,7 +211,7 @@ const it: Table = {
 const ja: Table = {
   "settings.localHttps.title": "安全なローカルアドレス",
   "settings.localHttps.intro": "このClawBoxにホームネットワーク内の https:// アドレスを割り当て、ブラウザーで音声入力、画面キャプチャ、クリップボード、通知を使えるようにします。",
-  "settings.localHttps.privacy": "オンにすると、ClawBoxはホームネットワーク上のこの機器のアドレス(例: 192.168.1.20)をClawBoxポータルに送信し、ポータルはそれを lan.clawbox.com 内のランダムな名前で公開DNSに登録します。その名前は公開の証明書ログにも記載されます。それ以外の情報は機器の外に出ず、オフにするとDNSレコードは削除されます。",
+  "settings.localHttps.privacy": "オンにすると、ClawBoxはホームネットワーク上のこの機器のアドレス(例: 192.168.1.20)をClawBoxポータルに送信し、ポータルはそれを lan.clawbox.com 内のランダムな名前で公開DNSに登録して、その名前の証明書を取得します。その後、名前は公開の証明書ログに記載されます。証明書の秘密鍵が機器の外に出ることはなく、オフにするとDNSレコードは削除されます。",
   "settings.localHttps.switchLabel": "安全なローカルアドレスを使う",
   "settings.localHttps.on": "オン",
   "settings.localHttps.off": "オフ",
@@ -244,7 +244,7 @@ const ja: Table = {
 const nl: Table = {
   "settings.localHttps.title": "Veilig lokaal adres",
   "settings.localHttps.intro": "Geeft deze ClawBox een https://-adres op je thuisnetwerk, zodat je browser hier spraakinvoer, schermopname, het klembord en meldingen toestaat.",
-  "settings.localHttps.privacy": "Als dit aan staat, stuurt ClawBox het adres van dit apparaat op je thuisnetwerk (zoals 192.168.1.20) naar het ClawBox-portaal, dat het in de openbare DNS publiceert onder een willekeurige naam in lan.clawbox.com. Die naam staat ook in openbare certificaatlogboeken. Verder verlaat niets het apparaat, en uitschakelen verwijdert het DNS-record.",
+  "settings.localHttps.privacy": "Als dit aan staat, stuurt ClawBox het adres van dit apparaat op je thuisnetwerk (zoals 192.168.1.20) naar het ClawBox-portaal, dat het in de openbare DNS publiceert onder een willekeurige naam in lan.clawbox.com en een certificaat voor die naam ophaalt; de naam staat daarna in openbare certificaatlogboeken. De privésleutel van het certificaat verlaat het apparaat nooit, en uitschakelen verwijdert het DNS-record.",
   "settings.localHttps.switchLabel": "Een veilig lokaal adres gebruiken",
   "settings.localHttps.on": "Aan",
   "settings.localHttps.off": "Uit",
@@ -277,7 +277,7 @@ const nl: Table = {
 const sv: Table = {
   "settings.localHttps.title": "Säker lokal adress",
   "settings.localHttps.intro": "Ger den här ClawBox en https://-adress i ditt hemnätverk, så att webbläsaren tillåter röstinmatning, skärminspelning, urklipp och aviseringar här.",
-  "settings.localHttps.privacy": "När detta är på skickar ClawBox enhetens adress i ditt hemnätverk (till exempel 192.168.1.20) till ClawBox-portalen, som publicerar den i offentlig DNS under ett slumpmässigt namn i lan.clawbox.com. Namnet listas också i offentliga certifikatloggar. Inget annat lämnar enheten, och när du stänger av tas DNS-posten bort.",
+  "settings.localHttps.privacy": "När detta är på skickar ClawBox enhetens adress i ditt hemnätverk (till exempel 192.168.1.20) till ClawBox-portalen, som publicerar den i offentlig DNS under ett slumpmässigt namn i lan.clawbox.com och hämtar ett certifikat för namnet; namnet listas sedan i offentliga certifikatloggar. Certifikatets privata nyckel lämnar aldrig enheten, och när du stänger av tas DNS-posten bort.",
   "settings.localHttps.switchLabel": "Använd en säker lokal adress",
   "settings.localHttps.on": "På",
   "settings.localHttps.off": "Av",
@@ -310,7 +310,7 @@ const sv: Table = {
 const zh: Table = {
   "settings.localHttps.title": "安全本地地址",
   "settings.localHttps.intro": "为这台 ClawBox 在家庭网络中分配一个 https:// 地址,让浏览器在此允许语音输入、屏幕捕获、剪贴板和通知。",
-  "settings.localHttps.privacy": "开启后,ClawBox 会把本设备在家庭网络中的地址(例如 192.168.1.20)发送到 ClawBox 门户,门户以 lan.clawbox.com 下的随机名称将其发布到公共 DNS。该名称也会出现在公开的证书日志中。除此之外不会有任何信息离开设备,关闭后 DNS 记录会被删除。",
+  "settings.localHttps.privacy": "开启后,ClawBox 会把本设备在家庭网络中的地址(例如 192.168.1.20)发送到 ClawBox 门户,门户以 lan.clawbox.com 下的随机名称将其发布到公共 DNS,并为该名称获取证书;此后该名称会出现在公开的证书日志中。证书私钥绝不会离开设备,关闭后 DNS 记录会被删除。",
   "settings.localHttps.switchLabel": "使用安全本地地址",
   "settings.localHttps.on": "开",
   "settings.localHttps.off": "关",

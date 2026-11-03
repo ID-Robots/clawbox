@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "På",
   "settings.localHttps.open": "Öppna",
   "settings.localHttps.preparing": "Hämtar certifikatet…",
-  "settings.localHttps.privacy": "När detta är på skickar ClawBox enhetens adress i ditt hemnätverk (till exempel 192.168.1.20) till ClawBox-portalen, som publicerar den i offentlig DNS under ett slumpmässigt namn i lan.clawbox.com. Namnet listas också i offentliga certifikatloggar. Inget annat lämnar enheten, och när du stänger av tas DNS-posten bort.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "När detta är på skickar ClawBox enhetens adress i ditt hemnätverk (till exempel 192.168.1.20) till ClawBox-portalen, som publicerar den i offentlig DNS under ett slumpmässigt namn i lan.clawbox.com och hämtar ett certifikat för namnet; namnet listas sedan i offentliga certifikatloggar. Certifikatets privata nyckel lämnar aldrig enheten, och när du stänger av tas DNS-posten bort.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "Certifikatet från portalen passade inte den här enheten och användes inte. Enheten försöker igen.",
   "settings.localHttps.problemNoLanIp": "Enheten har ingen adress i ditt hemnätverk just nu.",
   "settings.localHttps.problemNotPaired": "Logga först in på ClawBox AI — den säkra adressen utfärdas via ditt ClawBox-konto.",

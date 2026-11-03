@@ -3523,7 +3523,7 @@ const table: Record<string, string> = {
   "settings.localHttps.on": "On",
   "settings.localHttps.open": "Open",
   "settings.localHttps.preparing": "Getting the certificate…",
-  "settings.localHttps.privacy": "When this is on, ClawBox sends this box's address on your home network (like 192.168.1.20) to the ClawBox portal, which publishes it in public DNS under a random name in lan.clawbox.com. That name is also listed in public certificate logs. Nothing else leaves the box, and switching this off removes the DNS record.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
+  "settings.localHttps.privacy": "When this is on, ClawBox sends this box's address on your home network (like 192.168.1.20) to the ClawBox portal, which publishes it in public DNS under a random name in lan.clawbox.com and gets a certificate for that name; the name is then listed in public certificate logs. The certificate's private key never leaves the box, and switching this off removes the DNS record.", // public-hygiene: allow an example path in a translation, the same string as in src/lib/*translations*.ts
   "settings.localHttps.problemBadCertificate": "The certificate the portal sent did not match this box and was not used. The box tries again.",
   "settings.localHttps.problemNoLanIp": "The box has no address on your home network right now.",
   "settings.localHttps.problemNotPaired": "Sign in to ClawBox AI first — the secure address is issued through your ClawBox account.",

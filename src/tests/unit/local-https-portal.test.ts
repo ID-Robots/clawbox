@@ -137,6 +137,11 @@ describe("the HTTP client", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("refuses an answer far larger than any the contract has, before parsing it", async () => {
+    const fetchImpl = vi.fn(async () => new Response(`{"hostname":"${"x".repeat(300 * 1024)}"}`, { status: 200 }));
+    await expect(portalWith(fetchImpl).register("192.168.1.20")).rejects.toMatchObject({ code: "portal_error", message: expect.stringContaining("too large") });
+  });
+
   it("reads a network failure as portal_error", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("fetch failed");

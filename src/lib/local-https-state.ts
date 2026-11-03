@@ -64,10 +64,10 @@ export type LocalHttpsProblem =
 /** What the box's own resolvers answered for its hostname. */
 export type LocalHttpsDnsVerdict =
   | "ok" // the router's DNS answers with this box's address
-  | "rebind_blocked" // public DNS has it, the router drops it (DNS-rebind protection)
-  | "stale" // DNS still answers with another address
-  | "pending" // not in public DNS yet
-  | "unknown"; // could not tell (offline, stub portal)
+  | "rebind_blocked" // the portal published it a while ago and the router answers nothing (DNS-rebind protection)
+  | "stale" // the router still answers with another address
+  | "pending" // published only just now; answers can lag
+  | "unknown"; // could not tell (the lookup itself failed)
 
 export interface LocalHttpsState {
   enabled: boolean;
@@ -75,6 +75,8 @@ export interface LocalHttpsState {
   /** The LAN address the portal last accepted for `hostname`. */
   reportedIp: string | null;
   reportedAt: number | null;
+  /** When `reportedIp` was first published — DNS answers can lag it for a while. */
+  addressSince: number | null;
   certNotBefore: number | null;
   certNotAfter: number | null;
   /** A certificate order the portal has not finished; its key is order-key.pem. */
@@ -100,6 +102,7 @@ export const EMPTY_LOCAL_HTTPS_STATE: LocalHttpsState = {
   hostname: null,
   reportedIp: null,
   reportedAt: null,
+  addressSince: null,
   certNotBefore: null,
   certNotAfter: null,
   order: null,
@@ -145,6 +148,7 @@ export function normalizeLocalHttpsState(raw: unknown): LocalHttpsState {
     hostname: isLocalHttpsHostname(r.hostname) ? r.hostname : null,
     reportedIp: typeof r.reportedIp === "string" ? r.reportedIp : null,
     reportedAt: num(r.reportedAt),
+    addressSince: num(r.addressSince),
     certNotBefore: num(r.certNotBefore),
     certNotAfter: num(r.certNotAfter),
     order:
