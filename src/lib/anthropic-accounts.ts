@@ -435,6 +435,10 @@ interface PoolRuntime {
   /** Every change runs after the previous one: a read-modify-write of one config key, reachable from two tabs and the runner. */
   chain: Promise<unknown>;
   credentialLocks: Map<string, SerialLock>;
+  /** Per account, the refused-credential probe in flight and the copy it was asked about — see probeAccountCredential. */
+  probes: Map<string, { held: string | null; answer: Promise<CredentialProbe> }>;
+  /** Per account, the access token the pool's last renewal stored and when — see JUST_RENEWED_MS. */
+  renewals: Map<string, { access: string; at: number }>;
   wakeListeners: Set<() => void>;
   changeListeners: Set<(change: ActiveChange) => void>;
   wakeTimer: ReturnType<typeof setTimeout> | null;
@@ -450,6 +454,8 @@ function runtime(): PoolRuntime {
     snapshot: null,
     chain: Promise.resolve(),
     credentialLocks: new Map(),
+    probes: new Map(),
+    renewals: new Map(),
     wakeListeners: new Set(),
     changeListeners: new Set(),
     wakeTimer: null,
@@ -1300,6 +1306,7 @@ async function readCredential(account: AnthropicAccount, now: number): Promise<A
   const refreshed = await refreshOAuthTokens(tokens.refresh!, now);
   if (refreshed.ok) {
     await storeCredential(account.id, oauthSecret(refreshed.tokens));
+    noteRenewal(account.id, refreshed.tokens.access);
     await mutate((file) => {
       const row = file.accounts.find((a) => a.id === account.id);
       if (row) row.expiresAt = refreshed.tokens.expires;
@@ -1316,6 +1323,21 @@ async function readCredential(account: AnthropicAccount, now: number): Promise<A
   // before its network had to be signed in again by hand.
   if (refreshed.reason === "rejected") await markCredentialProblem(account.id, "revoked").catch(() => {});
   return null;
+}
+
+/**
+ * How long after the pool renewed a grant a refusal reported WITHOUT the
+ * refused copy (the chat gateway's look at core, a consumer's failure report)
+ * is taken to be the copy that renewal replaced (TASK-2139). The gateway
+ * notices core's failures on a ten-minute keeper pass, so a refusal of the
+ * replaced token can reach the probe that late; renewing again for it would
+ * replace the token every coding run on the account has just been handed.
+ */
+const JUST_RENEWED_MS = 15 * 60_000;
+
+/** The pool stored a renewed access token for this account — see JUST_RENEWED_MS. */
+function noteRenewal(id: string, access: string): void {
+  runtime().renewals.set(id, { access, at: Date.now() });
 }
 
 /**
@@ -1339,8 +1361,37 @@ export type KeyCheck = (key: string) => Promise<"ok" | "rejected" | "unreachable
  * caller's, since that check lives above this module). The `claude` sign-in
  * cannot be asked — this box never reads it — and a refusal that reached a
  * run is one Claude Code could not renew its way out of, so it is marked.
+ *
+ * ONE PROBE PER ACCOUNT AT A TIME, and every caller refused on the same copy
+ * (or unable to say which) awaits that one's answer (TASK-2139). A caller
+ * refused on ANOTHER copy asks on its own, after it under the account's lock:
+ * an answer about a stale copy says nothing about the store's current one,
+ * which may be exactly what that caller was refused on. On 2026-11-03 a burst of refusals on
+ * one account reached several runs within seconds, and each asked on its own:
+ * every probe renewed the grant again, so each run was handed a token the next
+ * renewal had already replaced, was refused again, and asked again — until all
+ * of them had failed. `held` is the credential the caller was refused with:
+ * when the store already holds a different one (another probe, or a spawn,
+ * renewed it since), that one is the fresh copy and nothing is spent on asking.
+ * A caller that cannot say (`held` null) and asks within JUST_RENEWED_MS of a
+ * renewal whose token the store still holds is answered from that renewal.
+ *
+ * Only a refused GRANT (or key) marks the account: a stale access token a
+ * consumer was still holding never does.
  */
-export async function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}): Promise<CredentialProbe> {
+export function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}, held: string | null = null): Promise<CredentialProbe> {
+  const probes = runtime().probes;
+  const inFlight = probes.get(id);
+  if (inFlight && (held === null || inFlight.held === held)) return inFlight.answer;
+  const answer = askAboutCredential(id, verifyKey, context, held).finally(() => {
+    if (probes.get(id)?.answer === answer) probes.delete(id);
+  });
+  probes.set(id, { held, answer });
+  return answer;
+}
+
+/** `probeAccountCredential`'s body: the one probe in flight for this account. */
+async function askAboutCredential(id: string, verifyKey: KeyCheck, context: FailureContext, held: string | null): Promise<CredentialProbe> {
   const account = (await readAccounts()).find((a) => a.id === id);
   if (!account) return "unknown";
   return credentialLock(account.id)(async (): Promise<CredentialProbe> => {
@@ -1352,6 +1403,8 @@ export async function probeAccountCredential(id: string, verifyKey: KeyCheck, co
     const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
     if (!stored.found) return stored.reason === "unavailable" ? "unknown" : dead("revoked");
     if (account.kind === "api_key") {
+      // The owner put another key in since the refused one was handed out.
+      if (held && stored.value !== held) return "ok";
       const verdict = await verifyKey(stored.value).catch(() => "unreachable" as const);
       if (verdict === "rejected") return dead("revoked");
       return verdict === "ok" ? "ok" : "unknown";
@@ -1359,6 +1412,15 @@ export async function probeAccountCredential(id: string, verifyKey: KeyCheck, co
     const tokens = parseOAuthSecret(stored.value);
     if (!tokens) return dead("revoked");
     const now = Date.now();
+    // Renewed since the refused copy was handed out, and still good: that
+    // renewal is the answer. Renewing AGAIN would only replace the token other
+    // runs have just been handed.
+    const live = tokens.expires === null || tokens.expires > now;
+    if (held && tokens.access !== held && live) return "ok";
+    // Renewed moments ago for another refusal, and the caller cannot say which
+    // copy it was refused with: almost surely the one that renewal replaced.
+    const renewal = runtime().renewals.get(account.id);
+    if (!held && live && renewal?.access === tokens.access && now - renewal.at < JUST_RENEWED_MS) return "ok";
     if (!tokens.refresh) {
       // Nothing to renew with: a token past its end is dead, one with life in
       // it cannot be told apart from a stale copy without spending a request.
@@ -1367,11 +1429,39 @@ export async function probeAccountCredential(id: string, verifyKey: KeyCheck, co
     const refreshed = await refreshOAuthTokens(tokens.refresh, now);
     if (!refreshed.ok) return refreshed.reason === "rejected" ? dead("revoked") : "unknown";
     await storeCredential(account.id, oauthSecret(refreshed.tokens));
+    noteRenewal(account.id, refreshed.tokens.access);
     await mutate((file) => {
       const row = file.accounts.find((a) => a.id === account.id);
       if (row) row.expiresAt = refreshed.tokens.expires;
     }).catch(() => {});
     return "ok";
+  });
+}
+
+/**
+ * A coding run restarted on a fresh copy of a Claude account's token — the one
+ * the pool renewed, or found already renewed, for its first refusal — was
+ * refused AGAIN on it (TASK-2139). When that copy is still the one the pool
+ * holds, Anthropic refused the freshest token the account can give: the
+ * account is marked `revoked` (the owner signs it in again, and the box's
+ * active account moves on). When the pool has replaced it since, it was only
+ * stale by the time it was used, and nothing is marked — a stale token a run
+ * held never takes an account out. Not asked again either way: asking renews
+ * the grant once more, replacing the token every other run has just been
+ * handed. API keys are not judged here: the probe sent the key itself to
+ * Anthropic and it was accepted, so a refusal of it is the CLI's, not the
+ * key's. Answers whether the account was marked.
+ */
+export async function markRefusedAfterRenewal(id: string, refused: string, context: FailureContext = {}): Promise<boolean> {
+  const account = (await readAccounts()).find((a) => a.id === id);
+  if (!account || account.kind !== "oauth") return false;
+  // Under the account's lock, as the probe marks: no renewal lands between
+  // reading which copy the pool holds and marking the account for it.
+  return credentialLock(account.id)(async () => {
+    const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
+    if (!stored.found || parseOAuthSecret(stored.value)?.access !== refused) return false;
+    await markCredentialProblem(account.id, "revoked", context);
+    return true;
   });
 }
 
@@ -1406,15 +1496,21 @@ export async function gatewayCredentialFor(id: string): Promise<{ access: string
  * has to spawn something on a path that has already committed to a spawn, and
  * the honest thing to spawn is the preferred account, which will refuse with
  * its limit — and that refusal is what pauses the run until the reset.
+ *
+ * `prefer` is tried first when it can answer and is not excluded: the account
+ * a run was refused on whose credential turned out only stale (TASK-2139) —
+ * the run goes back on IT, with the credential read again from the store,
+ * rather than on whichever account happens to be active.
  */
-export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
+export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean; prefer?: string | null } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
   const tried = new Set(opts.exclude ?? []);
   await readRoom(tried);
   for (;;) {
     const now = Date.now();
     const file = await serialised(loadLocked);
     const accounts = file.accounts.map((a) => ({ ...a }));
-    const next = pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? {} : { mode: file.pickMode, fullness: roomNow(now) });
+    const preferred = opts.prefer && !tried.has(opts.prefer) ? accounts.find((a) => a.id === opts.prefer && isUsable(a, now)) : undefined;
+    const next = preferred ?? pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? {} : { mode: file.pickMode, fullness: roomNow(now) });
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
@@ -1678,6 +1774,8 @@ export function _resetAnthropicAccountsForTests(): void {
   state.snapshot = null;
   state.chain = Promise.resolve();
   state.credentialLocks.clear();
+  state.probes.clear();
+  state.renewals.clear();
   if (state.wakeTimer) clearTimeout(state.wakeTimer);
   state.wakeTimer = null;
   state.wakeAt = null;

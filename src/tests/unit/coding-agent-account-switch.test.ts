@@ -75,6 +75,11 @@ function callsLog(): string {
   return path.join(base, "calls.log");
 }
 
+/** Written by a test to let a `later-auth` spawn be refused. */
+function goFile(): string {
+  return path.join(base, "go");
+}
+
 function calls(): { n: number; cred: string; args: string }[] {
   if (!fs.existsSync(callsLog())) return [];
   return fs.readFileSync(callsLog(), "utf-8").trim().split("\n").filter(Boolean).map((line) => {
@@ -86,10 +91,13 @@ function calls(): { n: number; cred: string; args: string }[] {
 /**
  * A fake claude-ds that does, on its Nth spawn, what line N of the plan says:
  * `limit` (the CLI's own limit line and a failed result), `ok`, or `hang`
- * (works until something ends it). It reads — and deletes — the credential
- * handoff exactly as the real wrapper does, and logs what it was handed.
+ * (works until something ends it); `later-auth` is refused like `auth`, but
+ * only once the test has written goFile(); `blip` dies on an upstream 503
+ * having done nothing (the runner's one transient retry). It reads — and
+ * deletes — the credential handoff exactly as the real wrapper does, and logs
+ * what it was handed.
  */
-function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disabled")[]): void {
+function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "later-auth" | "blip" | "disabled")[]): void {
   fs.writeFileSync(path.join(base, "plan"), `${plan.join("\n")}\n`);
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
@@ -106,6 +114,8 @@ function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disa
       'case "$mode" in',
       `  limit) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_LIMIT)} ${sq(LIMIT_RESULT)}; exit 1 ;;`,
       `  auth) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
+      `  later-auth) printf '%s\\n' ${sq(INIT)}; for _ in $(seq 1 200); do [ -e ${sq(goFile())} ] && break; sleep 0.1; done; printf '%s\\n' ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
+      `  blip) echo 'API Error: 503 Service Unavailable' >&2; printf '%s\\n' ${sq(INIT)}; exit 1 ;;`,
       `  disabled) printf '%s\\n' ${sq(INIT)} ${sq(DISABLED_RESULT)}; exit 1 ;;`,
       `  hang) printf '%s\\n' ${sq(INIT)}; sleep 30; exit 0 ;;`,
       `  *) printf '%s\\n' ${sq(INIT)} ${sq(OK_RESULT)}; exit 0 ;;`,
@@ -438,8 +448,293 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
 
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
     expect(run.status).toBe("failed");
-    // The first attempt and three carried-on ones, then it stops.
-    expect(calls()).toHaveLength(4);
+    // Each account once as it was, once more on its credential read again —
+    // then it stops, with the way out rather than the CLI's own words.
+    expect(calls().map((c) => c.cred)).toEqual([`api_key:${KEY_A}:`, `api_key:${KEY_A}:`, `api_key:${KEY_B}:`, `api_key:${KEY_B}:`]);
+    expect(run.error).toMatch(/Anthropic refused the credential of every account this run could use/);
+  });
+});
+
+// ── TASK-2139: a refused token the probe calls fine, many runs at once ──────
+
+describe("a credential refused mid-run that Anthropic still accepts when asked (TASK-2139)", () => {
+  const hours = (n: number) => Date.now() + n * 3_600_000;
+  const tokens = (name: string) => ({ access: `${name}-access`, refresh: `refresh-${name}`, expires: hours(8) });
+
+  /** Two Claude accounts, in that order: "Work" then "Personal". */
+  async function twoClaudeAccounts() {
+    const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work") });
+    const personal = await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal") });
+    return { work, personal };
+  }
+
+  /**
+   * Anthropic's token endpoint renewing every grant: `refresh-<name>` answers
+   * `<name>-fresh`, a little later, so callers that ask together overlap.
+   */
+  function anthropicRenews() {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes("/oauth/token")) return new Response("{}", { status: 200 });
+      const { refresh_token } = JSON.parse(String(init?.body)) as { refresh_token: string };
+      const name = refresh_token.replace(/^refresh-/, "");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return new Response(JSON.stringify({ access_token: `${name}-fresh`, refresh_token: `refresh-${name}-2`, expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return () => fetchMock.mock.calls.filter(([url]) => String(url).includes("/oauth/token")).length;
+  }
+
+  it("restarts the run on the SAME account with the credential read again from the store, and marks nothing", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    const { work } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(work.id);
+    expect(run.accountSwitches).toEqual([]);
+    const [first, second] = calls();
+    expect(first.cred).toBe("oauth:work-access:");
+    // The renewed token, never the refused one again.
+    expect(second.cred).toBe("oauth:work-fresh:");
+    expect(second.args).toContain(`--resume ${SESSION}`);
+    expect(renewals()).toBe(1);
+    // A stale copy held by the run is not the account's fault: nothing is marked.
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["ok", "ok"]);
+    // Said as the restart it is — not "carrying on with" the account just refused.
+    expect(run.progress).toContain('Anthropic refused the credential of account "Work"; restarting on it with a fresh credential');
+    expect(run.progress.filter((line) => line.includes("carrying on with"))).toEqual([]);
+  });
+
+  it("moves the run to the next account in order when the fresh credential is refused too — marks the account, and does not ask again", async () => {
+    installWrapper(["auth", "auth", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(personal.id);
+    expect(calls().map((c) => c.cred)).toEqual(["oauth:work-access:", "oauth:work-fresh:", "oauth:personal-access:"]);
+    expect(calls()[2].args).toContain(`--resume ${SESSION}`);
+    expect(run.accountSwitches).toEqual([expect.objectContaining({ fromId: work.id, toId: personal.id, kind: "auth" })]);
+    expect(run.progress).toContain('Anthropic refused the credential of account "Work"; restarting on it with a fresh credential');
+    expect(run.progress).toContain('Anthropic refused the credential of account "Work"; carrying on with "Personal" in the same session');
+    // Work's grant was renewed once, for the restart; the second refusal asked nothing.
+    expect(renewals()).toBe(1);
+    // The copy refused the second time is still the freshest the pool holds:
+    // Work needs signing in again, and the box's active account moves on.
+    const accounts = await pool.readAccounts();
+    expect(accounts.find((a) => a.id === work.id)?.status).toBe("revoked");
+    expect(accounts.find((a) => a.id === personal.id)?.status).toBe("ok");
+    expect(pool.activeAccountSnapshot()?.id).toBe(personal.id);
+  });
+
+  it("does not mark the account when its fresh copy was renewed again before the run was refused on it", async () => {
+    installWrapper(["auth", "later-auth", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    // The restart is running on work-fresh; then something renews the grant
+    // again (a consumer refused on that very copy), and only after that is
+    // the run refused — on a copy the pool no longer holds.
+    await vi.waitFor(() => expect(calls()).toHaveLength(2), { timeout: 20_000 });
+    expect(await pool.probeAccountCredential(work.id, vi.fn(), { source: "chat" }, "work-fresh")).toBe("ok");
+    expect(renewals()).toBe(2);
+    fs.writeFileSync(goFile(), "");
+    const run = await settled(started.id);
+
+    expect(run.status).toBe("completed");
+    // Once per account: the run moves on rather than looping on Work...
+    expect(calls().map((c) => c.cred)).toEqual(["oauth:work-access:", "oauth:work-fresh:", "oauth:personal-access:"]);
+    expect(run.anthropicAccount).toBe(personal.id);
+    // ...but a stale copy a run held never takes the account out.
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["ok", "ok"]);
+    expect(renewals()).toBe(2);
+  });
+
+  it("does not tell the owner to sign in again when the only account's second refusal was on a copy renewed since", async () => {
+    installWrapper(["auth", "later-auth"]);
+    makeProject("site");
+    const only = await pool.addOAuthAccount({ label: "Only", email: "only@example.com", tokens: tokens("work") });
+    const renewals = anthropicRenews();
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    await vi.waitFor(() => expect(calls()).toHaveLength(2), { timeout: 20_000 });
+    expect(await pool.probeAccountCredential(only.id, vi.fn(), { source: "chat" }, "work-fresh")).toBe("ok");
+    fs.writeFileSync(goFile(), "");
+    const run = await settled(started.id);
+
+    expect(run.status).toBe("failed");
+    expect(calls()).toHaveLength(2);
+    expect(renewals()).toBe(2);
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+    expect(run.error).toMatch(/renewed since and still shows as signed in/);
+    expect(run.error).not.toMatch(/every account/);
+  });
+
+  it("keeps the one restart per account across the runner's transient retry", async () => {
+    // Refused; restarted on the fresh copy, which dies on a 503 having done
+    // nothing; the transient retry, on that same copy, is refused again.
+    installWrapper(["auth", "blip", "auth", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.retries).toBe(1);
+    // Not a second restart on Work after the retry: on to the next account.
+    expect(calls().map((c) => c.cred)).toEqual(["oauth:work-access:", "oauth:work-fresh:", "oauth:work-fresh:", "oauth:personal-access:"]);
+    expect(run.anthropicAccount).toBe(personal.id);
+    expect(renewals()).toBe(1);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("revoked");
+  });
+
+  it("takes the account out (sign in again) only when the refresh grant itself is refused", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoClaudeAccounts();
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes("/oauth/token")) return new Response("{}", { status: 200 });
+      const { refresh_token } = JSON.parse(String(init?.body)) as { refresh_token: string };
+      return refresh_token === "refresh-work"
+        ? new Response(JSON.stringify({ error: "invalid_grant", error_description: "Refresh token revoked" }), { status: 400 })
+        : new Response(JSON.stringify({ access_token: "unused", refresh_token: "unused-2", expires_in: 28_800 }), { status: 200 });
+    }));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(personal.id);
+    // No restart on the account whose grant is gone: straight to the next one.
+    expect(calls().map((c) => c.cred)).toEqual(["oauth:work-access:", "oauth:personal-access:"]);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("revoked");
+  });
+
+  it("fails with one clear error only once every account has been refused", async () => {
+    installWrapper(["auth", "auth", "auth", "auth", "ok"]);
+    makeProject("site");
+    await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(calls().map((c) => c.cred)).toEqual(["oauth:work-access:", "oauth:work-fresh:", "oauth:personal-access:", "oauth:personal-fresh:"]);
+    expect(run.error).toBe("Anthropic refused the credential of every account this run could use. Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.");
+    expect(renewals()).toBe(2);
+    // Each was refused on the freshest copy the pool held: both need signing in again.
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["revoked", "revoked"]);
+  });
+
+  it("caps the carried-on tries of one run however many accounts there are", async () => {
+    installWrapper(Array.from({ length: 12 }, () => "auth" as const));
+    makeProject("site");
+    for (const n of [1, 2, 3, 4]) await pool.addApiKeyAccount({ label: `Key ${n}`, key: `sk-ant-api03-key-${n}-${"0".repeat(24)}` });
+    anthropicRefuses();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    // The first try and six carried-on ones: keys 1-3 twice each, key 4 once.
+    expect(calls()).toHaveLength(7);
+    expect(run.error).toMatch(/^Anthropic kept refusing this run's credential: it was carried on 6 times/);
+  });
+
+  it("asks Anthropic ONCE when several runs on the account are refused together, and every one goes on on the fresh token", async () => {
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", coding_agent_enabled: true, coding_agent_provider: "anthropic", coding_agent_max_parallel_runs: 3 });
+    // Anthropic refuses the token every run started with, and only that one.
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(binDir, "claude-ds"),
+      [
+        "#!/usr/bin/env bash",
+        readFirstTurn(),
+        'cred=$(tr "\\n" ":" < "$CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE"); rm -f "$CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE"',
+        `printf 'call 0 cred=%s args=%s\\n' "$cred" "$*" >> ${sq(callsLog())}`,
+        'case "$cred" in',
+        `  *work-access*) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
+        `  *) printf '%s\\n' ${sq(INIT)} ${sq(OK_RESULT)}; exit 0 ;;`,
+        "esac",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    for (const id of ["one", "two", "three"]) makeProject(id);
+    const { work } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+
+    const started = await Promise.all(["one", "two", "three"].map((projectId) => lib.startRun({ task: "build", projectId, source: "owner", provider: "anthropic" })));
+    const runs = await Promise.all(started.map((r) => settled(r.id)));
+
+    for (const run of runs) {
+      expect(run.status).toBe("completed");
+      expect(run.anthropicAccount).toBe(work.id);
+      expect(run.accountSwitches).toEqual([]);
+    }
+    // One renewal for the three refusals: a second would have replaced the
+    // token the first restarted run had just been handed.
+    expect(renewals()).toBe(1);
+    const creds = calls().map((c) => c.cred).sort();
+    expect(creds).toEqual(["oauth:work-access:", "oauth:work-access:", "oauth:work-access:", "oauth:work-fresh:", "oauth:work-fresh:", "oauth:work-fresh:"]);
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["ok", "ok"]);
+  });
+
+  it("answers every later refusal of the replaced copy from the one renewal — a run's, and a chat consumer's that cannot say which copy it held", async () => {
+    const { work } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+    const verify = vi.fn(async () => "ok" as const);
+
+    // The first run refused on work-access: the grant is renewed.
+    expect(await pool.probeAccountCredential(work.id, verify, { source: "coding", runId: "run-a" }, "work-access")).toBe("ok");
+    // A run refused on the same copy after that probe ended: the store already holds the renewed one.
+    expect(await pool.probeAccountCredential(work.id, verify, { source: "coding", runId: "run-b" }, "work-access")).toBe("ok");
+    // The chat gateway noticing core's refusal of the old copy on its next pass.
+    expect(await pool.probeAccountCredential(work.id, verify, { source: "chat" })).toBe("ok");
+    expect(renewals()).toBe(1);
+    // Every spawn from here on is handed the renewed token.
+    expect((await pool.prepareAccount()).prepared?.credential.secret).toBe("work-fresh");
+
+    // Long after the renewal, a refusal nobody can pin on a copy is asked about again.
+    const later = Date.now() + 16 * 60_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+    try {
+      expect(await pool.probeAccountCredential(work.id, verify, { source: "chat" })).toBe("ok");
+    } finally {
+      clock.mockRestore();
+    }
+    expect(renewals()).toBe(2);
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["ok", "ok"]);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("asks once for runs refused on the same copy, but never answers a run refused on the current copy from a probe about an older one", async () => {
+    const { work } = await twoClaudeAccounts();
+    const renewals = anthropicRenews();
+    const verify = vi.fn(async () => "ok" as const);
+
+    // Three runs refused together on the store's copy: one renewal between them.
+    const together = await Promise.all(["run-a", "run-b", "run-c"].map((runId) => pool.probeAccountCredential(work.id, verify, { source: "coding", runId }, "work-access")));
+    expect(together).toEqual(["ok", "ok", "ok"]);
+    expect(renewals()).toBe(1);
+
+    // At the same moment: a run refused on a copy long replaced, and one on
+    // the store's current copy (work-fresh). The first is answered from the
+    // store without asking; the second must not ride on that answer — the
+    // copy it was refused on is renewed.
+    const [stale, current] = await Promise.all([
+      pool.probeAccountCredential(work.id, verify, { source: "coding", runId: "run-d" }, "work-access"),
+      pool.probeAccountCredential(work.id, verify, { source: "coding", runId: "run-e" }, "work-fresh"),
+    ]);
+    expect([stale, current]).toEqual(["ok", "ok"]);
+    expect(renewals()).toBe(2);
+    expect((await pool.prepareAccount()).prepared?.credential.secret).toBe("work-2-fresh");
   });
 });
 

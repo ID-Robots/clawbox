@@ -1794,6 +1794,7 @@ const table: Record<string, string> = {
   "codingAgent.statusStopped": "Stoppad",
   "codingAgent.stepAccountMoved": "Anthropic-kontot ”{from}” kan inte längre svara; fortsätter med ”{to}” i samma session",
   "codingAgent.stepAccountRefused": "Anthropic nekade inloggningsuppgifterna för kontot ”{from}”; fortsätter med ”{to}” i samma session",
+  "codingAgent.stepAccountRenewed": "Anthropic nekade inloggningsuppgifterna för kontot ”{label}”; startar om på det med färska inloggningsuppgifter",
   "codingAgent.stepAccountSwitched": "Anthropic-kontot ”{from}” nådde sin användningsgräns (tillbaka kl. {time}); fortsätter med ”{to}” i samma session",
   "codingAgent.stepAccountsWaiting": "Alla Anthropic-konton har nått sin användningsgräns; väntar på återställningen kl. {time}",
   "codingAgent.stepAnthropicAccount": "På Anthropic-kontot ”{label}”",

@@ -1670,6 +1670,7 @@ export const nl: Record<string, string> = {
   "codingAgent.stepAnthropicAccount": "Op Anthropic-account “{label}”",
   "codingAgent.stepAccountSwitched": "Anthropic-account “{from}” heeft zijn gebruikslimiet bereikt (terug om {time}); verder met “{to}” in dezelfde sessie",
   "codingAgent.stepAccountRefused": "Anthropic weigerde de inloggegevens van account “{from}”; verder met “{to}” in dezelfde sessie",
+  "codingAgent.stepAccountRenewed": "Anthropic weigerde de inloggegevens van account “{label}”; opnieuw gestart op dit account met verse inloggegevens",
   "codingAgent.stepAccountMoved": "Anthropic-account “{from}” kan niet meer antwoorden; verder met “{to}” in dezelfde sessie",
   "codingAgent.stepAccountsWaiting": "Elk Anthropic-account heeft zijn gebruikslimiet bereikt; wacht op de reset om {time}",
   "codingAgent.stepResumedAfterLimit": "De gebruikslimiet is gereset; de run gaat verder waar hij gebleven was",

@@ -1670,6 +1670,7 @@ export const ja: Record<string, string> = {
   "codingAgent.stepAnthropicAccount": "Anthropic アカウント「{label}」を使用",
   "codingAgent.stepAccountSwitched": "Anthropic アカウント「{from}」が使用量の上限に達しました（{time} に復帰）。同じセッションのまま「{to}」で続行します",
   "codingAgent.stepAccountRefused": "Anthropic がアカウント「{from}」の認証情報を拒否しました。同じセッションのまま「{to}」で続行します",
+  "codingAgent.stepAccountRenewed": "Anthropic がアカウント「{label}」の認証情報を拒否しました。新しい認証情報で同じアカウントのまま再開します",
   "codingAgent.stepAccountMoved": "Anthropic アカウント「{from}」はもう応答できません。同じセッションのまま「{to}」で続行します",
   "codingAgent.stepAccountsWaiting": "すべての Anthropic アカウントが使用量の上限に達しました。{time} のリセットを待っています",
   "codingAgent.stepResumedAfterLimit": "使用量の上限がリセットされました。中断したところから再開します",

@@ -109,6 +109,7 @@ export type ProgressLabelKey =
   | "mcpServersMissing"
   | "anthropicAccount"
   | "accountRefused"
+  | "accountRenewed"
   | "accountMoved"
   | "accountSwitched"
   | "accountsWaiting"
@@ -377,6 +378,13 @@ export const RUNNER_STEP = {
   /** Anthropic refused the account's credential and the run was moved to the active account, in place (TASK-1260). */
   accountRefused: (from: string, to: string) =>
     `Anthropic refused the credential of account "${from}"; carrying on with "${to}" in the same session`,
+  /**
+   * Anthropic refused the run's copy of the credential but the account itself
+   * still answers (its grant renewed): the run restarts on the SAME account,
+   * in its session, with a fresh credential from the pool — once (TASK-2139).
+   */
+  accountRenewed: (label: string) =>
+    `Anthropic refused the credential of account "${label}"; restarting on it with a fresh credential`,
   /** Another consumer's limit moved the box's active account; this run followed it, in place (TASK-1260). */
   accountMoved: (from: string, to: string) =>
     `Anthropic account "${from}" can no longer answer; carrying on with "${to}" in the same session`,
@@ -487,6 +495,12 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
     labelKey: "accountRefused",
     icon: "key_off",
     params: (m) => ({ from: m[1], to: m[2] }),
+  },
+  {
+    re: /^Anthropic refused the credential of account "(.*)"; restarting on it with a fresh credential$/,
+    labelKey: "accountRenewed",
+    icon: "autorenew",
+    params: (m) => ({ label: m[1] }),
   },
   {
     re: /^Anthropic account "(.*)" can no longer answer; carrying on with "(.*)" in the same session$/,

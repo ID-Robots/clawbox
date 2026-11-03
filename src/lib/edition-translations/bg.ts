@@ -1656,6 +1656,7 @@ export const bg: Record<string, string> = {
   "codingAgent.stepAnthropicAccount": "С акаунт в Anthropic „{label}“",
   "codingAgent.stepAccountSwitched": "Акаунтът в Anthropic „{from}“ достигна лимита си за използване (обратно в {time}); продължава с „{to}“ в същата сесия",
   "codingAgent.stepAccountRefused": "Anthropic отказа идентификационните данни на акаунта „{from}“; продължава с „{to}“ в същата сесия",
+  "codingAgent.stepAccountRenewed": "Anthropic отказа идентификационните данни на акаунта „{label}“; рестартира се на него с нови идентификационни данни",
   "codingAgent.stepAccountMoved": "Акаунтът в Anthropic „{from}“ вече не може да отговаря; продължава с „{to}“ в същата сесия",
   "codingAgent.stepAccountsWaiting": "Всеки акаунт в Anthropic е достигнал лимита си за използване; изчаква нулирането в {time}",
   "codingAgent.stepResumedAfterLimit": "Лимитът за използване се нулира; продължава оттам, докъдето беше стигнало",

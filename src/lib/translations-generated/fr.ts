@@ -1794,6 +1794,7 @@ const table: Record<string, string> = {
   "codingAgent.statusStopped": "Arrêtée",
   "codingAgent.stepAccountMoved": "Le compte Anthropic « {from} » ne peut plus répondre ; la suite se fait avec « {to} » dans la même session",
   "codingAgent.stepAccountRefused": "Anthropic a refusé les identifiants du compte « {from} » ; la suite se fait avec « {to} » dans la même session",
+  "codingAgent.stepAccountRenewed": "Anthropic a refusé les identifiants du compte « {label} » ; redémarrage sur ce compte avec des identifiants neufs",
   "codingAgent.stepAccountSwitched": "Le compte Anthropic « {from} » a atteint sa limite d'utilisation (de retour à {time}) ; la suite se fait avec « {to} » dans la même session",
   "codingAgent.stepAccountsWaiting": "Tous les comptes Anthropic ont atteint leur limite d'utilisation ; en attente de la réinitialisation à {time}",
   "codingAgent.stepAnthropicAccount": "Sur le compte Anthropic « {label} »",

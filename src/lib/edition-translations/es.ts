@@ -1665,6 +1665,7 @@ export const es: Record<string, string> = {
   "codingAgent.stepAnthropicAccount": "En la cuenta de Anthropic «{label}»",
   "codingAgent.stepAccountSwitched": "La cuenta de Anthropic «{from}» alcanzó su límite de uso (vuelve a las {time}); se continúa con «{to}» en la misma sesión",
   "codingAgent.stepAccountRefused": "Anthropic rechazó las credenciales de la cuenta «{from}»; se continúa con «{to}» en la misma sesión",
+  "codingAgent.stepAccountRenewed": "Anthropic rechazó las credenciales de la cuenta «{label}»; se reinicia en ella con credenciales nuevas",
   "codingAgent.stepAccountMoved": "La cuenta de Anthropic «{from}» ya no puede responder; se continúa con «{to}» en la misma sesión",
   "codingAgent.stepAccountsWaiting": "Todas las cuentas de Anthropic han alcanzado su límite de uso; esperando al restablecimiento de las {time}",
   "codingAgent.stepResumedAfterLimit": "El límite de uso se restableció; se continúa donde se quedó",

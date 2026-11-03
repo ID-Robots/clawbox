@@ -1678,6 +1678,7 @@ export const zh: Record<string, string> = {
   "codingAgent.stepAnthropicAccount": "使用 Anthropic 账户“{label}”",
   "codingAgent.stepAccountSwitched": "Anthropic 账户“{from}”已达到使用上限（{time} 恢复）；在同一会话中改用“{to}”继续",
   "codingAgent.stepAccountRefused": "Anthropic 拒绝了账户“{from}”的凭据；在同一会话中改用“{to}”继续",
+  "codingAgent.stepAccountRenewed": "Anthropic 拒绝了账户“{label}”的凭据；使用新的凭据在该账户上重新开始",
   "codingAgent.stepAccountMoved": "Anthropic 账户“{from}”已无法响应；在同一会话中改用“{to}”继续",
   "codingAgent.stepAccountsWaiting": "所有 Anthropic 账户都已达到使用上限；等待 {time} 重置",
   "codingAgent.stepResumedAfterLimit": "使用上限已重置；从中断处继续",

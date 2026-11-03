@@ -1670,6 +1670,7 @@ export const fr: Record<string, string> = {
   "codingAgent.stepAnthropicAccount": "Sur le compte Anthropic « {label} »",
   "codingAgent.stepAccountSwitched": "Le compte Anthropic « {from} » a atteint sa limite d'utilisation (de retour à {time}) ; la suite se fait avec « {to} » dans la même session",
   "codingAgent.stepAccountRefused": "Anthropic a refusé les identifiants du compte « {from} » ; la suite se fait avec « {to} » dans la même session",
+  "codingAgent.stepAccountRenewed": "Anthropic a refusé les identifiants du compte « {label} » ; redémarrage sur ce compte avec des identifiants neufs",
   "codingAgent.stepAccountMoved": "Le compte Anthropic « {from} » ne peut plus répondre ; la suite se fait avec « {to} » dans la même session",
   "codingAgent.stepAccountsWaiting": "Tous les comptes Anthropic ont atteint leur limite d'utilisation ; en attente de la réinitialisation à {time}",
   "codingAgent.stepResumedAfterLimit": "La limite d'utilisation est réinitialisée ; reprise là où elle s'était arrêtée",
