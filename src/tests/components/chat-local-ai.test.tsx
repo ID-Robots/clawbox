@@ -331,7 +331,6 @@ describe("chatOnLocalAi", () => {
 });
 
 const sends = () => sentFrames.filter((f) => f.method === "chat.send");
-const card = () => screen.getByTestId("chat-local-ai-long-chat");
 
 async function type(text: string) {
   const textarea = await screen.findByRole("textbox");

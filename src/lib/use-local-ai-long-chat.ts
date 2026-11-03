@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
-import { uuid } from "@/lib/chat-history-cache";
 import type { ChatAttachment } from "@/lib/chat-attachments";
 import type { HarnessAdapter } from "@/lib/harness/transport";
 import {
@@ -165,13 +164,18 @@ export function useLocalAiLongChat(options: LocalAiLongChatOptions): LocalAiLong
   const turnRef = useRef<{ key: string; pending: LongChatPending } | null>(null);
   const sendingRef = useRef(sending);
   useEffect(() => { sendingRef.current = sending; }, [sending]);
-  useEffect(() => {
-    if (sending) return;
-    setCompactingSince(0);
-    setFramesSeen(false);
-    setTurnLong(false);
-    setServerReady(null);
-  }, [sending]);
+  // A turn that ended takes its phase with it. Reset while rendering, when
+  // `sending` changes, rather than in an effect (react-hooks/set-state-in-effect).
+  const [sendingSeen, setSendingSeen] = useState(sending);
+  if (sendingSeen !== sending) {
+    setSendingSeen(sending);
+    if (!sending) {
+      setCompactingSince(0);
+      setFramesSeen(false);
+      setTurnLong(false);
+      setServerReady(null);
+    }
+  }
 
   // Measure the conversation on screen between turns while on Local AI: on the
   // switch, on a tab change, once the socket is up, after every turn (whose
