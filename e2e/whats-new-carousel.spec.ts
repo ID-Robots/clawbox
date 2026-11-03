@@ -301,6 +301,20 @@ test.describe("the System Update window's What's new showcase", () => {
     await expect(stage).toContainText("Recording 0:04");
   });
 
+  test("in Settings → System Update's 672 px pane it is narrow: the text over a cropped, legible screenshot", async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await openUpdateWindow(page);
+    await page.goto("/app/settings");
+    await page.getByRole("button", { name: "System Update" }).first().click();
+    const showcase = page.getByTestId("whats-new-showcase");
+    await expect(showcase).toHaveAttribute("data-layout", "narrow", { timeout: 15_000 });
+    const stage = showcase.getByTestId("whats-new-showcase-stage");
+    const box = (await stage.boundingBox())!;
+    expect(box.width).toBeGreaterThan((await showcase.boundingBox())!.width * 0.8);
+    expect(box.width / box.height).toBeCloseTo(4 / 3, 1);
+    expect(await stage.locator(".wns-cam").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
+  });
+
   test("goes on drawing every feature, screenshot and all, once the box has gone down", async ({ page }) => {
     const showcase = await openUpdateWindow(page);
     // Every screenshot is fetched the moment the panel is drawn.
@@ -323,3 +337,61 @@ test.describe("the System Update window's What's new showcase", () => {
     expect(requested.filter((path) => !path.startsWith("/setup-api/"))).toEqual([]);
   });
 });
+
+/* ── On a phone: the owner watching the update through the box's tunnel ─── */
+
+/** A real touch swipe across the page, through the browser's own input. */
+async function swipe(page: Page, from: [number, number], to: [number, number]) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: from[0], y: from[1] }] });
+  for (let step = 1; step <= 8; step += 1) {
+    const x = from[0] + ((to[0] - from[0]) * step) / 8;
+    const y = from[1] + ((to[1] - from[1]) * step) / 8;
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
+}
+
+for (const size of [{ width: 360, height: 740 }, { width: 390, height: 844 }, { width: 430, height: 932 }, { width: 844, height: 390 }]) {
+  test.describe(`the update screen's showcase on a ${size.width}x${size.height} phone`, () => {
+    test.use({ viewport: size, isMobile: true, hasTouch: true });
+
+    test("nothing scrolls sideways, the steps come first, and the screenshot is cropped to a legible size", async ({ page }) => {
+      const showcase = await openUpdateWindow(page);
+      await expect(showcase).toHaveAttribute("data-layout", "narrow");
+      // The page itself never scrolls sideways; only the chips' own row does.
+      expect(await page.evaluate(() => document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth)).toBeLessThanOrEqual(1);
+      const steps = (await page.getByRole("progressbar", { name: "System Update" }).boundingBox())!;
+      const hero = (await showcase.boundingBox())!;
+      expect(steps.y + steps.height).toBeLessThanOrEqual(hero.y);
+      expect(hero.width).toBeGreaterThan(size.width * 0.85);
+      expect(hero.x + hero.width).toBeLessThanOrEqual(size.width);
+      // The demo's text is drawn at the cropped picture's size, not the stage's 3–4 px.
+      const stage = showcase.getByTestId("whats-new-showcase-stage");
+      expect(await stage.locator(".wns-cam").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
+      const chips = showcase.getByTestId("whats-new-showcase-chips");
+      expect(await chips.evaluate((el) => getComputedStyle(el).flexWrap)).toBe("nowrap");
+      expect(await chips.evaluate((el) => el.getBoundingClientRect().right)).toBeLessThanOrEqual(size.width);
+      await expect(page.getByTestId("update-run-notice")).toBeInViewport();
+    });
+
+    test("a swipe turns it and a tap holds it", async ({ page }) => {
+      const showcase = await openUpdateWindow(page);
+      const stage = showcase.getByTestId("whats-new-showcase-stage");
+      // The stage floats by design, so it is never "stable": no actionability waits on it.
+      await stage.evaluate((el) => el.scrollIntoView({ block: "center" }));
+      const box = (await stage.boundingBox())!;
+      const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+      await swipe(page, [x + box.width * 0.3, y], [x - box.width * 0.3, y + 6]);
+      await expect(showcase).toHaveAttribute("data-index", "1");
+      await swipe(page, [x - box.width * 0.3, y], [x + box.width * 0.3, y]);
+      await expect(showcase).toHaveAttribute("data-index", "0");
+      await page.touchscreen.tap(x, y);
+      await expect(showcase).toHaveAttribute("data-held", "true");
+      await expect(showcase.getByTestId("whats-new-showcase-held")).toBeVisible();
+      await page.touchscreen.tap(x, y);
+      await expect(showcase).toHaveAttribute("data-paused", "false");
+    });
+  });
+}

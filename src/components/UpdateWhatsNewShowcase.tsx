@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type ReactNode, type TouchEvent } from "react";
 
 /** The panel's `tr`: the catalogue's text, else the English floor — never the raw key. */
 export type Floor = (key: string, english: string, params?: Record<string, string>) => string;
@@ -21,6 +21,22 @@ export const SHOWCASE_ADVANCE_MS = 7500;
 export const SHOWCASE_TYPE_MS = 34;
 /** The live demo's timeline, the keyframes' `7s`: it settles before the next feature comes. */
 const DEMO_MS = 7000;
+/**
+ * Below this width of its own the showcase is laid out for a small screen:
+ * the text over the screenshot, and the screenshot cropped to the action
+ * instead of shrunk whole. Settings → System Update's pane is 672 px; the
+ * desktop's /updating panel (728 px) keeps its two columns.
+ */
+export const SHOWCASE_NARROW_PX = 704;
+/** A phone or a small window — a landscape phone too — is laid out narrow whatever the showcase's own width. */
+export const SHOWCASE_COMPACT_VIEWPORT = "(max-width: 1023.98px), (max-height: 500px)";
+/** A touch that moves less than this is a tap; one that moves at least `SWIPE_PX` sideways is a swipe. */
+const TAP_SLOP_PX = 10;
+const SWIPE_PX = 40;
+/** A touch held longer than this is not a tap. */
+const TAP_MS = 600;
+/** The mouse events a browser makes up after a tap come within this long of it: they are not a pointer hovering. */
+const TOUCH_MOUSE_MS = 1000;
 
 /*
  * Inline SVG only: this panel stays on screen while the box restarts, and an
@@ -48,23 +64,41 @@ const ICONS = {
   chat: <Glyph><path d="M4 5h16v11H9l-5 4z" /></Glyph>,
 };
 
-/* ── prefers-reduced-motion, live ──────────────────────────────────────── */
+/* ── prefers-reduced-motion and the screen's size, live ────────────────── */
 
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 
-function reducedMotionQuery(): MediaQueryList | null {
+function mediaQuery(query: string): MediaQueryList | null {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
-  return window.matchMedia(REDUCED_MOTION) ?? null;
+  return window.matchMedia(query) ?? null;
 }
 
-function subscribeReducedMotion(onChange: () => void) {
-  const query = reducedMotionQuery();
-  query?.addEventListener?.("change", onChange);
-  return () => query?.removeEventListener?.("change", onChange);
+function useMediaQuery(query: string): boolean {
+  const subscribe = useCallback((onChange: () => void) => {
+    const list = mediaQuery(query);
+    list?.addEventListener?.("change", onChange);
+    return () => list?.removeEventListener?.("change", onChange);
+  }, [query]);
+  return useSyncExternalStore(subscribe, () => mediaQuery(query)?.matches === true, () => false);
 }
 
-function usePrefersReducedMotion(): boolean {
-  return useSyncExternalStore(subscribeReducedMotion, () => reducedMotionQuery()?.matches === true, () => false);
+/**
+ * The showcase's own width (its container's, which its CSS lays out by), kept
+ * up as it changes; null until it has been laid out, which reads as wide.
+ * Measured before the first paint, so a phone never sees the wide layout.
+ */
+function useOwnWidth(element: HTMLElement | null): number | null {
+  const [width, setWidth] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    if (!element) return;
+    const measure = () => setWidth(element.clientWidth > 0 ? element.clientWidth : null);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element]);
+  return width;
 }
 
 /** How many of `at` (ms since mount) have passed; all of them with motion off. */
@@ -178,7 +212,7 @@ function LinkFrame({ tr, reduced }: DemoProps) {
       <b>{ICONS.browser} {tr("update.showcase.linkTitle", "Public link for {app}", { app: "Recipe Book" })}</b>
       <small>{tr("update.showcase.linkNote", "Anyone with the link reaches only this app.")}</small>
       <div className="wns-urlp">
-        https://jade-swan.clawbox.tech/a/recipe-book
+        <span className="wns-url">https://jade-swan.clawbox.tech/a/recipe-book</span>
         <span className="wns-copy">{copied ? `✓ ${tr("update.showcase.linkCopied", "Copied")}` : tr("update.showcase.linkCopy", "Copy")}</span>
       </div>
       <div className="wns-row"><span>{tr("update.showcase.linkExpires", "Expires")}</span><b>{tr("update.showcase.linkExpiresIn", "in 7 days")}</b></div>
@@ -320,6 +354,15 @@ function featureOf(key: string): Feature {
  * reads the same in any window size. With motion off every one-shot keyframe
  * is held at its end (the demo's result), the loops stand still, and the
  * camera, the float and the fade-in are dropped.
+ *
+ * Narrow (`data-layout="narrow"`: a phone, a small window, Settings' pane) the
+ * whole screenshot would be a few hundred pixels wide and its text 3–4 px, so
+ * it is drawn 880–960 px wide (`--wns-pz`, its text never under 10 px) on a taller stage (1:1 on a
+ * phone, 4:3 up to the two columns) and a camera of its own pans it to where
+ * the demo is (`--wns-fx`/`--wns-fy`, the point at the stage's centre, clamped
+ * so the picture always covers the stage); the demo's overlays are drawn at
+ * that size, its toasts become a band across the stage's foot. With motion off
+ * that camera stands where the demo ends.
  */
 const SHOWCASE_CSS = `
 @keyframes wns-up{from{opacity:0;transform:translateY(12px)}}
@@ -392,7 +435,8 @@ const SHOWCASE_CSS = `
 @keyframes wns-lkt{0%,48%{opacity:0;transform:scale(.94)}54%,100%{opacity:1;transform:none}}
 .wns-link .wns-row{display:flex;justify-content:space-between;color:#8d99ae;margin-top:8px;font-size:.92em}
 .wns-link .wns-row b{display:inline;color:#e8edf5;margin:0}
-.wns-link .wns-copy{margin-left:auto;color:#fff}
+.wns-link .wns-copy{margin-left:auto;color:#fff;flex:none}
+.wns-url{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .wns-link .wns-cur-2{left:92%;top:80%;opacity:0;animation:wns-lkcur2 7s ease-in-out both}
 @keyframes wns-lkcur2{0%,52%{left:92%;top:80%;opacity:0}54%{opacity:1}70%,100%{left:84.5%;top:49.5%;opacity:1}}
 
@@ -463,19 +507,51 @@ const SHOWCASE_CSS = `
 .wns[data-motion="reduce"] .wns-talk .wns-wave i{animation:none;height:55%}
 .wns[data-motion="reduce"] .wns-talk .wns-wave i:nth-child(2n){height:85%}
 .wns[data-motion="reduce"] .wns-talk .wns-wave i:nth-child(3n){height:35%}
+
+@property --wns-fx{syntax:"<number>";inherits:false;initial-value:.5}
+@property --wns-fy{syntax:"<number>";inherits:false;initial-value:.5}
+@property --wns-pz{syntax:"<number>";inherits:false;initial-value:960}
+.wns[data-layout="narrow"] .wns-scr{--wns-ar:.75;aspect-ratio:4/3;font-size:clamp(11px,3.2cqw,13px)}
+@container wns (width < 32.5rem){.wns[data-layout="narrow"] .wns-scr{--wns-ar:1;aspect-ratio:1}}
+@container wns (width >= 44rem){.wns[data-layout="narrow"] .wns-scr{--wns-ar:.625;aspect-ratio:16/10}}
+.wns[data-layout="narrow"] .wns-scr .wns-cam{--wns-pw:max(100cqw,calc(var(--wns-pz) * 1px),calc(160cqw * var(--wns-ar)));inset:auto;left:0;top:0;width:var(--wns-pw);height:calc(var(--wns-pw) * .625);transform-origin:0 0;font-size:calc(var(--wns-pw) * .0115);transform:translate(clamp(calc(100cqw - var(--wns-pw)),calc(50cqw - var(--wns-fx) * var(--wns-pw)),0px),clamp(calc(100cqw * var(--wns-ar) - var(--wns-pw) * .625),calc(50cqw * var(--wns-ar) - var(--wns-fy) * var(--wns-pw) * .625),0px));animation:none}
+.wns[data-layout="narrow"] .wns-shot .wns-cam{--wns-fx:.49;--wns-fy:.41;--wns-pz:880;animation:wns-n-shot 7s ease-in-out both}
+@keyframes wns-n-shot{0%{--wns-fx:.55;--wns-fy:.42;--wns-pz:880}18%,30%{--wns-fx:.7;--wns-fy:.33;--wns-pz:960}44%{--wns-fx:.33;--wns-fy:.27;--wns-pz:880}60%,100%{--wns-fx:.49;--wns-fy:.41;--wns-pz:880}}
+.wns[data-layout="narrow"] .wns-br .wns-cam{--wns-fx:.22;--wns-fy:.86;--wns-pz:960;animation:wns-n-br 7s ease-in-out both}
+@keyframes wns-n-br{0%{--wns-fx:.5;--wns-fy:.35;--wns-pz:880}20%,62%{--wns-fx:.5;--wns-fy:.22;--wns-pz:900}80%,100%{--wns-fx:.22;--wns-fy:.86;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-link .wns-cam{--wns-fx:.24;--wns-fy:.46;--wns-pz:960;animation:wns-n-link 7s ease-in-out both}
+@keyframes wns-n-link{0%{--wns-fx:.42;--wns-fy:.6;--wns-pz:880}25%,100%{--wns-fx:.24;--wns-fy:.46;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-grok .wns-cam{--wns-fx:.85;--wns-fy:.75;--wns-pz:960;animation:wns-n-grok 7s ease-in-out both}
+@keyframes wns-n-grok{0%{--wns-fx:.66;--wns-fy:.55;--wns-pz:880}18%,100%{--wns-fx:.85;--wns-fy:.75;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-talk .wns-cam{--wns-fx:.71;--wns-fy:.82;--wns-pz:900;animation:wns-n-talk 7s ease-in-out both}
+@keyframes wns-n-talk{0%{--wns-fx:.6;--wns-fy:.7;--wns-pz:880}20%,100%{--wns-fx:.71;--wns-fy:.82;--wns-pz:900}}
+.wns[data-layout="narrow"] .wns-chart .wns-cam{--wns-fx:.71;--wns-fy:.42;--wns-pz:960;animation:wns-n-chart 7s ease-in-out both}
+@keyframes wns-n-chart{0%{--wns-fx:.5;--wns-fy:.38;--wns-pz:880}18%,42%{--wns-fx:.42;--wns-fy:.3;--wns-pz:960}58%,100%{--wns-fx:.71;--wns-fy:.42;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-wiki .wns-cam{--wns-fx:.66;--wns-fy:.6;--wns-pz:900;animation:wns-n-wiki 7s ease-in-out both}
+@keyframes wns-n-wiki{0%{--wns-fx:.4;--wns-fy:.7;--wns-pz:880}10%,38%{--wns-fx:.36;--wns-fy:.68;--wns-pz:900}50%,100%{--wns-fx:.66;--wns-fy:.6;--wns-pz:900}}
+.wns[data-layout="narrow"][data-motion="reduce"] .wns-scr .wns-cam{animation:none}
+.wns[data-layout="narrow"] .wns-scr .wns-toast{left:4%;right:4%;top:auto;bottom:4%;width:auto;padding:2.6% 3.4%}
+.wns[data-layout="narrow"] .wns-scr .wns-key{left:4%;top:auto;bottom:5%}
+.wns[data-layout="narrow"] .wns-link .wns-cur-2{display:none}
+.wns-held{position:absolute;right:10px;top:10px;z-index:12;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#0a0f19d9;border:1px solid #f9731699;color:#f97316;font-size:14px;pointer-events:none}
 `;
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/** The title, typed in a letter at a time; whole at once with motion off. Sized by the whole title from the start. */
-function TypedTitle({ title, reduced }: { title: string; reduced: boolean }) {
+/**
+ * The title, typed in a letter at a time; whole at once with motion off.
+ * Sized by the whole title from the start — and by every title in `reserve`,
+ * so the screenshot under it does not move from one feature to the next.
+ */
+function TypedTitle({ title, reduced, reserve = [] }: { title: string; reduced: boolean; reserve?: readonly string[] }) {
   const letters = Array.from(title);
   const typed = useTyping(letters.length, 0, SHOWCASE_TYPE_MS, reduced);
   return (
     <span aria-hidden="true" className="grid" data-testid="whats-new-showcase-typed">
       <span className="invisible col-start-1 row-start-1">{title}</span>
+      {reserve.map((other, at) => <span key={at} className="invisible col-start-1 row-start-1" data-showcase-reserve="">{other}</span>)}
       <span className="col-start-1 row-start-1">
         {letters.slice(0, typed).join("")}
         {!reduced && <span className="wns-caret" />}
@@ -526,6 +602,11 @@ function Stage({ item, feature, active, tr, reduced, onBroken }: { item: Showcas
  * moves on every {@link SHOWCASE_ADVANCE_MS}, and holds while the pointer is
  * over it or the focus is in it; ←/→ (Home/End) turn it.
  *
+ * On a phone (narrow, see {@link SHOWCASE_NARROW_PX}) the text sits over a
+ * taller, cropped screenshot, the chips are one row that scrolls sideways, a
+ * swipe across it turns it and a tap holds it (another tap lets it go on).
+ * A touch is never taken for a pointer hovering over it.
+ *
  * It must keep working while the box restarts: no font or icon font of its
  * own, every screenshot and the logo loaded the moment it is drawn and kept
  * (see Stage), nothing fetched after that.
@@ -548,12 +629,21 @@ export default function UpdateWhatsNewShowcase({
   const [index, setIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  /** Held by a tap, until the next one. */
+  const [held, setHeld] = useState(false);
   const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
-  const reduced = usePrefersReducedMotion();
+  const reduced = useMediaQuery(REDUCED_MOTION);
+  const compactViewport = useMediaQuery(SHOWCASE_COMPACT_VIEWPORT);
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  const width = useOwnWidth(root);
+  const narrow = compactViewport || (width !== null && width < SHOWCASE_NARROW_PX);
   const id = useId();
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const tablist = useRef<HTMLDivElement | null>(null);
+  const touch = useRef<{ x: number; y: number; at: number } | null>(null);
+  const touchedAt = useRef(Number.NEGATIVE_INFINITY);
   const current = Math.max(0, Math.min(index, count - 1));
-  const paused = hovered || focused;
+  const paused = hovered || focused || held;
   const item = items[current] as ShowcaseItem | undefined;
   const feature = featureOf(item?.key ?? "");
 
@@ -562,6 +652,16 @@ export default function UpdateWhatsNewShowcase({
     const timer = setTimeout(() => setIndex((current + 1) % count), SHOWCASE_ADVANCE_MS);
     return () => clearTimeout(timer);
   }, [current, count, paused]);
+
+  // The narrow chip row scrolls sideways: keep the chip that is on in sight.
+  // The row only, never the page around it.
+  useEffect(() => {
+    const row = tablist.current;
+    const chip = tabs.current[current];
+    if (!narrow || !row || !chip || row.scrollWidth <= row.clientWidth) return;
+    const left = Math.max(0, chip.offsetLeft - (row.clientWidth - chip.offsetWidth) / 2);
+    row.scrollTo?.({ left, behavior: reduced ? "auto" : "smooth" });
+  }, [current, narrow, reduced]);
 
   const markBroken = (src: string) => setBroken((prev) => (prev.has(src) ? prev : new Set(prev).add(src)));
 
@@ -587,23 +687,63 @@ export default function UpdateWhatsNewShowcase({
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
   };
 
+  // A swipe across the feature turns it; a tap holds it, or lets it go on.
+  // The chips' row scrolls sideways itself and takes its own taps, as does the link.
+  const onTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    touchedAt.current = Date.now();
+    const start = event.touches[0];
+    const own = (event.target as Element).closest?.('[role="tablist"], a, button');
+    touch.current = event.touches.length === 1 && start && !own ? { x: start.clientX, y: start.clientY, at: Date.now() } : null;
+  };
+
+  const onTouchEnd = (event: TouchEvent<HTMLDivElement>) => {
+    touchedAt.current = Date.now();
+    const start = touch.current;
+    const end = event.changedTouches[0];
+    touch.current = null;
+    if (!start || !end) return;
+    const dx = end.clientX - start.x;
+    const dy = end.clientY - start.y;
+    if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      show(current + (dx < 0 ? 1 : -1), false);
+      return;
+    }
+    if (Math.abs(dx) > TAP_SLOP_PX || Math.abs(dy) > TAP_SLOP_PX || Date.now() - start.at > TAP_MS) return;
+    // Not a click: it neither focuses the panel nor reads as a pointer over it,
+    // so the tap alone decides; a chip that had the focus lets it go.
+    event.preventDefault();
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && event.currentTarget.contains(active)) active.blur();
+    setHeld((was) => !was);
+  };
+
+  const onMouseEnter = () => {
+    if (Date.now() - touchedAt.current > TOUCH_MOUSE_MS) setHovered(true);
+  };
+
   if (!item) return null;
 
   return (
     <>
       {/* Its own container: the two columns follow the hero's width, not the window's. */}
       <div
-        className="wns @container relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[#26334a] bg-[#0a0f19]"
+        ref={setRoot}
+        className="wns @container/wns relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[#26334a] bg-[#0a0f19]"
         data-testid="whats-new-showcase"
         data-index={current}
         data-feature={feature.id}
         data-motion={reduced ? "reduce" : "full"}
+        data-layout={narrow ? "narrow" : "wide"}
         data-paused={paused ? "true" : "false"}
-        onMouseEnter={() => setHovered(true)}
+        data-held={held ? "true" : "false"}
+        onMouseEnter={onMouseEnter}
         onMouseLeave={() => setHovered(false)}
         onFocus={() => setFocused(true)}
         onBlur={onBlur}
         onKeyDown={onKeyDown}
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={() => { touch.current = null; }}
       >
         <style>{SHOWCASE_CSS}</style>
         <div
@@ -613,7 +753,7 @@ export default function UpdateWhatsNewShowcase({
           data-testid="whats-new-showcase-glow"
         />
 
-        <div className="relative flex items-center gap-2 px-[30px] pt-6" aria-hidden="true" data-testid="whats-new-showcase-logo">
+        <div className={`relative flex items-center gap-2 ${narrow ? "px-4 pt-4" : "px-[30px] pt-6"}`} aria-hidden="true" data-testid="whats-new-showcase-logo">
           {/* eslint-disable-next-line @next/next/no-img-element -- the box's own crab from public/, loaded with the panel */}
           <img src="/clawbox-icon.png" alt="" width={28} height={28} loading="eager" draggable={false} className="h-7 w-7 object-contain" onError={(event) => { event.currentTarget.style.display = "none"; }} />
           <span className="font-display text-lg font-bold tracking-[-0.01em] text-[#f97316]">ClawBox</span>
@@ -624,19 +764,38 @@ export default function UpdateWhatsNewShowcase({
           id={`${id}-panel`}
           aria-labelledby={`${id}-tab-${current}`}
           tabIndex={0}
-          className="relative grid flex-1 grid-cols-1 items-center gap-[22px] rounded-xl pb-0 pl-[30px] pr-[26px] pt-[18px] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-orange-300/70 @2xl:grid-cols-[minmax(0,330px)_minmax(0,1fr)]"
+          className={`relative grid flex-1 grid-cols-1 items-center rounded-xl pb-0 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-orange-300/70 @min-[44rem]:grid-cols-[minmax(0,330px)_minmax(0,1fr)] ${
+            narrow ? "touch-pan-y gap-4 px-4 pt-3" : "gap-[22px] pl-[30px] pr-[26px] pt-[18px]"
+          }`}
+          data-testid="whats-new-showcase-panel"
         >
           <div className="min-w-0">
             <p className="m-0 font-mono text-xs font-extrabold uppercase tracking-[0.2em] text-[#8d99ae]" data-testid="whats-new-showcase-count">
               <b className="text-[#e8edf5]">{pad(current + 1)}</b> / {pad(count)} · {tr("update.showcase.newIn", "New in {release}", { release })}
             </p>
-            <Heading className="mb-2.5 mt-3.5 min-h-[68px] font-display text-[30px] font-bold leading-[1.12] tracking-[-0.01em] text-[#e8edf5]">
+            <Heading className={`font-display font-bold leading-[1.12] tracking-[-0.01em] text-[#e8edf5] ${narrow ? "mb-2 mt-2.5 text-[24px]" : "mb-2.5 mt-3.5 min-h-[68px] text-[30px]"}`}>
               <span className="sr-only">{item.title}</span>
-              <TypedTitle key={`${current}:${item.title}`} title={item.title} reduced={reduced} />
+              {/* Narrow, the screenshot sits under the text: it is sized by the
+                  longest title and body, so it stays put as the features turn. */}
+              <TypedTitle key={`${current}:${item.title}`} title={item.title} reduced={reduced} reserve={narrow ? items.map((entry) => entry.title) : undefined} />
             </Heading>
-            <p key={current} className="wns-up m-0 text-[13.5px] leading-normal text-[#b9c3d5]">{item.body}</p>
+            {narrow ? (
+              <div className="grid text-[13.5px] leading-normal text-[#b9c3d5]">
+                {items.map((entry, at) => (
+                  <p key={at} aria-hidden="true" className="invisible col-start-1 row-start-1 m-0" data-showcase-reserve="">{entry.body}</p>
+                ))}
+                <p key={current} className="wns-up col-start-1 row-start-1 m-0">{item.body}</p>
+              </div>
+            ) : (
+              <p key={current} className="wns-up m-0 text-[13.5px] leading-normal text-[#b9c3d5]">{item.body}</p>
+            )}
           </div>
-          <div className="wns-scene min-w-0">
+          <div className="wns-scene relative min-w-0">
+            {held && (
+              <span className="wns-held" aria-hidden="true" data-testid="whats-new-showcase-held">
+                <Glyph><path d="M9 5v14M15 5v14" /></Glyph>
+              </span>
+            )}
             {items.map((entry, at) => !broken.has(entry.image) && (
               <Stage
                 key={entry.key}
@@ -651,7 +810,20 @@ export default function UpdateWhatsNewShowcase({
           </div>
         </div>
 
-        <div role="tablist" aria-label={tr("update.showcase.label", "New features")} className="relative flex flex-wrap gap-1.5 pb-[18px] pl-[30px] pr-[26px] pt-[26px]">
+        {/* Narrow under a thumb, one row it scrolls sideways (inside itself,
+            never the page) instead of three wrapped ones; with a mouse, which
+            has no sideways swipe, they wrap. */}
+        <div
+          ref={tablist}
+          role="tablist"
+          aria-label={tr("update.showcase.label", "New features")}
+          className={`relative flex gap-1.5 ${
+            narrow
+              ? "flex-wrap px-4 pb-4 pt-5 pointer-coarse:snap-x pointer-coarse:scroll-px-4 pointer-coarse:flex-nowrap pointer-coarse:overflow-x-auto pointer-coarse:overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              : "flex-wrap pb-[18px] pl-[30px] pr-[26px] pt-[26px]"
+          }`}
+          data-testid="whats-new-showcase-chips"
+        >
           {items.map((entry, at) => {
             const on = at === current;
             const chip = featureOf(entry.key);
@@ -666,7 +838,9 @@ export default function UpdateWhatsNewShowcase({
                 aria-controls={`${id}-panel`}
                 tabIndex={on ? 0 : -1}
                 onClick={() => show(at, false)}
-                className={`inline-flex cursor-pointer items-center gap-[5px] rounded-full border px-[9px] py-1 text-[10.5px] leading-snug focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 ${
+                className={`inline-flex cursor-pointer items-center gap-[5px] rounded-full border leading-snug focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 ${
+                  narrow ? "shrink-0 whitespace-nowrap px-3 py-1.5 text-[12px] pointer-coarse:snap-start pointer-coarse:focus-visible:-outline-offset-2" : "px-[9px] py-1 text-[10.5px]"
+                } ${
                   on ? "border-[#f97316] bg-[#f97316] font-bold text-[#111]" : "border-[#26334a] bg-[#0d1420cc] text-[#8d99ae] hover:text-[#e8edf5]"
                 }`}
                 data-testid="whats-new-showcase-chip"

@@ -3,7 +3,9 @@ import { act, fireEvent, render, screen, within } from "@/tests/helpers/test-uti
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import UpdateWhatsNewShowcase, {
   SHOWCASE_ADVANCE_MS,
+  SHOWCASE_COMPACT_VIEWPORT,
   SHOWCASE_FEATURES,
+  SHOWCASE_NARROW_PX,
   SHOWCASE_TYPE_MS,
   type Floor,
 } from "@/components/UpdateWhatsNewShowcase";
@@ -34,9 +36,9 @@ function mount() {
   return screen.getByTestId("whats-new-showcase");
 }
 
-function reducedMotion(on: boolean) {
+function reducedMotion(on: boolean, { compactScreen = false } = {}) {
   window.matchMedia = ((query: string) => ({
-    matches: on && query === "(prefers-reduced-motion: reduce)",
+    matches: (on && query === "(prefers-reduced-motion: reduce)") || (compactScreen && query === SHOWCASE_COMPACT_VIEWPORT),
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -337,5 +339,244 @@ describe("UpdateWhatsNewShowcase", () => {
         for (const name of wanted) expect(table[key], `${locale} ${key}`).toContain(name);
       }
     }
+  });
+});
+
+/*
+ * On a phone — the owner watching an update through the box's tunnel — and in
+ * Settings' 672 px pane. jsdom lays nothing out, so the showcase's own width
+ * is what a ResizeObserver would report, set by hand.
+ */
+describe("UpdateWhatsNewShowcase — narrow: a phone, a small window, Settings' pane", () => {
+  let ownWidth = 0;
+  let observers: (() => void)[] = [];
+
+  class FakeResizeObserver {
+    constructor(private readonly callback: () => void) {}
+    observe() { observers.push(this.callback); }
+    disconnect() { observers = observers.filter((callback) => callback !== this.callback); }
+  }
+
+  /** The showcase is now `width` px wide, as its ResizeObserver reports it. */
+  function layOut(width: number) {
+    ownWidth = width;
+    act(() => observers.forEach((callback) => callback()));
+  }
+
+  function mountAt(width: number) {
+    ownWidth = width;
+    return mount();
+  }
+
+  function touch(element: Element, from: [number, number], to: [number, number] = from) {
+    fireEvent.touchStart(element, { touches: [{ clientX: from[0], clientY: from[1] }] });
+    return fireEvent.touchEnd(element, { touches: [], changedTouches: [{ clientX: to[0], clientY: to[1] }] });
+  }
+
+  function stage(showcase: HTMLElement) {
+    return within(showcase).getByTestId("whats-new-showcase-stage");
+  }
+
+  beforeEach(() => {
+    observers = [];
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.testid === "whats-new-showcase" ? ownWidth : 0;
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it(`is laid out narrow below ${SHOWCASE_NARROW_PX} px of its own — a phone, Settings' 672 px pane — and keeps the desktop's layout at /updating's 728 px`, () => {
+    const showcase = mountAt(360);
+    expect(showcase).toHaveAttribute("data-layout", "narrow");
+    const chips = within(showcase).getByTestId("whats-new-showcase-chips");
+    // Under a thumb one row that scrolls sideways inside itself, not three
+    // wrapped ones; a mouse, with no sideways swipe, still has them wrapped.
+    expect(chips.className).toContain("pointer-coarse:overflow-x-auto");
+    expect(chips.className).toContain("pointer-coarse:flex-nowrap");
+    expect(chips.className).toMatch(/(^| )flex-wrap( |$)/);
+    // Swipes are the showcase's; the page still scrolls up and down under a thumb.
+    expect(within(showcase).getByTestId("whats-new-showcase-panel").className).toContain("touch-pan-y");
+
+    layOut(672);
+    expect(showcase).toHaveAttribute("data-layout", "narrow");
+    layOut(728);
+    expect(showcase).toHaveAttribute("data-layout", "wide");
+    expect(chips.className).toContain("flex-wrap");
+    expect(chips.className).not.toContain("overflow-x-auto");
+    expect(chips.className).not.toContain("pointer-coarse:");
+    expect(within(showcase).getByTestId("whats-new-showcase-panel").className).not.toContain("touch-pan-y");
+    expect(showcase.querySelectorAll("[data-showcase-reserve]")).toHaveLength(0);
+    // Not laid out yet reads as wide: what the desktop has always drawn.
+    layOut(0);
+    expect(showcase).toHaveAttribute("data-layout", "wide");
+  });
+
+  it("is laid out narrow on a phone's screen whatever its own width: a phone held sideways too", () => {
+    reducedMotion(false, { compactScreen: true });
+    const showcase = mountAt(812);
+    expect(showcase).toHaveAttribute("data-layout", "narrow");
+  });
+
+  it("keeps the screenshot where it is as the features turn: the text is sized by every title and body", () => {
+    const showcase = mountAt(390);
+    const typed = within(showcase).getByTestId("whats-new-showcase-typed");
+    expect(typed.querySelectorAll("[data-showcase-reserve]")).toHaveLength(WHATS_NEW_HIGHLIGHTS.length);
+    expect(showcase.querySelectorAll("p[data-showcase-reserve]")).toHaveLength(WHATS_NEW_HIGHLIGHTS.length);
+    for (const body of WHATS_NEW_HIGHLIGHTS.map((item) => whatsNewEn[item.body])) {
+      expect([...showcase.querySelectorAll("p[data-showcase-reserve]")].map((p) => p.textContent)).toContain(body);
+    }
+    // Still one heading and one body a screen reader reads.
+    expect(within(showcase).getByRole("heading")).toHaveTextContent(TITLES[0]);
+    expect(within(showcase).getAllByText(whatsNewEn[WHATS_NEW_HIGHLIGHTS[0].body]).filter((p) => !p.hasAttribute("aria-hidden"))).toHaveLength(1);
+  });
+
+  it("turns with a swipe — to the left the next feature, to the right the one before — and gives it its full time", () => {
+    const showcase = mountAt(390);
+    touch(stage(showcase), [300, 400], [200, 410]);
+    expect(showcase).toHaveAttribute("data-index", "1");
+    expect(within(showcase).getByRole("heading", { name: TITLES[1] })).toBeInTheDocument();
+    touch(stage(showcase), [100, 400], [220, 390]);
+    expect(showcase).toHaveAttribute("data-index", "0");
+    // From the first, to the right wraps to the last.
+    touch(within(showcase).getByTestId("whats-new-showcase-panel"), [100, 300], [200, 300]);
+    expect(showcase).toHaveAttribute("data-index", String(WHATS_NEW_HIGHLIGHTS.length - 1));
+    // The swiped-to feature is not cut short.
+    advance(SHOWCASE_ADVANCE_MS - 1);
+    expect(showcase).toHaveAttribute("data-index", String(WHATS_NEW_HIGHLIGHTS.length - 1));
+    advance(1);
+    expect(showcase).toHaveAttribute("data-index", "0");
+  });
+
+  it("turns nothing for a thumb scrolling the page, a short slide, or a swipe along the chips' own row", () => {
+    const showcase = mountAt(390);
+    touch(stage(showcase), [200, 500], [180, 300]);
+    touch(stage(showcase), [200, 400], [175, 405]);
+    touch(within(showcase).getByTestId("whats-new-showcase-chips"), [300, 700], [100, 700]);
+    expect(showcase).toHaveAttribute("data-index", "0");
+    expect(showcase).toHaveAttribute("data-held", "false");
+  });
+
+  it("holds on a tap, with a pause mark on the screenshot, and goes on after the next tap", () => {
+    const showcase = mountAt(390);
+    // The tap is the showcase's own: no click, no focus, no made-up hover after it.
+    expect(touch(stage(showcase), [150, 400])).toBe(false);
+    expect(showcase).toHaveAttribute("data-held", "true");
+    expect(showcase).toHaveAttribute("data-paused", "true");
+    expect(within(showcase).getByTestId("whats-new-showcase-held")).toBeInTheDocument();
+    expect(within(showcase).getByTestId("whats-new-showcase-live")).toHaveAttribute("aria-live", "polite");
+    advance(SHOWCASE_ADVANCE_MS * 3);
+    expect(showcase).toHaveAttribute("data-index", "0");
+    // Held, it still turns by hand.
+    touch(stage(showcase), [300, 400], [200, 400]);
+    expect(showcase).toHaveAttribute("data-index", "1");
+    expect(showcase).toHaveAttribute("data-held", "true");
+
+    touch(stage(showcase), [150, 400], [153, 404]);
+    expect(showcase).toHaveAttribute("data-held", "false");
+    expect(showcase).toHaveAttribute("data-paused", "false");
+    expect(within(showcase).queryByTestId("whats-new-showcase-held")).toBeNull();
+    advance(SHOWCASE_ADVANCE_MS);
+    expect(showcase).toHaveAttribute("data-index", "2");
+  });
+
+  it("takes a long press for no tap", () => {
+    const showcase = mountAt(390);
+    fireEvent.touchStart(stage(showcase), { touches: [{ clientX: 150, clientY: 400 }] });
+    advance(700);
+    fireEvent.touchEnd(stage(showcase), { touches: [], changedTouches: [{ clientX: 150, clientY: 400 }] });
+    expect(showcase).toHaveAttribute("data-held", "false");
+  });
+
+  it("never takes a touch for a pointer over it: a chip tapped is picked, the show goes on", () => {
+    const showcase = mountAt(390);
+    const chip = within(showcase).getByRole("tab", { name: CHIPS[3] });
+    fireEvent.touchStart(chip, { touches: [{ clientX: 40, clientY: 700 }] });
+    fireEvent.touchEnd(chip, { touches: [], changedTouches: [{ clientX: 40, clientY: 700 }] });
+    // What a browser makes up after the tap.
+    fireEvent.mouseEnter(showcase);
+    fireEvent.click(chip);
+    expect(showcase).toHaveAttribute("data-index", "3");
+    expect(showcase).toHaveAttribute("data-paused", "false");
+    advance(SHOWCASE_ADVANCE_MS);
+    expect(showcase).toHaveAttribute("data-index", "4");
+    // A real mouse, long after, still holds it.
+    advance(1500);
+    fireEvent.mouseEnter(showcase);
+    expect(showcase).toHaveAttribute("data-paused", "true");
+  });
+
+  it("lets a tap decide even when a chip has the focus", () => {
+    const showcase = mountAt(390);
+    const chip = within(showcase).getByRole("tab", { name: CHIPS[0] });
+    act(() => chip.focus());
+    expect(showcase).toHaveAttribute("data-paused", "true");
+    touch(stage(showcase), [150, 400]);
+    expect(document.activeElement).not.toBe(chip);
+    expect(showcase).toHaveAttribute("data-held", "true");
+    touch(stage(showcase), [150, 400]);
+    expect(showcase).toHaveAttribute("data-paused", "false");
+  });
+
+  it("keeps the chip that is on in sight by scrolling its own row, and only when the row overflows", () => {
+    const showcase = mountAt(390);
+    const row = within(showcase).getByTestId("whats-new-showcase-chips");
+    const scrollTo = vi.fn();
+    Object.defineProperty(row, "scrollTo", { value: scrollTo, configurable: true });
+    Object.defineProperty(row, "scrollWidth", { value: 800, configurable: true });
+    Object.defineProperty(row, "clientWidth", { value: 300, configurable: true });
+    within(showcase).getAllByRole("tab").forEach((chip, at) => {
+      Object.defineProperty(chip, "offsetLeft", { value: 16 + at * 110, configurable: true });
+      Object.defineProperty(chip, "offsetWidth", { value: 100, configurable: true });
+    });
+    for (let turn = 0; turn < 3; turn += 1) advance(SHOWCASE_ADVANCE_MS);
+    expect(showcase).toHaveAttribute("data-index", "3");
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 16 + 3 * 110 - (300 - 100) / 2, behavior: "smooth" });
+    // Back at the first: the row's start, never a negative scroll.
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[0] }));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: "smooth" });
+    // A row that fits is left alone.
+    Object.defineProperty(row, "scrollWidth", { value: 300, configurable: true });
+    scrollTo.mockClear();
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[5] }));
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("with reduced motion: the camera stands where each demo ends, the chips' row jumps, and swipes and taps still work", () => {
+    reducedMotion(true);
+    const showcase = mountAt(390);
+    expect(showcase).toHaveAttribute("data-motion", "reduce");
+    expect(showcase).toHaveAttribute("data-layout", "narrow");
+    const row = within(showcase).getByTestId("whats-new-showcase-chips");
+    const scrollTo = vi.fn();
+    Object.defineProperty(row, "scrollTo", { value: scrollTo, configurable: true });
+    Object.defineProperty(row, "scrollWidth", { value: 800, configurable: true });
+    Object.defineProperty(row, "clientWidth", { value: 300, configurable: true });
+    touch(stage(showcase), [300, 400], [200, 400]);
+    expect(showcase).toHaveAttribute("data-index", "1");
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ behavior: "auto" }));
+    touch(stage(showcase), [150, 400]);
+    expect(showcase).toHaveAttribute("data-held", "true");
+    const css = showcase.querySelector("style")!.textContent!;
+    expect(css).toContain('.wns[data-layout="narrow"][data-motion="reduce"] .wns-scr .wns-cam{animation:none}');
+  });
+
+  it("has a narrow camera for every demo: it starts somewhere, pans to the action and stands where the demo ends", () => {
+    const showcase = mountAt(390);
+    const css = showcase.querySelector("style")!.textContent!;
+    for (const feature of Object.values(SHOWCASE_FEATURES)) {
+      const rule = css.match(new RegExp(String.raw`\.wns\[data-layout="narrow"\] \.wns-${feature.id} \.wns-cam\{([^}]*)\}`));
+      expect(rule, feature.id).not.toBeNull();
+      // Where it stands with motion off, and the picture's legible width.
+      expect(rule![1]).toMatch(/--wns-fx:\.\d+;--wns-fy:\.\d+;--wns-pz:\d{3,4}/);
+      expect(rule![1]).toContain(`animation:wns-n-${feature.id} 7s`);
+      expect(css).toContain(`@keyframes wns-n-${feature.id}{0%{`);
+    }
+    // Wherever it pans, the picture covers the stage: at least as wide as the stage, and as tall.
+    expect(css).toContain("--wns-pw:max(100cqw,calc(var(--wns-pz) * 1px),calc(160cqw * var(--wns-ar)))");
   });
 });

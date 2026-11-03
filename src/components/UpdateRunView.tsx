@@ -1035,7 +1035,9 @@ export function UpdateRunView({
 
   return (
     <div className="@container w-full" data-testid="update-run" data-status={status}>
-      <div className="grid grid-cols-1 gap-8 @3xl:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
+      {/* Side by side in a window; a phone held sideways (under 501 px tall)
+          keeps the steps first and puts "What's new" under them, full width. */}
+      <div className="grid grid-cols-1 gap-8 @3xl:[@media(min-height:501px)]:grid-cols-[minmax(0,440px)_minmax(0,1fr)]" data-testid="update-run-grid">
         <div className="min-w-0 space-y-[18px]">
           {header}
           {versionRow}
