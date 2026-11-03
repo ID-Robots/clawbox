@@ -33,6 +33,7 @@ const fs = require("fs");
 const path = require("path");
 const { ownerUsername, sessionFromCookieHeader } = require("./session-cookie.js");
 const { createUpgradeSessionWatch, recheckMsFromEnv } = require("./upgrade-session-watch.js");
+const { SESSION_PROBE_PATH, injectAtHeadStart, sessionGuardScript } = require("./hermes-dashboard-session-guard.js");
 const SESSION_EXPIRED_HEADER = "x-clawbox-session";
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
@@ -576,6 +577,15 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
   // Safe only because checkRequestOrigin() already validated the real ones.
   if (headers.origin) headers.origin = UPSTREAM_ORIGIN;
   if (headers.referer) headers.referer = rewriteReferer(headers.referer);
+  // A page gets the session guard (see guardedPage below), which needs its
+  // body whole and readable: asked for uncompressed, and in full rather than
+  // as a 304 — the browser's cached copy may be one served before the guard.
+  const guard = mayBePage(req) ? sessionGuardScript({ loginUrl: clawboxLoginUrl(req) }) : null;
+  if (guard) {
+    headers["accept-encoding"] = "identity";
+    delete headers["if-none-match"];
+    delete headers["if-modified-since"];
+  }
   if (injected) {
     headers.cookie = mergeCookie(req.headers.cookie, injected.cookieHeader);
   }
@@ -613,14 +623,14 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
             // — see scripts/setup-hermes-dashboard-auth.sh). Pass the 401 back
             // WITHOUT planting a session, and expire whatever the browser holds
             // so the next request retries the SSO path instead of this one.
-            pipeResponse(res, up, null, expireHermesCookies());
+            pipeResponse(res, up, null, expireHermesCookies(), guard);
             return;
           }
           forward(req, res, fresh, bodyBuf, false);
         });
         return;
       }
-      pipeResponse(res, up, injected);
+      pipeResponse(res, up, injected, undefined, guard);
     },
   );
   // Answer the client with `status` unless the response is already under way.
@@ -684,7 +694,68 @@ function forward(req, res, injected, bodyBuf, allowRelogin) {
   }
 }
 
-function pipeResponse(res, up, injected, extraSetCookies) {
+// A request that may be loading a page: what the session guard goes into.
+// Over the box's plain HTTP there is no Sec-Fetch-Dest to say so; a
+// navigation asks for HTML and the SPA's own calls do not.
+function mayBePage(req) {
+  const method = (req.method || "GET").toUpperCase();
+  return method === "GET" && String(req.headers.accept || "").includes("text/html");
+}
+
+// The largest page the guard is put into; anything bigger is passed on as it is.
+const MAX_GUARDED_PAGE_BYTES = 2 * 1024 * 1024;
+
+// A dashboard page with the session guard at the start of its <head>
+// (scripts/hermes-dashboard-session-guard.js), so a tab whose ClawBox session
+// ran out goes to ClawBox's /login instead of sitting on a dead chat (TASK-2131).
+// Only a whole, uncompressed 200 HTML body is touched; anything else, or a body
+// past MAX_GUARDED_PAGE_BYTES, is relayed byte for byte as before.
+function guardedPage(res, up, headers, guard) {
+  const chunks = [];
+  let size = 0;
+  let relayed = false;
+  const relayAsIs = () => {
+    relayed = true;
+    res.writeHead(up.statusCode || 502, headers);
+    for (const chunk of chunks) res.write(chunk);
+    chunks.length = 0;
+    up.pipe(res);
+  };
+  up.on("data", (chunk) => {
+    if (relayed) return;
+    chunks.push(chunk);
+    size += chunk.length;
+    if (size > MAX_GUARDED_PAGE_BYTES) {
+      up.pause();
+      relayAsIs();
+      up.resume();
+    }
+  });
+  up.on("end", () => {
+    if (relayed) return;
+    const body = Buffer.from(injectAtHeadStart(Buffer.concat(chunks).toString("utf8"), guard), "utf8");
+    const out = { ...headers };
+    delete out["content-length"];
+    delete out["transfer-encoding"];
+    delete out.etag;
+    delete out["last-modified"];
+    out["content-length"] = body.length;
+    // The page carries a script of the proxy's, so no copy of it may be kept
+    // that a later version of the guard would not replace.
+    out["cache-control"] = "no-store";
+    res.writeHead(up.statusCode || 200, out);
+    res.end(body);
+  });
+  up.on("error", () => { try { res.destroy(); } catch {} });
+}
+
+function isGuardablePage(up) {
+  const type = String(up.headers["content-type"] || "").toLowerCase();
+  const encoding = String(up.headers["content-encoding"] || "identity").toLowerCase();
+  return up.statusCode === 200 && type.startsWith("text/html") && encoding === "identity";
+}
+
+function pipeResponse(res, up, injected, extraSetCookies, guard) {
   const headers = { ...up.headers };
   const relay = [];
   // NEVER hand the browser a session the dashboard just REJECTED. Relaying the
@@ -704,8 +775,33 @@ function pipeResponse(res, up, injected, extraSetCookies) {
     const existing = headers["set-cookie"];
     headers["set-cookie"] = Array.isArray(existing) ? relay.concat(existing) : relay;
   }
+  if (guard && isGuardablePage(up)) {
+    guardedPage(res, up, headers, guard);
+    return;
+  }
   res.writeHead(up.statusCode || 502, headers);
   up.pipe(res);
+}
+
+// GET SESSION_PROBE_PATH: the dashboard page's own question, asked by its
+// session guard — is the ClawBox session this browser holds still the owner's?
+// Answered here, never forwarded: every other path on this port is the
+// dashboard's. The refusal is the session gate's marked 401, the one answer the
+// guard leaves for /login on.
+function answerSessionProbe(req, res) {
+  const method = (req.method || "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") {
+    res.writeHead(405, { Allow: "GET, HEAD", "Cache-Control": "no-store" });
+    res.end();
+    return;
+  }
+  if (hasValidSession(req)) {
+    res.writeHead(204, { "Cache-Control": "no-store" });
+    res.end();
+    return;
+  }
+  res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store", [SESSION_EXPIRED_HEADER]: "expired" });
+  res.end(method === "HEAD" ? undefined : JSON.stringify({ error: "Authentication required", login: clawboxLoginUrl(req) }));
 }
 
 function handleRequest(req, res) {
@@ -716,6 +812,11 @@ function handleRequest(req, res) {
   if (rejection) {
     res.writeHead(403, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
     res.end(`Forbidden (${rejection}).`);
+    return;
+  }
+
+  if (String(req.url || "").split("?")[0] === SESSION_PROBE_PATH) {
+    answerSessionProbe(req, res);
     return;
   }
 

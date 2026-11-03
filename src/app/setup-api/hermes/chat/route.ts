@@ -47,10 +47,12 @@ import {
   liveTurnResponseFor,
   stopLiveTurns,
   type LiveTurn,
+  type LiveTurnListenerOptions,
 } from "@/lib/harness/hermes-live-turn";
 import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
+import { personSession } from "@/lib/owner-session";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
@@ -737,10 +739,11 @@ function streamTurn(
   /** Whether the REQUEST named a provider — see `billedProviderFor`. */
   requestNamedProvider: boolean,
   live: LiveTurn,
+  listening: LiveTurnListenerOptions,
 ): Response {
   // Attach BEFORE the run starts, so the response hears the first frame live
   // rather than out of the replay. Either would be correct; this is cheaper.
-  const response = liveTurnResponse((listener) => live.attach(listener));
+  const response = liveTurnResponse((listener) => live.attach(listener), listening);
   runStreamedTurn(turn, fallbackSessionId, sessionKey, requestNamedProvider, live).catch((err) => {
     // Nobody awaits the turn any more, so nothing above may escape as an
     // unhandled rejection — a transcript write failing on the error path is
@@ -1041,7 +1044,22 @@ export async function GET(request: Request) {
   if (!which.ok) {
     return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
-  return liveTurnResponseFor(which.key) ?? new NextResponse(null, { status: 204 });
+  return liveTurnResponseFor(which.key, await listenerSession(request)) ?? new NextResponse(null, { status: 204 });
+}
+
+/**
+ * The session a streamed answer is read on, re-judged while it streams
+ * (TASK-2131). The session gate let the request in once, when it arrived; a turn
+ * runs for as long as its tools take, and the reply went on streaming to a page
+ * whose session had long run out. A person's cookie is asked about again by the
+ * same rule the gate applies — expiry, a password change, a removed user — and
+ * the stream ends when it no longer holds; the turn itself runs on and records
+ * its answer. The assistant's bearer has no session to run out and is not
+ * watched.
+ */
+async function listenerSession(request: Request): Promise<LiveTurnListenerOptions> {
+  if (!(await personSession(request))) return {};
+  return { stillSignedIn: async () => (await personSession(request)) !== null };
 }
 
 // DELETE /setup-api/hermes/chat?sessionKey=…[&turnId=…] → { stopped }
@@ -1558,7 +1576,7 @@ export async function POST(request: Request) {
       // harness's own record is precisely the answer to what it decided.
       if (turn) {
         handedOff = true;
-        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live);
+        return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, await listenerSession(request));
       }
     }
 
