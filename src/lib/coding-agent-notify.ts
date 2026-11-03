@@ -698,10 +698,11 @@ async function hermesChatTurn(body: Record<string, unknown>): Promise<"sent" | "
   }
   if (!res.ok) throw new Error(`the chat answered ${res.status}${errorOf(parseJson(text))}`);
   if (!(res.headers.get("content-type") ?? "").includes("text/event-stream")) return "sent";
+  // The chat route's own SSE frames (hermes-live-turn.ts), not gateway events.
   for (const block of text.split("\n\n")) {
-    const event = /^event: (\S+)$/m.exec(block)?.[1];
-    if (event === "done") return "sent";
-    if (event === "error") throw new Error(`the chat's turn failed${errorOf(parseJson(/^data: (.*)$/m.exec(block)?.[1] ?? ""))}`);
+    const frame = /^event: (\S+)$/m.exec(block)?.[1];
+    if (frame === "done") return "sent";
+    if (frame === "error") throw new Error(`the chat's turn failed${errorOf(parseJson(/^data: (.*)$/m.exec(block)?.[1] ?? ""))}`);
   }
   // Cut off before it said how the turn went: the turn is the box's and goes on.
   return "late";
