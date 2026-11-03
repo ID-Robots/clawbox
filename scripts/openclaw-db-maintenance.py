@@ -775,9 +775,11 @@ def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S,
 
 def verified_since(db, record, moment):
     """A successful compaction — OpenClaw's integrity checks — recorded at or
-    after `moment`, of the database on the schema it is on now."""
+    after `moment`, of the database on the schema it is on now. Its checks
+    must have SAID ok: a compaction that exited 0 with no verdict in its
+    report ("unreported") checked nothing a rollback copy may be retired on."""
     entry = ((record.get("databases") or {}).get(key_of(db)) or {}).get("lastCompact") or {}
-    if not entry.get("ok") or entry.get("integrity") == "failed":
+    if not entry.get("ok") or entry.get("integrity") != "ok":
         return False
     if entry.get("userVersion") != db.get("userVersion"):
         return False
@@ -1091,9 +1093,18 @@ def compaction_turned_on(store_path):
     "Run now" and the CLI are the owner's own call and do not ask it. No store,
     no record, an unreadable store or anything but a literal `true` is OFF,
     the default: a compaction stops the gateway for minutes and rewrites a
-    multi-GB file, which a box does only when its owner asked for it."""
-    data = read_json(store_path) if store_path else None
-    schedule = (data or {}).get(SCHEDULE_KEY)
+    multi-GB file, which a box does only when its owner asked for it. Read as
+    strictly as the web server reads it (JSON.parse knows no NaN/Infinity), so
+    a store the Settings card reads as off is off here too."""
+    def not_json(name):
+        raise ValueError("%s is not JSON" % name)
+
+    try:
+        with open(store_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh, parse_constant=not_json)
+    except Exception:
+        return False
+    schedule = data.get(SCHEDULE_KEY) if isinstance(data, dict) else None
     return isinstance(schedule, dict) and schedule.get("enabled") is True
 
 

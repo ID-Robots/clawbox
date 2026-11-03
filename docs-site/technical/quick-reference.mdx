@@ -110,8 +110,9 @@ bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts tokens
 
 # OpenClaw agent databases: sizes and what needs compacting (read-only), then compact
 # the ones that need it — pauses the assistant while it runs, only once it is idle.
-# Nothing is compacted automatically unless you turn on Settings → System →
+# ClawBox compacts them on its own only if you turn on Settings → System →
 # Agent databases → Nightly maintenance (off by default); `run` works either way.
+# (An OpenClaw update's own database migration is separate from this setting.)
 bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts db-maintenance status
 bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts db-maintenance run      # --dry-run to only look
 

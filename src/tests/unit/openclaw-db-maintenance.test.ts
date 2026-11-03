@@ -81,7 +81,11 @@ case "$1 $2" in
     if [ "\${OC_COMPACT_EXIT:-0}" != 0 ]; then echo "compaction refused" >&2; exit "$OC_COMPACT_EXIT"; fi
     vacuum "$OPENCLAW_STATE_DIR/agents/$5/agent/openclaw-agent.sqlite"
     echo "(node) ExperimentalWarning: SQLite is an experimental feature" >&2
-    printf '{"agentId":"%s","before":{"bytes":1},"after":{"bytes":1},"quick_check":"%s","integrity_check":"ok"}\\n' "$5" "\${OC_QUICK:-ok}"
+    if [ -n "\${OC_NO_VERDICT:-}" ]; then
+      printf '{"agentId":"%s","before":{"bytes":1},"after":{"bytes":1}}\\n' "$5"
+    else
+      printf '{"agentId":"%s","before":{"bytes":1},"after":{"bytes":1},"quick_check":"%s","integrity_check":"ok"}\\n' "$5" "\${OC_QUICK:-ok}"
+    fi
     ;;
   "doctor --state-sqlite")
     vacuum "$OPENCLAW_STATE_DIR/state/openclaw.sqlite"
@@ -311,6 +315,10 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the owner'
     }
     writeFileSync(path.join(dataDir, "config.json"), "{torn");
     expect(prestart().out).toMatch(OFF_LINE);
+    // Python's json takes NaN; the web server's JSON.parse refuses the whole
+    // store and the card reads it as off — so the pre-start does too.
+    writeFileSync(path.join(dataDir, "config.json"), '{"openclaw_db_maintenance": {"enabled": true, "time": "04:30"}, "x": NaN}');
+    expect(prestart().out).toMatch(OFF_LINE);
     expect(calledWith()).toEqual([]);
     expect(statSync(agentDb("main")).size).toBe(before);
   });
@@ -456,6 +464,16 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     expect(existsSync(bak)).toBe(true);
     expect(r.out).toMatch(/rollback copy of agent main kept until the gateway has started on the migrated database/);
     expect(calledWith()).not.toContain("update cleanup --yes --json");
+  });
+
+  it("keeps a copy whose compaction exited 0 but reported no integrity verdict", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const bak = backup(agentDb("main"));
+    gatewayStartedSince();
+    const r = prestart([], { OC_NO_VERDICT: "1" });
+    expect(record().databases["agent:main"].lastCompact).toMatchObject({ ok: true, exit: 0, integrity: "unreported" });
+    expect(existsSync(bak)).toBe(true);
+    expect(r.out).toMatch(/rollback copy of agent main kept until a compaction has checked its integrity/);
   });
 
   it("keeps every copy while a start-loop recovery has not settled", () => {
