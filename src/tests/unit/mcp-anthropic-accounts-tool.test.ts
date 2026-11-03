@@ -309,7 +309,7 @@ describe("anthropic_accounts on the meters of 2026-11 (TASK-2141)", () => {
     apiGet.mockResolvedValue(full);
     const out = await harness("openclaw").call("anthropic_accounts", {});
     if (out.isError) throw new Error("expected an answer");
-    expect(out.text.length).toBeGreaterThan(2_900); // the cap did bite
+    expect(out.text).toContain("…[truncated,"); // the cap did bite
     expect(out.text).toContain("Do not start or retry Anthropic runs before it.");
     expect(out.text).toContain('"last_swap"');
     expect(out.text.indexOf('"advice"')).toBeLessThan(out.text.indexOf('"accounts"'));

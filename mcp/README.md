@@ -1367,8 +1367,9 @@ can answer now or is at its usage limit and when it is back, and which one a run
 starting now would use; then `can_answer` ("1 of 2"), `all_limited` and
 `next_reset`. When every account is limited it adds `advice` — wait until the
 reset; runs that were cut off resume by themselves then — because that is the
-moment a queue must stop spending attempts: `coding_agent_run` answers the
-same situation with a CONFLICT naming the reset time. The verdict, `advice`
+moment a queue must stop spending attempts: `coding_agent_run` refuses a run
+in the same situation with a plain CONFLICT, which does not carry the reset
+time — this tool's `next_reset` does. The verdict, `advice`
 and `last_swap` come before `accounts`: the answer is capped at 3,000
 characters and cut from the end, so a full pool with its model weeks loses
 account detail first, never the advice (TASK-2141). Never a credential and

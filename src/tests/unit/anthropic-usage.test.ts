@@ -5,7 +5,7 @@
  * limit at all; Anthropic not answering is never read as "fine".
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchAnthropicUsage, nearestFull, parseAnthropicUsage, usageForModel } from "@/lib/anthropic-usage";
+import { fetchAnthropicUsage, modelWeekOf, nearestFull, parseAnthropicUsage, usageForModel } from "@/lib/anthropic-usage";
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -251,6 +251,14 @@ describe("the usage scheme of 2026-11", () => {
   it("takes the spent one of two weeks Anthropic gives for one model", () => {
     const reading = parseAnthropicUsage({ ...LIVE, limits: [LIVE.limits[0], { ...LIVE.limits[1], percent: 20, is_active: true }, { ...LIVE.limits[1], percent: 100, is_active: true }] });
     expect(usageForModel(reading, "claude-fable-5-1")).toMatchObject({ exhausted: true, week: { percent: 100 } });
+  });
+
+  it("waits for the LATER reset when two weeks of one model are both spent — the earlier one coming back frees nothing", () => {
+    const later = "2026-11-10T17:00:00Z";
+    const reading = parseAnthropicUsage({ ...LIVE, limits: [LIVE.limits[0], { ...LIVE.limits[1], percent: 100 }, { ...LIVE.limits[1], percent: 100, resets_at: later }] });
+    expect(usageForModel(reading, "claude-fable-5-1")).toMatchObject({ exhausted: true, resetsAt: at(later), week: { resetsAt: at(later) } });
+    expect(modelWeekOf(reading, "fable")).toMatchObject({ spent: true, resetsAt: at(later) });
+    expect(modelWeekOf(reading, "claude-opus-5-5")).toBeNull();
   });
 
   it("still reads an answer of the old shape exactly as before", () => {

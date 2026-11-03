@@ -231,7 +231,7 @@ export interface ModelUsage {
  * account when the Fable week is spent. With no model, the account's own.
  */
 export function usageForModel(reading: AnthropicUsageReading, model: string | null | undefined): ModelUsage {
-  const week = weekOf(reading, model);
+  const week = modelWeekOf(reading, model);
   const spentWeek = week?.spent ? week : null;
   // The session window counts as spent a few points short of full (the 90 %
   // rule) only when nothing else explains the stop: beside a spent model week
@@ -249,13 +249,21 @@ export function usageForModel(reading: AnthropicUsageReading, model: string | nu
   };
 }
 
-/** The run's model week in the answer: of several for one family, the fullest. */
-function weekOf(reading: AnthropicUsageReading, model: string | null | undefined): AnthropicModelWeek | null {
+/**
+ * The run's model week in the answer (a model id, or a family: "fable"). Of
+ * several for one family: a spent one first, and of the spent ones the one
+ * that resets LAST — the earlier coming back frees nothing while the other is
+ * still spent; of the rest, the fullest.
+ */
+export function modelWeekOf(reading: AnthropicUsageReading, model: string | null | undefined): AnthropicModelWeek | null {
   const family = modelFamily(model);
   if (!family) return null;
+  const later = (a: number | null, b: number | null) => (a ?? -Infinity) > (b ?? -Infinity);
   let best: AnthropicModelWeek | null = null;
   for (const week of reading.models ?? []) {
-    if (week.family === family && (!best || (week.spent && !best.spent) || (week.spent === best.spent && week.percent > best.percent))) best = week;
+    if (week.family !== family) continue;
+    if (!best || (week.spent && !best.spent)) best = week;
+    else if (week.spent === best.spent && (week.spent ? later(week.resetsAt, best.resetsAt) : week.percent > best.percent)) best = week;
   }
   return best;
 }
@@ -270,7 +278,7 @@ function weekOf(reading: AnthropicUsageReading, model: string | null | undefined
  * nothing is that close, and the CLI's own words decide.
  */
 export function nearestFull(reading: AnthropicUsageReading, model: string | null | undefined): { window: AnthropicUsageWindow; week: AnthropicModelWeek | null } | null {
-  const week = weekOf(reading, model);
+  const week = modelWeekOf(reading, model);
   let best: { window: AnthropicUsageWindow; week: AnthropicModelWeek | null } | null = null;
   for (const window of reading.windows ?? []) {
     if (window.kind === "session" && (!best || window.percent > best.window.percent)) best = { window, week: null };
