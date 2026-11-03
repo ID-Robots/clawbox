@@ -245,6 +245,20 @@ export async function syncChatTabs(
   return { tabs: adopted.inventory.tabs, active: adopted.inventory.active ?? null };
 }
 
+/**
+ * The owner's strip as it is on disk, for the server's own questions — which
+ * conversation the owner was last in, and whether a tab has been closed.
+ * Read only: no discovery, no write, never throws.
+ */
+export function readOwnerChatTabs(): { tabs: string[]; closed: string[]; active: ChatActiveRecord | null } {
+  const inventory = readInventory(INVENTORY_PATH);
+  return {
+    tabs: inventory.tabs.map((tab) => tab.key),
+    closed: inventory.closed.map((tab) => tab.key),
+    active: inventory.active ?? null,
+  };
+}
+
 /** Forget a removed user's strip, so a user created later under the name starts on an empty one. */
 export function removeUserInventory(username: string): void {
   const file = inventoryPathFor({ username, isOwner: false });

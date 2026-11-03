@@ -144,6 +144,45 @@ describe("gatewayWsChatSendMain", () => {
   });
 });
 
+describe("gatewayWsActiveSessions", () => {
+  it("asks for the sessions with work running — only keys the gateway's closed schema knows — and names main from the same hello", async () => {
+    helloExtra = { snapshot: { sessionDefaults: { mainSessionKey: "agent:main:main" } } };
+    // The row shape a board's 2026.10.9 gateway answers `sessions.list` with.
+    const port = await fakeGateway((method) => (method === "sessions.list"
+      ? {
+        ok: true,
+        payload: {
+          count: 4,
+          sessions: [
+            { key: "agent:main:cron:nightly", updatedAt: 300, hasActiveRun: true, status: "running", kind: "direct" },
+            { key: "agent:main:main", updatedAt: 100, hasActiveRun: true, status: "running", kind: "direct" },
+            { key: "agent:main:clawbox-abc123def456", updatedAt: 200, hasActiveRun: true, status: "running", kind: "direct" },
+            { key: "agent:main:clawbox-0c105ed00001", updatedAt: 400, hasActiveRun: false, status: "done", kind: "direct" },
+            { updatedAt: 500, hasActiveRun: true },
+          ],
+        },
+      }
+      : { ok: false, error: { code: "NOT_FOUND" } }));
+    await load(port);
+    const out = await lib.gatewayWsActiveSessions({ timeoutMs: 4_000 });
+    expect(out).toEqual({
+      mainSessionKey: "agent:main:main",
+      // Newest first; a row that says it is idle, or names no key, is not taken.
+      sessionKeys: ["agent:main:cron:nightly", "agent:main:clawbox-abc123def456", "agent:main:main"],
+    });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "sessions.list"]);
+    expect(seen[1].params).toEqual({ activeOnly: true, rowMode: "compact", limit: 50 });
+  });
+
+  it("answers no sessions for an idle gateway, and rejects as gatewayWsCall does", async () => {
+    const port = await fakeGateway(() => ({ ok: true, payload: { sessions: [] } }));
+    await load(port);
+    expect(await lib.gatewayWsActiveSessions()).toEqual({ mainSessionKey: "main", sessionKeys: [] });
+    await load(1);
+    await expect(lib.gatewayWsActiveSessions()).rejects.toMatchObject({ name: "GatewayWsUnavailableError" });
+  });
+});
+
 describe("gatewayWsPatchConfig", () => {
   it("patches against the revision the caller read, with the raw merge, and answers what changed", async () => {
     const port = await fakeGateway((method, params) => {
