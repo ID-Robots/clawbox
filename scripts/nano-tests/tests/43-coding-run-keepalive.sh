@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 1500
+# timeout: 900
 # covers: scripts/coding-run-hook.mjs src/lib/coding-run-inbox.ts src/lib/coding-run-worktree.ts
 # covers: src/lib/coding-run-inputs.ts
 #
@@ -11,7 +11,7 @@
 #     must fork from beta and carry nothing of the unrelated branch;
 #   - it is GIVEN a file from the owner's Documents folder (input_files),
 #     which used to be refused as outside_roots;
-#   - it is told to start a four-minute background job and then to END ITS
+#   - it is told to start a three-minute background job and then to END ITS
 #     TURN without waiting. Before the hook the run settled at once with the
 #     job's result never written; now the hook keeps the turn open, so the run
 #     may only settle after the job wrote its file, and its page says the stop
@@ -21,7 +21,7 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-JOB_SECONDS=240
+JOB_SECONDS=180
 
 board_api GET /setup-api/coding-agent/status
 if [ "$API_STATUS" != 200 ]; then
@@ -89,7 +89,7 @@ else
 fi
 BRANCH=$(api_json -r '.run.worktree.branch // empty')
 
-wait_coding_run 1300
+wait_coding_run 780
 ELAPSED=$(( $(date +%s) - START ))
 expect_completed
 note "settled after ${ELAPSED}s"
