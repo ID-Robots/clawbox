@@ -19,6 +19,8 @@ import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gatew
 const OK: SessionProbe = { kind: "ok" };
 const RECLAIM: SessionProbe = SIMULATED_SESSION_FAULT;
 const STARTING: SessionProbe = { kind: "unreachable", detail: "gateway starting; retry shortly", final: false };
+// The core's own retryable "not yet" (respondChatHistoryUnavailable, 2026.10.9).
+const REBUILDING: SessionProbe = { kind: "unavailable", detail: "UNAVAILABLE: session history is rebuilding; retry shortly" };
 
 function harness(answers: SessionProbe[], overrides: Partial<SessionCheckDeps> = {}) {
   let clock = 0;
@@ -58,17 +60,17 @@ describe("verifyGatewaySessions", () => {
     expect(restart).not.toHaveBeenCalled();
   });
 
-  it("restarts the gateway once when it answers UNAVAILABLE, and passes when the restarted one answers", async () => {
+  it("restarts the gateway once when it names the store failure, and passes when the restarted one answers", async () => {
     const { deps, restart, events } = harness([RECLAIM, OK]);
     await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "serving", restarted: true });
     expect(restart).toHaveBeenCalledTimes(1);
-    expect(events).toEqual(["ask:unavailable", "restart", "ask:ok"]);
+    expect(events).toEqual(["ask:store-failure", "restart", "ask:ok"]);
     // The owner's screen said what was happening, and is cleared after.
     expect(deps.onDetail).toHaveBeenCalledWith(expect.stringMatching(/cannot open chat sessions — restarting it once/));
     expect(vi.mocked(deps.onDetail!).mock.calls.at(-1)).toEqual([undefined]);
   });
 
-  it("fails the step with the owner's words when the gateway still answers UNAVAILABLE after its one restart", async () => {
+  it("fails the step with the owner's words when the gateway still names the store failure after its one restart", async () => {
     const { deps, restart, asked } = harness([RECLAIM]);
     const failure = await verifyGatewaySessions(deps).catch((err: unknown) => err);
     expect(failure).toBeInstanceOf(GatewaySessionsUnavailableError);
@@ -87,7 +89,7 @@ describe("verifyGatewaySessions", () => {
     const { deps, restart, events } = harness([RECLAIM, STARTING, RECLAIM, RECLAIM, OK]);
     await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "serving", restarted: true });
     expect(restart).toHaveBeenCalledTimes(1);
-    expect(events).toEqual(["ask:unavailable", "restart", "ask:unreachable", "ask:unavailable", "ask:unavailable", "ask:ok"]);
+    expect(events).toEqual(["ask:store-failure", "restart", "ask:unreachable", "ask:store-failure", "ask:store-failure", "ask:ok"]);
   });
 
   it("waits out a gateway that is still starting rather than restarting it", async () => {
@@ -102,6 +104,7 @@ describe("verifyGatewaySessions", () => {
     await expect(verifyGatewaySessions(deps)).resolves.toEqual({
       verdict: "unconfirmed",
       detail: "gateway starting; retry shortly",
+      restarted: false,
       answer: STARTING,
     });
     expect(asked()).toBe(11);
@@ -111,7 +114,7 @@ describe("verifyGatewaySessions", () => {
   it("asks once and carries on when there is no gateway token this server can use", async () => {
     const noToken: SessionProbe = { kind: "unreachable", detail: "no gateway token", final: true };
     const { deps, restart, asked } = harness([noToken]);
-    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: "no gateway token", answer: noToken });
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: "no gateway token", restarted: false, answer: noToken });
     expect(asked()).toBe(1);
     expect(restart).not.toHaveBeenCalled();
   });
@@ -119,7 +122,7 @@ describe("verifyGatewaySessions", () => {
   it("settles a restarted gateway's other refusal the way it settles one before a restart — carrying on, not failing", async () => {
     const refused: SessionProbe = { kind: "refused", detail: "INVALID_REQUEST: invalid chat.history params" };
     const { deps, restart, asked } = harness([RECLAIM, refused]);
-    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: refused.detail, answer: refused });
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: refused.detail, restarted: true, answer: refused });
     expect(restart).toHaveBeenCalledTimes(1);
     expect(asked()).toBe(2);
   });
@@ -166,15 +169,68 @@ describe("verifyGatewaySessions", () => {
     const { deps } = harness([RECLAIM, STARTING]);
     await expect(verifyGatewaySessions(deps)).rejects.toThrow(/it does not answer \(gateway starting; retry shortly\)/);
   });
+
+  // The core answers chat.history UNAVAILABLE, retryable, while its history is
+  // rebuilding or busy — as right after a core upgrade. That is "not yet", not
+  // the store failure: a restart then only starts the rebuild over.
+  it("asks a gateway still rebuilding its history again, and restarts nothing, when it answers within the window", async () => {
+    const { deps, restart, events } = harness([REBUILDING, REBUILDING, OK]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "serving", restarted: false });
+    expect(events).toEqual(["ask:unavailable", "ask:unavailable", "ask:ok"]);
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it("restarts once over a 'not yet' that lasts the whole window, and passes when the restarted gateway answers", async () => {
+    // Window 10 s at 1 s: eleven asks, all "not yet", then the restart.
+    const { deps, restart, events } = harness([...Array<SessionProbe>(11).fill(REBUILDING), OK]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "serving", restarted: true });
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(events.slice(-3)).toEqual(["ask:unavailable", "restart", "ask:ok"]);
+    expect(events.filter((e) => e === "ask:unavailable")).toHaveLength(11);
+  });
+
+  it("carries on, with the answer, when the restarted gateway is still 'not yet' at the end of its window — never a failed update", async () => {
+    const { deps, restart, asked } = harness([RECLAIM, REBUILDING]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({
+      verdict: "unconfirmed",
+      detail: REBUILDING.kind === "unavailable" ? REBUILDING.detail : "",
+      restarted: true,
+      answer: REBUILDING,
+    });
+    expect(restart).toHaveBeenCalledTimes(1);
+    // The restarted gateway was asked for its whole window before that.
+    expect(asked()).toBe(1 + 31);
+  });
+
+  it("still fails when the restarted gateway names the store failure again after a 'not yet'", async () => {
+    const { deps, restart } = harness([REBUILDING, RECLAIM, REBUILDING, RECLAIM], { windowMs: 0, recoveryWindowMs: 2_000 });
+    const failure = await verifyGatewaySessions(deps).catch((err: unknown) => err);
+    expect(failure).toBeInstanceOf(GatewaySessionsUnavailableError);
+    expect((failure as Error).message).toContain("it still answers UNAVAILABLE: SQLite session reclamation commit checkpoint expired");
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("classifySessionProbeError", () => {
-  it("reads the field box's answer — UNAVAILABLE with the reclamation text — as the failure", () => {
+  it("reads the field box's answer — the reclamation checkpoint — as the store failure, whatever code it comes with", () => {
     expect(classifySessionProbeError(new GatewayRpcError("SQLite session reclamation commit checkpoint expired", "UNAVAILABLE")))
-      .toEqual({ kind: "unavailable", detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired" });
-    // Either half is enough: the code alone, or the core's words under another code.
-    expect(classifySessionProbeError(new GatewayRpcError("session store busy", "UNAVAILABLE")).kind).toBe("unavailable");
-    expect(classifySessionProbeError(new GatewayRpcError("SQLite session reclamation commit checkpoint expired", "INTERNAL")).kind).toBe("unavailable");
+      .toEqual({ kind: "store-failure", detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired" });
+    expect(classifySessionProbeError(new GatewayRpcError("SQLite session reclamation commit checkpoint expired", "INTERNAL")).kind)
+      .toBe("store-failure");
+    expect(classifySessionProbeError(new Error("SQLite session reclamation commit checkpoint expired")).kind).toBe("store-failure");
+  });
+
+  it("reads any other UNAVAILABLE as the core's retryable 'not yet', not as the store failure", () => {
+    // The core's own sentences for chat.history (respondChatHistoryUnavailable, 2026.10.9).
+    for (const sentence of [
+      "session history is rebuilding; retry shortly",
+      "session history is busy; retry shortly",
+      "session rows are initializing; reload the conversation",
+      "session changed while reading history",
+    ]) {
+      expect(classifySessionProbeError(new GatewayRpcError(sentence, "UNAVAILABLE")))
+        .toEqual({ kind: "unavailable", detail: `UNAVAILABLE: ${sentence}` });
+    }
   });
 
   it("reads any other refusal as an answer that is not this failure", () => {

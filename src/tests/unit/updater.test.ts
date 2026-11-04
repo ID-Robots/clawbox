@@ -178,12 +178,18 @@ vi.mock("@/lib/plugin-repair-after-update", () => ({
 // What the agent databases weigh, which sizes the verify's `doctor --fix`.
 // 0 by default — what the real reader answers under this file's mocked
 // `fs/promises` — so only the cases about a large box move.
-const { mockOpenclawDatabaseBytes } = vi.hoisted(() => ({
+// The migration status the pre-start wrote: none by default, which is what the
+// real reader answers under the mocked `fs/promises`.
+const { mockOpenclawDatabaseBytes, mockReadMigrationStatus } = vi.hoisted(() => ({
   mockOpenclawDatabaseBytes: vi.fn<(stateDir: string) => Promise<number>>(async () => 0),
+  mockReadMigrationStatus: vi.fn<() => Promise<import("@/lib/openclaw-migration-status").OpenclawMigrationStatus | null>>(
+    async () => null,
+  ),
 }));
 vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
   ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
   openclawDatabaseBytes: mockOpenclawDatabaseBytes,
+  readOpenclawMigrationStatus: mockReadMigrationStatus,
 }));
 
 // The session check's one network call (TASK-2153): the `chat.history` the
@@ -395,6 +401,8 @@ describe("updater", () => {
     process.env.GATEWAY_SESSION_POLL_MS = "1";
     mockMainChatHistory.mockReset();
     mockMainChatHistory.mockResolvedValue({ sessionKey: "main" });
+    mockReadMigrationStatus.mockReset();
+    mockReadMigrationStatus.mockResolvedValue(null);
     // Pin the SKU: the step list is edition-dependent, so without this the
     // expectations below that look for `gateway_verify` would fail on a Hermes
     // box, where it is (correctly) filtered out. Only the edition VALUE is set
@@ -3610,6 +3618,35 @@ describe("updater", () => {
       expect(restartsAfterFirstAsk()).toHaveLength(1);
     });
 
+    it("asks a gateway still rebuilding its history again rather than restarting it", async () => {
+      // The core's own retryable UNAVAILABLE (respondChatHistoryUnavailable),
+      // as right after a core upgrade. A window long enough for a second ask.
+      process.env.GATEWAY_SESSION_WINDOW_MS = "5000";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restartsAfterFirstAsk()).toEqual([]);
+      expect(state.warnings ?? []).toEqual([]);
+    });
+
+    it("keeps the degraded-agents warning when the session check fails the step", async () => {
+      mockReadMigrationStatus.mockResolvedValue({
+        state: "degraded",
+        reason: "migration-incomplete",
+        requiredBytes: null,
+        freeBytes: null,
+        updatedAt: null,
+      } as import("@/lib/openclaw-migration-status").OpenclawMigrationStatus);
+      mockMainChatHistory.mockRejectedValue(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("failed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("failed");
+      expect(state.warnings?.map((w) => w.code)).toContain("openclaw-migration-degraded");
+    });
+
     it("runs in the OpenClaw-only update too, which ends on a running gateway the same way", async () => {
       mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
       updater.resetUpdateState();
@@ -3711,13 +3748,25 @@ describe("updater", () => {
       expect(mockSet).toHaveBeenCalledWith("update_warnings", expect.stringContaining("gateway-stop-unclean"));
     });
 
-    it("warns the owner when the stop outlived its 30 s, however it ended", async () => {
+    it("says nothing about a clean drain that outlived the 30 s client — the unit allows 330 s", async () => {
+      // TimeoutStopSec=330 (config/clawbox-gateway.service): OpenClaw sizes its
+      // drain from it, so a stop past the client's 30 s that ends clean is a
+      // healthy one, and a warning over it would send the owner after nothing.
       gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n", undefined, { stopTimesOut: true });
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      expect(state.warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+    });
+
+    it("warns the owner when systemd had to kill the stop, and says how long it took", async () => {
+      gatewayUnit("ActiveState=failed\nSubState=failed\nResult=timeout\nJob=\n", undefined, { stopTimesOut: true });
       const state = await runSecondHalf();
       expect(state.phase).toBe("completed");
       const warning = state.warnings?.filter((w) => w.code === "gateway-stop-unclean");
       expect(warning).toHaveLength(1);
-      expect(warning?.[0].message).toMatch(/did not stop within the 30s it is given \(it took about \d+s\)/);
+      expect(warning?.[0].message).toMatch(
+        /did not shut down cleanly when the update stopped it after about \d+s \(clawbox-gateway\.service ended failed \(failed, timeout\)\)/,
+      );
     });
 
     it("says nothing about a clean stop, or about a gateway that had already failed before it", async () => {

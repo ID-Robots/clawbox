@@ -2593,11 +2593,12 @@ const GATEWAY_STOP_UNCLEAN = "gateway-stop-unclean";
 async function stopGatewayForMaintenance(): Promise<void> {
   // Read before the stop so an earlier crash's result is not blamed on it.
   const before = await readUnitState("clawbox-gateway.service").catch(() => null);
-  // The unit's own stop deadline is the client's 30 s too, so a drain that
-  // uses all of it outlives the client by the moment systemd takes to kill.
-  // That stop is waited for on the unit, never reported as a failure, and
-  // never raced: a gateway still draining is a second writer of the state the
-  // maintenance step is about to touch.
+  // The client's 30 s is not the unit's stop deadline: TimeoutStopSec=330
+  // (config/clawbox-gateway.service), and OpenClaw sizes its graceful drain
+  // from it, so a clean stop can outlive the client by minutes. That stop is
+  // waited for on the unit, never reported as a failure, and never raced: a
+  // gateway still draining is a second writer of the state the maintenance
+  // step is about to touch.
   const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
     unit: "clawbox-gateway.service",
     timeoutMs: GATEWAY_STOP_CLIENT_MS,
@@ -2608,34 +2609,34 @@ async function stopGatewayForMaintenance(): Promise<void> {
   if (stop.kind === "settled" && stop.state.activeState === "active") {
     throw new Error(`clawbox-gateway did not stop: it is ${describeUnitState(stop.state)}`);
   }
-  // A stop that outlived its client is this stop's, whatever came before it.
-  // A failed result is judged only over a unit that was up: one crash-looping
-  // in auto-restart already carries a failed result the stop did not cause.
-  if (stop.kind === "settled" || before?.activeState === "active") {
-    await warnIfGatewayStopUnclean(stop);
-  }
+  // Judged only over a unit that was up: one crash-looping in auto-restart
+  // already carries a failed result the stop did not cause.
+  if (before?.activeState === "active") await warnIfGatewayStopUnclean(stop);
 }
 
 /**
  * Say so on the update's own result when the update stopped a running gateway
- * and it did not go quietly: the stop outlived its 30 s client, or the unit
- * ended failed (`Gateway shutdown did not complete cleanly`, exit 1, is how a
- * box with a dead chat after an update began — TASK-2153). The update carries
- * on — the gateway is down either way — but this was only in the journal, and
- * it is the first line anyone diagnosing what came next needs. Never throws.
+ * and it did not go quietly: the unit ended failed or with a result other than
+ * success — `Gateway shutdown did not complete cleanly`, exit 1, is how a box
+ * with a dead chat after an update began (TASK-2153), and `timeout` is
+ * systemd's SIGKILL at the unit's 330 s. A clean drain that merely outlived the
+ * 30 s client is not that, however long it took. The update carries on — the
+ * gateway is down either way — but this was only in the journal, and it is the
+ * first line anyone diagnosing what came next needs. Never throws.
  */
 async function warnIfGatewayStopUnclean(stop: Exclude<UnitJobOutcome, { kind: "in-flight" }>): Promise<void> {
   try {
     const state = stop.kind === "settled" ? stop.state : await readUnitState("clawbox-gateway.service");
-    const failed = state !== null && (state.activeState === "failed" || (state.result !== "" && state.result !== "success"));
-    if (stop.kind !== "settled" && !failed) return;
-    const ended = state ? ` (clawbox-gateway.service ended ${describeUnitState(state)})` : "";
-    const how = stop.kind === "settled"
-      ? `did not stop within the ${GATEWAY_STOP_CLIENT_MS / 1000}s it is given (it took about ${Math.round((GATEWAY_STOP_CLIENT_MS + stop.waitedMs) / 1000)}s)`
-      : "did not shut down cleanly";
+    if (state === null) return;
+    const failed = state.activeState === "failed" || (state.result !== "" && state.result !== "success");
+    if (!failed) return;
+    const took = stop.kind === "settled"
+      ? ` after about ${Math.round((GATEWAY_STOP_CLIENT_MS + stop.waitedMs) / 1000)}s`
+      : "";
     warnUpdate(
       GATEWAY_STOP_UNCLEAN,
-      `The OpenClaw gateway running before the update ${how} when the update stopped it${ended}. `
+      `The OpenClaw gateway running before the update did not shut down cleanly when the update stopped it${took} `
+        + `(clawbox-gateway.service ended ${describeUnitState(state)}). `
         + "The update carried on; if the chat does not answer after it, restart the device.",
     );
     await persistWarnings();
@@ -3933,16 +3934,24 @@ async function ensureGatewayServesSessions(): Promise<void> {
     console.log(`[Updater] gateway sessions: serving${outcome.restarted ? " after one restart" : ""}`);
     return;
   }
-  // Not a failure — nothing said the gateway cannot serve — but not a silent
-  // green either: a gateway that listens and never answers the chat's own
-  // request is the one thing here the owner may meet next. Not for a token
-  // this server cannot read (nothing was asked) or another refusal (it answered).
+  // Not a failure — nothing said the store failed — but not a silent green
+  // either: a gateway that listens and never answers the chat's own request,
+  // or is still getting its sessions ready after a restart, is the one thing
+  // here the owner may meet next. Not for a token this server cannot read
+  // (nothing was asked) or another refusal (it answered).
   if (outcome.answer.kind === "unreachable" && !outcome.answer.final) {
     warnUpdate(
       "gateway-sessions-unconfirmed",
       `The update could not confirm the chat answers: the OpenClaw gateway did not answer a chat request `
-        + `within ${Math.round(GATEWAY_SESSION_WINDOW_MS / 1000)}s (${outcome.detail}). `
-        + "If the chat stays silent, restart the device.",
+        + `within ${Math.round((outcome.restarted ? GATEWAY_SESSION_RECOVERY_WINDOW_MS : GATEWAY_SESSION_WINDOW_MS) / 1000)}s `
+        + `(${outcome.detail}). If the chat stays silent, restart the device.`,
+    );
+  } else if (outcome.answer.kind === "unavailable") {
+    warnUpdate(
+      "gateway-sessions-unconfirmed",
+      "The update could not confirm the chat answers: the OpenClaw gateway was still getting its chat sessions "
+        + `ready after a restart (${outcome.detail}). This usually finishes on its own; `
+        + "if the chat does not answer in a few minutes, restart the device.",
     );
   }
 }
@@ -4161,13 +4170,14 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 90_000,
     // Health first: the after-update plugin retry (TASK-1088) restarts the
     // gateway only when it has something to load, and only a healthy gateway
-    // is one it can prove a repair against. The session check comes after it,
-    // so it asks the gateway the owner is left with (TASK-2153).
+    // is one it can prove a repair against. The session check (TASK-2153) asks
+    // the gateway the owner is left with, after the degraded-agents warning
+    // that its throw must not swallow.
     customRun: async () => {
       await ensureGatewayHealthy();
       await retryPluginRepairsLeftByOlderCore();
-      await ensureGatewayServesSessions();
       await warnIfOpenclawDatabasesDegraded();
+      await ensureGatewayServesSessions();
     },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
@@ -5566,8 +5576,9 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     customRun: async () => {
       await ensureGatewayHealthy({ restartFirst: true });
       await retryPluginRepairsLeftByOlderCore();
-      await ensureGatewayServesSessions();
+      // First: the session check's throw must not swallow it.
       await warnIfOpenclawDatabasesDegraded();
+      await ensureGatewayServesSessions();
     },
   },
 ];

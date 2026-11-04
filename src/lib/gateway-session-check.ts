@@ -16,10 +16,16 @@
  * failure gives:
  *
  * - it answers: the gateway serves sessions, and that is the whole cost;
- * - it answers UNAVAILABLE, or names the reclamation checkpoint: restart the
+ * - it names the reclamation checkpoint — the store failure: restart the
  *   gateway ONCE, the way the update restarts it, and ask again until it
  *   answers or the recovery window ends — then fail the step with words the
  *   owner can act on, never a green "Completed" over a dead chat;
+ * - any OTHER `UNAVAILABLE` is not that failure but the core's "not yet": its
+ *   `chat.history` answers UNAVAILABLE, `retryable`, while its session rows are
+ *   initializing, its history is rebuilding (as after a core upgrade) or busy
+ *   (`respondChatHistoryUnavailable` in 2026.10.9). It is asked again; only one
+ *   that lasts the whole window earns the restart, and one still there after
+ *   the restart is a warning, not a failed update;
  * - anything else — no token this server can use, a gateway still starting
  *   for the whole window, a different refusal — is not that failure, and the
  *   step goes on exactly as it did before this check existed. A check that
@@ -36,7 +42,9 @@ import { gatewayWsMainChatHistory } from "@/lib/openclaw-gateway-ws";
 export type SessionProbe =
   /** It answered: the session store opened. */
   | { kind: "ok" }
-  /** It answered that it cannot serve sessions — the failure this check is for. */
+  /** It named the store failure (the reclamation checkpoint) — the failure this check is for. */
+  | { kind: "store-failure"; detail: string }
+  /** UNAVAILABLE without those words: the core's retryable "not yet" (initializing, rebuilding, busy). */
   | { kind: "unavailable"; detail: string }
   /** It answered with some other refusal: not that failure, not this check's to judge. */
   | { kind: "refused"; detail: string }
@@ -62,10 +70,11 @@ export function classifySessionProbeError(err: unknown): SessionProbe {
   if (failure?.name === "GatewayRpcError") {
     const code = typeof failure.code === "string" && failure.code ? failure.code : "ERROR";
     const detail = `${code}: ${message}`;
-    if (code === "UNAVAILABLE" || SESSION_STORE_FAILURE_RE.test(message)) return { kind: "unavailable", detail };
+    if (SESSION_STORE_FAILURE_RE.test(message)) return { kind: "store-failure", detail };
+    if (code === "UNAVAILABLE") return { kind: "unavailable", detail };
     return { kind: "refused", detail };
   }
-  if (SESSION_STORE_FAILURE_RE.test(message)) return { kind: "unavailable", detail: message };
+  if (SESSION_STORE_FAILURE_RE.test(message)) return { kind: "store-failure", detail: message };
   return {
     kind: "unreachable",
     detail: message,
@@ -85,7 +94,7 @@ export async function probeMainChatSession(timeoutMs: number): Promise<SessionPr
 
 /** The answer the field box gave, word for word — what {@link withSimulatedSessionFault} plays back. */
 export const SIMULATED_SESSION_FAULT: SessionProbe = {
-  kind: "unavailable",
+  kind: "store-failure",
   detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired",
 };
 
@@ -134,11 +143,17 @@ export interface SessionCheckDeps {
 export type SessionCheckOutcome =
   | { verdict: "serving"; restarted: boolean }
   /**
-   * It could not be asked, or answered with another refusal: the caller
-   * carries on as before. `answer` is the last ask, so the caller can tell a
-   * gateway that never answered from one that answered something else.
+   * It could not be asked, answered with another refusal, or was still "not
+   * yet" after its restart: the caller carries on. `answer` is the last ask, so
+   * the caller can tell a gateway that never answered from one still getting
+   * its sessions ready, and from one that answered something else.
    */
-  | { verdict: "unconfirmed"; detail: string; answer: Exclude<SessionProbe, { kind: "ok" } | { kind: "unavailable" }> };
+  | {
+    verdict: "unconfirmed";
+    detail: string;
+    restarted: boolean;
+    answer: Exclude<SessionProbe, { kind: "ok" } | { kind: "store-failure" }>;
+  };
 
 /** The shortest pause between two asks, whatever the caller passed: never a hot spin. */
 const MIN_INTERVAL_MS = 250;
@@ -178,7 +193,7 @@ async function askWithin(
   }
 }
 
-function stillUnavailableMessage(before: string, after: Exclude<SessionProbe, { kind: "ok" }>): string {
+function stillUnavailableMessage(before: string, after: Extract<SessionProbe, { kind: "store-failure" | "unreachable" }>): string {
   const now = after.kind === "unreachable" ? `it does not answer (${after.detail})` : `it still answers ${after.detail}`;
   return `The OpenClaw gateway is running but cannot open chat sessions (${before}), `
     + `and restarting it once did not fix that: ${now}. The chat will not answer until it can. `
@@ -187,29 +202,37 @@ function stillUnavailableMessage(before: string, after: Exclude<SessionProbe, { 
 
 /**
  * Prove the gateway serves chat sessions, restarting it once if it answers
- * that it cannot. Throws {@link GatewaySessionsUnavailableError} when it still
- * cannot after that restart, and whatever `restart` throws when it does not
- * come back at all.
+ * that it cannot. Throws {@link GatewaySessionsUnavailableError} when the store
+ * failure (or no answer at all) is still there after that restart, and
+ * whatever `restart` throws when it does not come back at all.
  */
 export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<SessionCheckOutcome> {
   const log = deps.log ?? ((line: string) => console.log(line));
-  // Before any restart, any ANSWER settles it: only "cannot ask yet" is asked
-  // again, so a box whose gateway is still starting is waited for, not restarted.
-  const first = await askWithin(deps, deps.windowMs, (answer) => answer.kind !== "unreachable");
+  // Before any restart, "cannot ask yet" and the core's "not yet" are asked
+  // again, so a gateway still starting or rebuilding its history is waited
+  // for, not restarted. The store failure, an answer or another refusal
+  // settles it at once.
+  const first = await askWithin(
+    deps,
+    deps.windowMs,
+    (answer) => answer.kind !== "unreachable" && answer.kind !== "unavailable",
+  );
   if (first.kind === "ok") return { verdict: "serving", restarted: false };
-  if (first.kind !== "unavailable") {
+  if (first.kind === "refused" || first.kind === "unreachable") {
     log(`could not confirm the gateway serves chat sessions (${first.detail}); carrying on`);
-    return { verdict: "unconfirmed", detail: first.detail, answer: first };
+    return { verdict: "unconfirmed", detail: first.detail, restarted: false, answer: first };
   }
 
+  // The store failure, or "not yet" for the whole window: the restart that
+  // cleared it in the field.
   log(`the gateway is up but cannot serve chat sessions (${first.detail}); restarting it once`);
   deps.onDetail?.("The gateway is up but cannot open chat sessions — restarting it once");
   try {
     await deps.restart();
     deps.onDetail?.("Waiting for the restarted gateway to open chat sessions");
-    // After the restart, "cannot serve" and "cannot ask" are both asked again:
-    // a fresh gateway may spend a while starting, or in the same reclamation,
-    // before it can. Any other answer settles it, as it does before a restart.
+    // After the restart only an answer or another refusal settles it: a fresh
+    // gateway may spend a while starting, rebuilding, or in the same
+    // reclamation, before it can.
     const after = await askWithin(
       deps,
       deps.recoveryWindowMs,
@@ -219,9 +242,11 @@ export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<Ses
       log("the restarted gateway serves chat sessions again");
       return { verdict: "serving", restarted: true };
     }
-    if (after.kind === "refused") {
-      log(`the restarted gateway no longer answers UNAVAILABLE (${after.detail}); carrying on`);
-      return { verdict: "unconfirmed", detail: after.detail, answer: after };
+    if (after.kind === "refused" || after.kind === "unavailable") {
+      // Not the store failure any more: the core's own retryable "not yet", or
+      // a different answer. Not a failed update over a state that clears.
+      log(`the restarted gateway no longer names the store failure (${after.detail}); carrying on`);
+      return { verdict: "unconfirmed", detail: after.detail, restarted: true, answer: after };
     }
     log(`the restarted gateway still cannot serve chat sessions (${after.detail})`);
     throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first.detail, after));

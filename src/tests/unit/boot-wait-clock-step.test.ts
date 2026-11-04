@@ -61,7 +61,7 @@ describe("verifyGatewaySessions", () => {
     // starting spent its window at once: no second ask, and a healthy update
     // failed.
     const answers: SessionProbe[] = [
-      { kind: "unavailable", detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired" },
+      { kind: "store-failure", detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired" },
       { kind: "unreachable", detail: "gateway starting; retry shortly", final: false },
       { kind: "unreachable", detail: "gateway starting; retry shortly", final: false },
       { kind: "ok" },
