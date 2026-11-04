@@ -20,6 +20,8 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+openclaw_only "The gateway's chat channels"
+
 if wait_gateway_settled 180; then
   ok "gateway started and settled (${SETTLE_WAITED}s)"
   [ -z "$SETTLE_SEEN" ] || note "on the way: $SETTLE_SEEN"

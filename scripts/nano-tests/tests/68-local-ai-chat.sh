@@ -44,6 +44,8 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+openclaw_only "Local AI as the OpenClaw chat model"
+
 PROMPT="направи ми проста todo страница"
 # Seconds one attempt may take, model load included (a cold start reads a
 # 3.35 GB GGUF; the page-writing turn took 31-56 s in the benchmark).

@@ -20,6 +20,8 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+openclaw_only "The gateway's /healthz under memory pressure"
+
 # "<swap total MB> <swap devices> <gw pid> <gw restarts> <setup pid> <setup restarts> <oom kills>"
 # shellcheck disable=SC2016  # expanded on the board
 snapshot() {

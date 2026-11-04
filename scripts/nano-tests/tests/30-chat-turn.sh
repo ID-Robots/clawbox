@@ -17,5 +17,7 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+openclaw_only "A chat turn through the openclaw agent CLI"
+
 chat_turn
 finish
