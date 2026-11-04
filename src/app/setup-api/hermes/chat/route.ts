@@ -1666,7 +1666,7 @@ export async function POST(request: Request) {
       // another round.
       const refused = err instanceof HermesExitError && Boolean(rawSessionId) && cliRefusedSession(err.stderr);
       if (refused && streamable) {
-        console.log("[hermes chat] the CLI was refused this conversation (permission_denied); retrying once through the dashboard");
+        console.log("[hermes chat] the CLI was refused this conversation (it belongs to the dashboard); retrying once through the dashboard");
         if (await waitForDashboard({ signal: live.signal })) {
           const turn = await openStreamedTurn();
           if (turn) {

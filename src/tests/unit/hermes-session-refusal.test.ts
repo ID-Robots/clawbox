@@ -29,6 +29,19 @@ describe("cliRefusedSession", () => {
     expect(cliRefusedSession("Error: permission_denied \r\n")).toBe(true);
   });
 
+  it("reads the same refusal while the dashboard still holds the conversation", () => {
+    // Captured on a board right after a dashboard turn on the same session.
+    const stderr = [
+      "hermes-refusal-reason: SESSION_NOT_OWNED",
+      "This chat is open in another Hermes window/terminal. Use it there, or start a new chat here.",
+      "Details: session 20261104_090334_5e1f0a opened by clawbox-chat 0m ago.",
+      "",
+    ].join("\n");
+    expect(cliRefusedSession(stderr)).toBe(true);
+    // Another lease reason is not this one.
+    expect(cliRefusedSession("hermes-refusal-reason: SESSION_COORDINATION_UNAVAILABLE\n")).toBe(false);
+  });
+
   it("does not read every mention of a permission as the refusal", () => {
     // Another failure is reported as it is, never retried.
     expect(cliRefusedSession("Error: cannot write config.yaml: permission denied")).toBe(false);

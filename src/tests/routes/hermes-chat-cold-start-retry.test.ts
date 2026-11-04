@@ -169,6 +169,26 @@ describe("the CLI refused a conversation the dashboard owns", () => {
     expect(errorRows()).toEqual([]);
   });
 
+  it("takes the turn back to the dashboard that still holds it, too", async () => {
+    // The lease's shape of the same refusal (SESSION_NOT_OWNED), captured on a
+    // board while the dashboard was still holding the conversation.
+    openTurnMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(answeringTurn("lighthouse"));
+    spawnMock.mockImplementation(() => cliChild([
+      "hermes-refusal-reason: SESSION_NOT_OWNED",
+      "This chat is open in another Hermes window/terminal. Use it there, or start a new chat here.",
+      "",
+    ].join("\n"), 1));
+
+    const res = await POST(post({ message: "What word did I ask you to remember?", sessionId: SESSION }));
+
+    expect(res.status).toBe(200);
+    expect(parse(await res.text()).find(([name]) => name === "done")?.[1]).toMatchObject({ text: "lighthouse" });
+    expect(openTurnMock).toHaveBeenCalledTimes(2);
+    expect(errorRows()).toEqual([]);
+  });
+
   it("retries ONCE: a retry that cannot open ends the turn with a sentence", async () => {
     openTurnMock.mockResolvedValue(null);
     spawnMock.mockImplementation(() => cliChild(REFUSED_STDERR, 1));

@@ -18,7 +18,8 @@ import { dashboardWsTicket } from "@/lib/hermes-dashboard-auth";
  *
  * after auto-starting a gateway to be refused by (~13-20 s on a board). Measured
  * on a board, v0.22.5: refused with the gateway cold, and refused again with it
- * already running.
+ * already running. (While the dashboard still holds the conversation the same
+ * refusal reads `SESSION_NOT_OWNED` instead — see SESSION_REFUSAL_LINE.)
  *
  * Nothing about that is visible while the dashboard answers, which is why it
  * surfaced as "the first message after X fails, the next works": the gateway's
@@ -35,11 +36,23 @@ import { dashboardWsTicket } from "@/lib/hermes-dashboard-auth";
  */
 
 /**
- * The CLI's refusal line, whole. `launch_from_args` prints `"Error: " + message`
- * and the gateway's reason is the bare code, so anything looser could match a
- * tool's output that merely mentions the word.
+ * The CLI's refusal lines, whole, in the two shapes the same refusal takes.
+ *
+ * `Error: permission_denied` is the gateway's: `launch_from_args` prints
+ * `"Error: " + message` and the reason is the bare code. That is what a COLD
+ * conversation gets — the dashboard that owns it has just restarted, or let
+ * it go.
+ *
+ * `hermes-refusal-reason: SESSION_NOT_OWNED` is the active-session lease's
+ * (`format_refusal_stderr`, hermes_cli/active_sessions.py), followed by "This
+ * chat is open in another Hermes window/terminal". That is what a conversation
+ * the dashboard is STILL holding gets — measured on a board right after a
+ * dashboard turn on it. Same owner, same answer: take the turn to the
+ * dashboard.
+ *
+ * Anything looser could match a tool's output that merely mentions the word.
  */
-const SESSION_REFUSAL_LINE = /^Error: permission_denied[ \t\r]*$/m;
+const SESSION_REFUSAL_LINE = /^(?:Error: permission_denied|hermes-refusal-reason: SESSION_NOT_OWNED)[ \t\r]*$/m;
 
 /** Was this `hermes chat` run refused the conversation it was asked to resume? */
 export function cliRefusedSession(stderr: string): boolean {
