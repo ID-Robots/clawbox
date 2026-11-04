@@ -254,6 +254,23 @@ describe("saying WHY a turn could not be opened (TASK-2152)", () => {
     expect(seen.failures).toEqual([{ reason: "refused", detail: "session not found" }]);
   });
 
+  it("calls a dashboard that is up but does not answer the session in time a timeout", async () => {
+    // Up, but slow — a cold start loading every plugin and the MCP server.
+    // The route waits for such a dashboard rather than detouring to the CLI.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const seen = listener();
+      const opening = openDashboardTurn({ text: "Hey", sessionId: "20260823_000000_aaaaaa", onOpenFailure: seen.onOpenFailure });
+      const socket = await latest();
+      socket.open();
+      await vi.advanceTimersByTimeAsync(16_000);
+      await expect(opening).resolves.toBeNull();
+      expect(seen.failures).toEqual([expect.objectContaining({ reason: "timeout" })]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("calls a turn stopped before it was opened stopped", async () => {
     const stop = new AbortController();
     stop.abort();

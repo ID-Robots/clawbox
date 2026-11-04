@@ -91,6 +91,7 @@ import {
 } from "@/lib/hermes-cli-message";
 import {
   cliRefusedSession,
+  DASHBOARD_READY_BUDGET_MS,
   dashboardStartedSession,
   SESSION_REFUSED_MESSAGE,
   SESSION_REFUSED_PICTURE_MESSAGE,
@@ -1665,14 +1666,21 @@ export async function POST(request: Request) {
     // merely down or slow — a restart, an update — on a conversation the
     // dashboard started (the CLI is refused those, so it is no alternative),
     // and otherwise after the CLI was refused. Never a second round.
-    let retried = false;
+    //
+    // "Once" counts REOPENS, not waits: a wait before the CLI that ran out
+    // reopened nothing, so the CLI's refusal still earns the one reopen — but
+    // only a single look at the dashboard by then, never a second full wait.
+    let reopened = false;
+    let waited = false;
     const retryOnDashboard = async (why: string): Promise<DashboardTurn | null> => {
-      retried = true;
-      console.log(`[hermes chat] ${why}; waiting for the dashboard to open this turn there once more`);
-      if (!(await waitForDashboard({ signal: live.signal }))) {
+      const budgetMs = waited ? 0 : DASHBOARD_READY_BUDGET_MS;
+      waited = true;
+      console.log(`[hermes chat] ${why}; ${budgetMs ? "waiting for" : "asking"} the dashboard to open this turn there once more`);
+      if (!(await waitForDashboard({ signal: live.signal, budgetMs }))) {
         console.log("[hermes chat] the dashboard did not come back in time");
         return null;
       }
+      reopened = true;
       const turn = await openTurn();
       console.log(turn
         ? "[hermes chat] the retry through the dashboard opened"
@@ -1779,10 +1787,10 @@ export async function POST(request: Request) {
       // could not open the turn, and the CLI cannot resume a conversation the
       // dashboard owns — see src/lib/hermes-session-refusal.ts. Only for that
       // refusal, only on a turn the dashboard can carry, and only if the one
-      // retry above was not already spent: it ends in an answer or in the
+      // reopen above was not already spent: it ends in an answer or in the
       // error below, never in another round.
       const refused = err instanceof HermesExitError && Boolean(rawSessionId) && cliRefusedSession(err.stderr);
-      if (refused && dashboardCarries && !retried) {
+      if (refused && dashboardCarries && !reopened) {
         const turn = await retryOnDashboard("the CLI was refused this conversation (it belongs to the dashboard)");
         if (turn) return serve(turn);
         if (live.signal.aborted) return stopped();

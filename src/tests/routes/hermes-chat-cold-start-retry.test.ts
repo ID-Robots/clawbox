@@ -487,6 +487,48 @@ describe("a dashboard that is not ready yet — an update, a restart (TASK-2152,
 
     expect(res.status).toBe(502);
     expect(openTurnMock).toHaveBeenCalledTimes(1);
-    expect(waitMock).toHaveBeenCalledTimes(1);
+    // One full wait before the CLI, then one single look after its refusal —
+    // never a second full wait.
+    expect(waitMock).toHaveBeenCalledTimes(2);
+    expect(waitMock.mock.calls[0][0].budgetMs).toBeGreaterThan(0);
+    expect(waitMock.mock.calls[1][0].budgetMs).toBe(0);
+  });
+
+  it("still reopens once when it comes back while the CLI is being refused", async () => {
+    // The wait before the CLI ran out (a restart slower than its budget); by
+    // the time the CLI is refused the dashboard is back. That wait reopened
+    // nothing, so the one reopen is still unspent.
+    openTurnMock
+      .mockImplementationOnce(failingOpen("unavailable"))
+      .mockResolvedValueOnce(answeringTurn("lighthouse"));
+    waitMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    spawnMock.mockImplementation(() => cliChild(REFUSED_STDERR, 1));
+
+    const res = await POST(post({ message: "hey", sessionId: SESSION }));
+
+    expect(res.status).toBe(200);
+    expect(parse(await res.text()).find(([name]) => name === "done")?.[1]).toMatchObject({ text: "lighthouse" });
+    expect(openTurnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(waitMock.mock.calls[1][0].budgetMs).toBe(0);
+  });
+
+  it("records a Stop, not a failure, when the owner stops the turn during that wait", async () => {
+    openTurnMock.mockImplementation(failingOpen("unavailable"));
+    waitMock.mockImplementation(({ signal }: { signal: AbortSignal }) => new Promise<boolean>((resolve) => {
+      signal.addEventListener("abort", () => resolve(false), { once: true });
+    }));
+
+    const pending = POST(post({ message: "hey", sessionId: SESSION, turnId: "turn-wait" }));
+    await vi.waitFor(() => expect(waitMock).toHaveBeenCalled());
+    await stopLiveTurns("desktop", { turnId: "turn-wait", waitMs: 0 });
+    const res = await pending;
+
+    expect(res.status).toBe(499);
+    expect(records().some((r) => r.variant === "stopped")).toBe(true);
+    expect(errorRows()).toEqual([]);
+    // A stopped turn starts nothing more: no CLI, no second open.
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(openTurnMock).toHaveBeenCalledTimes(1);
   });
 });

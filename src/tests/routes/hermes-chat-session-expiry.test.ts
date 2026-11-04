@@ -249,3 +249,39 @@ describe("the one-shot (CLI) answer to a session that ran out while it was writt
     expect(await res.json()).toMatchObject({ harness: "hermes" });
   });
 });
+
+describe("the JSON answer of a turn the dashboard carried (TASK-2152)", () => {
+  // A caller that did not ask to be streamed to is now answered through the
+  // dashboard too, settled and handed back whole — and held to the CLI path's
+  // rule: a session that ran out while the turn ran gets the marked 401.
+  function postJson(cookie: string): Request {
+    return new Request("http://localhost/setup-api/hermes/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: `clawbox_session=${cookie}` },
+      body: JSON.stringify({ message: "Run the long job and tell me how it went" }),
+    });
+  }
+
+  it("is the session gate's marked 401, not the reply — which is still recorded", async () => {
+    const turn = gatedTurn();
+    const pending = POST(postJson(mint(nowS() + 600)));
+    await vi.waitFor(() => expect(openTurnMock).toHaveBeenCalled());
+    writeConfig(1);
+    turn.release();
+    const res = await pending;
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-clawbox-session")).toBe("expired");
+    await vi.waitFor(() => expect(records().some((r) => r.role === "assistant")).toBe(true));
+  });
+
+  it("is the reply while the session holds", async () => {
+    const turn = gatedTurn();
+    const pending = POST(postJson(mint(nowS() + 600)));
+    await vi.waitFor(() => expect(openTurnMock).toHaveBeenCalled());
+    turn.release();
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toMatchObject({ text: "The first half, and the rest.", harness: "hermes" });
+  });
+});
