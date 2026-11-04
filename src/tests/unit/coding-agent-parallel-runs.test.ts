@@ -425,6 +425,32 @@ describe("a run's own copy of the project", () => {
     expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
   });
 
+  it("commits and merges home what the run wrote only through its shell, in its own copy", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([`echo late > "$PWD/late.txt"`, `echo '${result("the job wrote late.txt")}'`, "exit 0"].join("\n"));
+    const started = await lib.startRun({ task: "start a job", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    expect(fs.readFileSync(path.join(dir, "late.txt"), "utf8")).toBe("late\n");
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
+  });
+
+  it("forks from the base branch the caller names, and refuses one that does not exist before anything starts", async () => {
+    const dir = makeGitProject("alpha");
+    git(dir, "branch", "beta");
+    git(dir, "checkout", "--quiet", "-b", "elsewhere");
+    fs.writeFileSync(path.join(dir, "other.txt"), "x\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "--quiet", "-m", "elsewhere");
+    const started = await lib.startRun({ task: "look", directory: "alpha", source: "owner", baseBranch: "beta" });
+    expect(started.worktree?.base).toBe("beta");
+    expect(fs.existsSync(path.join(started.directory, "other.txt"))).toBe(false);
+    await finished(started.id);
+    await expect(lib.startRun({ task: "look", directory: "alpha", source: "owner", baseBranch: "nope" })).rejects.toMatchObject({ kind: "invalid" });
+    await expect(lib.startRun({ task: "look", directory: "alpha", source: "owner", baseBranch: "--force" })).rejects.toMatchObject({ kind: "invalid" });
+    expect(lib.listRuns().filter((r) => r.status === "running")).toEqual([]);
+  });
+
   it("merges the work home when the run made a branch of its own in its copy and committed there", async () => {
     const dir = makeGitProject("alpha");
     installWrapper([

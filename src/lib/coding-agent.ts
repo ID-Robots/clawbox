@@ -318,7 +318,7 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
-import { adoptOwnBranchWork, ownBranchWork } from "@/lib/coding-team-worktree";
+import { adoptOwnBranchWork, ownBranchWork, readCheckout } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
@@ -9223,8 +9223,13 @@ async function recordRunWork(run: CodingRun): Promise<void> {
   // folder's log could answer with is somebody else's.
   if (run.readOnly) return;
   // No file the tools confirmed — but a run that wrote through its shell and
-  // committed there has a commit of its own to record all the same.
-  if (run.filesTouched.length === 0) {
+  // committed there has a commit of its own to record all the same. In a run's
+  // OWN worktree the shell's files are the run's too (a background job's
+  // output, a generated file): nobody else writes there, and leaving them
+  // uncommitted strands them in a copy the settle then has to keep. Only when
+  // the run made no commit of its own: one that committed some files and left
+  // others chose what its branch holds. The box's favicons do not count.
+  if (run.filesTouched.length === 0 && !(await worktreeHoldsShellWork(run))) {
     await noteOwnCommit(run);
     return;
   }
@@ -9266,6 +9271,23 @@ async function recordRunWork(run: CodingRun): Promise<void> {
  * is not "nothing was committed" (the angry-pigs run, 2026-09-05). Never
  * throws; a folder that is not its own repository answers nothing.
  */
+/**
+ * True when the run works in its own worktree, committed nothing there itself,
+ * and the tree holds changes beyond the box's favicons.
+ */
+async function worktreeHoldsShellWork(run: CodingRun): Promise<boolean> {
+  const wt = run.worktree;
+  if (!wt || wt.removed || run.team || path.resolve(run.directory) !== path.resolve(wt.path)) return false;
+  try {
+    if ((await commitsAhead(wt.project, wt.branch, wt.base)) !== 0) return false;
+    if ((await ownBranchWork(wt.path, wt.branch)).length) return false;
+    const seen = await readCheckout(wt.path, "normal");
+    return seen.ok && seen.changed;
+  } catch {
+    return false;
+  }
+}
+
 async function noteOwnCommit(run: CodingRun): Promise<void> {
   try {
     const own = await newestCommitSince(run.directory, run.startedAt);
