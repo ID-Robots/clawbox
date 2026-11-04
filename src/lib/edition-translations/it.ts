@@ -1697,6 +1697,7 @@ export const it: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Messaggio a {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Messaggio al responsabile del team: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Messaggio all'assistente: {text}",
+  "codingAgent.stepRunMessageToAssistant": "Messaggio all'assistente ({kind}): {text}",
   "codingAgent.stepMessageMidTurn": "Messaggio consegnato durante il turno: {text}",
   "codingAgent.stepMessageToRun": "Messaggio all'esecuzione: {text}",
   // What's new in 4.3 (TASK-1059, TASK-1195)

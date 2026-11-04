@@ -1832,6 +1832,7 @@ const table: Record<string, string> = {
   "codingAgent.stepReviewLoopRound": "Ronda de revisión {round} de {id}",
   "codingAgent.stepReviewLoopTurn": "Ronda de revisión de {id}",
   "codingAgent.stepReviewRound": "Ronda de revisión {round} de {max} entregada al agente de código",
+  "codingAgent.stepRunMessageToAssistant": "Mensaje al asistente ({kind}): {text}",
   "codingAgent.stepSecretsInjected": "Secretos en el entorno: {names}",
   "codingAgent.stepSecretsUnreadable": "No se pudieron leer estos secretos: {names}",
   "codingAgent.stepStarted": "Iniciada",

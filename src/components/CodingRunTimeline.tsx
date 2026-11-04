@@ -120,6 +120,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   messageMidTurn: "codingAgent.stepMessageMidTurn",
   messageToRun: "codingAgent.stepMessageToRun",
   teamMessageToAssistant: "codingAgent.stepTeamMessageToAssistant",
+  runMessageToAssistant: "codingAgent.stepRunMessageToAssistant",
 };
 
 /**

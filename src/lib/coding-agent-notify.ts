@@ -758,6 +758,50 @@ async function notifyOriginChat(run: CodingRun): Promise<void> {
 }
 
 /**
+ * A running run's report into the chat that asked for it
+ * (coding-run-report.ts) — NOT an ending, so nothing is claimed and the chat
+ * may hear several. The run's words go in, inside the frame `runReportMessage`
+ * builds, which is the one place this module carries a model's text: the run
+ * is reporting to the assistant that started it, which is what the frame says.
+ *
+ * Where: the recorded origin when the box still runs that harness; otherwise,
+ * on OpenClaw, the owner's main conversation. Hermes has no main session to
+ * fall back on. Hermes' turn waits for one running in the chat (up to
+ * HERMES_BUSY_WAIT_MS), so it is sent in the background and answers "queued".
+ * Throws a TeamMessageError the route answers with when it cannot be sent.
+ */
+export async function deliverRunReport(runId: string, notice: { message: string; display: string }): Promise<"origin" | "main" | "queued"> {
+  const { TeamMessageError } = await import("@/lib/coding-team-messages");
+  const harness = await getActiveHarness();
+  const origin = parseChatNotice(kvGet(`${CHAT_NOTICE_KEY_PREFIX}${runId}`));
+  const fromOrigin = origin && origin.harness === harness ? origin : null;
+  let key = fromOrigin?.key ?? null;
+  if (key !== null) {
+    const { readOwnerChatTabs } = await import("@/lib/chat-tab-store");
+    if (readOwnerChatTabs().closed.includes(key)) key = null;
+  }
+  if (harness === "openclaw") {
+    try {
+      await sendOpenClawChatNotice(key, notice.message, `coding-run-report-${runId}-${Date.now()}`);
+    } catch (err) {
+      const gateway = await import("@/lib/openclaw-gateway-ws");
+      if (err instanceof gateway.GatewayWsUnavailableError) {
+        throw new TeamMessageError("NO_SESSION", "There is no assistant chat to post into right now: the OpenClaw gateway is not answering. The message was not delivered.");
+      }
+      throw new TeamMessageError("NOT_DELIVERED", `The assistant's chat did not take the message: ${(err instanceof Error ? err.message : String(err)).split("\n")[0].slice(0, 200)}`);
+    }
+    return fromOrigin ? "origin" : "main";
+  }
+  if (!fromOrigin) {
+    throw new TeamMessageError("UNSUPPORTED", "This run was not started from a ClawBox chat on Hermes, so there is no chat to tell; put it in your final report.");
+  }
+  void sendHermesChatNotice(key ?? DESKTOP_TRANSCRIPT_KEY, notice).catch((err: unknown) => {
+    console.error(`[coding-agent] ${runId}'s report did not reach its chat:`, err instanceof Error ? err.message : err);
+  });
+  return "queued";
+}
+
+/**
  * A coding TEAM's notice: ONE per team, when it settles, and none from its
  * member runs (coding-agent.ts sends no run notice while `run.team` is set).
  * A team of five used to put five run cards on the desktop and say nothing

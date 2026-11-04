@@ -1686,6 +1686,7 @@ export const ja: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "{run} へのメッセージ：{text}",
   "codingAgent.stepTeamMessageToLead": "チームリーダーへのメッセージ：{text}",
   "codingAgent.stepTeamMessageToAssistant": "アシスタントへのメッセージ：{text}",
+  "codingAgent.stepRunMessageToAssistant": "アシスタントへのメッセージ（{kind}）：{text}",
   "codingAgent.stepMessageMidTurn": "作業中にメッセージを届けました: {text}",
   "codingAgent.stepMessageToRun": "実行へのメッセージ: {text}",
   // What's new in 4.3 (TASK-1059, TASK-1195)

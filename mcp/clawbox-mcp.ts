@@ -76,12 +76,12 @@ import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { hasRunningJobs } from "./lib/jobs";
 import { resolveProfile } from "./lib/profile";
-import { runBrowserAllowed, teamRunContext } from "./lib/run-context";
+import { runBrowserAllowed, soloRunContext, teamRunContext } from "./lib/run-context";
 import { createRegistrar, hasActiveToolCalls, type Profile, type Registrar } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
-import { registerAppPublishTools, registerCodingAgentTools, registerCodingTeamTools, registerTeamRunTools } from "./tools/coding-agent";
+import { registerAppPublishTools, registerCodingAgentTools, registerCodingTeamTools, registerSoloRunTools, registerTeamRunTools } from "./tools/coding-agent";
 import { registerDesktopTools } from "./tools/desktop";
 import {
   hasMailboxSurface,
@@ -150,6 +150,9 @@ function instructionsFor(edition: Ed, profile: Profile): string {
       // the media paragraph: a tool described and not there wastes a step.
       ...(teamRunContext()
         ? ["team_message is how this run, one of a coding team, says it is blocked — to a teammate run, to the team's lead or to the box's assistant. It is not for progress, and a message you receive from a teammate needs no acknowledgement."]
+        : []),
+      ...(soloRunContext()
+        ? ["assistant_message is how this run tells the assistant that started it something it must know now: a question only the user can answer, a blocker, or a long job's result. It is not for routine progress; keep working after you send it."]
         : []),
       // Only where the owner ticked them for this run's project.
       ...(profile === "run-read"
@@ -291,6 +294,8 @@ export async function buildServer(
   // Inside a coding team's run only (the run context says so), like the media
   // tools; everywhere else it is simply not there.
   registerTeamRunTools(reg);
+  // Inside a single run only: its way back to the assistant that started it.
+  registerSoloRunTools(reg);
 
   // LAST. It takes over tools/call so that argument-validation failures come
   // back as the { error, code, message, next } envelope instead of the SDK's

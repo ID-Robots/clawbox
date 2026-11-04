@@ -1832,6 +1832,7 @@ const table: Record<string, string> = {
   "codingAgent.stepReviewLoopRound": "Granskningsrunda {round} för {id}",
   "codingAgent.stepReviewLoopTurn": "Granskningsrunda för {id}",
   "codingAgent.stepReviewRound": "Granskningsrunda {round} av {max} lämnad till kodagenten",
+  "codingAgent.stepRunMessageToAssistant": "Meddelande till assistenten ({kind}): {text}",
   "codingAgent.stepSecretsInjected": "Hemligheter i miljön: {names}",
   "codingAgent.stepSecretsUnreadable": "Dessa hemligheter kunde inte läsas: {names}",
   "codingAgent.stepStarted": "Startad",

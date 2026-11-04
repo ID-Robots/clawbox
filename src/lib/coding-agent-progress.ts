@@ -121,6 +121,9 @@ export type ProgressLabelKey =
   | "teamMessageToRun"
   | "teamMessageToLead"
   | "teamMessageToAssistant"
+  // A single run telling the assistant that started it something mid-run
+  // (src/lib/coding-run-report.ts).
+  | "runMessageToAssistant"
   // A message delivered TO this run (src/lib/coding-run-messages.ts): mid-turn
   // through its inbox hook, or as its next turn / with a start.
   | "messageMidTurn"
@@ -275,6 +278,7 @@ export const RUNNER_STEP = {
   teamMessageToRun: (runId: string, text: string) => `Team message to ${runId}: ${text}`,
   teamMessageToLead: (text: string) => `Team message to the lead: ${text}`,
   teamMessageToAssistant: (text: string) => `Team message to the assistant: ${text}`,
+  runMessageToAssistant: (kind: string, text: string) => `Message to the assistant (${kind}): ${text}`,
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
   /** On the FOLLOW-UP run: whose pull request it was started to fix, and which
    *  round of that loop it is — the round is what makes a fix run readable on
@@ -514,6 +518,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },
   { re: /^Team message to the lead: (.+)$/, labelKey: "teamMessageToLead", icon: "forum", params: (m) => ({ text: m[1] }) },
   { re: /^Team message to the assistant: (.+)$/, labelKey: "teamMessageToAssistant", icon: "forum", params: (m) => ({ text: m[1] }) },
+  { re: /^Message to the assistant \((question|blocker|milestone)\): (.+)$/, labelKey: "runMessageToAssistant", icon: "forum", params: (m) => ({ kind: m[1], text: m[2] }) },
   // runMessageProgressLine — the mid-turn shape first: the other is its prefix.
   { re: /^Message to the run, mid-turn: (.+)$/, labelKey: "messageMidTurn", icon: "mark_chat_read", params: (m) => ({ text: m[1] }) },
   { re: /^Message to the run: (.+)$/, labelKey: "messageToRun", icon: "chat", params: (m) => ({ text: m[1] }) },

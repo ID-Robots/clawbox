@@ -1832,6 +1832,7 @@ const table: Record<string, string> = {
   "codingAgent.stepReviewLoopRound": "{id} 的第 {round} 轮评审",
   "codingAgent.stepReviewLoopTurn": "{id} 的评审轮次",
   "codingAgent.stepReviewRound": "已把第 {round}/{max} 轮评审交给编码代理",
+  "codingAgent.stepRunMessageToAssistant": "发给助手的消息（{kind}）：{text}",
   "codingAgent.stepSecretsInjected": "环境中的密钥：{names}",
   "codingAgent.stepSecretsUnreadable": "无法读取这些密钥：{names}",
   "codingAgent.stepStarted": "已启动",

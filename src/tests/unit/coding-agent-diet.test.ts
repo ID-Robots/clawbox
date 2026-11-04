@@ -26,6 +26,7 @@ import {
   LEAN_VISUAL_BRIEF,
   leanHelpersBrief,
   MCP_BROWSER_TOOLS,
+  MCP_SOLO_TOOL,
   MCP_MEDIA_TOOLS,
   MCP_TEAM_TOOL,
   MEDIA_BRIEF_AUDIO,
@@ -130,10 +131,16 @@ describe("a run judged not visual", () => {
   const nonVisual = (extra: Partial<Parameters<typeof buildRunArgs>[0]> = {}) =>
     buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, visual: false, ...extra });
 
-  it("gets no MCP server — but keeps --strict-mcp-config", () => {
+  it("gets a server with only assistant_message — and keeps --strict-mcp-config", () => {
     const args = nonVisual();
     expect(args).toContain("--strict-mcp-config");
-    expect(args).not.toContain("--mcp-config");
+    const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+    const env = config.mcpServers.clawbox.env;
+    expect(env.CLAWBOX_RUN_BROWSER).toBe("0");
+    expect(env.CLAWBOX_RUN_ID).toBe("run-aaaaaaaa");
+    expect(env.CLAWBOX_TEAM_ID).toBeUndefined();
+    expect(env.CLAWBOX_RUN_MEDIA).toBeUndefined();
+    expect(flagValues(args, "--allowedTools")).toContain(MCP_SOLO_TOOL);
     // The evidence folder is still writable.
     expect(args[args.indexOf("--add-dir") + 1]).toMatch(/coding-agent-artifacts\/run-aaaaaaaa$/);
   });

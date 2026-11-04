@@ -6821,6 +6821,14 @@ export const MCP_MEDIA_TOOLS: Record<keyof RunMedia, string> = {
 export const MCP_TEAM_TOOL = "mcp__clawbox__team_message";
 
 /**
+ * The one tool a SINGLE run (no team, not read-only) gets beside the rest:
+ * `assistant_message`, its way back to the assistant that started it
+ * (src/lib/coding-run-report.ts). Every writing run has it, visual or not, so
+ * every such run gets the clawbox server.
+ */
+export const MCP_SOLO_TOOL = "mcp__clawbox__assistant_message";
+
+/**
  * "ClawBox read-only tools", approved by name for a run whose project ticked
  * them (src/lib/project-mcp-servers.ts) — the same readOnly set the run's
  * server registers under the `run-read` profile (src/lib/clawbox-run-read-tools.ts).
@@ -6854,7 +6862,7 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, opts: { visual?: boolean } = {}): string {
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual?: boolean } = {}): string {
   return JSON.stringify({ mcpServers: { clawbox: runClawboxServer(run, { visual: opts.visual !== false, readOnlyTools: false }) } });
 }
 
@@ -6865,15 +6873,15 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
  * to register — beside the harness servers exactly as the plan carries them.
  * Exported for the contract test.
  */
-export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean }): string {
-  const clawbox = opts.visual || run.team || plan.readOnlyTools
+export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean; solo?: boolean }): string {
+  const clawbox = opts.visual || run.team || plan.readOnlyTools || opts.solo
     ? { clawbox: runClawboxServer(run, { visual: opts.visual, readOnlyTools: plan.readOnlyTools }) }
     : {};
   return JSON.stringify({ mcpServers: { ...clawbox, ...plan.servers } }, null, 2);
 }
 
 /** The run's own clawbox server entry. */
-function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, opts: { visual: boolean; readOnlyTools: boolean }) {
+function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual: boolean; readOnlyTools: boolean }) {
   // A run judged NOT visual (`looksVisual`) holds neither the browser family
   // nor the media tools: its server is told so, and registers only what is
   // left (a team run's `team_message`). Omitted, today's server.
@@ -6904,9 +6912,12 @@ function runClawboxServer(run: { id: string; directory: string; media?: RunMedia
       // the tool speaks as THIS run — the route then checks the claim
       // against the team's board, so a variable is a name, not a pass.
       // `none` for the planner, whose run has no task of its own.
+      // Every run is named, so a single run's server registers
+      // `assistant_message` (mcp/lib/run-context.ts soloRunContext); the
+      // route checks the claim against the run record.
+      ...(run.team || !run.readOnly ? { CLAWBOX_RUN_ID: run.id } : {}),
       ...(run.team
         ? {
-            CLAWBOX_RUN_ID: run.id,
             CLAWBOX_TEAM_ID: run.team.id,
             CLAWBOX_TEAM_ROLE: run.team.role,
             CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
@@ -7107,7 +7118,8 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // A read-only run holds none of the visual tools either: its server
     // registers only what is left (a team's `team_message`), so no browser
     // profile starts and no media allowance is handed to a run that reads.
-    else if (visual || opts.run.team) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual: visual && !opts.readOnly }));
+    // A single writing run always gets it: its server registers `assistant_message`.
+    else if (visual || opts.run.team || !opts.readOnly) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual: visual && !opts.readOnly }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
@@ -7170,7 +7182,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // the read-only ClawBox tools by name, a harness server as a whole or by
     // the tools its own filter names.
     const mcpAllowed = mcp ? [...(mcp.readOnlyTools ? MCP_READ_ONLY_TOOLS : []), ...mcp.allowedTools] : [];
-    args.push("--allowedTools", ...(opts.readOnly ? [...READ_ONLY_TOOLS.split(","), ...READ_ONLY_GIT_RULES] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT && !opts.readOnly ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    args.push("--allowedTools", ...(opts.readOnly ? [...READ_ONLY_TOOLS.split(","), ...READ_ONLY_GIT_RULES] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT && !opts.readOnly ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : opts.run && !opts.readOnly ? [MCP_SOLO_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -12617,7 +12629,7 @@ function spawnRun(
   const mcpPlan = run.readOnly ? undefined : runMcpPlan.get(run.id);
   const runMcp: RunMcpArgs | null = mcpPlan && !codex
     ? {
-        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team }, mcpPlan, { visual: runHoldsVisualTools(run.visual) })),
+        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team, readOnly: run.readOnly }, mcpPlan, { visual: runHoldsVisualTools(run.visual), solo: !run.team && !run.readOnly })),
         allowedTools: mcpPlan.allowedTools,
         disallowedTools: mcpPlan.disallowedTools,
         readOnlyTools: mcpPlan.readOnlyTools,

@@ -1023,6 +1023,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Team message to {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Team message to the lead: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Team message to the assistant: {text}",
+  "codingAgent.stepRunMessageToAssistant": "Message to the assistant ({kind}): {text}",
   "codingAgent.stepMessageMidTurn": "Message delivered mid-turn: {text}",
   "codingAgent.stepMessageToRun": "Message to the run: {text}",
   "codingAgent.secretsNameLabel": "Variable name",

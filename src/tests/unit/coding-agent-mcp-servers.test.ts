@@ -302,7 +302,8 @@ describe("a project with an empty allowlist", () => {
     // Today: a box with no allowlist and no harness extras at all.
     const before = await runIn("site");
     const today = normalised(readArgv(), before.id);
-    expect(today.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 2);
+    // The browser family, the media pair and the run's assistant_message.
+    expect(today.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 3);
     expect(today[today.indexOf("--mcp-config") + 1].startsWith("{")).toBe(true);
 
     // The same box once a board is configured and ANOTHER project opted in.
@@ -322,7 +323,7 @@ describe("a project with an empty allowlist", () => {
     await runIn("site");
     const argv = readArgv();
     expect(Object.keys(mcpConfig(argv).mcpServers)).toEqual(["clawbox"]);
-    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 2);
+    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 3);
   });
 });
 
