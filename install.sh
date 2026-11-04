@@ -11541,7 +11541,9 @@ step_llamacpp_runtime() {
 
   # The fetch below is by commit, and a server only hands out a commit by its
   # full name.
-  if ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  # Length tested apart from the class: a bounded repeat inside `[[ =~ ]]`
+  # costs bash a glibc NFA state per repetition (shell-regex-hygiene.test.ts).
+  if [ "${#LLAMACPP_COMMIT}" -ne 40 ] || ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]+$ ]]; then
     echo "  LLAMACPP_COMMIT must be a full 40-character commit hash, not '$LLAMACPP_COMMIT' — leaving llama-server as it is."
     [ -n "$(llamacpp_binary_commit "$LLAMACPP_SERVER_BIN")" ]
     return
