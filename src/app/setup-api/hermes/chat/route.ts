@@ -85,7 +85,9 @@ import {
   hermesFailureMessage,
   safeHermesFailureMessage,
   spawnFailureMessage,
+  withoutErrorPrefix,
 } from "@/lib/hermes-cli-message";
+import { cliRefusedSession, SESSION_REFUSED_MESSAGE, waitForDashboard } from "@/lib/hermes-session-refusal";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -121,6 +123,17 @@ const HERMES_TIMEOUT_MS = Number(process.env.HERMES_CHAT_TIMEOUT_MS || 600_000);
 // A chat reply can't legitimately exceed this; cap the buffer so a runaway
 // process can't grow it unbounded.
 const MAX_OUTPUT_BYTES = 2_000_000;
+
+/**
+ * A `hermes chat` run that exited non-zero, with the stderr its message was
+ * read from — the one retry below needs the CLI's own refusal line, not the
+ * sentence made of it.
+ */
+class HermesExitError extends Error {
+  constructor(message: string, readonly stderr: string) {
+    super(message);
+  }
+}
 
 /**
  * `chat -q` writes the REPLY to stdout and its `session_id: <id>` banner to
@@ -222,7 +235,7 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
       out += outDecoder.end();
       err += errDecoder.end();
       if (code === 0) resolve({ out: out.trim(), err });
-      else reject(new Error(hermesExitMessage(code, out, err)));
+      else reject(new HermesExitError(hermesExitMessage(code, out, err), err));
     });
   });
 }
@@ -848,7 +861,7 @@ async function runStreamedTurn(
       // route already uses: the diagnosis is not lost, it just stops being
       // published.
       if (final.error) console.error("[hermes chat] dashboard turn failed", final.error);
-      const detail = safeHermesFailureMessage("", final.error || "") || "Hermes chat failed";
+      const detail = withoutErrorPrefix(safeHermesFailureMessage("", final.error || "") || "Hermes chat failed");
       await appendTranscript({
         role: "system",
         text: `Error: ${detail}`,
@@ -879,7 +892,7 @@ async function runStreamedTurn(
     // Not for an abort: the socket died because the customer pressed Stop,
     // and a journal line per cancelled turn is noise, not diagnosis.
     if (raw && !isAbort(err)) console.error("[hermes chat] dashboard stream failed", raw);
-    const detail = safeHermesFailureMessage("", raw) || "Hermes chat failed";
+    const detail = withoutErrorPrefix(safeHermesFailureMessage("", raw) || "Hermes chat failed");
     // ── Silence is not failure: ask the agent before saying so ─────────
     //
     // A quiet stream means this socket stopped hearing. It does NOT mean
@@ -1552,32 +1565,36 @@ export async function POST(request: Request) {
     // the CLI while a clarify is outstanding leaves it outstanding; what bounds
     // that is the `agent.clarify_timeout: 300` this device seeds
     // (scripts/register-mcp.sh), after which the agent gives up on its own.
-    if (wantsStream(request) && imagePaths.length === 0) {
-      // The catalogue knows which providers are user-defined; the transport
-      // needs that one bit to read the dashboard's provider KIND honestly. Only
-      // the LIVE catalogue knows it: the catalog-file fallback writes `false`
-      // for every row (the manifest has no such column) and cold-start writes
-      // `true` for its own — neither is the dashboard's `is_user_defined`, and a
-      // wrong `false` would blank the label on the box's own provider.
-      const providerRow = wantsProvider && payload?.source === "dashboard"
-        ? payload.providers.find((row) => row.id === rawProvider)
-        : undefined;
-      // `source === "dashboard"` says where the payload came from, not that the
-      // dashboard reported this field. A row that simply omits `is_user_defined`
-      // normalises to null, and passing that on as `false` would blank the label
-      // on the box's own provider — the hazard the comment above names.
-      const reportedUserDefined = typeof providerRow?.isUserDefined === "boolean"
-        ? providerRow.isUserDefined
-        : undefined;
-      const turn = await openDashboardTurn({
-        text: promptWithImages,
-        ...(rawModel ? { model: rawModel } : {}),
-        ...(wantsProvider ? { provider: rawProvider } : {}),
-        ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
-        ...(rawReasoning ? { reasoning: rawReasoning } : {}),
-        ...(rawSessionId ? { sessionId: rawSessionId } : {}),
-        signal: live.signal,
-      });
+    const streamable = wantsStream(request) && imagePaths.length === 0;
+    // The catalogue knows which providers are user-defined; the transport
+    // needs that one bit to read the dashboard's provider KIND honestly. Only
+    // the LIVE catalogue knows it: the catalog-file fallback writes `false`
+    // for every row (the manifest has no such column) and cold-start writes
+    // `true` for its own — neither is the dashboard's `is_user_defined`, and a
+    // wrong `false` would blank the label on the box's own provider.
+    const providerRow = wantsProvider && payload?.source === "dashboard"
+      ? payload.providers.find((row) => row.id === rawProvider)
+      : undefined;
+    // `source === "dashboard"` says where the payload came from, not that the
+    // dashboard reported this field. A row that simply omits `is_user_defined`
+    // normalises to null, and passing that on as `false` would blank the label
+    // on the box's own provider — the hazard the comment above names.
+    const reportedUserDefined = typeof providerRow?.isUserDefined === "boolean"
+      ? providerRow.isUserDefined
+      : undefined;
+    // One shape for both attempts: the fast path here, and the single retry the
+    // CLI's refusal earns below.
+    const openStreamedTurn = () => openDashboardTurn({
+      text: promptWithImages,
+      ...(rawModel ? { model: rawModel } : {}),
+      ...(wantsProvider ? { provider: rawProvider } : {}),
+      ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
+      ...(rawReasoning ? { reasoning: rawReasoning } : {}),
+      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+      signal: live.signal,
+    });
+    if (streamable) {
+      const turn = await openStreamedTurn();
       // `wantsProvider` and not `rawProvider`: "auto" is ClawBox's word for "let
       // Hermes decide", so a turn that sent it named no provider either, and the
       // harness's own record is precisely the answer to what it decided.
@@ -1625,15 +1642,40 @@ export async function POST(request: Request) {
       }
       return NextResponse.json(answered);
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
+      const stopped = async () => {
         // The owner hit Stop; the child was already killed. The CLI answers
         // whole, so there is no fragment to keep — only the marker, so the
         // question does not read as a reply that got lost.
         await recordStoppedTurn(sessionKey, "");
         live.emit("stopped", {});
         return new NextResponse(null, { status: 499 });
+      };
+      if (err instanceof DOMException && err.name === "AbortError") return stopped();
+      // ── The CLI was refused this conversation: one retry, on the dashboard ──
+      //
+      // The first message after Hermes restarts (TASK-2152): one dashboard turn
+      // failed to open, and the CLI cannot resume a conversation the dashboard
+      // owns — see src/lib/hermes-session-refusal.ts. Only for that refusal,
+      // only on a turn the dashboard could have taken in the first place, and
+      // only ONCE: the retry ends in a stream or in the error below, never in
+      // another round.
+      const refused = err instanceof HermesExitError && Boolean(rawSessionId) && cliRefusedSession(err.stderr);
+      if (refused && streamable) {
+        console.log("[hermes chat] the CLI was refused this conversation (permission_denied); retrying once through the dashboard");
+        if (await waitForDashboard({ signal: live.signal })) {
+          const turn = await openStreamedTurn();
+          if (turn) {
+            console.log("[hermes chat] the retry through the dashboard opened; streaming it");
+            handedOff = true;
+            return streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, listening);
+          }
+        }
+        if (live.signal.aborted) return stopped();
+        console.log("[hermes chat] the retry through the dashboard could not open; the turn fails");
       }
-      const detail = err instanceof Error ? err.message : "Hermes chat failed";
+      const detail = refused
+        ? SESSION_REFUSED_MESSAGE
+        : withoutErrorPrefix(err instanceof Error ? err.message : "Hermes chat failed");
       // A failure is recorded too. Without this a refresh shows a question with
       // nothing under it and no hint that the box tried and failed — the same
       // screen a still-running turn produces, which is the worse of the two to

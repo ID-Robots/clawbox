@@ -522,6 +522,24 @@ function frameType(frame: GatewayFrame): string {
  * Read conservatively: a switch counts as made only when nothing says it was
  * not. `warning` is upstream's own channel for "the live session did not sync",
  * and `✗` is the marker its own output uses for a refusal.
+ *
+ * But `warning` is not ONLY that channel, and reading every warning as a
+ * refusal was the first-message failure of TASK-2152. A switch that TOOK can
+ * carry a note there too — measured on a board, v0.22.5, ClawBox AI:
+ *
+ *   { "output": "  ✓ Model switched: deepseek-v4-flash … ⚠ Note: …",
+ *     "warning": "Note: `deepseek-v4-flash` was not found in this custom
+ *                 endpoint's model listing (…). It may still work …" }
+ *
+ * The live agent had switched ("Model switched in-place" in the agent log),
+ * the turn was given up anyway, the CLI fallback cannot resume a session the
+ * dashboard owns (`permission_denied`), and the next message worked only
+ * because the session was by then already on the picked model. So a warning
+ * is a refusal UNLESS Hermes announced the switch: `_commit_agent_switch`
+ * ends in a `session.info` event naming the new model on this very socket,
+ * written before the reply. The deferred-confirm answer (an expensive model,
+ * not switched) and a failed sync both come with a warning and without that
+ * announcement, so they still read as refusals.
  */
 /**
  * Ids that are safe to place in a `/model …` command line.
@@ -603,13 +621,23 @@ function commandSafe(value: string): boolean {
   return !value.startsWith("-") && COMMAND_SAFE_ID.test(value);
 }
 
-function modelSwitchTook(frame: GatewayFrame): boolean {
+function modelSwitchTook(frame: GatewayFrame, announced: boolean): boolean {
   if (frame.error) return false;
   const result = frame.result || {};
-  const warning = result.warning;
-  if (typeof warning === "string" && warning.trim()) return false;
   const output = typeof result.output === "string" ? result.output : "";
-  return !output.includes("✗");
+  if (output.includes("✗")) return false;
+  const warning = result.warning;
+  if (typeof warning === "string" && warning.trim()) return announced;
+  return true;
+}
+
+/** The model a `session.info` event announces, or "" when the frame is not one. */
+function announcedModel(frame: GatewayFrame): string {
+  if (frameType(frame) !== "session.info") return "";
+  const payload = frame.params?.payload;
+  if (!payload || typeof payload !== "object") return "";
+  const model = (payload as Record<string, unknown>).model;
+  return typeof model === "string" ? model.trim() : "";
 }
 
 function payloadText(frame: GatewayFrame): string {
@@ -869,6 +897,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
    */
   let framesSeen = 0;
   let lastEvent = "(none)";
+  /**
+   * The model a `/model` switch is waiting to hear announced, and whether it
+   * was — see `modelSwitchTook`. Read here rather than in `awaitReply`,
+   * which drops every event on its way to the reply it is looking for.
+   */
+  let switchTarget = "";
+  let switchAnnounced = false;
 
   socket.on("message", (raw) => {
     framesSeen += 1;
@@ -885,6 +920,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     }
     const type = frameType(frame);
     if (type) lastEvent = type;
+    if (switchTarget && announcedModel(frame) === switchTarget) switchAnnounced = true;
     if (waiter) {
       const resume = waiter;
       waiter = null;
@@ -1062,6 +1098,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
         throw new Error("model or provider is not safe to switch with");
       }
       const switchId = nextRpcId();
+      switchTarget = req.model;
       socket.send(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -1097,7 +1134,8 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       // a resumed session's frozen launch, so the route resumes without them
       // and the session's own route answers — the turn is not lost, and its
       // record names no model (`cliServedPair` in the route).
-      if (!modelSwitchTook(switched)) {
+      switchTarget = "";
+      if (!modelSwitchTook(switched, switchAnnounced)) {
         throw new Error(`dashboard would not switch this session to ${req.model}`);
       }
       activeModel = req.model;

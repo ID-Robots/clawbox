@@ -287,6 +287,20 @@ export function safeHermesFailureMessage(stdout: string, stderr: string): string
 }
 
 /**
+ * The failure without the CLI's own `Error: ` opener.
+ *
+ * Hermes prints its failures as `"Error: " + message` (`launch_from_args`),
+ * and the chat adds its own `Error: ` wherever it shows one — the transcript
+ * row, the bubble (`describeChatFailure`). Passing the CLI's line on whole is
+ * how a bubble read "Error: Error: permission_denied" (TASK-2152). Only the
+ * bare word at the very start goes: `RuntimeError: …` names the failure and
+ * stays.
+ */
+export function withoutErrorPrefix(text: string): string {
+  return text.replace(/^\s*Error:\s*/i, "").trim() || text.trim();
+}
+
+/**
  * Blank a secret out of a stream before anything else looks at it.
  *
  * Argv is the leak: `hermes auth add … --api-key <key>` puts the credential on
