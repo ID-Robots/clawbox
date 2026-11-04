@@ -4091,6 +4091,7 @@ describe("updater", () => {
         "restart",
         "post_update",
         "hermes_edition",
+        "llamacpp_runtime",
       ]);
     });
 
@@ -4129,8 +4130,20 @@ describe("updater", () => {
         "restart",
         "post_update",
         "gateway_verify",
+        "llamacpp_runtime",
       ]);
       expect(ids).not.toContain("hermes_edition");
+    });
+
+    // A box kept the llama-server it was born with through every move of the
+    // llama.cpp pin, because no update ever asked (TASK-2166). The step that
+    // asks is on every edition — both run Gemma and the memory embedder on
+    // that binary — and last, after the gateway is verified.
+    it("brings llama-server onto the pinned llama.cpp last, on every edition", async () => {
+      for (const edition of ["openclaw", "hermes", "dual", undefined]) {
+        const ids = await stepIdsFor(edition);
+        expect(ids.at(-1), `llamacpp_runtime closes the update on ${edition ?? "default"}`).toBe("llamacpp_runtime");
+      }
     });
 
     // CUDA/JetPack is laid down once, by the image or the first install.sh run.

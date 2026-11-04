@@ -433,8 +433,10 @@ export const de: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "Nicht installiert. Richten Sie es in Speicher-Shard ein.",
   "localModels.detail.embeddingsReady": "Bereit. Wacht auf, wenn Sie suchen, und schläft danach, um Arbeitsspeicher zu sparen.",
   "localModels.detail.embeddingsFailed": "Nach einem Fehler gestoppt. Startet bei der nächsten Suche erneut.",
+  "localModels.detail.embeddingsFailedBecause": "Nach einem Fehler gestoppt: {reason}",
   "localModels.detail.embeddingsLocal": "Durchsucht Ihren Speicher auf dieser Box.",
   "localModels.detail.embeddingsCloud": "Durchsucht Ihren Speicher in der Cloud.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Durchsucht Ihren Speicher in der Cloud. Das Modell auf dieser Box wurde nach einem Fehler gestoppt: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "Dieses Modell konnte nicht geändert werden.",

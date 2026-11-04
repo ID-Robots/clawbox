@@ -120,7 +120,11 @@ describe("install.sh pins llama.cpp instead of tracking master", () => {
     // Two devices here ended up on different upstream commits because the clone
     // was unpinned — the same install produced different inference binaries.
     expect(src).toMatch(/LLAMACPP_COMMIT="\$\{LLAMACPP_COMMIT:-[0-9a-f]{40}\}"/);
-    expect(src).toMatch(/git checkout --quiet \$LLAMACPP_COMMIT/);
+    // By commit, from the URL, and that commit or nothing (TASK-2166): the
+    // old "could not check out — building whatever is checked out" fallback
+    // is how a box ended up off the pin.
+    expect(src).toMatch(/git fetch --quiet \$LLAMACPP_REPO_URL \$pin && git -c advice\.detachedHead=false checkout --quiet --force --detach \$pin/);
+    expect(src).not.toMatch(/building whatever is checked out/);
   });
 
   it("does not shallow-clone, which cannot reach an arbitrary commit", () => {

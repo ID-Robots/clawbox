@@ -74,8 +74,10 @@ export const localModelsEn: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "Not installed. Set it up in Memory Shard.",
   "localModels.detail.embeddingsReady": "Ready. Wakes when you search, then sleeps to save memory.",
   "localModels.detail.embeddingsFailed": "Stopped after an error. It starts again on the next search.",
+  "localModels.detail.embeddingsFailedBecause": "Stopped after an error: {reason}",
   "localModels.detail.embeddingsLocal": "Searching your memory on this box.",
   "localModels.detail.embeddingsCloud": "Searching your memory in the cloud.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Searching your memory in the cloud. The model on this box stopped after an error: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "Could not change that model.",

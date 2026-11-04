@@ -421,8 +421,10 @@ export const bg: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "Не е инсталиран. Настройте го в Фрагмент на паметта.",
   "localModels.detail.embeddingsReady": "Готов. Събужда се при търсене и след това заспива, за да пести памет.",
   "localModels.detail.embeddingsFailed": "Спрян след грешка. Стартира отново при следващото търсене.",
+  "localModels.detail.embeddingsFailedBecause": "Спрян след грешка: {reason}",
   "localModels.detail.embeddingsLocal": "Търси в паметта ви на тази кутия.",
   "localModels.detail.embeddingsCloud": "Търси в паметта ви в облака.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Търси в паметта ви в облака. Моделът на тази кутия спря след грешка: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "Моделът не можа да бъде променен.",

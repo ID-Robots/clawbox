@@ -18,6 +18,7 @@ import { constants as fsConstants, promises as fs } from "fs";
 import os from "os";
 import path from "./runtime-path";
 import { EMBED_MODEL_ALIAS, EMBED_UNIT, isEmbeddingServerArgv } from "./embed-runtime-ids";
+import { readEmbedStopReason } from "./embed-server";
 
 const execFileAsync = promisify(execFile);
 
@@ -69,7 +70,8 @@ export type DetailCode =
   | "whisperReady" | "whisperOff" | "whisperNotInstalled"
   | "llamacppNotInstalled" | "llamacppAnswering" | "llamacppReady" | "llamacppOff"
   | "embeddingsNotOnEdition" | "embeddingsNotInstalled" | "embeddingsOff" | "embeddingsReady"
-  | "embeddingsFailed" | "embeddingsLocal" | "embeddingsCloud";
+  | "embeddingsFailed" | "embeddingsFailedBecause" | "embeddingsLocal" | "embeddingsCloud"
+  | "embeddingsCloudLocalFailed";
 
 export interface LocalModelEntry {
   id: string;
@@ -96,7 +98,11 @@ export interface LocalModelEntry {
   /** One line the customer can act on. Never a command line, never a path. */
   detail: string;
   detailCode: DetailCode;
-  /** The names the `runtime` / `detail` codes interpolate: model names, never paths. */
+  /**
+   * The names the `runtime` / `detail` codes interpolate: model names, never
+   * paths — and `reason`, the embedder's own last word when its unit failed,
+   * with every path in it cut to its last component.
+   */
   params?: Record<string, string>;
   /** Settings section or app that owns this engine's deeper controls. */
   managedBy?: "clawkeep" | "localAi";
@@ -652,6 +658,12 @@ interface EmbeddingProbe {
  * The embedder is reached through the proxy now, so a sleeping unit is exactly
  * what "starts when needed" means, and the unit's own state is the reading.
  */
+/** Why clawbox-embed.service failed, or null when it has not failed. */
+async function failedEmbedderReason(): Promise<string | null> {
+  const unit = await readUnitState(EMBED_UNIT, "system");
+  return unit.failed ? readEmbedStopReason() : null;
+}
+
 async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
   const base = {
     id: "embeddings",
@@ -685,6 +697,12 @@ async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
     const params: Record<string, string> = {};
     if (model) params.model = model;
     if (via) params.via = via;
+    // The model on this box is here and its last start FAILED: say why. A row
+    // that only said "in the cloud" over an embedder that could not start
+    // (TASK-2166, a llama-server too old for one of its flags) gave the owner
+    // nothing to act on, and nothing else on the box said it either.
+    const stopped = probe.engine.installed ? await failedEmbedderReason() : null;
+    if (stopped) params.reason = stopped;
     return {
       ...base,
       runtime: [model, via ? `via ${via}` : null].filter(Boolean).join(" ") || "Finds things in your memory",
@@ -694,7 +712,9 @@ async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
       diskBytes: null,
       memoryBytes: null,
       managedBy: "clawkeep",
-      ...line("embeddingsCloud", "Searching your memory in the cloud."),
+      ...(stopped
+        ? line("embeddingsCloudLocalFailed", `Searching your memory in the cloud. The model on this box stopped after an error: ${stopped}`)
+        : line("embeddingsCloud", "Searching your memory in the cloud.")),
       ...(Object.keys(params).length ? { params } : {}),
     };
   }
@@ -706,7 +726,9 @@ async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
     ? await processMemoryBytes("llama-server", OLLAMA_OWNED_PROCESS, isEmbeddingServerArgv)
     : null;
   const model = friendlyModelName(probe.model) ?? friendlyModelName(EMBED_MODEL_ALIAS) ?? "Qwen 3";
-  const params = { model, via: "llama.cpp" };
+  const stopped = installed && unit.failed ? await readEmbedStopReason() : null;
+  const params: Record<string, string> = { model, via: "llama.cpp" };
+  if (stopped) params.reason = stopped;
   return {
     ...base,
     runtime: `${model} via llama.cpp`,
@@ -716,15 +738,21 @@ async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
     diskBytes: probe.engine.modelBytes,
     memoryBytes,
     managedBy: "clawkeep",
+    // A known reason outranks "not pointed at it yet": the wiring
+    // (scripts/ensure-local-embeddings.sh) points memory search here only once
+    // the embedder answers, so an embedder that cannot start is exactly why it
+    // was never pointed here.
     ...(!installed
       ? line("embeddingsNotInstalled", "Not installed. Set it up in Memory Shard.")
-      : !probe.available
-        ? line("embeddingsOff", "Memory search is not pointed at it yet. Set it up in Memory Shard.")
-        : unit.active
-          ? line("embeddingsLocal", "Searching your memory on this box.")
-          : unit.failed
-            ? line("embeddingsFailed", "Stopped after an error. It starts again on the next search.")
-            : line("embeddingsReady", "Ready. Wakes when you search, then sleeps to save memory.")),
+      : stopped
+        ? line("embeddingsFailedBecause", `Stopped after an error: ${stopped}`)
+        : !probe.available
+          ? line("embeddingsOff", "Memory search is not pointed at it yet. Set it up in Memory Shard.")
+          : unit.active
+            ? line("embeddingsLocal", "Searching your memory on this box.")
+            : unit.failed
+              ? line("embeddingsFailed", "Stopped after an error. It starts again on the next search.")
+              : line("embeddingsReady", "Ready. Wakes when you search, then sleeps to save memory.")),
     params,
   };
 }

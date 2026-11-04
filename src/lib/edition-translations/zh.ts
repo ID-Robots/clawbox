@@ -445,8 +445,10 @@ export const zh: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "未安装。请在 记忆碎片 中设置。",
   "localModels.detail.embeddingsReady": "就绪。搜索时唤醒，之后休眠以节省内存。",
   "localModels.detail.embeddingsFailed": "因错误而停止。下次搜索时会重新启动。",
+  "localModels.detail.embeddingsFailedBecause": "因错误而停止：{reason}",
   "localModels.detail.embeddingsLocal": "正在这台设备上搜索你的记忆。",
   "localModels.detail.embeddingsCloud": "正在云端搜索你的记忆。",
+  "localModels.detail.embeddingsCloudLocalFailed": "正在云端搜索你的记忆。此设备上的模型因错误而停止：{reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "无法更改该模型。",

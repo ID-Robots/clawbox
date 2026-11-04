@@ -4050,6 +4050,33 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // fails the install if anything IS listening on 18789.
     applies: () => !gatewayIsAbsent(),
   },
+  {
+    // llama-server onto the llama.cpp commit this release pins
+    // (install.sh's step_llamacpp_runtime). install.sh only ever asked whether
+    // a llama-server was THERE, and no update asked at all, so a box kept the
+    // build it was born with through every pin move — one was still on a May
+    // build that rejects `--embd-normalize`, and its memory embedder could not
+    // start (TASK-2166).
+    //
+    // A box already on the pin answers in one `--version` probe. One that is
+    // not compiles llama.cpp with CUDA once — 25 min measured on an 8 GB Orin
+    // Nano with the assistant up beside it (four compile jobs; a fresh
+    // install's 19 min runs six) — in a tree beside the build it runs on,
+    // which keeps working until the new one is swapped in and has started. Last, after the gateway is verified, so
+    // a slow compile never stands between the owner and a working assistant.
+    // Not failFast, and advisory on an overrun: a box that could not rebuild
+    // keeps its old (working) llama-server and says so on a CLAWBOX-WARN
+    // line, a warning on the update rather than a failed one.
+    //
+    // Not on a PC: install-x64.sh builds llama.cpp its own way, and neither
+    // x64 root dispatcher has this step.
+    id: "llamacpp_runtime",
+    label: "Updating the local AI runtime",
+    timeoutMs: 90 * 60_000,
+    requiresRoot: true,
+    advisoryOnOverrun: true,
+    applies: () => !onX64Host(),
+  },
   // Two steps are deliberately NOT on this list any more (owner's rulings,
   // 2026-09-17).
   //
@@ -4088,6 +4115,19 @@ const UPDATE_STEPS: UpdateStepDef[] = [
  */
 function applicableSteps(): UpdateStepDef[] {
   return UPDATE_STEPS.filter((step) => !step.applies || step.applies());
+}
+
+/**
+ * Either kind of PC: the desktop integration package or install-x64.sh. A
+ * host file that cannot be judged answers "no" — the appliance's reading,
+ * the same one `rebuiltByOwner` takes.
+ */
+function onX64Host(): boolean {
+  try {
+    return hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR);
+  } catch {
+    return false;
+  }
 }
 
 /**
