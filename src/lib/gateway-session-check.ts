@@ -1,0 +1,210 @@
+/**
+ * Does the OpenClaw gateway SERVE CHAT SESSIONS, not merely answer `/healthz`?
+ *
+ * TASK-2153. An update that also moved the core (2026.8.1 → 2026.10.9) ended
+ * green — "Verifying gateway health" passed over a gateway that listened and
+ * answered `/healthz` `{"ok":true,"status":"live"}` — and the chat was dead for
+ * 22 minutes. Every session call (`chat.history`, `sessions.patch`,
+ * `models.list`, `agent`) answered `UNAVAILABLE` "SQLite session reclamation
+ * commit checkpoint expired" once a reclamation worker over a large agent
+ * database had run 33.9 s and been rejected. The gateway never recovered by
+ * itself; one restart fixed it at once
+ * (docs/issues/openclaw-session-reclamation-checkpoint.md).
+ *
+ * So the verify asks the question the chat asks — one `chat.history` on the
+ * main session over the gateway's own RPC — and acts only on the answer that
+ * failure gives:
+ *
+ * - it answers: the gateway serves sessions, and that is the whole cost;
+ * - it answers UNAVAILABLE, or names the reclamation checkpoint: restart the
+ *   gateway ONCE, the way the update restarts it, and ask again until it
+ *   answers or the recovery window ends — then fail the step with words the
+ *   owner can act on, never a green "Completed" over a dead chat;
+ * - anything else — no token this server can use, a gateway still starting
+ *   for the whole window, a different refusal — is not that failure, and the
+ *   step goes on exactly as it did before this check existed. A check that
+ *   cannot ask must not become a failed update.
+ *
+ * POLICY ONLY: the probe, the restart and the clock are the caller's, so every
+ * outcome is tested without a gateway (gateway-session-check.test.ts).
+ */
+
+import { gatewayWsMainChatHistory } from "@/lib/openclaw-gateway-ws";
+
+/** One ask of the gateway, classified. */
+export type SessionProbe =
+  /** It answered: the session store opened. */
+  | { kind: "ok" }
+  /** It answered that it cannot serve sessions — the failure this check is for. */
+  | { kind: "unavailable"; detail: string }
+  /** It answered with some other refusal: not that failure, not this check's to judge. */
+  | { kind: "refused"; detail: string }
+  /**
+   * It could not be asked: not listening, still starting, no answer in time.
+   * `final` when asking again cannot help (no gateway token this server can use).
+   */
+  | { kind: "unreachable"; detail: string; final: boolean };
+
+/** The core's own words for the store failure, whatever code they arrive with. */
+const SESSION_STORE_FAILURE_RE = /session reclamation|reclamation commit|commit checkpoint/i;
+
+/**
+ * What an error from {@link gatewayWsMainChatHistory} says about the gateway.
+ *
+ * By name, not `instanceof`: suites that import the updater mock
+ * `@/lib/openclaw-gateway-ws` without its classes, and `instanceof undefined`
+ * throws (the same reason `restartGatewayForRecovery` matches by name).
+ */
+export function classifySessionProbeError(err: unknown): SessionProbe {
+  const failure = err as { name?: unknown; code?: unknown; message?: unknown } | null;
+  const message = typeof failure?.message === "string" && failure.message ? failure.message : String(err);
+  if (failure?.name === "GatewayRpcError") {
+    const code = typeof failure.code === "string" && failure.code ? failure.code : "ERROR";
+    const detail = `${code}: ${message}`;
+    if (code === "UNAVAILABLE" || SESSION_STORE_FAILURE_RE.test(message)) return { kind: "unavailable", detail };
+    return { kind: "refused", detail };
+  }
+  if (SESSION_STORE_FAILURE_RE.test(message)) return { kind: "unavailable", detail: message };
+  return {
+    kind: "unreachable",
+    detail: message,
+    final: failure?.name === "GatewayWsUnavailableError" && message === "no gateway token",
+  };
+}
+
+/** One `chat.history` on the main session, as the chat opens it. Never throws. */
+export async function probeMainChatSession(timeoutMs: number): Promise<SessionProbe> {
+  try {
+    await gatewayWsMainChatHistory({ timeoutMs });
+    return { kind: "ok" };
+  } catch (err) {
+    return classifySessionProbeError(err);
+  }
+}
+
+/** The answer the field box gave, word for word — what {@link withSimulatedSessionFault} plays back. */
+export const SIMULATED_SESSION_FAULT: SessionProbe = {
+  kind: "unavailable",
+  detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired",
+};
+
+/**
+ * A hardware-test seam, and nothing else: `once` answers the first ask with
+ * {@link SIMULATED_SESSION_FAULT} and lets the real gateway answer the rest,
+ * `always` answers every ask with it — so the restart, and the failed step, can
+ * be shown on a board against a real gateway and a real restart. The updater
+ * reads it from `CLAWBOX_TEST_SESSION_FAULT`, which nothing on a box sets; any
+ * other value is the probe untouched.
+ */
+export function withSimulatedSessionFault(
+  probe: () => Promise<SessionProbe>,
+  mode: string | undefined,
+): () => Promise<SessionProbe> {
+  if (mode !== "once" && mode !== "always") return probe;
+  let played = false;
+  return async () => {
+    if (mode === "always" || !played) {
+      played = true;
+      return SIMULATED_SESSION_FAULT;
+    }
+    return probe();
+  };
+}
+
+export interface SessionCheckDeps {
+  /** One ask; never throws ({@link probeMainChatSession}). */
+  probe: () => Promise<SessionProbe>;
+  /** Restart the gateway the way the caller does, and wait until it listens; throws when it does not. */
+  restart: () => Promise<void>;
+  /** How long a gateway that cannot be asked yet is asked again, before any restart. */
+  windowMs: number;
+  /** How long the restarted gateway has to answer. */
+  recoveryWindowMs: number;
+  /** Between two asks. */
+  intervalMs: number;
+  log?: (line: string) => void;
+  /** What the update screen says while the check recovers; `undefined` clears it. */
+  onDetail?: (detail: string | undefined) => void;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+export type SessionCheckOutcome =
+  | { verdict: "serving"; restarted: boolean }
+  /** It could not be asked, or answered with another refusal: the caller carries on as before. */
+  | { verdict: "unconfirmed"; detail: string };
+
+/** The step's failure: the gateway still cannot serve sessions after its one restart. */
+export class GatewaySessionsUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GatewaySessionsUnavailableError";
+  }
+}
+
+/**
+ * Ask until `settles` says the answer is the one wanted or the window is spent,
+ * and answer the last ask. Always asks once, also on a spent window; never asks
+ * again when asking again cannot help.
+ */
+async function askWithin(
+  deps: SessionCheckDeps,
+  windowMs: number,
+  settles: (answer: SessionProbe) => boolean,
+): Promise<SessionProbe> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + (Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0);
+  const interval = Number.isFinite(deps.intervalMs) && deps.intervalMs > 0 ? deps.intervalMs : 1;
+  for (;;) {
+    const answer = await deps.probe();
+    if (settles(answer) || (answer.kind === "unreachable" && answer.final)) return answer;
+    const left = deadline - now();
+    if (left <= 0) return answer;
+    await sleep(Math.min(interval, left));
+  }
+}
+
+function stillUnavailableMessage(before: string, after: Exclude<SessionProbe, { kind: "ok" }>): string {
+  const now = after.kind === "unreachable" ? `it does not answer (${after.detail})` : `it still answers ${after.detail}`;
+  return `The OpenClaw gateway is running but cannot open chat sessions (${before}), `
+    + `and restarting it once did not fix that: ${now}. The chat will not answer until it can. `
+    + "Restart the device; if the chat is still silent, retry the update or contact support with this message.";
+}
+
+/**
+ * Prove the gateway serves chat sessions, restarting it once if it answers
+ * that it cannot. Throws {@link GatewaySessionsUnavailableError} when it still
+ * cannot after that restart, and whatever `restart` throws when it does not
+ * come back at all.
+ */
+export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<SessionCheckOutcome> {
+  const log = deps.log ?? ((line: string) => console.log(line));
+  // Before any restart, any ANSWER settles it: only "cannot ask yet" is asked
+  // again, so a box whose gateway is still starting is waited for, not restarted.
+  const first = await askWithin(deps, deps.windowMs, (answer) => answer.kind !== "unreachable");
+  if (first.kind === "ok") return { verdict: "serving", restarted: false };
+  if (first.kind !== "unavailable") {
+    log(`could not confirm the gateway serves chat sessions (${first.detail}); carrying on`);
+    return { verdict: "unconfirmed", detail: first.detail };
+  }
+
+  log(`the gateway is up but cannot serve chat sessions (${first.detail}); restarting it once`);
+  deps.onDetail?.("The gateway is up but cannot open chat sessions — restarting it once");
+  try {
+    await deps.restart();
+    deps.onDetail?.("Waiting for the restarted gateway to open chat sessions");
+    // After the restart only a real answer is proof: this gateway could not
+    // serve a session a moment ago, and a fresh one may spend a while in the
+    // same reclamation before it can.
+    const after = await askWithin(deps, deps.recoveryWindowMs, (answer) => answer.kind === "ok");
+    if (after.kind === "ok") {
+      log("the restarted gateway serves chat sessions again");
+      return { verdict: "serving", restarted: true };
+    }
+    log(`the restarted gateway still cannot serve chat sessions (${after.detail})`);
+    throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first.detail, after));
+  } finally {
+    deps.onDetail?.(undefined);
+  }
+}

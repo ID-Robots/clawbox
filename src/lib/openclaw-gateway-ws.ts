@@ -126,6 +126,30 @@ export async function gatewayWsChatSendMain(
 }
 
 /**
+ * Read the newest message of the main chat session — the `chat.history` the
+ * web chat sends the moment it opens, for the session it binds to (the key
+ * from THIS hello, as {@link gatewayWsChatSendMain} takes it). `/healthz`
+ * answers off a flag; this one has to open the session store, which is what
+ * the update's verify needs to know (src/lib/gateway-session-check.ts). Only
+ * the key it read is answered, never the message. Rejects as
+ * {@link gatewayWsCall} does.
+ */
+export async function gatewayWsMainChatHistory(
+  options: GatewayWsCallOptions = {},
+): Promise<{ sessionKey: string }> {
+  let sessionKey = "main";
+  await callAfterHello(
+    "chat.history",
+    (hello) => {
+      sessionKey = mainSessionKeyOf(hello);
+      return { sessionKey, limit: 1 };
+    },
+    options,
+  );
+  return { sessionKey };
+}
+
+/**
  * The sessions with agent work running or queued RIGHT NOW (`sessions.list`
  * with `activeOnly`), newest-updated first, and the main session's key from
  * the same handshake — so a caller can tell the conversation the web chat is

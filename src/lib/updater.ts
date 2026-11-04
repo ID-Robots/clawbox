@@ -47,7 +47,14 @@ import {
   X64_DESKTOP_CORE_STEP_TIMEOUT_MS,
   X64_DESKTOP_GATEWAY_READY_WAIT_MS,
 } from "./x64-integration";
-import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
+import {
+  UNIT_JOB_SETTLE_BUDGET_MS,
+  describeUnitState,
+  readUnitState,
+  runUnitJob,
+  type UnitJobOutcome,
+} from "./gateway-unit-job";
+import { probeMainChatSession, verifyGatewaySessions, withSimulatedSessionFault } from "./gateway-session-check";
 import {
   describeStillStarting,
   formatWaited,
@@ -2078,6 +2085,16 @@ const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
 const GATEWAY_START_LIMIT_MS = Number(process.env.GATEWAY_START_LIMIT_MS || String(GATEWAY_PRE_START_TIMEOUT_MS));
 const GATEWAY_START_POLL_MS = Number(process.env.GATEWAY_START_POLL_MS || "5000");
 const GATEWAY_START_POLL_MAX_MS = Number(process.env.GATEWAY_START_POLL_MAX_MS || "15000");
+// The session check after the gateway listens (`ensureGatewayServesSessions`):
+// how long a gateway that cannot be asked yet — its first 10-20 s refuse every
+// connect with "gateway starting" — is asked again, how long a gateway the
+// check restarted has to answer (a fresh start may spend a while in the same
+// reclamation), and how long one `chat.history` may take on a loaded Jetson.
+// Tunable for tests only.
+const GATEWAY_SESSION_WINDOW_MS = Number(process.env.GATEWAY_SESSION_WINDOW_MS || "60000");
+const GATEWAY_SESSION_RECOVERY_WINDOW_MS = Number(process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS || "120000");
+const GATEWAY_SESSION_POLL_MS = Number(process.env.GATEWAY_SESSION_POLL_MS || "3000");
+const GATEWAY_SESSION_CALL_TIMEOUT_MS = 15_000;
 // The floor of the update's `doctor --fix` bound; it grows with the databases.
 const DOCTOR_FIX_TIMEOUT_MS = 90_000;
 
@@ -2565,7 +2582,12 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
   );
 }
 
+const GATEWAY_STOP_CLIENT_MS = 30_000;
+const GATEWAY_STOP_UNCLEAN = "gateway-stop-unclean";
+
 async function stopGatewayForMaintenance(): Promise<void> {
+  // Read before the stop so an earlier crash's result is not blamed on it.
+  const before = await readUnitState("clawbox-gateway.service").catch(() => null);
   // The unit's own stop deadline is the client's 30 s too, so a drain that
   // uses all of it outlives the client by the moment systemd takes to kill.
   // That stop is waited for on the unit, never reported as a failure, and
@@ -2573,13 +2595,44 @@ async function stopGatewayForMaintenance(): Promise<void> {
   // maintenance step is about to touch.
   const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
     unit: "clawbox-gateway.service",
-    timeoutMs: 30_000,
+    timeoutMs: GATEWAY_STOP_CLIENT_MS,
   });
   if (stop.kind === "in-flight") {
     throw new Error(`clawbox-gateway was still stopping ${Math.round(stop.waitedMs / 1000)}s after it was asked to — not starting maintenance beside it`);
   }
   if (stop.kind === "settled" && stop.state.activeState === "active") {
     throw new Error(`clawbox-gateway did not stop: it is ${describeUnitState(stop.state)}`);
+  }
+  if (before && before.activeState !== "inactive" && before.activeState !== "failed") {
+    await warnIfGatewayStopUnclean(stop);
+  }
+}
+
+/**
+ * Say so on the update's own result when the update stopped a running gateway
+ * and it did not go quietly: the stop outlived its 30 s client, or the unit
+ * ended failed (`Gateway shutdown did not complete cleanly`, exit 1, is how a
+ * box with a dead chat after an update began — TASK-2153). The update carries
+ * on — the gateway is down either way — but this was only in the journal, and
+ * it is the first line anyone diagnosing what came next needs. Never throws.
+ */
+async function warnIfGatewayStopUnclean(stop: Exclude<UnitJobOutcome, { kind: "in-flight" }>): Promise<void> {
+  try {
+    const state = stop.kind === "settled" ? stop.state : await readUnitState("clawbox-gateway.service");
+    const failed = state !== null && (state.activeState === "failed" || (state.result !== "" && state.result !== "success"));
+    if (stop.kind !== "settled" && !failed) return;
+    const ended = state ? ` (clawbox-gateway.service ended ${describeUnitState(state)})` : "";
+    const how = stop.kind === "settled"
+      ? `took about ${Math.round((GATEWAY_STOP_CLIENT_MS + stop.waitedMs) / 1000)}s to stop, longer than the ${GATEWAY_STOP_CLIENT_MS / 1000}s it is given`
+      : "did not shut down cleanly";
+    warnUpdate(
+      GATEWAY_STOP_UNCLEAN,
+      `The OpenClaw gateway running before the update ${how} when the update stopped it${ended}. `
+        + "The update carried on and started it again; if the chat does not answer afterwards, restart the device.",
+    );
+    await persistWarnings();
+  } catch (err) {
+    console.warn("[Updater] could not record how the gateway stopped:", err instanceof Error ? err.message : err);
   }
 }
 
@@ -3824,6 +3877,56 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
 }
 
 /**
+ * One plain restart of the gateway, the way this install restarts it, and the
+ * same wait `ensureGatewayHealthy` gives a restart — no doctor, no pre-start
+ * of the update's own: the session failure below is the running process's,
+ * and the restart that cleared it in the field was nothing more.
+ */
+async function restartGatewayAndWait(): Promise<void> {
+  await restartGatewayForRecovery();
+  if (hasX64DesktopIntegration(PROJECT_DIR)) {
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    throw new Error("The existing OpenClaw user gateway did not become ready after a restart. Check its service logs before retrying the update.");
+  }
+  const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+  if (verdict.kind === "listening") return;
+  throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
+}
+
+/**
+ * After the gateway listens: does it serve the chat (TASK-2153)?
+ *
+ * A gateway that answers `/healthz` and listens can still refuse every session
+ * call — a box updated to a new core did, for 22 minutes, after this step had
+ * passed. `@/lib/gateway-session-check` asks it one `chat.history`, restarts it
+ * once when it answers that it cannot, and fails the step with the owner's
+ * words when the restart did not help. A check that cannot ask (no token this
+ * server can read, a gateway still starting) leaves the step as it was.
+ *
+ * `CLAWBOX_TEST_SESSION_FAULT` is a hardware-test seam (see
+ * `withSimulatedSessionFault`), read per run; nothing on a box sets it.
+ */
+async function ensureGatewayServesSessions(): Promise<void> {
+  // No OpenClaw gateway on the Hermes edition: nothing to ask.
+  if (gatewayIsAbsent()) return;
+  const outcome = await verifyGatewaySessions({
+    probe: withSimulatedSessionFault(
+      () => probeMainChatSession(GATEWAY_SESSION_CALL_TIMEOUT_MS),
+      process.env.CLAWBOX_TEST_SESSION_FAULT,
+    ),
+    restart: restartGatewayAndWait,
+    windowMs: GATEWAY_SESSION_WINDOW_MS,
+    recoveryWindowMs: GATEWAY_SESSION_RECOVERY_WINDOW_MS,
+    intervalMs: GATEWAY_SESSION_POLL_MS,
+    log: (line) => console.log(`[Updater] gateway sessions: ${line}`),
+    onDetail: showRunningStepDetail,
+  });
+  if (outcome.verdict === "serving") {
+    console.log(`[Updater] gateway sessions: serving${outcome.restarted ? " after one restart" : ""}`);
+  }
+}
+
+/**
  * Retry the plugin repairs an OLDER CORE left behind, once the gateway is known
  * to be healthy (TASK-1088).
  *
@@ -4037,10 +4140,12 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 90_000,
     // Health first: the after-update plugin retry (TASK-1088) restarts the
     // gateway only when it has something to load, and only a healthy gateway
-    // is one it can prove a repair against.
+    // is one it can prove a repair against. The session check comes after it,
+    // so it asks the gateway the owner is left with (TASK-2153).
     customRun: async () => {
       await ensureGatewayHealthy();
       await retryPluginRepairsLeftByOlderCore();
+      await ensureGatewayServesSessions();
       await warnIfOpenclawDatabasesDegraded();
     },
     failFast: true,
@@ -5440,6 +5545,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     customRun: async () => {
       await ensureGatewayHealthy({ restartFirst: true });
       await retryPluginRepairsLeftByOlderCore();
+      await ensureGatewayServesSessions();
       await warnIfOpenclawDatabasesDegraded();
     },
   },

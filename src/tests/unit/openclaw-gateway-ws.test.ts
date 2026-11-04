@@ -144,6 +144,28 @@ describe("gatewayWsChatSendMain", () => {
   });
 });
 
+describe("gatewayWsMainChatHistory", () => {
+  it("asks the session the hello names as main for its newest message — what the chat asks on open", async () => {
+    helloExtra = { snapshot: { sessionDefaults: { mainSessionKey: "agent:main:main" } } };
+    const port = await fakeGateway((method) => (method === "chat.history" ? { ok: true, payload: { messages: [] } } : { ok: false, error: { code: "NOT_FOUND" } }));
+    await load(port);
+    expect(await lib.gatewayWsMainChatHistory()).toEqual({ sessionKey: "agent:main:main" });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "chat.history"]);
+    expect(seen[1].params).toEqual({ sessionKey: "agent:main:main", limit: 1 });
+  });
+
+  it("raises the gateway's UNAVAILABLE as a call refusal, with its code — not as a gateway that is down", async () => {
+    const port = await fakeGateway(() => ({ ok: false, error: { code: "UNAVAILABLE", message: "SQLite session reclamation commit checkpoint expired" } }));
+    await load(port);
+    await expect(lib.gatewayWsMainChatHistory()).rejects.toMatchObject({
+      name: "GatewayRpcError",
+      code: "UNAVAILABLE",
+      message: "SQLite session reclamation commit checkpoint expired",
+    });
+    expect(seen[1].params).toEqual({ sessionKey: "main", limit: 1 });
+  });
+});
+
 describe("gatewayWsActiveSessions", () => {
   it("asks for the sessions with work running — only keys the gateway's closed schema knows — and names main from the same hello", async () => {
     helloExtra = { snapshot: { sessionDefaults: { mainSessionKey: "agent:main:main" } } };
