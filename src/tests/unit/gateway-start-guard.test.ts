@@ -449,3 +449,74 @@ describe("a config write while the gateway is starting", () => {
     quiet.mockRestore();
   });
 });
+
+/**
+ * A PLANNED stop of a gateway that is still starting (the update's quiesce
+ * for post_update, the after-update plugin repair) waited out the unit's
+ * whole TimeoutStopSec: the pinned core runs its start on after SIGTERM, its
+ * Telegram provider starts after the signal and keeps a retained consumer,
+ * and shutdown waits to its deadline. The wait lets the start finish first:
+ * the core's own `/startupz`, then a settle for the channel providers that
+ * start just after it.
+ */
+describe("waitForGatewayStartBeforeStop", () => {
+  const pending = Symbol("pending");
+  const settled = <T>(p: Promise<T>) => Promise.race([p, Promise.resolve(pending)]);
+
+  it("waits for the core to say it has started, then for its channels, before a stop", async () => {
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["silent", "starting", "starting", "started"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(await settled(waited)).toBe(pending);
+    // Started, but the channel providers start just after `started`.
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS - 2_000);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("gives up at its bound, so the stop still happens", async () => {
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["starting"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_START_WAIT_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_START_WAIT_MS + 2_000);
+    await expect(waited).resolves.toBe("timed-out");
+  });
+
+  it("does not wait on a gateway long past its start, a unit running nothing, or one already draining", async () => {
+    const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
+    host.ageS = 900;
+    host.startup = ["started"];
+    await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
+    expect(host.probes).toBe(0);
+    host.procs = null;
+    await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
+    host.procs = "4242\n";
+    host.ageS = 20;
+    host.startup = ["draining"];
+    await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
+  });
+
+  it("does not count a forward step of the wall clock against the start", async () => {
+    // The update's second half quiesces the gateway at boot, while timesyncd
+    // steps the clock of a box with no RTC forward by half a day.
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["starting"];
+    const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await settled(waited)).toBe(pending);
+    host.probes = 0;
+    host.startup = ["started"];
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+});

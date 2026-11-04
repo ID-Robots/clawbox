@@ -26,6 +26,7 @@ import { runHermesCli } from "./hermes-cli";
 import { hermesHome } from "./hermes-env";
 import { waitForPortOpen } from "./port-probe";
 import { monotonicNow } from "./monotonic-clock";
+import { waitForGatewayStartBeforeStop } from "./gateway-start-guard";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
@@ -2714,6 +2715,29 @@ async function waitForGatewayPreStart(): Promise<void> {
 }
 
 /**
+ * And a gateway out of its pre-start can still be starting: Type=simple goes
+ * straight to `running`, and the core runs its startup sidecars and channels
+ * for half a minute after. A stop in that window waits out the unit's whole
+ * TimeoutStopSec (see `waitForGatewayStartBeforeStop`), and both callers that
+ * matter land in it by construction: post_update quiesces a gateway the build
+ * or the boot has just started, and the after-update plugin repair one that
+ * has just come back. Masked first for the reason waitForGatewayPreStart
+ * gives. Never a failure: a start that does not finish in time is stopped
+ * anyway, as it always was.
+ */
+async function letGatewayFinishStarting(): Promise<void> {
+  const began = monotonicNow();
+  const outcome = await waitForGatewayStartBeforeStop();
+  if (outcome === "not-starting") return;
+  const waited = formatWaited(monotonicNow() - began);
+  console.log(
+    outcome === "settled"
+      ? `[Updater] clawbox-gateway finished starting; stopping it after ${waited}`
+      : `[Updater] clawbox-gateway had not finished starting after ${waited}; stopping it anyway`,
+  );
+}
+
+/**
  * Keep systemd from starting the gateway while an OpenClaw writer is active.
  * A root-owned runtime drop-in condition works even for /etc units, unlike
  * a /run unit mask (TASK-789). The guard comes before stop so a root update step cannot race the stop with its
@@ -2730,6 +2754,7 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
     masked = true;
     await setGatewayMaintenanceMask(true);
     await waitForGatewayPreStart();
+    await letGatewayFinishStarting();
     await stopGatewayForMaintenance();
     outcome = { ok: true, value: await operation() };
   } catch (err) {

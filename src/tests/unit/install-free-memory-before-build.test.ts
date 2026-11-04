@@ -104,9 +104,14 @@ function sourceInstallShellFns(tmp: string): string[] {
     "free_memory_for_build",
     "pause_gateway_if_build_needs_room",
     "report_gateway_build_pause",
+    "uptime_s",
+    "let_gateway_finish_starting",
   ];
   return [
     `: > "${tmp}/fns.sh"`,
+    // The settle after the core says `started` is real seconds; only the tests
+    // about it set one.
+    'export CLAWBOX_GATEWAY_STOP_SETTLE_S="${CLAWBOX_GATEWAY_STOP_SETTLE_S:-0}"',
     // The top-level state the pair keeps between the stop and the start, and
     // the settle the check waits out. Cut from install.sh too, so a test cannot
     // pass by declaring them itself.
@@ -117,6 +122,32 @@ function sourceInstallShellFns(tmp: string): string[] {
     ...fns.map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
     `. "${tmp}/fns.sh"`,
   ];
+}
+
+/**
+ * A stand-in for `curl` that answers the gateway's `/startupz` from
+ * STARTUPZ_CODES (in order; the last one repeats) and records each probe in
+ * PROBE_LOG, beside the systemctl calls when a test points both at one file.
+ * Every harness that stops the gateway gets one: a planned stop asks the core
+ * first, and the real curl would reach whatever listens on the runner's 18789.
+ */
+function writeStartupProbe(bin: string): void {
+  fs.writeFileSync(
+    path.join(bin, "curl"),
+    [
+      "#!/bin/sh",
+      'url=""',
+      'for a in "$@"; do url="$a"; done',
+      'n=$(cat "${PROBE_COUNT:-/nonexistent}" 2>/dev/null || echo 0)',
+      'code=""; i=0',
+      'for c in ${STARTUPZ_CODES:-200}; do code="$c"; [ "$i" -ge "$n" ] && break; i=$((i + 1)); done',
+      'if [ -n "${PROBE_COUNT:-}" ]; then echo $((n + 1)) > "$PROBE_COUNT"; fi',
+      'if [ -n "${PROBE_LOG:-}" ]; then printf "probe %s %s\\n" "${url##*/}" "$code" >> "$PROBE_LOG"; fi',
+      'printf "%s" "$code"',
+      "",
+    ].join(NL),
+    { mode: 0o755 },
+  );
 }
 
 describe("do_rebuild frees memory in the one place it can hold", () => {
@@ -264,6 +295,7 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
       `#!/bin/sh${NL}printf "sync\\n" >> "$SYSTEMCTL_LOG"${NL}`,
       { mode: 0o755 },
     );
+    writeStartupProbe(path.join(tmp, "bin"));
   });
 
   afterEach(() => {
@@ -599,6 +631,7 @@ describe("free_memory_for_build gives back what it took", () => {
     // The settle is real seconds on a box and nothing this file is about; the
     // stub keeps the suite fast. That the settle EXISTS is asserted as text.
     fs.writeFileSync(path.join(tmp, "bin", "sleep"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
+    writeStartupProbe(path.join(tmp, "bin"));
   });
 
   afterEach(() => {
@@ -1050,5 +1083,144 @@ describe("both stops an update performs have a start", () => {
     expect(llamaBranch.length).toBeGreaterThan(0);
     expect(llamaBranch).not.toContain("pause_engine_unit");
     expect(llamaBranch).not.toContain("pause_engine_user_unit");
+  });
+});
+
+/**
+ * A planned stop of a gateway that has not finished starting waits out the
+ * unit's whole TimeoutStopSec. The pinned core (OpenClaw 2026.10.9) does not
+ * end its start on SIGTERM: startup runs on, the Telegram provider starts
+ * AFTER the signal and keeps a retained consumer, and shutdown waits to its
+ * deadline (330 s) and writes a `gateway.stop_shutdown_timeout` stability
+ * bundle. An update on a box under 12 GB stops the gateway about 30 s after
+ * gateway_setup restarted it, so every such update paid five and a half
+ * minutes. On a box's journal every stop that landed before the core said
+ * `ready` hit that deadline, and every stop after it settled in a second.
+ *
+ * Both of do_rebuild's gateway stops go through pause_engine_unit, so that is
+ * where the wait is; driven here against stubbed systemctl, curl and ps.
+ */
+describe("a planned gateway stop lets a starting gateway finish first", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gw-stop-"));
+    fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
+    // Every unit exists; the ones in ACTIVE_UNITS run until the first stop.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "systemctl"),
+      [
+        "#!/bin/sh",
+        'printf "%s\\n" "$*" >> "$CALL_LOG"',
+        'case " $* " in',
+        '  *" cat "*) exit 0 ;;',
+        '  *" stop "*) : > "$CALL_LOG.stopped"; exit 0 ;;',
+        '  *" show "*) printf "%s\\n" "${MAIN_PID:-}"; exit 0 ;;',
+        '  *" is-active "*)',
+        '    [ -e "$CALL_LOG.stopped" ] && exit 3',
+        "    for u in $ACTIVE_UNITS; do",
+        '      case " $* " in *" $u "*) exit 0 ;; esac',
+        "    done",
+        "    exit 3 ;;",
+        "esac",
+        "exit 0",
+        "",
+      ].join(NL),
+      { mode: 0o755 },
+    );
+    // How long the gateway's main process has run, when a test says.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "ps"),
+      `#!/bin/sh${NL}[ -n "\${PS_ETIMES:-}" ] || exit 1${NL}printf "  %s\\n" "$PS_ETIMES"${NL}`,
+      { mode: 0o755 },
+    );
+    writeStartupProbe(path.join(tmp, "bin"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function stopGateway({
+    codes,
+    active = "clawbox-gateway.service",
+    settle = "1",
+    wait,
+    etimes,
+    call = "pause_engine_unit clawbox-gateway.service",
+  }: { codes: string; active?: string; settle?: string; wait?: string; etimes?: string; call?: string }) {
+    const log = path.join(tmp, "calls.log");
+    fs.writeFileSync(log, "");
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR="${tmp}"`,
+      'CLAWBOX_USER="$(id -un)"',
+      `export PATH="${tmp}/bin:$PATH"`,
+      ...sourceInstallShellFns(tmp),
+      // An 8 GB box with ~2.9 GB left: the no-reboot arm pauses.
+      'awk() { case "$1" in *MemTotal*) echo 7800000 ;; *MemAvailable*) echo 3000000 ;; *) command awk "$@" ;; esac; }',
+      `${call} 2>&1`,
+    ].join(NL);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      CALL_LOG: log,
+      PROBE_LOG: log,
+      PROBE_COUNT: path.join(tmp, "probes"),
+      STARTUPZ_CODES: codes,
+      ACTIVE_UNITS: active,
+      CLAWBOX_GATEWAY_STOP_SETTLE_S: settle,
+    };
+    delete env.CLAWBOX_GATEWAY_STOP_WAIT_S;
+    if (wait !== undefined) env.CLAWBOX_GATEWAY_STOP_WAIT_S = wait;
+    if (etimes !== undefined) Object.assign(env, { PS_ETIMES: etimes, MAIN_PID: "4242" });
+    const out = execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    return { out, calls: fs.readFileSync(log, "utf8").split(NL).filter(Boolean) };
+  }
+
+  it("stops a starting gateway only after the core says it has started, and its channels have had their moment", () => {
+    const r = stopGateway({ codes: "503 503 200" });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    expect(stop).toBeGreaterThan(-1);
+    const probes = r.calls.slice(0, stop).filter((c) => c.startsWith("probe "));
+    expect(probes.slice(0, 3)).toEqual(["probe startupz 503", "probe startupz 503", "probe startupz 200"]);
+    // Not at the first 200: the core says `started` just BEFORE its channel
+    // providers start, and a stop in that gap hangs the same way.
+    expect(probes.filter((p) => p === "probe startupz 200").length).toBeGreaterThanOrEqual(2);
+    expect(r.out).toMatch(/clawbox-gateway\.service is still starting/);
+  });
+
+  it("stops it anyway, and says so, when the start does not finish within the bound", () => {
+    const r = stopGateway({ codes: "503", wait: "2" });
+    expect(r.calls).toContain("stop clawbox-gateway.service");
+    expect(r.out).toMatch(/clawbox-gateway\.service had not finished starting after 2 s/);
+  });
+
+  it("waits the same way on the no-reboot arm's pause for the build", () => {
+    const r = stopGateway({ codes: "503 200", settle: "0", call: "pause_gateway_if_build_needs_room" });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    expect(stop).toBeGreaterThan(-1);
+    expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe "))).toEqual([
+      "probe startupz 503",
+      "probe startupz 200",
+    ]);
+  });
+
+  it("stops a gateway that has been up for minutes at once, without asking", () => {
+    const r = stopGateway({ codes: "503", etimes: "4000" });
+    expect(r.calls).toContain("stop clawbox-gateway.service");
+    expect(r.calls.some((c) => c.startsWith("probe "))).toBe(false);
+  });
+
+  it("does not wait on a gateway that is not running, nor on any other unit", () => {
+    const idle = stopGateway({ codes: "503", active: "" });
+    expect(idle.calls).toContain("stop clawbox-gateway.service");
+    expect(idle.calls.some((c) => c.startsWith("probe "))).toBe(false);
+    const ollama = stopGateway({ codes: "503", active: "ollama.service", call: "pause_engine_unit ollama.service" });
+    expect(ollama.calls).toContain("stop ollama.service");
+    expect(ollama.calls.some((c) => c.startsWith("probe "))).toBe(false);
   });
 });
