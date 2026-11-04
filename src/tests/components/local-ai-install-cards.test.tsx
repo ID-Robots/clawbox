@@ -209,7 +209,7 @@ describe("re-attaching to a download that is already running", () => {
       status: "Fetching the small speech model…", completed: 100 * 1024 * 1024, total: 500 * 1024 * 1024,
       startedAt: 1, updatedAt: 2, stepStartedAt: 1, finishedAt: null, error: null, result: null,
       log: ["Fetching the small speech model…"], logCount: 1, runner: "r", dismissed: false,
-      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, percent: 18, etaSeconds: 240,
+      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, label: "Whisper small", lanes: [], needs: null, queuedAt: null, queuedBehind: null, percent: 18, etaSeconds: 240,
       ...over,
     };
   }

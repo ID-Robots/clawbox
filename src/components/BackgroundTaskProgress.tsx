@@ -8,9 +8,11 @@ import {
   canCancelBackgroundTask,
   fetchBackgroundTask,
   formatEtaParts,
+  isLiveTask,
   notifyBackgroundTaskStarted,
   type BackgroundTaskView,
 } from "@/lib/background-task-client";
+import { EMBED_MODEL_DOWNLOAD_KIND } from "@/lib/background-task-kinds";
 
 /**
  * One background task's progress, drawn the same way wherever it is drawn:
@@ -52,8 +54,24 @@ export function shownPercent(task: Pick<BackgroundTaskView, "percent" | "total">
   return raw !== null && (measured || raw > 0) ? raw : null;
 }
 
+/**
+ * What a queued task waits for, by name. The engines' names (Kokoro, Whisper,
+ * Gemma 4) are names in every language and come as the task called itself;
+ * the memory-search model is a description, so it is said in the owner's.
+ */
+export function queuedBehindName(t: Translate, behind: { kind: string; label: string }): string {
+  if (behind.kind === EMBED_MODEL_DOWNLOAD_KIND) return t("localModels.name.memorySearch");
+  return behind.label;
+}
+
+/** "Queued — starts after Kokoro", or without a name when the box did not say one. */
+export function queuedLine(t: Translate, behind: { kind: string; label: string } | null | undefined): string {
+  return behind ? t("backgroundTasks.queuedBehind", { name: queuedBehindName(t, behind) }) : t("backgroundTasks.queued");
+}
+
 /** The sentence a task's ending (or its current work) is summed up in. */
 export function taskHeadline(t: Translate, task: BackgroundTaskView): string {
+  if (task.state === "queued") return queuedLine(t, task.queuedBehind);
   if (task.state === "running") return task.status ?? task.steps.find((s) => s.state === "running")?.label ?? task.title;
   if (task.state === "failed" || task.state === "interrupted") return task.error ?? t("backgroundTasks.failed");
   if (task.state === "cancelled") return t("backgroundTasks.cancelled");
@@ -104,6 +122,10 @@ export function BackgroundTaskProgress({
   const stepIndex = current ? task.steps.indexOf(current) + 1 : null;
   const stopping = running && (task.cancelRequested === true || cancelAsked);
   const cancellable = onCancel !== undefined && canCancelBackgroundTask(task) && !cancelAsked;
+  // Where Cancel would be, on work that has none (a root step: the box may
+  // start it, never stop it half-way) — so the owner is not left looking for
+  // a button that is not there.
+  const unstoppable = onCancel !== undefined && running && task.cancellable !== true && !stopping;
 
   useEffect(() => {
     if (logOpen && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -168,6 +190,11 @@ export function BackgroundTaskProgress({
             {t("backgroundTasks.cancel")}
           </button>
         )}
+        {unstoppable && (
+          <span className="ml-auto text-[11px] text-white/40 text-right" data-testid={`${testId}-no-cancel`}>
+            {t("backgroundTasks.notCancellable")}
+          </span>
+        )}
       </div>
       {logOpen && (
         <pre
@@ -220,8 +247,9 @@ export function useBackgroundTask(taskId: string | null): BackgroundTaskView | n
         void tick();
         return;
       }
-      // Ended: nothing more will change. A failed read keeps trying.
-      if (next && next.state !== "running") return;
+      // Ended: nothing more will change. A failed read keeps trying, and so
+      // does a task that is still queued — it starts by itself.
+      if (next && !isLiveTask(next)) return;
       timer = setTimeout(tick, INLINE_POLL_MS);
     };
     const kick = () => {
@@ -244,8 +272,8 @@ export function useBackgroundTask(taskId: string | null): BackgroundTaskView | n
 /**
  * Design 3: the task inline in Settings, under the control that started it —
  * the same steps, percentage, time left and log the corner card draws, while
- * it runs. Its ending is the row's own business (its verdict line), so this
- * draws nothing once the task has ended.
+ * it runs or waits its turn (with its Cancel then). Its ending is the row's own
+ * business (its verdict line), so this draws nothing once the task has ended.
  */
 export function BackgroundTaskInline({
   taskId,
@@ -263,7 +291,7 @@ export function BackgroundTaskInline({
   const { t } = useT();
   const task = useBackgroundTask(taskId);
   const { cancel, asked } = useCancelBackgroundTask();
-  if (!task || task.state !== "running") return null;
+  if (!task || !isLiveTask(task)) return null;
   return (
     <div className="mt-2 rounded-lg border border-white/[0.06] bg-black/20 px-3 pt-2 pb-2" data-testid={testId}>
       {showHeadline && (

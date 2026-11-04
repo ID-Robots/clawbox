@@ -9,6 +9,7 @@ import {
   dismissBackgroundTaskCard,
   endsQuietly,
   fetchBackgroundTasks,
+  isLiveTask,
   visibleBackgroundTasks,
   type BackgroundTaskView,
 } from "@/lib/background-task-client";
@@ -46,7 +47,7 @@ export function useBackgroundTasks(enabled: boolean): {
     const tasks = await fetchBackgroundTasks();
     if (tasks) {
       setAll(tasks);
-      runningRef.current = tasks.some((t) => t.state === "running");
+      runningRef.current = tasks.some(isLiveTask);
     }
     setNow(boxNowMs());
   }, []);
@@ -127,6 +128,7 @@ const BackgroundTaskCard = memo(function BackgroundTaskCard({
 }) {
   const { t } = useT();
   const running = task.state === "running";
+  const queued = task.state === "queued";
   const failed = task.state === "failed" || task.state === "interrupted";
   const cancelled = task.state === "cancelled";
   const headline = taskHeadline(t, task);
@@ -134,7 +136,10 @@ const BackgroundTaskCard = memo(function BackgroundTaskCard({
     ? { ring: "bg-red-500/15 border-red-500/30", icon: "text-red-400", name: "error" }
     : running
       ? { ring: "bg-orange-500/15 border-orange-500/30", icon: "text-orange-400", name: "downloading" }
-      : cancelled
+      : queued
+        // Waiting its turn: its own card, quieter than the work it waits for.
+        ? { ring: "bg-white/10 border-white/20", icon: "text-white/70", name: "schedule" }
+        : cancelled
         ? { ring: "bg-white/10 border-white/20", icon: "text-white/60", name: "block" }
         : { ring: "bg-emerald-500/15 border-emerald-500/30", icon: "text-emerald-400", name: "task_alt" };
 
@@ -159,7 +164,7 @@ const BackgroundTaskCard = memo(function BackgroundTaskCard({
             {headline}
           </div>
         </div>
-        {!running && (
+        {!running && !queued && (
           <button
             type="button"
             onClick={() => onDismiss(task.id)}

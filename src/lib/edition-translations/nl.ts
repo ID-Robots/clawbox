@@ -1481,6 +1481,8 @@ export const nl: Record<string, string> = {
   "localModels.install.diskNeed": "{need} downloaden",
   "localModels.install.diskShort": "Te weinig ruimte: {need} nodig, maar {free} vrij.",
   "localModels.install.refusal.busy": "Er wordt op dit moment al iets anders gedownload.",
+  "localModels.install.refusal.removing": "Dit wordt nu verwijderd. Probeer het zo opnieuw.",
+  "localModels.uninstall.switchChatFirst": "Zet de chat eerst op een ander model",
   "localModels.install.refusal.notInstalled": "Dat onderdeel is nog niet op deze box geïnstalleerd.",
   "localModels.install.refusal.noDownloader": "Het downloadprogramma staat nog niet op deze box. Installeer eerst het lokale model.",
   "localModels.install.refusal.alreadyHere": "Dat staat al op deze box.",

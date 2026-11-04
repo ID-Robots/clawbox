@@ -807,4 +807,16 @@ export async function register() {
   } catch (err) {
     console.error('[instrumentation] Could not load the app unit caps:', err instanceof Error ? err.message : err)
   }
+  try {
+    // The long work Settings started (src/lib/background-tasks.ts) is read at
+    // boot, not at the first request that asks: a root step left running by
+    // the last server is adopted, and installs left queued behind it move on
+    // as soon as it ends — on a box nobody has opened a browser on since the
+    // restart, too. Synchronous and small: one JSON file.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resumeBackgroundTasks } = require('./lib/background-tasks')
+    resumeBackgroundTasks()
+  } catch (err) {
+    console.error('[instrumentation] Could not resume the background tasks:', err instanceof Error ? err.message : err)
+  }
 }

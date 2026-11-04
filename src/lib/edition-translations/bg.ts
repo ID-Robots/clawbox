@@ -1467,6 +1467,8 @@ export const bg: Record<string, string> = {
   "localModels.install.diskNeed": "{need} за изтегляне",
   "localModels.install.diskShort": "Няма достатъчно място: нужни са {need}, свободни са само {free}.",
   "localModels.install.refusal.busy": "В момента вече се изтегля друго.",
+  "localModels.install.refusal.removing": "В момента се премахва. Опитайте отново след малко.",
+  "localModels.uninstall.switchChatFirst": "Първо превключете чата към друг модел",
   "localModels.install.refusal.notInstalled": "Тази част още не е инсталирана на тази кутия.",
   "localModels.install.refusal.noDownloader": "Програмата за изтегляне още я няма на тази кутия. Първо инсталирайте локалния модел.",
   "localModels.install.refusal.alreadyHere": "Това вече е на тази кутия.",

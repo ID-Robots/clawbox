@@ -15,8 +15,12 @@ describe("the Whisper engine preflight's home", () => {
   it("is install.sh's fixed installer home, not an environment override", () => {
     const installHome = /^CLAWBOX_HOME="([^"]+)"$/m.exec(read("install.sh"))?.[1];
     expect(installHome).toBe("/home/clawbox");
-    const route = read("src/app/setup-api/whisper/route.ts");
-    expect(route).toContain(`const INSTALLER_HOME = "${installHome}";`);
-    expect(route).not.toMatch(/process\.env\.CLAWBOX_HOME/);
+    // The preflight lives with the install's task now (a route may export only
+    // its handlers), and the queue's disk needs measure the same home.
+    for (const file of ["src/lib/whisper-install-tasks.ts", "src/lib/local-ai-install-queue.ts"]) {
+      const source = read(file);
+      expect(source).toContain(`const INSTALLER_HOME = "${installHome}";`);
+      expect(source).not.toMatch(/process\.env\.CLAWBOX_HOME/);
+    }
   });
 });

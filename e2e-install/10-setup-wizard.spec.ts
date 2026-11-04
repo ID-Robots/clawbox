@@ -103,18 +103,21 @@ test.describe("fresh-install setup wizard (UI)", () => {
     // ── Step 2: Update (frequently auto-advances) ─────────────────
     const updateStep = page.getByTestId("setup-step-update");
     const credentialsStep = page.getByTestId("setup-step-credentials");
+    const continueBtn = updateStep.getByRole("button", { name: /Continue/i });
 
-    // UpdateStep auto-advances to credentials when update_completed is
-    // already set (which happens as soon as we hit /setup-api/update/status
-    // once). Race the two — whichever shows first wins.
-    const credVisibleFast = await credentialsStep
-      .waitFor({ state: "visible", timeout: 8_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!credVisibleFast) {
-      await expect(updateStep).toBeVisible({ timeout: 10_000 });
-      const continueBtn = updateStep.getByRole("button", { name: /Continue/i });
-      await continueBtn.click();
+    // An "up to date" answer from /setup-api/update/status shows Continue AND
+    // auto-advances to credentials 1.5 s later, so the two race. Wait for
+    // whichever shows first, in ONE window. Two windows in sequence (8 s for
+    // credentials, then 10 s for the update step) missed an advance that landed
+    // just as the first closed: by the time the second looked, the update
+    // step was already gone and credentials was still mounting. Continue keeps
+    // the ~28 s it had (8 s, then the click's 20 s action timeout). A wizard
+    // stuck on "Checking for updates..." for longer still fails here.
+    await expect(credentialsStep.or(continueBtn).first()).toBeVisible({ timeout: 28_000 });
+    if (await continueBtn.isVisible()) {
+      // The auto-advance can still beat this click and unmount the button.
+      // Credentials showing, asserted below, is what counts either way.
+      await continueBtn.click({ timeout: 5_000 }).catch(() => undefined);
     }
 
     // ── Step 3: Credentials ──────────────────────────────────────

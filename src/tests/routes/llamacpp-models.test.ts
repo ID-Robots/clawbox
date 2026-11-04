@@ -381,6 +381,29 @@ describe("DELETE /setup-api/llamacpp/models?engine=1", () => {
     expect(stopped).not.toHaveBeenCalled();
   });
 
+  it("refuses while a Gemma install runs or waits its turn — another browser's — and touches nothing (TASK-2128)", async () => {
+    vi.stubEnv("CLAWBOX_ROOT", fs.mkdtempSync(path.join(os.tmpdir(), "gguf-tasks-")));
+    const tasks = await import("@/lib/background-tasks");
+    tasks.resetBackgroundTasksForTests();
+    let finish!: () => void;
+    const started = tasks.startBackgroundTask({
+      kind: "llamacpp-install",
+      title: "Installing Gemma 4 (local AI)",
+      run: () => new Promise<void>((resolve) => { finish = resolve; }),
+    });
+    fs.writeFileSync(path.join(modelDir, GEMMA), "x".repeat(64));
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "busy", taskId: started.started ? started.task.id : null });
+    expect(fs.existsSync(path.join(modelDir, GEMMA))).toBe(true);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    finish();
+    tasks.resetBackgroundTasksForTests();
+    vi.unstubAllEnvs();
+  });
+
   it("refuses while Gemma is the PRIMARY model — local-only mode included — and touches nothing", async () => {
     // The off switch clears only the fallback list: a primary left on
     // llamacpp/… would send the next turn to a runtime that downloads the file

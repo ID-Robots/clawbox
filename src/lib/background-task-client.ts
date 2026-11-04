@@ -41,10 +41,22 @@ export async function fetchBackgroundTasks(filter: { kind?: string } = {}): Prom
   }
 }
 
-/** The running task of any of these kinds, or null — how a reopened panel finds its work. */
+/**
+ * Not ended: working, or queued to work (src/lib/background-tasks.ts). Every
+ * surface that asks "is this still going?" asks this, so a task waiting its
+ * turn is followed, drawn and offered its Cancel like one that runs.
+ */
+export function isLiveTask(task: Pick<BackgroundTaskView, "state">): boolean {
+  return task.state === "running" || task.state === "queued";
+}
+
+/**
+ * The live task (running, or queued to run) of any of these kinds, or null —
+ * how a reopened panel finds its work.
+ */
 export async function findRunningBackgroundTask(kinds: readonly string[]): Promise<BackgroundTaskView | null> {
   const tasks = await fetchBackgroundTasks();
-  return tasks?.find((task) => task.state === "running" && kinds.includes(task.kind)) ?? null;
+  return tasks?.find((task) => isLiveTask(task) && kinds.includes(task.kind)) ?? null;
 }
 
 /**
@@ -161,8 +173,12 @@ export async function fetchBackgroundTask(id: string): Promise<BackgroundTaskVie
   }
 }
 
-/** Whether the owner can still stop it: running, stoppable, and not already stopping. */
+/**
+ * Whether the owner can still stop it: running, stoppable, and not already
+ * stopping — or queued, which nothing of has started, so it always can be.
+ */
 export function canCancelBackgroundTask(task: Pick<BackgroundTaskView, "state" | "cancellable" | "cancelRequested">): boolean {
+  if (task.state === "queued") return true;
   return task.state === "running" && task.cancellable === true && task.cancelRequested !== true;
 }
 
@@ -179,13 +195,14 @@ export const SUCCESS_CARD_MS = 30_000;
 export const SUCCESS_STALE_MS = 10 * 60 * 1000;
 
 /**
- * Which tasks the corner card draws: every running one; an ended one until it
- * is dismissed — a success (or a stop the owner asked for) only while it is
- * fresh, a failure or an interruption until the owner has seen it.
+ * Which tasks the corner card draws: every live one (running, or queued); an
+ * ended one until it is dismissed — a success (or a stop the owner asked for)
+ * only while it is fresh, a failure or an interruption until the owner has
+ * seen it.
  */
 export function visibleBackgroundTasks(tasks: readonly BackgroundTaskView[], now: number): BackgroundTaskView[] {
   return tasks.filter((task) => {
-    if (task.state === "running") return true;
+    if (isLiveTask(task)) return true;
     if (task.dismissed) return false;
     if (endsQuietly(task)) return now - (task.finishedAt ?? task.updatedAt) < SUCCESS_STALE_MS;
     return true;
