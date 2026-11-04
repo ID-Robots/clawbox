@@ -17,6 +17,8 @@ const signOut = vi.hoisted(() => ({
   signOutRefusal: vi.fn(),
 }));
 vi.mock("@/lib/provider-sign-out", () => signOut);
+const hermesAuth = vi.hoisted(() => ({ hermesStillSignedIn: vi.fn(async () => false) }));
+vi.mock("@/lib/provider-sign-out-hermes", () => hermesAuth);
 const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn() }));
 vi.mock("@/lib/owner-session", () => owner);
 vi.mock("@/lib/gateway-hot-apply", () => ({ waitForGatewayBack: vi.fn(async () => true) }));
@@ -84,5 +86,28 @@ describe("POST /setup-api/ai-models/clawai/sign-out", () => {
       await vi.waitFor(() => expect(tasks.getBackgroundTask(taskId)?.state).toBe("failed"));
       expect(tasks.getBackgroundTask(taskId)).toMatchObject({ error: `refused: ${kind}`, result: { kind } });
     }
+  });
+
+  it("on Hermes, ClawBox AI as the default is refused 409 is_default before any task", async () => {
+    signOut.resolveSignOutTarget.mockResolvedValue({ ok: true, harness: "hermes", edition: "hermes", row: "clawai", label: "ClawBox AI" });
+    const error = "ClawBox AI is the default provider. Make another provider the default first, then sign out of it.";
+    signOut.signOutRefusal.mockResolvedValueOnce({ kind: "is_default", error });
+    const res = await POST(req());
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error, kind: "is_default" });
+    expect(signOut.signOutOfProvider).not.toHaveBeenCalled();
+    expect(tasks.listBackgroundTasks()).toEqual([]);
+  });
+
+  it("on Hermes, off the default: signed out once Hermes' own list says so, failed while it still lists it", async () => {
+    signOut.resolveSignOutTarget.mockResolvedValue({ ok: true, harness: "hermes", edition: "hermes", row: "clawai", label: "ClawBox AI" });
+    const ok = await (await POST(req())).json();
+    await vi.waitFor(() => expect(tasks.getBackgroundTask(ok.taskId)?.state).toBe("succeeded"));
+    expect(tasks.getBackgroundTask(ok.taskId)?.result).toMatchObject({ signedOut: true, provider: "clawai", verified: true });
+    expect(hermesAuth.hermesStillSignedIn).toHaveBeenCalledWith("clawai");
+    hermesAuth.hermesStillSignedIn.mockResolvedValueOnce(true);
+    const stuck = await (await POST(req())).json();
+    await vi.waitFor(() => expect(tasks.getBackgroundTask(stuck.taskId)?.state).toBe("failed"));
+    expect(tasks.getBackgroundTask(stuck.taskId)).toMatchObject({ result: { kind: "still_signed_in" } });
   });
 });

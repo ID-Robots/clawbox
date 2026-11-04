@@ -21,10 +21,17 @@
  *  - ClawBox AI is such a provider (src/lib/hermes-clawai.ts): its token in
  *    `providers.clawai.api_key`, in the cloud voice it arms
  *    (`tts.openai.api_key`) and in `.env`'s `CLAWBOX_AI_TOKEN`, which the
- *    image plugin reads. The block itself STAYS — base URL and models — so a
- *    box whose default it is keeps a provider Hermes can resolve, and its row
- *    reads "Needs sign-in" rather than every turn failing on an unknown
- *    provider (src/lib/hermes-local-ai.ts says what that costs).
+ *    image plugin reads. On the Hermes that answers the chat the WHOLE block
+ *    goes too — base URL and models: Hermes answers `authenticated: true` for
+ *    any provider defined in config.yaml whose block has a base URL, key or no
+ *    key, so a block left behind kept ClawBox AI signed in to Hermes' own list
+ *    (GET /setup-api/hermes/models) after its token was gone. That is safe
+ *    there because the sign-out of Hermes' default is refused
+ *    (src/lib/provider-sign-out.ts): nothing the chat runs on names the block.
+ *    The re-link writes it again. On the other half of a dual box, which does
+ *    not answer the chat and whose default it may be, the block STAYS, so that
+ *    Hermes keeps a provider it can resolve (src/lib/hermes-local-ai.ts says
+ *    what an unknown one costs).
  *  - Rotating copies: Hermes' last good parses (`backups/config/config.yaml.
  *    good.*`) and ClawBox's own `config.yaml.bak` (src/lib/credential-copies.ts).
  *
@@ -43,7 +50,7 @@ import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue, type Her
 import { runHermesCli } from "@/lib/hermes-cli";
 import { clearHermesEnvValues, getHermesEnvValue, hermesEnvPath, hermesHome } from "@/lib/hermes-env";
 import { HERMES_IMAGE_TOKEN_ENV } from "@/lib/hermes-image-plugin";
-import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { getModelOptions, invalidateModelOptions } from "@/lib/hermes-model-options";
 import { logSafe } from "@/lib/log-safe";
 import { forgetClawaiKeyProbe } from "@/lib/provider-status";
 import type { HarnessSignOut } from "@/lib/provider-sign-out-types";
@@ -56,6 +63,7 @@ const CLAWAI = "clawai";
  * read on its own, so the harness contract checks every one of them against
  * the pinned Hermes (scripts/harness-contract).
  */
+const HERMES_CLAWAI_BLOCK = "providers.clawai";
 const HERMES_CLAWAI_API_KEY = "providers.clawai.api_key";
 const HERMES_MODEL_API_KEY = "model.api_key";
 const HERMES_VOICE_API_KEY = "tts.openai.api_key";
@@ -213,7 +221,16 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
       envUnreadable = true;
     }
   }
-  const held = heldInAuth(auth) || config.keys.length > 0 || envToken !== null;
+  // ClawBox AI's whole block, on the Hermes that answers the chat (see the
+  // file header). A block with no key left in it still counts: it is what
+  // Hermes' list reads as signed in, the box an earlier sign-out left behind.
+  const takesBlock = slug === CLAWAI && active;
+  const block = takesBlock ? await resolveHermesConfigValue(HERMES_CLAWAI_BLOCK) : null;
+  const blockHeld = block !== null && (block.state === "present" || block.state === "value");
+  const unset = blockHeld
+    ? [HERMES_CLAWAI_BLOCK, ...config.keys.filter((key) => !key.startsWith(`${HERMES_CLAWAI_BLOCK}.`))]
+    : config.keys;
+  const held = heldInAuth(auth) || config.keys.length > 0 || envToken !== null || blockHeld;
   const secrets = [...new Set([
     ...config.values,
     ...(isScrubbableSecret(envToken) ? [envToken] : []),
@@ -235,10 +252,11 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
         }
         if (auth.oauthBlock) await hermesCli(["auth", "logout", slug], `auth logout ${slug}`);
       }
-      // 2. The key in config.yaml, and ClawBox AI's in `.env`.
-      if (config.keys.length > 0) {
+      // 2. The key in config.yaml (ClawBox AI's block with it, where it goes),
+      // and ClawBox AI's in `.env`.
+      if (unset.length > 0) {
         try {
-          await patchHermesConfig({ unset: config.keys });
+          await patchHermesConfig({ unset });
         } catch (err) {
           console.warn("[provider-sign-out] could not take the key out of Hermes' config:", err instanceof Error ? logSafe(err.message) : err);
         }
@@ -282,8 +300,11 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
       if (after === null) unread.push("Hermes' auth store");
       else if (heldInAuth(after)) left.push("Hermes' auth store");
       const again = await configKeysFor(slug, token);
-      if (again.keys.length > 0) left.push("Hermes' config.yaml");
-      else if (again.unreadable || config.unreadable) unread.push("Hermes' config.yaml");
+      const blockAfter = takesBlock ? await resolveHermesConfigValue(HERMES_CLAWAI_BLOCK) : null;
+      const blockLeft = blockAfter !== null && (blockAfter.state === "present" || blockAfter.state === "value");
+      const blockUnread = block?.state === "unreadable" || blockAfter?.state === "unreadable";
+      if (again.keys.length > 0 || blockLeft) left.push("Hermes' config.yaml");
+      else if (again.unreadable || config.unreadable || blockUnread) unread.push("Hermes' config.yaml");
       if (slug === CLAWAI) {
         try {
           if ((await getHermesEnvValue(HERMES_IMAGE_TOKEN_ENV)) !== null) left.push("Hermes' .env");
@@ -303,4 +324,27 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
       return { left, unread };
     },
   };
+}
+
+/**
+ * Does Hermes ITSELF still list `slug` as signed in — the `authenticated` flag
+ * GET /setup-api/hermes/models hands the panel and the chat? The files the
+ * read-back looked at are ClawBox's view; this is the harness's, and a
+ * sign-out is not done while the two disagree. A fresh read, never the cached
+ * answer from before the restart. `null` while it cannot say: the dashboard
+ * did not answer live (still restarting, or a fallback or kept copy stood in),
+ * or it reported no verdict for the row. A row it does not list is not signed
+ * in. Never throws.
+ */
+export async function hermesStillSignedIn(slug: string): Promise<boolean | null> {
+  try {
+    invalidateModelOptions();
+    const payload = await getModelOptions();
+    if (payload.source !== "dashboard" || payload.stale || payload.degraded) return null;
+    const row = payload.providers.find((entry) => entry.id === slug);
+    if (!row) return false;
+    return typeof row.authenticated === "boolean" ? row.authenticated : null;
+  } catch {
+    return null;
+  }
 }

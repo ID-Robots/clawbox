@@ -655,12 +655,12 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // An older server that does not say falls back to "not the
             // default". On the default it is LOCKED, like the switch —
             // signing the chat's own provider out would leave it answering
-            // on nothing — except for ClawBox AI, the account a box with
-            // nothing else had no way out of (#1369). The route holds the
-            // same rule.
+            // on nothing — except for ClawBox AI on OpenClaw, the account a
+            // box with nothing else had no way out of (#1369). On Hermes it
+            // is locked like any default. The route holds the same rule.
             const canSignOut = row.state === "connected"
               || (row.state === "needs-reauth" && (row.credentialHeld ?? !row.isDefault));
-            const signOutLocked = row.isDefault && row.id !== "clawai";
+            const signOutLocked = row.isDefault && (row.id !== "clawai" || summary?.harness === "hermes");
             const armed = signOutArmed === row.id;
             return (
               <Fragment key={row.id}>

@@ -44,7 +44,8 @@ const REFUSAL_STATUS: Record<ProviderSignOutRefusal, number> = {
  * - 404 `unknown_provider`: no cloud provider by that id (an on-device engine
  *   has no sign-in; it is turned off in Settings → Local AI).
  * - 409 `is_default`: the chat runs on it — make another provider the default
- *   first. ClawBox AI is the exception, as in #1369.
+ *   first. ClawBox AI on OpenClaw is the exception, as in #1369; on Hermes it
+ *   is refused like any other default.
  * - 409 `default_unknown`: the box could not read which provider is the
  *   default, or none is set (Hermes on `auto`), so it did not risk signing the
  *   chat out from under itself.

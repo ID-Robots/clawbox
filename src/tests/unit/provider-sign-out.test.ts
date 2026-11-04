@@ -209,15 +209,20 @@ vi.mock("@/lib/coding-agent-mcp-refresh", () => refresh);
 // ── Hermes ──────────────────────────────────────────────────────────────────
 const hermesYaml = vi.hoisted(() => ({
   hermesConfigPath: vi.fn(() => `${tmp}/hermes/config.yaml`),
+  // A key with keys under it is a block: `present`, as the real reader says.
   resolveHermesConfigValue: vi.fn(async (key: string) => {
     if (box.hermesConfigUnreadable) return { state: "unreadable" };
-    return Object.hasOwn(box.hermesConfig, key) ? { state: "value", value: box.hermesConfig[key] } : { state: "absent" };
+    if (Object.hasOwn(box.hermesConfig, key)) return { state: "value", value: box.hermesConfig[key] };
+    return Object.keys(box.hermesConfig).some((k) => k.startsWith(`${key}.`)) ? { state: "present" } : { state: "absent" };
   }),
-  // The merge path keeps the previous revision beside the file, as the real one does.
+  // The merge path keeps the previous revision beside the file, as the real
+  // one does; unsetting a block takes everything under it.
   patchHermesConfig: vi.fn(async (patch: { unset?: string[] }) => {
     const previous = Object.entries(box.hermesConfig).map(([k, v]) => `${k}: ${v}`).join("\n");
     fs.writeFileSync(`${tmp}/hermes/config.yaml.bak`, previous, { mode: 0o600 });
-    for (const key of patch.unset ?? []) delete box.hermesConfig[key];
+    for (const key of patch.unset ?? []) {
+      for (const k of Object.keys(box.hermesConfig)) if (k === key || k.startsWith(`${key}.`)) delete box.hermesConfig[k];
+    }
     return { mode: "merge", backupPath: `${tmp}/hermes/config.yaml.bak` };
   }),
 }));
@@ -240,6 +245,7 @@ const messaging = vi.hoisted(() => ({ restartHermesGatewayIfRunning: vi.fn(async
 vi.mock("@/lib/clawbox-mcp-registration", () => messaging);
 
 import { resolveSignOutTarget, signOutOfProvider, signOutRefusal } from "@/lib/provider-sign-out";
+import { hermesStillSignedIn } from "@/lib/provider-sign-out-hermes";
 import { resetBackgroundTasksForTests, startBackgroundTask } from "@/lib/background-tasks";
 import { withProviderChangeLock } from "@/lib/provider-change-lock";
 
@@ -783,14 +789,38 @@ describe("signOutOfProvider — Hermes", () => {
 
   const removed = () => hermesCli.runHermesCli.mock.calls.map((c) => (c[0] as string[]).join(" "));
 
-  it("ClawBox AI: its key in config.yaml and the voice, the .env token, the backups — the block and the default stay", async () => {
+  /** ClawBox AI off the default: the chat runs on OpenRouter. */
+  const openrouterDefault = () => {
+    box.hermesConfig["model.provider"] = "openrouter";
+    box.hermesConfig["model.default"] = "openrouter/auto";
+  };
+
+  it("ClawBox AI as the default is refused, like any default — before the route starts a task, and touching nothing", async () => {
+    const target = await resolveSignOutTarget("clawai");
+    expect(target).toMatchObject({ ok: true, harness: "hermes", row: "clawai", label: "ClawBox AI" });
+    if (!target.ok) throw new Error("no target");
+    const refusal = { kind: "is_default", error: "ClawBox AI is the default provider. Make another provider the default first, then sign out of it." };
+    expect(await signOutRefusal(target)).toEqual(refusal);
+    // Asked again under the change lock, inside the task: the same answer.
+    expect(await signOutOfProvider("clawai")).toEqual({ ok: false, ...refusal });
+    expect(hermesYaml.patchHermesConfig).not.toHaveBeenCalled();
+    expect(hermesCli.runHermesCli).not.toHaveBeenCalled();
+    expect(hermesEnv.clearHermesEnvValues).not.toHaveBeenCalled();
+    expect(store.setMany).not.toHaveBeenCalled();
+    expect(bounce.bounceHermesDashboardShared).not.toHaveBeenCalled();
+    expect(box.hermesConfig).toMatchObject({ "providers.clawai.api_key": TOKEN, "providers.clawai.base_url": "https://proxy" });
+    expect(box.hermesEnv.CLAWBOX_AI_TOKEN).toBe(TOKEN);
+    expect(box.store.clawai_token).toBe(TOKEN);
+  });
+
+  it("ClawBox AI off the default: its whole block, the voice copy, the .env token, the backups — the default stays", async () => {
+    openrouterDefault();
+    // Hermes lists a provider defined in config.yaml as signed in while its
+    // block has a base URL, key or no key: the block goes with the key.
+    box.hermesConfig["providers.clawai.models"] = "deepseek-v4-pro";
     expect(await signOutOfProvider("clawai")).toEqual({ ok: true, changed: true, gatewayRestarting: false });
-    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({ unset: ["providers.clawai.api_key", "tts.openai.api_key"] });
-    expect(box.hermesConfig).toEqual({
-      "model.provider": "clawai",
-      "model.default": "deepseek-v4-pro",
-      "providers.clawai.base_url": "https://proxy",
-    });
+    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({ unset: ["providers.clawai", "tts.openai.api_key"] });
+    expect(box.hermesConfig).toEqual({ "model.provider": "openrouter", "model.default": "openrouter/auto" });
     expect(box.hermesEnv).toEqual({ TELEGRAM_BOT_TOKEN: "owners-bot-token" });
     // Hermes' own fingerprint row is not the key: it is pruned once the key is gone.
     expect(removed()).toEqual([]);
@@ -810,10 +840,41 @@ describe("signOutOfProvider — Hermes", () => {
   });
 
   it("ClawBox AI: an owner's own voice key stays", async () => {
+    openrouterDefault();
     box.hermesConfig["tts.openai.api_key"] = "sk-owners-voice-key-0123";
     expect(await signOutOfProvider("clawai")).toMatchObject({ ok: true });
-    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({ unset: ["providers.clawai.api_key"] });
+    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({ unset: ["providers.clawai"] });
     expect(box.hermesConfig["tts.openai.api_key"]).toBe("sk-owners-voice-key-0123");
+  });
+
+  it("ClawBox AI: a block an earlier sign-out left with no key in it is still a sign-in to Hermes, and goes", async () => {
+    box.hermesConfig = { "model.provider": "openrouter", "providers.clawai.base_url": "https://proxy" };
+    box.hermesEnv = {};
+    box.store = {};
+    expect(await signOutOfProvider("clawai")).toEqual({ ok: true, changed: true, gatewayRestarting: false });
+    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({ unset: ["providers.clawai"] });
+    expect(box.hermesConfig).toEqual({ "model.provider": "openrouter" });
+    expect(bounce.bounceHermesDashboardShared).toHaveBeenCalledTimes(1);
+  });
+
+  it("never answers signed out while ClawBox AI's block is still in config.yaml, or over a config it could not read", async () => {
+    openrouterDefault();
+    hermesYaml.patchHermesConfig.mockImplementationOnce(async (patch: { unset?: string[] }) => {
+      // The key went, the block did not.
+      for (const key of patch.unset ?? []) delete box.hermesConfig[key];
+      delete box.hermesConfig["providers.clawai.api_key"];
+      return { mode: "merge", backupPath: `${tmp}/hermes/config.yaml.bak` };
+    });
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/removed from Hermes' config.yaml/) });
+    hermesBox();
+    openrouterDefault();
+    const read = hermesYaml.resolveHermesConfigValue.getMockImplementation()!;
+    hermesYaml.resolveHermesConfigValue.mockImplementation(async (key: string) => (key === "providers.clawai" && !Object.hasOwn(box.hermesConfig, "providers.clawai.base_url") ? { state: "unreadable" } : read(key)));
+    try {
+      expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/checked in Hermes' config.yaml/) });
+    } finally {
+      hermesYaml.resolveHermesConfigValue.mockImplementation(read);
+    }
   });
 
   it("OpenRouter: its pool row through `hermes auth remove`, nothing of anyone else's", async () => {
@@ -858,14 +919,16 @@ describe("signOutOfProvider — Hermes", () => {
     expect(hermesCli.runHermesCli).not.toHaveBeenCalled();
   });
 
-  it("refuses any provider but ClawBox AI while Hermes picks its own (auto, or nothing set)", async () => {
+  it("refuses every provider, ClawBox AI too, while Hermes picks its own (auto, or nothing set)", async () => {
     box.hermesConfig["model.provider"] = "auto";
     expect(await signOutOfProvider("openrouter")).toMatchObject({ ok: false, kind: "default_unknown", error: expect.stringMatching(/^No provider is set as the default/) });
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "default_unknown" });
     delete box.hermesConfig["model.provider"];
     expect(await signOutOfProvider("gemini")).toMatchObject({ ok: false, kind: "default_unknown" });
+    // #1369's exception is OpenClaw's alone.
+    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "default_unknown" });
     expect(hermesCli.runHermesCli).not.toHaveBeenCalled();
-    // ClawBox AI keeps #1369's rule.
-    expect(await signOutOfProvider("clawai")).toMatchObject({ ok: true });
+    expect(hermesYaml.patchHermesConfig).not.toHaveBeenCalled();
   });
 
   it("an env-seeded pool row goes through `hermes auth remove` even when it copies no secret", async () => {
@@ -885,6 +948,7 @@ describe("signOutOfProvider — Hermes", () => {
   });
 
   it("never answers signed out while config.yaml still holds the ClawBox AI key", async () => {
+    openrouterDefault();
     hermesYaml.patchHermesConfig.mockRejectedValueOnce(new Error("Failed to update the Hermes config"));
     expect(await signOutOfProvider("clawai")).toMatchObject({ ok: false, kind: "still_signed_in", error: expect.stringMatching(/removed from Hermes' config.yaml/) });
   });
@@ -914,6 +978,9 @@ describe("signOutOfProvider — a dual box", () => {
     expect(await signOutOfProvider("clawai")).toEqual({ ok: true, changed: true, gatewayRestarting: false });
     expect(cli.spawnOpenclawCli).toHaveBeenCalledTimes(1);
     expect(box.hermesConfig).not.toHaveProperty("providers.clawai.api_key");
+    // Hermes' default may be ClawBox AI on the half that does not answer the
+    // chat: its block stays, so Hermes keeps a provider it can resolve.
+    expect(box.hermesConfig).toMatchObject({ "model.provider": "clawai", "providers.clawai.base_url": "https://proxy" });
     expect(box.hermesEnv).not.toHaveProperty("CLAWBOX_AI_TOKEN");
     expect(gateway.awaitGatewayHotApply).toHaveBeenCalledTimes(1);
     expect(bounce.bounceHermesDashboardShared).not.toHaveBeenCalled();
@@ -921,10 +988,12 @@ describe("signOutOfProvider — a dual box", () => {
 
   it("running Hermes: ClawBox AI out of openclaw.json too, the gateway not restarted", async () => {
     hermesBox();
+    box.hermesConfig["model.provider"] = "openrouter";
     box.edition = "dual";
     box.config = signedInConfig();
     box.gatewayStore = { "deepseek:default": { provider: "deepseek", type: "api_key" } };
     expect(await signOutOfProvider("clawai")).toMatchObject({ ok: true, changed: true });
+    expect(box.hermesConfig).toEqual({ "model.provider": "openrouter", "model.default": "deepseek-v4-pro" });
     expect(cli.spawnOpenclawCli).toHaveBeenCalledWith(["models", "auth", "logout", "deepseek:default", "--yes"], expect.anything());
     expect(box.config).toMatchObject({ models: { providers: { deepseek: { baseUrl: "https://proxy" } } } });
     expect((box.config.models as { providers: { deepseek: Record<string, unknown> } }).providers.deepseek).not.toHaveProperty("apiKey");
@@ -941,5 +1010,41 @@ describe("signOutOfProvider — a dual box", () => {
     expect(readAuth().credential_pool.openrouter).toEqual([]);
     expect(cli.spawnOpenclawCli).not.toHaveBeenCalled();
     expect(box.gatewayStore).toHaveProperty("openrouter:default");
+  });
+});
+
+describe("hermesStillSignedIn — Hermes' own list, which the sign-out task's verify step asks", () => {
+  const payload = (providers: { id: string; authenticated: boolean | null }[], extra: Record<string, unknown> = {}) => ({
+    providers: providers.map((row) => ({ ...row, name: row.id, verified: null, isUserDefined: null, source: "dashboard", total: 0, models: [] })),
+    current: { provider: "openrouter", model: "openrouter/auto" },
+    reasoning: "",
+    fetchedAt: Date.now(),
+    source: "dashboard",
+    stale: false,
+    ...extra,
+  });
+
+  it("answers from a fresh live read: the row's own flag, and a row Hermes does not list is not signed in", async () => {
+    modelOptions.getModelOptions.mockResolvedValue(payload([{ id: "clawai", authenticated: true }, { id: "openrouter", authenticated: false }]));
+    expect(await hermesStillSignedIn("clawai")).toBe(true);
+    expect(await hermesStillSignedIn("openrouter")).toBe(false);
+    expect(await hermesStillSignedIn("gemini")).toBe(false);
+    // Never the copy cached from before the restart.
+    expect(modelOptions.invalidateModelOptions).toHaveBeenCalledTimes(3);
+    expect(modelOptions.invalidateModelOptions.mock.invocationCallOrder[0]).toBeLessThan(modelOptions.getModelOptions.mock.invocationCallOrder[0]);
+  });
+
+  it("cannot say over anything but a live verdict: a fallback, a kept copy, a row with no flag, a failed read", async () => {
+    const rows = [{ id: "clawai", authenticated: true }];
+    for (const answer of [
+      payload(rows, { source: "catalog-file", stale: true }),
+      payload(rows, { degraded: "dashboard-unreachable" }),
+      payload([{ id: "clawai", authenticated: null }]),
+    ]) {
+      modelOptions.getModelOptions.mockResolvedValueOnce(answer);
+      expect(await hermesStillSignedIn("clawai"), JSON.stringify(answer)).toBeNull();
+    }
+    modelOptions.getModelOptions.mockRejectedValueOnce(new Error("dashboard down"));
+    expect(await hermesStillSignedIn("clawai")).toBeNull();
   });
 });

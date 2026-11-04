@@ -27,6 +27,8 @@ const gateway = vi.hoisted(() => ({ waitForGatewayBack: vi.fn() }));
 vi.mock("@/lib/gateway-hot-apply", () => gateway);
 const status = vi.hoisted(() => ({ readProviderStatus: vi.fn() }));
 vi.mock("@/lib/provider-status", () => status);
+const hermesAuth = vi.hoisted(() => ({ hermesStillSignedIn: vi.fn() }));
+vi.mock("@/lib/provider-sign-out-hermes", () => hermesAuth);
 // The real module's constants (the cookie verifier reads `DATA_DIR` at import)
 // over an in-memory store.
 vi.mock("@/lib/config-store", async (importOriginal) => ({
@@ -79,6 +81,7 @@ beforeEach(async () => {
   signOut.signOutOfProvider.mockResolvedValue({ ok: true, changed: true, gatewayRestarting: false });
   gateway.waitForGatewayBack.mockResolvedValue(true);
   status.readProviderStatus.mockResolvedValue({ harness: "openclaw", providers: [], defaultProvider: null, unrunnable: [], degraded: false });
+  hermesAuth.hermesStillSignedIn.mockResolvedValue(false);
   tasks = await import("@/lib/background-tasks");
   tasks.resetBackgroundTasksForTests();
   ({ POST } = await import("@/app/setup-api/providers/sign-out/route"));
@@ -175,6 +178,27 @@ describe("POST /setup-api/providers/sign-out", () => {
     const { taskId } = await (await POST(request({ cookie: true }))).json();
     expect((await ended(taskId)).state).toBe("succeeded");
     expect(gateway.waitForGatewayBack).not.toHaveBeenCalled();
+    expect(hermesAuth.hermesStillSignedIn).toHaveBeenCalledWith("openrouter");
+  });
+
+  it("on Hermes, the default is refused 409 is_default before any task — ClawBox AI's too", async () => {
+    signOut.resolveSignOutTarget.mockResolvedValue({ ok: true, harness: "hermes", edition: "hermes", row: "clawai", label: "ClawBox AI" });
+    const error = "ClawBox AI is the default provider. Make another provider the default first, then sign out of it.";
+    signOut.signOutRefusal.mockResolvedValue({ kind: "is_default", error });
+    const res = await POST(request({ cookie: true, body: { provider: "clawai" } }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error, kind: "is_default" });
+    expect(signOut.signOutOfProvider).not.toHaveBeenCalled();
+    expect(tasks.listBackgroundTasks()).toEqual([]);
+  });
+
+  it("on Hermes, a sign-out Hermes still lists signed in ends the task failed, never signed out", async () => {
+    signOut.resolveSignOutTarget.mockResolvedValue({ ok: true, harness: "hermes", edition: "hermes", row: "openrouter", label: "OpenRouter" });
+    hermesAuth.hermesStillSignedIn.mockResolvedValue(true);
+    const res = await POST(request({ cookie: true }));
+    expect(res.status).toBe(202);
+    const task = await ended((await res.json()).taskId);
+    expect(task).toMatchObject({ state: "failed", error: expect.stringMatching(/^OpenRouter was not signed out: Hermes still lists it as signed in/), result: { kind: "still_signed_in" } });
   });
 
   it("refuses the MCP bearer — what the agent holds — and no session, 403 owner_only, signing nothing out", async () => {

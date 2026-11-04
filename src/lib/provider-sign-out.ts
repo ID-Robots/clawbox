@@ -34,10 +34,16 @@
  * THE DEFAULT. Signing out must not leave the assistant on a provider nobody
  * signed in to, so the DEFAULT provider's sign-out is refused (`is_default`,
  * the row's button is locked with the same "make another provider the default
- * first" hint as its switch) — for every provider but ClawBox AI, which keeps
- * #1369's rule: it is the box's own provider, the one a box with nothing else
- * would otherwise have no way out of, and its row stays the default reading
- * "Sign in again" while the chat answers with "Sign in to ClawBox AI again".
+ * first" hint as its switch) — for every provider but ClawBox AI on OpenClaw,
+ * which keeps #1369's rule: it is the box's own provider, the one a box with
+ * nothing else would otherwise have no way out of, and its row stays the
+ * default reading "Sign in again" while the chat answers with "Sign in to
+ * ClawBox AI again". On HERMES ClawBox AI is refused like any other default:
+ * Hermes counts a provider defined in config.yaml as signed in for as long as
+ * its block has a base URL, key or no key, so the default's sign-out took the
+ * token and left Hermes' own list (GET /setup-api/hermes/models) calling it
+ * signed in — a job that said "signed out" over a box that was not. Off the
+ * default, the Hermes half takes the whole block (provider-sign-out-hermes.ts).
  * Another provider's sign-out never touches the default, so the chat goes on
  * answering on the one it is on. A box whose default cannot be read, or names
  * none (Hermes on `auto` picks whichever credential it finds), is refused too
@@ -214,7 +220,11 @@ async function refusalBeforeSignOut(harness: Harness, row: string, label: string
         error: "A ClawBox AI sign-in is finishing on this box. Wait for it to finish, then sign out.",
       };
     }
-  } else {
+  }
+  // ClawBox AI skips the default check on OpenClaw only (#1369): Hermes lists
+  // its block as signed in for as long as the block is there, and the default's
+  // block is the one the chat cannot do without (see the file header).
+  if (row !== CLAWAI_ROW || harness === "hermes") {
     const current = await readDefaultRow(harness);
     if (!current.known) {
       return {

@@ -14,6 +14,9 @@ const gateway = vi.hoisted(() => ({ waitForGatewayBack: vi.fn() }));
 vi.mock("@/lib/gateway-hot-apply", () => gateway);
 const status = vi.hoisted(() => ({ readProviderStatus: vi.fn() }));
 vi.mock("@/lib/provider-status", () => status);
+// Hermes' own list of who is signed in (GET /setup-api/hermes/models).
+const hermesAuth = vi.hoisted(() => ({ hermesStillSignedIn: vi.fn() }));
+vi.mock("@/lib/provider-sign-out-hermes", () => hermesAuth);
 
 import { getBackgroundTask, resetBackgroundTasksForTests, type BackgroundTaskView } from "@/lib/background-tasks";
 import {
@@ -64,6 +67,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   gateway.waitForGatewayBack.mockResolvedValue(true);
   status.readProviderStatus.mockResolvedValue(rows("connected"));
+  hermesAuth.hermesStillSignedIn.mockResolvedValue(false);
 });
 
 afterEach(() => {
@@ -263,6 +267,8 @@ describe("a provider sign-out task", () => {
       status: "Signed out of OpenAI.",
       verified: true,
     });
+    // OpenClaw's answer is its own: Hermes is never asked.
+    expect(hermesAuth.hermesStillSignedIn).not.toHaveBeenCalled();
   });
 
   it("fails with the sign-out's refusal and its kind", async () => {
@@ -286,6 +292,68 @@ describe("a provider sign-out task", () => {
     }));
     expect((await ended(task.id)).state).toBe("succeeded");
     expect(gateway.waitForGatewayBack).not.toHaveBeenCalled();
+  });
+
+  const hermesSignOut = (provider = "openrouter", label = "OpenRouter") => taskOf(startProviderSignOutTask({
+    provider,
+    label,
+    harness: "hermes",
+    signOut: async () => ({ ok: true, changed: true, gatewayRestarting: false }),
+  }));
+
+  it("on Hermes, verified only once Hermes' own list no longer has the provider signed in", async () => {
+    status.readProviderStatus.mockResolvedValue(rows("disconnected", "openrouter"));
+    const done = await ended(hermesSignOut().id);
+    expect(done).toMatchObject({ state: "succeeded", result: { signedOut: true, provider: "openrouter", verified: true } });
+    expect(done.result).not.toHaveProperty("warning");
+    expect(hermesAuth.hermesStillSignedIn).toHaveBeenCalledWith("openrouter");
+  });
+
+  it("on Hermes, fails still_signed_in when Hermes still lists the provider signed in — the files being clean is not enough", async () => {
+    // The box's own row already reads it signed out: the case a board caught.
+    status.readProviderStatus.mockResolvedValue(rows("disconnected", "clawai"));
+    hermesAuth.hermesStillSignedIn.mockResolvedValue(true);
+    const done = await ended(hermesSignOut("clawai", "ClawBox AI").id);
+    expect(done).toMatchObject({
+      state: "failed",
+      error: "ClawBox AI was not signed out: Hermes still lists it as signed in. Try again; if it stays, restart the box and sign out again.",
+      result: { kind: "still_signed_in" },
+    });
+  });
+
+  it("on Hermes, waits out a dashboard still coming back from the restart, then takes its word", async () => {
+    hermesAuth.hermesStillSignedIn.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(true);
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const task = hermesSignOut();
+      await vi.waitFor(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(getBackgroundTask(task.id)?.state).toBe("failed");
+      });
+      expect(hermesAuth.hermesStillSignedIn).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("on Hermes, a dashboard that never answers is not a failure, and not verified either", async () => {
+    status.readProviderStatus.mockResolvedValue(rows("disconnected", "openrouter"));
+    hermesAuth.hermesStillSignedIn.mockResolvedValue(null);
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    try {
+      const task = hermesSignOut();
+      await vi.waitFor(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getBackgroundTask(task.id)?.state).toBe("succeeded");
+      });
+      expect(getBackgroundTask(task.id)?.result).toMatchObject({
+        signedOut: true,
+        verified: false,
+        warning: "Hermes did not answer in time to confirm that OpenRouter is signed out; Settings shows it once Hermes is back.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

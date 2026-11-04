@@ -21,7 +21,8 @@
  *    row back. Its end says whether the row reads connected.
  *  - SIGN-OUT (`PROVIDER_SIGN_OUT_KIND`): `signOutOfProvider` (which removes
  *    and reads back every copy itself), then the restart it started, then the
- *    row read back.
+ *    row read back — and on Hermes, Hermes' own list of who is signed in: a
+ *    provider it still lists signed in fails the task (`still_signed_in`).
  *
  * ONE PROVIDER SIGN-IN OR SIGN-OUT AT A TIME. Both kinds share a group: every
  * one rewrites the harness's credentials and restarts it. Asked again for the
@@ -183,6 +184,21 @@ async function settledRowState(provider: string): Promise<ProviderConnectionStat
   }
 }
 
+/**
+ * Hermes' own word on whether `provider` is still signed in (see
+ * `hermesStillSignedIn`), waited out while its dashboard comes back from the
+ * sign-out's restart; `null` when it had not answered by `waitMs`.
+ */
+async function settledHermesSignIn(provider: string, waitMs: number): Promise<boolean | null> {
+  const { hermesStillSignedIn } = await import("@/lib/provider-sign-out-hermes");
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const signedIn = await hermesStillSignedIn(provider).catch(() => null);
+    if (signedIn !== null || Date.now() >= deadline) return signedIn;
+    await sleep(VERIFY_POLL_MS);
+  }
+}
+
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -292,7 +308,8 @@ const SIGN_OUT_STEPS = [
 /**
  * Sign out of a provider as a task (see the file header). `harness` is the one
  * the sign-out runs on: only OpenClaw's restart is a gateway this task can
- * wait for — Hermes' own restart is done inside the sign-out's apply.
+ * wait for — Hermes' own restart is done inside the sign-out's apply, and its
+ * dashboard coming back is waited out by the verify step, which asks it.
  */
 export function startProviderSignOutTask(spec: {
   provider: string;
@@ -318,6 +335,22 @@ export function startProviderSignOutTask(spec: {
       }
       ctx.step("verify", `Checking that ${label} is signed out…`);
       const state = await settledRowState(provider);
+      // On Hermes the files being clean is not the end of it: Hermes keeps its
+      // own list of who is signed in (GET /setup-api/hermes/models), and a
+      // sign-out it still lists signed in did not happen, whatever was removed.
+      let hermesSignedIn: boolean | null = null;
+      if (spec.harness === "hermes") {
+        hermesSignedIn = await settledHermesSignIn(provider, outcome.gatewayRestarting ? PROVIDER_GATEWAY_WAIT_MS : VERIFY_WAIT_MS);
+        if (hermesSignedIn === true) {
+          throw new BackgroundTaskFailure(
+            `${label} was not signed out: Hermes still lists it as signed in. Try again; if it stays, restart the box and sign out again.`,
+            { kind: "still_signed_in" },
+          );
+        }
+        if (hermesSignedIn === null) {
+          note = [note, `Hermes did not answer in time to confirm that ${label} is signed out; Settings shows it once Hermes is back.`].filter(Boolean).join(" ");
+        }
+      }
       return {
         signedOut: true,
         provider,
@@ -325,8 +358,9 @@ export function startProviderSignOutTask(spec: {
         gatewayRestarting: false,
         status: `Signed out of ${label}.`,
         // The sign-out read every copy back itself; the row is what the list
-        // will say, which a status cache can still lag behind for a moment.
-        verified: state !== "connected",
+        // will say, which a status cache can still lag behind for a moment —
+        // and on Hermes, Hermes' own list said it too.
+        verified: state !== "connected" && (spec.harness !== "hermes" || hermesSignedIn === false),
         ...(note ? { warning: note } : {}),
       };
     },

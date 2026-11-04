@@ -22,6 +22,9 @@ import { CLAWAI_ROW, resolveSignOutTarget, signOutOfProvider, signOutRefusal } f
  * Refusals answered before any task, with `kind`:
  * - 403 `owner_only`: OWNER ONLY, the rule of providers/enabled.
  * - 409 `sign_in_in_progress`: a device login is writing its token right now.
+ * - 409 `is_default` / `default_unknown`, on Hermes only: ClawBox AI is the
+ *   chat's default there (or Hermes picks its own), the rule of every other
+ *   provider's sign-out (src/lib/provider-sign-out.ts).
  */
 export async function POST(request: Request) {
   if (!(await hasPersonSession(request))) {

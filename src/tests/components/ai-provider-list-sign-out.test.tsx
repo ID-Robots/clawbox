@@ -4,7 +4,8 @@
  * harness, that posts the row's sign-out, re-reads the box and tells every
  * other surface, and draws the signed-out state from the box's own answer.
  * The default's sign-out is locked with the switch's hint — except ClawBox
- * AI's, the account a box had no way out of (#1369).
+ * AI's on OpenClaw, the account a box had no way out of (#1369). On Hermes
+ * ClawBox AI's is locked like any default's.
  *
  * The sign-out is the box's background task (TASK-2148): the POST answers 202
  * with it, and the list follows it at /setup-api/background-jobs/tasks.
@@ -169,6 +170,23 @@ describe("AiProviderList — signing out of a provider", () => {
     fireEvent.click(locked);
     fireEvent.click(locked);
     expect(box.posts).toEqual([]);
+  });
+
+  it("locks ClawBox AI's sign-out too while it is Hermes' default — #1369's exception is OpenClaw's", async () => {
+    const box = stubBox({
+      harness: "hermes",
+      rows: [{ ...HERMES_ROWS[0], isDefault: true }, { ...HERMES_ROWS[1], isDefault: false }, HERMES_ROWS[2]],
+    });
+    renderList();
+    const locked = await signOutButton("clawai", "ClawBox AI");
+    expect(locked).toBeDisabled();
+    expect(locked).toHaveAttribute("aria-describedby", "ai-provider-locked-clawai");
+    expect(screen.getByTestId("ai-provider-locked-hint-clawai")).toHaveTextContent("Make another provider the default first.");
+    fireEvent.click(locked);
+    fireEvent.click(locked);
+    expect(box.posts).toEqual([]);
+    // The provider that is not the default stays offered.
+    expect(await signOutButton("openrouter", "OpenRouter")).toBeEnabled();
   });
 
   it("signs out on Hermes too, ClawBox AI and a key provider alike", async () => {
