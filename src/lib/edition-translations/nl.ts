@@ -1686,6 +1686,7 @@ export const nl: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Bericht aan {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Bericht aan de teamleiding: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Bericht aan de assistent: {text}",
+  "codingAgent.stepRunMessageToAssistant": "Bericht aan de assistent ({kind}): {text}",
   "codingAgent.stepMessageMidTurn": "Bericht tijdens de beurt bezorgd: {text}",
   "codingAgent.stepMessageToRun": "Bericht aan de run: {text}",
   // What's new in 4.3 (TASK-1059, TASK-1195)

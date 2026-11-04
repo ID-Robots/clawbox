@@ -1832,6 +1832,7 @@ const table: Record<string, string> = {
   "codingAgent.stepReviewLoopRound": "{id} のレビューラウンド {round}",
   "codingAgent.stepReviewLoopTurn": "{id} のレビューラウンド",
   "codingAgent.stepReviewRound": "レビューラウンド {round}/{max} をコーディングエージェントに委任",
+  "codingAgent.stepRunMessageToAssistant": "アシスタントへのメッセージ（{kind}）：{text}",
   "codingAgent.stepSecretsInjected": "環境内のシークレット: {names}",
   "codingAgent.stepSecretsUnreadable": "次のシークレットを読み取れませんでした: {names}",
   "codingAgent.stepStarted": "開始しました",

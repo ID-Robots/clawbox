@@ -508,7 +508,8 @@ describe("a run", () => {
     expect(prompt).not.toContain("Delegate instead of doing everything in one thread");
     expect([lib.leanHelpersBrief(false), lib.leanHelpersBrief(true)].some((s) => prompt.includes(s))).toBe(true);
     expect(prompt).not.toContain(lib.LEAN_VISUAL_BRIEF);
-    expect(argv).not.toContain("--mcp-config");
+    // Its server holds no browser family, only the run's assistant_message.
+    expect(JSON.parse(argv[argv.indexOf("--mcp-config") + 1]).mcpServers.clawbox.env.CLAWBOX_RUN_BROWSER).toBe("0");
 
     makeProject("site");
     const visual = await finished((await lib.startRun({ task: "Fix the parser", projectId: "site", source: "agent" })).id);
@@ -1227,7 +1228,7 @@ describe("what a run can verify with", () => {
     for (const tool of lib.MCP_BROWSER_TOOLS) expect(argv).toContain(tool);
     expect(argv).toContain(lib.MCP_MEDIA_TOOLS.images);
     expect(argv).toContain(lib.MCP_MEDIA_TOOLS.audio);
-    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 2);
+    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 3);
     // The run's own server is told which of the two it may register; the
     // variable carries no secret, like everything else in this block.
     expect(server.env.CLAWBOX_RUN_MEDIA).toBe("images,audio");
@@ -2584,8 +2585,12 @@ describe("a team run's message tool", () => {
     expect(planner.CLAWBOX_TEAM_TASK).toBe("none");
     for (const solo of [lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home }), lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team: null })]) {
       const soloEnv = JSON.parse(solo).mcpServers.clawbox.env;
-      for (const key of ["CLAWBOX_RUN_ID", "CLAWBOX_TEAM_ID", "CLAWBOX_TEAM_ROLE", "CLAWBOX_TEAM_TASK"]) expect(soloEnv[key]).toBeUndefined();
+      // A single writing run is named (its assistant_message), never as a team member.
+      expect(soloEnv.CLAWBOX_RUN_ID).toBe("run-ab12cd34");
+      for (const key of ["CLAWBOX_TEAM_ID", "CLAWBOX_TEAM_ROLE", "CLAWBOX_TEAM_TASK"]) expect(soloEnv[key]).toBeUndefined();
     }
+    // A read-only single run has no assistant_message, so it is not named.
+    expect(JSON.parse(lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, readOnly: true })).mcpServers.clawbox.env.CLAWBOX_RUN_ID).toBeUndefined();
   });
 
   it("approves team_message for every team run, the read-only planner and reviewer included, and for no other run", () => {

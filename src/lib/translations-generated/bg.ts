@@ -1832,6 +1832,7 @@ const table: Record<string, string> = {
   "codingAgent.stepReviewLoopRound": "Раунд {round} от прегледа на {id}",
   "codingAgent.stepReviewLoopTurn": "Кръг на преглед за {id}",
   "codingAgent.stepReviewRound": "Кръг на преглед {round} от {max} е предаден на кодиращия агент",
+  "codingAgent.stepRunMessageToAssistant": "Съобщение към асистента ({kind}): {text}",
   "codingAgent.stepSecretsInjected": "Тайни в средата: {names}",
   "codingAgent.stepSecretsUnreadable": "Тези тайни не можаха да бъдат прочетени: {names}",
   "codingAgent.stepStarted": "Стартирано",

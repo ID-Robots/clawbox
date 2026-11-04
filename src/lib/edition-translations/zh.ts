@@ -1694,6 +1694,7 @@ export const zh: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "发给 {run} 的消息：{text}",
   "codingAgent.stepTeamMessageToLead": "发给团队负责人的消息：{text}",
   "codingAgent.stepTeamMessageToAssistant": "发给助手的消息：{text}",
+  "codingAgent.stepRunMessageToAssistant": "发给助手的消息（{kind}）：{text}",
   "codingAgent.stepMessageMidTurn": "已在运行中送达消息：{text}",
   "codingAgent.stepMessageToRun": "发给运行的消息：{text}",
   // What's new in 4.3 (TASK-1059, TASK-1195)

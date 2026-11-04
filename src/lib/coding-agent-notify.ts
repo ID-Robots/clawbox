@@ -49,6 +49,7 @@ import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
+import { ENDED_WITH_LIVE_WORK } from "@/lib/coding-agent-progress";
 import type { TeamBoard } from "@/lib/coding-team-board";
 import { formatResetClock } from "@/lib/anthropic-limit";
 import { OPEN_ANTHROPIC_ACCOUNTS_SETTINGS } from "@/lib/notify-action";
@@ -608,7 +609,26 @@ export function buildChatNotice(run: CodingRun, harness: Harness): { message: st
   const already = harness === "openclaw"
     ? "If you have already told them how this run ended, reply NO_REPLY."
     : "If you have already told them how this run ended, say so in one line.";
-  return { message: `${display} ${ask} ${already}`, display };
+  return { message: [display, ...unfinishedWarnings(run), ask, already].join(" "), display };
+}
+
+/**
+ * What an ending must not be mistaken for: a finished run whose deliverable is
+ * missing, or one that ended with work it had started still running (the stop
+ * guard ran out of refusals). Fixed words only, like the rest of the notice —
+ * never the verdict's own text or the job names, which a model wrote.
+ */
+function unfinishedWarnings(run: CodingRun): string[] {
+  const out: string[] = [];
+  if (run.deliverable && run.deliverableCheck) {
+    out.push(run.deliverableCheck.ok
+      ? "Its deliverable is there."
+      : "Its deliverable is MISSING, so do not report the work as done.");
+  }
+  if ((run.progress ?? []).some((line) => line.startsWith(ENDED_WITH_LIVE_WORK))) {
+    out.push("It ended with work it had started still running: the work is NOT finished, so finish or restart only that part.");
+  }
+  return out;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -755,6 +775,50 @@ async function notifyOriginChat(run: CodingRun): Promise<void> {
   } catch (err) {
     console.error(`[coding-agent] the chat that asked for ${run.id} was not told it ended:`, err instanceof Error ? err.message : err);
   }
+}
+
+/**
+ * A running run's report into the chat that asked for it
+ * (coding-run-report.ts) — NOT an ending, so nothing is claimed and the chat
+ * may hear several. The run's words go in, inside the frame `runReportMessage`
+ * builds, which is the one place this module carries a model's text: the run
+ * is reporting to the assistant that started it, which is what the frame says.
+ *
+ * Where: the recorded origin when the box still runs that harness; otherwise,
+ * on OpenClaw, the owner's main conversation. Hermes has no main session to
+ * fall back on. Hermes' turn waits for one running in the chat (up to
+ * HERMES_BUSY_WAIT_MS), so it is sent in the background and answers "queued".
+ * Throws a TeamMessageError the route answers with when it cannot be sent.
+ */
+export async function deliverRunReport(runId: string, notice: { message: string; display: string }): Promise<"origin" | "main" | "queued"> {
+  const { TeamMessageError } = await import("@/lib/coding-team-messages");
+  const harness = await getActiveHarness();
+  const origin = parseChatNotice(kvGet(`${CHAT_NOTICE_KEY_PREFIX}${runId}`));
+  const fromOrigin = origin && origin.harness === harness ? origin : null;
+  let key = fromOrigin?.key ?? null;
+  if (key !== null) {
+    const { readOwnerChatTabs } = await import("@/lib/chat-tab-store");
+    if (readOwnerChatTabs().closed.includes(key)) key = null;
+  }
+  if (harness === "openclaw") {
+    try {
+      await sendOpenClawChatNotice(key, notice.message, `coding-run-report-${runId}-${Date.now()}`);
+    } catch (err) {
+      const gateway = await import("@/lib/openclaw-gateway-ws");
+      if (err instanceof gateway.GatewayWsUnavailableError) {
+        throw new TeamMessageError("NO_SESSION", "There is no assistant chat to post into right now: the OpenClaw gateway is not answering. The message was not delivered.");
+      }
+      throw new TeamMessageError("NOT_DELIVERED", `The assistant's chat did not take the message: ${(err instanceof Error ? err.message : String(err)).split("\n")[0].slice(0, 200)}`);
+    }
+    return fromOrigin ? "origin" : "main";
+  }
+  if (!fromOrigin) {
+    throw new TeamMessageError("UNSUPPORTED", "This run was not started from a ClawBox chat on Hermes, so there is no chat to tell; put it in your final report.");
+  }
+  void sendHermesChatNotice(key ?? DESKTOP_TRANSCRIPT_KEY, notice).catch((err: unknown) => {
+    console.error(`[coding-agent] ${runId}'s report did not reach its chat:`, err instanceof Error ? err.message : err);
+  });
+  return "queued";
 }
 
 /**

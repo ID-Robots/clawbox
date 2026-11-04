@@ -42,9 +42,13 @@
  *       - a process the run started that is still alive in its own cgroup:
  *         a background shell the harness keeps, or anything reparented out
  *         of the harness's tree. Not counted: the harness's own MCP servers
- *         (its non-shell children), a process that LISTENS on a TCP port (the
- *         documented "leave a server running" pattern), and any pid listed in
- *         <state-dir>/.run-jobs/keep (one pid per line).
+ *         (its non-shell children) and a process tree that LISTENS on a TCP
+ *         port (the documented "leave a server running" pattern). Nothing
+ *         else can be waved through: a pid the run wrote to the old
+ *         <state-dir>/.run-jobs/keep list is NOT exempt, because a model that
+ *         was told it could list a pid there listed its 3-minute test job and
+ *         stopped (seen on a board), which is the very stop this hook exists
+ *         to refuse.
  *     Bounded: at most MAX_BLOCKS refusals and MAX_BLOCK_SPAN_MS from the
  *     first one, counted in <state-dir>/.run-jobs/stop-blocks.json (the box
  *     reads that file to say a run ended with work still live). A sub-agent's
@@ -207,11 +211,6 @@ function listens(pid, inodes) {
   return false;
 }
 
-function keptPids(jobsDir) {
-  const raw = readText(path.join(jobsDir, "keep")) || "";
-  return new Set(raw.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 1));
-}
-
 /** A short, single-line description of a process for the model. */
 function describe(pid) {
   const argv = procArgv(pid).join(" ").replace(/\s+/g, " ").trim();
@@ -221,11 +220,11 @@ function describe(pid) {
 /**
  * The run's own processes that are still doing work: everything in its
  * cgroup (else the harness's descendants) minus this hook's chain, the
- * harness's non-shell children (its MCP servers) and their trees, servers
- * that listen on a TCP port, and pids the run said to keep. Answers the
+ * harness's non-shell children (its MCP servers) and their trees, and servers
+ * that listen on a TCP port. Answers the
  * roots only — a background shell, not every child under it.
  */
-function liveRunProcesses(selfPid, jobsDir) {
+function liveRunProcesses(selfPid) {
   const chain = ancestors(selfPid);
   const harness = harnessPid(chain);
   if (harness === null) return [];
@@ -246,7 +245,6 @@ function liveRunProcesses(selfPid, jobsDir) {
     }
     return false;
   };
-  const kept = keptPids(jobsDir);
   const inodes = listeningInodes();
   // The harness's own helpers: a child of the harness that is not a shell
   // (MCP servers, the language server) and everything under it.
@@ -267,7 +265,7 @@ function liveRunProcesses(selfPid, jobsDir) {
   const candidates = [];
   for (const pid of parentOf.keys()) {
     if (pid === harness || chain.has(pid) || !inRun(pid)) continue;
-    if (under(pid, helperRoots) || under(pid, kept)) continue;
+    if (under(pid, helperRoots)) continue;
     candidates.push(pid);
   }
   const candidateSet = new Set(candidates);
@@ -344,7 +342,7 @@ function keepalive(stateDir, inboxDir, input) {
   const now = Date.now();
   const messages = inboxDir ? takeInbox(inboxDir) : [];
   const jobs = liveJobs(jobsDir, now);
-  const procs = liveRunProcesses(process.pid, jobsDir);
+  const procs = liveRunProcesses(process.pid);
   if (!messages.length && !jobs.length && !procs.length) return null;
   const blocks = readBlocks(blocksFile);
   const first = blocks.first || now;
@@ -362,8 +360,8 @@ function keepalive(stateDir, inboxDir, input) {
   parts.push(
     "Do not end your turn yet: once you stop, this run exits and nothing wakes you again, so the work above would be left half done. " +
       "Wait for it in this turn (poll it with sleep in a loop, in steps of a few minutes), read its result and finish with it. " +
-      `If a process is meant to keep running after you finish (a server you leave for the owner), write its pid on its own line to ${path.join(jobsDir, "keep")}; ` +
-      `remove a job file from ${jobsDir} when its job is done.`,
+      "Only a server you leave running for the owner may outlive you, and only once it listens on a TCP port; a test, a build, an update or any other job must finish first. " +
+      `Remove a job file from ${jobsDir} when its job is done.`,
   );
   return parts.join("\n\n");
 }

@@ -92,3 +92,17 @@ export function runBrowserAllowed(): boolean {
   if (!runContext()) return true;
   return (process.env.CLAWBOX_RUN_BROWSER ?? "").trim() !== "0";
 }
+
+/**
+ * A single run — of no coding team — as the runner names it: the run context
+ * above plus CLAWBOX_RUN_ID, and none of the team variables. `assistant_message`
+ * registers from it (mcp/tools/coding-agent.ts); a team's run has
+ * `team_message` instead. The web server checks the claim against its own
+ * record of the run regardless.
+ */
+export function soloRunContext(): { runId: string } | null {
+  if (!runContext()) return null;
+  if (process.env.CLAWBOX_TEAM_ID?.trim()) return null;
+  const runId = process.env.CLAWBOX_RUN_ID?.trim() ?? "";
+  return RUN_ID.test(runId) ? { runId } : null;
+}

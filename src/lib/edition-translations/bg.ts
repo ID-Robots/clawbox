@@ -1672,6 +1672,7 @@ export const bg: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Съобщение към {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Съобщение към водещия на екипа: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Съобщение към асистента: {text}",
+  "codingAgent.stepRunMessageToAssistant": "Съобщение към асистента ({kind}): {text}",
   "codingAgent.stepMessageMidTurn": "Съобщение, доставено по време на работа: {text}",
   "codingAgent.stepMessageToRun": "Съобщение към изпълнението: {text}",
   // What's new in 4.3 (TASK-1059, TASK-1195)

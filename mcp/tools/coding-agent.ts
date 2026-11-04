@@ -100,7 +100,7 @@ import {
 } from "../../src/lib/coding-settings-shape";
 import { MODEL_ROLES, ROLE_AUTO, ROLE_EFFORT_LEVELS, ROLE_MODEL_TIERS, type ModelRole } from "../../src/lib/coding-role-models";
 import { PR_BODY_TASK_MODES } from "../../src/lib/coding-pr-body";
-import { teamRunContext } from "../lib/run-context";
+import { soloRunContext, teamRunContext } from "../lib/run-context";
 
 const MAX_TASK_CHARS = 4_000;
 /**
@@ -2547,4 +2547,95 @@ export function registerTeamRunTools(reg: Registrar): void {
       return text(`Posted into the assistant's chat. It may answer by steering you with a message. ${carryOn}${left}`);
     },
   );
+}
+
+// ── Inside a single run: the one tool that talks back to the assistant ──────
+
+/** What the run-report route answers. */
+interface RunReportReply {
+  sent?: boolean;
+  delivered?: "origin" | "main" | "queued";
+  left?: number;
+}
+
+export const RUN_REPORT_KIND_VALUES = ["question", "blocker", "milestone"] as const;
+
+/**
+ * `assistant_message` — registered ONLY in a single run (no team): the runner
+ * sets CLAWBOX_RUN_ID for it (mcp/lib/run-context.ts soloRunContext). The run
+ * speaks as itself; the route checks that it is a live run of no team, then
+ * posts into the chat that started it (src/lib/coding-run-report.ts).
+ */
+export function registerSoloRunTools(reg: Registrar): void {
+  const solo = soloRunContext();
+  if (!solo) return;
+  reg.tool(
+    "assistant_message",
+    `Tell the assistant that started this run ONE thing it must know now, while you keep working: kind="question" for a decision only the user can make, "blocker" when you cannot go on, "milestone" for a long job's result. Not for routine progress. Plain text, at most ${MAX_TEAM_MESSAGE_CHARS} characters; ${MAX_TEAM_MESSAGES_PER_WINDOW} per ${TEAM_MESSAGE_WINDOW_MS / 60_000} minutes and ${MAX_TEAM_MESSAGES_PER_RUN} per run.`,
+    {
+      kind: zEnumOf(RUN_REPORT_KIND_VALUES, "\"question\", \"blocker\" or \"milestone\"."),
+      text: zText(MAX_TEAM_MESSAGE_CHARS, "What to say, in plain text: the question with the options, the blocker and what you need, or the milestone's result."),
+    },
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, maxChars: 2_000 },
+    async ({ kind, text: said }: { kind: (typeof RUN_REPORT_KIND_VALUES)[number]; text: string }) => {
+      let res: RunReportReply;
+      try {
+        res = await apiPost<RunReportReply>(
+          "/setup-api/coding-agent/run-report",
+          { runId: solo.runId, kind, text: said },
+          { timeoutMs: TEAM_MESSAGE_CALL_TIMEOUT_MS + 30_000 },
+        );
+      } catch (err) {
+        if (err instanceof ApiError) throw runReportRefusal(err);
+        throw err;
+      }
+      if (!res.sent) {
+        throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not take the message.", "Do not retry more than once; carry on and put it in your final report.");
+      }
+      const left = typeof res.left === "number" ? ` (${res.left} message${res.left === 1 ? "" : "s"} to the assistant left in this run.)` : "";
+      const where = res.delivered === "queued" ? "Queued into the assistant's chat; it goes in as soon as the chat's current turn ends." : "Posted into the assistant's chat.";
+      const next = kind === "question"
+        ? "Keep working on what does not depend on the answer; the answer comes to you as a message. If you reach the point where you need it, wait with short sleeps rather than ending your turn."
+        : "Carry on with your task; do not wait for a reply and do not send the same thing again.";
+      return text(`${where} ${next}${left}`);
+    },
+  );
+}
+
+function runReportRefusal(err: ApiError): ToolError {
+  let body: { code?: unknown; error?: unknown; nextAllowedAt?: unknown } = {};
+  try {
+    body = JSON.parse(err.body) as typeof body;
+  } catch {
+    /* classified below */
+  }
+  const code = typeof body.code === "string" ? body.code : "";
+  const said = typeof body.error === "string" && body.error.trim() ? body.error.trim() : "The ClawBox refused the message.";
+  const message = `${code || "REFUSED"}: ${said}`;
+  const nothingSent = "Nothing was sent.";
+  switch (code) {
+    case "RATE_LIMITED": {
+      const at = typeof body.nextAllowedAt === "number" ? new Date(body.nextAllowedAt).toISOString() : null;
+      return new ToolError("CONFLICT", message, at
+        ? `${nothingSent} Do not try again before ${at}; carry on meanwhile.`
+        : `${nothingSent} This run has no messages to the assistant left: put it in your final report.`);
+    }
+    case "NO_SESSION":
+    case "NOT_DELIVERED":
+      return new ToolError("ENDPOINT_DOWN", message, "The assistant did not get it. Try once more at most, then put it in your final report.");
+    case "UNSUPPORTED":
+      return new ToolError("NOT_SUPPORTED_HERE", message, "Do not call this tool again in this run; put it in your final report.");
+    case "SETTLED":
+    case "FORBIDDEN":
+    case "NOT_FOUND":
+      return new ToolError("CONFLICT", message, "Do not call this tool again in this run; put it in your final report.");
+    case "TOO_LONG":
+      return new ToolError("TOO_LARGE", message, `${nothingSent} Say it in at most ${MAX_TEAM_MESSAGE_CHARS} characters and send it once.`);
+    case "EMPTY":
+    case "NOT_PLAIN_TEXT":
+    case "INVALID":
+      return new ToolError("BAD_ARGUMENT", message, `${nothingSent} Send plain text with kind question, blocker or milestone.`);
+    default:
+      return classifyError(err, "assistant_message");
+  }
 }

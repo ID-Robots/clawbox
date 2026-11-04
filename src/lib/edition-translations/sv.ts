@@ -1682,6 +1682,7 @@ export const sv: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Meddelande till {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Meddelande till teamets ledare: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Meddelande till assistenten: {text}",
+  "codingAgent.stepRunMessageToAssistant": "Meddelande till assistenten ({kind}): {text}",
   "codingAgent.stepMessageMidTurn": "Meddelande levererat mitt i arbetet: {text}",
   "codingAgent.stepMessageToRun": "Meddelande till körningen: {text}",
   // What's new in 4.3 (TASK-1059, TASK-1195)
