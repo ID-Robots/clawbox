@@ -3,6 +3,7 @@ import net from "net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { waitForGatewayStart, type GatewayStartState } from "@/lib/gateway-start-wait";
 import { waitForUnitJob } from "@/lib/gateway-unit-job";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 import { waitForPortOpen } from "@/lib/port-probe";
 
 /**
@@ -75,6 +76,30 @@ describe("waitForUnitJob", () => {
     const outcome = await waitForUnitJob({ unit: "clawbox-gateway.service", timeoutMs: 1_000, settleBudgetMs: 60_000, pollMs: 1 });
     expect(outcome.kind).toBe("settled");
     expect(shows).toBe(2);
+  });
+});
+
+describe("withOpenclawMaintenanceRetry", () => {
+  it("asks again with what is really left of the budget when the wall clock stepped during the refused ask", async () => {
+    // The updater's quiesced repair at boot (`doctor --fix`, `config validate`)
+    // goes through this. On the wall clock the step either ended the window at
+    // once or handed the next ask 1 ms, a kill over a command never given time.
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const given: number[] = [];
+    const answer = await withOpenclawMaintenanceRetry(async (timeoutMs) => {
+      given.push(timeoutMs);
+      if (given.length === 1) {
+        wallClockStep = TWELVE_HOURS_MS;
+        throw Object.assign(new Error("Command failed"), {
+          stderr: "OpenClaw state is undergoing offline maintenance; retry when it finishes.",
+        });
+      }
+      return "valid";
+    }, { timeoutMs: 60_000, label: "config validate", pauseMs: 1 });
+    expect(answer).toBe("valid");
+    expect(given).toHaveLength(2);
+    expect(given[1]).toBeGreaterThan(50_000);
+    quiet.mockRestore();
   });
 });
 

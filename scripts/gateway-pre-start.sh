@@ -21,7 +21,7 @@ set -euo pipefail
 # the step timings and the time budgets below are counted on (clawbox_now_ms
 # says why not bash's own). Empty where it cannot be read, which then times
 # from the first step.
-read -r CLAWBOX_PRESTART_T0_UPTIME _ < /proc/uptime 2>/dev/null || CLAWBOX_PRESTART_T0_UPTIME=""
+read -r CLAWBOX_PRESTART_T0_UPTIME _ 2>/dev/null </proc/uptime || CLAWBOX_PRESTART_T0_UPTIME=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -288,17 +288,17 @@ clawbox_stamp_remember() {
 }
 
 # Milliseconds on the box's MONOTONIC clock, into CLAWBOX_NOW_MS: /proc/uptime
-# (CLOCK_BOOTTIME, "12345.67 …"; `read` is a builtin, so no fork), or the
-# reading of it given as $1. Not bash's SECONDS or EPOCHREALTIME, which are wall
-# clock: the box has no battery-backed RTC, boots on the clock it saved at
-# shutdown, and timesyncd steps it forward — half a day after a night off —
-# while this script runs. On those, one cold boot logged a 12-hour "pre-start
+# (CLOCK_BOOTTIME, "12345.67 …", so in 10 ms steps; `read` is a builtin, so no
+# fork), or the reading of it given as $1. Not bash's SECONDS or EPOCHREALTIME,
+# which are wall clock: the box has no battery-backed RTC, boots on the clock it
+# saved at shutdown, and timesyncd steps it forward — half a day after a night
+# off — while this script runs. On those, one cold boot logged a 12-hour "pre-start
 # total" and handed both time budgets below 0 s, though systemd, which counts
 # the unit's TimeoutStartSec on a monotonic clock, had used 40 s of it. Without
 # /proc/uptime the wall clock is all there is.
 clawbox_now_ms() {
   local up="${1:-}" rest us
-  [ -n "$up" ] || read -r up rest < /proc/uptime 2>/dev/null || up=""
+  [ -n "$up" ] || read -r up rest 2>/dev/null </proc/uptime || up=""
   if [[ "$up" =~ ^[0-9]+\.[0-9]+$ ]]; then
     rest="${up#*.}00"
     CLAWBOX_NOW_MS=$(( 10#${up%%.*} * 1000 + 10#${rest:0:3} ))

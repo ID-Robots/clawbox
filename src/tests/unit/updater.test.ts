@@ -1804,7 +1804,14 @@ describe("updater", () => {
 
         const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
         expect(postStep?.error).toBe("post_update exited with status 1");
-        expect(settleQueries).toBeGreaterThanOrEqual(2);
+        // The mask stayed on until the unit was seen out of `activating`.
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+        const settleAt = calls
+          .map((call, index) => (call.includes("clawbox-root-update@post_update.service -p ActiveState") ? index : -1))
+          .filter((index) => index >= 0);
+        const firstLeave = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh leave"));
+        expect(settleAt.length).toBeGreaterThanOrEqual(2);
+        expect(firstLeave).toBeGreaterThan(settleAt[1]);
       } finally {
         vi.useRealTimers();
       }

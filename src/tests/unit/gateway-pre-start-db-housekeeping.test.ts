@@ -31,6 +31,11 @@ function between(from: string, to: string, startAt = 0): string {
   return SRC.slice(start, end);
 }
 
+/** The step timings: where the script keeps its clock, ahead of every section below. */
+const STEP_TIMINGS = between("# ── Step timings, and the checks a start may take on trust", "# OpenClaw 2026.10 or later.");
+/** /proc/uptime's first field less `seconds`: a pre-start that began that long ago. */
+const uptimeAgo = (seconds: number) => (Number(readFileSync("/proc/uptime", "utf-8").split(" ")[0]) - seconds).toFixed(2);
+
 /** The config pass: the heredoc that follows the memory-rebuild export. */
 const CONFIG_PASS = (() => {
   const head = `python3 - "$OPENCLAW_CONFIG" <<'PY'\n`;
@@ -499,16 +504,14 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     // only the 100 s count, in the budget and in the closing timing line.
     stubPython(path.join(dir, "bin"));
     const args = path.join(dir, "py-args");
-    const timings = between("# ── Step timings, and the checks a start may take on trust", "# OpenClaw 2026.10 or later.");
-    const up = Number(readFileSync("/proc/uptime", "utf-8").split(" ")[0]);
-    const r = runBlock(`${timings}\n${BLOCK}`, {
+    const r = runBlock(`${STEP_TIMINGS}\n${BLOCK}`, {
       SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
       CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_2026_10: "1",
       OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
       OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
       OPENCLAW_BIN: "/opt/oc/bin/openclaw",
-      CLAWBOX_PRESTART_T0_UPTIME: (up - 100).toFixed(2),
+      CLAWBOX_PRESTART_T0_UPTIME: uptimeAgo(100),
     }, { PY_ARGS: args, SECONDS: "43200", CLAWBOX_PRESTART_CEILING_S: "300" });
     expect(r.status).toBe(0);
     const argv = existsSync(args) ? readFileSync(args, "utf-8").trim().split("\n") : [];
@@ -626,7 +629,7 @@ describe("gateway-pre-start.sh start-loop recovery block", () => {
   const BLOCK = between("# ── Start-loop recovery", "# ── First boot on a NEW OpenClaw core");
 
   /** The block with a `python3` that records its argv and a `systemctl` answering NRestarts. */
-  function guard(env: Record<string, string> = {}, core2026_10 = "1") {
+  function guard(env: Record<string, string> = {}, core2026_10 = "1", startedAgoS?: number) {
     const binDir = path.join(dir, "bin");
     stubPython(binDir);
     writeFileSync(path.join(binDir, "systemctl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > "${dir}/systemctl-args"\nprintf '%s\\n' "\${NRESTARTS:-0}"\n`);
@@ -637,13 +640,17 @@ describe("gateway-pre-start.sh start-loop recovery block", () => {
     chmodSync(openclaw, 0o755);
     const args = path.join(dir, "py-args");
     rmSync(args, { force: true });
-    const r = runBlock(BLOCK, {
+    // With `startedAgoS`, the step timings run first, as in the script, with
+    // the pre-start begun that long ago on /proc/uptime.
+    const timed = startedAgoS !== undefined;
+    const r = runBlock(timed ? `${STEP_TIMINGS}\n${BLOCK}` : BLOCK, {
       SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
       CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_2026_10: core2026_10,
       OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
       OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
       OPENCLAW_BIN: openclaw,
+      ...(timed ? { CLAWBOX_PRESTART_T0_UPTIME: uptimeAgo(startedAgoS) } : {}),
     }, { PY_ARGS: args, ...env });
     const argv = existsSync(args) ? readFileSync(args, "utf-8").trim().split("\n") : [];
     const opt = (name: string) => argv[argv.indexOf(name) + 1];
@@ -672,6 +679,15 @@ describe("gateway-pre-start.sh start-loop recovery block", () => {
     const { opt } = guard({ SECONDS: "43200" });
     expect(Number(opt("--budget-seconds"))).toBeGreaterThanOrEqual(440);
     expect(Number(opt("--budget-seconds"))).toBeLessThanOrEqual(450);
+  });
+
+  it.skipIf(!existsSync("/proc/uptime"))("takes off what the pre-start has already run, on the monotonic clock", () => {
+    // Begun 100 s ago on /proc/uptime, the wall clock twelve hours on.
+    const { r, opt } = guard({ SECONDS: "43200" }, "1", 100);
+    expect(r.status).toBe(0);
+    // 600 s of ceiling, 150 held back, 100 already run.
+    expect(Number(opt("--budget-seconds"))).toBeGreaterThanOrEqual(348);
+    expect(Number(opt("--budget-seconds"))).toBeLessThanOrEqual(350);
   });
 
   it("counts an unreadable restart count as none", () => {

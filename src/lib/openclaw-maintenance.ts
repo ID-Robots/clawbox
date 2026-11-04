@@ -36,6 +36,7 @@
  */
 
 import { logSafe } from "@/lib/log-safe";
+import { monotonicNow } from "@/lib/monotonic-clock";
 
 /** Both of 2026.10.3's admission refusals end in this instruction; 2026.10.6 keeps the first. */
 export const OPENCLAW_MAINTENANCE_RE = /retry (?:when it|after maintenance) finishes/i;
@@ -100,10 +101,13 @@ export async function withOpenclawMaintenanceRetry<T>(
 ): Promise<T> {
   const windowMs = options.windowMs ?? MAINTENANCE_RETRY_WINDOW_MS;
   const pauseMs = options.pauseMs ?? MAINTENANCE_RETRY_PAUSE_MS;
-  const started = Date.now();
+  // Monotonic: the updater's repair runs this at boot, while timesyncd steps
+  // the clock of a box with no RTC; on the wall clock that step ended the
+  // window at once or handed the next ask 1 ms.
+  const started = monotonicNow();
   const deadline = started + options.timeoutMs;
   for (let tries = 1; ; tries++) {
-    const askedAt = Date.now();
+    const askedAt = monotonicNow();
     try {
       // The first ask is exactly the call it always was; only a repeat is
       // given what is left.
@@ -111,7 +115,7 @@ export async function withOpenclawMaintenanceRetry<T>(
     } catch (err) {
       if (!isOpenclawMaintenanceRefusal(err)) throw err;
       if (err instanceof OpenclawStateMaintenanceError) throw err;
-      const now = Date.now();
+      const now = monotonicNow();
       const lastAskMs = now - askedAt;
       const fitsWindow = now + pauseMs - started <= windowMs;
       const fitsBudget = deadline - (now + pauseMs) > lastAskMs;

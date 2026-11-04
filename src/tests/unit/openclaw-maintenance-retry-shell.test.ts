@@ -101,6 +101,17 @@ describe("scripts/openclaw-maintenance-retry.sh", () => {
     expect(r.stdout).toContain("offline maintenance");
   });
 
+  it("counts its window on the monotonic clock, not on bash's wall-clock SECONDS", () => {
+    // The gateway's pre-start calls this at boot, the minute timesyncd steps
+    // the clock of a box with no RTC forward (half a day after a night off).
+    // A window counted on SECONDS ends at that step. The step cannot be made
+    // from outside a running bash, so this reads the code; the cases above
+    // prove the window still ends where it should.
+    const code = readFileSync(WRAPPER, "utf-8").split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+    expect(code).toContain("/proc/uptime");
+    expect(code).not.toMatch(/started=\$SECONDS|\(\(SECONDS - started/);
+  });
+
   it("still hands on what the command printed when the caller's timeout ends it", () => {
     // Without the wrapper `timeout` leaves the partial output; the wrapper
     // captures it, so it has to replay it when it is signalled too.

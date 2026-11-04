@@ -312,6 +312,26 @@ describe("a config write while the gateway is starting", () => {
     quiet.mockRestore();
   });
 
+  it("does not count a forward step of the wall clock as time the gateway spent starting", async () => {
+    // The box has no RTC: timesyncd steps its clock forward after a cold boot,
+    // half a day after a night off, while the gateway starts and the boot's
+    // own config repair is held for it. Only `Date` moves, as on the box.
+    vi.useFakeTimers();
+    host.startup = ["starting"];
+    const { holdWhileGatewayStarts } = await import("@/lib/gateway-start-guard");
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const held = holdWhileGatewayStarts("config set");
+    held.catch(() => {});
+    await vi.advanceTimersByTimeAsync(5_000);
+    vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    host.probes = 0;
+    host.startup = ["started"];
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(held).resolves.toBe(true);
+    quiet.mockRestore();
+  });
+
   it("holds a whole-file write the same way", async () => {
     vi.useFakeTimers();
     host.startup = ["starting"];

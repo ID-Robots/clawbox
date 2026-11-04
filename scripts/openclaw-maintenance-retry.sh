@@ -38,12 +38,25 @@ trap 'rm -f "$out" "$err"' EXIT
 # had printed is still handed on, as it would have been without the wrapper.
 trap 'cat "$out"; cat "$err" >&2; exit 143' TERM INT
 
-started=$SECONDS
+# The window is counted on the box's monotonic clock, /proc/uptime (`read` is
+# a builtin: no fork). bash's SECONDS is wall clock, and the gateway's pre-start
+# calls this at boot, the minute timesyncd steps the clock of a box with no RTC
+# forward — half a day after a night off — which ended the window at once.
+# SECONDS only where /proc/uptime cannot be read.
+now_s() {
+  local up rest
+  read -r up rest 2>/dev/null </proc/uptime || up=""
+  up="${up%%.*}"
+  if [[ "$up" =~ ^[0-9]+$ ]]; then now="$up"; else now="$SECONDS"; fi
+}
+now_s
+started=$now
 while :; do
   rc=0
   "$@" >"$out" 2>"$err" || rc=$?
   if [ "$rc" -ne 0 ] && grep -qiE 'retry (when it|after maintenance) finishes' "$out" "$err"; then
-    if [ $((SECONDS - started + pause)) -le "$window" ]; then
+    now_s
+    if [ $((now - started + pause)) -le "$window" ]; then
       sleep "$pause"
       continue
     fi
