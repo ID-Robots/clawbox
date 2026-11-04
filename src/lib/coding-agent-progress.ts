@@ -255,6 +255,8 @@ export const RUNNER_STEP = {
   startedFromQueue: "Started from the queue",
   queueCanceled: "Canceled by the owner before it started",
   ciFix: (runId: string, attempt: number, max: number) => `Fixing the failed CI of ${runId} (attempt ${attempt} of ${max})`,
+  keptAlive: (n: number) => `The stop guard kept the run working ${n === 1 ? "once" : `${n} times`} while work it had started was still running`,
+  endedWithLiveWork: (what: string) => `Ended with its own work still running (the stop guard's limit was reached): ${what}`,
   leftoverRunning:
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",

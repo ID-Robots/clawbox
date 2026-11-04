@@ -210,3 +210,115 @@ describe("the --settings a run is spawned with", () => {
     expect(inbox.runHookSettings({ node: "/usr/bin/node", script: "/x/hook.mjs", inbox: null, mergeGuard: false })).toBeNull();
   });
 });
+
+describe("the keep-alive Stop hook", () => {
+  const STOP = { hook_event_name: "Stop", session_id: "s", stop_hook_active: false };
+  const blockOf = (out: string): { decision: string; reason: string } => JSON.parse(out) as { decision: string; reason: string };
+  let state: string;
+  let jobs: string;
+  beforeEach(() => {
+    state = path.join(root, "evidence");
+    jobs = path.join(state, ".run-jobs");
+    fs.mkdirSync(state, { recursive: true });
+  });
+
+  it("lets a run with nothing of its own going on stop, and writes nothing", () => {
+    expect(hook(["keepalive", state], STOP)).toBe("");
+    expect(fs.existsSync(path.join(jobs, "stop-blocks.json"))).toBe(false);
+  });
+
+  it("refuses the stop while a message waits in the inbox, and hands the message over", () => {
+    const dir = inbox.ensureRunInbox(RUN);
+    inbox.postToInbox(RUN, { id: "m-00000001", at: 1, context: "also test on Hermes" });
+    const out = blockOf(hook(["keepalive", state, dir], STOP));
+    expect(out.decision).toBe("block");
+    expect(out.reason).toContain("also test on Hermes");
+    expect(inbox.inboxPending(RUN)).toEqual([]);
+    expect(inbox.inboxReceipts(RUN).map((r) => r.id)).toEqual(["m-00000001"]);
+  });
+
+  it("refuses the stop while a registered job's process lives, and not once it is gone", () => {
+    const sleeper = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      fs.mkdirSync(jobs, { recursive: true });
+      fs.writeFileSync(path.join(jobs, "board.json"), JSON.stringify({ name: "board matrix", pid: sleeper.pid }));
+      const out = blockOf(hook(["keepalive", state], STOP));
+      expect(out.decision).toBe("block");
+      expect(out.reason).toContain(`board matrix (pid ${sleeper.pid})`);
+      expect(out.reason).toMatch(/nothing wakes you again/);
+    } finally {
+      sleeper.kill("SIGKILL");
+    }
+    // A dead pid is a finished job.
+    const dead = spawnSync("true").pid ?? 999_999;
+    fs.writeFileSync(path.join(jobs, "board.json"), JSON.stringify({ name: "board matrix", pid: dead }));
+    expect(hook(["keepalive", state], STOP)).toBe("");
+  });
+
+  it("counts a job with no pid as running until it is old, and the counter caps the refusals", () => {
+    fs.mkdirSync(jobs, { recursive: true });
+    fs.writeFileSync(path.join(jobs, "update.json"), JSON.stringify({ name: "in-app update" }));
+    expect(blockOf(hook(["keepalive", state], STOP)).reason).toContain("in-app update");
+    const counted = JSON.parse(fs.readFileSync(path.join(jobs, "stop-blocks.json"), "utf8")) as { count: number; capped: boolean };
+    expect(counted).toMatchObject({ count: 1, capped: false });
+    // Out of refusals: the stop goes through and the record says so.
+    fs.writeFileSync(path.join(jobs, "stop-blocks.json"), JSON.stringify({ count: 20, first: Date.now() }));
+    expect(hook(["keepalive", state], STOP)).toBe("");
+    const capped = JSON.parse(fs.readFileSync(path.join(jobs, "stop-blocks.json"), "utf8")) as { capped: boolean; last: { jobs: string[] } };
+    expect(capped.capped).toBe(true);
+    expect(capped.last.jobs).toEqual(["in-app update"]);
+    // An old job with no pid no longer counts.
+    const old = (Date.now() - 4 * 60 * 60 * 1000) / 1000;
+    fs.writeFileSync(path.join(jobs, "stop-blocks.json"), JSON.stringify({ count: 0 }));
+    fs.utimesSync(path.join(jobs, "update.json"), old, old);
+    expect(hook(["keepalive", state], STOP)).toBe("");
+  });
+
+  it("finds a background process the harness's shell left running, and lets a kept pid go", () => {
+    // A stand-in harness: a program whose name is `claude`, which starts a
+    // background shell (the way a Bash tool call with run_in_background does)
+    // and then runs the Stop hook as its child, the way the harness does.
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    const harness = path.join(bin, "claude");
+    fs.writeFileSync(
+      harness,
+      `#!${process.execPath}
+const { spawn, spawnSync } = require("child_process");
+const bg = spawn("sh", ["-c", "sleep 30"], { stdio: "ignore" });
+const keep = process.argv[2] === "keep";
+if (keep) require("fs").writeFileSync(${JSON.stringify(path.join(jobs, "keep"))}, String(bg.pid) + "\\n");
+setTimeout(() => {
+  const r = spawnSync(process.execPath, [${JSON.stringify(SCRIPT)}, "keepalive", ${JSON.stringify(state)}], { input: JSON.stringify(${JSON.stringify(STOP)}), encoding: "utf-8" });
+  process.stdout.write(r.stdout);
+  bg.kill("SIGKILL");
+}, 300);
+`,
+      { mode: 0o755 },
+    );
+    fs.mkdirSync(jobs, { recursive: true });
+    const blocked = spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000 });
+    const out = blockOf(blocked.stdout);
+    expect(out.decision).toBe("block");
+    expect(out.reason).toMatch(/Processes you started are still running:[\s\S]*sh -c sleep 30/);
+    fs.rmSync(path.join(jobs, "stop-blocks.json"), { force: true });
+    const kept = spawnSync(harness, ["keep"], { encoding: "utf-8", timeout: 20_000 });
+    expect(kept.stdout).toBe("");
+  });
+
+  it("is not the run's stop when a sub-agent stops", () => {
+    fs.mkdirSync(jobs, { recursive: true });
+    fs.writeFileSync(path.join(jobs, "update.json"), JSON.stringify({ name: "in-app update" }));
+    expect(hook(["keepalive", state], { ...STOP, agent_id: "a1" })).toBe("");
+  });
+
+  it("is in the --settings only for a run that has an evidence folder, after the inbox", () => {
+    const s = JSON.parse(inbox.runHookSettings({ node: "/usr/bin/node", script: "/x/hook.mjs", inbox: "/d/in", mergeGuard: false, keepAlive: "/e/run" })!) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    expect(Object.keys(s.hooks)).toEqual(["PostToolUse", "Stop"]);
+    expect(s.hooks.Stop[0].hooks[0].command).toBe("'/usr/bin/node' '/x/hook.mjs' 'keepalive' '/e/run' '/d/in'");
+    const none = JSON.parse(inbox.runHookSettings({ node: "/usr/bin/node", script: "/x/hook.mjs", inbox: "/d/in", mergeGuard: false, keepAlive: null })!) as { hooks: Record<string, unknown> };
+    expect(Object.keys(none.hooks)).toEqual(["PostToolUse"]);
+  });
+});

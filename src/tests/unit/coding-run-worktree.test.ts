@@ -77,6 +77,24 @@ describe("a run's worktree", () => {
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
   });
 
+  it("forks from a named base branch instead of the checkout's unrelated branch, and refuses a branch that is not there", async () => {
+    git(dir, "branch", "beta");
+    git(dir, "checkout", "-q", "-b", "feature/unrelated");
+    fs.writeFileSync(path.join(dir, "other.js"), "another branch's work\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "unrelated");
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-bbbbcccc", protectedRoot: PROTECTED, baseBranch: "beta" });
+    expect(made).toMatchObject({ ok: true, branch: "clawbox/run-bbbbcccc", base: "beta" });
+    if (!made.ok) return;
+    expect(git(made.path, "rev-parse", "HEAD")).toBe(git(dir, "rev-parse", "beta"));
+    expect(fs.existsSync(path.join(made.path, "other.js"))).toBe(false);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature/unrelated");
+
+    const missing = await addRunWorktree({ projectDir: dir, runId: "run-ddddeeee", protectedRoot: PROTECTED, baseBranch: "nope" });
+    expect(missing).toMatchObject({ ok: false, reason: "no_base_branch" });
+    expect(fs.existsSync(runWorktreePath(dir, "run-ddddeeee"))).toBe(false);
+  });
+
   it("gives two runs of one project trees that cannot see each other's half-written files", async () => {
     const a = await addRunWorktree({ projectDir: dir, runId: "run-aaaaaaaa", protectedRoot: PROTECTED });
     const b = await addRunWorktree({ projectDir: dir, runId: "run-bbbbbbbb", protectedRoot: PROTECTED });

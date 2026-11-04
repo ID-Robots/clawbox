@@ -224,6 +224,10 @@ const RUN_RULES: ErrorRule[] = [
     code: "CONFLICT",
     message: "A coding run is already in progress on this ClawBox.",
     next: "Do not start another. Call coding_agent_status to follow the running one, or coding_agent_stop to end it first.",
+    // The route names the run in the way (the one holding the only slot, or
+    // the one already resuming this session); without it the assistant read
+    // "the box is full" when one run was simply already doing this work.
+    withRouteDetail: true,
   },
   // Two different 404s reach this tool, and the run route says which in its
   // body. Without the first rule a stale resume_run_id was reported as a
@@ -1182,6 +1186,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         1024,
         "Comma-separated ABSOLUTE paths of files to GIVE the run (assets, a user's file); a path only in the task is never read.",
       ),
+      base_branch: zOptText(
+        200,
+        "Branch the run's copy forks from, e.g. \"beta\"; omit to fork from the project's checked-out branch.",
+      ),
       deliverable_files: zOptText(
         512,
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
@@ -1190,10 +1198,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       user_asked_again: zBool(false, USER_ASKED_AGAIN_DESCRIPTION),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, effort, deliverable_files, input_files, fix_ci, user_asked_again }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, effort, deliverable_files, input_files, base_branch, fix_ci, user_asked_again }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; effort?: string; deliverable_files?: string;
-      input_files?: string; fix_ci?: boolean; user_asked_again?: boolean;
+      input_files?: string; base_branch?: string; fix_ci?: boolean; user_asked_again?: boolean;
     }) => {
       if (fix_ci === true && !resume_run_id) {
         throw new ToolError("BAD_ARGUMENT", "fix_ci continues the run whose pull request failed its checks.", "Pass that run's id as resume_run_id with fix_ci.");
@@ -1257,6 +1265,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // decides what it will copy and from where; this end only splits.
       const inputs = (input_files ?? "").split(",").map((p) => p.trim()).filter(Boolean);
       if (inputs.length) body.inputs = inputs;
+      if (base_branch?.trim()) body.baseBranch = base_branch.trim();
       let res: { started?: boolean; queued?: boolean; run?: RunPayload };
       try {
         res = await apiPost<{ started?: boolean; queued?: boolean; run?: RunPayload }>(
@@ -1311,7 +1320,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         // same project at the same time — and which means the project folder
         // itself will not change until the run's branch is merged home.
         + (run.worktree
-          ? `That folder is this run's own copy of ${run.worktree.project}, on branch ${run.worktree.branch}. `
+          ? `That folder is this run's own copy of ${run.worktree.project}, on branch ${run.worktree.branch}${run.worktree.base ? ` forked from ${run.worktree.base}` : ""}. `
           : "")
         + (paths.length ? `It is not counted as finished until ${paths.join(", ")} exist and are not empty. ` : "")
         // What the device actually managed to hand over. Said plainly, because

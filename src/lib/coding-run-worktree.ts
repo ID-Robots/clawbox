@@ -72,7 +72,7 @@ const asBox = (dir: string): Promise<{ ok: true; args: string[] } | { ok: false;
   codingGitIdentityArgs(dir);
 
 /** Why a run works in the project folder itself rather than in a worktree of its own. */
-export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "failed";
+export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "no_base_branch" | "failed";
 
 /**
  * Why a run's branch could not be brought home into the project.
@@ -125,14 +125,17 @@ export function addRunWorktree(input: {
   projectDir: string;
   runId: string;
   protectedRoot: string;
+  /** Fork from this branch (local, else `origin/<name>`) instead of the checkout's own. */
+  baseBranch?: string | null;
 }): Promise<RunWorktreeAdded | RunWorktreeRefused> {
   return withDirLock(input.projectDir, () => addRunWorktreeNow(input));
 }
 
-async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
+async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch }: {
   projectDir: string;
   runId: string;
   protectedRoot: string;
+  baseBranch?: string | null;
 }): Promise<RunWorktreeAdded | RunWorktreeRefused> {
   const dir = path.resolve(projectDir);
   const top = await gitIn(dir, ["rev-parse", "--show-toplevel"]);
@@ -175,9 +178,12 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
     const seeded = await gitIn(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, reason: "failed", detail: failureDetail(seeded, "Making the first commit") };
   }
-  // Never a coding team's branch a team left checked out (`forkBase`).
-  const fork = await forkBase(dir);
-  if (!fork.ok) return { ok: false, reason: "failed", detail: fork.detail };
+  // A base the caller named wins; otherwise never a coding team's branch a
+  // team left checked out (`forkBase`). A named branch that is checked out is
+  // the ordinary fork; one that is not merges home only by pull request (the
+  // settle's not_on_base), which is what a fork from elsewhere is for.
+  const fork = baseBranch ? await namedBase(dir, baseBranch) : await forkBase(dir);
+  if (!fork.ok) return { ok: false, reason: baseBranch ? "no_base_branch" : "failed", detail: fork.detail };
   const base = fork.base;
   const branch = runBranchName(runId);
   const target = runWorktreePath(dir, runId);
@@ -194,6 +200,15 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   // copy of this tree is then still known for one (coding-folder-kind.ts).
   writeRunMarker(target, { kind: "run", id: runId, project: dir });
   return { ok: true, path: target, branch, base };
+}
+
+/** The caller's named base: the local branch, else the remote's, else a refusal naming it. */
+async function namedBase(dir: string, name: string): Promise<{ ok: true; base: string; from: string | null } | { ok: false; detail: string }> {
+  const on = await currentBranch(dir);
+  if (on === name) return { ok: true, base: name, from: null };
+  if (ok(await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]))) return { ok: true, base: name, from: name };
+  if (ok(await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]))) return { ok: true, base: name, from: `origin/${name}` };
+  return { ok: false, detail: `There is no branch "${name}" in this project, locally or on its origin, to fork the run from.` };
 }
 
 /**

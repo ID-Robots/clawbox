@@ -76,7 +76,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; effort?: unknown; deliverable?: unknown;
-    inputs?: unknown; experience?: unknown; fixCi?: unknown; userAskedAgain?: unknown;
+    inputs?: unknown; experience?: unknown; fixCi?: unknown; userAskedAgain?: unknown; baseBranch?: unknown;
   };
   try {
     body = await request.json();
@@ -173,6 +173,9 @@ export async function POST(request: Request) {
       // `readExperienceInput`, which refuses with a stable code, so nothing a
       // caller sent reaches the run's prompt before that reader has passed it.
       experience: body.experience,
+      // Unvalidated for the reason `deliverable` is: `startRun` reads it
+      // through `requireBaseBranch` and refuses a malformed or missing branch.
+      ...(body.baseBranch !== undefined && body.baseBranch !== null ? { baseBranch: body.baseBranch } : {}),
       // Only ever `true` or absent: what failed is the box's to append, from
       // its own record of the named run — never the caller's.
       ...(body.fixCi === true ? { fixCi: true } : {}),

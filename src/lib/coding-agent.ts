@@ -2188,6 +2188,7 @@ export interface QueuedStart {
   deliverable?: unknown;
   inputs?: unknown;
   experience?: unknown;
+  baseBranch?: unknown;
 }
 
 export interface RunQueueEntry {
@@ -2573,6 +2574,14 @@ export interface StartRunInput {
    * the chain — never a loop pushing fixes at a red CI for ever.
    */
   fixCi?: boolean;
+  /**
+   * The branch this run's own copy of the project forks from, instead of the
+   * branch the project folder has checked out. For a checkout that sits on an
+   * unrelated branch: forking from it carried that branch's commits into the
+   * run's pull request. Read through `requireBaseBranch`; refused when the
+   * branch does not exist, and when the run would get no worktree to fork.
+   */
+  baseBranch?: unknown;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
   /** Internal: set only by the review loop, naming the run whose pull request
@@ -4806,6 +4815,7 @@ function parseQueueEntry(raw: unknown): RunQueueEntry {
       deliverable: start.deliverable,
       inputs: start.inputs,
       experience: start.experience,
+      ...(typeof start.baseBranch === "string" ? { baseBranch: start.baseBranch } : {}),
       ...(start.fixCi === true ? { fixCi: true } : {}),
     },
   };
@@ -6417,6 +6427,12 @@ const LEAN_BRIEF_HEAD = [
   // what it was handed into CLAWBOX_RUN_INPUTS_DIR; hunting for the original
   // is a refusal the run cannot argue with.
   "Files you were given are in $CLAWBOX_RUN_INPUTS_DIR; if one is missing, say so rather than look elsewhere.",
+  // 2026-11-04: four runs started a long job (a board test matrix, an
+  // in-app update, a review workflow), ended their turn with "the evidence
+  // follows when it finishes" and were never woken: `claude -p` exits when
+  // the model stops. The Stop hook (scripts/coding-run-hook.mjs keepalive)
+  // now refuses that stop; this line is the same rule said up front.
+  "Never end your turn while work you started is still running (a test, a build, a board job, an update): once you stop, this run exits and nothing wakes you again. Wait for it in this turn by polling with sleep, a few minutes per step, and finish with its result. For a long job, write $CLAWBOX_RUN_ARTIFACTS_DIR/.run-jobs/<name>.json with {\"name\":\"…\",\"pid\":<pid>} and delete it when the job is done; a process you deliberately leave running for the owner (a server) goes on its own line, as its pid, in $CLAWBOX_RUN_ARTIFACTS_DIR/.run-jobs/keep.",
   // The old "one command per call, chaining is refused" was false since runs
   // got `Bash(*)` (see buildRunArgs); the one enforced rule is the
   // kill-by-name list (BASH_KILL_DENYLIST).
@@ -7822,6 +7838,7 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // point can contain a value: the child is gone, and `secretNames` on the
   // record is names only.
   dropRunSecrets(run.id);
+  noteKeepAlive(run);
   if ((run.status === "completed" && !run.team) || run.status === "paused") {
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
@@ -7923,6 +7940,33 @@ function prunedPaths(pruned: PrunedArtifact[]): string {
   const names = pruned.map((p) => (p.reason === "interpreter" ? `${p.path}/` : p.path)).sort();
   const shown = names.slice(0, 4).join(", ");
   return names.length > 4 ? `${shown} (+${names.length - 4})` : shown;
+}
+
+/**
+ * What the keep-alive Stop hook did for this run (scripts/coding-run-hook.mjs
+ * writes `<evidence>/.run-jobs/stop-blocks.json`), said on the run's timeline:
+ * how often it kept the run working, and — when it ran out of refusals —
+ * that the run ENDED with its own work still live, so whoever reads the
+ * status never takes a half-done run for a finished one. Read once, at the
+ * settle; a missing or unreadable file says nothing.
+ */
+function noteKeepAlive(run: CodingRun): void {
+  let blocks: { count?: unknown; capped?: unknown; last?: { jobs?: unknown; procs?: unknown } | null } | null = null;
+  try {
+    blocks = JSON.parse(fs.readFileSync(path.join(artifactsDir(run.id), ".run-jobs", "stop-blocks.json"), "utf8"));
+  } catch {
+    return;
+  }
+  if (!blocks || typeof blocks !== "object") return;
+  const count = Number(blocks.count) || 0;
+  if (count > 0) pushProgress(run, RUNNER_STEP.keptAlive(count));
+  if (blocks.capped === true) {
+    const items = [
+      ...(Array.isArray(blocks.last?.jobs) ? blocks.last.jobs : []),
+      ...(Array.isArray(blocks.last?.procs) ? blocks.last.procs : []),
+    ].filter((x): x is string => typeof x === "string");
+    pushProgress(run, RUNNER_STEP.endedWithLiveWork(items.slice(0, 3).join("; ") || "unnamed work"));
+  }
 }
 
 function pushProgress(run: CodingRun, line: string): void {
@@ -12937,7 +12981,17 @@ function spawnHookSettings(run: CodingRun): { json: string; inbox: boolean } | n
   }
   // The merge guard for every team run, a read-only one included: it has Bash
   // for read-only git, and the guard reads whole command lines.
-  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null });
+  // The keep-alive Stop hook for every run that can start work of its own: a
+  // read-only run (planner, reviewer, review pass) starts nothing to wait for.
+  let keepAlive: string | null = null;
+  if (!run.readOnly) {
+    try {
+      keepAlive = artifactsDir(run.id);
+    } catch (err) {
+      console.error(`[coding-agent] ${run.id}: no keep-alive hook:`, err instanceof Error ? err.message : err);
+    }
+  }
+  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null, keepAlive });
   return json ? { json, inbox: inbox !== null } : null;
 }
 
@@ -13064,12 +13118,15 @@ function protectedCheckout(): string {
  * that fourth is said on the record, because it is the only one the owner
  * could act on.
  */
-async function attachRunWorktree(run: CodingRun, projectDir: string): Promise<void> {
-  // Never throws: a run that could not be given a copy of the project is a
-  // run working in the project folder, which is what every run did until now
-  // — not a run that fails to start.
-  const made = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout() })
+async function attachRunWorktree(run: CodingRun, projectDir: string, baseBranch: string | null = null): Promise<void> {
+  // Never throws for the box's own choice: a run that could not be given a
+  // copy of the project is a run working in the project folder, which is what
+  // every run did until now — not a run that fails to start. A base branch the
+  // CALLER named is different: working in place would be on some other branch
+  // than the one asked for, so a branch that is not there refuses the start.
+  const made = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout(), baseBranch })
     .catch((err: unknown) => ({ ok: false as const, reason: "failed" as const, detail: err instanceof Error ? err.message : String(err) }));
+  if (!made.ok && made.reason === "no_base_branch") throw new CodingAgentError("invalid", made.detail);
   if (!made.ok) {
     if (made.reason === "failed") pushProgress(run, RUNNER_STEP.worktreeKept(`it could not be made — ${made.detail}`));
     // A folder inside a repository that is not its own: said here, once. The
@@ -13359,6 +13416,20 @@ export function markRunWorktreesRemoved(paths: readonly string[]): number {
 
 // ─── Public operations ───────────────────────────────────────────────────────
 
+/** A git branch name a caller may name as a run's base: plain, bounded, never an option. */
+const BASE_BRANCH_RE = /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._/-]{1,200}(?<![./])$/;
+
+/** `baseBranch` as asked, or null when none was; throws `invalid` on a malformed name. */
+export function requireBaseBranch(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  const name = typeof raw === "string" ? raw.trim().replace(/^origin\//, "") : "";
+  if (!name) return null;
+  if (!BASE_BRANCH_RE.test(name) || name.endsWith(".lock")) {
+    throw new CodingAgentError("invalid", `"${String(raw).slice(0, 80)}" is not a branch name this box will fork from.`);
+  }
+  return name;
+}
+
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let task = normalizeTask(input.task, isBoxWrittenTask(input));
   /** A Fix CI continuation's place in its chain — see StartRunInput.fixCi. */
@@ -13367,6 +13438,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // request is a plain 400 that cost the box nothing.
   const givenExperience = requireExperience(input.experience);
   const givenEffort = requireEffort(input.effort);
+  const givenBase = requireBaseBranch(input.baseBranch);
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -13581,7 +13653,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       run.worktree = inheritedWorktree;
     } else if (!run.team && !run.readOnly) {
       stepCodingStart(run.id, "worktree");
-      await attachRunWorktree(run, directory);
+      await attachRunWorktree(run, directory, givenBase);
+    }
+    if (givenBase && run.worktree?.base !== givenBase) {
+      throw new CodingAgentError("invalid", resumeRunId
+        ? "base_branch is for a new run: a resumed run keeps the branch it already has."
+        : "base_branch needs a run of its own copy of the project, and this folder does not get one (it is not a git repository's root, or it is ClawBox's own checkout).");
     }
 
     // The run's own branch, made BEFORE any work happens.
@@ -14723,6 +14800,7 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
   }
   const task = normalizeTask(input.task, isBoxWrittenTask(input));
   requireExperience(input.experience);
+  requireBaseBranch(input.baseBranch);
   if (queuedRuns().length >= MAX_QUEUED_RUNS) {
     throw new CodingAgentError("busy", `There are already ${MAX_QUEUED_RUNS} coding runs waiting for a slot on this ClawBox. Wait for the queue to move, or ask the owner to cancel one.`);
   }
@@ -14766,6 +14844,7 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
       deliverable: input.deliverable,
       inputs: input.inputs,
       experience: input.experience,
+      ...(typeof input.baseBranch === "string" ? { baseBranch: input.baseBranch } : {}),
       ...(input.fixCi === true ? { fixCi: true } : {}),
     },
   };
@@ -14819,6 +14898,7 @@ function startQueuedRun(id: string): Promise<CodingRun> {
       deliverable: start.deliverable,
       inputs: start.inputs,
       experience: start.experience,
+      ...(start.baseBranch !== undefined ? { baseBranch: start.baseBranch } : {}),
       fixCi: start.fixCi === true,
       source: run.source,
       queuedRunId: id,
