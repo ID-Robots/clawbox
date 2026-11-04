@@ -199,9 +199,10 @@ function windowOf(ms: number): number {
  * gateway that refused connects for most of the window ("gateway starting")
  * and first says "rebuilding" near its end, or on an ask that took a while to
  * answer, is asked on — not restarted over seconds of "not yet". The "not yet"
- * clock can only start from an ask sent by the end of the first window, so all
- * asking ends by twice the window plus one ask. A last ask that went
- * unanswered after a "not yet" is still that "not yet".
+ * clock starts from an answer to an ask sent by the end of the first window,
+ * so all asking ends by twice the window plus about two asks (the one whose
+ * answer started that clock, and the last). A last ask that went unanswered
+ * after a "not yet" is still that "not yet".
  */
 async function askBeforeRestart(deps: SessionCheckDeps): Promise<SessionProbe> {
   const { now, sleep, interval } = pacing(deps);
@@ -227,9 +228,12 @@ async function askBeforeRestart(deps: SessionCheckDeps): Promise<SessionProbe> {
 /**
  * After the one restart: ask until it answers, refuses something else, or
  * `recoveryWindowMs` from the first ask is over — a fixed window, so the
- * restarted gateway is waited for exactly that long. Answers the last ask as
- * it was, and the store failure if the restarted gateway named it on any ask:
- * a gateway that names it and then stops answering has not recovered.
+ * restarted gateway is waited for exactly that long. Not even "no token" ends
+ * it early: this gateway was asked before the restart, so a token that cannot
+ * be read now is the restart's doing (openclaw.json being rewritten), not a
+ * box that can never be asked. Answers the last ask as it was, and the store
+ * failure if the restarted gateway named it on any ask: a gateway that names
+ * it and then stops answering has not recovered.
  */
 async function askAfterRestart(deps: SessionCheckDeps): Promise<{ last: SessionProbe; storeFailure: StoreFailure | null }> {
   const { now, sleep, interval } = pacing(deps);
@@ -238,9 +242,7 @@ async function askAfterRestart(deps: SessionCheckDeps): Promise<{ last: SessionP
   for (;;) {
     const answer = await deps.probe();
     if (answer.kind === "store-failure") storeFailure = answer;
-    if (answer.kind === "ok" || answer.kind === "refused" || (answer.kind === "unreachable" && answer.final)) {
-      return { last: answer, storeFailure };
-    }
+    if (answer.kind === "ok" || answer.kind === "refused") return { last: answer, storeFailure };
     const left = deadline - now();
     if (left <= 0) return { last: answer, storeFailure };
     await sleep(Math.min(interval, left));

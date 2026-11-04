@@ -3647,6 +3647,24 @@ describe("updater", () => {
       expect(warning?.[0].message).toContain("gateway starting; retry shortly");
     });
 
+    it("warns, never passes silently, when the restarted gateway's token cannot be read at the end", async () => {
+      // Windows of 0: one ask each side. "Not yet" earns the restart; after it
+      // the token is unreadable. Before a restart that would mean nothing was
+      // asked (no warning); after one, the gateway was asked before, so it counts.
+      process.env.GATEWAY_SESSION_WINDOW_MS = "0";
+      process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS = "0";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("no gateway token"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("no gateway token");
+    });
+
     it("keeps the degraded-agents warning when the session check fails the step", async () => {
       mockReadMigrationStatus.mockResolvedValue({
         state: "degraded",

@@ -299,6 +299,56 @@ describe("verifyGatewaySessions", () => {
     expect(asked()).toBe(1 + 31);
   });
 
+  it("keeps asking a restarted gateway whose token cannot be read for a moment, and passes when it answers", async () => {
+    // Asked before the restart, so "no token" now is the restart's doing (the
+    // config being rewritten), not a box that can never be asked.
+    const NO_TOKEN: SessionProbe = { kind: "unreachable", detail: "no gateway token", final: true };
+    const { deps, restart } = harness([...Array<SessionProbe>(11).fill(REBUILDING), NO_TOKEN, NO_TOKEN, OK]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "serving", restarted: true });
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks a restarted gateway whose token stays unreadable for its whole window, then carries on unconfirmed", async () => {
+    const NO_TOKEN: SessionProbe = { kind: "unreachable", detail: "no gateway token", final: true };
+    const { deps, asked } = harness([...Array<SessionProbe>(11).fill(REBUILDING), NO_TOKEN]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({
+      verdict: "unconfirmed",
+      detail: "no gateway token",
+      restarted: true,
+      answer: NO_TOKEN,
+    });
+    expect(asked()).toBe(11 + 31);
+  });
+
+  it("ends the asking before a restart by twice the window plus about two asks, when the first 'not yet' was slow", async () => {
+    // Window 10 s. Starting until the 10 s mark; the ask sent at 10 s answers
+    // "not yet" after 3 s; every ask after it takes 3 s and goes unanswered.
+    let clock = 0;
+    let restartedAt = -1;
+    await verifyGatewaySessions({
+      probe: async () => {
+        const sentAt = clock;
+        if (sentAt < 10_000) return STARTING;
+        clock += 3_000;
+        return sentAt === 10_000 ? REBUILDING : STARTING;
+      },
+      restart: async () => {
+        restartedAt = clock;
+      },
+      windowMs: 10_000,
+      recoveryWindowMs: 0,
+      intervalMs: 1_000,
+      log: () => {},
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    });
+    // The "not yet" lasted its window (13 s -> 23 s), and nothing ran past 2 x 10 s + two 3 s asks.
+    expect(restartedAt).toBeGreaterThanOrEqual(23_000);
+    expect(restartedAt).toBeLessThanOrEqual(26_000);
+  });
+
   it("still fails when the restarted gateway names the store failure again after a 'not yet'", async () => {
     const { deps, restart } = harness([REBUILDING, RECLAIM, REBUILDING, RECLAIM], { windowMs: 0, recoveryWindowMs: 2_000 });
     const failure = await verifyGatewaySessions(deps).catch((err: unknown) => err);

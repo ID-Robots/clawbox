@@ -3937,9 +3937,10 @@ async function ensureGatewayServesSessions(): Promise<void> {
   // Not a failure — nothing said the store failed — but not a silent green
   // either: a gateway that listens and never answers the chat's own request,
   // or is still getting its sessions ready after a restart, is the one thing
-  // here the owner may meet next. Not for a token this server cannot read
-  // (nothing was asked) or another refusal (it answered).
-  if (outcome.answer.kind === "unreachable" && !outcome.answer.final) {
+  // here the owner may meet next. Not for another refusal (it answered), nor
+  // for a token this server cannot read before any restart (nothing was
+  // asked); after a restart the gateway was asked before, so it counts.
+  if (outcome.answer.kind === "unreachable" && (outcome.restarted || !outcome.answer.final)) {
     warnUpdate(
       "gateway-sessions-unconfirmed",
       `The update could not confirm the chat answers: the OpenClaw gateway did not answer a chat request `
