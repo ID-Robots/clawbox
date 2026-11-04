@@ -196,7 +196,7 @@ describe("DELETE /setup-api/whatsapp/pair", () => {
 
 describe("POST /setup-api/whatsapp/unpair", () => {
   it("clears every session location the adapter reads", async () => {
-    const res = await UNPAIR();
+    const res = await UNPAIR(new Request("http://localhost/setup-api/whatsapp/unpair", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -212,7 +212,7 @@ describe("POST /setup-api/whatsapp/unpair", () => {
     // in the plugin's own auth dir and is dropped through `channels logout`, so
     // reaching for the Hermes paths here would delete the wrong box's files.
     mockHarness.mockResolvedValue("openclaw");
-    await UNPAIR();
+    await UNPAIR(new Request("http://localhost/setup-api/whatsapp/unpair", { method: "POST" }));
 
     expect(unpair).not.toHaveBeenCalled();
     expect(openclawLogout).toHaveBeenCalled();
@@ -223,7 +223,7 @@ describe("POST /setup-api/whatsapp/unpair", () => {
 
   it("reports a failure instead of claiming success", async () => {
     unpair.mockRejectedValue(new Error("EPERM: /home/clawbox/.hermes/whatsapp/session"));
-    const res = await UNPAIR();
+    const res = await UNPAIR(new Request("http://localhost/setup-api/whatsapp/unpair", { method: "POST" }));
 
     expect(res.status).toBe(500);
     const body = await res.json();

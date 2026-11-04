@@ -46,6 +46,13 @@ export interface ClawAiConnectSession {
    * the UI polling `configuring` forever.
    */
   configuringStartedAt?: number;
+  /**
+   * The provider sign-in task finishing this session (src/lib/provider-auth-tasks.ts),
+   * once the token landed: the poll answers from it while it runs, and from
+   * how it ended when a web server that restarted under it never wrote the
+   * session.
+   */
+  taskId?: string;
 }
 
 const STATE_PATH = path.join(DATA_DIR, "clawai-connect-state.json");

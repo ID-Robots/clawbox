@@ -3,6 +3,8 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(),
   set: vi.fn(),
+  // Where Settings' background save (TASK-2148) keeps its job record.
+  resolveConfigRoot: () => process.env.CLAWBOX_ROOT || "/tmp",
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
@@ -85,6 +87,26 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", token);
     expect(mockSetTelegramToken).toHaveBeenCalledWith(token);
     expect(mockRestartGateway).toHaveBeenCalled();
+  });
+
+  it("runs the same save as a job of the box when Settings asks (TASK-2148): 202 at once, the save's answer at its end", async () => {
+    const { getBackgroundTask, resetBackgroundTasksForTests } = await import("@/lib/background-tasks");
+    resetBackgroundTasksForTests();
+    const token = "123456789:ABCDefGHIjklMNOpqrsTUVwxyz";
+    const res = await telegramConfigurePost(jsonRequest({ botToken: token, background: true }));
+    expect(res.status).toBe(202);
+    const { taskId, task } = await res.json();
+    expect(task).toMatchObject({
+      kind: "channel-setup",
+      title: "Setting up Telegram",
+      meta: { subject: "telegram", action: "configure", label: "Telegram" },
+    });
+    expect(JSON.stringify(task)).not.toContain(token);
+    await vi.waitFor(() => expect(getBackgroundTask(taskId)?.state).toBe("succeeded"));
+    expect(getBackgroundTask(taskId)?.result).toMatchObject({ success: true, httpStatus: 200, status: "Telegram is set up." });
+    expect(mockSetTelegramToken).toHaveBeenCalledWith(token);
+    expect(mockRestartGateway).toHaveBeenCalled();
+    resetBackgroundTasksForTests();
   });
 
   it("resets the allowlist + name map when the bot token changes", async () => {

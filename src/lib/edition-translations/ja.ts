@@ -41,6 +41,7 @@ export const ja: Record<string, string> = {
   "settings.providers.signOut": "{name} からサインアウト",
   "settings.providers.signOutConfirm": "サインアウト — もう一度タップ",
   "settings.providers.signingOut": "サインアウト中…",
+  "settings.providers.connecting": "接続中…",
   "settings.providers.signOutRestarting": "完了のためアシスタントを再起動しています — 1分ほどで戻ります。",
   "settings.providers.signOutFailed": "{name} からサインアウトできませんでした。",
   "settings.providers.signOutTimedOut": "本体の応答が間に合いませんでした。一覧を読み直しました — {name} が一覧にない場合、サインアウトは完了しています。",

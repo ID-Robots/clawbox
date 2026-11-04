@@ -215,7 +215,61 @@ export async function GET(request: Request) {
  * made in between waits, and then reads the box as the sign-out left it.
  */
 export async function POST(request: Request) {
+  // Settings' ask (TASK-2148): the provider's whole save — its key, when one
+  // was pasted, then this pick — as a background task of the box
+  // (src/lib/provider-auth-tasks.ts), answered 202 at once and followed by the
+  // panel and the desktop's corner card. The task ends with this route's own
+  // answer, `keySaved` beside it; a failure keeps the failing write's `error`
+  // (its code: `provider_unauthenticated`, `catalog_unavailable`, …).
+  const tasks = await import("@/lib/provider-auth-tasks");
+  const background = await tasks.backgroundAskOf(request);
+  if (background) return saveInBackground(background, tasks);
   return withProviderChangeLock(() => postHermesModels(request));
+}
+
+async function saveInBackground(
+  body: Record<string, unknown>,
+  tasks: typeof import("@/lib/provider-auth-tasks"),
+): Promise<Response> {
+  const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+  if (!provider) return NextResponse.json({ error: "provider is required" }, { status: 400 });
+  const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+  const model = typeof body.model === "string" ? body.model.trim() : "";
+  const { canonicalProviderId, providerRowLabel } = await import("@/lib/provider-status");
+  const row = canonicalProviderId("hermes", provider) ?? provider;
+  const label = providerRowLabel("hermes", row);
+  // The codes this route answers with, said for the card (the panel says
+  // them in the owner's language from the code itself).
+  const sentence = (code: unknown): string | undefined =>
+    code === "provider_unauthenticated"
+      ? (apiKey
+        ? `The ${label} key was saved, but Hermes has not listed its models yet. Pick a model once it has.`
+        : `${label} has no sign-in on this box yet. Add its key first.`)
+      : code === "catalog_unavailable"
+        ? `Hermes could not list the ${label} models right now. Try again in a moment.`
+        : undefined;
+  return tasks.providerAuthStartResponse(tasks.startProviderSignInTask({
+    provider: row,
+    label,
+    ask: { provider, apiKey, model },
+    save: async () => {
+      // CREDENTIAL FIRST, as the panel always did: `hermes auth add` is what
+      // unlocks the provider's model list the pick below is checked against.
+      if (apiKey) {
+        const { POST: saveKey } = await import("@/app/setup-api/hermes/provider-key/route");
+        const key = await tasks.saveOutcomeOf(await saveKey(tasks.saveRequest("/setup-api/hermes/provider-key", { provider, apiKey })));
+        if (!key.ok) return key;
+      }
+      const picked = await tasks.saveOutcomeOf(await withProviderChangeLock(() => postHermesModels(
+        tasks.saveRequest("/setup-api/hermes/models", { provider, ...(model ? { model } : {}) }),
+      )));
+      return {
+        ...picked,
+        body: { ...picked.body, keySaved: Boolean(apiKey) },
+        ...(picked.ok ? {} : { message: sentence(picked.body.error) }),
+      };
+    },
+  }));
 }
 
 async function postHermesModels(request: Request) {

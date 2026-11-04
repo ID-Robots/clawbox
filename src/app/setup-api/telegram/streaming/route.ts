@@ -1,3 +1,5 @@
+import { CHANNEL_SETUP_GROUP, CHANNEL_SETUP_KIND } from "@/lib/background-task-kinds";
+import { routeAsSettingsJob } from "@/lib/settings-jobs";
 import { NextResponse } from "next/server";
 import {
   gatewayIsAbsent,
@@ -59,7 +61,27 @@ export async function GET() {
   }
 }
 
+/** POST { enabled } — with `background: true` (Settings, TASK-2148) a job of the box (src/lib/settings-jobs.ts). */
 export async function POST(request: Request) {
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/telegram/streaming",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: (body) => ({
+      subject: "telegram",
+      action: "streaming",
+      label: "Telegram",
+      title: body.enabled === true ? "Turning on Telegram progress updates" : "Turning off Telegram progress updates",
+      status: "Saving and restarting the assistant…",
+      done: "Telegram progress updates saved.",
+    }),
+    handler: setStreaming,
+  });
+  return job ?? setStreaming(request);
+}
+
+async function setStreaming(request: Request): Promise<Response> {
   if (gatewayIsAbsent()) {
     return NextResponse.json(UNSUPPORTED, { status: 501 });
   }

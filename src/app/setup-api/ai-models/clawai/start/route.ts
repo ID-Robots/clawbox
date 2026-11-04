@@ -7,6 +7,7 @@ import {
   createClawAiUserCode,
   writeClawAiSession,
 } from "@/lib/clawai-connect";
+import { providerAuthBusyMessage, providerAuthMetaOf, runningProviderAuthTask } from "@/lib/provider-auth-tasks";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,23 @@ interface UpstreamDeviceStartResponse {
 }
 
 export async function POST(request: NextRequest) {
+  // A ClawBox AI change already running on this box (TASK-2148). A sign-in
+  // finishing: a new code would overwrite the session that task reports to,
+  // and its token would be a second sign-in over the first. A sign-out: it
+  // clears the session as it goes, and would drop the code just given out.
+  // Settings shows either one in progress.
+  const running = runningProviderAuthTask();
+  if (running && providerAuthMetaOf(running)?.provider === "clawai") {
+    return NextResponse.json(
+      {
+        error: providerAuthBusyMessage(running, "Wait for it to finish."),
+        code: "provider_change_running",
+        taskId: running.id,
+      },
+      { status: 409 },
+    );
+  }
+
   let body: { scope?: unknown; deviceName?: unknown; tier?: unknown } = {};
   try {
     body = await request.json();

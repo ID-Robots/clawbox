@@ -2438,7 +2438,43 @@ function alignChannelAudio(): Promise<void> {
     );
 }
 
+/**
+ * POST — save a provider. Answered as ONE JSON body (below), except when the
+ * body asks `background: true`: Settings' ask (TASK-2148). The same save then
+ * runs as a background task of the box (src/lib/provider-auth-tasks.ts) that
+ * also waits out the restart it starts and reads the provider's row back, and
+ * this answers 202 `{ taskId, started, task }` at once. The task's result is
+ * this route's own success body (restart already waited out); a failure ends
+ * it `failed` with the body's sentence and `code`. The same provider asked
+ * again while its task runs follows that task; another provider change
+ * running is 409 `provider_change_running`. On-device models are never asked
+ * this way and are always saved in the request.
+ */
 export async function POST(request: Request) {
+  const tasks = await import("@/lib/provider-auth-tasks");
+  const background = await tasks.backgroundAskOf(request);
+  if (!background) return configureNow(request);
+
+  const asked = typeof background.provider === "string" ? background.provider.trim() : "";
+  if (!asked) return NextResponse.json({ error: "Missing provider" }, { status: 400 });
+  const harness = await getActiveHarness().catch(() => "openclaw" as const);
+  const { canonicalProviderId, isLocalProviderRow, providerRowLabel } = await import("@/lib/provider-status");
+  const row = canonicalProviderId(harness, asked) ?? asked;
+  const own = () => tasks.saveRequest("/setup-api/ai-models/configure", background);
+  // An on-device model is not a sign-in: no row to follow, no card to draw.
+  if (isLocalProviderRow(row) || isLocalProviderRow(normalizeProviderId(asked) ?? asked)) {
+    return configureNow(own());
+  }
+  return tasks.providerAuthStartResponse(tasks.startProviderSignInTask({
+    provider: row,
+    label: providerRowLabel(harness, row),
+    ask: background,
+    save: async () => tasks.saveOutcomeOf(await configureNow(own())),
+  }));
+}
+
+/** The save itself, answered as one JSON body once it is done. */
+async function configureNow(request: Request): Promise<Response> {
   const gateway: GatewayTracker = { state: "untouched" };
   let response: Response;
   try {

@@ -9,8 +9,10 @@ import PluginRepairNotice from "./PluginRepairNotice";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
+import { useProviderAuthTasks } from "@/hooks/useProviderAuthTasks";
+import { notifyBackgroundTaskStarted, waitForBackgroundTaskEnd } from "@/lib/background-task-client";
+import type { ProviderAuthTask } from "@/lib/provider-auth-task-client";
 import { notifyProvidersChanged } from "@/lib/ui-events";
-import { waitForGatewayAfterRestart } from "@/lib/wait-for-gateway";
 import type { ProviderStatusRow } from "@/lib/provider-status";
 
 /**
@@ -29,6 +31,17 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
  * which stays offered there (#1369: the box's own provider, the one a box with
  * nothing else has no other way out of; its row then reads "Sign in again").
  * The rules live in the routes; this component only reflects them.
+ *
+ * THE BOX'S WORK, NOT THE WINDOW'S (TASK-2148). A sign-out — and the box's
+ * half of a sign-in — runs as a background task of the box
+ * (src/lib/provider-auth-tasks.ts), which the desktop's corner card shows
+ * too. This list follows the task by its id; closing Settings only stops the
+ * following. Opened again (here, in another tab, on another device) it reads
+ * the tasks the box is running (`useProviderAuthTasks`) and draws the change
+ * in progress: a sign-out's row in hand with its spinner, followed to its end
+ * exactly as if this window had started it; a provider being connected as a
+ * row of its own with the same spinner. Every row's controls wait while any
+ * change runs — the box runs one at a time.
  */
 
 /** How long the armed "Sign out — tap again" waits for the second tap. */
@@ -46,9 +59,10 @@ const SIGNED_OUT_NOTE_MS = 3_000;
  */
 const SIGNED_OUT_ROW_MS = 600;
 /**
- * The longest the sign-out's own request is waited for. On a board it takes
- * tens of seconds (the harness CLI runs, the credential copies are scrubbed);
- * a request that never answers must not hold every row's controls for good.
+ * The longest the request that STARTS a sign-out is waited for. The sign-out
+ * itself is a task of the box, followed for as long as it runs; its request
+ * answers at once, and one that never answers must not hold every row's
+ * controls for good.
  */
 export const SIGN_OUT_REQUEST_MS = 150_000;
 /**
@@ -65,13 +79,20 @@ interface HeldRow {
 }
 
 /**
- * A sign-out in flight: the request (`request`), the gateway restart behind it
- * when the route says one is underway (`restarting`), and the box's re-read
+ * A sign-out in flight: the box's task removing the sign-in (`request`), the
+ * restart behind it (`restarting`, the task's own step), and the box's re-read
  * after it (`settling`, with the number of that read — `useProviderStatus`).
  */
 interface SignOutFlow extends HeldRow {
   phase: "request" | "restarting" | "settling";
   read?: number;
+  /** The box's task, once the route has named it. */
+  taskId?: string;
+}
+
+/** A row for a provider the box is changing but no longer (or not yet) lists. */
+function rowForTask(task: ProviderAuthTask): ProviderStatusRow {
+  return { id: task.provider, label: task.label, state: "connected", isDefault: false, enabled: true, section: "ai" };
 }
 
 /** The class each sign-out state puts on its row (globals.css). */
@@ -102,6 +123,10 @@ interface AiProviderListProps {
 export default function AiProviderList({ showAnthropicAccounts = false, onAnthropicAccountsShown }: AiProviderListProps = {}) {
   const { t } = useT();
   const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh, readNonce, summaryNonce } = useProviderStatus();
+  /** The provider change the box is running, whoever started it (TASK-2148). */
+  const { running: providerChange } = useProviderAuthTasks();
+  /** Sign-out tasks this list already follows (or has followed), so one is never taken up twice. */
+  const followedSignOuts = useRef(new Set<string>());
   const [toggling, setToggling] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
   /**
@@ -180,70 +205,106 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
     signOutAbort.current?.abort();
   }, []);
 
-  const signOutOf = useCallback(async (row: ProviderStatusRow, index: number) => {
+  /**
+   * Run a sign-out on this row: start it on the box (`adopt` absent) or take
+   * up the one the box is already running (`adopt`, its task id), then follow
+   * that task to its end, the row in hand throughout.
+   */
+  const runSignOut = useCallback(async (row: ProviderStatusRow, index: number, adopt?: string) => {
     disarmSignOut();
     signOutAbort.current?.abort();
     const abort = new AbortController();
     signOutAbort.current = abort;
-    setSigningOut({ row, index, phase: "request" });
+    setSigningOut({ row, index, phase: "request", ...(adopt ? { taskId: adopt } : {}) });
     setToggleError(null);
     setSignOutError(null);
     setSignOutNote(null);
     const failed = t("settings.providers.signOutFailed", { name: row.label });
     let signedOut = false;
     let timedOut = false;
-    // Bounds the request and the reading of its answer, not the restart wait
-    // after it (that has its own budget).
-    const requestTimer = setTimeout(() => {
-      timedOut = true;
-      abort.abort();
-    }, SIGN_OUT_REQUEST_MS);
     try {
-      const res = await fetch("/setup-api/providers/sign-out", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: row.id }),
+      let taskId = adopt ?? null;
+      if (!taskId) {
+        // Bounds the request that starts the sign-out, not the sign-out: the
+        // box runs that as a task, followed below for as long as it runs.
+        const requestTimer = setTimeout(() => {
+          timedOut = true;
+          abort.abort();
+        }, SIGN_OUT_REQUEST_MS);
+        try {
+          const res = await fetch("/setup-api/providers/sign-out", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: row.id }),
+            signal: abort.signal,
+          });
+          const data = (await res.json().catch(() => ({}))) as { error?: unknown; taskId?: unknown };
+          if (timedOut) throw new Error(failed);
+          if (!res.ok) {
+            throw new Error(typeof data.error === "string" && data.error ? data.error : failed);
+          }
+          taskId = typeof data.taskId === "string" && data.taskId ? data.taskId : null;
+        } finally {
+          clearTimeout(requestTimer);
+        }
+        if (!taskId) throw new Error(failed);
+        followedSignOuts.current.add(taskId);
+        // The corner card asks at once rather than at its next poll.
+        notifyBackgroundTaskStarted(taskId);
+      }
+      const id = taskId;
+      // The row stays in hand through the whole task, its restart included:
+      // read before the task has ended, the box would still be answering from
+      // the old process.
+      const ended = await waitForBackgroundTaskEnd(id, {
         signal: abort.signal,
+        onUpdate: (task) => {
+          const phase = task.state === "running" && task.steps.some((step) => step.id === "restart" && step.state === "running")
+            ? "restarting"
+            : "request";
+          setSigningOut((flow) => (
+            flow?.row.id === row.id && (flow.phase !== phase || flow.taskId !== id) && flow.phase !== "settling"
+              ? { ...flow, phase, taskId: id }
+              : flow
+          ));
+        },
       });
-      const data = (await res.json().catch(() => ({}))) as { error?: unknown; gatewayRestarting?: unknown };
-      clearTimeout(requestTimer);
-      if (timedOut) throw new Error(failed);
-      if (!res.ok) {
-        throw new Error(typeof data.error === "string" && data.error ? data.error : failed);
-      }
-      // The credential is off the box and the harness is restarting to drop
-      // the copy it had loaded. The row stays in hand through that as well:
-      // read now, the box would still be answering from the old process.
-      if (data.gatewayRestarting === true) {
-        setSigningOut((flow) => (flow?.row.id === row.id ? { ...flow, phase: "restarting" } : flow));
-        await waitForGatewayAfterRestart({ signal: abort.signal });
-      }
+      if (abort.signal.aborted) throw new Error(failed);
+      if (!ended) throw new Error(failed);
+      if (ended.state !== "succeeded") throw new Error(ended.error || failed);
       signedOut = true;
     } catch (e) {
+      // This list went away (or another sign-out took over): the box's task
+      // goes on, and whichever list is on screen next follows it.
+      if (abort.signal.aborted && !timedOut) return;
       // A request that never answered may still have signed out on the box:
       // say so, and let the re-read below show which.
       const message = timedOut
         ? t("settings.providers.signOutTimedOut", { name: row.label })
         : e instanceof Error && e.message ? e.message : failed;
       setSignOutError({ id: row.id, message });
-    } finally {
-      clearTimeout(requestTimer);
-      // Re-read either way: a refusal can come after part of the sign-in was
-      // removed, and the rows are the box's answer, not this click's. The
-      // number of THIS read is what the row waits for below.
-      const read = refresh();
-      notifyProvidersChanged();
-      // A sign-out that landed holds the row until that re-read has; a refused
-      // one gives it back now, with the reason under its button.
-      setSigningOut((flow) => (flow?.row.id !== row.id ? flow : signedOut ? { ...flow, phase: "settling", read } : null));
     }
+    // Re-read either way: a refusal can come after part of the sign-in was
+    // removed, and the rows are the box's answer, not this click's. The
+    // number of THIS read is what the row waits for below.
+    const read = refresh();
+    notifyProvidersChanged();
+    // A sign-out that landed holds the row until that re-read has; a refused
+    // one gives it back now, with the reason under its button.
+    setSigningOut((flow) => (flow?.row.id !== row.id ? flow : signedOut ? { ...flow, phase: "settling", read } : null));
   }, [disarmSignOut, refresh, t]);
 
+  const signOutOf = useCallback(
+    (row: ProviderStatusRow, index: number) => runSignOut(row, index),
+    [runSignOut],
+  );
+
   const onSignOutClick = useCallback((row: ProviderStatusRow, index: number) => {
-    // One sign-out at a time. The button in hand stays focusable (so a
-    // keyboard keeps its place through a minute-long sign-out) and says it is
-    // disabled; this is what makes that true.
-    if (signingOut) return;
+    // One sign-out at a time — one provider change at all, on the box. The
+    // button in hand stays focusable (so a keyboard keeps its place through a
+    // minute-long sign-out) and says it is disabled; this is what makes that
+    // true.
+    if (signingOut || providerChange) return;
     if (signOutArmed === row.id) {
       void signOutOf(row, index);
       return;
@@ -255,7 +316,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
     }, SIGN_OUT_CONFIRM_MS);
     setSignOutArmed(row.id);
     setSignOutError(null);
-  }, [signOutArmed, signingOut, signOutOf]);
+  }, [signOutArmed, signingOut, providerChange, signOutOf]);
 
   /** The box has answered the re-read: let the row go, and say so. */
   const finishSignOut = useCallback((flow: SignOutFlow) => {
@@ -350,6 +411,26 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // longer lists, held in the place it had: while the sign-out still runs, so
   // nothing jumps under the owner's pointer, and after it so it can fold away
   // rather than vanish.
+  // A sign-out the box is running that this list did not start — begun
+  // before Settings was closed, or in another tab or on another device — is
+  // taken up as if it had been: the row in hand, followed to its end, the
+  // note after it (TASK-2148). Only once the list has answered, so the row is
+  // the box's own where it still lists it.
+  useEffect(() => {
+    if (providerChange?.action !== "sign-out" || loading || signingOut) return;
+    if (followedSignOuts.current.has(providerChange.id)) return;
+    followedSignOuts.current.add(providerChange.id);
+    const index = rows.findIndex((row) => row.id === providerChange.provider);
+    // The box's task is external state this list follows, like a deep link.
+    void runSignOut(index >= 0 ? rows[index] : rowForTask(providerChange), index >= 0 ? index : rows.length, providerChange.id);
+  }, [providerChange, loading, signingOut, rows, runSignOut]);
+
+  // A provider the box is connecting right now. A row it already lists shows
+  // the spinner in place of its state; one it does not list yet is drawn as a
+  // row of its own below the others until the box lists it.
+  const connecting = providerChange?.action === "sign-in" ? providerChange : null;
+  const connectingRow = connecting && !rows.some((row) => row.id === connecting.provider) ? connecting : null;
+
   const held = signingOut ?? signedOutRow;
   const shown = rows.map((row, index) => ({ row, index, held: false }));
   if (held && !rows.some((row) => row.id === held.row.id)) {
@@ -539,7 +620,8 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // (the server serialises the two as well — provider-change-lock.ts).
             // A held row is a picture of one the box no longer lists: nothing
             // on it can be pressed.
-            const busy = toggling === row.id || settingDefault === row.id || signingOut !== null || isHeld;
+            const busy = toggling === row.id || settingDefault === row.id || signingOut !== null || providerChange !== null || isHeld;
+            const connectingHere = connecting?.provider === row.id && !isHeld;
             // ...and it answers to none of the row's test ids: those are the
             // box's answer, and that has let the row go.
             const tid = (id: string) => (isHeld ? undefined : id);
@@ -573,12 +655,12 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
             // An older server that does not say falls back to "not the
             // default". On the default it is LOCKED, like the switch —
             // signing the chat's own provider out would leave it answering
-            // on nothing — except for ClawBox AI, the account a box with
-            // nothing else had no way out of (#1369). The route holds the
-            // same rule.
+            // on nothing — except for ClawBox AI on OpenClaw, the account a
+            // box with nothing else had no way out of (#1369). On Hermes it
+            // is locked like any default. The route holds the same rule.
             const canSignOut = row.state === "connected"
               || (row.state === "needs-reauth" && (row.credentialHeld ?? !row.isDefault));
-            const signOutLocked = row.isDefault && row.id !== "clawai";
+            const signOutLocked = row.isDefault && (row.id !== "clawai" || summary?.harness === "hermes");
             const armed = signOutArmed === row.id;
             return (
               <Fragment key={row.id}>
@@ -630,9 +712,11 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                         </span>
                       )}
                     </span>
-                    {row.enabled
-                      ? <ProviderConnectionLabel state={row.state} className="provider-sign-out-dim text-[11px]" />
-                      : <span className="provider-sign-out-dim block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
+                    {connectingHere
+                      ? <ConnectingLabel providerId={row.id} />
+                      : row.enabled
+                        ? <ProviderConnectionLabel state={row.state} className="provider-sign-out-dim text-[11px]" />
+                        : <span className="provider-sign-out-dim block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
                     {/* Visible, not only a hover title: on a phone there is no
                         hover, and a dimmed switch with no reason looks broken.
                         The switch names this line as its description. */}
@@ -815,7 +899,22 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
               </Fragment>
             );
           })}
-          {shown.length === 0 && (
+          {connectingRow && (
+            <li
+              className="flex items-center gap-3 px-3 py-2.5"
+              data-testid={`ai-provider-connecting-${connectingRow.provider}`}
+              aria-busy="true"
+            >
+              <span className="flex items-center justify-center w-9 h-9 rounded-lg bg-white/[0.06] shrink-0">
+                <AIProviderIcon provider={connectingRow.provider} size={20} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block min-w-0 text-sm font-medium break-words text-[var(--text-primary)]">{connectingRow.label}</span>
+                <ConnectingLabel providerId={connectingRow.provider} />
+              </span>
+            </li>
+          )}
+          {shown.length === 0 && !connectingRow && (
             <li className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
               {t("settings.providers.empty")}
             </li>
@@ -857,5 +956,31 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * "Connecting…" under a provider's name while the box connects it, with the
+ * spinner the sign-out's button turns into — the same turning ring, so a
+ * change in progress reads alike whichever way it goes.
+ */
+function ConnectingLabel({ providerId }: { providerId: string }) {
+  const { t } = useT();
+  return (
+    <span
+      role="status"
+      className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]"
+      data-testid={`ai-provider-connecting-label-${providerId}`}
+    >
+      <span
+        aria-hidden="true"
+        className="material-symbols-rounded motion-safe:animate-spin"
+        style={{ fontSize: 14 }}
+        data-testid={`ai-provider-connecting-spinner-${providerId}`}
+      >
+        progress_activity
+      </span>
+      {t("settings.providers.connecting")}
+    </span>
   );
 }

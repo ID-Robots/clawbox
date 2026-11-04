@@ -3676,6 +3676,7 @@ const table: Record<string, string> = {
   "settings.providers.changeFailed": "Impossible de modifier le fournisseur.",
   "settings.providers.changeModel": "Changer de modèle",
   "settings.providers.connected": "Connecté",
+  "settings.providers.connecting": "Connexion…",
   "settings.providers.default": "Par défaut",
   "settings.providers.defaultFailed": "Impossible de changer le fournisseur par défaut : {message}",
   "settings.providers.degraded": "Agent injoignable — certains états peuvent être obsolètes",

@@ -7,6 +7,8 @@ import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import { notifyProvidersChanged } from "@/lib/ui-events";
 import { humanizeApiError } from "@/lib/api-error-message";
 import { waitForGatewayAfterRestart } from "@/lib/wait-for-gateway";
+import { notifyBackgroundTaskStarted, waitForBackgroundTaskEnd } from "@/lib/background-task-client";
+import { useProviderAuthTasks } from "@/hooks/useProviderAuthTasks";
 import { isClawboxAiImageModelId } from "@/lib/clawbox-ai-models";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
@@ -650,15 +652,21 @@ export default function AIModelsStep({
   const clawaiFinishRef = useRef<{
     complete: (warning?: string) => void;
     error: (message: string) => void;
-    configuring: () => void;
+    configuring: (taskId?: string) => void;
   }>({ complete: () => {}, error: () => {}, configuring: () => {} });
+  /**
+   * The provider sign-in task (TASK-2148) this panel is following, or has
+   * followed: its own save's, the ClawBox AI device login's, or one it took up
+   * on opening. One the box runs that this is not is taken up (see below).
+   */
+  const followedConnectRef = useRef<string | null>(null);
 
   const clawaiLogin = useClawaiDeviceLogin({
     scope: configureScope,
     getTier: () => clawaiTier,
     onStart: () => setStatus(null),
     onBusyChange: setSaving,
-    onConfiguring: () => clawaiFinishRef.current.configuring(),
+    onConfiguring: (taskId) => clawaiFinishRef.current.configuring(taskId),
     // The warning travels: a ClawBox AI sign-in is a `subscription` save, so it
     // takes the doctor stop and the deferred session sweep — the one path most
     // likely to produce the sentence, and until now the one that dropped it.
@@ -873,7 +881,15 @@ export default function AIModelsStep({
     clawaiFinishRef.current = {
       complete: showSuccessAndContinue,
       error: showError,
-      configuring: () => showConfiguring("generic"),
+      configuring: (taskId) => {
+        // The device login drives its own ending (its poll): a follow of the
+        // same task this panel took up on its own steps aside for it.
+        if (taskId) {
+          if (followedConnectRef.current === taskId) saveControllerRef.current?.abort();
+          followedConnectRef.current = taskId;
+        }
+        showConfiguring("generic");
+      },
     };
   }, [showConfiguring, showError, showSuccessAndContinue]);
 
@@ -896,6 +912,71 @@ export default function AIModelsStep({
     // than as its own JSON.
     return humanizeApiError(data, fallback);
   }, [TRANSLATED_ERROR_CODES, t]);
+
+  /**
+   * Follow the box's sign-in task to its end (TASK-2148). Settings asks the
+   * configure route for its save as a background task, so the save is the
+   * box's and closing the window loses nothing; this panel only watches it.
+   * The task's steps light the overlay's rows and its headline is the
+   * overlay's line; its ending is the save's — on success the route's own
+   * answer with the restart already waited out.
+   */
+  const followConnectTask = useCallback(async (taskId: string, signal: AbortSignal) => {
+    followedConnectRef.current = taskId;
+    notifyBackgroundTaskStarted(taskId);
+    const ended = await waitForBackgroundTaskEnd(taskId, {
+      signal,
+      onUpdate: (task) => {
+        if (task.state !== "running") return;
+        const step = task.steps.find((s) => s.state === "running")?.id;
+        const atLeast = step === "verify" ? 3 : step === "restart" ? 2 : 1;
+        setConfiguringState((current) => (current && !current.completed && current.kind === "generic"
+          ? { ...current, phase: Math.max(current.phase, atLeast), detail: task.status ?? current.detail }
+          : current));
+      },
+    });
+    if (signal.aborted) return;
+    if (!ended) return showError("The box no longer knows this sign-in. Check the provider list above; if it is not connected, try again.");
+    if (ended.state === "succeeded") {
+      // The box's own verdict is the overlay's last line: "Connected to …"
+      // once the row reads connected, "Saved the … sign-in" when it does not
+      // (yet) — never a claim the box did not make.
+      const verdict = typeof ended.result?.status === "string" ? ended.result.status : null;
+      setConfiguringState((current) => (current ? { ...current, detail: verdict } : current));
+      return finishConfigure(ended.result ?? { success: true }, signal);
+    }
+    const code = typeof ended.result?.code === "string" ? ended.result.code : undefined;
+    const key = code ? TRANSLATED_ERROR_CODES[code] : undefined;
+    showError(key ? t(key) : humanizeApiError(ended.error, "Failed to configure"));
+  }, [TRANSLATED_ERROR_CODES, finishConfigure, showError, t]);
+
+  // A sign-in the box is running that this panel is not following — saved
+  // before Settings was closed, or in another tab or on another device — is
+  // taken up on opening (TASK-2148): the same overlay, followed to the same
+  // ending, instead of a panel that offers to connect a provider the box is
+  // connecting right now. Settings only, and not on the Hermes edition, whose
+  // panel is HermesProviderConfig (the provider list above shows it there).
+  const { running: providerChange } = useProviderAuthTasks(embedded && edition !== null && edition !== "hermes");
+  useEffect(() => {
+    if (providerChange?.action !== "sign-in" || configuringState) return;
+    if (followedConnectRef.current === providerChange.id) return;
+    const controller = new AbortController();
+    saveControllerRef.current?.abort();
+    saveControllerRef.current = controller;
+    // The box's task is external state this panel follows, like the device
+    // login's poll.
+    setStatus(null);
+    setSaveWarning(null);
+    setConfiguringState({
+      provider: normalizeSelectableProvider(providerChange.provider) ?? providerChange.provider,
+      kind: "generic",
+      phase: 1,
+      detail: providerChange.status,
+      progressPercent: null,
+      completed: false,
+    });
+    void followConnectTask(providerChange.id, controller.signal);
+  }, [configuringState, followConnectTask, providerChange]);
 
   // Ollama hook
   const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
@@ -1155,15 +1236,21 @@ export default function AIModelsStep({
       const res = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: configureScope, ...payload }),
+        // Settings asks for the save as a task of the box (TASK-2148); the
+        // wizard keeps the request-long save.
+        body: JSON.stringify({ scope: configureScope, ...payload, ...(embedded ? { background: true } : {}) }),
         signal: controller.signal,
       });
+      // The bound is the request's: a task it started is followed for as long
+      // as the box runs it.
       clearTimeout(timeout);
       if (controller.signal.aborted) return;
       if (!res.ok) return showError(await extractError(res, "Failed to configure"));
       const data = await res.json();
       if (controller.signal.aborted) return;
-      if (data.success) {
+      if (res.status === 202 && typeof data.taskId === "string") {
+        await followConnectTask(data.taskId, controller.signal);
+      } else if (data.success) {
         await finishConfigure(data, controller.signal);
       } else {
         showError(humanizeApiError(data.error, "Failed to configure"));
@@ -1179,7 +1266,7 @@ export default function AIModelsStep({
       clearTimeout(timeout);
       if (!controller.signal.aborted) setSaving(false);
     }
-  }, [configureScope, extractError, finishConfigure, showConfiguring, showError]);
+  }, [configureScope, embedded, extractError, finishConfigure, followConnectTask, showConfiguring, showError]);
 
   const selected = allowedProviders.find((p) => p.id === selectedProvider);
   // A ClawBox AI sign-in that failed says why just under its card, which on
@@ -1446,14 +1533,16 @@ export default function AIModelsStep({
       const saveRes = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(configureBody),
+        body: JSON.stringify({ ...configureBody, ...(embedded ? { background: true } : {}) }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
       if (!saveRes.ok) return showError(await extractError(saveRes, "Failed to save token"));
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
-      if (saveData.success) {
+      if (saveRes.status === 202 && typeof saveData.taskId === "string") {
+        await followConnectTask(saveData.taskId, controller.signal);
+      } else if (saveData.success) {
         await finishConfigure(saveData, controller.signal);
       } else {
         showError(humanizeApiError(saveData.error, "Failed to save token"));
@@ -1462,7 +1551,7 @@ export default function AIModelsStep({
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [configureScope, extractError, finishConfigure, getRequestedCatalogModelId, noUsableCatalogModel, selectedProvider, showConfiguring, showError, t]);
+  }, [configureScope, embedded, extractError, finishConfigure, followConnectTask, getRequestedCatalogModelId, noUsableCatalogModel, selectedProvider, showConfiguring, showError, t]);
 
   // --- Device auth flow (OpenAI, Google) ---
 

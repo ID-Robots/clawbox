@@ -3676,6 +3676,7 @@ const table: Record<string, string> = {
   "settings.providers.changeFailed": "Доставчикът не можа да бъде променен.",
   "settings.providers.changeModel": "Смяна на модела",
   "settings.providers.connected": "Свързан",
+  "settings.providers.connecting": "Свързване…",
   "settings.providers.default": "По подразбиране",
   "settings.providers.defaultFailed": "Стойността по подразбиране не можа да се смени: {message}",
   "settings.providers.degraded": "Агентът не отговори — някои състояния може да са остарели",

@@ -4,13 +4,18 @@
  * harness, that posts the row's sign-out, re-reads the box and tells every
  * other surface, and draws the signed-out state from the box's own answer.
  * The default's sign-out is locked with the switch's hint — except ClawBox
- * AI's, the account a box had no way out of (#1369).
+ * AI's on OpenClaw, the account a box had no way out of (#1369). On Hermes
+ * ClawBox AI's is locked like any default's.
+ *
+ * The sign-out is the box's background task (TASK-2148): the POST answers 202
+ * with it, and the list follows it at /setup-api/background-jobs/tasks.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import AiProviderList from "@/components/AiProviderList";
 import { PROVIDERS_CHANGED_EVENT, notifyProvidersChanged } from "@/lib/ui-events";
+import { providerTask } from "@/tests/helpers/provider-task";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid="icon" /> }));
@@ -34,10 +39,19 @@ interface Box {
   signedOut: Set<string>;
   /** What the status answers for rows not signed out here; a test may change it. */
   rows: Row[];
+  /** The box's provider tasks, by id. */
+  tasks: Map<string, Record<string, unknown>>;
 }
 
-function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?: { status: number; error: string }; answer?: Promise<void> } = {}): Box {
-  const state: Box = { posts: [], signedOut: new Set(), rows: opts.rows ?? OPENCLAW_ROWS };
+function stubBox(opts: {
+  harness?: "openclaw" | "hermes";
+  rows?: Row[];
+  refuse?: { status: number; error: string };
+  /** The sign-out starts, and its task fails with this sentence. */
+  failTask?: string;
+  answer?: Promise<void>;
+} = {}): Box {
+  const state: Box = { posts: [], signedOut: new Set(), rows: opts.rows ?? OPENCLAW_ROWS, tasks: new Map() };
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
@@ -57,9 +71,21 @@ function stubBox(opts: { harness?: "openclaw" | "hermes"; rows?: Row[]; refuse?:
       state.posts.push(body);
       await opts.answer;
       expect(new Headers(init.headers).get("content-type")).toBe("application/json");
-      if (opts.refuse) return json({ error: opts.refuse.error, kind: "still_signed_in" }, opts.refuse.status);
-      state.signedOut.add(body.provider);
-      return json({ signedOut: true, provider: body.provider, changed: true, gatewayRestarting: false });
+      if (opts.refuse) return json({ error: opts.refuse.error, kind: "is_default" }, opts.refuse.status);
+      const id = `task-${state.posts.length}`;
+      const label = state.rows.find((row) => row.id === body.provider)?.label ?? body.provider;
+      if (opts.failTask) {
+        state.tasks.set(id, providerTask(id, { provider: body.provider, label, state: "failed", error: opts.failTask }));
+      } else {
+        state.signedOut.add(body.provider);
+        state.tasks.set(id, providerTask(id, { provider: body.provider, label, state: "succeeded" }));
+      }
+      return json({ taskId: id, started: true, task: state.tasks.get(id) }, 202);
+    }
+    if (url.startsWith("/setup-api/background-jobs/tasks")) {
+      const id = new URL(url, "http://box").searchParams.get("id");
+      if (id) return state.tasks.has(id) ? json({ task: state.tasks.get(id) }) : json({ error: "No such task." }, 404);
+      return json({ tasks: [...state.tasks.values()] });
     }
     return json({ error: "unexpected" }, 404);
   }));
@@ -146,6 +172,23 @@ describe("AiProviderList — signing out of a provider", () => {
     expect(box.posts).toEqual([]);
   });
 
+  it("locks ClawBox AI's sign-out too while it is Hermes' default — #1369's exception is OpenClaw's", async () => {
+    const box = stubBox({
+      harness: "hermes",
+      rows: [{ ...HERMES_ROWS[0], isDefault: true }, { ...HERMES_ROWS[1], isDefault: false }, HERMES_ROWS[2]],
+    });
+    renderList();
+    const locked = await signOutButton("clawai", "ClawBox AI");
+    expect(locked).toBeDisabled();
+    expect(locked).toHaveAttribute("aria-describedby", "ai-provider-locked-clawai");
+    expect(screen.getByTestId("ai-provider-locked-hint-clawai")).toHaveTextContent("Make another provider the default first.");
+    fireEvent.click(locked);
+    fireEvent.click(locked);
+    expect(box.posts).toEqual([]);
+    // The provider that is not the default stays offered.
+    expect(await signOutButton("openrouter", "OpenRouter")).toBeEnabled();
+  });
+
   it("signs out on Hermes too, ClawBox AI and a key provider alike", async () => {
     const box = stubBox({ harness: "hermes", rows: HERMES_ROWS });
     renderList();
@@ -187,7 +230,7 @@ describe("AiProviderList — signing out of a provider", () => {
   });
 
   it("shows the box's refusal in its own words and keeps the row signed in", async () => {
-    stubBox({ refuse: { status: 500, error: "The OpenAI GPT sign-in could not be removed from the gateway's auth store." } });
+    stubBox({ failTask: "The OpenAI GPT sign-in could not be removed from the gateway's auth store." });
     renderList();
     const button = await signOutButton("openai", "OpenAI GPT");
     fireEvent.click(button);
@@ -195,6 +238,17 @@ describe("AiProviderList — signing out of a provider", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("could not be removed from the gateway's auth store");
     expect(screen.getByTestId("ai-provider-sign-out-openai")).toBeInTheDocument();
     expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
+  });
+
+  it("shows a refusal the box answers at once, before any task, the same way", async () => {
+    const box = stubBox({ refuse: { status: 409, error: "OpenAI GPT is the default provider. Make another provider the default first, then sign out of it." } });
+    renderList();
+    const button = await signOutButton("openai", "OpenAI GPT");
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent("is the default provider");
+    expect(screen.getByTestId("ai-provider-sign-out-openai")).toBeEnabled();
+    expect(box.tasks.size).toBe(0);
   });
 
   it("is offered on a dead sign-in the box still holds, and not on the default's 'needs sign-in' row", async () => {

@@ -3676,6 +3676,7 @@ const table: Record<string, string> = {
   "settings.providers.changeFailed": "プロバイダーを変更できませんでした。",
   "settings.providers.changeModel": "モデルを変更",
   "settings.providers.connected": "接続済み",
+  "settings.providers.connecting": "接続中…",
   "settings.providers.default": "既定",
   "settings.providers.defaultFailed": "既定を変更できませんでした: {message}",
   "settings.providers.degraded": "エージェントに接続できません — 一部の状態が最新ではない可能性があります",

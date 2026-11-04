@@ -13,6 +13,10 @@
  *     out of …" stands above the list for about three seconds;
  *   - error: the row is back as it was, the box's reason under its button;
  *   - reduced motion: every state and word, no fold and no wash.
+ *
+ * The sign-out itself is the box's background task (TASK-2148): the POST
+ * answers 202 with it, the list follows it at /setup-api/background-jobs/tasks,
+ * and the restart behind it is the task's own `restart` step.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -20,20 +24,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import AiProviderList, { SIGN_OUT_REQUEST_MS } from "@/components/AiProviderList";
+import { providerTask } from "@/tests/helpers/provider-task";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid="icon" /> }));
 
-// The wait for the gateway after a restart polls /setup-api/gateway/health
-// every two seconds; here the test says when the gateway is back. A plain
-// function, not a vi.fn: the suite resets mock implementations before each test.
-const gateway = vi.hoisted(() => ({ waits: 0, back: null as null | (() => void) }));
-vi.mock("@/lib/wait-for-gateway", () => ({
-  waitForGatewayAfterRestart: () => {
-    gateway.waits += 1;
-    return new Promise<boolean>((resolve) => { gateway.back = () => resolve(true); });
-  },
-}));
+// The restart behind a sign-out is the box's task's own step; here the test
+// says when the gateway is back (`back`), and counts the restarts the task
+// went through (`waits`).
+const gateway = { waits: 0, back: null as null | (() => void) };
 
 type Row = { id: string; label: string; state: string; isDefault: boolean; section: string; enabled: boolean; credentialHeld?: boolean };
 
@@ -67,6 +66,8 @@ function stubBox(opts: {
 } = {}): Box {
   const rows = opts.rows ?? OPENCLAW_ROWS;
   const box: Box = { posts: [], statusReads: 0, signedOut: new Set() };
+  /** The box's sign-out tasks: each answers its record as it stands now. */
+  const tasks = new Map<string, () => ReturnType<typeof providerTask>>();
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
@@ -90,10 +91,32 @@ function stubBox(opts: {
           init.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
         });
       }
-      await opts.answer;
-      if (opts.refuse) return json({ error: opts.refuse.error, kind: "still_signed_in" }, opts.refuse.status);
-      box.signedOut.add(provider);
-      return json({ signedOut: true, provider, changed: true, gatewayRestarting: opts.restarting === true });
+      // The box starts the task at once and answers; the task is what takes
+      // its time: held by `answer`, then (with `restarting`) by the restart.
+      const id = `task-${box.posts.length}`;
+      const label = rows.find((row) => row.id === provider)?.label ?? provider;
+      let removed = !opts.answer;
+      void opts.answer?.then(() => { removed = true; });
+      let restarted = !opts.restarting;
+      tasks.set(id, () => {
+        if (!removed) return providerTask(id, { provider, label, state: "running", step: "remove" });
+        if (opts.refuse) return providerTask(id, { provider, label, state: "failed", error: opts.refuse.error });
+        box.signedOut.add(provider);
+        if (!restarted) {
+          if (!gateway.back) {
+            gateway.waits += 1;
+            gateway.back = () => { restarted = true; };
+          }
+          return providerTask(id, { provider, label, state: "running", step: "restart" });
+        }
+        return providerTask(id, { provider, label, state: "succeeded" });
+      });
+      return json({ taskId: id, started: true, task: tasks.get(id)!() }, 202);
+    }
+    if (url.startsWith("/setup-api/background-jobs/tasks")) {
+      const id = new URL(url, "http://box").searchParams.get("id");
+      if (id) return tasks.has(id) ? json({ task: tasks.get(id)!() }) : json({ error: "No such task." }, 404);
+      return json({ tasks: [...tasks.values()].map((task) => task()) });
     }
     return json({ error: "unexpected" }, 404);
   }));

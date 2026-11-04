@@ -14,6 +14,9 @@ import {
   type BackgroundTaskView,
 } from "@/lib/background-task-client";
 import { BackgroundTaskProgress, taskHeadline, useCancelBackgroundTask } from "@/components/BackgroundTaskProgress";
+import { isProviderAuthTask } from "@/lib/provider-auth-task-client";
+import { isSettingsJob } from "@/lib/settings-job-client";
+import { notifyProvidersChanged } from "@/lib/ui-events";
 
 /**
  * The desktop's corner card for long work Settings started — an install, a
@@ -42,12 +45,22 @@ export function useBackgroundTasks(enabled: boolean): {
   // a browser behind the box kept a finished card up for as long as it lagged.
   const [now, setNow] = useState(() => boxNowMs());
   const runningRef = useRef(false);
+  /** The provider sign-ins and sign-outs the last read held, by id and whether they ran (TASK-2148). */
+  const providerSeenRef = useRef<Map<string, boolean> | null>(null);
 
   const refresh = useCallback(async () => {
     const tasks = await fetchBackgroundTasks();
     if (tasks) {
       setAll(tasks);
       runningRef.current = tasks.some(isLiveTask);
+      // A provider change that ended changed what every provider surface on
+      // the desktop says — the chat's model picker too, with Settings closed.
+      // Ended since the last read: seen running, or never seen at all (it ran
+      // between two slow polls). The first read is no news.
+      const provider = new Map(tasks.filter(isProviderAuthTask).map((t) => [t.id, isLiveTask(t)] as const));
+      const before = providerSeenRef.current;
+      providerSeenRef.current = provider;
+      if (before && [...provider].some(([id, live]) => !live && before.get(id) !== false)) notifyProvidersChanged();
     }
     setNow(boxNowMs());
   }, []);
@@ -132,10 +145,16 @@ const BackgroundTaskCard = memo(function BackgroundTaskCard({
   const failed = task.state === "failed" || task.state === "interrupted";
   const cancelled = task.state === "cancelled";
   const headline = taskHeadline(t, task);
+  // A Settings action run as a job (a provider sign-in, a channel's setup)
+  // measures nothing it could fill a bar with: its running mark is a turning
+  // ring rather than a download arrow.
+  const spinner = running && isSettingsJob(task);
   const tone = failed
     ? { ring: "bg-red-500/15 border-red-500/30", icon: "text-red-400", name: "error" }
     : running
-      ? { ring: "bg-orange-500/15 border-orange-500/30", icon: "text-orange-400", name: "downloading" }
+      ? spinner
+        ? { ring: "bg-orange-500/15 border-orange-500/30", icon: "text-orange-400 motion-safe:animate-spin", name: "progress_activity" }
+        : { ring: "bg-orange-500/15 border-orange-500/30", icon: "text-orange-400", name: "downloading" }
       : queued
         // Waiting its turn: its own card, quieter than the work it waits for.
         ? { ring: "bg-white/10 border-white/20", icon: "text-white/70", name: "schedule" }
@@ -154,7 +173,12 @@ const BackgroundTaskCard = memo(function BackgroundTaskCard({
     >
       <div className="flex items-start gap-3 px-4 pt-3">
         <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 border ${tone.ring}`}>
-          <span className={`material-symbols-rounded ${tone.icon}`} style={{ fontSize: 20 }} aria-hidden="true">
+          <span
+            className={`material-symbols-rounded ${tone.icon}`}
+            style={{ fontSize: 20 }}
+            aria-hidden="true"
+            data-testid={spinner ? "background-task-spinner" : undefined}
+          >
             {tone.name}
           </span>
         </div>

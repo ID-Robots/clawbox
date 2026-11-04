@@ -39,6 +39,7 @@ export const nl: Record<string, string> = {
   "settings.providers.signOut": "Afmelden bij {name}",
   "settings.providers.signOutConfirm": "Afmelden — tik nogmaals",
   "settings.providers.signingOut": "Afmelden…",
+  "settings.providers.connecting": "Verbinden…",
   "settings.providers.signOutRestarting": "De assistent start opnieuw om dit af te ronden — over ongeveer een minuut terug.",
   "settings.providers.signOutFailed": "Afmelden bij {name} is mislukt.",
   "settings.providers.signOutTimedOut": "De box reageerde niet op tijd. De lijst is opnieuw gelezen — staat {name} er niet meer in, dan is het afmelden gelukt.",

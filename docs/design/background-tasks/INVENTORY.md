@@ -365,11 +365,28 @@ All three now read ✅ in section 1.
 
 Every route's NDJSON shape is unchanged, so the Memory Shard wizard and the other readers read the same lines.
 
+### Provider and channel changes (TASK-2148)
+
+The owner's rule from this slice on: every Settings action that is not instant runs as a job of the box. The shared helper is `src/lib/settings-jobs.ts` (server: `startSettingsJob`, `routeAsSettingsJob`), `src/lib/settings-job-client.ts` (browser: `settingsJobFetch`) and `src/hooks/useSettingsJobs.ts` (reopen); [NON-INSTANT-ACTIONS.md](NON-INSTANT-ACTIONS.md) lists every remaining action and how to convert it.
+
+The box's half of connecting a provider, and every sign-out, now run as jobs in one group, `provider-auth` (`src/lib/provider-auth-tasks.ts`): one provider change at a time, the same ask for the same provider answered by the running job (202, `started: false`), anything else refused `409 provider_change_running`. Not cancellable.
+
+| Process | Before | After |
+|---|---|---|
+| OpenClaw provider save (API key, ClawBox AI token, OAuth handoffs for OpenAI, Anthropic, xAI) — row 136 | ⚠️ In-request; the overlay, the restart wait and the verdict lived in the window. | Settings posts `background: true`: a `provider-sign-in` task (save, restart, read the row back), answered 202 and followed by id. The wizard keeps the request-long save. |
+| ClawBox AI configure after the device login's token lands — row 129 | ⚠️ A fire-and-forget promise only a poll could see. | The same work as a `provider-sign-in` task; the session file names it (`taskId`) and the poll answers from the task while it runs and from how it ended after a restart. A new code is refused while it runs. |
+| Hermes edition: key and model save, ClawBox AI link — rows 141, 142 | ✅ Survived, with no progress anywhere but the window. | `background: true` on `/setup-api/hermes/models` (key, then pick, one task) and `/setup-api/hermes/clawai`. |
+| Provider sign-out (both routes, both harnesses) — not inventoried | In-request, then a gateway wait in the window. | A `provider-sign-out` task (remove and read back, restart, read the row back); refusals the box can tell at once are still answered before any task. |
+
+Settings reads `GET /setup-api/background-jobs/tasks?group=provider-auth` on opening (`useProviderAuthTasks`): the provider list takes a running sign-out up as its own and draws a provider being connected with the same spinner, the connect panels re-open their overlay on a running sign-in, and the rows re-read when a change ends. The corner card draws every settings job with a turning ring.
+
+The channels' saves, connects and disconnects — Telegram (bot token, progress updates), Discord (save, members), Email (connect, disconnect), WhatsApp (save, unlink) — are jobs of one group, `channel-setup`, through `routeAsSettingsJob` in each route and `settingsJobFetch` in Settings. Reopened, Settings → Channels marks the channel being set up with the ring and its step, the channel's pane draws the job and holds its controls, and the channel's status is read again when the job ends. Pairing approvals, the Discord invite wait, the WhatsApp QR and the email test send stay in-request (see NON-INSTANT-ACTIONS.md).
+
 ### Still to do (next slices)
 
 In section 1's order of what the owner loses the most:
 
-- **The device-code sign-ins (❌ dies)**: ClawBox AI pairing, OpenAI (ChatGPT), xAI, the Hermes CLI and dashboard sign-ins. Each needs the server to poll the provider itself: a task whose card shows the code and link until it is approved.
+- **The device-code sign-ins (❌ dies)**: ClawBox AI pairing, OpenAI (ChatGPT), xAI, the Hermes CLI and dashboard sign-ins. Each needs the server to poll the provider itself: a task whose card shows the code and link until it is approved. (What follows the approval is a task since TASK-2148; the wait for the approval itself is not.)
 - **The harness swap (⚠️)**: a root step with five phase markers that map onto steps, and a carry-over after the unit. Its stream carries `{phase}` lines, which the shared stream would have to forward.
 - **The remaining root-step installs (⚠️)**: cloudflared (Remote Access) and the user-account steps. Each is a single `ctx.rootStep` with `finishes`.
 - **WhatsApp pairing and the Discord invite wait (❌ dies)**, and the Telegram readiness wait.
