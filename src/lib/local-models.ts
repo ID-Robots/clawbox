@@ -18,7 +18,6 @@ import { constants as fsConstants, promises as fs } from "fs";
 import os from "os";
 import path from "./runtime-path";
 import { EMBED_MODEL_ALIAS, EMBED_UNIT, isEmbeddingServerArgv } from "./embed-runtime-ids";
-import { readEmbedStopReason } from "./embed-server";
 
 const execFileAsync = promisify(execFile);
 
@@ -658,10 +657,21 @@ interface EmbeddingProbe {
  * The embedder is reached through the proxy now, so a sleeping unit is exactly
  * what "starts when needed" means, and the unit's own state is the reading.
  */
+/**
+ * The embedder's last word, read off its log. Loaded on this one path, never
+ * at module load: embed-server resolves its log under the config store's
+ * DATA_DIR as it is imported, and this module is also every voice reader's
+ * (buildTtsInventory), whose tests mock the store without it.
+ */
+async function embedStopReason(): Promise<string | null> {
+  const { readEmbedStopReason } = await import("./embed-server");
+  return readEmbedStopReason();
+}
+
 /** Why clawbox-embed.service failed, or null when it has not failed. */
 async function failedEmbedderReason(): Promise<string | null> {
   const unit = await readUnitState(EMBED_UNIT, "system");
-  return unit.failed ? readEmbedStopReason() : null;
+  return unit.failed ? embedStopReason() : null;
 }
 
 async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
@@ -726,7 +736,7 @@ async function embeddingEntry(probe: EmbeddingProbe): Promise<LocalModelEntry> {
     ? await processMemoryBytes("llama-server", OLLAMA_OWNED_PROCESS, isEmbeddingServerArgv)
     : null;
   const model = friendlyModelName(probe.model) ?? friendlyModelName(EMBED_MODEL_ALIAS) ?? "Qwen 3";
-  const stopped = installed && unit.failed ? await readEmbedStopReason() : null;
+  const stopped = installed && unit.failed ? await embedStopReason() : null;
   const params: Record<string, string> = { model, via: "llama.cpp" };
   if (stopped) params.reason = stopped;
   return {
