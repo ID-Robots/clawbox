@@ -491,15 +491,45 @@ describe("waitForGatewayStartBeforeStop", () => {
   it("does not wait on a gateway long past its start, a unit running nothing, or one already draining", async () => {
     const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
     host.ageS = 900;
-    host.startup = ["started"];
-    await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
-    expect(host.probes).toBe(0);
+    for (const answer of ["started", "silent"] as const) {
+      host.probes = 0;
+      host.startup = [answer];
+      await expect(waitForGatewayStartBeforeStop(), answer).resolves.toBe("not-starting");
+      expect(host.probes, answer).toBe(1);
+    }
     host.procs = null;
     await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
     host.procs = "4242\n";
     host.ageS = 20;
     host.startup = ["draining"];
     await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
+  });
+
+  it("takes the core's own `starting` over the process's age", async () => {
+    // A slow start (a cold box, large agent databases under inspection) can
+    // still answer `starting` at five minutes.
+    vi.useFakeTimers();
+    host.ageS = 900;
+    host.startup = ["starting", "starting", "started"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS + 2_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("does not let a probe that goes unanswered end the settle early", async () => {
+    // A busy event loop right after `started` is when the providers start.
+    vi.useFakeTimers();
+    host.ageS = 40;
+    host.startup = ["started", "silent"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS - 3_000);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await expect(waited).resolves.toBe("settled");
   });
 
   it("does not count a forward step of the wall clock against the start", async () => {

@@ -1229,10 +1229,10 @@ harness_has_no_gpu() {
 # wait_for_gateway_port, hermes_dashboard_restart_after_install's pid poll,
 # restore_previous_build's dashboard poll, step_validate_services' settle, and
 # let_gateway_finish_starting before a planned gateway stop.
-# None of them bounds anything — by the time each runs, the thing it is looking
-# at has already succeeded or already failed — they decide when to write a
-# REPORT, attempt a REPAIR or go ahead with a STOP, and none of those can be
-# deferred for ever.
+# None of them bounds WORK: the first four look at something that has already
+# succeeded or already failed, and decide when to write a REPORT or attempt a
+# REPAIR; the fifth watches a start in flight and decides only when a stop
+# goes ahead. None of those can be deferred for ever.
 # They are the exception because systemd answers the two halves of "not
 # answering yet" identically: a unit still coming up and a unit that is up and
 # will never bind the port are both `active`. Each says so where it lives.
@@ -2237,23 +2237,29 @@ uptime_s() {
 # TimeoutStopSec (330 s) and writes a `gateway.stop_shutdown_timeout` stability
 # bundle. An update on a box under 12 GB stops the gateway about 30 s after
 # gateway_setup restarted it, so every such update paid five and a half
-# minutes. On the box's journal every stop that landed before the core said
-# `ready` hit that deadline, and every stop after it settled in a second.
+# minutes. On the box's journal every stop that landed between the core's
+# SIGTERM handler (about 16 s into a start; a stop before it ends the process
+# at once) and its `ready` hit that deadline, and every stop after `ready`
+# settled in a second.
 #
 # The core's own word for "startup done" is /startupz 200 (docs/gateway/
 # health.md). It comes just BEFORE the channel providers start (a second on a
 # warm start, 13 s on a boot whose DNS was not up yet), and nothing the core
 # serves says when they have: /readyz counts a starting account as healthy. So
-# after the 200 the stop waits CLAWBOX_GATEWAY_STOP_SETTLE_S (20 s) more.
+# after the 200 the stop waits CLAWBOX_GATEWAY_STOP_SETTLE_S (20 s) more, and a
+# probe that goes unanswered meanwhile (a busy event loop) is no news. A 503 is
+# the core's word at any age; after the 200 it is a restart, or a drain the
+# unit's own stop is about to end, and it is waited for anew.
 #
-# A watch, not a deadline (see the list near the top): a gateway that has not
-# started within CLAWBOX_GATEWAY_STOP_WAIT_S (180 s) is stopped anyway, as it
-# always was, and this never fails. A gateway process older than 300 s (the
-# RECENT_START_MS of src/lib/gateway-start-guard.ts) is not starting, and its
-# stop goes ahead at once.
+# Bounded, and never a failure: a gateway that has not started within
+# CLAWBOX_GATEWAY_STOP_WAIT_S (180 s) is stopped anyway, as it always was. One
+# whose process is older than 300 s (the RECENT_START_MS of
+# src/lib/gateway-start-guard.ts) and answers 200 or nothing, with no 503
+# before it, is not starting, and its stop goes ahead at once. Its twin there is
+# waitForGatewayStartBeforeStop.
 let_gateway_finish_starting() {
   local budget="${CLAWBOX_GATEWAY_STOP_WAIT_S:-180}" settle="${CLAWBOX_GATEWAY_STOP_SETTLE_S:-20}"
-  local pid age code t0 now started_at="" announced=""
+  local pid age code t0 now started_at="" announced="" long_started=0
   case "$budget" in ''|*[!0-9]*) budget=180 ;; esac
   { [ "${#budget}" -le 4 ] && [ "$budget" -ge 1 ]; } || budget=180
   case "$settle" in ''|*[!0-9]*) settle=20 ;; esac
@@ -2261,20 +2267,27 @@ let_gateway_finish_starting() {
   systemctl is-active --quiet clawbox-gateway.service 2>/dev/null || return 0
   pid="$(systemctl show -p MainPID --value clawbox-gateway.service 2>/dev/null || true)"
   age="$(ps -o etimes= -p "${pid:-0}" 2>/dev/null | tr -d ' ' || true)"
-  case "$age" in ''|*[!0-9]*) ;; *) [ "${#age}" -le 9 ] && [ "$age" -lt 300 ] || return 0 ;; esac
+  case "$age" in
+    ''|*[!0-9]*) ;;
+    *) { [ "${#age}" -le 9 ] && [ "$age" -lt 300 ]; } || long_started=1 ;;
+  esac
   t0="$(uptime_s)"
   while systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; do
     code="$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT:-18789}/startupz" 2>/dev/null || true)"
     now="$(uptime_s)"
-    if [ "$code" = "200" ]; then
-      if [ -z "$started_at" ]; then
-        started_at="$now"
-        echo "  clawbox-gateway.service has started; giving its channels ${settle} s to come up before stopping it"
-      fi
+    case "$code" in
+      503) started_at="" long_started=0 ;;
+      *)
+        if [ -z "$started_at" ] && [ "$long_started" = 1 ]; then
+          return 0
+        elif [ "$code" = "200" ] && [ -z "$started_at" ]; then
+          started_at="$now"
+          echo "  clawbox-gateway.service has started; giving its channels ${settle} s to come up before stopping it"
+        fi
+        ;;
+    esac
+    if [ -n "$started_at" ]; then
       [ $(( now - started_at )) -lt "$settle" ] || return 0
-    elif [ -n "$started_at" ]; then
-      # Started, and now not: it is draining or restarting under someone else.
-      return 0
     elif [ $(( now - t0 )) -ge "$budget" ]; then
       echo "  Warning: clawbox-gateway.service had not finished starting after ${budget} s (/startupz: ${code:-no answer}); stopping it anyway" >&2
       return 0

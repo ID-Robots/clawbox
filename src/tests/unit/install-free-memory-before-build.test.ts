@@ -1128,10 +1128,17 @@ describe("a planned gateway stop lets a starting gateway finish first", () => {
       ].join(NL),
       { mode: 0o755 },
     );
-    // How long the gateway's main process has run, when a test says.
+    // How long the gateway's main process has run, when a test says — and
+    // only for that process: `ps -o etimes= -p <MainPID>`.
     fs.writeFileSync(
       path.join(tmp, "bin", "ps"),
-      `#!/bin/sh${NL}[ -n "\${PS_ETIMES:-}" ] || exit 1${NL}printf "  %s\\n" "$PS_ETIMES"${NL}`,
+      [
+        "#!/bin/sh",
+        'case " $* " in *" -p ${MAIN_PID:-none} "*) ;; *) exit 1 ;; esac',
+        '[ -n "${PS_ETIMES:-}" ] || exit 1',
+        'printf "  %s\\n" "$PS_ETIMES"',
+        "",
+      ].join(NL),
       { mode: 0o755 },
     );
     writeStartupProbe(path.join(tmp, "bin"));
@@ -1151,6 +1158,8 @@ describe("a planned gateway stop lets a starting gateway finish first", () => {
   }: { codes: string; active?: string; settle?: string; wait?: string; etimes?: string; call?: string }) {
     const log = path.join(tmp, "calls.log");
     fs.writeFileSync(log, "");
+    fs.rmSync(`${log}.stopped`, { force: true });
+    fs.rmSync(path.join(tmp, "probes"), { force: true });
     const script = [
       "set -euo pipefail",
       `PROJECT_DIR="${tmp}"`,
@@ -1209,10 +1218,44 @@ describe("a planned gateway stop lets a starting gateway finish first", () => {
     ]);
   });
 
-  it("stops a gateway that has been up for minutes at once, without asking", () => {
-    const r = stopGateway({ codes: "503", etimes: "4000" });
-    expect(r.calls).toContain("stop clawbox-gateway.service");
-    expect(r.calls.some((c) => c.startsWith("probe "))).toBe(false);
+  it("stops a gateway that has been up for minutes at once, once it answers started or nothing", () => {
+    for (const codes of ["200", "000"]) {
+      const r = stopGateway({ codes, etimes: "4000" });
+      const stop = r.calls.indexOf("stop clawbox-gateway.service");
+      expect(stop, codes).toBeGreaterThan(-1);
+      expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe ")), codes).toEqual([`probe startupz ${codes}`]);
+      expect(r.out, codes).not.toMatch(/giving its channels/);
+    }
+  });
+
+  it("takes the core's own 503 over the process's age", () => {
+    // A slow start (a cold box, large agent databases under inspection) can
+    // still answer `starting` at five minutes.
+    const r = stopGateway({ codes: "503 200", settle: "0", etimes: "4000" });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe "))).toEqual([
+      "probe startupz 503",
+      "probe startupz 200",
+    ]);
+  });
+
+  it("waits on a young gateway that does not answer yet, as it binds its port late in its start", () => {
+    const r = stopGateway({ codes: "000 000 200", settle: "0", etimes: "12" });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe "))).toEqual([
+      "probe startupz 000",
+      "probe startupz 000",
+      "probe startupz 200",
+    ]);
+  });
+
+  it("does not let an unanswered probe end the settle early", () => {
+    // A busy event loop right after `started` is when the providers start.
+    const r = stopGateway({ codes: "200 000", settle: "3", etimes: "40" });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    expect(stop).toBeGreaterThan(-1);
+    // One probe a second from the 200 on: the settle is three of them, not one.
+    expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe ")).length).toBeGreaterThanOrEqual(4);
   });
 
   it("does not wait on a gateway that is not running, nor on any other unit", () => {
