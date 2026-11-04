@@ -101,15 +101,55 @@ describe("scripts/openclaw-maintenance-retry.sh", () => {
     expect(r.stdout).toContain("offline maintenance");
   });
 
-  it("counts its window on the monotonic clock, not on bash's wall-clock SECONDS", () => {
+  it("keeps its window when bash's own clock jumps half a day between two asks", () => {
     // The gateway's pre-start calls this at boot, the minute timesyncd steps
-    // the clock of a box with no RTC forward (half a day after a night off).
-    // A window counted on SECONDS ends at that step. The step cannot be made
-    // from outside a running bash, so this reads the code; the cases above
-    // prove the window still ends where it should.
-    const code = readFileSync(WRAPPER, "utf-8").split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
-    expect(code).toContain("/proc/uptime");
-    expect(code).not.toMatch(/started=\$SECONDS|\(\(SECONDS - started/);
+    // the clock of a box with no RTC forward. A command that is a shell
+    // function runs in the wrapper's own bash, so its `SECONDS=` moves the very
+    // count the window was once measured on, deterministically, mid-run.
+    const left = path.join(dir, "left");
+    writeFileSync(left, "1");
+    const program = `
+refused_once_then_valid() {
+  printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
+  if [ "$(cat ${JSON.stringify(left)})" -gt 0 ]; then
+    echo 0 > ${JSON.stringify(left)}
+    SECONDS=$((SECONDS + 43200))
+    echo "OpenClaw state is undergoing offline maintenance; retry when it finishes." >&2
+    return 1
+  fi
+  printf '%s\\n' '{"valid":true}'
+}
+export -f refused_once_then_valid
+exec ${JSON.stringify(WRAPPER)} refused_once_then_valid config validate --json
+`;
+    const r = run(["bash", "-c", program]);
+    expect(r.stderr).not.toContain("still finishing maintenance");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("{\"valid\":true}");
+    expect(callCount()).toBe(2);
+  });
+
+  it("keeps one clock for the whole window when /proc/uptime stops answering", () => {
+    // The wrapper's clock on its own, with `read` failing after its first
+    // answer: the window carries on from bash's own count rather than
+    // subtracting an uptime start from SECONDS, which would keep it open.
+    const src = readFileSync(WRAPPER, "utf-8");
+    const from = src.indexOf("# The window is counted on the box's monotonic clock");
+    const to = src.indexOf("\nnow_s\nstarted=", from);
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const program = `
+reads=0
+read() { reads=$((reads + 1)); [ "$reads" -eq 1 ] || return 1; builtin read "$@"; }
+${src.slice(from, to)}
+now_s; a=$now
+SECONDS=$((SECONDS + 5))
+now_s; echo "delta=$((now - a))"
+`;
+    const r = run(["bash", "-c", program]);
+    const delta = Number(/delta=(-?\d+)/.exec(r.stdout)?.[1]);
+    expect(delta).toBeGreaterThanOrEqual(5);
+    expect(delta).toBeLessThanOrEqual(6);
   });
 
   it("still hands on what the command printed when the caller's timeout ends it", () => {

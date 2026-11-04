@@ -42,12 +42,26 @@ trap 'cat "$out"; cat "$err" >&2; exit 143' TERM INT
 # a builtin: no fork). bash's SECONDS is wall clock, and the gateway's pre-start
 # calls this at boot, the minute timesyncd steps the clock of a box with no RTC
 # forward — half a day after a night off — which ended the window at once.
-# SECONDS only where /proc/uptime cannot be read.
+# SECONDS only where /proc/uptime cannot be read, and then for the whole run:
+# the first reading latches the clock, and a run begun on /proc/uptime that
+# loses it carries on by SECONDS from its last uptime reading (`offset`), so the
+# window never compares one clock with the other.
+clock=""
+offset=0
 now_s() {
   local up rest
-  read -r up rest 2>/dev/null </proc/uptime || up=""
-  up="${up%%.*}"
-  if [[ "$up" =~ ^[0-9]+$ ]]; then now="$up"; else now="$SECONDS"; fi
+  if [ "$clock" != "seconds" ]; then
+    read -r up rest 2>/dev/null </proc/uptime || up=""
+    up="${up%%.*}"
+    if [[ "$up" =~ ^[0-9]+$ ]]; then
+      now="$up"
+      clock=uptime
+      offset=$(( up - SECONDS ))
+      return 0
+    fi
+    [ -n "$clock" ] || clock=seconds
+  fi
+  now=$(( SECONDS + offset ))
 }
 now_s
 started=$now

@@ -296,21 +296,34 @@ clawbox_stamp_remember() {
 # total" and handed both time budgets below 0 s, though systemd, which counts
 # the unit's TimeoutStartSec on a monotonic clock, had used 40 s of it. Without
 # /proc/uptime the wall clock is all there is.
+#
+# ONE clock per run, latched by the first reading in CLAWBOX_CLOCK: a run that
+# began on the wall clock stays on it, and a run that began on /proc/uptime and
+# then gets a reading it cannot use carries on from its last uptime reading by
+# the wall clock (CLAWBOX_CLOCK_OFFSET_MS). Subtracting one clock from the
+# other is off by the whole epoch, about 1.8e12 ms.
+CLAWBOX_CLOCK=""
+CLAWBOX_CLOCK_OFFSET_MS=0
 clawbox_now_ms() {
-  local up="${1:-}" rest us
-  [ -n "$up" ] || read -r up rest 2>/dev/null </proc/uptime || up=""
-  if [[ "$up" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    rest="${up#*.}00"
-    CLAWBOX_NOW_MS=$(( 10#${up%%.*} * 1000 + 10#${rest:0:3} ))
-    return 0
-  fi
-  us="${EPOCHREALTIME:-}"
+  local up="${1:-}" rest wall us="${EPOCHREALTIME:-}"
   if [ -n "$us" ]; then
     us="${us/[.,]/}"
-    CLAWBOX_NOW_MS=$(( 10#$us / 1000 ))
+    wall=$(( 10#$us / 1000 ))
   else
-    CLAWBOX_NOW_MS="$(date +%s%3N 2>/dev/null || echo 0)"
+    wall=$(( SECONDS * 1000 ))
   fi
+  if [ "$CLAWBOX_CLOCK" != "wall" ]; then
+    [ -n "$up" ] || read -r up rest 2>/dev/null </proc/uptime || up=""
+    if [[ "$up" =~ ^[0-9]+\.[0-9]+$ ]]; then
+      rest="${up#*.}00"
+      CLAWBOX_NOW_MS=$(( 10#${up%%.*} * 1000 + 10#${rest:0:3} ))
+      CLAWBOX_CLOCK=uptime
+      CLAWBOX_CLOCK_OFFSET_MS=$(( CLAWBOX_NOW_MS - wall ))
+      return 0
+    fi
+    [ -n "$CLAWBOX_CLOCK" ] || CLAWBOX_CLOCK=wall
+  fi
+  CLAWBOX_NOW_MS=$(( wall + CLAWBOX_CLOCK_OFFSET_MS ))
 }
 CLAWBOX_STEP_NAME="startup and version probe"
 clawbox_now_ms "${CLAWBOX_PRESTART_T0_UPTIME:-}"
