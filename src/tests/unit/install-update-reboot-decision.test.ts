@@ -315,6 +315,10 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     settle?: number;
     /** Units that are active on a NEW invocation at every look: a crash loop. */
     bouncy?: string[];
+    /** Units still "activating" for their first two looks after the restart. */
+    late?: string[];
+    /** Unit → how many of its first InvocationID reads answer nothing. */
+    noInvocation?: Record<string, number>;
   }
 
   function run(box: Box): { status: number | null; events: string[]; out: string; relay: string } {
@@ -331,12 +335,14 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     }
     // A running unit has an invocation; one that is not running has none yet.
     for (const u of box.active) fs.writeFileSync(path.join(state, `${u}.inv`), "inv-boot");
+    for (const [u, k] of Object.entries(box.noInvocation ?? {})) fs.writeFileSync(path.join(state, `${u}.noinv`), String(k));
     const types = Object.entries(box.types ?? {}).map(([u, t]) => `${u}) echo ${t} ;;`).join(" ");
     const failing = (box.failing ?? []).join(" ");
     const flaky = (box.flaky ?? []).join(" ");
     const slow = (box.slow ?? []).join(" ");
     const stuck = (box.stuck ?? []).join(" ");
     const bouncy = (box.bouncy ?? []).join(" ");
+    const late = (box.late ?? []).join(" ");
     const apMarker = path.join(tmp, "run", "clawbox", "update-ap-restart");
     fs.rmSync(apMarker, { force: true });
     const lines = (units: string[], rest: string) =>
@@ -346,7 +352,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       `ENGINE_SETTLE_S=${box.settle ?? 0}`,
       `EV=${JSON.stringify(events)}; ST=${JSON.stringify(state)}`,
       "sleep() { echo \"sleep $*\" >> \"$EV\"; }",
-      "unit_state() { if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
+      // A late unit answers "activating" for its first N looks after its restart.
+      "unit_state() { local n; if [ -f \"$ST/$1.late\" ]; then n=$(cat \"$ST/$1.late\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.late\"; echo activating; return; fi; fi; if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
       "systemctl() {",
       "  echo \"systemctl $*\" >> \"$EV\"",
       "  case \"$1\" in",
@@ -356,6 +363,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       "      case \"$4\" in",
       `        Type) case \"$2\" in ${types} *) echo simple ;; esac ;;`,
       "        InvocationID)",
+      "          if [ -f \"$ST/$2.noinv\" ] && [ \"$(cat \"$ST/$2.noinv\")\" -gt 0 ]; then echo $(( $(cat \"$ST/$2.noinv\") - 1 )) > \"$ST/$2.noinv\"; return 0; fi",
       // A slow unit shows its old invocation once more; a flaky one dies on
       // its second look, as a unit that forked and then exited would.
       "          if [ -f \"$ST/$2.wait\" ]; then rm -f \"$ST/$2.wait\";",
@@ -366,7 +374,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       "      esac ;;",
       "    is-active)",
       "      if [ \"$2\" = --quiet ]; then [ \"$(unit_state \"$3\")\" = active ]; return; fi",
-      "      unit_state \"$2\"; [ \"$(unit_state \"$2\")\" = active ] ;;",
+      "      local st; st=$(unit_state \"$2\"); echo \"$st\"; [ \"$st\" = active ] ;;",
       "    restart|start)",
       "      shift; local u rc=0",
       "      for u in \"$@\"; do",
@@ -378,6 +386,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       "        echo \"inv-$RANDOM$RANDOM\" > \"$ST/$u.inv\"",
       `        case " ${flaky} " in *" $u "*) : > "$ST/$u.flaky" ;; esac`,
       "        touch \"$ST/$u.restarted\"",
+      `        case " ${late} " in *" $u "*) echo 2 > "$ST/$u.late" ;; esac`,
       "      done; return $rc ;;",
       "    *) return 0 ;;",
       "  esac",
@@ -561,13 +570,13 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     expect(r.out).not.toContain("[ok] clawbox-websockify.service");
     expect(r.relay).toContain("websockify (failed)");
     // Active on its boot-time invocation is not "running again".
-    expect(r.relay).toContain("performance (still the old process)");
+    expect(r.relay).toContain("performance (old process)");
     expect(r.relay).not.toContain("(active)");
   });
 
   it("counts the settle in the wait it states", () => {
     const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], looks: 0, settle: 1 });
-    expect(r.relay).toContain("again 1 s after");
+    expect(r.relay).toContain("not back 1 s after");
     expect(r.events).toContain("sleep 1");
   });
 
@@ -578,7 +587,28 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     const line = r.relay.split("\n").find((l) => l.startsWith("CLAWBOX-WARN[service-not-restarted]: ")) ?? "";
     const message = line.replace("CLAWBOX-WARN[service-not-restarted]: ", "");
     expect(message.length).toBeLessThanOrEqual(300);
+    // The count first: a card the cap cuts still says how many.
+    expect(message).toContain("6 clawbox-* services not back");
     for (const u of six) expect(message).toContain(`${u.replace(/^clawbox-/, "").replace(/\.service$/, "")} (failed)`);
+  });
+
+  it("never counts a restart back when the unit's invocation could not be read", () => {
+    // RED on 84cafe0: an empty pre-restart invocation differed from any later one.
+    const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], noInvocation: { "clawbox-vnc.service": 2 }, looks: 0 });
+    expect(r.out).not.toContain("[ok] clawbox-vnc.service");
+    expect(r.relay).toContain("vnc (not checked)");
+  });
+
+  it("asks once more when the first read of an invocation comes back empty", () => {
+    const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], noInvocation: { "clawbox-vnc.service": 1 }, looks: 0 });
+    expect(r.relay).toContain("vnc (old process)");
+  });
+
+  it("calls a unit that came up only after the wait late, never crashed", () => {
+    // RED on 84cafe0: it was labelled "crashed and restarted".
+    const r = run({ active: BOX, types: TYPES, late: ["clawbox-browser.service"], looks: 0 });
+    expect(r.relay).toContain("browser (up late)");
+    expect(r.relay).not.toContain("crashed");
   });
 
   it("names a unit that died and came back during the settle as such, never as plain active", () => {
@@ -598,7 +628,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
 
   it("stops waiting once every unit still down has failed again", () => {
     const r = run({ active: BOX, types: TYPES, failing: ["clawbox-vnc.service"], looks: 30 });
-    expect(r.relay).toContain("again 0 s after");
+    expect(r.relay).toContain("not back 0 s after");
   });
 
   it("drops the warnings an earlier run left behind, so post_update states only this run's", () => {
@@ -765,8 +795,13 @@ d("report_update_ap_restart: post_update proves the hotspot restart the update q
 
   it("says a hotspot still starting at the end of its wait is still starting, not down", () => {
     const r = report(["activating"], "inv-new");
-    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*still starting/m);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*still activating/m);
     expect(r.out).not.toContain("nothing retries it");
+  });
+
+  it("says a hotspot caught stopping is stopping, not starting", () => {
+    const r = report(["deactivating"], "inv-new");
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*still deactivating/m);
   });
 
   it("never calls the hotspot restarted without a record of the run it replaced", () => {

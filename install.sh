@@ -12968,7 +12968,7 @@ ap_sources_changed() {
 # dashboard stopped.
 restart_services_after_update() {
   local served="${1:-}" relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}"
-  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n terminal engines down="" ap_restart=0 settled state short
+  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n=0 terminal engines down="" ap_restart=0 settled state short label count=0
   local ap_marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}" ap_before
   local -a candidates=() restart=() start=() units=() before=() seen=() pending=() warnings=()
   case "$looks" in ''|*[!0-9]*) looks=90 ;; esac
@@ -13013,9 +13013,24 @@ restart_services_after_update() {
         ;;
       *) continue ;;
     esac
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then restart+=("$unit"); else start+=("$unit"); fi
+    now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      restart+=("$unit")
+      # A running unit always has an invocation, so an empty answer is a query
+      # that failed. Asked once more; still empty, nothing could prove its
+      # restart, and it is named as not checked rather than counted back.
+      [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+      if [ -z "$now" ]; then
+        short="${unit#clawbox-}"
+        down="${down:+$down, }${short%.service} (not checked)"
+        count=$((count + 1))
+        continue
+      fi
+    else
+      start+=("$unit")
+    fi
     units+=("$unit")
-    before+=("$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)")
+    before+=("$now")
   done
   # ONE call each, so the jobs are queued together: clawbox-browser Requires=
   # clawbox-vnc, and the browser's own restart merges with the one vnc's pulls
@@ -13029,7 +13044,6 @@ restart_services_after_update() {
     systemctl start --no-block "${start[@]}" || true
   fi
   if [ "${#units[@]}" -gt 0 ]; then
-    n=0
     settled=0
     while :; do
       pending=()
@@ -13089,27 +13103,37 @@ restart_services_after_update() {
       case " ${pending[*]} " in
         *" $i "*)
           # Short names and the state in words: the updater cuts a warning at
-          # 300 characters, and "active" under "not running again" is either a
-          # restart that never took or a unit that died and came back.
+          # 300 characters, and "active" under "not back" is one of three
+          # things — a restart that never took (the old invocation), a unit
+          # that was up on a new one and is on a third (a crash loop), or one
+          # that only came up after the wait.
           state="$(systemctl is-active "$unit" 2>/dev/null || true)"
           now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
-          if [ "$state" = active ] && [ "$now" = "${before[i]}" ]; then
-            state="still the old process"
-          elif [ "$state" = active ]; then
-            state="crashed and restarted"
+          if [ "$state" != active ]; then
+            label="${state:-unknown}"
+          elif [ -z "$now" ]; then
+            label="unknown"
+          elif [ "$now" = "${before[i]}" ]; then
+            label="old process"
+          elif [ -n "${seen[i]}" ] && [ "${seen[i]}" != "${before[i]}" ] && [ "$now" != "${seen[i]}" ]; then
+            label="crashed and restarted"
+          else
+            label="up late"
           fi
           short="${unit#clawbox-}"
-          down="${down:+$down, }${short%.service} (${state:-unknown})"
+          down="${down:+$down, }${short%.service} ($label)"
+          count=$((count + 1))
           ;;
         *) echo "    [ok] $unit is running on the updated files" ;;
       esac
     done
-    if [ -n "$down" ]; then
-      # The hint first: the updater cuts a warning at 300 characters.
-      line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot. Not running again ${n} s after the update restarted them, of the clawbox-* services: $down"
-      echo "$line"
-      warnings+=("$line")
-    fi
+  fi
+  if [ "$count" -gt 0 ]; then
+    # The hint and the count first: the updater cuts a warning at 300
+    # characters, and a cut list still says how many.
+    line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot. $count clawbox-* services not back ${n} s after the update restarted them: $down"
+    echo "$line"
+    warnings+=("$line")
   fi
   # do_rebuild's own: the engines it paused for the build that did not come
   # back, on ONE line (the updater keeps one card per code) and under a code
@@ -13182,7 +13206,7 @@ report_update_ap_restart() {
   elif [ "$state" = active ] && [ -n "$now" ] && [ "$now" != "$before" ]; then
     echo "  clawbox-ap.service is back on the hotspot scripts this update installed"
   elif [ "$state" = activating ] || [ "$state" = deactivating ] || [ "$state" = reloading ]; then
-    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted was still starting ${n} s into this check; it finishes on its own if it can, and a reboot starts it again if not"
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted was still $state ${n} s into this check; it finishes on its own if it can, and a reboot starts it again if not"
   elif [ "$state" = active ]; then
     echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted is still on its previous run; it applies the new scripts at the next reboot"
   else
