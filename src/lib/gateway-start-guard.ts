@@ -297,8 +297,8 @@ export async function waitForGatewayStartBeforeStop(
   options: {
     budgetMs?: number;
     settleMs?: number;
-    /** Called when the wait first holds, then every 30 s it goes on holding: a caller with a page to keep informed. */
-    onHold?: (waitedMs: number) => void;
+    /** Called when the wait first holds (`first`), then every 30 s it goes on holding: a caller with a page to keep informed. */
+    onHold?: (waitedMs: number, first: boolean) => void;
   } = {},
 ): Promise<"not-starting" | "settled" | "gone" | "timed-out"> {
   const { budgetMs = GATEWAY_STOP_START_WAIT_MS, settleMs = GATEWAY_STOP_SETTLE_MS, onHold } = options;
@@ -329,8 +329,8 @@ export async function waitForGatewayStartBeforeStop(
       return "timed-out";
     }
     if (notedAt === null || now - notedAt >= 30_000) {
+      onHold?.(now - began, notedAt === null);
       notedAt = now;
-      onHold?.(now - began);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }

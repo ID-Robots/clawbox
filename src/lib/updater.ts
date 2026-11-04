@@ -2728,8 +2728,8 @@ async function waitForGatewayPreStart(): Promise<void> {
 async function letGatewayFinishStarting(): Promise<void> {
   const began = monotonicNow();
   const outcome = await waitForGatewayStartBeforeStop({
-    onHold: (waitedMs) => {
-      if (waitedMs < 1_000) console.log("[Updater] clawbox-gateway is still starting; letting it finish before stopping it");
+    onHold: (_waitedMs, first) => {
+      if (first) console.log("[Updater] clawbox-gateway is still starting; letting it finish before stopping it");
     },
   });
   if (outcome === "not-starting") return;

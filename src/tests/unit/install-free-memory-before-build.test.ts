@@ -1257,7 +1257,8 @@ describe("a planned gateway stop lets a starting gateway finish first", () => {
     const stop = r.calls.indexOf("stop clawbox-gateway.service");
     const probes = r.calls.slice(0, stop).filter((c) => c.startsWith("probe "));
     expect(probes.slice(0, 3)).toEqual(["probe startupz 200", "probe startupz 503", "probe startupz 200"]);
-    expect(probes.length).toBeGreaterThanOrEqual(5);
+    // 4 or 5 (the clock is whole seconds); a settle counted from the first 200 gives at most 3.
+    expect(probes.length).toBeGreaterThanOrEqual(4);
   });
 
   it("does not let an unanswered probe end the settle early", () => {
@@ -1265,8 +1266,9 @@ describe("a planned gateway stop lets a starting gateway finish first", () => {
     const r = stopGateway({ codes: "200 000", settle: "3", etimes: "40" });
     const stop = r.calls.indexOf("stop clawbox-gateway.service");
     expect(stop).toBeGreaterThan(-1);
-    // One probe a second from the 200 on: the settle is three of them, not one.
-    expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe ")).length).toBeGreaterThanOrEqual(4);
+    // One probe a second from the 200 on: 3 or 4 of them for a 3 s settle on a
+    // whole-second clock; a settle ended by the missed probe gives 2.
+    expect(r.calls.slice(0, stop).filter((c) => c.startsWith("probe ")).length).toBeGreaterThanOrEqual(3);
   });
 
   it("does not wait on a gateway that is not running, nor on any other unit", () => {

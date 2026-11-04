@@ -736,7 +736,7 @@ function errorText(err: unknown): string {
  */
 async function letOpenclawGatewayFinishStarting(emit: SwapEmit): Promise<void> {
   const outcome = await waitForGatewayStartBeforeStop({
-    onHold: (waitedMs) => emit(waitedMs < 1_000
+    onHold: (waitedMs, first) => emit(first
       ? "Waiting for the OpenClaw gateway to finish starting…"
       : `Still waiting for the OpenClaw gateway to finish starting (${Math.round(waitedMs / 1000)} s)…`),
   });

@@ -551,15 +551,15 @@ describe("waitForGatewayStartBeforeStop", () => {
     host.ageS = 20;
     host.startup = ["starting"];
     const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
-    const holds: number[] = [];
-    const waited = waitForGatewayStartBeforeStop({ onHold: (ms) => holds.push(ms) });
+    const holds: [number, boolean][] = [];
+    const waited = waitForGatewayStartBeforeStop({ onHold: (ms, first) => holds.push([ms, first]) });
     await vi.advanceTimersByTimeAsync(31_500);
     host.procs = null;
     await vi.advanceTimersByTimeAsync(1_500);
     await expect(waited).resolves.toBe("gone");
     // Once at the start of the hold, then once 30 s on.
-    expect(holds.length).toBe(2);
-    expect(holds[0]).toBeLessThan(1_000);
+    expect(holds.map(([, first]) => first)).toEqual([true, false]);
+    expect(holds[1][0]).toBeGreaterThanOrEqual(30_000);
   });
 
   it("does not count a forward step of the wall clock against the start", async () => {
