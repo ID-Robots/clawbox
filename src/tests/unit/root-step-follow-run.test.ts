@@ -114,6 +114,32 @@ describe("followRootStepRun follows a run somebody else dispatched", () => {
     expect(lines).toContain("Downloading the memory-search model...");
   });
 
+  it("follows an adopted run to its end across a forward step of the wall clock", async () => {
+    // A run adopted from the previous web server is followed again as this
+    // one starts — on a cold boot, before timesyncd has stepped the clock of
+    // a box with no RTC. The step must not spend the follow's whole budget.
+    const { followRootStepRun } = await import("@/lib/root-step-follow");
+    states = [ACTIVE, ACTIVE, DONE];
+    invocation = RUN_A;
+    ending = "clawbox-root-update@embed_model.service: Deactivated successfully.\n";
+    const realNow = Date.now;
+    let step = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow.call(Date) + step);
+    const answer = mockExecFile.getMockImplementation()!;
+    mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+      if (cmd.includes("systemctl") && !args.includes("InvocationID") && shows === 0) step = 12 * 60 * 60 * 1000;
+      return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+    }) as unknown as typeof childProcess.execFile);
+
+    const result = await run(followRootStepRun(
+      { step: "embed_model", sinceMs: realNow.call(Date) - 60_000, invocationId: RUN_A },
+      { timeoutMs: 60_000, label: "the download", onStatus: () => {} },
+    ));
+
+    expect(result).toEqual({ ok: true });
+    expect(shows).toBe(3);
+  });
+
   it("reads a recorded run that has already ended as its ending, on systemd's own word for it", async () => {
     const { followRootStepRun } = await import("@/lib/root-step-follow");
     states = [DONE];

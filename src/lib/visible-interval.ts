@@ -30,6 +30,10 @@
 
 import { isMonitorSessionWindow } from "./desktop-screens";
 import { kioskBarInset } from "./kiosk-bar-inset";
+import { monotonicNow } from "./monotonic-clock";
+
+// Where the desktop's polls have always imported it from.
+export { monotonicNow };
 
 export interface VisibleIntervalOptions {
   /**
@@ -43,11 +47,6 @@ export interface VisibleIntervalOptions {
    * longer than the interval itself means "as if visible" — every tick runs.
    */
   hiddenMs?: number | (() => number);
-}
-
-/** A monotonic clock: the box has no RTC and its wall clock jumps at NTP sync. */
-export function monotonicNow(): number {
-  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
 
 /**

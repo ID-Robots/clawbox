@@ -25,6 +25,7 @@ import { hasHermesHarness, readEdition, type EditionName } from "./edition-sourc
 import { runHermesCli } from "./hermes-cli";
 import { hermesHome } from "./hermes-env";
 import { waitForPortOpen } from "./port-probe";
+import { monotonicNow } from "./monotonic-clock";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
@@ -904,9 +905,9 @@ async function readBuildId(): Promise<string> {
  * as success — this function never returns normally.
  */
 async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
-  const deadline = Date.now() + REBUILD_TAKEOVER_TIMEOUT_MS;
+  const deadline = monotonicNow() + REBUILD_TAKEOVER_TIMEOUT_MS;
   let message = "Rebuild did not restart the device within the expected window";
-  while (Date.now() < deadline) {
+  while (monotonicNow() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     if (rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP))) {
       const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP, dispatchedAt);
@@ -1842,6 +1843,8 @@ async function updateClawBoxAndReboot(): Promise<void> {
   await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
   // Captured before the dispatch, so the failure read below cannot miss a line
   // the unit wrote in its first moments — nor pick up the previous attempt's.
+  // Wall clock on purpose, like every journal `--since` here: the journal
+  // stamps its lines with it. Deadlines use `monotonicNow()`.
   const rebuildDispatchedAt = Date.now();
   await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
   await waitForRebuildToTakeOver(rebuildDispatchedAt);
@@ -2615,9 +2618,13 @@ async function removeGatewayMaintenanceMask(): Promise<void> {
  * left running and the step fails instead.
  */
 async function waitForGatewayPreStart(): Promise<void> {
-  const deadline = Date.now() + GATEWAY_PRE_START_TIMEOUT_MS;
+  // Monotonic, as systemd counts the TimeoutStartSec this mirrors: this wait
+  // runs at boot, when timesyncd steps the clock of a box with no RTC (half a
+  // day after a night off), and on `Date.now()` that step ended it at once and
+  // failed a healthy update.
+  const deadline = monotonicNow() + GATEWAY_PRE_START_TIMEOUT_MS;
   let announced = false;
-  while (Date.now() < deadline) {
+  while (monotonicNow() < deadline) {
     let subState: string | null = null;
     try {
       const { stdout } = await execFile(
@@ -2636,7 +2643,7 @@ async function waitForGatewayPreStart(): Promise<void> {
       console.log("[Updater] waiting for clawbox-gateway to finish its pre-start before stopping it");
     }
     // Never sleep past the ceiling: the gateway is masked while this waits.
-    await delay(Math.min(GATEWAY_WAIT_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+    await delay(Math.min(GATEWAY_WAIT_INTERVAL_MS, Math.max(0, deadline - monotonicNow())));
   }
   // systemd's own TimeoutStartSec has killed any pre-start by now, so this is
   // a unit whose state could not be confirmed for ten minutes. Leave it alone:
@@ -4094,7 +4101,7 @@ function applicableSteps(): UpdateStepDef[] {
  * arbitrary root with no password. TASK-539.
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   try {
     await startRootStep(stepId, { timeoutMs: timeoutMs + 30_000 });
   } catch (err) {
@@ -4105,7 +4112,7 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
     // successful) log line as the failure, which is how a healthy update
     // once showed "failed: Linkdown routing sysctl installed".
     if ((err as { killed?: boolean }).killed) {
-      const waitedS = Math.round((Date.now() - startedAt) / 1000);
+      const waitedS = Math.round((monotonicNow() - startedAt) / 1000);
       throw new BudgetOverrunError(
         `${stepId} was still running after ${waitedS}s — gave up waiting (it may finish on its own in the background)`,
       );
@@ -4116,8 +4123,8 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
 
 async function waitForRootStepToSettle(stepId: string): Promise<void> {
   const serviceName = rootStepUnit(stepId);
-  const deadline = Date.now() + ROOT_STEP_SETTLE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + ROOT_STEP_SETTLE_TIMEOUT_MS;
+  while (monotonicNow() < deadline) {
     try {
       const { stdout } = await execFile(
         "/usr/bin/systemctl",

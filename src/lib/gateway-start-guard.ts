@@ -1,6 +1,7 @@
 import fsSync from "fs";
 import { envPort } from "@/lib/port-probe";
 import { logSafe } from "@/lib/log-safe";
+import { monotonicNow } from "@/lib/monotonic-clock";
 
 /**
  * Never write openclaw.json under a gateway that is starting.
@@ -238,14 +239,17 @@ export async function holdWhileGatewayStarts(label: string, budgetMs = GATEWAY_S
   const what = JSON.stringify(logSafe(label));
   const why = phase === "pre-start" ? "the gateway's pre-start is running" : "the gateway is starting";
   console.warn(`[openclaw-config] ${what}: ${why}; holding the write until it is ready`);
-  const started = Date.now();
+  // Monotonic, like the unit's age above: a boot-time config write is held
+  // here while timesyncd steps the clock of a box with no RTC, and on the wall
+  // clock that step counted as half a day of starting.
+  const started = monotonicNow();
   let startingMs = 0;
   let last = started;
   while (startingMs < budgetMs) {
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     const was = phase;
     phase = await gatewayStartPhase();
-    const now = Date.now();
+    const now = monotonicNow();
     if (was === "starting") startingMs += now - last;
     last = now;
     if (!holds(phase)) {
