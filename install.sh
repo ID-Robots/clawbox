@@ -2210,9 +2210,9 @@ llamacpp_pid_if_running() {
 PAUSED_ENGINE_UNITS=()
 PAUSED_ENGINE_USER_UNITS=()
 PAUSED_ENGINE_UID=""
-# The warnings resume_paused_engines raised, for a caller whose own journal
-# nobody reads (restart_services_after_update relays them to post_update).
-ENGINE_RESUME_WARNINGS=()
+# The engines resume_paused_engines could not bring back, for a caller whose
+# own journal nobody reads (restart_services_after_update relays them).
+ENGINE_NOT_RESUMED=()
 
 # Stop an engine, remembering whether it was running.
 #
@@ -2314,7 +2314,7 @@ runtime_wakes_unit() {
 }
 
 resume_paused_engines() {
-  local unit uid_dir line
+  local unit uid_dir
   if [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ]; then
     for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
       if runtime_wakes_unit "$unit"; then
@@ -2333,9 +2333,8 @@ resume_paused_engines() {
         echo "    [ok] $unit is back"
       else
         echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
-        line="CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
-        echo "$line"
-        ENGINE_RESUME_WARNINGS+=("$line")
+        echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
+        ENGINE_NOT_RESUMED+=("$unit")
       fi
     done
   fi
@@ -2359,9 +2358,8 @@ resume_paused_engines() {
           echo "    [ok] $unit is back"
         else
           echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
-          line="CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
-          echo "$line"
-          ENGINE_RESUME_WARNINGS+=("$line")
+          echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
+          ENGINE_NOT_RESUMED+=("$unit")
         fi
       done
     fi
@@ -2448,8 +2446,8 @@ free_memory_for_build() {
   # reboots at the end of it, so the assistant is interrupted either way. Since
   # updates reboot only when something needs a boot (update_reboot_reasons),
   # most take the shape below instead. A
-  # rebuild nothing reboots after (`install.sh --step rebuild`, the legacy
-  # updater hand-over) keeps the gateway through bun install and the node-pty
+  # rebuild nothing reboots after (the update's restart arm, `install.sh --step
+  # rebuild`, the legacy updater hand-over) keeps the gateway through bun install and the node-pty
   # rebuild, and pause_gateway_if_build_needs_room decides just before
   # `next build` itself, on the memory actually left then (TASK-1197).
   ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
@@ -12926,7 +12924,8 @@ ap_sources_changed() {
 #     current pre-start. Restarting it here would start a pre-start for
 #     post_update to wait out and then stop.
 #   * clawbox-ap.service: restarted only when running and its unit or scripts
-#     changed, never started. A restart drops whoever is on the hotspot, and
+#     changed, and then only after the dashboard (clawbox-setup is After= it);
+#     never started. A restart drops whoever is on the hotspot, and
 #     clawbox-ap-watchdog.timer runs the new ap-watchdog.sh every 20 s, which is
 #     what brings a hotspot back.
 #   * other one-shots (nvme-boot-order, firstboot-vnc, build-heal): their work
@@ -12949,22 +12948,26 @@ ap_sources_changed() {
 # the ClawBox MCP server as a child it started from this tree, so it is
 # restarted through Hermes (hermes_gateway_refresh_after_install) when it runs.
 #
-# Proved per unit — active AND a new invocation, since an exit status says only
-# that the jobs were queued — with one-second looks up to a bound counted in
-# looks, never on the clock (an NTP step at this point is not hypothetical).
+# Proved per unit — active with a new invocation, and the SAME invocation still
+# active a settle later, since an exit status says only that the jobs were
+# queued and a Type=simple unit is active the moment it forks — with one-second
+# looks up to a bound counted in looks, never on the clock (an NTP step at this
+# point is not hypothetical).
 # The jobs are queued without blocking, so a start that hangs (a one-shot with
 # no start timeout) costs the bound and never the dashboard. What did not come
 # back is ONE warning naming every unit, because the updater keeps one card per
-# code; it is kept in a file with do_rebuild's engine warnings for post_update
+# code; it is kept in a file with do_rebuild's engines (ENGINE_NOT_RESUMED, one
+# line under a code of its own) for post_update
 # to state again (relay_update_restart_warnings), since nobody reads this
 # step's own journal: the server that dispatched it is gone. Never fatal before
 # the setup restart: errexit is live, and nothing may leave the box with its
 # dashboard stopped.
 restart_services_after_update() {
   local served="${1:-}" relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}"
-  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" unit rc out line now i n down=""
-  local -a candidates=() restart=() start=() units=() before=() pending=() warnings=()
+  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n terminal engines down="" ap_restart=0
+  local -a candidates=() restart=() start=() units=() before=() seen=() pending=() warnings=()
   case "$looks" in ''|*[!0-9]*) looks=90 ;; esac
+  case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
   # This run's warnings only: an earlier run whose post_update never came (a
   # refused continuation) must not have its warnings stated as this one's.
   rm -f "$relay" 2>/dev/null || true
@@ -12991,7 +12994,7 @@ restart_services_after_update() {
         rc=0
         ap_sources_changed "$served" || rc=$?
         case "$rc" in
-          0) echo "  $unit: its unit or scripts changed in this update, so the hotspot restarts too" ;;
+          0) echo "  $unit: its unit or scripts changed in this update, so the hotspot restarts too, once the dashboard is back"; ap_restart=1; continue ;;
           1) echo "  Leaving $unit up: its unit and scripts did not change, and a restart would drop whoever is on the hotspot"; continue ;;
           *) echo "  Leaving $unit up: could not tell whether its scripts changed (no usable commit stamp on the replaced build); its watchdog runs the new copy every 20 s"; continue ;;
         esac
@@ -13026,31 +13029,64 @@ restart_services_after_update() {
       pending=()
       for i in "${!units[@]}"; do
         unit="${units[$i]}"
-        now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
-        if systemctl is-active --quiet "$unit" 2>/dev/null && [ -n "$now" ] && [ "$now" != "${before[$i]}" ]; then
-          continue
+        seen[i]="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+        if ! { systemctl is-active --quiet "$unit" 2>/dev/null && [ -n "${seen[i]}" ] && [ "${seen[i]}" != "${before[i]}" ]; }; then
+          pending+=("$i")
         fi
-        pending+=("$unit")
       done
-      if [ "${#pending[@]}" -eq 0 ] || [ "$n" -ge "$looks" ]; then break; fi
+      if [ "${#pending[@]}" -eq 0 ]; then
+        # Active is not up: systemd calls a Type=simple unit active the moment
+        # it forks (see ENGINE_SETTLE_S). The SAME invocation, still active a
+        # settle later, is — a unit that died, or died and came back, is not.
+        sleep "$settle"
+        for i in "${!units[@]}"; do
+          unit="${units[$i]}"
+          now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          if ! { systemctl is-active --quiet "$unit" 2>/dev/null && [ "$now" = "${seen[i]}" ]; }; then
+            pending+=("$i")
+          fi
+        done
+        if [ "${#pending[@]}" -eq 0 ]; then break; fi
+      fi
+      # No point waiting on units that have all failed again: nothing restarts
+      # a failed unit by itself.
+      terminal=1
+      for i in "${pending[@]}"; do
+        now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
+        if [ "$(systemctl is-active "${units[$i]}" 2>/dev/null || true)" != failed ] \
+          || [ -z "$now" ] || [ "$now" = "${before[i]}" ]; then
+          terminal=0
+          break
+        fi
+      done
+      if [ "$n" -ge "$looks" ] || [ "$terminal" = 1 ]; then break; fi
       sleep 1
       n=$((n + 1))
     done
-    for unit in "${units[@]}"; do
+    for i in "${!units[@]}"; do
+      unit="${units[$i]}"
       case " ${pending[*]} " in
-        *" $unit "*) down="${down:+$down, }$unit ($(systemctl is-active "$unit" 2>/dev/null || true))" ;;
+        *" $i "*) down="${down:+$down, }$unit ($(systemctl is-active "$unit" 2>/dev/null || true))" ;;
         *) echo "    [ok] $unit is running on the updated files" ;;
       esac
     done
     if [ -n "$down" ]; then
-      line="CLAWBOX-WARN[service-not-restarted]: not running again ${n} s after the update restarted ClawBox's services: $down. A reboot brings back the ones that start at boot."
+      # The hint first: the updater cuts a warning at 300 characters.
+      line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot. Not running again after the update restarted ClawBox's services and waited ${n} s: $down"
       echo "$line"
       warnings+=("$line")
     fi
   fi
-  # do_rebuild's own: an engine it paused for the build that did not come back.
-  warnings+=(${ENGINE_RESUME_WARNINGS[@]+"${ENGINE_RESUME_WARNINGS[@]}"})
-  ENGINE_RESUME_WARNINGS=()
+  # do_rebuild's own: the engines it paused for the build that did not come
+  # back, on ONE line (the updater keeps one card per code) and under a code
+  # of its own, so post_update's own engine warning is not masked by it.
+  engines="${ENGINE_NOT_RESUMED[*]-}"
+  if [ -n "$engines" ]; then
+    line="CLAWBOX-WARN[engine-not-resumed:rebuild]: running before the update's rebuild and not back after it: ${engines// /, }. They start again on the next request that needs them."
+    echo "$line"
+    warnings+=("$line")
+  fi
+  ENGINE_NOT_RESUMED=()
   if has_hermes_harness; then
     # `1`: the gateway is on files this update replaced — its MCP child's.
     out="$(hermes_gateway_refresh_after_install 1)" || true
@@ -13068,6 +13104,13 @@ restart_services_after_update() {
   # step_rebuild_reboot gives.
   systemctl reset-failed clawbox-setup.service 2>/dev/null || true
   systemctl restart clawbox-setup.service
+  # The hotspot AFTER the dashboard: clawbox-setup is After= clawbox-ap, so a
+  # restart queued before it would hold the dashboard for the whole of
+  # start-ap.sh. Queued and not waited for; the watchdog keeps the hotspot up.
+  if [ "$ap_restart" = 1 ]; then
+    systemctl restart --no-block clawbox-ap.service \
+      || echo "  Warning: could not queue the clawbox-ap.service restart; its watchdog runs the new script every 20 s" >&2
+  fi
 }
 
 # post_update's half of the warnings restart_services_after_update kept: stated
