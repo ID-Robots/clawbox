@@ -141,6 +141,11 @@ else
 fi
 
 # 4. Their own chat, through the relay, with the cookie the browser would send.
+# The relay is the OpenClaw gateway on this port; a Hermes box masks that
+# gateway (its chat is /setup-api/hermes/chat), so the check is OpenClaw only.
+if ! systemctl is-active -q clawbox-gateway.service; then
+  say "the user chat over the gateway relay is not checked: this box runs the Hermes agent runtime (no OpenClaw gateway)"
+else
 chat=$(cd "$REPO" && USER_COOKIE="$USER_COOKIE" USER_NAME="$USER_NAME" timeout 300 node -e '"'"'
   const WebSocket = require("ws");
   const ws = new WebSocket("ws://127.0.0.1/", { headers: { cookie: "clawbox_session=" + process.env.USER_COOKIE, origin: "http://127.0.0.1" } });
@@ -178,6 +183,7 @@ chat=$(cd "$REPO" && USER_COOKIE="$USER_COOKIE" USER_NAME="$USER_NAME" timeout 3
   });
 '"'"' 2>&1)
 printf "%s\n" "$chat" | grep "^RESULT " || say "not ok - the chat check printed nothing: $(printf "%s" "$chat" | tail -n 3 | tr "\n" " ")"
+fi
 
 # 5. The owner removes them.
 trap - EXIT

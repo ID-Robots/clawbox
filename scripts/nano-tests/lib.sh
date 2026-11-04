@@ -198,6 +198,32 @@ wait_gateway_health() {
   done
 }
 
+# board_runtime — the agent runtime the box runs: "openclaw" or "hermes", read
+# from GET /setup-api/harness/active (the desktop chat's own question) and
+# kept for the rest of the test. A box that cannot say counts as OpenClaw, the
+# runtime every test was written for. Leaves API_STATUS/API_BODY as that call
+# set them, so call it before a test's own first request.
+BOARD_RUNTIME=
+board_runtime() {
+  if [ -z "$BOARD_RUNTIME" ]; then
+    board_api GET /setup-api/harness/active
+    BOARD_RUNTIME=$(api_json -r '.active // empty')
+    case "$BOARD_RUNTIME" in openclaw|hermes) ;; *) BOARD_RUNTIME=openclaw ;; esac
+  fi
+  printf '%s' "$BOARD_RUNTIME"
+}
+
+# openclaw_only WHAT — the first line of a test that only means something with
+# the OpenClaw gateway (port 18789, the `openclaw` CLI's agent turns, its
+# /healthz): on a Hermes box, whose gateway unit is masked on purpose, it is a
+# SKIP saying so rather than a failure, and the test ends here.
+openclaw_only() {
+  if [ "$(board_runtime)" = hermes ]; then
+    skip "$1 needs the OpenClaw gateway; this box runs the Hermes agent runtime, whose gateway is masked on purpose"
+    finish
+  fi
+}
+
 # chat_turn — one real chat turn through the box's configured provider:
 # `openclaw agent --agent main` must answer "NANO-CI-OK <serial>" within 240 s.
 # Retried ONCE after 60 s, because the gateway restarts twice after a rebuild

@@ -34,6 +34,10 @@
 #        turn answers (chat_turn in lib.sh).
 # A restart that fails is reported and the reboot still runs: the two halves
 # are separate verdicts, as they were as two tests.
+# On a Hermes box (OpenClaw gateway masked on purpose) the gateway pass and the
+# `openclaw agent` turn do not apply: the reboot is checked with Hermes' own
+# health (/setup-api/harness/status), its dashboard units coming back by
+# themselves, and the gateway staying masked.
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -106,7 +110,15 @@ restart_gateway_pass() {
   chat_turn
 }
 
-restart_gateway_pass || note "the gateway restart pass did not hold (above); the reboot runs anyway"
+RUNTIME=$(board_runtime)
+note "agent runtime: $RUNTIME"
+if [ "$RUNTIME" = hermes ]; then
+  # The OpenClaw gateway is masked on a Hermes box: there is nothing to restart
+  # and no `openclaw agent` turn. The reboot below checks Hermes instead.
+  note "the gateway restart pass is OpenClaw's; this box runs the Hermes agent runtime"
+else
+  restart_gateway_pass || note "the gateway restart pass did not hold (above); the reboot runs anyway"
+fi
 
 # ---- 2. the reboot -------------------------------------------------------------
 MARK="nano-ci-reboot-$NANO_RUN_ID"
@@ -150,6 +162,20 @@ ok "board back after a real reboot (${UP}s to answer ssh)"
 UPTIME=$(board 'cut -d. -f1 /proc/uptime' | tail -n 1)
 note "board uptime when first reached: ${UPTIME:-?}s"
 
+if [ "$RUNTIME" = hermes ]; then
+  HEALTHY=
+  while [ $(( $(date +%s) - START )) -lt $(( UP + 300 )) ]; do
+    board_api GET /setup-api/harness/status
+    HEALTHY=$(api_json -r '[.harnesses[]? | select(.id == "hermes") | .healthy] | first // empty')
+    [ "$HEALTHY" = true ] && break
+    sleep 5
+  done
+  if [ "$HEALTHY" = true ]; then
+    ok "Hermes healthy $(( $(date +%s) - START ))s after reboot (/setup-api/harness/status)"
+  else
+    not_ok "Hermes not healthy 300 s after boot: $(printf '%s' "$API_BODY" | head -c 200)"
+  fi
+else
 # First probe as early as the box answers: this is where `degraded: cpu` shows.
 gateway_probe /readyz
 note "first /readyz after boot: HTTP $PROBE_STATUS $(printf '%s' "$PROBE_BODY" | jq -c '{ready, degraded: .eventLoop.degraded, reasons: .eventLoop.reasons, uptimeMs}' 2>/dev/null)"
@@ -160,10 +186,14 @@ if wait_gateway_settled 300; then
 else
   not_ok "gateway not settled 300 s after boot: ${SETTLE_STATE:-unknown} (seen: ${SETTLE_SEEN:-nothing})"
 fi
+fi
 
 # shellcheck disable=SC2016  # expanded on the board
 AFTER=$(board '
-  for u in clawbox-gateway.service clawbox-setup.service; do
+  units="clawbox-gateway.service clawbox-setup.service"
+  [ "$2" = hermes ] && units="clawbox-setup.service clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service"
+  [ "$2" = hermes ] && echo "masked clawbox-gateway.service $(systemctl is-active clawbox-gateway.service 2>/dev/null)"
+  for u in $units; do
     for _ in $(seq 1 24); do [ "$(systemctl is-active "$u")" = active ] && break; sleep 5; done
     echo "unit $u $(systemctl is-enabled "$u" 2>/dev/null) $(systemctl is-active "$u")"
   done
@@ -172,9 +202,11 @@ AFTER=$(board '
   rm -f "$HOME/.$1" "/tmp/$1"
   echo "head $(git -C "$REPO" rev-parse HEAD)"
   echo "login $(curl -sS -o /dev/null -w "%{http_code}" --max-time 30 "$DASHBOARD/login")"
-' "$MARK")
+' "$MARK" "$RUNTIME")
 while read -r kind a b c; do
   case "$kind" in
+    masked)
+      if [ "$b" = active ]; then not_ok "$a is running after reboot on a Hermes box (it should stay masked)"; else ok "$a stays $b after reboot on a Hermes box"; fi ;;
     unit)
       if [ "$b" = enabled ] && [ "$c" = active ]; then ok "$a came back by itself"; else not_ok "$a after reboot: $b, $c"; fi ;;
     failed)
@@ -189,6 +221,10 @@ while read -r kind a b c; do
   esac
 done <<<"$AFTER"
 
-chat_turn
-note "reboot to chat answer: $(( $(date +%s) - START ))s"
+if [ "$RUNTIME" = hermes ]; then
+  note "no openclaw agent turn on a Hermes box; Hermes health after the reboot is checked above"
+else
+  chat_turn
+  note "reboot to chat answer: $(( $(date +%s) - START ))s"
+fi
 finish
