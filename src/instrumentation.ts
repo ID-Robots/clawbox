@@ -52,11 +52,15 @@ export async function repairOpenclawConfig(repairs: {
   }
   if (!changed) return
   try {
-    // No readiness wait: nothing here reads the answer, and this promise gates
-    // `armUpdateContinuation`, which resumes a half-finished update. Spending
-    // the restart budget at boot would eat the margin the memory-probe delay
-    // is sized against for no information.
+    // The START wait is spent on purpose: the repair's write was held until
+    // the core said `started`, so a restart now would land just before its
+    // channel providers start and wait out the unit's whole stop timeout. It
+    // leaves the memory-probe gate alone, which reads the persisted
+    // continuation flag rather than this promise.
     await repairs.letGatewayFinishStarting?.()
+    // No readiness wait after the restart: nothing here reads the answer, and
+    // this promise gates `armUpdateContinuation`, which resumes a half-finished
+    // update; spending the restart budget would buy no information.
     await repairs.restartGateway({ awaitReady: false })
   } catch (err) {
     console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)

@@ -2727,14 +2727,19 @@ async function waitForGatewayPreStart(): Promise<void> {
  */
 async function letGatewayFinishStarting(): Promise<void> {
   const began = monotonicNow();
-  const outcome = await waitForGatewayStartBeforeStop();
+  const outcome = await waitForGatewayStartBeforeStop({
+    onHold: (waitedMs) => {
+      if (waitedMs < 1_000) console.log("[Updater] clawbox-gateway is still starting; letting it finish before stopping it");
+    },
+  });
   if (outcome === "not-starting") return;
   const waited = formatWaited(monotonicNow() - began);
-  console.log(
-    outcome === "settled"
-      ? `[Updater] clawbox-gateway finished starting; stopping it after ${waited}`
-      : `[Updater] clawbox-gateway had not finished starting after ${waited}; stopping it anyway`,
-  );
+  const said = {
+    settled: `clawbox-gateway finished starting; stopping it after ${waited}`,
+    gone: `clawbox-gateway stopped running during the ${waited} wait for its start`,
+    "timed-out": `clawbox-gateway had not finished starting after ${waited}; stopping it anyway`,
+  } as const;
+  console.log(`[Updater] ${said[outcome]}`);
 }
 
 /**

@@ -532,6 +532,36 @@ describe("waitForGatewayStartBeforeStop", () => {
     await expect(waited).resolves.toBe("settled");
   });
 
+  it("waits anew when the core says it is starting again after it had started", async () => {
+    // A restart under someone else: the settle counts from the second `started`.
+    vi.useFakeTimers();
+    host.ageS = 40;
+    host.startup = ["started", "starting", "starting", "started"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    // The second `started` is at 3 s: 20 s from the first is not enough.
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS + 1_500);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("says the gateway went away, not that it finished starting, and tells a waiting page it is holding", async () => {
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["starting"];
+    const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
+    const holds: number[] = [];
+    const waited = waitForGatewayStartBeforeStop({ onHold: (ms) => holds.push(ms) });
+    await vi.advanceTimersByTimeAsync(31_500);
+    host.procs = null;
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(waited).resolves.toBe("gone");
+    // Once at the start of the hold, then once 30 s on.
+    expect(holds.length).toBe(2);
+    expect(holds[0]).toBeLessThan(1_000);
+  });
+
   it("does not count a forward step of the wall clock against the start", async () => {
     // The update's second half quiesces the gateway at boot, while timesyncd
     // steps the clock of a box with no RTC forward by half a day.

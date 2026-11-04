@@ -294,18 +294,27 @@ export const GATEWAY_STOP_SETTLE_MS = 20_000;
  * the caller's own wait.
  */
 export async function waitForGatewayStartBeforeStop(
-  budgetMs = GATEWAY_STOP_START_WAIT_MS,
-  settleMs = GATEWAY_STOP_SETTLE_MS,
-): Promise<"not-starting" | "settled" | "timed-out"> {
+  options: {
+    budgetMs?: number;
+    settleMs?: number;
+    /** Called when the wait first holds, then every 30 s it goes on holding: a caller with a page to keep informed. */
+    onHold?: (waitedMs: number) => void;
+  } = {},
+): Promise<"not-starting" | "settled" | "gone" | "timed-out"> {
+  const { budgetMs = GATEWAY_STOP_START_WAIT_MS, settleMs = GATEWAY_STOP_SETTLE_MS, onHold } = options;
   const began = monotonicNow();
   let startedAt: number | null = null;
   let seenStarting = false;
+  let notedAt: number | null = null;
   for (;;) {
     const unit = readGatewayUnit();
-    if (unit?.kind !== "gateway") return startedAt === null ? "not-starting" : "settled";
+    // Gone, or already stopping: nothing left to let finish, and nothing that
+    // finished either, once this has held.
+    const over = notedAt === null ? "not-starting" : "gone";
+    if (unit?.kind !== "gateway") return over;
     const probe = await probeStartup();
     const now = monotonicNow();
-    if (probe === "draining") return startedAt === null ? "not-starting" : "settled";
+    if (probe === "draining") return over;
     if (probe === "starting") {
       startedAt = null;
       seenStarting = true;
@@ -318,6 +327,10 @@ export async function waitForGatewayStartBeforeStop(
       if (now - startedAt >= settleMs) return "settled";
     } else if (now - began >= budgetMs) {
       return "timed-out";
+    }
+    if (notedAt === null || now - notedAt >= 30_000) {
+      notedAt = now;
+      onHold?.(now - began);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }

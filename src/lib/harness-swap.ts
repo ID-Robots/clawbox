@@ -735,9 +735,13 @@ function errorText(err: unknown): string {
  * Telegram carry follows the persona refresh's own restart.
  */
 async function letOpenclawGatewayFinishStarting(emit: SwapEmit): Promise<void> {
-  const outcome = await waitForGatewayStartBeforeStop();
+  const outcome = await waitForGatewayStartBeforeStop({
+    onHold: (waitedMs) => emit(waitedMs < 1_000
+      ? "Waiting for the OpenClaw gateway to finish starting…"
+      : `Still waiting for the OpenClaw gateway to finish starting (${Math.round(waitedMs / 1000)} s)…`),
+  });
   if (outcome === "settled") emit("The OpenClaw gateway has finished starting.");
-  else if (outcome === "timed-out") emit("The OpenClaw gateway is still starting; going on without it.");
+  else if (outcome === "timed-out") emit("The OpenClaw gateway is still starting; restarting it anyway.");
 }
 
 /**

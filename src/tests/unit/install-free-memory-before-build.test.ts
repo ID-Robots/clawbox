@@ -1094,8 +1094,9 @@ describe("both stops an update performs have a start", () => {
  * deadline (330 s) and writes a `gateway.stop_shutdown_timeout` stability
  * bundle. An update on a box under 12 GB stops the gateway about 30 s after
  * gateway_setup restarted it, so every such update paid five and a half
- * minutes. On a box's journal every stop that landed before the core said
- * `ready` hit that deadline, and every stop after it settled in a second.
+ * minutes. On a box's journal every stop that landed between the core's
+ * SIGTERM handler (about 16 s into a start) and its `ready` hit that deadline,
+ * and every stop after `ready` settled in a second.
  *
  * Both of do_rebuild's gateway stops go through pause_engine_unit, so that is
  * where the wait is; driven here against stubbed systemctl, curl and ps.
@@ -1247,6 +1248,16 @@ describe("a planned gateway stop lets a starting gateway finish first", () => {
       "probe startupz 000",
       "probe startupz 200",
     ]);
+  });
+
+  it("waits anew when the core says it is starting again after it had started", () => {
+    // A 503 after the 200 is a restart under someone else (pause_engine_unit
+    // holds no mask): the settle counts from the second 200, not the first.
+    const r = stopGateway({ codes: "200 503 200", settle: "2", etimes: "40" });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    const probes = r.calls.slice(0, stop).filter((c) => c.startsWith("probe "));
+    expect(probes.slice(0, 3)).toEqual(["probe startupz 200", "probe startupz 503", "probe startupz 200"]);
+    expect(probes.length).toBeGreaterThanOrEqual(5);
   });
 
   it("does not let an unanswered probe end the settle early", () => {
