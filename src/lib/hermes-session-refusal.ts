@@ -59,6 +59,17 @@ export const SESSION_REFUSED_MESSAGE =
   + "Send your message again in a moment; if it keeps happening, start a new chat.";
 
 /**
+ * The same refusal on a turn the dashboard was never offered — one carrying a
+ * picture (`--image` is a CLI flag), or a caller that cannot be streamed to.
+ * There is no retry to make there and sending again is refused the same way,
+ * so the advice is the one that works: a new chat, which the CLI creates and
+ * may therefore continue.
+ */
+export const SESSION_REFUSED_NO_DASHBOARD_MESSAGE =
+  "Hermes would not continue this conversation for this kind of message (a picture, "
+  + "or a request that cannot be streamed). Start a new chat to send it.";
+
+/**
  * How long a refused turn waits for the dashboard before giving up.
  *
  * Long enough for a dashboard restart, which loads every plugin and the MCP
@@ -105,7 +116,8 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * the retry's own `session.resume` to answer, not this probe's.
  *
  * True when it answered in time; false when it did not, or the wait was
- * stopped.
+ * stopped. Bounded by the budget plus one probe's own timeout: a probe started
+ * just before the deadline is let finish rather than cut off.
  */
 export async function waitForDashboard(opts: DashboardReadyOptions = {}): Promise<boolean> {
   const probe = opts.probe ?? dashboardWsTicket;

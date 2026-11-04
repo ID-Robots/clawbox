@@ -57,7 +57,7 @@ vi.mock("@/lib/hermes-model-options", () => ({
 
 import { POST } from "@/app/setup-api/hermes/chat/route";
 import { resetLiveTurns, stopLiveTurns } from "@/lib/harness/hermes-live-turn";
-import { SESSION_REFUSED_MESSAGE } from "@/lib/hermes-session-refusal";
+import { SESSION_REFUSED_MESSAGE, SESSION_REFUSED_NO_DASHBOARD_MESSAGE } from "@/lib/hermes-session-refusal";
 
 const SESSION = "20261104_090334_5e1f0a";
 
@@ -256,9 +256,21 @@ describe("nothing else is retried", () => {
     const res = await POST(post({ message: "Hello again", sessionId: SESSION }, { stream: false }));
 
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error: string }).error).toBe(SESSION_REFUSED_MESSAGE);
+    // Sending again would be refused the same way, so it does not say to.
+    expect(((await res.json()) as { error: string }).error).toBe(SESSION_REFUSED_NO_DASHBOARD_MESSAGE);
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(waitMock).not.toHaveBeenCalled();
+  });
+
+  it("never doubles the prefix on a CLI line that was nothing but the opener", async () => {
+    openTurnMock.mockResolvedValue(null);
+    spawnMock.mockImplementation(() => cliChild("Error:\n", 1));
+
+    const res = await POST(post({ message: "Hello", sessionId: SESSION }));
+
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toBe("Hermes chat failed");
+    expect(errorRows()[0].text).toBe("Error: Hermes chat failed");
   });
 
   it("answers a successful CLI turn exactly as before", async () => {

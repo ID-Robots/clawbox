@@ -87,7 +87,12 @@ import {
   spawnFailureMessage,
   withoutErrorPrefix,
 } from "@/lib/hermes-cli-message";
-import { cliRefusedSession, SESSION_REFUSED_MESSAGE, waitForDashboard } from "@/lib/hermes-session-refusal";
+import {
+  cliRefusedSession,
+  SESSION_REFUSED_MESSAGE,
+  SESSION_REFUSED_NO_DASHBOARD_MESSAGE,
+  waitForDashboard,
+} from "@/lib/hermes-session-refusal";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -861,7 +866,7 @@ async function runStreamedTurn(
       // route already uses: the diagnosis is not lost, it just stops being
       // published.
       if (final.error) console.error("[hermes chat] dashboard turn failed", final.error);
-      const detail = withoutErrorPrefix(safeHermesFailureMessage("", final.error || "") || "Hermes chat failed");
+      const detail = withoutErrorPrefix(safeHermesFailureMessage("", final.error || "")) || "Hermes chat failed";
       await appendTranscript({
         role: "system",
         text: `Error: ${detail}`,
@@ -892,7 +897,7 @@ async function runStreamedTurn(
     // Not for an abort: the socket died because the customer pressed Stop,
     // and a journal line per cancelled turn is noise, not diagnosis.
     if (raw && !isAbort(err)) console.error("[hermes chat] dashboard stream failed", raw);
-    const detail = withoutErrorPrefix(safeHermesFailureMessage("", raw) || "Hermes chat failed");
+    const detail = withoutErrorPrefix(safeHermesFailureMessage("", raw)) || "Hermes chat failed";
     // ── Silence is not failure: ask the agent before saying so ─────────
     //
     // A quiet stream means this socket stopped hearing. It does NOT mean
@@ -1674,8 +1679,8 @@ export async function POST(request: Request) {
         console.log("[hermes chat] the retry through the dashboard could not open; the turn fails");
       }
       const detail = refused
-        ? SESSION_REFUSED_MESSAGE
-        : withoutErrorPrefix(err instanceof Error ? err.message : "Hermes chat failed");
+        ? streamable ? SESSION_REFUSED_MESSAGE : SESSION_REFUSED_NO_DASHBOARD_MESSAGE
+        : withoutErrorPrefix(err instanceof Error ? err.message : "") || "Hermes chat failed";
       // A failure is recorded too. Without this a refresh shows a question with
       // nothing under it and no hint that the box tried and failed — the same
       // screen a still-running turn produces, which is the worse of the two to

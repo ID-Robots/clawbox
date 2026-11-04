@@ -294,10 +294,11 @@ export function safeHermesFailureMessage(stdout: string, stderr: string): string
  * row, the bubble (`describeChatFailure`). Passing the CLI's line on whole is
  * how a bubble read "Error: Error: permission_denied" (TASK-2152). Only the
  * bare word at the very start goes: `RuntimeError: …` names the failure and
- * stays.
+ * stays. A line that was nothing BUT the opener comes back empty, for the
+ * caller's own fallback sentence.
  */
 export function withoutErrorPrefix(text: string): string {
-  return text.replace(/^\s*Error:\s*/i, "").trim() || text.trim();
+  return text.replace(/^\s*Error:\s*/i, "").trim();
 }
 
 /**

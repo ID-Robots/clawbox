@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/hermes-dashboard-auth", () => ({ dashboardWsTicket: vi.fn() }));
 
+import { withoutErrorPrefix } from "@/lib/hermes-cli-message";
 import {
   cliRefusedSession,
   DASHBOARD_READY_BUDGET_MS,
   SESSION_REFUSED_MESSAGE,
+  SESSION_REFUSED_NO_DASHBOARD_MESSAGE,
   waitForDashboard,
 } from "@/lib/hermes-session-refusal";
 
@@ -38,9 +40,27 @@ describe("cliRefusedSession", () => {
   });
 
   it("tells the owner what to do, not the code", () => {
-    expect(SESSION_REFUSED_MESSAGE).not.toContain("permission_denied");
-    expect(SESSION_REFUSED_MESSAGE).not.toMatch(/^Error:/);
+    for (const sentence of [SESSION_REFUSED_MESSAGE, SESSION_REFUSED_NO_DASHBOARD_MESSAGE]) {
+      expect(sentence).not.toContain("permission_denied");
+      expect(sentence).not.toMatch(/^Error:/);
+    }
     expect(SESSION_REFUSED_MESSAGE).toMatch(/send your message again/i);
+    // Where no retry exists, sending again is refused the same way.
+    expect(SESSION_REFUSED_NO_DASHBOARD_MESSAGE).not.toMatch(/again/i);
+    expect(SESSION_REFUSED_NO_DASHBOARD_MESSAGE).toMatch(/new chat/i);
+  });
+});
+
+describe("withoutErrorPrefix", () => {
+  it("drops the CLI's own opener, so the chat's prefix is the only one", () => {
+    expect(withoutErrorPrefix("Error: permission_denied")).toBe("permission_denied");
+    expect(withoutErrorPrefix("  error:  Gateway could not start: runtime_exited ")).toBe("Gateway could not start: runtime_exited");
+    expect(withoutErrorPrefix("Error:")).toBe("");
+  });
+
+  it("keeps a failure whose NAME ends in Error", () => {
+    expect(withoutErrorPrefix("RuntimeError: upstream refused the request")).toBe("RuntimeError: upstream refused the request");
+    expect(withoutErrorPrefix("HTTP 404: Model not found")).toBe("HTTP 404: Model not found");
   });
 });
 
