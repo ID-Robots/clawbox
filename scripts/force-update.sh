@@ -582,8 +582,8 @@ if systemctl is-active --quiet clawbox-setup; then
   echo "[force-update]   being current does NOT mean the update finished."
   echo "[force-update] To finish: open http://clawbox.local, launch the System Update"
   echo "[force-update]   app (Settings -> About -> System Update), open 'Advanced"
-  echo "[force-update]   options' and click 'Force full update'. The device reboots"
-  echo "[force-update]   when it completes."
+  echo "[force-update]   options' and click 'Force full update'. ClawBox restarts its"
+  echo "[force-update]   services when it completes, and reboots only if the update needs it."
 else
   echo "[force-update] WARNING: clawbox-setup failed to come up. Check 'sudo journalctl -u clawbox-setup -n 50'." >&2
   exit 1

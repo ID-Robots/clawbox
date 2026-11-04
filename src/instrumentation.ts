@@ -77,7 +77,7 @@ async function runOnceMoreIfMovedWhileHeld(run: () => Promise<boolean>): Promise
  * Ask the updater, once the boot rush has passed, whether an update is waiting
  * for its second half.
  *
- * WHY. An update reboots the box halfway through: the system fixups, the
+ * WHY. An update restarts ClawBox (or reboots the box) halfway through: the system fixups, the
  * Hermes re-provisioning and the build-identity check run AFTER the restart,
  * and `checkContinuation()` is what starts them. Its only caller was the
  * update status route, so the second half waited for somebody to open the

@@ -3988,7 +3988,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     failFast: true,
   },
   {
-    // Runs after reboot via checkContinuation — picks up dispatcher scripts,
+    // Runs after the restart or reboot via checkContinuation — picks up dispatcher scripts,
     // sysctls, and other root fixups that landed in the new install.sh.
     // 5 min, not 60s: on a freshly-installed device the fixups run on cold
     // caches (clawkeep pip force-reinstall, vnc apt work) and routinely
@@ -4059,7 +4059,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   // for a few hours after it unpinned for the update's length instead. Now the
   // update does not touch the power profile at all: the box keeps the profile
   // it booted with, and clawbox-performance.service applies the persisted or
-  // default one at the reboot that ends the update. install.sh's
+  // default one when the update ends (rebuild_reboot restarts it, or reboots). install.sh's
   // step_performance_mode still runs on a full install and by hand, and its
   // update_owns_the_box guard stays for a hand-run step while an update is in
   // flight.

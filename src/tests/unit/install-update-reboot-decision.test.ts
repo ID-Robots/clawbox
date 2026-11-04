@@ -58,12 +58,17 @@ function bash(script: string, env: Record<string, string> = {}): { status: numbe
 // ── 1. The decision ─────────────────────────────────────────────────────────
 
 d("update_reboot_reasons: the signals a boot is needed", () => {
-  const BOOT_SECS = 1_800_000_000;
+  const BOOT_FILES = ["Image", "initrd", "extlinux/extlinux.conf", "dtb/kernel_tegra234-p3768.dtb"];
+  // The files' ctime is the moment the test writes them, and cannot be set:
+  // the boot is placed after it (nothing new) or before it (all new).
+  const NOW = Math.floor(Date.now() / 1000);
   let boot: string;
   let modules: string;
   let procStat: string;
   let flag: string;
   let marker: string;
+
+  const bootedAt = (secs: number) => fs.writeFileSync(procStat, `cpu  1 2 3 4\nbtime ${secs}\nprocesses 42\n`);
 
   beforeEach(() => {
     boot = path.join(tmp, "boot");
@@ -75,13 +80,15 @@ d("update_reboot_reasons: the signals a boot is needed", () => {
     fs.mkdirSync(path.join(boot, "dtb"), { recursive: true });
     fs.mkdirSync(path.join(modules, "5.15.185-tegra"), { recursive: true });
     fs.mkdirSync(path.dirname(marker), { recursive: true });
-    fs.writeFileSync(procStat, `cpu  1 2 3 4\nbtime ${BOOT_SECS}\nprocesses 42\n`);
-    // Every kernel/boot file written before this boot: nothing to report.
-    for (const f of ["Image", "initrd", "extlinux/extlinux.conf", "dtb/kernel_tegra234-p3768.dtb"]) {
+    // dpkg gives an unpacked file the archive's mtime, the package's build
+    // date: old, whenever it was installed.
+    for (const f of BOOT_FILES) {
       const p = path.join(boot, f);
       fs.writeFileSync(p, "x");
-      fs.utimesSync(p, BOOT_SECS - 3600, BOOT_SECS - 3600);
+      fs.utimesSync(p, NOW - 86_400 * 90, NOW - 86_400 * 90);
     }
+    // Every kernel/boot file installed before this boot: nothing to report.
+    bootedAt(NOW + 3600);
   });
 
   function reasons(): { status: number | null; lines: string[]; err: string } {
@@ -124,10 +131,11 @@ d("update_reboot_reasons: the signals a boot is needed", () => {
     expect(r.lines[0]).toContain(flag);
   });
 
-  it.each(["Image", "initrd", "extlinux/extlinux.conf", "dtb/kernel_tegra234-p3768.dtb"])(
-    "names /boot/%s when it was written since this boot",
+  it.each(BOOT_FILES)(
+    "names /boot/%s when it was installed since this boot, by ctime, whatever its mtime",
     (file) => {
-      fs.utimesSync(path.join(boot, file), BOOT_SECS + 600, BOOT_SECS + 600);
+      for (const other of BOOT_FILES.filter((f) => f !== file)) fs.rmSync(path.join(boot, other));
+      bootedAt(NOW - 3600);
       const r = reasons();
       expect(r.status).toBe(0);
       expect(r.lines).toHaveLength(1);
@@ -136,7 +144,6 @@ d("update_reboot_reasons: the signals a boot is needed", () => {
   );
 
   it("never calls a boot file new when the boot time cannot be read", () => {
-    fs.utimesSync(path.join(boot, "Image"), BOOT_SECS + 600, BOOT_SECS + 600);
     fs.writeFileSync(procStat, "cpu  1 2 3 4\n");
     expect(reasons().lines).toEqual([]);
   });
@@ -156,7 +163,7 @@ d("update_reboot_reasons: the signals a boot is needed", () => {
   it("reports every signal at once", () => {
     fs.mkdirSync(path.dirname(flag), { recursive: true });
     fs.writeFileSync(flag, "");
-    fs.utimesSync(path.join(boot, "Image"), BOOT_SECS + 1, BOOT_SECS + 1);
+    bootedAt(NOW - 3600);
     fs.writeFileSync(marker, "a step needs a boot\n");
     expect(reasons().lines).toHaveLength(3);
   });
@@ -280,11 +287,13 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
 
 d("restart_services_after_update: what the reboot used to restart", () => {
   interface Box {
-    /** Active clawbox-* services as systemd lists them. */
+    /** Running clawbox-* services, as `list-units --state=active` lists them. */
     active: string[];
+    /** Enabled clawbox-* services, as `list-unit-files --state=enabled` lists them. */
+    enabled?: string[];
     /** Unit → systemd Type (default simple). */
     types?: Record<string, string>;
-    /** Units whose restart does not take. */
+    /** Units whose restart or start does not take. */
     failing?: string[];
     /** ap_sources_changed's answer: 0 changed, 1 unchanged, 2 unknown. */
     apChanged?: 0 | 1 | 2;
@@ -292,39 +301,49 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     hermesOut?: string;
     /** A relay file an earlier run left behind. */
     staleRelay?: string;
+    /** What do_rebuild's resume_paused_engines kept. */
+    engineWarnings?: string[];
   }
 
   function run(box: Box): { status: number | null; events: string[]; out: string; relay: string } {
     const events = path.join(tmp, "events");
     const state = path.join(tmp, "state");
     const relay = path.join(tmp, "run", "clawbox", "update-restart-warnings");
+    fs.rmSync(events, { force: true });
+    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(relay, { force: true });
     fs.mkdirSync(state, { recursive: true });
     if (box.staleRelay) {
       fs.mkdirSync(path.dirname(relay), { recursive: true });
       fs.writeFileSync(relay, box.staleRelay);
     }
+    // A running unit has an invocation; one that is not running has none yet.
     for (const u of box.active) fs.writeFileSync(path.join(state, `${u}.inv`), "inv-boot");
     const types = Object.entries(box.types ?? {}).map(([u, t]) => `${u}) echo ${t} ;;`).join(" ");
     const failing = (box.failing ?? []).join(" ");
+    const lines = (units: string[], rest: string) =>
+      units.length ? `printf '%s ${rest}\\n' ${units.map((u) => JSON.stringify(u)).join(" ")}` : ":";
     const script = [
       "set -euo pipefail",
-      "ENGINE_SETTLE_S=0",
       `EV=${JSON.stringify(events)}; ST=${JSON.stringify(state)}`,
+      "unit_state() { if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
       "systemctl() {",
       "  echo \"systemctl $*\" >> \"$EV\"",
       "  case \"$1\" in",
-      box.active.length
-        ? `    list-units) printf '%s loaded active running ClawBox\\n' ${box.active.map((u) => JSON.stringify(u)).join(" ")} ;;`
-        : "    list-units) ;;",
+      `    list-units) ${lines(box.active, "loaded active running ClawBox")} ;;`,
+      `    list-unit-files) ${lines(box.enabled ?? [], "enabled enabled")} ;;`,
       "    show)",
       "      case \"$4\" in",
       `        Type) case \"$2\" in ${types} *) echo simple ;; esac ;;`,
       "        InvocationID) cat \"$ST/$2.inv\" 2>/dev/null || true ;;",
       "      esac ;;",
-      "    is-active) shift; [ \"$1\" = --quiet ] && shift; [ -f \"$ST/$1.inv\" ] && [ ! -f \"$ST/$1.dead\" ] ;;",
-      "    restart)",
+      "    is-active)",
+      "      if [ \"$2\" = --quiet ]; then [ \"$(unit_state \"$3\")\" = active ]; return; fi",
+      "      unit_state \"$2\"; [ \"$(unit_state \"$2\")\" = active ] ;;",
+      "    restart|start)",
       "      shift; local u rc=0",
       "      for u in \"$@\"; do",
+      "        case \"$u\" in -*) continue ;; esac",
       `        case " ${failing} " in *" $u "*) touch "$ST/$u.dead"; rc=1 ;; *) echo "inv-$RANDOM$RANDOM" > "$ST/$u.inv" ;; esac`,
       "      done; return $rc ;;",
       "    *) return 0 ;;",
@@ -333,12 +352,13 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       `ap_sources_changed() { echo "ap_sources_changed $*" >> "$EV"; return ${box.apChanged ?? 1}; }`,
       `has_hermes_harness() { return ${box.hermes ? 0 : 1}; }`,
       `hermes_gateway_refresh_after_install() { echo "hermes_gateway_refresh_after_install $*" >> "$EV"; printf '%s' ${JSON.stringify(box.hermesOut ?? "")}; }`,
+      `ENGINE_RESUME_WARNINGS=(${(box.engineWarnings ?? []).map((w) => JSON.stringify(w)).join(" ")})`,
       fn("restart_services_after_update"),
       "restart_services_after_update 0123456789abcdef0123456789abcdef01234567",
     ].join("\n");
-    const r = bash(script, { CLAWBOX_UPDATE_RESTART_RELAY: relay });
-    const lines = fs.existsSync(events) ? fs.readFileSync(events, "utf-8").split("\n").filter(Boolean) : [];
-    return { status: r.status, events: lines, out: r.out, relay: fs.existsSync(relay) ? fs.readFileSync(relay, "utf-8") : "" };
+    const r = bash(script, { CLAWBOX_UPDATE_RESTART_RELAY: relay, CLAWBOX_RESTART_WAIT_S: "0" });
+    const ev = fs.existsSync(events) ? fs.readFileSync(events, "utf-8").split("\n").filter(Boolean) : [];
+    return { status: r.status, events: ev, out: r.out, relay: fs.existsSync(relay) ? fs.readFileSync(relay, "utf-8") : "" };
   }
 
   // What `systemctl list-units 'clawbox-*'` showed on the OpenClaw box mid-update.
@@ -354,68 +374,111 @@ d("restart_services_after_update: what the reboot used to restart", () => {
   ];
   const TYPES = {
     "clawbox-ap.service": "oneshot",
+    "clawbox-build-heal.service": "oneshot",
+    "clawbox-firstboot-vnc.service": "oneshot",
     "clawbox-nvme-boot-order.service": "oneshot",
     "clawbox-performance.service": "oneshot",
     "clawbox-root-update@rebuild_reboot.service": "oneshot",
   };
 
-  const restartCalls = (events: string[]) => events.filter((e) => e.startsWith("systemctl restart "));
+  const calls = (events: string[], verb: string) => events.filter((e) => e.startsWith(`systemctl ${verb} `));
+  const unitsOf = (call: string) => call.split(" ").slice(2).filter((w) => !w.startsWith("-")).sort();
 
-  it("restarts every running service in ONE call, and clawbox-setup last", () => {
+  it("restarts every running service in ONE call without blocking, and clawbox-setup last", () => {
     const r = run({ active: BOX, types: TYPES });
     expect(r.status).toBe(0);
-    const calls = restartCalls(r.events);
-    expect(calls).toHaveLength(2);
-    // One transaction: clawbox-browser Requires= clawbox-vnc, so separate
-    // restarts would bounce the browser twice.
-    const units = calls[0].replace("systemctl restart ", "").split(" ").sort();
-    expect(units).toEqual([
+    const restarts = calls(r.events, "restart");
+    expect(restarts).toHaveLength(2);
+    // Queued, never waited on: a start that hangs must not keep the dashboard down.
+    expect(restarts[0]).toContain("--no-block");
+    // One call: clawbox-browser Requires= clawbox-vnc, so separate restarts
+    // would bounce the browser twice.
+    expect(unitsOf(restarts[0])).toEqual([
       "clawbox-browser.service",
       "clawbox-performance.service",
       "clawbox-vnc.service",
       "clawbox-websockify.service",
     ]);
-    expect(calls[1]).toBe("systemctl restart clawbox-setup.service");
+    expect(restarts[1]).toBe("systemctl restart clawbox-setup.service");
     const reset = r.events.indexOf("systemctl reset-failed clawbox-setup.service");
-    expect(reset).toBeGreaterThan(r.events.indexOf(calls[0]));
-    expect(reset).toBeLessThan(r.events.indexOf(calls[1]));
-    expect(r.events.indexOf("systemctl daemon-reload")).toBeLessThan(r.events.indexOf(calls[0]));
+    expect(reset).toBeGreaterThan(r.events.indexOf(restarts[0]));
+    expect(reset).toBeLessThan(r.events.indexOf(restarts[1]));
+    expect(r.events.indexOf("systemctl daemon-reload")).toBeLessThan(r.events.indexOf(restarts[0]));
     expect(r.out).toContain("[ok] clawbox-vnc.service");
     expect(r.relay).toBe("");
   });
 
   it("never restarts the gateway (post_update and gateway_verify do), its own root step, or a boot-time one-shot", () => {
     const r = run({ active: BOX, types: TYPES });
-    const restarted = restartCalls(r.events).join(" ");
-    expect(restarted).not.toContain("clawbox-gateway.service");
-    expect(restarted).not.toContain("clawbox-root-update@");
-    expect(restarted).not.toContain("clawbox-nvme-boot-order.service");
+    const touched = [...calls(r.events, "restart"), ...calls(r.events, "start")].join(" ");
+    expect(touched).not.toContain("clawbox-gateway.service");
+    expect(touched).not.toContain("clawbox-root-update@");
+    expect(touched).not.toContain("clawbox-nvme-boot-order.service");
     expect(r.out).toContain("clawbox-gateway.service");
   });
 
-  it("bounces the hotspot only when its unit or scripts changed", () => {
-    expect(restartCalls(run({ active: BOX, types: TYPES, apChanged: 1 }).events)[0]).not.toContain("clawbox-ap.service");
-    fs.rmSync(path.join(tmp, "events"), { force: true });
-    expect(restartCalls(run({ active: BOX, types: TYPES, apChanged: 2 }).events)[0]).not.toContain("clawbox-ap.service");
-    fs.rmSync(path.join(tmp, "events"), { force: true });
-    const changed = run({ active: BOX, types: TYPES, apChanged: 0 });
-    expect(restartCalls(changed.events)[0]).toContain("clawbox-ap.service");
-    expect(changed.events).toContain("ap_sources_changed 0123456789abcdef0123456789abcdef01234567");
+  it("starts what is enabled and not running, as the boot did — but no boot-time one-shot, gateway or hotspot", () => {
+    const r = run({
+      active: BOX,
+      types: TYPES,
+      enabled: [
+        "clawbox-ap.service",
+        "clawbox-build-heal.service",
+        "clawbox-firstboot-vnc.service",
+        "clawbox-gateway.service",
+        "clawbox-nvme-boot-order.service",
+        "clawbox-setup.service",
+        "clawbox-tunnel.service",
+        "clawbox-vnc.service",
+      ],
+    });
+    expect(r.status).toBe(0);
+    const starts = calls(r.events, "start");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toContain("--no-block");
+    expect(unitsOf(starts[0])).toEqual(["clawbox-tunnel.service"]);
+    // Listed twice (running and enabled), restarted once.
+    expect(unitsOf(calls(r.events, "restart")[0]).filter((u) => u === "clawbox-vnc.service")).toHaveLength(1);
+    expect(r.out).toContain("[ok] clawbox-tunnel.service");
   });
 
-  it("warns, and keeps the warning for post_update, when a service does not come back", () => {
-    const r = run({ active: BOX, types: TYPES, failing: ["clawbox-vnc.service"] });
+  it("bounces the hotspot only when it is up and its unit or scripts changed", () => {
+    expect(calls(run({ active: BOX, types: TYPES, apChanged: 1 }).events, "restart")[0]).not.toContain("clawbox-ap.service");
+    expect(calls(run({ active: BOX, types: TYPES, apChanged: 2 }).events, "restart")[0]).not.toContain("clawbox-ap.service");
+    const changed = run({ active: BOX, types: TYPES, apChanged: 0 });
+    expect(calls(changed.events, "restart")[0]).toContain("clawbox-ap.service");
+    expect(changed.events).toContain("ap_sources_changed 0123456789abcdef0123456789abcdef01234567");
+    // A hotspot that is down is its watchdog's to bring up, changed or not.
+    const down = run({ active: BOX.filter((u) => u !== "clawbox-ap.service"), enabled: ["clawbox-ap.service"], types: TYPES, apChanged: 0 });
+    expect([...calls(down.events, "restart"), ...calls(down.events, "start")].join(" ")).not.toContain("clawbox-ap.service");
+  });
+
+  it("names EVERY unit that did not come back, on one warning kept for post_update", () => {
+    // The updater keeps one card per code, so two lines would show one unit.
+    const r = run({
+      active: [...BOX, "clawbox-tunnel.service"],
+      types: TYPES,
+      failing: ["clawbox-vnc.service", "clawbox-tunnel.service"],
+    });
     expect(r.status).toBe(0);
-    expect(r.out).toMatch(/^CLAWBOX-WARN\[service-not-restarted\]: clawbox-vnc\.service/m);
-    expect(r.relay).toMatch(/^CLAWBOX-WARN\[service-not-restarted\]: clawbox-vnc\.service/m);
+    const warns = r.out.split("\n").filter((l) => l.startsWith("CLAWBOX-WARN[service-not-restarted]"));
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("clawbox-vnc.service (failed)");
+    expect(warns[0]).toContain("clawbox-tunnel.service (failed)");
+    expect(warns[0]).not.toContain("clawbox-browser.service");
+    expect(r.relay.trim()).toBe(warns[0]);
     // The dashboard comes back whatever happened to the rest.
-    expect(restartCalls(r.events).at(-1)).toBe("systemctl restart clawbox-setup.service");
+    expect(calls(r.events, "restart").at(-1)).toBe("systemctl restart clawbox-setup.service");
+  });
+
+  it("keeps the rebuild's own engine warnings for post_update too", () => {
+    const warn = "CLAWBOX-WARN[engine-not-resumed]: ollama.service was running before this update and did not come back";
+    expect(run({ active: BOX, types: TYPES, engineWarnings: [warn] }).relay).toContain(warn);
   });
 
   it("drops the warnings an earlier run left behind, so post_update states only this run's", () => {
     const stale = "CLAWBOX-WARN[service-not-restarted]: clawbox-tunnel.service did not come back\n";
     expect(run({ active: BOX, types: TYPES, staleRelay: stale }).relay).toBe("");
-    fs.rmSync(path.join(tmp, "events"), { force: true });
     const r = run({ active: BOX, types: TYPES, staleRelay: stale, failing: ["clawbox-vnc.service"] });
     expect(r.relay).not.toContain("clawbox-tunnel.service");
     expect(r.relay).toContain("clawbox-vnc.service");
@@ -438,7 +501,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
   it("still restarts clawbox-setup when nothing else is running", () => {
     const r = run({ active: [] });
     expect(r.status).toBe(0);
-    expect(restartCalls(r.events)).toEqual(["systemctl restart clawbox-setup.service"]);
+    expect(calls(r.events, "restart")).toEqual(["systemctl restart clawbox-setup.service"]);
+    expect(calls(r.events, "start")).toEqual([]);
   });
 });
 

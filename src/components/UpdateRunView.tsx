@@ -268,7 +268,7 @@ export function runHeadline(status: RunStatus, state: UpdateState | null, tr: Tr
       return {
         headline: tr("update.heroComplete", "Update complete"),
         subhead: state?.steps.some((s) => s.id === RESTART_STEP_ID)
-          ? tr("update.heroCompleteRestart", "The device will restart in a moment.")
+          ? tr("update.heroCompleteRestart", "ClawBox will restart in a moment.")
           : tr("update.heroCompleteSub", "Everything's been updated."),
       };
     case "failed":
@@ -1177,7 +1177,7 @@ export function UpdateRunView({
     ?? (status === "updating"
       ? { icon: "power_settings_new", title: tr("update.heroUpdatingSub", "Don't power off until this finishes."), note: tr("update.reconnectNote", "Your ClawBox will briefly go offline while restarting. This page reconnects automatically.") }
       : restarts
-        ? { icon: "restart_alt", title: tr("update.reloadOnRestart", "The page will reload once the device is back up."), note: null }
+        ? { icon: "restart_alt", title: tr("update.reloadOnRestart", "The page will reload once ClawBox is back up."), note: null }
         : null);
   const warn = bar?.tone === "warn";
 
