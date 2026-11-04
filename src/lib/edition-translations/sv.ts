@@ -430,8 +430,10 @@ export const sv: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "Inte installerad. Ställ in den i Minnesskärva.",
   "localModels.detail.embeddingsReady": "Redo. Vaknar när du söker och somnar sedan för att spara minne.",
   "localModels.detail.embeddingsFailed": "Stoppad efter ett fel. Startar igen vid nästa sökning.",
+  "localModels.detail.embeddingsFailedBecause": "Stoppad efter ett fel: {reason}",
   "localModels.detail.embeddingsLocal": "Söker i ditt minne på den här boxen.",
   "localModels.detail.embeddingsCloud": "Söker i ditt minne i molnet.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Söker i ditt minne i molnet. Modellen på den här boxen stoppades efter ett fel: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "Det gick inte att ändra den modellen.",

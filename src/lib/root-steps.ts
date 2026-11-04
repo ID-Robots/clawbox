@@ -75,6 +75,7 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "harness_swap",
   "hermes_edition",
   "llamacpp_install",
+  "llamacpp_runtime",
   "nvidia_jetpack",
   "ollama_install",
   "openclaw_config",

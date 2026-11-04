@@ -134,6 +134,15 @@ function rowText(t: Translate, prefix: string, code: string | undefined, params:
   return text === key ? english : text;
 }
 
+/**
+ * Memory search pointed at an embedder that is not this box — with or without
+ * a note that the one on this box failed to start. Either way the row is the
+ * cloud's, and there is nothing of this box's for it to install or remove.
+ */
+function isCloudEmbedding(entry: LocalModelEntry): boolean {
+  return entry.detailCode === "embeddingsCloud" || entry.detailCode === "embeddingsCloudLocalFailed";
+}
+
 /** The on-device roles by kind, each read from the surface that decides it. */
 type Roles = Partial<Record<Kind, Role>>;
 
@@ -688,7 +697,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       }
       case "embedding": {
         // An embedder somewhere else has nothing on this box to remove.
-        if (entry.detailCode === "embeddingsCloud") break;
+        if (isCloudEmbedding(entry)) break;
         if (entry.installed) uninstall = removal("/setup-api/embed/install");
         else install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/embed/install", {}) };
         break;
@@ -717,7 +726,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const engine = entries.find((e) => e.kind === kind);
     if (!engine || !usable(engine)) return null;
     if (kind === "stt") return <WhisperSizesCard onChanged={afterInstall} />;
-    if (kind === "embedding" && engine.detailCode !== "embeddingsCloud") return <EmbeddingModelCard onChanged={afterInstall} />;
+    if (kind === "embedding" && !isCloudEmbedding(engine)) return <EmbeddingModelCard onChanged={afterInstall} />;
     return null;
   };
 

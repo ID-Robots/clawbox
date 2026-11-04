@@ -436,8 +436,10 @@ export const ja: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "未インストール。メモリシャード で設定してください。",
   "localModels.detail.embeddingsReady": "準備完了。検索時に起動し、その後はメモリ節約のため休止します。",
   "localModels.detail.embeddingsFailed": "エラーで停止しました。次の検索時に再起動します。",
+  "localModels.detail.embeddingsFailedBecause": "エラーで停止しました: {reason}",
   "localModels.detail.embeddingsLocal": "このボックスでメモリを検索しています。",
   "localModels.detail.embeddingsCloud": "クラウドでメモリを検索しています。",
+  "localModels.detail.embeddingsCloudLocalFailed": "クラウドでメモリを検索しています。このボックスのモデルはエラーで停止しました: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "そのモデルを変更できませんでした。",

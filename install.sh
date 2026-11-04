@@ -11156,18 +11156,21 @@ step_ollama_install() {
 #
 # $1 = source: a .tar.gz on this device, or an http(s) URL to one
 # $2 = "ON" when this device expects a CUDA-enabled build
-# $3 = the llama.cpp directory whose build/bin the archive populates
+# $3 = the llama.cpp directory whose build/bin the archive becomes
+# $4 = the llama.cpp commit it must have been built from (the pin)
 #
 # It is an ARCHIVE, not a bare binary. llama-server is a 15KB wrapper that
 # dlopens ~212MB of siblings (libggml-cuda.so alone is 193MB), and cmake bakes
 # an absolute RPATH pointing at the build tree — so the libraries have to land
 # back at that same path or the binary installs cleanly and then fails to start.
-# Unpacking build/bin reproduces exactly what a source build leaves behind,
-# minus the ~19 minutes.
+# The archive is a build host's build/bin, so it becomes this box's
+# $3/build/bin: what a source build at that path leaves behind, minus the ~19
+# minutes.
 #
-# Returns 0 only when the build has passed every check below; every rejection
-# returns non-zero so the caller compiles instead. The ways a prebuilt goes
-# wrong are silent at install time and loud on a customer's device.
+# Returns 0 only when the build has passed every check below and is the
+# installed llama-server; every rejection returns non-zero with the box's
+# llama-server as it was, so the caller compiles instead. The ways a prebuilt
+# goes wrong are silent at install time and loud on a customer's device.
 #
 # Be precise about what is established here. The checks are FITNESS checks —
 # right architecture, right backend, starts on this device. They say nothing
@@ -11175,7 +11178,7 @@ step_ollama_install() {
 # separate question, answered by the transport (https, or a local file the
 # operator placed) and by LLAMACPP_PREBUILT_SHA256 when one is supplied.
 install_prebuilt_llamacpp() {
-  local src="$1" want_cuda="$2" llama_dir="$3"
+  local src="$1" want_cuda="$2" llama_dir="$3" pin="${4:-}"
   local tmp; tmp="$(mktemp -d)" || return 1
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
@@ -11254,31 +11257,379 @@ install_prebuilt_llamacpp() {
     return 1
   fi
 
-  # Put the libraries where the RPATH will look for them.
-  mkdir -p "$llama_dir/build/bin"
-  cp -a "$staged/." "$llama_dir/build/bin/" || return 1
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$llama_dir" 2>/dev/null || true
+  # Staged as the tree it will become, never unpacked over the live one: the
+  # installed llama-server may be loading its libraries from build/bin right
+  # now, and a pin move replaces a binary that is in use (TASK-2166).
+  local next="$llama_dir/build.clawbox-next" prev="$llama_dir/build.clawbox-prev"
+  rm -rf "$next"
+  # The checkout directory is the clawbox user's: created here by root, a later
+  # source build could neither clone into it nor `git init` it.
+  if [ ! -d "$llama_dir" ] && ! install -d -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" "$llama_dir"; then
+    return 1
+  fi
+  if ! mkdir -p "$next/bin" || ! cp -a "$staged/." "$next/bin/"; then
+    rm -rf "$next"
+    return 1
+  fi
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$next" 2>/dev/null || true
 
   # Does it actually run HERE? The check that catches a build made against a
   # different CUDA/driver ABI — it passes every test above and then will not
-  # start on the customer's device.
-  if ! "$llama_dir/build/bin/llama-server" --version >/dev/null 2>&1; then
+  # start on the customer's device. Against its OWN libraries (LD_LIBRARY_PATH
+  # is searched before a RUNPATH, which names the live tree), and as the
+  # clawbox user: they are clawbox-writable files now, and root runs none.
+  if ! as_clawbox env LD_LIBRARY_PATH="$next/bin" "$next/bin/llama-server" --version >/dev/null 2>&1; then
     echo "  Prebuilt will not execute on this device — ignoring it."
+    rm -rf "$next"
     return 1
   fi
 
-  install -m 755 "$llama_dir/build/bin/llama-server" /usr/local/bin/llama-server || return 1
+  # The pinned build? Any other commit would be rebuilt from source by the
+  # very next update, so it would be no shortcut at all.
+  local built
+  built="$(llamacpp_binary_commit "$next/bin/llama-server" "$next/bin")"
+  if ! llamacpp_commit_matches "$built" "$pin"; then
+    echo "  Prebuilt is llama.cpp ${built:-of an unknown commit}, not the pinned ${pin:0:9} — ignoring it."
+    rm -rf "$next"
+    return 1
+  fi
+
+  # Swap the tree in, and keep the old one until the INSTALLED binary has
+  # started: activate_llamacpp_server puts the old binary back if it does not,
+  # and the old tree goes back under it here. The archive's RUNPATH fixes the
+  # tree's name, so this path — unlike the source build's tree of its own — has
+  # a window of two renames in which the old binary would find the new
+  # libraries; a llama-server starting inside those microseconds fails once and
+  # is started again by whatever asked for it.
+  rm -rf "$prev"
+  if [ -e "$llama_dir/build" ] && ! mv "$llama_dir/build" "$prev"; then
+    rm -rf "$next"
+    return 1
+  fi
+  if ! mv "$next" "$llama_dir/build" || ! activate_llamacpp_server "$llama_dir/build/bin/llama-server" "$pin"; then
+    rm -rf "$llama_dir/build" "$next"
+    if [ -e "$prev" ]; then mv "$prev" "$llama_dir/build"; fi
+    return 1
+  fi
+  rm -rf "$prev"
+  LLAMACPP_ACTIVE_TREE="$llama_dir/build"
   echo "  Installed prebuilt llama.cpp (skipped the source build)."
   return 0
 }
 
-step_llamacpp_install() {
+# Where every caller finds llama-server: the gateway's Gemma, the memory
+# embedder (scripts/start-embed-server.sh), the web server. A root-owned copy;
+# the libraries its RUNPATH loads stay in the build tree it came from.
+LLAMACPP_SERVER_BIN="/usr/local/bin/llama-server"
+# Held for the length of a check-and-build: Settings → Local AI's Gemma install
+# (llamacpp_install) and the updater's llamacpp_runtime are different units,
+# and both would build into the same tree.
+LLAMACPP_BUILD_LOCK="/run/lock/clawbox-llamacpp-build.lock"
+LLAMACPP_REPO_URL="https://github.com/ggml-org/llama.cpp.git"
+
+# The commit an installed llama-server says it was built from — the short hash
+# in its own `--version` ("version: 6970 (db7d8b24b)") — or nothing when it
+# cannot say: it does not start, or it was built outside a git checkout and
+# answers "unknown".
+#
+# $1 = the binary, $2 = a directory to load its libraries from instead of the
+# tree its RUNPATH names (a staged build that is not in place yet).
+#
+# As the clawbox user, never as root: the binary may be root-owned, but the
+# libraries it loads live in the clawbox-writable build tree, and root
+# executing them would hand root to anything that can write there.
+llamacpp_binary_commit() {
+  local bin="$1" libdir="${2:-}" out
+  if [ -n "$libdir" ]; then
+    out="$(as_clawbox env LD_LIBRARY_PATH="$libdir" "$bin" --version 2>&1)" || return 0
+  else
+    out="$(as_clawbox "$bin" --version 2>&1)" || return 0
+  fi
+  printf '%s\n' "$out" | sed -n 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' | head -n 1
+}
+
+# Does the short hash a binary reports ($1) name the pinned commit ($2, the
+# full hash)? Seven characters at least: anything shorter names nothing.
+llamacpp_commit_matches() {
+  local built="$1" pin="$2"
+  [ "${#built}" -ge 7 ] && [ -n "$pin" ] || return 1
+  case "$pin" in
+    "$built"*) return 0 ;;
+  esac
+  return 1
+}
+
+# What `ldd` says $1 loads, as text. As the clawbox user, for the reason
+# llamacpp_binary_commit gives: ldd may run the binary's own ELF interpreter,
+# and this binary was built by the clawbox user. Captured whole before anyone
+# greps it — `ldd | grep -q` under pipefail reads a grep that matched early,
+# and so made ldd die of SIGPIPE, as a failed match.
+llamacpp_server_libraries() {
+  as_clawbox ldd "$1" 2>/dev/null || true
+}
+
+# Why llama-server has to be (re)built, in one line, or nothing when it is
+# already the pinned build. $1 = the installed binary, $2 = "ON" when this
+# device expects CUDA, $3 = the pinned commit.
+#
+# The binary's own `--version` is the record — not a stamp file written beside
+# it, which would go stale the first time someone replaced the binary by hand
+# and which no box installed before this change has. A binary that cannot say
+# which commit it is gets rebuilt: that is also the binary that no longer
+# starts (its build tree gone), the one most worth replacing.
+llamacpp_rebuild_reason() {
+  local bin="$1" want_cuda="$2" pin="$3" built
+  if [ ! -x "$bin" ]; then
+    echo "llama-server is missing"
+    return 0
+  fi
+  built="$(llamacpp_binary_commit "$bin")"
+  if [ -z "$built" ]; then
+    echo "the installed llama-server does not start, or does not say which llama.cpp it was built from"
+    return 0
+  fi
+  # CUDA is now available but the installed binary was built CPU-only — the
+  # upgrade case for installs that predate the nvcc PATH probe.
+  if [ "$want_cuda" = "ON" ] && ! grep -qiE 'libcuda|libcublas|libcudart' <<<"$(llamacpp_server_libraries "$bin")"; then
+    echo "the installed llama-server was built without CUDA"
+    return 0
+  fi
+  if ! llamacpp_commit_matches "$built" "$pin"; then
+    echo "the installed llama-server is llama.cpp $built, and this release pins ${pin:0:9}"
+  fi
+  return 0
+}
+
+# How many compile jobs the llama.cpp build may run: one per GiB of
+# MemAvailable, never more than the cores, never fewer than one.
+# LLAMACPP_BUILD_JOBS overrides.
+#
+# Not -j$(nproc) any more. The build used to run only on a fresh install,
+# before anything else was resident; it now also runs inside an in-app update,
+# with the gateway, the web server and whatever local model is loaded beside
+# it, on an 8 GB Orin where nvcc's CUDA kernels are the hungriest compile
+# units: four jobs took MemAvailable from 4.2 GB to 1.0 GB at their peak
+# (measured with the gateway up, 25 min for the whole build). An unreadable
+# /proc/meminfo is not a reason to crawl: it keeps the cores.
+llamacpp_build_jobs() {
+  local cores avail jobs
+  if [[ "${LLAMACPP_BUILD_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$LLAMACPP_BUILD_JOBS"
+    return 0
+  fi
+  cores="$(nproc 2>/dev/null || echo 1)"
+  avail="$(available_mb)"
+  if [ "$avail" -le 0 ]; then
+    echo "$cores"
+    return 0
+  fi
+  jobs=$(( avail / 1024 ))
+  [ "$jobs" -ge 1 ] || jobs=1
+  [ "$jobs" -le "$cores" ] || jobs="$cores"
+  echo "$jobs"
+}
+
+ensure_llamacpp_build_prereqs() {
+  if ! command -v cmake &>/dev/null || ! command -v git &>/dev/null || ! command -v python3 &>/dev/null; then
+    echo "  Installing llama.cpp build prerequisites..."
+    wait_for_apt
+    apt-get update -qq
+    apt-get install -y -qq git curl python3 python3-pip python-is-python3 build-essential cmake ninja-build pkg-config
+  fi
+}
+
+# Build llama-server at the pinned commit in a tree of its own,
+# $1/build-<commit>-<cuda|cpu>, BESIDE the one the installed binary runs from.
+#
+# Never in place. cmake bakes an absolute RUNPATH into llama-server, and the
+# copy in /usr/local/bin loads its libraries (libllama, libggml-cuda, …) from
+# the tree it was built in. Rebuilding THAT tree rewrites those libraries under
+# a binary that is installed and may be running, for the twenty minutes the
+# compile takes — and a build that fails halfway leaves a llama-server that
+# loads half of one build and half of another. In a tree of its own the old
+# binary works until the moment it is replaced, and keeps working if it never
+# is. The backend is in the name because it is a reason to rebuild at the same
+# commit: a CPU-only build of the pin gaining CUDA must not be rebuilt in the
+# tree it is running from either.
+#
+# $1 = the llama.cpp checkout, $2 = the pinned commit (full hash), $3 = "ON"
+# for a CUDA build. Sets LLAMACPP_BUILT_SERVER to the new binary on success.
+build_llamacpp_from_source() {
+  local llama_dir="$1" pin="$2" want_cuda="$3"
+  local tree="$llama_dir/build-${pin:0:12}-cpu" head jobs started
+  if [ "$want_cuda" = "ON" ]; then tree="$llama_dir/build-${pin:0:12}-cuda"; fi
+  LLAMACPP_BUILT_SERVER=""
+
+  if [ ! -d "$llama_dir/.git" ]; then
+    if [ -d "$llama_dir" ] && [ -n "$(ls -A "$llama_dir" 2>/dev/null)" ]; then
+      # A box whose llama.cpp came as a prebuilt archive: build/bin and no
+      # checkout. Make it one; the fetch below brings the commit.
+      as_clawbox git init --quiet "$llama_dir" || return 1
+    else
+      # Not --depth 1: a shallow clone of the default branch cannot check out
+      # an arbitrary commit, and the pin is the point.
+      as_clawbox git clone --quiet "$LLAMACPP_REPO_URL" "$llama_dir" || return 1
+    fi
+  fi
+  # The commit itself, from the URL. A plain `git fetch origin` brings the
+  # default branch, which reaches the pin only when the pin is on it AND newer
+  # than what a shallow clone (what installs before the pin made) already has;
+  # a `git init` above has no origin at all. And no "build whatever is checked
+  # out" fallback: that is how a box ends up off the pin and rebuilt on every
+  # update after.
+  if ! as_clawbox_login "cd $llama_dir && git fetch --quiet $LLAMACPP_REPO_URL $pin && git -c advice.detachedHead=false checkout --quiet --force --detach $pin"; then
+    echo "  Could not fetch and check out llama.cpp $pin."
+    return 1
+  fi
+  head="$(as_clawbox git -C "$llama_dir" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$head" != "$pin" ]; then
+    echo "  The llama.cpp checkout is at ${head:-no commit}, not $pin."
+    return 1
+  fi
+
+  # Pin CUDA architectures to Jetson Orin's sm_87 so cmake doesn't spend
+  # ~15 extra minutes probing / compiling kernels for datacenter and
+  # desktop GPUs we don't target. Without this, configure on Jetson ARM
+  # can take 20–30 minutes and the resulting binary is 8x larger than
+  # needed.
+  local flags=(-DCMAKE_BUILD_TYPE=Release "-DGGML_CUDA=$want_cuda")
+  if [ "$want_cuda" = "ON" ]; then
+    flags+=(-DCMAKE_CUDA_ARCHITECTURES=87)
+  fi
+  jobs="$(llamacpp_build_jobs)"
+  started=$SECONDS
+  echo "  Installing llama.cpp server (CUDA=$want_cuda): llama.cpp ${pin:0:9} into $(basename "$tree"), $jobs compile jobs..."
+  as_clawbox_login "rm -f $tree/CMakeCache.txt && rm -rf $tree/CMakeFiles && cd $llama_dir && cmake -S . -B $tree ${flags[*]}" || return 1
+  # nice: the gateway and the web server are running beside an update's build.
+  as_clawbox_login "cd $llama_dir && nice -n 10 cmake --build $tree --config Release -j$jobs --target llama-server" || return 1
+  [ -x "$tree/bin/llama-server" ] || return 1
+  echo "  Built llama-server in $(( (SECONDS - started) / 60 ))m$(( (SECONDS - started) % 60 ))s."
+  LLAMACPP_BUILT_SERVER="$tree/bin/llama-server"
+  LLAMACPP_ACTIVE_TREE="$tree"
+  return 0
+}
+
+# Put $1 — a llama-server whose RUNPATH names the tree it sits in — in place of
+# /usr/local/bin/llama-server, and keep the old one unless the new one starts.
+#
+# Atomic: the copy is staged beside the live binary and renamed over it, so
+# there is no moment with no llama-server or a half-written one; a unit that
+# starts during the swap gets one build or the other, and a process already
+# running keeps the inode it has. Proven twice, each time by its own
+# `--version` naming the pin: the build tree's copy before the swap, and the
+# INSTALLED copy after it — the one every caller execs, resolving its libraries
+# from /usr/local/bin. If that one does not start, the previous binary goes
+# straight back.
+#
+# $1 = the new binary, $2 = the pinned commit, $3 = a directory to load the
+# new binary's libraries from for the first proof (see llamacpp_binary_commit).
+activate_llamacpp_server() {
+  local new="$1" pin="$2" libdir="${3:-}" built
+  local live="$LLAMACPP_SERVER_BIN"
+  local staged="$live.clawbox-new" kept="$live.clawbox-prev"
+  built="$(llamacpp_binary_commit "$new" "$libdir")"
+  if ! llamacpp_commit_matches "$built" "$pin"; then
+    echo "  The new llama-server reports ${built:-no llama.cpp commit}, not ${pin:0:9} — keeping the installed one."
+    return 1
+  fi
+  rm -f "$staged" "$kept"
+  if ! install -m 755 "$new" "$staged"; then
+    rm -f "$staged"
+    return 1
+  fi
+  if [ -e "$live" ] && ! ln -f "$live" "$kept" 2>/dev/null && ! cp -a "$live" "$kept"; then
+    rm -f "$staged" "$kept"
+    return 1
+  fi
+  if ! mv -f "$staged" "$live"; then
+    rm -f "$staged" "$kept"
+    return 1
+  fi
+  built="$(llamacpp_binary_commit "$live")"
+  if ! llamacpp_commit_matches "$built" "$pin"; then
+    echo "  The installed llama-server does not start — putting the previous one back."
+    if [ -e "$kept" ]; then mv -f "$kept" "$live"; else rm -f "$live"; fi
+    return 1
+  fi
+  rm -f "$kept"
+  echo "  llama-server is now llama.cpp $built (pinned ${pin:0:9})."
+  return 0
+}
+
+# Delete the llama.cpp build trees the installed llama-server no longer loads
+# from, so a pin move does not leave a CUDA build tree behind every time. Only
+# once ldd shows the installed binary taking libllama from the tree being
+# kept: a RUNPATH that named any other tree would make THAT one still in use.
+# A llama-server that is running from a removed tree keeps the files it has
+# open; the next start is the new build.
+prune_llamacpp_build_trees() {
+  local llama_dir="$1" keep="$2" tree
+  if [ -z "$keep" ] || ! grep -qF "$keep/bin/libllama" <<<"$(llamacpp_server_libraries "$LLAMACPP_SERVER_BIN")"; then
+    echo "  Kept the previous llama.cpp build trees: the installed llama-server does not load from ${keep:-a known tree}."
+    return 0
+  fi
+  for tree in "$llama_dir"/build "$llama_dir"/build-* "$llama_dir"/build.clawbox-*; do
+    [ -d "$tree" ] && [ "$tree" != "$keep" ] || continue
+    rm -rf -- "$tree" && echo "  Removed the previous llama.cpp build tree ($(basename "$tree"))."
+  done
+  return 0
+}
+
+# Install the pinned llama-server: the prebuilt when one is supplied and it
+# proves itself, otherwise a source build. Leaves the installed binary as it
+# was on any failure.
+#
+# A prebuilt binary skips the compile, which is the single most expensive step
+# in the whole install — measured at 18m51s on an Orin Nano, and it produces a
+# byte-identical result on every device of the same model. Supplying one is
+# opt-in (LLAMACPP_PREBUILT), so nothing changes for anyone who doesn't set it.
+# It is validated before it is trusted, and ANY failure falls through to the
+# source build. A device that ends up without a working llama-server is worse
+# than a slow install, so the fast path is never allowed to be the last word.
+llamacpp_install_pinned() {
+  local llama_dir="$1" pin="$2" want_cuda="$3"
+  LLAMACPP_ACTIVE_TREE=""
+  if [ -n "${LLAMACPP_PREBUILT:-}" ]; then
+    if install_prebuilt_llamacpp "$LLAMACPP_PREBUILT" "$want_cuda" "$llama_dir" "$pin"; then
+      return 0
+    fi
+    echo "  Falling back to building llama.cpp from source."
+  fi
+  ensure_llamacpp_build_prereqs || return 1
+  build_llamacpp_from_source "$llama_dir" "$pin" "$want_cuda" || return 1
+  activate_llamacpp_server "$LLAMACPP_BUILT_SERVER" "$pin"
+}
+
+# Bring /usr/local/bin/llama-server onto the pinned llama.cpp build.
+#
+# The question used to be "is there a llama-server, and does it have CUDA?",
+# asked only by step_llamacpp_install — so a box that HAD a binary kept it
+# through every move of the pin, and an in-app update never asked at all. A
+# field box was still on a May build that rejects `--embd-normalize`, and its
+# memory embedder could not start (TASK-2166). The question now is "was it
+# built from the pinned commit?", answered by the binary itself, and the
+# updater asks it after every update (its `llamacpp_runtime` step): one
+# `--version` on a box that is already there.
+#
+# Exit status says whether the box HAS a working llama-server, not whether it
+# moved. A box that keeps its old binary because the rebuild could not be done
+# — GitHub unreachable, a compile that failed — is still a working box: it says
+# so on a CLAWBOX-WARN line, which the updater shows the owner, and the next
+# update tries again. Only a box left with no llama-server that starts fails.
+step_llamacpp_runtime() {
   if is_test_mode; then
-    echo "  CLAWBOX_TEST_MODE=1, skipping llama.cpp native build and model download"
+    echo "  CLAWBOX_TEST_MODE=1, skipping the llama.cpp runtime check"
     return 0
   fi
   local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
-  local ENABLE_GGML_CUDA="OFF"
+  local ENABLE_GGML_CUDA="OFF" lock_fd="" rc=0
+  # Pinned, not tip-of-master. An unpinned --depth 1 clone gave every device
+  # whatever upstream happened to be that day — the two boxes here ended up on
+  # d2f8305 and db7d8b2, so "the same install" produced different inference
+  # binaries. This commit is the one proven on this hardware; move it
+  # deliberately, with a rebuild to prove the new one — and moving it now
+  # moves every box, on its next update.
+  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-db7d8b24b5197ca39435cf47b3c1ba039b53605b}"
 
   # On Jetson, nvcc ships at /usr/local/cuda/bin but isn't on systemd's PATH,
   # so `command -v nvcc` fails and we silently fall back to a CPU-only build.
@@ -11287,17 +11638,68 @@ step_llamacpp_install() {
   if ! command -v nvcc &>/dev/null && [ -x /usr/local/cuda/bin/nvcc ]; then
     export PATH="/usr/local/cuda/bin:$PATH"
   fi
-
   if command -v nvcc &>/dev/null; then
     ENABLE_GGML_CUDA="ON"
   fi
 
-  if ! command -v cmake &>/dev/null || ! command -v git &>/dev/null || ! command -v python3 &>/dev/null; then
-    echo "  Installing llama.cpp build prerequisites..."
-    wait_for_apt
-    apt-get update -qq
-    apt-get install -y -qq git curl python3 python3-pip python-is-python3 build-essential cmake ninja-build pkg-config
+  # The fetch below is by commit, and a server only hands out a commit by its
+  # full name.
+  # Length tested apart from the class: a bounded repeat inside `[[ =~ ]]`
+  # costs bash a glibc NFA state per repetition (shell-regex-hygiene.test.ts).
+  if [ "${#LLAMACPP_COMMIT}" -ne 40 ] || ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]+$ ]]; then
+    echo "  LLAMACPP_COMMIT must be a full 40-character commit hash, not '$LLAMACPP_COMMIT' — leaving llama-server as it is."
+    [ -n "$(llamacpp_binary_commit "$LLAMACPP_SERVER_BIN")" ]
+    return
   fi
+
+  # One check-and-build at a time; a second one waits for the first — however
+  # long a slow box takes, install.sh caps no work by the clock — then finds
+  # its result and has nothing to do. The kernel drops the lock with its
+  # holder, so a killed build never leaves one behind.
+  mkdir -p "$(dirname "$LLAMACPP_BUILD_LOCK")" 2>/dev/null || true
+  if command -v flock &>/dev/null && exec {lock_fd}>>"$LLAMACPP_BUILD_LOCK"; then
+    if ! flock -n "$lock_fd"; then
+      echo "  Waiting for the llama.cpp build already running to finish..."
+      flock "$lock_fd" || true
+    fi
+  fi
+  llamacpp_runtime_locked "$LLAMA_DIR" "$LLAMACPP_COMMIT" "$ENABLE_GGML_CUDA" || rc=$?
+  if [ -n "$lock_fd" ]; then exec {lock_fd}>&-; fi
+  return "$rc"
+}
+
+llamacpp_runtime_locked() {
+  local llama_dir="$1" pin="$2" want_cuda="$3" reason
+  reason="$(llamacpp_rebuild_reason "$LLAMACPP_SERVER_BIN" "$want_cuda" "$pin")"
+  if [ -z "$reason" ]; then
+    echo "  llama-server already installed (llama.cpp ${pin:0:9}, CUDA=$want_cuda)"
+    return 0
+  fi
+  echo "  Rebuilding llama-server: $reason."
+  if llamacpp_install_pinned "$llama_dir" "$pin" "$want_cuda"; then
+    # A memory embedder that failed on the old binary would read "failed" in
+    # Settings → Local AI until something started it again; cleared, the next
+    # search starts it on this build. A running one finishes on the old inode
+    # and wakes on this build after its idle stop.
+    systemctl reset-failed clawbox-embed.service 2>/dev/null || true
+    prune_llamacpp_build_trees "$llama_dir" "$LLAMACPP_ACTIVE_TREE"
+    return 0
+  fi
+  if [ -n "$(llamacpp_binary_commit "$LLAMACPP_SERVER_BIN")" ]; then
+    echo "CLAWBOX-WARN[llamacpp-not-rebuilt]: llama-server could not be rebuilt at the llama.cpp this release pins (${pin:0:9}), so the build already installed stays in use — the next update tries again, and 'sudo bash $PROJECT_DIR/install.sh --step llamacpp_runtime' tries now"
+    return 0
+  fi
+  echo "  No llama-server that starts is installed, and none could be built."
+  return 1
+}
+
+step_llamacpp_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping llama.cpp native build and model download"
+    return 0
+  fi
+
+  ensure_llamacpp_build_prereqs
 
   # Run the pipx migration whether or not `hf` already resolves: a device
   # upgraded from a pre-pipx install has a real pip --user-installed `hf` on
@@ -11325,65 +11727,11 @@ step_llamacpp_install() {
       || echo "  Warning: Hugging Face CLI install failed (pipx unavailable, pip blocked by PEP 668 on newer bases)" >&2
   fi
 
-  # Determine if a rebuild is needed. Rebuild when:
-  #   a) llama-server is missing, OR
-  #   b) CUDA is now available but the installed binary was built CPU-only
-  #      (common upgrade case for existing installs that predate the fix above).
-  local needs_rebuild="false"
-  if [ ! -x /usr/local/bin/llama-server ]; then
-    needs_rebuild="true"
-  elif [ "$ENABLE_GGML_CUDA" = "ON" ] \
-       && ! ldd /usr/local/bin/llama-server 2>/dev/null | grep -qiE 'libcuda|libcublas|libcudart'; then
-    echo "  Existing llama-server was built without CUDA — rebuilding with GPU support"
-    needs_rebuild="true"
-  fi
-
-  # A prebuilt binary skips the compile below, which is the single most
-  # expensive step in the whole install — measured at 18m51s on an Orin Nano,
-  # and it produces a byte-identical result on every device of the same model.
-  # Supplying one is opt-in (LLAMACPP_PREBUILT), so nothing changes for anyone
-  # who doesn't set it.
-  #
-  # It is validated before it is trusted, and ANY failure falls through to the
-  # source build. A device that ends up without a working llama-server is worse
-  # than a slow install, so the fast path is never allowed to be the last word.
-  if [ "$needs_rebuild" = "true" ] && [ -n "${LLAMACPP_PREBUILT:-}" ]; then
-    if install_prebuilt_llamacpp "$LLAMACPP_PREBUILT" "$ENABLE_GGML_CUDA" "$LLAMA_DIR"; then
-      needs_rebuild="false"
-    else
-      echo "  Falling back to building llama.cpp from source."
-    fi
-  fi
-
-  if [ "$needs_rebuild" = "true" ]; then
-    echo "  Installing llama.cpp server (CUDA=$ENABLE_GGML_CUDA)..."
-    # Pinned, not tip-of-master. An unpinned --depth 1 clone gave every device
-    # whatever upstream happened to be that day — the two boxes here ended up on
-    # d2f8305 and db7d8b2, so "the same install" produced different inference
-    # binaries. This commit is the one proven on this hardware; move it
-    # deliberately, with a rebuild to prove the new one.
-    local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-db7d8b24b5197ca39435cf47b3c1ba039b53605b}"
-    if [ ! -d "$LLAMA_DIR/.git" ]; then
-      # Not --depth 1: a shallow clone of the default branch cannot check out an
-      # arbitrary commit, and the pin is the point.
-      as_clawbox git clone https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
-    fi
-    as_clawbox_login "cd $LLAMA_DIR && git fetch --quiet origin && git checkout --quiet $LLAMACPP_COMMIT"       || echo "  Warning: could not check out $LLAMACPP_COMMIT — building whatever is checked out."
-    # Pin CUDA architectures to Jetson Orin's sm_87 so cmake doesn't spend
-    # ~15 extra minutes probing / compiling kernels for datacenter and
-    # desktop GPUs we don't target. Without this, configure on Jetson ARM
-    # can take 20–30 minutes and the resulting binary is 8x larger than
-    # needed.
-    local LLAMACPP_CMAKE_FLAGS=(-DCMAKE_BUILD_TYPE=Release "-DGGML_CUDA=$ENABLE_GGML_CUDA")
-    if [ "$ENABLE_GGML_CUDA" = "ON" ]; then
-      LLAMACPP_CMAKE_FLAGS+=(-DCMAKE_CUDA_ARCHITECTURES=87)
-    fi
-    as_clawbox_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build ${LLAMACPP_CMAKE_FLAGS[*]}"
-    as_clawbox_login "cd $LLAMA_DIR && cmake --build build --config Release -j$(nproc) --target llama-server"
-    install -m 755 "$LLAMA_DIR/build/bin/llama-server" /usr/local/bin/llama-server
-  else
-    echo "  llama-server already installed (CUDA=$ENABLE_GGML_CUDA)"
-  fi
+  # The binary itself — missing, CPU-only on a CUDA box, or built from any
+  # commit but the pin — is step_llamacpp_runtime's, which the in-app updater
+  # also runs on its own after every update. It fails only when the box is
+  # left with no llama-server that starts.
+  step_llamacpp_runtime || return 1
 
   ensure_llamacpp_model_cached
   echo "  llama.cpp runtime ready"
@@ -13807,7 +14155,7 @@ step_validate_services() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
+  bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_runtime llamacpp_model
   embed_model
   chromium_install google_chrome_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts

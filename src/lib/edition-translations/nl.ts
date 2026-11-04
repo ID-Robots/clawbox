@@ -434,8 +434,10 @@ export const nl: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "Niet geïnstalleerd. Stel het in via Geheugenfragment.",
   "localModels.detail.embeddingsReady": "Klaar. Wordt wakker als u zoekt en slaapt daarna om geheugen te sparen.",
   "localModels.detail.embeddingsFailed": "Gestopt na een fout. Start opnieuw bij de volgende zoekopdracht.",
+  "localModels.detail.embeddingsFailedBecause": "Gestopt na een fout: {reason}",
   "localModels.detail.embeddingsLocal": "Doorzoekt je geheugen op deze box.",
   "localModels.detail.embeddingsCloud": "Doorzoekt je geheugen in de cloud.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Doorzoekt je geheugen in de cloud. Het model op deze box is gestopt na een fout: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "Kan dat model niet wijzigen.",

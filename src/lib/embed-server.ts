@@ -21,6 +21,7 @@
  */
 
 import fs from "fs/promises";
+import type { FileHandle } from "fs/promises";
 import path from "./runtime-path";
 import { DATA_DIR } from "./config-store";
 import { getLocalAiProxyRootUrl } from "./local-ai-proxy-url";
@@ -139,6 +140,51 @@ export async function getEmbedProvisioningStatus(): Promise<EmbedProvisioningSta
     installed: binaryAvailable && modelAvailable,
     modelBytes: modelAvailable ? modelStat.size : null,
   };
+}
+
+/** How much of the end of the embedder's log is read for the reason it stopped. */
+const FAILURE_TAIL_BYTES = 16 * 1024;
+const FAILURE_REASON_MAX_CHARS = 300;
+
+/**
+ * Why the memory embedder stopped, from the last line its log has: the
+ * start script's own refusal (scripts/start-embed-server.sh puts the reason
+ * and the fix on its LAST line — a llama-server too old for a flag, a binary
+ * that does not start) or llama-server's last word. Read only for a unit that
+ * has FAILED; null when there is no log or nothing in it.
+ *
+ * For Settings → Local AI, whose detail lines carry no paths: every absolute
+ * path in the line is cut to its last component.
+ */
+export async function readEmbedStopReason(logPath = EMBED_LOG_PATH): Promise<string | null> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await fs.open(logPath, "r");
+    const { size } = await handle.stat();
+    const length = Math.min(size, FAILURE_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    return embedStopReasonFromLog(buffer.toString("utf-8"));
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** The pure half of readEmbedStopReason: the log's text in, the reason out. */
+export function embedStopReasonFromLog(text: string): string | null {
+  const last = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).at(-1);
+  if (!last) return null;
+  const reason = last
+    .replace(/^\[embed\]\s*/, "")
+    .replace(/(^|[\s'"(=:])\/(?:[^\s'"()/]+\/)*([^\s'"()/]+)/g, "$1$2")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!reason) return null;
+  return reason.length > FAILURE_REASON_MAX_CHARS
+    ? `${reason.slice(0, FAILURE_REASON_MAX_CHARS - 1).trimEnd()}…`
+    : reason;
 }
 
 /**

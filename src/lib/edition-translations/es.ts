@@ -429,8 +429,10 @@ export const es: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "No instalado. Configúralo en Fragmento de memoria.",
   "localModels.detail.embeddingsReady": "Listo. Se activa cuando buscas y luego duerme para ahorrar memoria.",
   "localModels.detail.embeddingsFailed": "Detenido tras un error. Vuelve a iniciarse en la próxima búsqueda.",
+  "localModels.detail.embeddingsFailedBecause": "Detenido tras un error: {reason}",
   "localModels.detail.embeddingsLocal": "Buscando en tu memoria en esta caja.",
   "localModels.detail.embeddingsCloud": "Buscando en tu memoria en la nube.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Buscando en tu memoria en la nube. El modelo de esta caja se detuvo tras un error: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "No se pudo cambiar ese modelo.",

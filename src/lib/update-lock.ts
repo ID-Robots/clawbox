@@ -134,6 +134,12 @@ function processStartTicks(pid: number): string | null {
  * run room without holding a crashed one's lock for long. The boot-time check
  * that releases an abandoned lock still runs; this only decides whether the
  * release happens now or at the next boot.
+ *
+ * One step outlives it: `llamacpp_runtime`, on the one update that moves a box
+ * onto a new llama.cpp pin, compiles for ~20 minutes. While its web server
+ * lives the pid check below still holds the lock; if that server dies past
+ * the heartbeat, the run is read as interrupted, and resuming it re-dispatches
+ * a step that waits on the compile's own lock and then finds nothing to do.
  */
 const HOLDER_HEARTBEAT_MS = 20 * 60 * 1000;
 
