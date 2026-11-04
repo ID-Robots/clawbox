@@ -2,6 +2,7 @@ import * as childProcess from "child_process";
 import net from "net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { waitForGatewayStart, type GatewayStartState } from "@/lib/gateway-start-wait";
+import { verifyGatewaySessions, type SessionProbe } from "@/lib/gateway-session-check";
 import { waitForUnitJob } from "@/lib/gateway-unit-job";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 import { waitForPortOpen } from "@/lib/port-probe";
@@ -50,6 +51,37 @@ describe("waitForGatewayStart", () => {
     });
     expect(verdict.kind).toBe("listening");
     expect(reads).toBe(2);
+  });
+});
+
+describe("verifyGatewaySessions", () => {
+  it("gives a restarted gateway its whole window when the wall clock steps forward while it starts", async () => {
+    // gateway_verify's session check (TASK-2153) runs right after the update's
+    // reboot. On the wall clock, a step while the restarted gateway was still
+    // starting spent its window at once: no second ask, and a healthy update
+    // failed.
+    const answers: SessionProbe[] = [
+      { kind: "store-failure", detail: "UNAVAILABLE: SQLite session reclamation commit checkpoint expired" },
+      { kind: "unreachable", detail: "gateway starting; retry shortly", final: false },
+      { kind: "unreachable", detail: "gateway starting; retry shortly", final: false },
+      { kind: "ok" },
+    ];
+    let asked = 0;
+    const outcome = await verifyGatewaySessions({
+      probe: async () => {
+        // The first ask after the restart is when the clock steps.
+        if (asked === 1) wallClockStep = TWELVE_HOURS_MS;
+        return answers[Math.min(asked++, answers.length - 1)];
+      },
+      restart: async () => {},
+      windowMs: 60_000,
+      recoveryWindowMs: 120_000,
+      intervalMs: 1,
+      log: () => {},
+      sleep: async () => {},
+    });
+    expect(outcome).toEqual({ verdict: "serving", restarted: true });
+    expect(asked).toBe(4);
   });
 });
 

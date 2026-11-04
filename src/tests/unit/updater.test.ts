@@ -178,15 +178,34 @@ vi.mock("@/lib/plugin-repair-after-update", () => ({
 // What the agent databases weigh, which sizes the verify's `doctor --fix`.
 // 0 by default — what the real reader answers under this file's mocked
 // `fs/promises` — so only the cases about a large box move.
-const { mockOpenclawDatabaseBytes } = vi.hoisted(() => ({
+// The migration status the pre-start wrote: none by default, which is what the
+// real reader answers under the mocked `fs/promises`.
+const { mockOpenclawDatabaseBytes, mockReadMigrationStatus } = vi.hoisted(() => ({
   mockOpenclawDatabaseBytes: vi.fn<(stateDir: string) => Promise<number>>(async () => 0),
+  mockReadMigrationStatus: vi.fn<() => Promise<import("@/lib/openclaw-migration-status").OpenclawMigrationStatus | null>>(
+    async () => null,
+  ),
 }));
 vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
   ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
   openclawDatabaseBytes: mockOpenclawDatabaseBytes,
+  readOpenclawMigrationStatus: mockReadMigrationStatus,
+}));
+
+// The session check's one network call (TASK-2153): the `chat.history` the
+// verify asks the gateway once it listens. Healthy by default — a gateway that
+// answers — so only the cases about one that cannot serve sessions move; the
+// policy and the restart around it are the real ones.
+const { mockMainChatHistory } = vi.hoisted(() => ({
+  mockMainChatHistory: vi.fn(async (): Promise<{ sessionKey: string }> => ({ sessionKey: "main" })),
+}));
+vi.mock("@/lib/openclaw-gateway-ws", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-gateway-ws")>()),
+  gatewayWsMainChatHistory: mockMainChatHistory,
 }));
 
 import { get, set, setMany } from "@/lib/config-store";
+import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
 
@@ -377,6 +396,13 @@ describe("updater", () => {
     process.env.GATEWAY_START_LIMIT_MS = "1";
     process.env.GATEWAY_START_POLL_MS = "1";
     process.env.GATEWAY_START_POLL_MAX_MS = "1";
+    process.env.GATEWAY_SESSION_WINDOW_MS = "1";
+    process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS = "1";
+    process.env.GATEWAY_SESSION_POLL_MS = "1";
+    mockMainChatHistory.mockReset();
+    mockMainChatHistory.mockResolvedValue({ sessionKey: "main" });
+    mockReadMigrationStatus.mockReset();
+    mockReadMigrationStatus.mockResolvedValue(null);
     // Pin the SKU: the step list is edition-dependent, so without this the
     // expectations below that look for `gateway_verify` would fail on a Hermes
     // box, where it is (correctly) filtered out. Only the edition VALUE is set
@@ -424,6 +450,9 @@ describe("updater", () => {
     delete process.env.GATEWAY_START_LIMIT_MS;
     delete process.env.GATEWAY_START_POLL_MS;
     delete process.env.GATEWAY_START_POLL_MAX_MS;
+    delete process.env.GATEWAY_SESSION_WINDOW_MS;
+    delete process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS;
+    delete process.env.GATEWAY_SESSION_POLL_MS;
     // NOT CLAWBOX_EDITION_FILE — that is a suite-wide guarantee from
     // vitest.config.ts, and deleting it here would leave later files in this
     // worker reading the real /etc/clawbox/edition.env.
@@ -3526,6 +3555,273 @@ describe("updater", () => {
       // After the gateway restart the step exists for, never before it.
       expect(restartCalls.length).toBeGreaterThan(0);
       expect(Math.min(...restartCalls)).toBeLessThan(mockRetryAfterCoreUpdate.mock.invocationCallOrder[0]);
+    });
+  });
+
+  /**
+   * TASK-2153: a gateway that listens and answers /healthz can still refuse
+   * every session call, and a box did for 22 minutes after this step passed.
+   * The verify now asks it one chat.history. Only that call is mocked: the
+   * restart is the update's own (`systemctl restart` through the mocked
+   * execFile), and the step's verdict is the real runner's.
+   */
+  describe("the session check after the gateway listens (TASK-2153)", () => {
+    const reclaimFailure = () => new GatewayRpcError("SQLite session reclamation commit checkpoint expired", "UNAVAILABLE");
+
+    /** The gateway restarts issued after the session check first asked. */
+    function restartsAfterFirstAsk(): number[] {
+      const firstAsk = mockMainChatHistory.mock.invocationCallOrder[0];
+      return mockExecFile.mock.calls
+        .map(([, args], index) => ({ args: (args as string[]).join(" "), order: mockExecFile.mock.invocationCallOrder[index] }))
+        .filter(({ args, order }) => args.includes("systemctl restart clawbox-gateway.service") && order > firstAsk)
+        .map(({ order }) => order);
+    }
+
+    /** The second half of an update — post_update, then gateway_verify — to its end. */
+    async function runVerify(): Promise<ReturnType<typeof updater.getUpdateState>> {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+      return updater.getUpdateState();
+    }
+
+    it("passes a gateway that answers chat.history, and restarts nothing for it", async () => {
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(1);
+      expect(restartsAfterFirstAsk()).toEqual([]);
+    });
+
+    it("restarts the gateway once when it answers UNAVAILABLE, and passes when the restarted one answers", async () => {
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      const restarts = restartsAfterFirstAsk();
+      expect(restarts).toHaveLength(1);
+      // Asked again only after that restart, and once was enough.
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restarts[0]).toBeLessThan(mockMainChatHistory.mock.invocationCallOrder[1]);
+    });
+
+    it("fails the step, in words the owner can act on, when the gateway still answers UNAVAILABLE after that restart", async () => {
+      mockMainChatHistory.mockRejectedValue(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("failed");
+      const verify = state.steps.find((step) => step.id === "gateway_verify");
+      expect(verify?.status).toBe("failed");
+      expect(verify?.error).toContain("cannot open chat sessions (UNAVAILABLE: SQLite session reclamation commit checkpoint expired)");
+      expect(verify?.error).toContain("restarting it once did not fix that");
+      expect(state.error).toBe(verify?.error);
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+    });
+
+    it("asks a gateway still rebuilding its history again rather than restarting it", async () => {
+      // The core's own retryable UNAVAILABLE (respondChatHistoryUnavailable),
+      // as right after a core upgrade. A window long enough for a second ask.
+      process.env.GATEWAY_SESSION_WINDOW_MS = "5000";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restartsAfterFirstAsk()).toEqual([]);
+      expect(state.warnings ?? []).toEqual([]);
+    });
+
+    it("never fails the update over a restart earned by 'not yet' alone — a slow box gets a warning", async () => {
+      // The core's "not yet" for the whole (1 ms) window earns the restart; the
+      // restarted gateway is still starting when its window ends. The store
+      // failure was never named, so this is a slow box, not a dead chat.
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("gateway starting; retry shortly"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("gateway starting; retry shortly");
+    });
+
+    it("warns, never passes silently, when the restarted gateway's token cannot be read at the end", async () => {
+      // Windows of 0: one ask each side. "Not yet" earns the restart; after it
+      // the token is unreadable. Before a restart that would mean nothing was
+      // asked (no warning); after one, the gateway was asked before, so it counts.
+      process.env.GATEWAY_SESSION_WINDOW_MS = "0";
+      process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS = "0";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("no gateway token"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("no gateway token");
+    });
+
+    it("keeps the degraded-agents warning when the session check fails the step", async () => {
+      mockReadMigrationStatus.mockResolvedValue({
+        state: "degraded",
+        reason: "migration-incomplete",
+        requiredBytes: null,
+        freeBytes: null,
+        updatedAt: null,
+      } as import("@/lib/openclaw-migration-status").OpenclawMigrationStatus);
+      mockMainChatHistory.mockRejectedValue(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("failed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("failed");
+      expect(state.warnings?.map((w) => w.code)).toContain("openclaw-migration-degraded");
+    });
+
+    it("runs in the OpenClaw-only update too, which ends on a running gateway the same way", async () => {
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      updater.resetUpdateState();
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+    });
+
+    it("passes, with a word to the owner, a gateway that never answered the chat's request in the window", async () => {
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("gateway starting; retry shortly"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(restartsAfterFirstAsk()).toEqual([]);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("could not confirm the chat answers");
+      expect(warning?.[0].message).toContain("gateway starting; retry shortly");
+    });
+
+    it("says nothing when there is no gateway token to ask with — nothing was asked", async () => {
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("no gateway token"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(1);
+      expect(state.warnings?.some((w) => w.code === "gateway-sessions-unconfirmed")).toBeFalsy();
+    });
+
+    it("asks nothing on the Hermes edition, where there is no OpenClaw gateway", async () => {
+      vi.resetModules();
+      process.env.CLAWBOX_EDITION = "hermes";
+      updater = await import("@/lib/updater");
+      const state = await runVerify();
+      expect(state.steps.map((step) => step.id)).not.toContain("gateway_verify");
+      expect(mockMainChatHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * The old gateway on the field box exited 1 when the update stopped it, and
+   * that was only ever in the journal. Said on the update's own result now.
+   */
+  describe("a gateway stop that did not go cleanly (TASK-2153)", () => {
+    /**
+     * Answer the unit-state reads: running until stopped, then `afterStop`.
+     * `stopTimesOut`: the stop's client is killed by its deadline, as Node
+     * kills it, so the update waits for systemd to finish the job.
+     */
+    function gatewayUnit(
+      afterStop: string,
+      before = "ActiveState=active\nSubState=running\nResult=success\nJob=\n",
+      options: { stopTimesOut?: boolean } = {},
+    ): void {
+      const base = mockExecFile.getMockImplementation() as ((...call: unknown[]) => unknown) | undefined;
+      let current = before;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        const argv = Array.isArray(args) ? args.join(" ") : "";
+        if (argv.includes("systemctl stop clawbox-gateway.service")) {
+          current = afterStop;
+          if (options.stopTimesOut) {
+            const callback = rest.find((part) => typeof part === "function") as
+              | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+              | undefined;
+            callback?.(Object.assign(new Error("Command failed: systemctl stop"), { killed: true, signal: "SIGTERM" }), { stdout: "", stderr: "" });
+            return {};
+          }
+        }
+        if (argv.includes("systemctl restart clawbox-gateway.service")) current = before;
+        // The unit-state read (`readUnitState`), not the start wait's, which asks for NRestarts too.
+        if (argv.startsWith("show clawbox-gateway.service") && argv.includes("-p Result") && !argv.includes("NRestarts")) {
+          const callback = rest.find((part) => typeof part === "function") as
+            | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+            | undefined;
+          callback?.(null, { stdout: current, stderr: "" });
+          return {};
+        }
+        return base?.(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+    }
+
+    async function runSecondHalf(): Promise<ReturnType<typeof updater.getUpdateState>> {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+      return updater.getUpdateState();
+    }
+
+    it("warns the owner when the running gateway ended failed on the update's stop, and carries on", async () => {
+      gatewayUnit("ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n");
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      const warning = state.warnings?.filter((w) => w.code === "gateway-stop-unclean");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain(
+        "did not shut down cleanly when the update stopped it (clawbox-gateway.service ended failed (failed, exit-code))",
+      );
+      // Persisted, like every warning that must outlive the web server's restart.
+      expect(mockSet).toHaveBeenCalledWith("update_warnings", expect.stringContaining("gateway-stop-unclean"));
+    });
+
+    it("says nothing about a clean drain that outlived the 30 s client — the unit allows 330 s", async () => {
+      // TimeoutStopSec=330 (config/clawbox-gateway.service): OpenClaw sizes its
+      // drain from it, so a stop past the client's 30 s that ends clean is a
+      // healthy one, and a warning over it would send the owner after nothing.
+      gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n", undefined, { stopTimesOut: true });
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      expect(state.warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+    });
+
+    it("warns the owner when systemd had to kill the stop, and says how long it took", async () => {
+      gatewayUnit("ActiveState=failed\nSubState=failed\nResult=timeout\nJob=\n", undefined, { stopTimesOut: true });
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      const warning = state.warnings?.filter((w) => w.code === "gateway-stop-unclean");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toMatch(
+        /did not shut down cleanly when the update stopped it after about \d+s \(clawbox-gateway\.service ended failed \(failed, timeout\)\)/,
+      );
+    });
+
+    it("says nothing about a clean stop, or about a gateway that had already failed before it", async () => {
+      gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n");
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      gatewayUnit(
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+      );
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+
+      // Crash-looping: between two starts it carries the last crash's result.
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      gatewayUnit(
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+        "ActiveState=activating\nSubState=auto-restart\nResult=exit-code\nJob=\n",
+      );
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
     });
   });
 
