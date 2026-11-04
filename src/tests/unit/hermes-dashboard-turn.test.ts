@@ -219,6 +219,68 @@ describe("opening a dashboard turn", () => {
   });
 });
 
+describe("saying WHY a turn could not be opened (TASK-2152)", () => {
+  // Null alone carried no reason, and the route needs one: a dashboard that is
+  // restarting is worth waiting for, one that refused the conversation is not.
+  function listener() {
+    const failures: Array<{ reason: string; detail: string }> = [];
+    return { failures, onOpenFailure: (f: { reason: string; detail: string }) => failures.push(f) };
+  }
+
+  it("calls a dashboard that mints no ticket unavailable", async () => {
+    ticketMock.mockResolvedValue(null);
+    const seen = listener();
+    await expect(openDashboardTurn({ text: "Hey", onOpenFailure: seen.onOpenFailure })).resolves.toBeNull();
+    expect(seen.failures).toEqual([expect.objectContaining({ reason: "unavailable" })]);
+  });
+
+  it("calls a socket that dies before the session answers unavailable", async () => {
+    const seen = listener();
+    const opening = openDashboardTurn({ text: "Hey", onOpenFailure: seen.onOpenFailure });
+    const socket = await latest();
+    socket.emit("error", new Error("ECONNREFUSED"));
+    await expect(opening).resolves.toBeNull();
+    expect(seen.failures).toEqual([{ reason: "unavailable", detail: "ECONNREFUSED" }]);
+  });
+
+  it("calls a session the dashboard answered no to refused, in the dashboard's own words", async () => {
+    const seen = listener();
+    const opening = openDashboardTurn({ text: "Hey", sessionId: "20260823_000000_aaaaaa", onOpenFailure: seen.onOpenFailure });
+    const socket = await latest();
+    socket.open();
+    await Promise.resolve();
+    socket.deliver({ jsonrpc: "2.0", id: 1, error: { message: "session not found" } });
+    await expect(opening).resolves.toBeNull();
+    expect(seen.failures).toEqual([{ reason: "refused", detail: "session not found" }]);
+  });
+
+  it("calls a turn stopped before it was opened stopped", async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const seen = listener();
+    await expect(openDashboardTurn({ text: "Hey", signal: stop.signal, onOpenFailure: seen.onOpenFailure }))
+      .resolves.toBeNull();
+    expect(seen.failures).toEqual([expect.objectContaining({ reason: "stopped" })]);
+  });
+
+  it("still answers null when the listener itself throws", async () => {
+    ticketMock.mockResolvedValue(null);
+    await expect(openDashboardTurn({
+      text: "Hey",
+      onOpenFailure: () => {
+        throw new Error("a broken listener");
+      },
+    })).resolves.toBeNull();
+  });
+
+  it("says nothing when the turn opens", async () => {
+    const seen = listener();
+    const { turn } = await connect({ onOpenFailure: seen.onOpenFailure });
+    expect(turn).not.toBeNull();
+    expect(seen.failures).toEqual([]);
+  });
+});
+
 describe("running a dashboard turn", () => {
   it("reports each fragment of the ANSWER as it lands", async () => {
     const { turn, socket } = await connect();

@@ -192,10 +192,9 @@ describe("a Hermes turn that streams", () => {
     await expect(adapter.sendTurn(turn, () => {})).rejects.toThrow("the provider is rate limiting");
   });
 
-  it("asks to be streamed to only when the box can and the caller is listening", async () => {
-    // Two halves, and neither on its own. Asking on a box that cannot stream
-    // costs nothing (the route answers JSON), but asking with no listener would
-    // hold the whole turn open for events nobody reads.
+  it("asks to be streamed to whenever the caller is listening", async () => {
+    // Asking with no listener would hold the whole turn open for events nobody
+    // reads, so that half stays.
     const streamable = makeAdapter(sseResponse([frame("done", { text: "ok", harness: "hermes" })]));
     await streamable.adapter.sendTurn(turn, () => {});
     expect(streamable.requests[0].headers.Accept).toBe("text/event-stream");
@@ -203,10 +202,18 @@ describe("a Hermes turn that streams", () => {
     const noListener = makeAdapter(jsonResponse({ text: "ok", harness: "hermes" }));
     await noListener.adapter.sendTurn(turn);
     expect(noListener.requests[0].headers.Accept).toBeUndefined();
+  });
 
-    const cannotStream = makeAdapter(jsonResponse({ text: "ok", harness: "hermes" }), BLOCKING_CAPS);
-    await cannotStream.adapter.sendTurn(turn, () => {});
-    expect(cannotStream.requests[0].headers.Accept).toBeUndefined();
+  it("still asks when the page's probe said the box cannot stream (TASK-2152)", async () => {
+    // The probe is read on page load and kept. One that landed while the
+    // dashboard was restarting after an update said "no" for the rest of the
+    // page's life, and every text turn of an ongoing chat then went to the
+    // CLI fallback, which cannot continue it. Asking costs nothing: a box that
+    // really cannot stream answers JSON, and that is read below.
+    const staleNo = makeAdapter(jsonResponse({ text: "ok", harness: "hermes" }), BLOCKING_CAPS);
+    const result = await staleNo.adapter.sendTurn(turn, () => {});
+    expect(staleNo.requests[0].headers.Accept).toBe("text/event-stream");
+    expect(result.text).toBe("ok");
   });
 
   it("reads a STREAMED answer even when the caller passed no listener", async () => {

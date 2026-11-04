@@ -350,20 +350,17 @@ describe("when the box cannot stream", () => {
     expect(spawnMock).toHaveBeenCalled();
   });
 
-  it("does not stream to a caller that did not ask to be streamed to", async () => {
+  it("does not stream to a caller that did not ask, but still takes the turn through the dashboard", async () => {
+    // `Accept` decides only how the answer comes back (TASK-2152). Gating the
+    // dashboard on it sent every text turn of a page whose probe had said "no"
+    // to the CLI, which cannot continue a conversation the dashboard started.
     openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["ok"] }).handle);
-    readTurnMock.mockResolvedValue({ text: "blocking" });
-    spawnMock.mockImplementation(() => ({
-      stdout: { on: (e: string, cb: (c: Buffer) => void) => e === "data" && cb(Buffer.from("blocking")) },
-      stderr: { on: () => {} },
-      on: (e: string, cb: (code: number) => void) => {
-        if (e === "close") setTimeout(() => cb(0), 0);
-      },
-      kill: () => {},
-    }));
+    readTurnMock.mockResolvedValue(null);
     const res = await POST(post({ message: "Hey" }, "application/json"));
-    expect(openTurnMock).not.toHaveBeenCalled();
+    expect(openTurnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).not.toHaveBeenCalled();
     expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toMatchObject({ text: "ok", harness: "hermes" });
   });
 });
 

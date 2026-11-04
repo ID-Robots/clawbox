@@ -439,11 +439,18 @@ export class HermesAdapter implements HarnessAdapter {
   }
 
   async sendTurn(req: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResult> {
-    // Ask to be streamed to only when both halves are true: this box can do it
-    // (`capabilities.streamsTurns`, probed) AND the caller is listening. The
-    // route honours the header when it can and answers with ordinary JSON when
-    // it cannot, so asking is never a commitment — see `readStreamedTurn`.
-    const streaming = this.capabilities.streamsTurns && typeof onEvent === "function";
+    // Ask to be streamed to whenever the caller is listening. The route honours
+    // the header when it can and answers with ordinary JSON when it cannot, so
+    // asking is never a commitment — see `readStreamedTurn`.
+    //
+    // It used to be asked only while `capabilities.streamsTurns` said yes, and
+    // that fact is read on page load and on a provider change and then kept: a
+    // read that landed while the dashboard was restarting (an update, a reboot)
+    // kept this page from streaming for the rest of its life, after the
+    // dashboard was long back (TASK-2152). The route tries the dashboard for
+    // every text turn anyway, so the probe can only ever have downgraded a turn
+    // that would stream to one that arrives whole.
+    const streaming = typeof onEvent === "function";
     const ctx = this.context();
     // Captured NOW: the owner may be in another tab by the time the reply
     // lands, and the session id it reports belongs to the conversation that

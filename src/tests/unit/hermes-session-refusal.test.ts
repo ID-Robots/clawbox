@@ -5,9 +5,10 @@ vi.mock("@/lib/hermes-dashboard-auth", () => ({ dashboardWsTicket: vi.fn() }));
 import { withoutErrorPrefix } from "@/lib/hermes-cli-message";
 import {
   cliRefusedSession,
+  dashboardStartedSession,
   DASHBOARD_READY_BUDGET_MS,
   SESSION_REFUSED_MESSAGE,
-  SESSION_REFUSED_NO_DASHBOARD_MESSAGE,
+  SESSION_REFUSED_PICTURE_MESSAGE,
   waitForDashboard,
 } from "@/lib/hermes-session-refusal";
 
@@ -53,14 +54,27 @@ describe("cliRefusedSession", () => {
   });
 
   it("tells the owner what to do, not the code", () => {
-    for (const sentence of [SESSION_REFUSED_MESSAGE, SESSION_REFUSED_NO_DASHBOARD_MESSAGE]) {
+    for (const sentence of [SESSION_REFUSED_MESSAGE, SESSION_REFUSED_PICTURE_MESSAGE]) {
       expect(sentence).not.toContain("permission_denied");
       expect(sentence).not.toMatch(/^Error:/);
     }
     expect(SESSION_REFUSED_MESSAGE).toMatch(/send your message again/i);
     // Where no retry exists, sending again is refused the same way.
-    expect(SESSION_REFUSED_NO_DASHBOARD_MESSAGE).not.toMatch(/again/i);
-    expect(SESSION_REFUSED_NO_DASHBOARD_MESSAGE).toMatch(/new chat/i);
+    expect(SESSION_REFUSED_PICTURE_MESSAGE).not.toMatch(/again/i);
+    expect(SESSION_REFUSED_PICTURE_MESSAGE).toMatch(/new chat/i);
+    // A text turn is never told it was a picture (TASK-2152): only the picture
+    // sentence mentions one.
+    expect(SESSION_REFUSED_PICTURE_MESSAGE).toMatch(/picture/i);
+    expect(SESSION_REFUSED_MESSAGE).not.toMatch(/picture/i);
+  });
+});
+
+describe("dashboardStartedSession", () => {
+  it("knows the dashboard's ids from the CLI's", () => {
+    expect(dashboardStartedSession("20261104_090334_5e1f0a")).toBe(true);
+    expect(dashboardStartedSession(`local-${"a".repeat(64)}`)).toBe(false);
+    expect(dashboardStartedSession("")).toBe(false);
+    expect(dashboardStartedSession("20261104_090334_5e1f0a --global")).toBe(false);
   });
 });
 
@@ -109,6 +123,17 @@ describe("waitForDashboard", () => {
     await expect(waitForDashboard({ probe, now: c.now, sleep: c.sleep, pollMs: 1_000 })).resolves.toBe(true);
     expect(probe).toHaveBeenCalledTimes(3);
     expect(c.slept).toEqual([1_000, 1_000]);
+  });
+
+  it("reads a probe that throws, even synchronously, as not ready", async () => {
+    const c = clock();
+    const probe = vi.fn()
+      .mockImplementationOnce(() => {
+        throw new Error("no such export on a mocked module");
+      })
+      .mockResolvedValueOnce("a-ticket");
+    await expect(waitForDashboard({ probe, now: c.now, sleep: c.sleep, pollMs: 1_000 })).resolves.toBe(true);
+    expect(probe).toHaveBeenCalledTimes(2);
   });
 
   it("gives up when the budget is spent, never sleeping past it", async () => {
