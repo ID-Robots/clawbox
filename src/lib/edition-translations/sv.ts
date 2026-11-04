@@ -1478,6 +1478,8 @@ export const sv: Record<string, string> = {
   "localModels.install.diskNeed": "{need} att ladda ner",
   "localModels.install.diskShort": "Inte tillräckligt med plats: kräver {need}, bara {free} ledigt.",
   "localModels.install.refusal.busy": "Något annat laddas redan ner just nu.",
+  "localModels.install.refusal.removing": "Det tas bort just nu. Försök igen om en stund.",
+  "localModels.uninstall.switchChatFirst": "Byt först chatten till en annan modell",
   "localModels.install.refusal.notInstalled": "Den delen är inte installerad på den här lådan än.",
   "localModels.install.refusal.noDownloader": "Nedladdaren finns inte på den här lådan än. Installera den lokala modellen först.",
   "localModels.install.refusal.alreadyHere": "Det finns redan på den här lådan.",

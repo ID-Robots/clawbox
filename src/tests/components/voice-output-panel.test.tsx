@@ -758,7 +758,7 @@ describe("channel voice notes", () => {
       steps: [{ id: "install", label: "Install Kokoro and register the voice", state: "running", weight: 1 }],
       status: "  Installing Kokoro TTS...", completed: null, total: null, startedAt: 1, updatedAt: 2, stepStartedAt: 1,
       finishedAt: null, error: null, result: null, log: [], logCount: 0, runner: "r", dismissed: false,
-      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, percent: null, etaSeconds: null,
+      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, label: "Kokoro", lanes: [], needs: null, queuedAt: null, queuedBehind: null, percent: null, etaSeconds: null,
     };
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {

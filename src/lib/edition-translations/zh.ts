@@ -1492,6 +1492,8 @@ export const zh: Record<string, string> = {
   "localModels.install.diskNeed": "下载 {need}",
   "localModels.install.diskShort": "空间不足：需要 {need}，只剩 {free}。",
   "localModels.install.refusal.busy": "现在已经在下载别的东西了。",
+  "localModels.install.refusal.removing": "正在移除，请稍后再试。",
+  "localModels.uninstall.switchChatFirst": "请先将聊天切换到其他模型",
   "localModels.install.refusal.notInstalled": "这一部分还没有安装到这台盒子上。",
   "localModels.install.refusal.noDownloader": "下载工具还不在这台盒子上。请先安装本地模型。",
   "localModels.install.refusal.alreadyHere": "它已经在这台盒子上了。",

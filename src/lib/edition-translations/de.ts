@@ -1481,6 +1481,8 @@ export const de: Record<string, string> = {
   "localModels.install.diskNeed": "{need} Download",
   "localModels.install.diskShort": "Nicht genug Platz: benötigt {need}, nur {free} frei.",
   "localModels.install.refusal.busy": "Gerade wird schon etwas anderes heruntergeladen.",
+  "localModels.install.refusal.removing": "Das wird gerade entfernt. Versuchen Sie es gleich noch einmal.",
+  "localModels.uninstall.switchChatFirst": "Stellen Sie den Chat zuerst auf ein anderes Modell um",
   "localModels.install.refusal.notInstalled": "Dieser Teil ist auf dieser Box noch nicht installiert.",
   "localModels.install.refusal.noDownloader": "Das Download-Werkzeug ist noch nicht auf dieser Box. Installieren Sie zuerst das lokale Modell.",
   "localModels.install.refusal.alreadyHere": "Das ist bereits auf dieser Box.",

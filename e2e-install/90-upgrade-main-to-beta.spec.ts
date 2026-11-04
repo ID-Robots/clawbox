@@ -49,6 +49,63 @@ const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
  */
 const REBUILD_DOWNTIME_POLLS = 420;
 
+/**
+ * How long no OpenClaw process may have run before the main baseline archives
+ * the PR head's OpenClaw home. The catalogue warm-up (bootWarmup in
+ * src/app/setup-api/ai-models/catalog/route.ts) starts its CLI calls at 5, 10,
+ * 20 and 30 s; the widest gap is 10 s. So a longer quiet window means the
+ * warm-up is over, not paused between two forks. The second constant bounds
+ * the whole wait: what is left of the warm-up plus one quiet window.
+ */
+const OPENCLAW_QUIET_MS = 15_000;
+const OPENCLAW_QUIET_TIMEOUT_MS = 2 * 60_000;
+
+/** `pid args` of every OpenClaw process in the container: the CLI, the gateway, a script run on its store. */
+async function openclawProcesses(): Promise<string[]> {
+  const out = await dockerExec(["ps", "-eo", "pid=,args="], { user: "root" });
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    // `openclaw` as a command word or a path segment. `.openclaw` is a path
+    // into its home, which is not OpenClaw running.
+    .filter((line) => /(^|[\s/])openclaw([\s/.:_-]|$)/.test(line.replace(/^\d+\s+/, "")));
+}
+
+/**
+ * Stop every OpenClaw process of the PR head, and return once none has started
+ * for OPENCLAW_QUIET_MS.
+ *
+ * Killed, not waited out: `openclaw` is a launcher that re-spawns the real CLI
+ * as a detached grandchild, and that one can stay up for minutes after its
+ * answer (route.ts, fetchOpenclawCatalogOnce). Killing them is safe here. The
+ * gateway is already stopped, and the home they hold is archived and never
+ * read again. A catalogue fork killed before it answers counts as a failed
+ * refresh, which backs off rather than forking again.
+ */
+async function quiesceOpenclaw(): Promise<void> {
+  const deadline = Date.now() + OPENCLAW_QUIET_TIMEOUT_MS;
+  let quietSince: number | null = null;
+  let running: string[] = [];
+  while (Date.now() < deadline) {
+    running = await openclawProcesses();
+    if (running.length > 0) {
+      quietSince = null;
+      const pids = running.map((line) => line.split(/\s+/)[0]).join(" ");
+      // One may have exited since `ps` listed it.
+      await dockerExec(["bash", "-c", `kill -KILL ${pids} 2>/dev/null || true`], { user: "root" });
+    } else if (quietSince === null) {
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= OPENCLAW_QUIET_MS) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(
+    `OpenClaw kept starting for ${OPENCLAW_QUIET_TIMEOUT_MS / 1000}s after the gateway stopped, ` +
+      `so the main baseline cannot archive its home: ${running.join(" | ") || "(none at the last look)"}`,
+  );
+}
+
 test.describe.configure({ mode: "serial" });
 
 test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
@@ -65,9 +122,17 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     // clean historical baseline. Archive the future OpenClaw home while
     // leaving ClawBox's data/config.json (the setup state this test promises to
     // preserve) untouched, then let main create the store shape it understands.
+    await dockerExec(["bash", "-lc", "systemctl stop clawbox-gateway.service || true"], { user: "root" });
+    // The archive only holds if no OpenClaw of the PR head runs after it: any
+    // CLI call writes a fresh state database on its own (newer) schema into the
+    // empty home, and main's updater then refuses to install over it before
+    // step 1. The wizard that just ran leaves such calls behind. Its AI step
+    // opens the model catalogue, whose warm-up runs `openclaw models list` for
+    // each provider it enumerates through the CLI, 5 s apart, for about 30 s.
+    await quiesceOpenclaw();
     await dockerExec([
       "bash", "-lc",
-      "set -e; systemctl stop clawbox-gateway.service || true; " +
+      "set -e; " +
       "test ! -e /home/clawbox/.openclaw-e2e-future; " +
       "if [ -e /home/clawbox/.openclaw ]; then mv /home/clawbox/.openclaw /home/clawbox/.openclaw-e2e-future; fi; " +
       "install -d -o clawbox -g clawbox -m 700 /home/clawbox/.openclaw",

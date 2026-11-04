@@ -172,3 +172,31 @@ describe("fetchBackgroundTasks", () => {
     ]);
   });
 });
+
+describe("a queued task is a live one (TASK-2128)", () => {
+  const view = (state: string, over: Record<string, unknown> = {}) => ({
+    state, cancellable: false, cancelRequested: false, dismissed: false, finishedAt: null, updatedAt: 0, ...over,
+  }) as unknown as import("@/lib/background-task-client").BackgroundTaskView;
+
+  it("counts as live, is always cancellable, and is drawn on the corner card", async () => {
+    const { canCancelBackgroundTask, isLiveTask, visibleBackgroundTasks } = await import("@/lib/background-task-client");
+    expect(isLiveTask(view("queued"))).toBe(true);
+    expect(isLiveTask(view("running"))).toBe(true);
+    expect(isLiveTask(view("cancelled"))).toBe(false);
+    // Nothing of it has started, so it can always be dropped.
+    expect(canCancelBackgroundTask(view("queued"))).toBe(true);
+    expect(canCancelBackgroundTask(view("running"))).toBe(false);
+    expect(visibleBackgroundTasks([view("queued", { dismissed: true })], Date.now())).toHaveLength(1);
+  });
+
+  it("is found again by a reopened panel, like a running one", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      tasks: [
+        { id: "done", kind: "voice-kokoro-install", state: "succeeded" },
+        { id: "waiting", kind: "voice-kokoro-install", state: "queued" },
+      ],
+    }), { status: 200 })));
+    const { findRunningBackgroundTask } = await import("@/lib/background-task-client");
+    expect((await findRunningBackgroundTask(["voice-kokoro-install"]))?.id).toBe("waiting");
+  });
+});

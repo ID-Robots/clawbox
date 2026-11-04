@@ -208,3 +208,24 @@ describe("an unanswered systemd is not an ending", () => {
     expect(result.error).toContain("could not be asked");
   });
 });
+
+describe("followRootStep never makes the root step's plumbing the headline (TASK-2128)", () => {
+  it("shows the last line that says what the step is doing, and logs su's and PAM's lines", async () => {
+    const { followRootStep } = await import("@/lib/root-step-follow");
+    states = [ACTIVE, DONE];
+    invocation = RUN_A;
+    journal = [
+      "  Installing faster-whisper...",
+      "(to clawbox) root on none",
+      "pam_unix(su-l:session): session opened for user clawbox(uid=1000) by (uid=0)",
+      "pam_unix(su-l:session): session closed for user clawbox",
+    ].join("\n");
+    const onStatus = vi.fn();
+    const onLog = vi.fn();
+    const result = await run(followRootStep("voice_whisper_install", { timeoutMs: 60_000, label: "the speech install", onStatus, onLog }));
+
+    expect(result.ok).toBe(true);
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["Installing faster-whisper..."]);
+    expect(onLog).toHaveBeenCalledWith("pam_unix(su-l:session): session closed for user clawbox");
+  });
+});

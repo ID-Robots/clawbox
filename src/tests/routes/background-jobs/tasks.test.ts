@@ -177,6 +177,57 @@ describe("POST /setup-api/background-jobs/tasks (cancel)", () => {
   });
 });
 
+describe("a queued task through the tasks route (TASK-2128)", () => {
+  function startInLane(kind: string, gate = deferred()) {
+    const started = startBackgroundTask({
+      kind,
+      title: `Installing ${kind}`,
+      label: kind,
+      lanes: ["system"],
+      async run() {
+        await gate.promise;
+        return { status: "Installed." };
+      },
+    });
+    if (!started.started) throw new Error("not accepted");
+    return { id: started.task.id, gate, queued: started.queued };
+  }
+
+  it("lists it as queued, refuses to dismiss it, and drops it on Cancel even though its work could not be stopped running", async () => {
+    const first = startInLane("kokoro");
+    const second = startInLane("whisper");
+    expect(second.queued).toBe(true);
+    const list = await (await GET(new Request("http://box/setup-api/background-jobs/tasks"))).json();
+    expect(list.tasks.find((t: { id: string }) => t.id === second.id)).toMatchObject({
+      state: "queued",
+      queuedBehind: { id: first.id, label: "kokoro" },
+    });
+
+    const dismiss = await POST(sameOrigin({ id: second.id, action: "dismiss" }));
+    expect(dismiss.status).toBe(409);
+    const cancel = await POST(sameOrigin({ id: second.id, action: "cancel" }));
+    expect(cancel.status).toBe(200);
+    expect((await cancel.json()).task.state).toBe("cancelled");
+    first.gate.resolve();
+  });
+
+  it("follows a queued task to its start and its verdict", async () => {
+    const first = startInLane("kokoro");
+    const second = startInLane("whisper");
+    const res = await followGET(new Request(`http://box/setup-api/background-jobs/tasks/follow?id=${second.id}`));
+    first.gate.resolve();
+    await vi.waitFor(async () => {
+      const one = await (await GET(new Request(`http://box/setup-api/background-jobs/tasks?id=${second.id}`))).json();
+      expect(one.task.state).toBe("running");
+    });
+    second.gate.resolve();
+    const lines = (await res.text()).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines[0]).toMatchObject({ taskId: second.id, queued: true, behind: { kind: "kokoro", label: "kokoro" } });
+    expect(lines.some((l) => l.queued === false)).toBe(true);
+    expect(lines.at(-1)).toMatchObject({ success: true, status: "Installed." });
+  });
+});
+
 describe("GET /setup-api/background-jobs/tasks/follow", () => {
   it("re-attaches to a running task as the install routes' NDJSON, to its verdict", async () => {
     const { id, gate } = startDemo();

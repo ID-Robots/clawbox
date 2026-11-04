@@ -22,8 +22,10 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * GET ?id=<id>     one task, with its whole log ring
  * POST {id, action: "dismiss"}   hide an ENDED task's card (a person's browser, same origin)
  * POST {id, action: "cancel"}    stop a RUNNING task whose work can stop safely
- *                                 (`cancellable`); it ends `cancelled`. 409
- *                                 `not_running` / `not_cancellable` otherwise.
+ *                                 (`cancellable`), or drop a QUEUED one (always:
+ *                                 nothing of it has started); it ends
+ *                                 `cancelled`. 409 `not_running` /
+ *                                 `not_cancellable` otherwise.
  *
  * Both writes are a person's: the agent holds the MCP bearer the middleware
  * also admits here, and stopping (or hiding) the owner's install is not its

@@ -115,17 +115,24 @@ export async function checkInstallDisks(parts: readonly InstallPart[]): Promise<
  * this exact condition.
  */
 export function diskRefusal(verdict: DiskVerdict): NextResponse {
-  return NextResponse.json(
-    {
-      error: "There is not enough room on this box for that download.",
-      code: "disk_full",
-      requiredBytes: verdict.requiredBytes,
-      freeBytes: verdict.freeBytes,
-      reserveBytes: verdict.reserveBytes,
-      shortfallBytes: verdict.shortfallBytes,
-    },
-    { status: 507 },
-  );
+  return NextResponse.json({ error: DISK_FULL_MESSAGE, ...diskFullPayload(verdict) }, { status: 507 });
+}
+
+export const DISK_FULL_MESSAGE = "There is not enough room on this box for that download.";
+
+/**
+ * The refusal's code and figures without the response: what an install that
+ * waited its turn in the queue and THEN found the disk short closes its task
+ * with, so its row says the same sentence a click refused up front gets.
+ */
+export function diskFullPayload(verdict: DiskVerdict): Record<string, unknown> {
+  return {
+    code: "disk_full",
+    requiredBytes: verdict.requiredBytes,
+    freeBytes: verdict.freeBytes,
+    reserveBytes: verdict.reserveBytes,
+    shortfallBytes: verdict.shortfallBytes,
+  };
 }
 
 /**
