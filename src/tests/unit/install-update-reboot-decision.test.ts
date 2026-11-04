@@ -290,6 +290,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     apChanged?: 0 | 1 | 2;
     hermes?: boolean;
     hermesOut?: string;
+    /** A relay file an earlier run left behind. */
+    staleRelay?: string;
   }
 
   function run(box: Box): { status: number | null; events: string[]; out: string; relay: string } {
@@ -297,6 +299,10 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     const state = path.join(tmp, "state");
     const relay = path.join(tmp, "run", "clawbox", "update-restart-warnings");
     fs.mkdirSync(state, { recursive: true });
+    if (box.staleRelay) {
+      fs.mkdirSync(path.dirname(relay), { recursive: true });
+      fs.writeFileSync(relay, box.staleRelay);
+    }
     for (const u of box.active) fs.writeFileSync(path.join(state, `${u}.inv`), "inv-boot");
     const types = Object.entries(box.types ?? {}).map(([u, t]) => `${u}) echo ${t} ;;`).join(" ");
     const failing = (box.failing ?? []).join(" ");
@@ -404,6 +410,15 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     expect(r.relay).toMatch(/^CLAWBOX-WARN\[service-not-restarted\]: clawbox-vnc\.service/m);
     // The dashboard comes back whatever happened to the rest.
     expect(restartCalls(r.events).at(-1)).toBe("systemctl restart clawbox-setup.service");
+  });
+
+  it("drops the warnings an earlier run left behind, so post_update states only this run's", () => {
+    const stale = "CLAWBOX-WARN[service-not-restarted]: clawbox-tunnel.service did not come back\n";
+    expect(run({ active: BOX, types: TYPES, staleRelay: stale }).relay).toBe("");
+    fs.rmSync(path.join(tmp, "events"), { force: true });
+    const r = run({ active: BOX, types: TYPES, staleRelay: stale, failing: ["clawbox-vnc.service"] });
+    expect(r.relay).not.toContain("clawbox-tunnel.service");
+    expect(r.relay).toContain("clawbox-vnc.service");
   });
 
   it("restarts the Hermes gateway through Hermes, before clawbox-setup, and keeps its warning", () => {

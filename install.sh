@@ -12941,6 +12941,9 @@ restart_services_after_update() {
   local settle="${ENGINE_SETTLE_S:-3}" unit rc out line state now i
   local -a active=() restart=() before=() warnings=()
   case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
+  # This run's warnings only: an earlier run whose post_update never came (a
+  # refused continuation) must not have its warnings stated as this one's.
+  rm -f "$relay" 2>/dev/null || true
   systemctl daemon-reload \
     || echo "  Warning: systemctl daemon-reload failed — restarting on the unit files systemd already had" >&2
   # The running set BEFORE anything is restarted: a vnc restart takes the
