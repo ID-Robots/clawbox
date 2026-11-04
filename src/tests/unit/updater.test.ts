@@ -3654,6 +3654,20 @@ describe("updater", () => {
       expect(restarts[0]).toBeLessThan(mockMainChatHistory.mock.invocationCallOrder[1]);
     });
 
+    it("lets a gateway that has just started finish before that restart", async () => {
+      // The store failure is answered on the first ask, moments after the
+      // gateway began answering: a restart then lands before its channel
+      // providers have started and waits out the unit's whole stop timeout.
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      await runVerify();
+      const firstAsk = mockMainChatHistory.mock.invocationCallOrder[0];
+      const [restart] = restartsAfterFirstAsk();
+      expect(restart).toBeGreaterThan(firstAsk);
+      expect(
+        mockWaitForGatewayStart.mock.invocationCallOrder.some((order) => order > firstAsk && order < restart),
+      ).toBe(true);
+    });
+
     it("fails the step, in words the owner can act on, when the gateway still answers UNAVAILABLE after that restart", async () => {
       mockMainChatHistory.mockRejectedValue(reclaimFailure());
       const state = await runVerify();

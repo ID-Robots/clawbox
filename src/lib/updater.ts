@@ -3922,6 +3922,10 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
  * and the restart that cleared it in the field was nothing more.
  */
 async function restartGatewayAndWait(): Promise<void> {
+  // The store failure is answered on the first ask, which lands moments after
+  // the gateway began answering — just after it started, before its channel
+  // providers have (see letGatewayFinishStarting).
+  await letGatewayFinishStarting();
   await restartGatewayForRecovery();
   if (hasX64DesktopIntegration(PROJECT_DIR)) {
     if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
