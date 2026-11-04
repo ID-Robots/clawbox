@@ -274,7 +274,7 @@ describe("the keep-alive Stop hook", () => {
     expect(hook(["keepalive", state], STOP)).toBe("");
   });
 
-  it("finds a background process the harness's shell left running, and lets a kept pid go", () => {
+  it("finds a background process the harness's shell left running, and does not let a 'kept' pid go", () => {
     // A stand-in harness: a program whose name is `claude`, which starts a
     // background shell (the way a Bash tool call with run_in_background does)
     // and then runs the Stop hook as its child, the way the harness does.
@@ -302,8 +302,12 @@ setTimeout(() => {
     expect(out.decision).toBe("block");
     expect(out.reason).toMatch(/Processes you started are still running:[\s\S]*sh -c sleep 30/);
     fs.rmSync(path.join(jobs, "stop-blocks.json"), { force: true });
+    // A pid written to the old keep list is still a job that has not finished:
+    // a model that was offered the list put its test job there and stopped.
     const kept = spawnSync(harness, ["keep"], { encoding: "utf-8", timeout: 20_000 });
-    expect(kept.stdout).toBe("");
+    expect(blockOf(kept.stdout).decision).toBe("block");
+    expect(blockOf(kept.stdout).reason).toMatch(/only once it listens on a TCP port/);
+    expect(blockOf(kept.stdout).reason).not.toMatch(/\.run-jobs\/keep/);
   });
 
   it("is not the run's stop when a sub-agent stops", () => {

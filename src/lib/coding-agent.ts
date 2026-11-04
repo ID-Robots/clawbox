@@ -6432,7 +6432,7 @@ const LEAN_BRIEF_HEAD = [
   // follows when it finishes" and were never woken: `claude -p` exits when
   // the model stops. The Stop hook (scripts/coding-run-hook.mjs keepalive)
   // now refuses that stop; this line is the same rule said up front.
-  "Never end your turn while work you started is still running (a test, a build, a board job, an update): once you stop, this run exits and nothing wakes you again. Wait for it in this turn by polling with sleep, a few minutes per step, and finish with its result. For a long job, write $CLAWBOX_RUN_ARTIFACTS_DIR/.run-jobs/<name>.json with {\"name\":\"…\",\"pid\":<pid>} and delete it when the job is done; a process you deliberately leave running for the owner (a server) goes on its own line, as its pid, in $CLAWBOX_RUN_ARTIFACTS_DIR/.run-jobs/keep.",
+  "Never end your turn while work you started is still running (a test, a build, a board job, an update): once you stop, this run exits and nothing wakes you again. Wait for it in this turn by polling with sleep, a few minutes per step, and finish with its result. For a long job, write $CLAWBOX_RUN_ARTIFACTS_DIR/.run-jobs/<name>.json with {\"name\":\"…\",\"pid\":<pid>} and delete it when the job is done; only a server you leave running for the owner may outlive you, and only once it listens on a TCP port.",
   // The old "one command per call, chaining is refused" was false since runs
   // got `Bash(*)` (see buildRunArgs); the one enforced rule is the
   // kill-by-name list (BASH_KILL_DENYLIST).
