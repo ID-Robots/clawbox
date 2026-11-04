@@ -24,8 +24,9 @@
  *   `chat.history` answers UNAVAILABLE, `retryable`, while its session rows are
  *   initializing, its history is rebuilding (as after a core upgrade) or busy
  *   (`respondChatHistoryUnavailable` in 2026.10.9). It is asked again; only one
- *   that lasts the whole window earns the restart, and one still there after
- *   the restart is a warning, not a failed update;
+ *   that lasts a whole window from its first answer earns the restart, and a
+ *   restarted gateway that is still "not yet", or still starting, without ever
+ *   naming the store failure is a warning, not a failed update;
  * - anything else — no token this server can use, a gateway still starting
  *   for the whole window, a different refusal — is not that failure, and the
  *   step goes on exactly as it did before this check existed. A check that
@@ -170,6 +171,15 @@ export class GatewaySessionsUnavailableError extends Error {
  * Ask until `settles` says the answer is the one wanted or the window is spent,
  * and answer the last ask. Always asks once, also on a spent window; never asks
  * again when asking again cannot help.
+ *
+ * A "not yet" (`unavailable`) is timed on its own clock, from its first answer:
+ * the window it must outlast is `windowMs` of "not yet", not of asking. So a
+ * gateway that refused connects for most of the window ("gateway starting")
+ * and first says "rebuilding" on the last ask is asked on, not handed back as
+ * a whole window of "not yet"; and a window of "not yet" whose last ask
+ * happened to time out is still that "not yet". All asking ends by twice the
+ * window. Returns the last answer — or, when that last ask went unanswered
+ * after a "not yet", the last "not yet".
  */
 async function askWithin(
   deps: SessionCheckDeps,
@@ -182,20 +192,38 @@ async function askWithin(
   // one ask — failing a healthy update — or stretch it by hours.
   const now = deps.now ?? monotonicNow;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const deadline = now() + (Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0);
+  const window = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0;
+  const started = now();
   const interval = Number.isFinite(deps.intervalMs) ? Math.max(MIN_INTERVAL_MS, deps.intervalMs) : MIN_INTERVAL_MS;
+  let notYet: Extract<SessionProbe, { kind: "unavailable" }> | null = null;
+  let notYetSince = 0;
   for (;;) {
     const answer = await deps.probe();
     if (settles(answer) || (answer.kind === "unreachable" && answer.final)) return answer;
-    const left = deadline - now();
-    if (left <= 0) return answer;
+    const at = now();
+    if (answer.kind === "unavailable") {
+      if (!notYet) notYetSince = at;
+      notYet = answer;
+    }
+    // A "not yet" seen in this window has its own deadline, capped at twice
+    // the window; without one, the window is the deadline.
+    const deadline = notYet ? Math.min(notYetSince + window, started + 2 * window) : started + window;
+    const left = deadline - at;
+    // The latest answer, unless it is an ask that went unanswered after a
+    // "not yet": one dropped ask does not turn that into "no answer".
+    if (left <= 0) return answer.kind === "unreachable" && notYet ? notYet : answer;
     await sleep(Math.min(interval, left));
   }
 }
 
-function stillUnavailableMessage(before: string, after: Extract<SessionProbe, { kind: "store-failure" | "unreachable" }>): string {
-  const now = after.kind === "unreachable" ? `it does not answer (${after.detail})` : `it still answers ${after.detail}`;
-  return `The OpenClaw gateway is running but cannot open chat sessions (${before}), `
+function stillUnavailableMessage(
+  before: Extract<SessionProbe, { kind: "store-failure" | "unavailable" }>,
+  after: Extract<SessionProbe, { kind: "store-failure" | "unreachable" }>,
+): string {
+  const now = after.kind === "unreachable"
+    ? `it does not answer (${after.detail})`
+    : `it ${before.kind === "store-failure" ? "still " : ""}answers ${after.detail}`;
+  return `The OpenClaw gateway is running but cannot open chat sessions (${before.detail}), `
     + `and restarting it once did not fix that: ${now}. The chat will not answer until it can. `
     + "Restart the device; if the chat is still silent, retry the update or contact support with this message.";
 }
@@ -203,8 +231,9 @@ function stillUnavailableMessage(before: string, after: Extract<SessionProbe, { 
 /**
  * Prove the gateway serves chat sessions, restarting it once if it answers
  * that it cannot. Throws {@link GatewaySessionsUnavailableError} when the store
- * failure (or no answer at all) is still there after that restart, and
- * whatever `restart` throws when it does not come back at all.
+ * failure is named after that restart, or was named before it and the
+ * restarted gateway has not answered since; and whatever `restart` throws when
+ * it does not come back at all.
  */
 export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<SessionCheckOutcome> {
   const log = deps.log ?? ((line: string) => console.log(line));
@@ -242,14 +271,16 @@ export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<Ses
       log("the restarted gateway serves chat sessions again");
       return { verdict: "serving", restarted: true };
     }
-    if (after.kind === "refused" || after.kind === "unavailable") {
-      // Not the store failure any more: the core's own retryable "not yet", or
-      // a different answer. Not a failed update over a state that clears.
-      log(`the restarted gateway no longer names the store failure (${after.detail}); carrying on`);
-      return { verdict: "unconfirmed", detail: after.detail, restarted: true, answer: after };
+    // A failed update needs the store failure in the evidence: named now, or
+    // named before the restart and the restarted gateway never answering since.
+    // A restart earned by "not yet" alone, over a gateway still starting or
+    // rebuilding at the end, is a slow box — warned about, not failed.
+    if (after.kind === "store-failure" || (after.kind === "unreachable" && first.kind === "store-failure")) {
+      log(`the restarted gateway still cannot serve chat sessions (${after.detail})`);
+      throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first, after));
     }
-    log(`the restarted gateway still cannot serve chat sessions (${after.detail})`);
-    throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first.detail, after));
+    log(`the restarted gateway does not name the store failure (${after.detail}); carrying on`);
+    return { verdict: "unconfirmed", detail: after.detail, restarted: true, answer: after };
   } finally {
     deps.onDetail?.(undefined);
   }

@@ -3632,6 +3632,21 @@ describe("updater", () => {
       expect(state.warnings ?? []).toEqual([]);
     });
 
+    it("never fails the update over a restart earned by 'not yet' alone — a slow box gets a warning", async () => {
+      // The core's "not yet" for the whole (1 ms) window earns the restart; the
+      // restarted gateway is still starting when its window ends. The store
+      // failure was never named, so this is a slow box, not a dead chat.
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("gateway starting; retry shortly"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("gateway starting; retry shortly");
+    });
+
     it("keeps the degraded-agents warning when the session check fails the step", async () => {
       mockReadMigrationStatus.mockResolvedValue({
         state: "degraded",
