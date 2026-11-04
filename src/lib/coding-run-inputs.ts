@@ -40,13 +40,29 @@
  * `~/.ssh/id_ed25519` would have had the box stage its own private key into a
  * folder every run can read.
  *
+ * THE OWNER'S OWN FILES are a second, narrower gate (`isOwnerFile`): a file
+ * the Files app shows — under the browse root, no hidden folder or dotfile on
+ * the way, nothing `isProtectedFilePath` refuses — or a file in one of the
+ * assistant's own workspaces (the Files app's one carve-out inside
+ * `~/.openclaw`). Without it a mockup the assistant made in its workspace, or a
+ * PDF in `~/Documents`, was refused as `outside_roots` and the assistant had to
+ * copy it into the run's worktree by hand. A credential still never qualifies:
+ * every store is a hidden folder or refused by the guard, and the guard runs on
+ * the REAL path.
+ *
  * SERVER ONLY (fs, and the absolute paths of the box's own directories).
  */
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
-import { CODING_AGENT_INPUTS_SUBTREE } from "@/lib/file-guard";
+import {
+  CODING_AGENT_INPUTS_SUBTREE,
+  filesBrowseRoot,
+  isInside,
+  isOpenclawWorkspacePath,
+  isProtectedFilePath,
+} from "@/lib/file-guard";
 
 /** How many files one run may be handed. A task with more is a folder, not inputs. */
 export const MAX_RUN_INPUTS = 20;
@@ -84,7 +100,7 @@ export interface RunInputFile {
  * what is on disk rather than trust it.
  *
  *   not_absolute  — not an absolute path; a run's inputs are named by where they are
- *   outside_roots — outside every location this box will copy from (`inputSourceRoots`)
+ *   outside_roots — outside every location this box will copy from (`inputSourceRoots`, `isOwnerFile`)
  *   not_a_file    — not there, not a regular file, or a symlink (which may lead anywhere)
  *   too_large     — bigger than MAX_INPUT_BYTES
  *   too_many      — MAX_RUN_INPUTS already staged for this run
@@ -176,6 +192,33 @@ export function runInputsDir(runId: string): string {
  */
 export function inputSourceRoots(): string[] {
   return [...assistantMediaRoots(), inputsRoot()];
+}
+
+/** A secret-looking file name, refused even where the Files app would show it. */
+const SECRET_NAME_RE = /(^|[._-])(secrets?|credentials?|tokens?|passwords?|passwd|apikey|api[._-]key)([._-]|$)|\.(pem|key|p12|pfx|kdbx)$|^id_(rsa|ed25519|ecdsa|dsa)/i;
+
+/**
+ * Is `real` (an already-resolved path) one of the owner's own files the box may
+ * hand a run? See the header: the Files app's view of the home, minus anything
+ * hidden, anything the secret guard refuses and anything named like a secret.
+ */
+export function isOwnerFile(real: string): boolean {
+  if (SECRET_NAME_RE.test(path.basename(real))) return false;
+  if (isProtectedFilePath(real)) return false;
+  if (isOpenclawWorkspacePath(real)) {
+    // Inside a workspace: still no hidden segment below the workspace folder.
+    const segs = real.split(path.sep);
+    const at = segs.lastIndexOf(".openclaw");
+    return !segs.slice(at + 2).some((seg) => seg.startsWith("."));
+  }
+  let home: string;
+  try {
+    home = fs.realpathSync(filesBrowseRoot());
+  } catch {
+    return false;
+  }
+  if (real === home || !isInside(real, home)) return false;
+  return !path.relative(home, real).split(path.sep).some((seg) => seg.startsWith("."));
 }
 
 /** The inputs tree, and the shared folder inside it. Best effort by design:
@@ -277,7 +320,7 @@ export async function stageRunInputs(runId: string, paths: readonly string[]): P
       refused.push({ path: named, code: "not_a_file" });
       continue;
     }
-    if (!roots.some((root) => real === root || real.startsWith(root + path.sep))) {
+    if (!roots.some((root) => real === root || real.startsWith(root + path.sep)) && !isOwnerFile(real)) {
       refused.push({ path: named, code: "outside_roots" });
       continue;
     }

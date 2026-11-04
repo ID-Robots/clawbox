@@ -262,6 +262,17 @@ describe("coding_agent_run", () => {
     expect(out.error.next).toMatch(/coding_agent_status/);
   });
 
+  it("names the run that holds the folder when the route says which one", async () => {
+    apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({
+      error: "Another coding run (run-abc12345) is already working in that folder.", kind: "busy",
+    })));
+    const out = await harness().call("coding_agent_run", { task: "x", project_id: "site" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/run-abc12345/);
+  });
+
   it("points a missing project at code_project_list", async () => {
     apiPost.mockRejectedValue(new ApiError(404, JSON.stringify({ error: "no project", kind: "not_found" })));
     const out = await harness().call("coding_agent_run", { task: "x", project_id: "gone" });

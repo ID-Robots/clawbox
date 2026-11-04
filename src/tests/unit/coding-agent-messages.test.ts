@@ -400,10 +400,11 @@ describe("delivery MID-TURN, through the run's inbox hook", () => {
     expect(typeof settled.messages[0].deliveredAt).toBe("number");
     expect(settled.progress.join("\n")).toContain("Message to the run, mid-turn: use tabs, not spaces");
     expect(settled.midTurn).toBe(true);
-    // The spawn had its hook; the inbox went with the run.
+    // The spawn had its hook, and the keep-alive Stop hook that also reads the
+    // inbox; the inbox went with the run.
     const argv = lastArgv();
     const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]) as { hooks: Record<string, unknown> };
-    expect(Object.keys(settings.hooks)).toEqual(["PostToolUse"]);
+    expect(Object.keys(settings.hooks)).toEqual(["PostToolUse", "Stop"]);
     expect(fs.existsSync(path.join(root, "data", "coding-agent-inbox", run.id))).toBe(false);
   });
 

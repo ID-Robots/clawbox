@@ -27,6 +27,28 @@
  *     API — is denied with the reason. The team's orchestrator does the one
  *     final merge; `--disallowedTools` refuses the plain prefixes too, and this
  *     catches the same commands inside `bash -c`, after `&&`, behind `env`.
+ *
+ *   node coding-run-hook.mjs keepalive <state-dir> [<inbox-dir>]
+ *     Stop. A run is `claude -p`: once the model ends its turn the process
+ *     exits and nothing wakes it again, so a run that started a long job in
+ *     the background (a board test matrix, an in-app update, a review
+ *     workflow) and then said "the evidence follows when it finishes" was
+ *     settled half done. This hook refuses that stop (`decision: "block"`)
+ *     while the run still has work of its own going on, and says what:
+ *       - a message waiting in its inbox (handed over in the reason, taken
+ *         the same way the PostToolUse hook takes it);
+ *       - a job the run registered in <state-dir>/.run-jobs/<name>.json
+ *         ({"pid": n} alive, or no pid and younger than JOB_MAX_AGE_MS);
+ *       - a process the run started that is still alive in its own cgroup:
+ *         a background shell the harness keeps, or anything reparented out
+ *         of the harness's tree. Not counted: the harness's own MCP servers
+ *         (its non-shell children), a process that LISTENS on a TCP port (the
+ *         documented "leave a server running" pattern), and any pid listed in
+ *         <state-dir>/.run-jobs/keep (one pid per line).
+ *     Bounded: at most MAX_BLOCKS refusals and MAX_BLOCK_SPAN_MS from the
+ *     first one, counted in <state-dir>/.run-jobs/stop-blocks.json (the box
+ *     reads that file to say a run ended with work still live). A sub-agent's
+ *     stop (`agent_id` in the input) is not the run's.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -68,6 +90,284 @@ function hookInput() {
   }
 }
 
+/** How many times one run's stop may be refused, and for how long after the first refusal. */
+const MAX_BLOCKS = 20;
+const MAX_BLOCK_SPAN_MS = 4 * 60 * 60 * 1000;
+/** A registered job with no pid counts as running for this long after it was written. */
+const JOB_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+const SHELLS = new Set(["bash", "sh", "dash", "zsh"]);
+
+function readText(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** pid → { ppid, state } from /proc/<pid>/stat; null when the process is gone. */
+function procStat(pid) {
+  const raw = readText(`/proc/${pid}/stat`);
+  if (!raw) return null;
+  const close = raw.lastIndexOf(")");
+  const rest = raw.slice(close + 2).split(" ");
+  return { state: rest[0], ppid: Number(rest[1]) };
+}
+
+function procArgv(pid) {
+  const raw = readText(`/proc/${pid}/cmdline`);
+  return raw ? raw.split("\0").filter(Boolean) : [];
+}
+
+function alive(pid) {
+  const st = procStat(pid);
+  return st !== null && st.state !== "Z" && st.state !== "X";
+}
+
+/** This hook's own chain up to init: never counted as the run's work. */
+function ancestors(pid) {
+  const out = new Set();
+  let cur = pid;
+  for (let i = 0; i < 64 && cur > 1 && !out.has(cur); i++) {
+    out.add(cur);
+    const st = procStat(cur);
+    if (!st) break;
+    cur = st.ppid;
+  }
+  return out;
+}
+
+/** The harness: the nearest ancestor whose argv names Claude Code. */
+function harnessPid(chain) {
+  for (const pid of chain) {
+    const argv = procArgv(pid);
+    if (argv.some((a) => /(^|\/)claude(-ds)?$|\/claude\/versions\/|claude-code/.test(a))) return pid;
+  }
+  return null;
+}
+
+/**
+ * The pids in the run's own cgroup (v2): only when this process sits in a
+ * run's transient scope (`clawbox-run-<runId>-….scope`, coding-run-unit.ts).
+ * A run spawned without one shares the web server's cgroup, where "every
+ * process here" would be the server itself — null then, and the caller walks
+ * the harness's descendants instead.
+ */
+function cgroupPids() {
+  const line = (readText("/proc/self/cgroup") || "").split("\n").find((l) => l.startsWith("0::"));
+  if (!line) return null;
+  const rel = line.slice(3).trim();
+  if (!rel || rel === "/" || !/\/clawbox-run-[^/]*\.scope$/.test(rel)) return null;
+  const procs = readText(path.join("/sys/fs/cgroup", rel, "cgroup.procs"));
+  if (procs === null) return null;
+  return procs.split("\n").map(Number).filter((n) => Number.isInteger(n) && n > 1);
+}
+
+/** Every pid on the box with its parent, for the descendant walk when no cgroup can be read. */
+function allPids() {
+  try {
+    return fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n)).map(Number);
+  } catch {
+    return [];
+  }
+}
+
+/** Socket inodes in LISTEN state, from /proc/net/tcp and tcp6 (state 0A). */
+function listeningInodes() {
+  const out = new Set();
+  for (const f of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    const raw = readText(f);
+    if (!raw) continue;
+    for (const row of raw.split("\n").slice(1)) {
+      const cols = row.trim().split(/\s+/);
+      if (cols[3] === "0A" && cols[9]) out.add(cols[9]);
+    }
+  }
+  return out;
+}
+
+function listens(pid, inodes) {
+  if (inodes.size === 0) return false;
+  let fds;
+  try {
+    fds = fs.readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return false;
+  }
+  for (const fd of fds) {
+    let target = "";
+    try {
+      target = fs.readlinkSync(`/proc/${pid}/fd/${fd}`);
+    } catch {
+      continue;
+    }
+    const m = /^socket:\[(\d+)\]$/.exec(target);
+    if (m && inodes.has(m[1])) return true;
+  }
+  return false;
+}
+
+function keptPids(jobsDir) {
+  const raw = readText(path.join(jobsDir, "keep")) || "";
+  return new Set(raw.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 1));
+}
+
+/** A short, single-line description of a process for the model. */
+function describe(pid) {
+  const argv = procArgv(pid).join(" ").replace(/\s+/g, " ").trim();
+  return `pid ${pid}: ${argv.length > 140 ? argv.slice(0, 137) + "..." : argv || "(no command line)"}`;
+}
+
+/**
+ * The run's own processes that are still doing work: everything in its
+ * cgroup (else the harness's descendants) minus this hook's chain, the
+ * harness's non-shell children (its MCP servers) and their trees, servers
+ * that listen on a TCP port, and pids the run said to keep. Answers the
+ * roots only — a background shell, not every child under it.
+ */
+function liveRunProcesses(selfPid, jobsDir) {
+  const chain = ancestors(selfPid);
+  const harness = harnessPid(chain);
+  if (harness === null) return [];
+  const scoped = cgroupPids();
+  const parentOf = new Map();
+  const universe = scoped ?? allPids();
+  for (const pid of universe) {
+    const st = procStat(pid);
+    if (st && st.state !== "Z" && st.state !== "X") parentOf.set(pid, st.ppid);
+  }
+  // Without a cgroup, the run is the harness's descendants only.
+  const inRun = (pid) => {
+    if (scoped) return parentOf.has(pid);
+    let cur = pid;
+    for (let i = 0; i < 64 && cur > 1; i++) {
+      if (cur === harness) return true;
+      cur = parentOf.get(cur) ?? 0;
+    }
+    return false;
+  };
+  const kept = keptPids(jobsDir);
+  const inodes = listeningInodes();
+  // The harness's own helpers: a child of the harness that is not a shell
+  // (MCP servers, the language server) and everything under it.
+  const helperRoots = new Set();
+  for (const [pid, ppid] of parentOf) {
+    if (ppid !== harness || chain.has(pid)) continue;
+    const name = path.basename(procArgv(pid)[0] || "");
+    if (!SHELLS.has(name)) helperRoots.add(pid);
+  }
+  const under = (pid, roots) => {
+    let cur = pid;
+    for (let i = 0; i < 64 && cur > 1; i++) {
+      if (roots.has(cur)) return true;
+      cur = parentOf.get(cur) ?? 0;
+    }
+    return false;
+  };
+  const candidates = [];
+  for (const pid of parentOf.keys()) {
+    if (pid === harness || chain.has(pid) || !inRun(pid)) continue;
+    if (under(pid, helperRoots) || under(pid, kept)) continue;
+    candidates.push(pid);
+  }
+  const candidateSet = new Set(candidates);
+  // A tree that holds a listening socket anywhere is a server the run left on purpose.
+  const serverRoots = new Set();
+  for (const pid of candidates) {
+    if (!listens(pid, inodes)) continue;
+    let root = pid;
+    while (candidateSet.has(parentOf.get(root) ?? 0)) root = parentOf.get(root);
+    serverRoots.add(root);
+  }
+  return candidates
+    .filter((pid) => !candidateSet.has(parentOf.get(pid) ?? 0) && !serverRoots.has(pid))
+    .sort((a, b) => a - b);
+}
+
+/** Jobs the run registered and that still count as running. */
+function liveJobs(jobsDir, now) {
+  let names;
+  try {
+    names = fs.readdirSync(jobsDir).filter((n) => n.endsWith(".json") && n !== "stop-blocks.json");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names) {
+    const file = path.join(jobsDir, name);
+    let job = null;
+    try {
+      job = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    const label = typeof job?.name === "string" && job.name.trim() ? job.name.trim() : name.replace(/\.json$/, "");
+    if (Number.isInteger(job?.pid) && job.pid > 1) {
+      if (alive(job.pid)) out.push(`${label} (pid ${job.pid})`);
+      continue;
+    }
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(file).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (now - mtime < JOB_MAX_AGE_MS) out.push(label);
+  }
+  return out.sort();
+}
+
+function readBlocks(file) {
+  try {
+    const b = JSON.parse(fs.readFileSync(file, "utf8"));
+    return { count: Number(b.count) || 0, first: Number(b.first) || 0, capped: b.capped === true, last: b.last ?? null };
+  } catch {
+    return { count: 0, first: 0, capped: false, last: null };
+  }
+}
+
+function writeBlocks(file, blocks) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(blocks));
+    fs.renameSync(tmp, file);
+  } catch {
+    // The record is best effort; the refusal itself does not depend on it.
+  }
+}
+
+function keepalive(stateDir, inboxDir, input) {
+  if (!stateDir || typeof input.agent_id === "string") return null;
+  const jobsDir = path.join(stateDir, ".run-jobs");
+  const blocksFile = path.join(jobsDir, "stop-blocks.json");
+  const now = Date.now();
+  const messages = inboxDir ? takeInbox(inboxDir) : [];
+  const jobs = liveJobs(jobsDir, now);
+  const procs = liveRunProcesses(process.pid, jobsDir);
+  if (!messages.length && !jobs.length && !procs.length) return null;
+  const blocks = readBlocks(blocksFile);
+  const first = blocks.first || now;
+  if (blocks.count >= MAX_BLOCKS || now - first > MAX_BLOCK_SPAN_MS) {
+    // Out of refusals: let the run stop, and leave the box the fact that it
+    // ended with work still live.
+    writeBlocks(blocksFile, { ...blocks, first, capped: true, last: { at: now, jobs, procs: procs.map(describe) } });
+    return null;
+  }
+  writeBlocks(blocksFile, { count: blocks.count + 1, first, capped: false, last: { at: now, jobs, procs: procs.map(describe) } });
+  const parts = [];
+  if (messages.length) parts.push(`New messages for you arrived:\n\n${messages.join("\n\n")}`);
+  if (jobs.length) parts.push(`Jobs you registered are still running: ${jobs.join(", ")}.`);
+  if (procs.length) parts.push(`Processes you started are still running:\n${procs.map((p) => `- ${describe(p)}`).join("\n")}`);
+  parts.push(
+    "Do not end your turn yet: once you stop, this run exits and nothing wakes you again, so the work above would be left half done. " +
+      "Wait for it in this turn (poll it with sleep in a loop, in steps of a few minutes), read its result and finish with it. " +
+      `If a process is meant to keep running after you finish (a server you leave for the owner), write its pid on its own line to ${path.join(jobsDir, "keep")}; ` +
+      `remove a job file from ${jobsDir} when its job is done.`,
+  );
+  return parts.join("\n\n");
+}
+
 function takeInbox(dir) {
   const pending = path.join(dir, "pending");
   const taken = path.join(dir, "taken");
@@ -106,6 +406,11 @@ function main() {
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: contexts.join("\n\n") },
     }));
+    return;
+  }
+  if (mode === "keepalive") {
+    const reason = keepalive(dir, process.argv[4], input);
+    if (reason) process.stdout.write(JSON.stringify({ decision: "block", reason }));
     return;
   }
   if (mode === "merge-guard") {

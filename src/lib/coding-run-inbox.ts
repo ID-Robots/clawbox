@@ -184,8 +184,15 @@ function shellWord(word: string): string {
  * unmatched pattern stays literal, and `-e` is false for it), `exec` hands the
  * hook's stdin on to the script, and the trailing `:` keeps the exit status 0
  * on the empty path — the hook never fails the tool call it rides on.
+ *
+ * `keepAlive` is the run's evidence folder: with it the run also gets a Stop
+ * hook (`keepalive`) that refuses to let the model end its turn while the
+ * run still has work of its own going on — a message in its inbox, a job it
+ * registered, a background process it started — because a `claude -p` run
+ * that stops is never woken again. Bounded inside the script (MAX_BLOCKS,
+ * MAX_BLOCK_SPAN_MS); see scripts/coding-run-hook.mjs.
  */
-export function runHookSettings(opts: { node: string; script?: string; inbox: string | null; mergeGuard: boolean }): string | null {
+export function runHookSettings(opts: { node: string; script?: string; inbox: string | null; mergeGuard: boolean; keepAlive?: string | null }): string | null {
   const script = opts.script ?? runHookScriptPath();
   const hook = (...args: string[]) => ({ type: "command", command: [opts.node, script, ...args].map(shellWord).join(" "), timeout: 10 });
   const inboxHook = (dir: string) => ({
@@ -196,5 +203,6 @@ export function runHookSettings(opts: { node: string; script?: string; inbox: st
   const hooks: Record<string, unknown[]> = {};
   if (opts.inbox) hooks.PostToolUse = [{ matcher: "*", hooks: [inboxHook(opts.inbox)] }];
   if (opts.mergeGuard) hooks.PreToolUse = [{ matcher: "Bash", hooks: [hook("merge-guard")] }];
+  if (opts.keepAlive) hooks.Stop = [{ hooks: [hook("keepalive", opts.keepAlive, ...(opts.inbox ? [opts.inbox] : []))] }];
   return Object.keys(hooks).length ? JSON.stringify({ hooks }) : null;
 }
