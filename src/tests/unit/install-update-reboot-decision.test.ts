@@ -313,6 +313,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     stuck?: string[];
     /** ENGINE_SETTLE_S (the fake default is 0). */
     settle?: number;
+    /** Units that are active on a NEW invocation at every look: a crash loop. */
+    bouncy?: string[];
   }
 
   function run(box: Box): { status: number | null; events: string[]; out: string; relay: string } {
@@ -334,6 +336,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     const flaky = (box.flaky ?? []).join(" ");
     const slow = (box.slow ?? []).join(" ");
     const stuck = (box.stuck ?? []).join(" ");
+    const bouncy = (box.bouncy ?? []).join(" ");
     const apMarker = path.join(tmp, "run", "clawbox", "update-ap-restart");
     fs.rmSync(apMarker, { force: true });
     const lines = (units: string[], rest: string) =>
@@ -357,6 +360,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       // its second look, as a unit that forked and then exited would.
       "          if [ -f \"$ST/$2.wait\" ]; then rm -f \"$ST/$2.wait\";",
       "          elif [ -f \"$ST/$2.next\" ]; then mv \"$ST/$2.next\" \"$ST/$2.inv\"; fi",
+      `          case " ${bouncy} " in *" $2 "*) [ -f "$ST/$2.restarted" ] && echo "inv-$RANDOM$RANDOM" > "$ST/$2.inv" ;; esac`,
       "          if [ -f \"$ST/$2.flaky\" ]; then echo x >> \"$ST/$2.flaky\"; [ \"$(wc -l < \"$ST/$2.flaky\")\" -ge 2 ] && touch \"$ST/$2.dead\"; fi",
       "          cat \"$ST/$2.inv\" 2>/dev/null || true ;;",
       "      esac ;;",
@@ -373,6 +377,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       `        case " ${slow} " in *" $u "*) echo "inv-$RANDOM$RANDOM" > "$ST/$u.next"; touch "$ST/$u.wait"; continue ;; esac`,
       "        echo \"inv-$RANDOM$RANDOM\" > \"$ST/$u.inv\"",
       `        case " ${flaky} " in *" $u "*) : > "$ST/$u.flaky" ;; esac`,
+      "        touch \"$ST/$u.restarted\"",
       "      done; return $rc ;;",
       "    *) return 0 ;;",
       "  esac",
@@ -500,9 +505,9 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     expect(r.status).toBe(0);
     const warns = r.out.split("\n").filter((l) => l.startsWith("CLAWBOX-WARN[service-not-restarted]"));
     expect(warns).toHaveLength(1);
-    expect(warns[0]).toContain("clawbox-vnc (failed)");
-    expect(warns[0]).toContain("clawbox-tunnel (failed)");
-    expect(warns[0]).not.toContain("clawbox-browser");
+    expect(warns[0]).toContain("vnc (failed)");
+    expect(warns[0]).toContain("tunnel (failed)");
+    expect(warns[0]).not.toContain("browser (");
     expect(r.relay.trim()).toBe(warns[0]);
     // The dashboard comes back whatever happened to the rest.
     expect(calls(r.events, "restart").at(-1)).toBe("systemctl restart clawbox-setup.service");
@@ -520,7 +525,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     // systemd calls a Type=simple unit active the moment it forks.
     const r = run({ active: BOX, types: TYPES, flaky: ["clawbox-vnc.service"] });
     expect(r.out).not.toContain("[ok] clawbox-vnc.service");
-    expect(r.relay).toMatch(/^CLAWBOX-WARN\[service-not-restarted\]: .*clawbox-vnc \(failed\)/m);
+    expect(r.relay).toMatch(/^CLAWBOX-WARN\[service-not-restarted\]: .*: vnc \(failed\)/m);
   });
 
   it("waits, within its bound, for a unit that comes up on a later look (no false failure)", () => {
@@ -540,8 +545,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       looks: 30,
     });
     expect(r.out).not.toContain("[ok] clawbox-websockify.service");
-    expect(r.relay).toContain("clawbox-websockify (failed)");
-    expect(r.relay).toContain("clawbox-tunnel (failed)");
+    expect(r.relay).toContain("websockify (failed)");
+    expect(r.relay).toContain("tunnel (failed)");
   });
 
   it("settle-checks every unit when the bound runs out, and names a restart that never took", () => {
@@ -554,26 +559,33 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       looks: 0,
     });
     expect(r.out).not.toContain("[ok] clawbox-websockify.service");
-    expect(r.relay).toContain("clawbox-websockify (failed)");
+    expect(r.relay).toContain("websockify (failed)");
     // Active on its boot-time invocation is not "running again".
-    expect(r.relay).toContain("clawbox-performance (still the old process)");
+    expect(r.relay).toContain("performance (still the old process)");
     expect(r.relay).not.toContain("(active)");
   });
 
   it("counts the settle in the wait it states", () => {
     const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], looks: 0, settle: 1 });
-    expect(r.relay).toContain("waited 1 s");
+    expect(r.relay).toContain("again 1 s after");
     expect(r.events).toContain("sleep 1");
   });
 
-  it("keeps a five-unit warning under the updater's 300-character cap", () => {
-    const five = ["clawbox-vnc.service", "clawbox-browser.service", "clawbox-websockify.service",
+  it("keeps a six-unit warning under the updater's 300-character cap", () => {
+    const six = ["clawbox-vnc.service", "clawbox-browser.service", "clawbox-websockify.service", "clawbox-tunnel.service",
       "clawbox-hermes-dashboard.service", "clawbox-hermes-dashboard-proxy.service"];
-    const r = run({ active: five, failing: five, looks: 0 });
+    const r = run({ active: six, failing: six, looks: 0 });
     const line = r.relay.split("\n").find((l) => l.startsWith("CLAWBOX-WARN[service-not-restarted]: ")) ?? "";
     const message = line.replace("CLAWBOX-WARN[service-not-restarted]: ", "");
     expect(message.length).toBeLessThanOrEqual(300);
-    for (const u of five) expect(message).toContain(u.replace(/\.service$/, ""));
+    for (const u of six) expect(message).toContain(`${u.replace(/^clawbox-/, "").replace(/\.service$/, "")} (failed)`);
+  });
+
+  it("names a unit that died and came back during the settle as such, never as plain active", () => {
+    const r = run({ active: BOX, types: TYPES, bouncy: ["clawbox-vnc.service"], looks: 0 });
+    expect(r.out).not.toContain("[ok] clawbox-vnc.service");
+    expect(r.relay).toContain("vnc (crashed and restarted)");
+    expect(r.relay).not.toContain("(active)");
   });
 
   it("leaves the hotspot restart a marker post_update proves it by", () => {
@@ -586,15 +598,15 @@ d("restart_services_after_update: what the reboot used to restart", () => {
 
   it("stops waiting once every unit still down has failed again", () => {
     const r = run({ active: BOX, types: TYPES, failing: ["clawbox-vnc.service"], looks: 30 });
-    expect(r.relay).toContain("waited 0 s");
+    expect(r.relay).toContain("again 0 s after");
   });
 
   it("drops the warnings an earlier run left behind, so post_update states only this run's", () => {
     const stale = "CLAWBOX-WARN[service-not-restarted]: clawbox-tunnel.service did not come back\n";
     expect(run({ active: BOX, types: TYPES, staleRelay: stale }).relay).toBe("");
     const r = run({ active: BOX, types: TYPES, staleRelay: stale, failing: ["clawbox-vnc.service"] });
-    expect(r.relay).not.toContain("clawbox-tunnel");
-    expect(r.relay).toContain("clawbox-vnc (failed)");
+    expect(r.relay).not.toContain("tunnel (");
+    expect(r.relay).toContain("vnc (failed)");
   });
 
   it("never writes the kept warnings through a symlink", () => {
@@ -703,12 +715,12 @@ d("ap_sources_changed: did this update change what clawbox-ap runs", () => {
 // ── 5. The late hotspot restart, proved by post_update ─────────────────────
 
 d("report_update_ap_restart: post_update proves the hotspot restart the update queued", () => {
-  function report(states: string[], inv: string, marker = "inv-boot"): { out: string; events: string[]; markerLeft: boolean } {
+  function report(states: string[], inv: string, marker = "inv-boot", newline = true): { out: string; events: string[]; markerLeft: boolean } {
     const m = path.join(tmp, "update-ap-restart");
     const events = path.join(tmp, "events");
     const seq = path.join(tmp, "seq");
     fs.rmSync(events, { force: true });
-    if (marker) fs.writeFileSync(m, `${marker}\n`); else fs.rmSync(m, { force: true });
+    if (marker) fs.writeFileSync(m, newline ? `${marker}\n` : marker); else fs.rmSync(m, { force: true });
     fs.writeFileSync(seq, states.join("\n") + "\n");
     const script = [
       "set -euo pipefail",
@@ -751,9 +763,23 @@ d("report_update_ap_restart: post_update proves the hotspot restart the update q
     expect(r.markerLeft).toBe(false);
   });
 
-  it("warns when the hotspot is still starting at the end of its wait", () => {
+  it("says a hotspot still starting at the end of its wait is still starting, not down", () => {
     const r = report(["activating"], "inv-new");
-    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*activating/m);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*still starting/m);
+    expect(r.out).not.toContain("nothing retries it");
+  });
+
+  it("never calls the hotspot restarted without a record of the run it replaced", () => {
+    const r = report(["active"], "inv-new", "none");
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*unknown/m);
+    expect(r.out).not.toContain("is back on");
+  });
+
+  it("reads a record with no trailing newline", () => {
+    // `read` fails on it, but has read it: the old invocation still counts.
+    const r = report(["active"], "inv-boot", "inv-boot", false);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[ap-not-restarted\]: .*previous run/m);
+    expect(r.out).not.toContain("is back on");
   });
 
   it("warns when the queued restart never ran (the same invocation)", () => {

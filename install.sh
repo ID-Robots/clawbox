@@ -12968,7 +12968,7 @@ ap_sources_changed() {
 # dashboard stopped.
 restart_services_after_update() {
   local served="${1:-}" relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}"
-  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n terminal engines down="" ap_restart=0 settled state
+  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n terminal engines down="" ap_restart=0 settled state short
   local ap_marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}" ap_before
   local -a candidates=() restart=() start=() units=() before=() seen=() pending=() warnings=()
   case "$looks" in ''|*[!0-9]*) looks=90 ;; esac
@@ -13089,19 +13089,24 @@ restart_services_after_update() {
       case " ${pending[*]} " in
         *" $i "*)
           # Short names and the state in words: the updater cuts a warning at
-          # 300 characters, and "active" under "not running again" is a unit
-          # whose restart never took.
+          # 300 characters, and "active" under "not running again" is either a
+          # restart that never took or a unit that died and came back.
           state="$(systemctl is-active "$unit" 2>/dev/null || true)"
           now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
-          if [ "$state" = active ] && [ "$now" = "${before[i]}" ]; then state="still the old process"; fi
-          down="${down:+$down, }${unit%.service} (${state:-unknown})"
+          if [ "$state" = active ] && [ "$now" = "${before[i]}" ]; then
+            state="still the old process"
+          elif [ "$state" = active ]; then
+            state="crashed and restarted"
+          fi
+          short="${unit#clawbox-}"
+          down="${down:+$down, }${short%.service} (${state:-unknown})"
           ;;
         *) echo "    [ok] $unit is running on the updated files" ;;
       esac
     done
     if [ -n "$down" ]; then
       # The hint first: the updater cuts a warning at 300 characters.
-      line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot. Not running again after the update restarted ClawBox's services and waited ${n} s: $down"
+      line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot. Not running again ${n} s after the update restarted them, of the clawbox-* services: $down"
       echo "$line"
       warnings+=("$line")
     fi
@@ -13153,14 +13158,17 @@ restart_services_after_update() {
 # post_update's check of the hotspot restart restart_services_after_update
 # queued: back on a NEW invocation, or a warning that says how it is instead.
 # Waits while the unit is still starting, in one-second looks up to
-# CLAWBOX_AP_RESTART_WAIT_S (start-ap.sh's own phases can take minutes), then
-# drops the marker either way.
+# CLAWBOX_AP_RESTART_WAIT_S — short, because on an OpenClaw box the gateway is
+# stopped for post_update and this wait is the assistant's too; the restart was
+# queued minutes earlier — then drops the marker either way. Without a record
+# of the run it replaced it says so, and never calls the hotspot restarted.
 report_update_ap_restart() {
   local marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}"
-  local looks="${CLAWBOX_AP_RESTART_WAIT_S:-240}" before="" now state n=0
+  local looks="${CLAWBOX_AP_RESTART_WAIT_S:-60}" before="" now state n=0
   [ -f "$marker" ] || return 0
-  case "$looks" in ''|*[!0-9]*) looks=240 ;; esac
-  read -r before < "$marker" 2>/dev/null || before=""
+  case "$looks" in ''|*[!0-9]*) looks=60 ;; esac
+  # `|| :`: read fails on a last line with no newline but has still read it.
+  read -r before < "$marker" 2>/dev/null || :
   while :; do
     state="$(systemctl is-active clawbox-ap.service 2>/dev/null || true)"
     case "$state" in activating|deactivating|reloading) ;; *) break ;; esac
@@ -13169,8 +13177,12 @@ report_update_ap_restart() {
     n=$((n + 1))
   done
   now="$(systemctl show clawbox-ap.service -p InvocationID --value 2>/dev/null || true)"
-  if [ "$state" = active ] && [ -n "$now" ] && [ "$now" != "$before" ]; then
+  if [ -z "$before" ] || [ "$before" = none ]; then
+    echo "CLAWBOX-WARN[ap-not-restarted]: the update restarted the hotspot (clawbox-ap) but could not record its previous run, so whether it restarted is unknown; it is ${state:-unknown} now"
+  elif [ "$state" = active ] && [ -n "$now" ] && [ "$now" != "$before" ]; then
     echo "  clawbox-ap.service is back on the hotspot scripts this update installed"
+  elif [ "$state" = activating ] || [ "$state" = deactivating ] || [ "$state" = reloading ]; then
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted was still starting ${n} s into this check; it finishes on its own if it can, and a reboot starts it again if not"
   elif [ "$state" = active ]; then
     echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted is still on its previous run; it applies the new scripts at the next reboot"
   else
