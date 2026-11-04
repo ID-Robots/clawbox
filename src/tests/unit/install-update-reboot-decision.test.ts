@@ -321,6 +321,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     noInvocation?: Record<string, number>;
     /** Unit → how many of its first is-active queries answer nothing. */
     noState?: Record<string, number>;
+    /** Unit → which of its is-active queries (1-based, all of them counted) answer nothing. */
+    failAt?: Record<string, number[]>;
   }
 
   function run(box: Box): { status: number | null; events: string[]; out: string; relay: string } {
@@ -339,6 +341,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     for (const u of box.active) fs.writeFileSync(path.join(state, `${u}.inv`), "inv-boot");
     for (const [u, k] of Object.entries(box.noInvocation ?? {})) fs.writeFileSync(path.join(state, `${u}.noinv`), String(k));
     for (const [u, k] of Object.entries(box.noState ?? {})) fs.writeFileSync(path.join(state, `${u}.nostate`), String(k));
+    for (const [u, at] of Object.entries(box.failAt ?? {})) fs.writeFileSync(path.join(state, `${u}.failat`), at.join("\n") + "\n");
     const types = Object.entries(box.types ?? {}).map(([u, t]) => `${u}) echo ${t} ;;`).join(" ");
     const failing = (box.failing ?? []).join(" ");
     const flaky = (box.flaky ?? []).join(" ");
@@ -357,7 +360,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       "sleep() { echo \"sleep $*\" >> \"$EV\"; }",
       // A late unit answers "activating" for its first N looks after its restart.
       // A unit whose state query fails answers nothing for its first N looks.
-      "unit_state() { local n; if [ -f \"$ST/$1.nostate\" ]; then n=$(cat \"$ST/$1.nostate\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.nostate\"; echo; return; fi; fi; if [ -f \"$ST/$1.late\" ]; then n=$(cat \"$ST/$1.late\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.late\"; echo activating; return; fi; fi; if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
+      "unit_state() { local n c; c=$(( $(cat \"$ST/$1.calls\" 2>/dev/null || echo 0) + 1 )); echo $c > \"$ST/$1.calls\"; if grep -qx \"$c\" \"$ST/$1.failat\" 2>/dev/null; then echo; return; fi; if [ -f \"$ST/$1.nostate\" ]; then n=$(cat \"$ST/$1.nostate\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.nostate\"; echo; return; fi; fi; if [ -f \"$ST/$1.late\" ]; then n=$(cat \"$ST/$1.late\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.late\"; echo activating; return; fi; fi; if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
       "systemctl() {",
       "  echo \"systemctl $*\" >> \"$EV\"",
       "  case \"$1\" in",
@@ -599,8 +602,10 @@ d("restart_services_after_update: what the reboot used to restart", () => {
   it("never counts a restart back when the unit's invocation could not be read", () => {
     const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], noInvocation: { "clawbox-vnc.service": 2 }, looks: 0 });
     expect(r.out).not.toContain("[ok] clawbox-vnc.service");
-    // Its own clause, not counted among the units that are down.
-    expect(r.relay).toContain("Not checked (systemd did not answer): vnc.");
+    // Its own clause, not counted among the units that are down — and its
+    // restart queued all the same.
+    expect(r.relay).toContain("Restarted but not checked (systemd did not answer): vnc.");
+    expect(calls(r.events, "restart")[0]).toContain("clawbox-vnc.service");
     expect(r.relay).not.toMatch(/\d+ clawbox-\* services not back/);
   });
 
@@ -610,20 +615,60 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     expect(r.relay).toContain("vnc (old process)");
   });
 
-  it("never sends a running unit to `start` because its state query failed", () => {
+  it("restarts a unit whose state query failed twice, and proves it like any other", () => {
     // RED on b4ddb2a: an empty is-active read as "not running", and `start`
-    // on a running unit kept its old process under an [ok].
+    // on a running unit kept its old process under an [ok] on the next look.
     const r = run({
       active: BOX,
       types: TYPES,
       stuck: ["clawbox-vnc.service"],
       noState: { "clawbox-vnc.service": 2 },
       noInvocation: { "clawbox-vnc.service": 1 },
-      looks: 0,
+      looks: 1,
     });
     expect(r.out).not.toContain("[ok] clawbox-vnc.service");
-    expect(r.relay).toContain("Not checked (systemd did not answer): vnc.");
+    expect(calls(r.events, "restart")[0]).toContain("clawbox-vnc.service");
     expect(calls(r.events, "start").join(" ")).not.toContain("clawbox-vnc.service");
+    expect(r.relay).toContain("vnc (old process)");
+  });
+
+  it("restarts, and so starts, an enabled unit whose state query failed twice", () => {
+    // RED on bca0af5: it got no job at all and stayed down.
+    const r = run({
+      active: BOX,
+      types: TYPES,
+      enabled: ["clawbox-tunnel.service"],
+      noState: { "clawbox-tunnel.service": 2 },
+      looks: 1,
+    });
+    expect(calls(r.events, "restart")[0]).toContain("clawbox-tunnel.service");
+    // A unit that never ran has no invocation to prove the restart against:
+    // queued, and said to be unchecked rather than counted back.
+    expect(r.relay).toContain("Restarted but not checked (systemd did not answer): tunnel.");
+  });
+
+  it("never calls a unit not back because one query failed at its last look", () => {
+    // The browser is stuck, so the wait ends at the bound; the tunnel's 4th
+    // query is its post-loop settle look. RED on bca0af5: "tunnel (up late)".
+    const withFail = run({
+      active: [...BOX, "clawbox-tunnel.service"],
+      types: TYPES,
+      stuck: ["clawbox-browser.service"],
+      failAt: { "clawbox-tunnel.service": [4] },
+      looks: 1,
+    });
+    expect(withFail.relay).toContain("browser (old process)");
+    expect(withFail.out).toContain("[ok] clawbox-tunnel.service");
+    expect(withFail.relay).not.toContain("tunnel (");
+  });
+
+  it("re-asks the hotspot's state, and never calls it down because a query failed", () => {
+    const once = run({ active: BOX, types: TYPES, apChanged: 0, noState: { "clawbox-ap.service": 1 } });
+    expect(calls(once.events, "restart").at(-1)).toBe("systemctl restart --no-block clawbox-ap.service");
+    const twice = run({ active: BOX, types: TYPES, apChanged: 0, noState: { "clawbox-ap.service": 2 } });
+    expect(calls(twice.events, "restart").join(" ")).not.toContain("clawbox-ap.service");
+    expect(twice.out).toContain("could not tell whether the hotspot is up");
+    expect(twice.out).not.toContain("the hotspot is not up");
   });
 
   it("asks once more when the first state query comes back empty", () => {

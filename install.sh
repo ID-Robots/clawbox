@@ -12992,7 +12992,12 @@ restart_services_after_update() {
         continue
         ;;
       clawbox-ap.service)
-        if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+        state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+        [ -n "$state" ] || state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+        if [ -z "$state" ]; then
+          echo "  Leaving $unit as it is: could not tell whether the hotspot is up (systemd did not answer); the new scripts apply at its next start"
+          continue
+        elif [ "$state" != active ]; then
           echo "  Leaving $unit down: the hotspot is not up, and whether it should be is the network flow's call"
           continue
         fi
@@ -13016,18 +13021,18 @@ restart_services_after_update() {
     # The state as a WORD, never the exit status: a query that failed (a
     # D-Bus stall right after the build) answers nothing, and read as "not
     # running" it would send a running unit to `start`, which leaves it on its
-    # old process. Asked once more; still nothing, the unit is not checked.
+    # old process. Asked once more; still nothing, it is RESTARTED, which
+    # starts a unit that was not running too, and proved like any other.
     state="$(systemctl is-active "$unit" 2>/dev/null || true)"
     [ -n "$state" ] || state="$(systemctl is-active "$unit" 2>/dev/null || true)"
     now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
     short="${unit#clawbox-}"
     short="${short%.service}"
     case "$state" in
-      '') unchecked="${unchecked:+$unchecked, }$short"; continue ;;
-      active|reloading)
+      ''|active|reloading)
         # A running unit always has an invocation, so an empty answer is a
         # query that failed: asked once more, and still empty nothing can prove
-        # its restart.
+        # its restart. The restart is queued all the same.
         [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
         restart+=("$unit")
         if [ -z "$now" ]; then unchecked="${unchecked:+$unchecked, }$short"; continue; fi
@@ -13100,7 +13105,11 @@ restart_services_after_update() {
         case " ${pending[*]} " in *" $i "*) continue ;; esac
         now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
         [ -n "$now" ] || now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
-        if ! { systemctl is-active --quiet "${units[$i]}" 2>/dev/null && [ "$now" = "${seen[i]}" ]; }; then
+        # The state as a word here too, asked once more: this is the last look
+        # a unit gets, and a query that failed is not a unit that went down.
+        state="$(systemctl is-active "${units[$i]}" 2>/dev/null || true)"
+        [ -n "$state" ] || state="$(systemctl is-active "${units[$i]}" 2>/dev/null || true)"
+        if ! { [ "$state" = active ] && [ "$now" = "${seen[i]}" ]; }; then
           pending+=("$i")
         fi
       done
@@ -13138,15 +13147,15 @@ restart_services_after_update() {
   fi
   if [ "$count" -gt 0 ] || [ -n "$unchecked" ]; then
     # The hint and the count first: the updater cuts a warning at 300
-    # characters, and a cut list still says how many. A unit systemd could not
-    # be asked about is its own clause: most likely it is fine, and it is not
-    # counted among the ones that are not.
+    # characters, and a cut list still says how many. A unit whose invocation
+    # systemd would not give is its own clause: its restart was queued, so most
+    # likely it is fine, and it is not counted among the ones that are not.
     line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot."
     if [ "$count" -gt 0 ]; then
       line="$line $count clawbox-* services not back ${n} s after the update restarted them: $down."
     fi
     if [ -n "$unchecked" ]; then
-      line="$line Not checked (systemd did not answer): $unchecked."
+      line="$line Restarted but not checked (systemd did not answer): $unchecked."
     fi
     echo "$line"
     warnings+=("$line")
