@@ -199,7 +199,7 @@ vi.mock("@/lib/openclaw-gateway-ws", async (orig) => ({
 }));
 
 import { get, set, setMany } from "@/lib/config-store";
-import { GatewayRpcError } from "@/lib/openclaw-gateway-ws";
+import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
 
@@ -3619,6 +3619,25 @@ describe("updater", () => {
       expect(restartsAfterFirstAsk()).toHaveLength(1);
     });
 
+    it("passes, with a word to the owner, a gateway that never answered the chat's request in the window", async () => {
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("gateway starting; retry shortly"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(restartsAfterFirstAsk()).toEqual([]);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("could not confirm the chat answers");
+      expect(warning?.[0].message).toContain("gateway starting; retry shortly");
+    });
+
+    it("says nothing when there is no gateway token to ask with — nothing was asked", async () => {
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("no gateway token"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(1);
+      expect(state.warnings?.some((w) => w.code === "gateway-sessions-unconfirmed")).toBeFalsy();
+    });
+
     it("asks nothing on the Hermes edition, where there is no OpenClaw gateway", async () => {
       vi.resetModules();
       process.env.CLAWBOX_EDITION = "hermes";
@@ -3634,13 +3653,30 @@ describe("updater", () => {
    * that was only ever in the journal. Said on the update's own result now.
    */
   describe("a gateway stop that did not go cleanly (TASK-2153)", () => {
-    /** Answer the unit-state reads: running until stopped, then `afterStop`. */
-    function gatewayUnit(afterStop: string, before = "ActiveState=active\nSubState=running\nResult=success\nJob=\n"): void {
+    /**
+     * Answer the unit-state reads: running until stopped, then `afterStop`.
+     * `stopTimesOut`: the stop's client is killed by its deadline, as Node
+     * kills it, so the update waits for systemd to finish the job.
+     */
+    function gatewayUnit(
+      afterStop: string,
+      before = "ActiveState=active\nSubState=running\nResult=success\nJob=\n",
+      options: { stopTimesOut?: boolean } = {},
+    ): void {
       const base = mockExecFile.getMockImplementation() as ((...call: unknown[]) => unknown) | undefined;
       let current = before;
       mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
         const argv = Array.isArray(args) ? args.join(" ") : "";
-        if (argv.includes("systemctl stop clawbox-gateway.service")) current = afterStop;
+        if (argv.includes("systemctl stop clawbox-gateway.service")) {
+          current = afterStop;
+          if (options.stopTimesOut) {
+            const callback = rest.find((part) => typeof part === "function") as
+              | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+              | undefined;
+            callback?.(Object.assign(new Error("Command failed: systemctl stop"), { killed: true, signal: "SIGTERM" }), { stdout: "", stderr: "" });
+            return {};
+          }
+        }
         if (argv.includes("systemctl restart clawbox-gateway.service")) current = before;
         // The unit-state read (`readUnitState`), not the start wait's, which asks for NRestarts too.
         if (argv.startsWith("show clawbox-gateway.service") && argv.includes("-p Result") && !argv.includes("NRestarts")) {
@@ -3675,6 +3711,15 @@ describe("updater", () => {
       expect(mockSet).toHaveBeenCalledWith("update_warnings", expect.stringContaining("gateway-stop-unclean"));
     });
 
+    it("warns the owner when the stop outlived its 30 s, however it ended", async () => {
+      gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n", undefined, { stopTimesOut: true });
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      const warning = state.warnings?.filter((w) => w.code === "gateway-stop-unclean");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toMatch(/did not stop within the 30s it is given \(it took about \d+s\)/);
+    });
+
     it("says nothing about a clean stop, or about a gateway that had already failed before it", async () => {
       gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n");
       expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
@@ -3684,6 +3729,15 @@ describe("updater", () => {
       gatewayUnit(
         "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
         "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+      );
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+
+      // Crash-looping: between two starts it carries the last crash's result.
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      gatewayUnit(
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+        "ActiveState=activating\nSubState=auto-restart\nResult=exit-code\nJob=\n",
       );
       expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
     });

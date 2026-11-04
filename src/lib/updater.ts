@@ -2090,10 +2090,15 @@ const GATEWAY_START_POLL_MAX_MS = Number(process.env.GATEWAY_START_POLL_MAX_MS |
 // connect with "gateway starting" — is asked again, how long a gateway the
 // check restarted has to answer (a fresh start may spend a while in the same
 // reclamation), and how long one `chat.history` may take on a loaded Jetson.
-// Tunable for tests only.
-const GATEWAY_SESSION_WINDOW_MS = Number(process.env.GATEWAY_SESSION_WINDOW_MS || "60000");
-const GATEWAY_SESSION_RECOVERY_WINDOW_MS = Number(process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS || "120000");
-const GATEWAY_SESSION_POLL_MS = Number(process.env.GATEWAY_SESSION_POLL_MS || "3000");
+// Tunable for tests only, and a typo is the default rather than a budget: a
+// NaN window would give a restarted gateway one ask (sessionWaitMs).
+function sessionWaitMs(name: string, fallback: number): number {
+  const value = Number(process.env[name] || fallback);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+const GATEWAY_SESSION_WINDOW_MS = sessionWaitMs("GATEWAY_SESSION_WINDOW_MS", 60_000);
+const GATEWAY_SESSION_RECOVERY_WINDOW_MS = sessionWaitMs("GATEWAY_SESSION_RECOVERY_WINDOW_MS", 120_000);
+const GATEWAY_SESSION_POLL_MS = sessionWaitMs("GATEWAY_SESSION_POLL_MS", 3_000);
 const GATEWAY_SESSION_CALL_TIMEOUT_MS = 15_000;
 // The floor of the update's `doctor --fix` bound; it grows with the databases.
 const DOCTOR_FIX_TIMEOUT_MS = 90_000;
@@ -2603,7 +2608,10 @@ async function stopGatewayForMaintenance(): Promise<void> {
   if (stop.kind === "settled" && stop.state.activeState === "active") {
     throw new Error(`clawbox-gateway did not stop: it is ${describeUnitState(stop.state)}`);
   }
-  if (before && before.activeState !== "inactive" && before.activeState !== "failed") {
+  // A stop that outlived its client is this stop's, whatever came before it.
+  // A failed result is judged only over a unit that was up: one crash-looping
+  // in auto-restart already carries a failed result the stop did not cause.
+  if (stop.kind === "settled" || before?.activeState === "active") {
     await warnIfGatewayStopUnclean(stop);
   }
 }
@@ -2623,12 +2631,12 @@ async function warnIfGatewayStopUnclean(stop: Exclude<UnitJobOutcome, { kind: "i
     if (stop.kind !== "settled" && !failed) return;
     const ended = state ? ` (clawbox-gateway.service ended ${describeUnitState(state)})` : "";
     const how = stop.kind === "settled"
-      ? `took about ${Math.round((GATEWAY_STOP_CLIENT_MS + stop.waitedMs) / 1000)}s to stop, longer than the ${GATEWAY_STOP_CLIENT_MS / 1000}s it is given`
+      ? `did not stop within the ${GATEWAY_STOP_CLIENT_MS / 1000}s it is given (it took about ${Math.round((GATEWAY_STOP_CLIENT_MS + stop.waitedMs) / 1000)}s)`
       : "did not shut down cleanly";
     warnUpdate(
       GATEWAY_STOP_UNCLEAN,
       `The OpenClaw gateway running before the update ${how} when the update stopped it${ended}. `
-        + "The update carried on and started it again; if the chat does not answer afterwards, restart the device.",
+        + "The update carried on; if the chat does not answer after it, restart the device.",
     );
     await persistWarnings();
   } catch (err) {
@@ -3923,6 +3931,19 @@ async function ensureGatewayServesSessions(): Promise<void> {
   });
   if (outcome.verdict === "serving") {
     console.log(`[Updater] gateway sessions: serving${outcome.restarted ? " after one restart" : ""}`);
+    return;
+  }
+  // Not a failure — nothing said the gateway cannot serve — but not a silent
+  // green either: a gateway that listens and never answers the chat's own
+  // request is the one thing here the owner may meet next. Not for a token
+  // this server cannot read (nothing was asked) or another refusal (it answered).
+  if (outcome.answer.kind === "unreachable" && !outcome.answer.final) {
+    warnUpdate(
+      "gateway-sessions-unconfirmed",
+      `The update could not confirm the chat answers: the OpenClaw gateway did not answer a chat request `
+        + `within ${Math.round(GATEWAY_SESSION_WINDOW_MS / 1000)}s (${outcome.detail}). `
+        + "If the chat stays silent, restart the device.",
+    );
   }
 }
 

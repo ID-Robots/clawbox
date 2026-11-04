@@ -131,8 +131,15 @@ export interface SessionCheckDeps {
 
 export type SessionCheckOutcome =
   | { verdict: "serving"; restarted: boolean }
-  /** It could not be asked, or answered with another refusal: the caller carries on as before. */
-  | { verdict: "unconfirmed"; detail: string };
+  /**
+   * It could not be asked, or answered with another refusal: the caller
+   * carries on as before. `answer` is the last ask, so the caller can tell a
+   * gateway that never answered from one that answered something else.
+   */
+  | { verdict: "unconfirmed"; detail: string; answer: Exclude<SessionProbe, { kind: "ok" } | { kind: "unavailable" }> };
+
+/** The shortest pause between two asks, whatever the caller passed: never a hot spin. */
+const MIN_INTERVAL_MS = 250;
 
 /** The step's failure: the gateway still cannot serve sessions after its one restart. */
 export class GatewaySessionsUnavailableError extends Error {
@@ -155,7 +162,7 @@ async function askWithin(
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = now() + (Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0);
-  const interval = Number.isFinite(deps.intervalMs) && deps.intervalMs > 0 ? deps.intervalMs : 1;
+  const interval = Number.isFinite(deps.intervalMs) ? Math.max(MIN_INTERVAL_MS, deps.intervalMs) : MIN_INTERVAL_MS;
   for (;;) {
     const answer = await deps.probe();
     if (settles(answer) || (answer.kind === "unreachable" && answer.final)) return answer;
@@ -186,7 +193,7 @@ export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<Ses
   if (first.kind === "ok") return { verdict: "serving", restarted: false };
   if (first.kind !== "unavailable") {
     log(`could not confirm the gateway serves chat sessions (${first.detail}); carrying on`);
-    return { verdict: "unconfirmed", detail: first.detail };
+    return { verdict: "unconfirmed", detail: first.detail, answer: first };
   }
 
   log(`the gateway is up but cannot serve chat sessions (${first.detail}); restarting it once`);
@@ -194,13 +201,21 @@ export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<Ses
   try {
     await deps.restart();
     deps.onDetail?.("Waiting for the restarted gateway to open chat sessions");
-    // After the restart only a real answer is proof: this gateway could not
-    // serve a session a moment ago, and a fresh one may spend a while in the
-    // same reclamation before it can.
-    const after = await askWithin(deps, deps.recoveryWindowMs, (answer) => answer.kind === "ok");
+    // After the restart, "cannot serve" and "cannot ask" are both asked again:
+    // a fresh gateway may spend a while starting, or in the same reclamation,
+    // before it can. Any other answer settles it, as it does before a restart.
+    const after = await askWithin(
+      deps,
+      deps.recoveryWindowMs,
+      (answer) => answer.kind === "ok" || answer.kind === "refused",
+    );
     if (after.kind === "ok") {
       log("the restarted gateway serves chat sessions again");
       return { verdict: "serving", restarted: true };
+    }
+    if (after.kind === "refused") {
+      log(`the restarted gateway no longer answers UNAVAILABLE (${after.detail}); carrying on`);
+      return { verdict: "unconfirmed", detail: after.detail, answer: after };
     }
     log(`the restarted gateway still cannot serve chat sessions (${after.detail})`);
     throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first.detail, after));

@@ -99,21 +99,53 @@ describe("verifyGatewaySessions", () => {
 
   it("carries on, unconfirmed, when the gateway cannot be asked for the whole window — as the step did before", async () => {
     const { deps, restart, asked } = harness([STARTING]);
-    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: STARTING.kind === "unreachable" ? STARTING.detail : "" });
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({
+      verdict: "unconfirmed",
+      detail: "gateway starting; retry shortly",
+      answer: STARTING,
+    });
     expect(asked()).toBe(11);
     expect(restart).not.toHaveBeenCalled();
   });
 
   it("asks once and carries on when there is no gateway token this server can use", async () => {
-    const { deps, restart, asked } = harness([{ kind: "unreachable", detail: "no gateway token", final: true }]);
-    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: "no gateway token" });
+    const noToken: SessionProbe = { kind: "unreachable", detail: "no gateway token", final: true };
+    const { deps, restart, asked } = harness([noToken]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: "no gateway token", answer: noToken });
     expect(asked()).toBe(1);
     expect(restart).not.toHaveBeenCalled();
   });
 
+  it("settles a restarted gateway's other refusal the way it settles one before a restart — carrying on, not failing", async () => {
+    const refused: SessionProbe = { kind: "refused", detail: "INVALID_REQUEST: invalid chat.history params" };
+    const { deps, restart, asked } = harness([RECLAIM, refused]);
+    await expect(verifyGatewaySessions(deps)).resolves.toEqual({ verdict: "unconfirmed", detail: refused.detail, answer: refused });
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(asked()).toBe(2);
+  });
+
+  it("never asks faster than every 250 ms, whatever interval it was given", async () => {
+    for (const intervalMs of [Number.NaN, 0, -5, 1]) {
+      const slept: number[] = [];
+      let clock = 0;
+      const { deps, asked } = harness([STARTING], {
+        intervalMs,
+        windowMs: 1_000,
+        sleep: async (ms) => {
+          slept.push(ms);
+          clock += ms;
+        },
+        now: () => clock,
+      });
+      await verifyGatewaySessions(deps);
+      expect(slept).toEqual([250, 250, 250, 250]);
+      expect(asked()).toBe(5);
+    }
+  });
+
   it("does not restart over a refusal that is not the session-store failure", async () => {
     const { deps, restart, asked } = harness([{ kind: "refused", detail: "INVALID_REQUEST: invalid chat.history params" }]);
-    await expect(verifyGatewaySessions(deps)).resolves.toMatchObject({ verdict: "unconfirmed" });
+    await expect(verifyGatewaySessions(deps)).resolves.toMatchObject({ verdict: "unconfirmed", answer: { kind: "refused" } });
     expect(asked()).toBe(1);
     expect(restart).not.toHaveBeenCalled();
   });
