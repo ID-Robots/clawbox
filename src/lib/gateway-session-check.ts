@@ -167,51 +167,82 @@ export class GatewaySessionsUnavailableError extends Error {
   }
 }
 
+type StoreFailure = Extract<SessionProbe, { kind: "store-failure" }>;
+type NotYet = Extract<SessionProbe, { kind: "unavailable" }>;
+
 /**
- * Ask until `settles` says the answer is the one wanted or the window is spent,
- * and answer the last ask. Always asks once, also on a spent window; never asks
- * again when asking again cannot help.
- *
- * A "not yet" (`unavailable`) is timed on its own clock, from its first answer:
- * the window it must outlast is `windowMs` of "not yet", not of asking. So a
- * gateway that refused connects for most of the window ("gateway starting")
- * and first says "rebuilding" on the last ask is asked on, not handed back as
- * a whole window of "not yet"; and a window of "not yet" whose last ask
- * happened to time out is still that "not yet". All asking ends by twice the
- * window. Returns the last answer — or, when that last ask went unanswered
- * after a "not yet", the last "not yet".
+ * The clock the asking runs on. Monotonic (`@/lib/monotonic-clock`):
+ * gateway_verify runs right after the update's reboot, when timesyncd steps
+ * the clock of a box with no RTC, and on `Date.now()` that step would end the
+ * restarted gateway's window after one ask — failing a healthy update — or
+ * stretch it by hours.
  */
-async function askWithin(
-  deps: SessionCheckDeps,
-  windowMs: number,
-  settles: (answer: SessionProbe) => boolean,
-): Promise<SessionProbe> {
-  // Monotonic (`@/lib/monotonic-clock`): gateway_verify runs right after the
-  // update's reboot, when timesyncd steps the clock of a box with no RTC, and
-  // on `Date.now()` that step would end the restarted gateway's window after
-  // one ask — failing a healthy update — or stretch it by hours.
-  const now = deps.now ?? monotonicNow;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const window = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0;
+function pacing(deps: SessionCheckDeps) {
+  return {
+    now: deps.now ?? monotonicNow,
+    sleep: deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    interval: Number.isFinite(deps.intervalMs) ? Math.max(MIN_INTERVAL_MS, deps.intervalMs) : MIN_INTERVAL_MS,
+  };
+}
+
+function windowOf(ms: number): number {
+  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+
+/**
+ * Before any restart: ask until an answer settles it — ok, the store failure,
+ * another refusal, or "no token" — or the waiting is over.
+ *
+ * "Cannot ask yet" (unreachable) is waited for up to `windowMs` from the first
+ * ask. A "not yet" (`unavailable`) runs on its own clock, from its FIRST
+ * answer, and is handed back only once it has lasted a whole `windowMs`: a
+ * gateway that refused connects for most of the window ("gateway starting")
+ * and first says "rebuilding" near its end, or on an ask that took a while to
+ * answer, is asked on — not restarted over seconds of "not yet". The "not yet"
+ * clock can only start from an ask sent by the end of the first window, so all
+ * asking ends by twice the window plus one ask. A last ask that went
+ * unanswered after a "not yet" is still that "not yet".
+ */
+async function askBeforeRestart(deps: SessionCheckDeps): Promise<SessionProbe> {
+  const { now, sleep, interval } = pacing(deps);
+  const window = windowOf(deps.windowMs);
   const started = now();
-  const interval = Number.isFinite(deps.intervalMs) ? Math.max(MIN_INTERVAL_MS, deps.intervalMs) : MIN_INTERVAL_MS;
-  let notYet: Extract<SessionProbe, { kind: "unavailable" }> | null = null;
+  let notYet: NotYet | null = null;
   let notYetSince = 0;
   for (;;) {
     const answer = await deps.probe();
-    if (settles(answer) || (answer.kind === "unreachable" && answer.final)) return answer;
+    if (answer.kind !== "unreachable" && answer.kind !== "unavailable") return answer;
+    if (answer.kind === "unreachable" && answer.final) return answer;
     const at = now();
     if (answer.kind === "unavailable") {
       if (!notYet) notYetSince = at;
       notYet = answer;
     }
-    // A "not yet" seen in this window has its own deadline, capped at twice
-    // the window; without one, the window is the deadline.
-    const deadline = notYet ? Math.min(notYetSince + window, started + 2 * window) : started + window;
-    const left = deadline - at;
-    // The latest answer, unless it is an ask that went unanswered after a
-    // "not yet": one dropped ask does not turn that into "no answer".
+    const left = (notYet ? notYetSince + window : started + window) - at;
     if (left <= 0) return answer.kind === "unreachable" && notYet ? notYet : answer;
+    await sleep(Math.min(interval, left));
+  }
+}
+
+/**
+ * After the one restart: ask until it answers, refuses something else, or
+ * `recoveryWindowMs` from the first ask is over — a fixed window, so the
+ * restarted gateway is waited for exactly that long. Answers the last ask as
+ * it was, and the store failure if the restarted gateway named it on any ask:
+ * a gateway that names it and then stops answering has not recovered.
+ */
+async function askAfterRestart(deps: SessionCheckDeps): Promise<{ last: SessionProbe; storeFailure: StoreFailure | null }> {
+  const { now, sleep, interval } = pacing(deps);
+  const deadline = now() + windowOf(deps.recoveryWindowMs);
+  let storeFailure: StoreFailure | null = null;
+  for (;;) {
+    const answer = await deps.probe();
+    if (answer.kind === "store-failure") storeFailure = answer;
+    if (answer.kind === "ok" || answer.kind === "refused" || (answer.kind === "unreachable" && answer.final)) {
+      return { last: answer, storeFailure };
+    }
+    const left = deadline - now();
+    if (left <= 0) return { last: answer, storeFailure };
     await sleep(Math.min(interval, left));
   }
 }
@@ -230,10 +261,11 @@ function stillUnavailableMessage(
 
 /**
  * Prove the gateway serves chat sessions, restarting it once if it answers
- * that it cannot. Throws {@link GatewaySessionsUnavailableError} when the store
- * failure is named after that restart, or was named before it and the
- * restarted gateway has not answered since; and whatever `restart` throws when
- * it does not come back at all.
+ * that it cannot. Throws {@link GatewaySessionsUnavailableError} when the
+ * restarted gateway's last answer is the store failure, or the store failure
+ * was named (before the restart or after it) and the restarted gateway is not
+ * answering when its window ends; and whatever `restart` throws when it does
+ * not come back at all.
  */
 export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<SessionCheckOutcome> {
   const log = deps.log ?? ((line: string) => console.log(line));
@@ -241,11 +273,7 @@ export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<Ses
   // again, so a gateway still starting or rebuilding its history is waited
   // for, not restarted. The store failure, an answer or another refusal
   // settles it at once.
-  const first = await askWithin(
-    deps,
-    deps.windowMs,
-    (answer) => answer.kind !== "unreachable" && answer.kind !== "unavailable",
-  );
+  const first = await askBeforeRestart(deps);
   if (first.kind === "ok") return { verdict: "serving", restarted: false };
   if (first.kind === "refused" || first.kind === "unreachable") {
     log(`could not confirm the gateway serves chat sessions (${first.detail}); carrying on`);
@@ -262,22 +290,23 @@ export async function verifyGatewaySessions(deps: SessionCheckDeps): Promise<Ses
     // After the restart only an answer or another refusal settles it: a fresh
     // gateway may spend a while starting, rebuilding, or in the same
     // reclamation, before it can.
-    const after = await askWithin(
-      deps,
-      deps.recoveryWindowMs,
-      (answer) => answer.kind === "ok" || answer.kind === "refused",
-    );
+    const { last: after, storeFailure } = await askAfterRestart(deps);
     if (after.kind === "ok") {
       log("the restarted gateway serves chat sessions again");
       return { verdict: "serving", restarted: true };
     }
-    // A failed update needs the store failure in the evidence: named now, or
-    // named before the restart and the restarted gateway never answering since.
-    // A restart earned by "not yet" alone, over a gateway still starting or
-    // rebuilding at the end, is a slow box — warned about, not failed.
-    if (after.kind === "store-failure" || (after.kind === "unreachable" && first.kind === "store-failure")) {
+    // A failed update needs the store failure in the evidence: the restarted
+    // gateway names it last, or it was named — before the restart or after it
+    // — and the restarted gateway is not answering at the end. A restart
+    // earned by "not yet" alone, over a gateway still starting or rebuilding
+    // at the end, is a slow box — warned about, not failed.
+    if (after.kind === "store-failure") {
       log(`the restarted gateway still cannot serve chat sessions (${after.detail})`);
       throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first, after));
+    }
+    if (after.kind === "unreachable" && (first.kind === "store-failure" || storeFailure)) {
+      log(`the restarted gateway still cannot serve chat sessions (${storeFailure?.detail ?? after.detail})`);
+      throw new GatewaySessionsUnavailableError(stillUnavailableMessage(first, storeFailure ?? after));
     }
     log(`the restarted gateway does not name the store failure (${after.detail}); carrying on`);
     return { verdict: "unconfirmed", detail: after.detail, restarted: true, answer: after };

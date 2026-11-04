@@ -215,7 +215,7 @@ describe("verifyGatewaySessions", () => {
     }
   });
 
-  it("times a 'not yet' that began late for a whole window of its own, and no longer than twice the window", async () => {
+  it("times a 'not yet' that began late for a whole window of its own", async () => {
     // Starting until 9 s, then "not yet" from 9 s: restarted at 19 s — ten
     // seconds of "not yet" — not at the 10 s mark of the asking.
     const { deps, restart, events } = harness([...Array<SessionProbe>(9).fill(STARTING), REBUILDING]);
@@ -224,6 +224,36 @@ describe("verifyGatewaySessions", () => {
     expect(events.indexOf("restart")).toBe(9 + 11);
     // Still "not yet" after the restart: carried on, never a failed update.
     expect(outcome).toMatchObject({ verdict: "unconfirmed", restarted: true, answer: { kind: "unavailable" } });
+  });
+
+  it("gives a 'not yet' first answered by a slow ask across the window's end a whole window too", async () => {
+    // Real asks take time (connect, then up to 15 s for the call). Here the ask
+    // sent at the 10 s mark answers "not yet" only at 15 s, and the gateway
+    // answers at 22 s — seven seconds of "not yet", never a window of it.
+    let clock = 0;
+    const restart = vi.fn(async () => {});
+    const outcome = await verifyGatewaySessions({
+      probe: async () => {
+        const sentAt = clock;
+        if (sentAt < 10_000) return STARTING;
+        if (sentAt === 10_000) {
+          clock += 5_000;
+          return REBUILDING;
+        }
+        return clock >= 22_000 ? OK : REBUILDING;
+      },
+      restart,
+      windowMs: 10_000,
+      recoveryWindowMs: 30_000,
+      intervalMs: 1_000,
+      log: () => {},
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    });
+    expect(outcome).toEqual({ verdict: "serving", restarted: false });
+    expect(restart).not.toHaveBeenCalled();
   });
 
   it("reads a window of 'not yet' whose last ask went unanswered as that 'not yet', and restarts", async () => {
@@ -244,6 +274,29 @@ describe("verifyGatewaySessions", () => {
       answer: STARTING,
     });
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  // After the restart the window is fixed, and silence is silence: no "not
+  // yet" clock and no standing in for a dropped ask.
+  it("fails when the restarted gateway names the store failure and then stops answering, whatever earned the restart", async () => {
+    const { deps, restart } = harness([...Array<SessionProbe>(11).fill(REBUILDING), RECLAIM, STARTING]);
+    const failure = await verifyGatewaySessions(deps).catch((err: unknown) => err);
+    expect(failure).toBeInstanceOf(GatewaySessionsUnavailableError);
+    expect((failure as Error).message).toContain("it answers UNAVAILABLE: SQLite session reclamation commit checkpoint expired");
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a store-failure restart whose gateway said 'not yet' once and then nothing for the rest of its window", async () => {
+    const { deps, restart } = harness([RECLAIM, REBUILDING, STARTING]);
+    await expect(verifyGatewaySessions(deps)).rejects.toThrow(/it does not answer \(gateway starting; retry shortly\)/);
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the restarted gateway exactly its recovery window, however late a 'not yet' begins", async () => {
+    const { deps, asked } = harness([RECLAIM, ...Array<SessionProbe>(20).fill(STARTING), REBUILDING]);
+    await expect(verifyGatewaySessions(deps)).resolves.toMatchObject({ verdict: "unconfirmed", restarted: true, answer: { kind: "unavailable" } });
+    // One ask before the restart, then 0..30 s at 1 s: 31 — not 30 s more from the first "not yet".
+    expect(asked()).toBe(1 + 31);
   });
 
   it("still fails when the restarted gateway names the store failure again after a 'not yet'", async () => {
