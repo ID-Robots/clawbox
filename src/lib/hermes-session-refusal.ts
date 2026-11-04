@@ -60,6 +60,21 @@ export function cliRefusedSession(stderr: string): boolean {
 }
 
 /**
+ * Is this a conversation the DASHBOARD started, by the shape of its id?
+ *
+ * The dashboard mints timestamped ids (`20260810_194609_7568b9`); `hermes chat`
+ * from v0.22.4 names its sessions `local-` + 64 hex. Only the first kind is
+ * refused to the CLI — so only for the first kind is it worth WAITING for a
+ * dashboard that is down before the CLI is tried at all: for the second, the
+ * CLI is the right door and a wait would only delay it.
+ */
+const DASHBOARD_SESSION_ID = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
+
+export function dashboardStartedSession(sessionId: string): boolean {
+  return DASHBOARD_SESSION_ID.test(sessionId);
+}
+
+/**
  * What the owner reads when the retry could not be made either.
  *
  * Not the code: "permission_denied" reads as something the owner did wrong,
@@ -72,15 +87,20 @@ export const SESSION_REFUSED_MESSAGE =
   + "Send your message again in a moment; if it keeps happening, start a new chat.";
 
 /**
- * The same refusal on a turn the dashboard was never offered — one carrying a
- * picture (`--image` is a CLI flag), or a caller that cannot be streamed to.
- * There is no retry to make there and sending again is refused the same way,
- * so the advice is the one that works: a new chat, which the CLI creates and
- * may therefore continue.
+ * The same refusal on the one kind of turn the dashboard cannot carry: a turn
+ * with a PICTURE on it (`--image` is a CLI flag, and the dashboard transport
+ * has not been taught `image.attach`). There is no retry to make there and
+ * sending again is refused the same way, so the advice is the one that works:
+ * a new chat, which the CLI creates and may therefore continue.
+ *
+ * Only ever for a picture. It used to stand for "the dashboard was not
+ * offered" and so reached TEXT turns whose page had not asked to be streamed
+ * to, telling an owner that their "hey" was a picture (TASK-2152); every text
+ * turn is offered to the dashboard now.
  */
-export const SESSION_REFUSED_NO_DASHBOARD_MESSAGE =
-  "Hermes would not continue this conversation for this kind of message (a picture, "
-  + "or a request that cannot be streamed). Start a new chat to send it.";
+export const SESSION_REFUSED_PICTURE_MESSAGE =
+  "Hermes can't add a picture to a conversation that is already under way. "
+  + "Start a new chat to send the picture.";
 
 /**
  * How long a refused turn waits for the dashboard before giving up.
@@ -133,14 +153,21 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * just before the deadline is let finish rather than cut off.
  */
 export async function waitForDashboard(opts: DashboardReadyOptions = {}): Promise<boolean> {
-  const probe = opts.probe ?? dashboardWsTicket;
+  const probe = opts.probe ?? ((signal?: AbortSignal) => dashboardWsTicket(signal));
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? abortableSleep;
   const pollMs = opts.pollMs ?? DASHBOARD_READY_POLL_MS;
   const deadline = now() + (opts.budgetMs ?? DASHBOARD_READY_BUDGET_MS);
   for (;;) {
     if (opts.signal?.aborted) return false;
-    const ticket = await probe(opts.signal).catch(() => null);
+    // A probe that throws — even synchronously — is a dashboard that did not
+    // answer, never a reason to fail the turn.
+    let ticket: string | null = null;
+    try {
+      ticket = await probe(opts.signal);
+    } catch {
+      ticket = null;
+    }
     if (opts.signal?.aborted) return false;
     if (ticket) return true;
     const left = deadline - now();
