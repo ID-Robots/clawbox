@@ -10179,6 +10179,8 @@ step_post_update() {
   # 2.8 GB the stop was for is still released — what comes back is the idle
   # server the box had before the update, which is the whole point of the pair.
   resume_paused_engines
+  # The hotspot the rebuild step's service restart queued, minutes ago now.
+  report_update_ap_restart
   # LAST WORD: the failures collected above, in the line the updater turns into
   # a warning on the update's status. Silent on a healthy run.
   report_optional_step_failures
@@ -12925,9 +12927,10 @@ ap_sources_changed() {
 #     post_update to wait out and then stop.
 #   * clawbox-ap.service: restarted only when running and its unit or scripts
 #     changed, and then only after the dashboard (clawbox-setup is After= it);
-#     never started. A restart drops whoever is on the hotspot, and
-#     clawbox-ap-watchdog.timer runs the new ap-watchdog.sh every 20 s, which is
-#     what brings a hotspot back.
+#     never started. A restart drops whoever is on the hotspot, and whether the
+#     hotspot should be up is the network flow's call, not the update's. Once
+#     setup is complete nothing retries this unit (ap-watchdog.sh stands down),
+#     so the late restart is proved by post_update (report_update_ap_restart).
 #   * other one-shots (nvme-boot-order, firstboot-vnc, build-heal): their work
 #     belongs to the boot. clawbox-performance.service is the one-shot that is
 #     restarted: it applies the power profile with the clawbox-power-mode.sh
@@ -12950,9 +12953,10 @@ ap_sources_changed() {
 #
 # Proved per unit — active with a new invocation, and the SAME invocation still
 # active a settle later, since an exit status says only that the jobs were
-# queued and a Type=simple unit is active the moment it forks — with one-second
-# looks up to a bound counted in looks, never on the clock (an NTP step at this
-# point is not hypothetical).
+# queued and a Type=simple unit is active the moment it forks. Every unit gets
+# that settle look, however the wait ends. The wait is one-second looks plus
+# the settles, up to CLAWBOX_RESTART_WAIT_S seconds counted that way, never on
+# the clock (an NTP step at this point is not hypothetical).
 # The jobs are queued without blocking, so a start that hangs (a one-shot with
 # no start timeout) costs the bound and never the dashboard. What did not come
 # back is ONE warning naming every unit, because the updater keeps one card per
@@ -12964,13 +12968,14 @@ ap_sources_changed() {
 # dashboard stopped.
 restart_services_after_update() {
   local served="${1:-}" relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}"
-  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n terminal engines down="" ap_restart=0
+  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n terminal engines down="" ap_restart=0 settled state
+  local ap_marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}" ap_before
   local -a candidates=() restart=() start=() units=() before=() seen=() pending=() warnings=()
   case "$looks" in ''|*[!0-9]*) looks=90 ;; esac
   case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
   # This run's warnings only: an earlier run whose post_update never came (a
   # refused continuation) must not have its warnings stated as this one's.
-  rm -f "$relay" 2>/dev/null || true
+  rm -f "$relay" "$ap_marker" 2>/dev/null || true
   systemctl daemon-reload \
     || echo "  Warning: systemctl daemon-reload failed — restarting on the unit files systemd already had" >&2
   # Running or enabled, read BEFORE anything is restarted: a vnc restart takes
@@ -12988,7 +12993,7 @@ restart_services_after_update() {
         ;;
       clawbox-ap.service)
         if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
-          echo "  Leaving $unit to its watchdog: the hotspot is not up, and the watchdog decides when it should be"
+          echo "  Leaving $unit down: the hotspot is not up, and whether it should be is the network flow's call"
           continue
         fi
         rc=0
@@ -12996,7 +13001,7 @@ restart_services_after_update() {
         case "$rc" in
           0) echo "  $unit: its unit or scripts changed in this update, so the hotspot restarts too, once the dashboard is back"; ap_restart=1; continue ;;
           1) echo "  Leaving $unit up: its unit and scripts did not change, and a restart would drop whoever is on the hotspot"; continue ;;
-          *) echo "  Leaving $unit up: could not tell whether its scripts changed (no usable commit stamp on the replaced build); its watchdog runs the new copy every 20 s"; continue ;;
+          *) echo "  Leaving $unit up: could not tell whether its scripts changed (no usable commit stamp on the replaced build); the new scripts apply at its next start"; continue ;;
         esac
         ;;
       clawbox-performance.service) ;;
@@ -13025,6 +13030,7 @@ restart_services_after_update() {
   fi
   if [ "${#units[@]}" -gt 0 ]; then
     n=0
+    settled=0
     while :; do
       pending=()
       for i in "${!units[@]}"; do
@@ -13039,6 +13045,7 @@ restart_services_after_update() {
         # it forks (see ENGINE_SETTLE_S). The SAME invocation, still active a
         # settle later, is — a unit that died, or died and came back, is not.
         sleep "$settle"
+        n=$((n + settle))
         for i in "${!units[@]}"; do
           unit="${units[$i]}"
           now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
@@ -13046,7 +13053,7 @@ restart_services_after_update() {
             pending+=("$i")
           fi
         done
-        if [ "${#pending[@]}" -eq 0 ]; then break; fi
+        if [ "${#pending[@]}" -eq 0 ]; then settled=1; break; fi
       fi
       # No point waiting on units that have all failed again: nothing restarts
       # a failed unit by itself.
@@ -13063,10 +13070,32 @@ restart_services_after_update() {
       sleep 1
       n=$((n + 1))
     done
+    # The other two ways out — the bound, and everything still down having
+    # failed — come from a first look alone: the units that passed it still owe
+    # the settle look before anything calls them back.
+    if [ "$settled" != 1 ]; then
+      sleep "$settle"
+      n=$((n + settle))
+      for i in "${!units[@]}"; do
+        case " ${pending[*]} " in *" $i "*) continue ;; esac
+        now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
+        if ! { systemctl is-active --quiet "${units[$i]}" 2>/dev/null && [ "$now" = "${seen[i]}" ]; }; then
+          pending+=("$i")
+        fi
+      done
+    fi
     for i in "${!units[@]}"; do
       unit="${units[$i]}"
       case " ${pending[*]} " in
-        *" $i "*) down="${down:+$down, }$unit ($(systemctl is-active "$unit" 2>/dev/null || true))" ;;
+        *" $i "*)
+          # Short names and the state in words: the updater cuts a warning at
+          # 300 characters, and "active" under "not running again" is a unit
+          # whose restart never took.
+          state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+          now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          if [ "$state" = active ] && [ "$now" = "${before[i]}" ]; then state="still the old process"; fi
+          down="${down:+$down, }${unit%.service} (${state:-unknown})"
+          ;;
         *) echo "    [ok] $unit is running on the updated files" ;;
       esac
     done
@@ -13096,7 +13125,9 @@ restart_services_after_update() {
     done <<< "$out"
   fi
   if [ "${#warnings[@]}" -gt 0 ]; then
-    { mkdir -p "$(dirname "$relay")" && printf '%s\n' "${warnings[@]}" >> "$relay"; } 2>/dev/null \
+    # Never through a symlink: root writes this file. /run/clawbox is root's
+    # (/run is root-only), so this is a second line, not the first.
+    { mkdir -p "$(dirname "$relay")" && [ ! -L "$relay" ] && printf '%s\n' "${warnings[@]}" >> "$relay"; } 2>/dev/null \
       || echo "  Warning: could not keep these warnings for post_update at $relay" >&2
   fi
   echo "  Restarting clawbox-setup.service last: the update's second half resumes from it"
@@ -13106,11 +13137,47 @@ restart_services_after_update() {
   systemctl restart clawbox-setup.service
   # The hotspot AFTER the dashboard: clawbox-setup is After= clawbox-ap, so a
   # restart queued before it would hold the dashboard for the whole of
-  # start-ap.sh. Queued and not waited for; the watchdog keeps the hotspot up.
+  # start-ap.sh. Queued here and proved by post_update, minutes later, from the
+  # invocation this marker keeps (report_update_ap_restart): after setup nothing
+  # else would notice a hotspot whose new script failed.
   if [ "$ap_restart" = 1 ]; then
-    systemctl restart --no-block clawbox-ap.service \
-      || echo "  Warning: could not queue the clawbox-ap.service restart; its watchdog runs the new script every 20 s" >&2
+    ap_before="$(systemctl show clawbox-ap.service -p InvocationID --value 2>/dev/null || true)"
+    { mkdir -p "$(dirname "$ap_marker")" && [ ! -L "$ap_marker" ] && printf '%s\n' "${ap_before:-none}" > "$ap_marker"; } 2>/dev/null \
+      || echo "  Warning: could not keep the hotspot restart for post_update to check at $ap_marker" >&2
+    if ! systemctl restart --no-block clawbox-ap.service; then
+      echo "CLAWBOX-WARN[ap-not-restarted]: the update could not restart the hotspot (clawbox-ap) after changing its scripts; it runs the previous ones until a reboot"
+    fi
   fi
+}
+
+# post_update's check of the hotspot restart restart_services_after_update
+# queued: back on a NEW invocation, or a warning that says how it is instead.
+# Waits while the unit is still starting, in one-second looks up to
+# CLAWBOX_AP_RESTART_WAIT_S (start-ap.sh's own phases can take minutes), then
+# drops the marker either way.
+report_update_ap_restart() {
+  local marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}"
+  local looks="${CLAWBOX_AP_RESTART_WAIT_S:-240}" before="" now state n=0
+  [ -f "$marker" ] || return 0
+  case "$looks" in ''|*[!0-9]*) looks=240 ;; esac
+  read -r before < "$marker" 2>/dev/null || before=""
+  while :; do
+    state="$(systemctl is-active clawbox-ap.service 2>/dev/null || true)"
+    case "$state" in activating|deactivating|reloading) ;; *) break ;; esac
+    if [ "$n" -ge "$looks" ]; then break; fi
+    sleep 1
+    n=$((n + 1))
+  done
+  now="$(systemctl show clawbox-ap.service -p InvocationID --value 2>/dev/null || true)"
+  if [ "$state" = active ] && [ -n "$now" ] && [ "$now" != "$before" ]; then
+    echo "  clawbox-ap.service is back on the hotspot scripts this update installed"
+  elif [ "$state" = active ]; then
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted is still on its previous run; it applies the new scripts at the next reboot"
+  else
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted is ${state:-unknown} now, and nothing retries it after setup; a reboot starts it again"
+  fi
+  rm -f "$marker" 2>/dev/null || true
+  return 0
 }
 
 # post_update's half of the warnings restart_services_after_update kept: stated
