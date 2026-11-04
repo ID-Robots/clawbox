@@ -29,6 +29,7 @@
  * outcome is tested without a gateway (gateway-session-check.test.ts).
  */
 
+import { monotonicNow } from "@/lib/monotonic-clock";
 import { gatewayWsMainChatHistory } from "@/lib/openclaw-gateway-ws";
 
 /** One ask of the gateway, classified. */
@@ -126,6 +127,7 @@ export interface SessionCheckDeps {
   /** What the update screen says while the check recovers; `undefined` clears it. */
   onDetail?: (detail: string | undefined) => void;
   sleep?: (ms: number) => Promise<void>;
+  /** Milliseconds on a monotonic clock; only differences are read. Default `monotonicNow`. */
   now?: () => number;
 }
 
@@ -159,7 +161,11 @@ async function askWithin(
   windowMs: number,
   settles: (answer: SessionProbe) => boolean,
 ): Promise<SessionProbe> {
-  const now = deps.now ?? Date.now;
+  // Monotonic (`@/lib/monotonic-clock`): gateway_verify runs right after the
+  // update's reboot, when timesyncd steps the clock of a box with no RTC, and
+  // on `Date.now()` that step would end the restarted gateway's window after
+  // one ask — failing a healthy update — or stretch it by hours.
+  const now = deps.now ?? monotonicNow;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = now() + (Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0);
   const interval = Number.isFinite(deps.intervalMs) ? Math.max(MIN_INTERVAL_MS, deps.intervalMs) : MIN_INTERVAL_MS;
