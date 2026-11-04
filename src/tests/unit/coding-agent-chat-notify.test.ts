@@ -53,6 +53,7 @@ import {
 import { kvGet, kvGetAll } from "@/lib/kv-store";
 import { beginLiveTurn } from "@/lib/harness/hermes-live-turn";
 import { appendTranscript } from "@/lib/harness/transcript-store";
+import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
@@ -566,6 +567,25 @@ describe("what the notice says", () => {
 
   it("asks the assistant not to start a stopped run again on its own", () => {
     expect(buildChatNotice(run({ status: "stopped" }), "openclaw").message).toMatch(/do not start it again unless they ask/);
+  });
+
+  it("says whether a run's deliverable is there, never the verdict's own words", () => {
+    const deliverable = { kind: "files", files: ["index.html"] } as unknown as CodingRun["deliverable"];
+    const there = buildChatNotice(run({ deliverable, deliverableCheck: { ok: true, missing: null, checkedAt: 1 } }), "openclaw").message;
+    expect(there).toContain("Its deliverable is there.");
+    const missing = buildChatNotice(run({ deliverable, deliverableCheck: { ok: false, missing: "index.html sk-live-DO-NOT-LEAK", checkedAt: 1 } }), "hermes").message;
+    expect(missing).toMatch(/deliverable is MISSING, so do not report the work as done/);
+    expect(missing).not.toContain("sk-live-DO-NOT-LEAK");
+    expect(buildChatNotice(run(), "openclaw").message).not.toMatch(/deliverable/i);
+  });
+
+  it("warns when a run ended with its own work still running, without naming that work", () => {
+    const progress = [RUNNER_STEP.endedWithLiveWork("board matrix sk-live-DO-NOT-LEAK")];
+    const { message, display } = buildChatNotice(run({ progress }), "openclaw");
+    expect(message).toMatch(/still running: the work is NOT finished/);
+    expect(message).not.toContain("sk-live-DO-NOT-LEAK");
+    expect(message.startsWith(display)).toBe(true);
+    expect(buildChatNotice(run({ progress: [RUNNER_STEP.keptAlive(2)] }), "openclaw").message).not.toMatch(/NOT finished/);
   });
 
   it("offers NO_REPLY only where the chat hides it", () => {

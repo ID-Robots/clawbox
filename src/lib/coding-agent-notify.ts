@@ -49,6 +49,7 @@ import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
+import { ENDED_WITH_LIVE_WORK } from "@/lib/coding-agent-progress";
 import type { TeamBoard } from "@/lib/coding-team-board";
 import { formatResetClock } from "@/lib/anthropic-limit";
 import { OPEN_ANTHROPIC_ACCOUNTS_SETTINGS } from "@/lib/notify-action";
@@ -608,7 +609,26 @@ export function buildChatNotice(run: CodingRun, harness: Harness): { message: st
   const already = harness === "openclaw"
     ? "If you have already told them how this run ended, reply NO_REPLY."
     : "If you have already told them how this run ended, say so in one line.";
-  return { message: `${display} ${ask} ${already}`, display };
+  return { message: [display, ...unfinishedWarnings(run), ask, already].join(" "), display };
+}
+
+/**
+ * What an ending must not be mistaken for: a finished run whose deliverable is
+ * missing, or one that ended with work it had started still running (the stop
+ * guard ran out of refusals). Fixed words only, like the rest of the notice —
+ * never the verdict's own text or the job names, which a model wrote.
+ */
+function unfinishedWarnings(run: CodingRun): string[] {
+  const out: string[] = [];
+  if (run.deliverable && run.deliverableCheck) {
+    out.push(run.deliverableCheck.ok
+      ? "Its deliverable is there."
+      : "Its deliverable is MISSING, so do not report the work as done.");
+  }
+  if ((run.progress ?? []).some((line) => line.startsWith(ENDED_WITH_LIVE_WORK))) {
+    out.push("It ended with work it had started still running: the work is NOT finished, so finish or restart only that part.");
+  }
+  return out;
 }
 
 function sleep(ms: number): Promise<void> {

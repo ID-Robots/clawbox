@@ -234,6 +234,9 @@ function shorten(s: string, max: number): string {
  * The wording is frozen for a second reason: runs already on disk carry these
  * exact strings, and the reader has to go on recognising them.
  */
+/** How the progress line of a run that ended with its own work still live starts; the chat notice looks for it. */
+export const ENDED_WITH_LIVE_WORK = "Ended with its own work still running";
+
 export const RUNNER_STEP = {
   thinking: "Thinking…",
   continuing: "Continuing after a background helper finished",
@@ -259,7 +262,7 @@ export const RUNNER_STEP = {
   queueCanceled: "Canceled by the owner before it started",
   ciFix: (runId: string, attempt: number, max: number) => `Fixing the failed CI of ${runId} (attempt ${attempt} of ${max})`,
   keptAlive: (n: number) => `The stop guard kept the run working ${n === 1 ? "once" : `${n} times`} while work it had started was still running`,
-  endedWithLiveWork: (what: string) => `Ended with its own work still running (the stop guard's limit was reached): ${what}`,
+  endedWithLiveWork: (what: string) => `${ENDED_WITH_LIVE_WORK} (the stop guard's limit was reached): ${what}`,
   leftoverRunning:
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",
