@@ -906,7 +906,7 @@ async function readBuildId(): Promise<string> {
  */
 async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
   const deadline = monotonicNow() + REBUILD_TAKEOVER_TIMEOUT_MS;
-  let message = "Rebuild did not restart the device within the expected window";
+  let message = "Rebuild did not restart ClawBox within the expected window";
   while (monotonicNow() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     if (rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP))) {
@@ -3988,7 +3988,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     failFast: true,
   },
   {
-    // Runs after reboot via checkContinuation — picks up dispatcher scripts,
+    // Runs after the restart or reboot via checkContinuation — picks up dispatcher scripts,
     // sysctls, and other root fixups that landed in the new install.sh.
     // 5 min, not 60s: on a freshly-installed device the fixups run on cold
     // caches (clawkeep pip force-reinstall, vnc apt work) and routinely
@@ -4059,7 +4059,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   // for a few hours after it unpinned for the update's length instead. Now the
   // update does not touch the power profile at all: the box keeps the profile
   // it booted with, and clawbox-performance.service applies the persisted or
-  // default one at the reboot that ends the update. install.sh's
+  // default one when the update ends (rebuild_reboot restarts it, or reboots). install.sh's
   // step_performance_mode still runs on a full install and by hand, and its
   // update_owns_the_box guard stays for a hand-run step while an update is in
   // flight.
@@ -5349,8 +5349,8 @@ async function resumeContinuation(): Promise<boolean> {
       // readRootStepFailure.
       ? (await readRootStepFailure(REBUILD_ROOT_STEP, null)) ?? "Rebuild failed before the restart"
       : buildMissing
-        ? `The device restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
-        : `The device restarted without producing a new build — see ${logs}`;
+        ? `ClawBox restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
+        : `ClawBox restarted without producing a new build — see ${logs}`;
     runtime.state = createInitialState(steps);
     runtime.state.warnings = await restoreWarnings();
     runtime.state.phase = "failed";

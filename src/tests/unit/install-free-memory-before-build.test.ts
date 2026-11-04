@@ -961,12 +961,13 @@ describe("both stops an update performs have a start", () => {
     // step_rebuild_reboot is the in-app updater's step. On the arm that really
     // reboots, the engines are systemd's to bring back; starting them here
     // restores nothing that survives and lengthens the shutdown the updater is
-    // already waiting through.
+    // already waiting through. Only that arm has a reboot reason, and test mode
+    // never asks for one, so every other arm takes the resuming call.
     const STEP = shellCode(extractShellFunction("step_rebuild_reboot"));
-    expect(STEP).toContain("do_rebuild --reboot-follows");
-    const testArm = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
-    expect(testArm, "test mode does not reboot, so it takes the resuming call")
-      .toMatch(/is_test_mode; then\s*\n\s*do_rebuild\s*\n/);
+    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
+    const decision = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
+    expect(decision, "test mode does not reboot, so it never asks for a reason")
+      .toMatch(/if ! is_test_mode; then\s*\n\s*reboot_reasons="\$\(update_reboot_reasons\)"/);
   });
 
   it("has NO unguarded statement between the pause and the accounting", () => {

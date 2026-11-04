@@ -3293,7 +3293,7 @@ describe("updater", () => {
       expect(await updater.checkContinuation()).toBe(false);
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
-      expect(state.error).toBe("The device restarted without producing a new build — see the clawbox-setup service log");
+      expect(state.error).toBe("ClawBox restarted without producing a new build — see the clawbox-setup service log");
     });
 
     it("restarts a stopped gateway through its granted unit restart, and diagnoses one that stays down", async () => {

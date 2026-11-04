@@ -324,7 +324,7 @@ describe("the /updating screen", () => {
 
     // The rebuild takes the server down for a poll or two, then it answers again.
     serverUp = false;
-    await screen.findByText(/The device is restarting/, undefined, { timeout: 5_000 });
+    await screen.findByText(/ClawBox is restarting/, undefined, { timeout: 5_000 });
     serverUp = true;
     await screen.findByRole("region", { name: "What's new in ClawBox 4.2.0" }, { timeout: 5_000 });
     expect(fetchMock.mock.calls.filter(([url]) => url === UPDATE_WHATS_NEW_ENDPOINT)).toHaveLength(2);

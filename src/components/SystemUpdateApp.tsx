@@ -668,7 +668,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                         {tr("update.forceFullUpdate", "Force full update")}
                       </div>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        {tr("update.forceFullUpdateHelp", "Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.")}
+                        {tr("update.forceFullUpdateHelp", "Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. It restarts the ClawBox services when it finishes, and reboots the device only when the update needs it.")}
                       </p>
                       <button
                         type="button"
@@ -716,7 +716,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 "update.forceConfirmBody",
                 "This re-runs the full update — including OpenClaw and system-service setup — even though the version is already current, then {reboot}. Use it to finish a recovery or fix services that misbehave after an update.",
               )}
-              slots={{ reboot: <strong>{tr("update.forceConfirmReboot", "reboots the device")}</strong> }}
+              slots={{ reboot: <strong>{tr("update.forceConfirmReboot", "restarts the ClawBox services (rebooting the device only if the update needs it)")}</strong> }}
             />
           </p>
         </ConfirmModal>

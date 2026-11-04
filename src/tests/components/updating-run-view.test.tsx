@@ -238,7 +238,7 @@ describe("/updating draws the System Update run view", () => {
     expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("7 / 10 steps complete");
     expect(view.queryByTestId("update-step-detail")).toBeNull();
     expect(view.getByTestId("update-run-notice")).toHaveTextContent(
-      "The device is restarting and is not answering yet. This screen will return to the desktop on its own.",
+      "ClawBox is restarting and is not answering yet. This screen will return to the desktop on its own.",
     );
 
     await advance(5 * 60_000);

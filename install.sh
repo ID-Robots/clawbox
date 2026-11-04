@@ -2210,6 +2210,9 @@ llamacpp_pid_if_running() {
 PAUSED_ENGINE_UNITS=()
 PAUSED_ENGINE_USER_UNITS=()
 PAUSED_ENGINE_UID=""
+# The engines resume_paused_engines could not bring back, for a caller whose
+# own journal nobody reads (restart_services_after_update relays them).
+ENGINE_NOT_RESUMED=()
 
 # Stop an engine, remembering whether it was running.
 #
@@ -2331,6 +2334,7 @@ resume_paused_engines() {
       else
         echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
         echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
+        ENGINE_NOT_RESUMED+=("$unit")
       fi
     done
   fi
@@ -2355,6 +2359,7 @@ resume_paused_engines() {
         else
           echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
           echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
+          ENGINE_NOT_RESUMED+=("$unit")
         fi
       done
     fi
@@ -2438,9 +2443,11 @@ free_memory_for_build() {
   #
   # And only HERE — before bun install, for the whole rebuild — on the update's
   # reboot path, which is the proven one and is left exactly as it was: the box
-  # reboots at the end of it, so the assistant is interrupted either way. A
-  # rebuild nothing reboots after (`install.sh --step rebuild`, the legacy
-  # updater hand-over) keeps the gateway through bun install and the node-pty
+  # reboots at the end of it, so the assistant is interrupted either way. Since
+  # updates reboot only when something needs a boot (update_reboot_reasons),
+  # most take the shape below instead. A
+  # rebuild nothing reboots after (the update's restart arm, `install.sh --step
+  # rebuild`, the legacy updater hand-over) keeps the gateway through bun install and the node-pty
   # rebuild, and pause_gateway_if_build_needs_room decides just before
   # `next build` itself, on the memory actually left then (TASK-1197).
   ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
@@ -4724,7 +4731,9 @@ PY
 # it: active, a main pid, the same pid a settle later.
 #
 # `$1` is 1 when this run replaced the agent — the gateway is on deleted files
-# and is bounced whatever the unit says — and 0 for a runnable agent it found,
+# and is bounced whatever the unit says; restart_services_after_update passes 1
+# too, because the ClawBox MCP server the gateway holds runs from the tree the
+# update replaced — and 0 for a runnable agent it found,
 # where only a unit Hermes had to repair is a reason to bounce: that is every box
 # an earlier update upgraded, crash-looping. Only a gateway that was running or
 # trying to be (`activating` is the crash loop) is restarted. A failure is a
@@ -9978,6 +9987,9 @@ step_post_update() {
   # `set -u`, and a second call in one shell would otherwise re-report the
   # first call's failures.
   POST_UPDATE_FAILED_STEPS=""
+  # What the rebuild step's service restart could not bring back, said where the
+  # updater reads it (restart_services_after_update keeps it for this step).
+  relay_update_restart_warnings
   # Re-apply system-level fixups that aren't covered by `git pull && build`.
   # Triggered by the in-app updater so existing devices pick up new dispatcher
   # scripts, sysctls, etc. without a full reinstall. Keep this list small and
@@ -10101,7 +10113,7 @@ step_post_update() {
   # Re-assert the gateway service after an in-app update. The full update
   # syncs repo files and rebuilds before this continuation runs; older devices
   # can therefore reach the new UI while the gateway is still using stale
-  # service/drop-in state or is simply down from the reboot handoff. Run the
+  # service/drop-in state or is simply down from the rebuild handoff. Run the
   # same idempotent setup used by fresh installs so a completed update leaves
   # clawbox-gateway as the active single source of truth.
   optional_step gateway_setup step_gateway_setup
@@ -10167,6 +10179,8 @@ step_post_update() {
   # 2.8 GB the stop was for is still released — what comes back is the idle
   # server the box had before the update, which is the whole point of the pair.
   resume_paused_engines
+  # The hotspot the rebuild step's service restart queued, minutes ago now.
+  report_update_ap_restart
   # LAST WORD: the failures collected above, in the line the updater turns into
   # a warning on the update's status. Silent on a healthy run.
   report_optional_step_failures
@@ -10711,10 +10725,10 @@ step_performance_mode() {
   # power-cycled, each left with a core whose files had never reached the disk
   # (see promote_staged_openclaw_core).
   # Whatever the last straw was on that hardware, the pin bought nothing: every
-  # full update ends in rebuild_reboot, and clawbox-performance.service applies
-  # the persisted or default profile at that boot anyway. So the step is OFF
-  # the update list (src/lib/updater.ts UPDATE_STEPS, owner's ruling
-  # 2026-09-17): an in-app update does not touch the power profile at all, and
+  # full update ends in rebuild_reboot, which restarts clawbox-performance.service
+  # or reboots into it, and the unit applies the persisted or default profile
+  # either way. So the step is OFF the update list (src/lib/updater.ts
+  # UPDATE_STEPS, owner's ruling 2026-09-17): an in-app update does not touch the power profile at all, and
   # the box keeps the profile it booted with. The guard below is what remains
   # of the in-between hours when the update still dispatched the step and it
   # UNPINNED for the update's length — `--restore`, the unit's own ExecStop
@@ -10727,7 +10741,7 @@ step_performance_mode() {
   # full install, and a hand-run step with no update running, apply here
   # exactly as they always did.
   if [ -n "${CLAWBOX_DISPATCHED_STEP:-}" ] && update_owns_the_box; then
-    echo "  An in-app update owns the box: unpinning the clocks for the length of the update — clawbox-performance.service applies the power profile again at the reboot that ends it"
+    echo "  An in-app update owns the box: unpinning the clocks for the length of the update — clawbox-performance.service applies the power profile again when the update ends"
     "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --restore || \
       echo "  Warning: could not unpin the clocks for the update (non-fatal)"
     install_performance_unit
@@ -10736,8 +10750,8 @@ step_performance_mode() {
   # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
   # box nothing is persisted, so this resolves to PERFORMANCE — the script's
   # DEFAULT_MODE since the owner's ruling of 2026-09-15 — and because
-  # clawbox-performance.service applies the same resolution at every boot, the
-  # reboot that ends every in-app update included, that default reaches a box
+  # clawbox-performance.service applies the same resolution at every boot and at
+  # the end of every in-app update (rebuild_reboot), that default reaches a box
   # already in the field that never chose. An owner's persisted `balanced` is
   # read back as such and kept.
   #
@@ -11530,8 +11544,8 @@ step_rebuild() {
   # `Restart=always` onto the tree that existed the moment `next build` wrote
   # the standalone entry — which is BEFORE postbuild copied .next/static,
   # public/ and build-info.json beside it. `start` is a no-op over that process
-  # and would leave the box serving a half-copied build. step_rebuild_reboot is
-  # saved by the reboot that follows it; this step is not.
+  # and would leave the box serving a half-copied build. step_rebuild_reboot
+  # restarts the same way, or reboots.
   echo "Restarting clawbox-setup.service..."
   # `reset-failed` for the same reason as in restore_previous_build: the unit
   # crash-loops for the length of every rebuild now, and a latched start limit
@@ -12717,6 +12731,18 @@ step_fix_git_perms() {
   echo "  Fixed .git ownership"
 }
 
+# The commit the served build's own stamp names, or nothing. A rebuild replaces
+# the stamp, so a caller that needs the OLD build's commit reads it first.
+served_build_commit() {
+  local stamp built=""
+  for stamp in "$PROJECT_DIR/.next/standalone/.next/build-info.json" "$PROJECT_DIR/.next/build-info.json"; do
+    [ -f "$stamp" ] || continue
+    built=$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' "$stamp" | head -n 1)
+    [ -n "$built" ] && break
+  done
+  printf '%s' "$built"
+}
+
 # Put the checkout back on the commit the served build was made from, after a
 # rebuild failed and do_rebuild restored the previous build (TASK-1427).
 #
@@ -12732,12 +12758,8 @@ step_fix_git_perms() {
 # already and this must not mask its exit code.
 restore_checkout_to_served_build() {
   [ -d "$PROJECT_DIR/.git" ] || return 0
-  local stamp built="" head
-  for stamp in "$PROJECT_DIR/.next/standalone/.next/build-info.json" "$PROJECT_DIR/.next/build-info.json"; do
-    [ -f "$stamp" ] || continue
-    built=$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' "$stamp" | head -n 1)
-    [ -n "$built" ] && break
-  done
+  local built head
+  built="$(served_build_commit)"
   case "$built" in
     ""|*[!0-9a-f]*) echo "  Checkout left as is: the served build carries no commit stamp"; return 0 ;;
   esac
@@ -12791,6 +12813,447 @@ rebuild_checkout_guard() {
   exit "$rc"
 }
 
+# ── How an in-app update ends: a reboot only when something needs a boot ────
+#
+# Every update used to end in a bare `reboot`, and on 2026-11-03 that reboot
+# left a box dark for twelve hours, after an orderly shutdown and before
+# anything of the next boot was logged — where systemd's watchdog no longer
+# reaches — until the owner pulled the plug. Most updates change nothing a boot
+# applies: a web build, units and scripts, an OpenClaw core, and each of those is
+# picked up by restarting the process that runs it. So the update now asks, and
+# reboots only for a reason. (Owner's ruling, 2026-11-04: keep the reboot when
+# it is needed, a JetPack upgrade above all.)
+#
+# The reasons, and nothing broader — a general "what changed since boot" diff
+# would answer yes to every update:
+#   1. Ubuntu's own: /var/run/reboot-required (+ .pkgs), which
+#      /usr/share/update-notifier/notify-reboot-required writes from the postinst
+#      of every package that needs a boot. On L4T that is nvidia-l4t-kernel,
+#      -initrd and -bootloader (the bootloader's also stages the UEFI capsule:
+#      the JetPack upgrade), and libc6, systemd, dbus, libssl3, network-manager.
+#      It also carries what unattended-upgrades installed between two updates,
+#      so the first update after one of those reboots, which is right.
+#   2. A kernel or boot file installed since this boot, or a running kernel
+#      whose modules are gone: a kernel install that skipped the notifier. By
+#      ctime, not mtime: dpkg gives every file it unpacks the archive's mtime
+#      (the package's build date), while ctime is the install's and cannot be
+#      set back. Against /proc/stat's btime, which the kernel derives from the
+#      CURRENT clock, so an NTP step since boot moves both sides together. No
+#      step on the update path writes /boot (the boot-order guard writes EFI
+#      variables).
+#   3. A ClawBox marker, /run/clawbox/reboot-required, one reason per line, for
+#      an install step that changes something only a boot applies. No step on the
+#      update path writes one today: the only `usermod -aG` is step_ensure_user's,
+#      for a user it has just created on a full install. /run is a tmpfs, so a
+#      marker never outlives the boot it asked for.
+#
+# Prints one reason per line, nothing when no boot is needed, and returns 0
+# whatever it could not read. Every path is overridable for the tests.
+update_reboot_reasons() {
+  local flag="${CLAWBOX_REBOOT_REQUIRED_FLAG:-/var/run/reboot-required}"
+  local marker="${CLAWBOX_REBOOT_MARKER:-/run/clawbox/reboot-required}"
+  local boot="${CLAWBOX_BOOT_DIR:-/boot}"
+  local modules="${CLAWBOX_MODULES_DIR:-/lib/modules}"
+  local proc_stat="${CLAWBOX_PROC_STAT:-/proc/stat}"
+  local release="${CLAWBOX_KERNEL_RELEASE:-}"
+  local pkgs="" btime file ctime changed="" line
+  if [ -e "$flag" ]; then
+    # Each package once — every postinst of one upgrade appends its own — and a
+    # long list cut short, because this is a sentence in the update's log.
+    if [ -r "$flag.pkgs" ]; then
+      pkgs="$(awk 'NF && !seen[$1]++ { n++; if (n <= 6) out = out (n > 1 ? ", " : "") $1 }
+        END { if (n > 6) out = out " and " (n - 6) " more"; printf "%s", out }' "$flag.pkgs" 2>/dev/null || true)"
+    fi
+    echo "$flag is set${pkgs:+ (by $pkgs)}"
+  fi
+  btime="$(awk '$1 == "btime" { print $2; exit }' "$proc_stat" 2>/dev/null || true)"
+  case "$btime" in
+    ''|*[!0-9]*) ;;
+    *)
+      for file in "$boot/Image" "$boot/initrd" "$boot/extlinux/extlinux.conf" "$boot"/dtb/*; do
+        [ -f "$file" ] || continue
+        ctime="$(stat -L -c %Z "$file" 2>/dev/null || true)"
+        case "$ctime" in ''|*[!0-9]*) continue ;; esac
+        if [ "$ctime" -gt "$btime" ]; then changed="${changed:+$changed, }${file#"$boot"/}"; fi
+      done
+      ;;
+  esac
+  if [ -n "$changed" ]; then echo "kernel or boot files in $boot changed since this boot: $changed"; fi
+  [ -n "$release" ] || release="$(uname -r 2>/dev/null || true)"
+  if [ -n "$release" ] && [ ! -d "$modules/$release" ]; then
+    echo "the running kernel $release has no $modules/$release any more"
+  fi
+  if [ -f "$marker" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      if [ -n "$line" ]; then echo "$line"; fi
+    done < "$marker" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Did this update change what clawbox-ap.service runs: its unit, the two scripts
+# it starts and stops (root-owned libexec copies of these tree files) and the
+# radio library both source? `$1` is the commit of the build the update
+# replaced (served_build_commit, read before the rebuild). 0 changed, 1
+# unchanged, 2 cannot tell (no stamp, or a commit git does not have). git runs
+# as the tree's owner, never root (use_tree_owner_for_git).
+ap_sources_changed() {
+  local from="${1:-}" rc=0
+  case "$from" in ''|*[!0-9a-f]*) return 2 ;; esac
+  as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" diff --quiet "$from" HEAD -- \
+    config/clawbox-ap.service scripts/start-ap.sh scripts/stop-ap.sh scripts/wifi-radio.sh 2>/dev/null || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+# The end of an update that needs no boot: give the box what the reboot used to.
+#
+# FALSE SUCCESS IS THE RISK here — a process left on the code the update
+# replaced, or a service the boot would have started left down, under an update
+# that says it completed. So every ClawBox service that is RUNNING is restarted,
+# and every one that is ENABLED but not running is started, as the boot did —
+# unless one of these says why not:
+#   * clawbox-setup.service: last, below. It is stopped for the whole rebuild,
+#     and starting it is what resumes the update's second half
+#     (checkContinuation), so everything else is fresh before that runs.
+#   * clawbox-root-update@*: this step itself and its siblings.
+#   * clawbox-gateway.service: the continuation owns it. post_update runs with
+#     the gateway quiesced (GATEWAY_QUIESCED_ROOT_STEPS: masked, its pre-start
+#     waited for, stopped), and gateway_verify starts it again through the
+#     current pre-start. Restarting it here would start a pre-start for
+#     post_update to wait out and then stop.
+#   * clawbox-ap.service: restarted only when running and its unit or scripts
+#     changed, and then only after the dashboard (clawbox-setup is After= it);
+#     never started. A restart drops whoever is on the hotspot, and whether the
+#     hotspot should be up is the network flow's call, not the update's. Once
+#     setup is complete nothing retries this unit (ap-watchdog.sh stands down),
+#     so the late restart is proved by post_update (report_update_ap_restart).
+#   * other one-shots (nvme-boot-order, firstboot-vnc, build-heal): their work
+#     belongs to the boot. clawbox-performance.service is the one-shot that is
+#     restarted: it applies the power profile with the clawbox-power-mode.sh
+#     this update installed (its stop restores, its start applies), as the boot
+#     did.
+# Not here, and why they need nothing: the timers' services run a fresh process
+# from the new files on every tick, and daemon-reload applies a changed
+# schedule; do_rebuild has started ollama and the voice user units again if
+# they were running, on the new files, and left the embedder to the local-AI
+# proxy's guarded wake, as a boot does; llama.cpp is the web server's child and
+# starts with it; apt's postinsts restart the daemons they upgrade and flag the
+# ones that need a boot (reason 1); the owner's desktop session runs no ClawBox
+# code. A coding run in flight (its clawbox-run-* scope, in the clawbox user's
+# manager) is left to finish on the code it started with, deliberately: the
+# reboot ended it, and an update should not.
+#
+# The Hermes gateway is the clawbox user's unit and Hermes' own, and it holds
+# the ClawBox MCP server as a child it started from this tree, so it is
+# restarted through Hermes (hermes_gateway_refresh_after_install) when it runs.
+#
+# Proved per unit — active with a new invocation, and the SAME invocation still
+# active a settle later, since an exit status says only that the jobs were
+# queued and a Type=simple unit is active the moment it forks. Every unit gets
+# that settle look, however the wait ends. The wait is one-second looks plus
+# the settles, up to CLAWBOX_RESTART_WAIT_S seconds counted that way, never on
+# the clock (an NTP step at this point is not hypothetical).
+# The jobs are queued without blocking, so a start that hangs (a one-shot with
+# no start timeout) costs the bound and never the dashboard. What did not come
+# back is ONE warning naming every unit, because the updater keeps one card per
+# code; it is kept in a file with do_rebuild's engines (ENGINE_NOT_RESUMED, one
+# line under a code of its own) for post_update
+# to state again (relay_update_restart_warnings), since nobody reads this
+# step's own journal: the server that dispatched it is gone. Never fatal before
+# the setup restart: errexit is live, and nothing may leave the box with its
+# dashboard stopped.
+restart_services_after_update() {
+  local served="${1:-}" relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}"
+  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n=0 terminal engines down="" ap_restart=0 settled state short label count=0 unchecked=""
+  local ap_marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}" ap_before
+  local -a candidates=() restart=() start=() units=() before=() seen=() pending=() warnings=()
+  case "$looks" in ''|*[!0-9]*) looks=90 ;; esac
+  case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
+  # This run's warnings only: an earlier run whose post_update never came (a
+  # refused continuation) must not have its warnings stated as this one's.
+  rm -f "$relay" "$ap_marker" 2>/dev/null || true
+  systemctl daemon-reload \
+    || echo "  Warning: systemctl daemon-reload failed — restarting on the unit files systemd already had" >&2
+  # Running or enabled, read BEFORE anything is restarted: a vnc restart takes
+  # the browser that Requires= it down, and a list read afterwards would miss it.
+  mapfile -t candidates < <({
+    systemctl list-units --type=service --state=active --no-legend --plain 'clawbox-*' 2>/dev/null
+    systemctl list-unit-files --type=service --state=enabled --no-legend 'clawbox-*' 2>/dev/null
+  } | awk 'NF && !seen[$1]++ { print $1 }')
+  for unit in "${candidates[@]}"; do
+    case "$unit" in
+      clawbox-setup.service|clawbox-root-update@*) continue ;;
+      clawbox-gateway.service)
+        echo "  Leaving $unit to the update's second half: post_update stops it and gateway_verify starts it on the updated pre-start"
+        continue
+        ;;
+      clawbox-ap.service)
+        state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+        [ -n "$state" ] || state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+        if [ -z "$state" ]; then
+          echo "  Leaving $unit as it is: could not tell whether the hotspot is up (systemd did not answer); the new scripts apply at its next start"
+          continue
+        elif [ "$state" != active ]; then
+          echo "  Leaving $unit down: the hotspot is not up, and whether it should be is the network flow's call"
+          continue
+        fi
+        rc=0
+        ap_sources_changed "$served" || rc=$?
+        case "$rc" in
+          0) echo "  $unit: its unit or scripts changed in this update, so the hotspot restarts too, once the dashboard is back"; ap_restart=1; continue ;;
+          1) echo "  Leaving $unit up: its unit and scripts did not change, and a restart would drop whoever is on the hotspot"; continue ;;
+          *) echo "  Leaving $unit up: could not tell whether its scripts changed (no usable commit stamp on the replaced build); the new scripts apply at its next start"; continue ;;
+        esac
+        ;;
+      clawbox-performance.service) ;;
+      clawbox-*.service)
+        if [ "$(systemctl show "$unit" -p Type --value 2>/dev/null || true)" = oneshot ]; then
+          echo "  Leaving $unit alone: a one-shot whose work belongs to the boot"
+          continue
+        fi
+        ;;
+      *) continue ;;
+    esac
+    # The state as a WORD, never the exit status: a query that failed (a
+    # D-Bus stall right after the build) answers nothing, and read as "not
+    # running" it would send a running unit to `start`, which leaves it on its
+    # old process. Asked once more; still nothing, it is RESTARTED, which
+    # starts a unit that was not running too, and proved like any other.
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    [ -n "$state" ] || state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+    short="${unit#clawbox-}"
+    short="${short%.service}"
+    case "$state" in
+      ''|active|reloading)
+        # A running unit always has an invocation, so an empty answer is a
+        # query that failed: asked once more, and still empty nothing can prove
+        # its restart. The restart is queued all the same.
+        [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+        restart+=("$unit")
+        if [ -z "$now" ]; then unchecked="${unchecked:+$unchecked, }$short"; continue; fi
+        ;;
+      *) start+=("$unit") ;;
+    esac
+    units+=("$unit")
+    before+=("$now")
+  done
+  # ONE call each, so the jobs are queued together: clawbox-browser Requires=
+  # clawbox-vnc, and the browser's own restart merges with the one vnc's pulls
+  # in instead of running twice.
+  if [ "${#restart[@]}" -gt 0 ]; then
+    echo "  Restarting ${restart[*]}..."
+    systemctl restart --no-block "${restart[@]}" || true
+  fi
+  if [ "${#start[@]}" -gt 0 ]; then
+    echo "  Starting ${start[*]}: enabled and not running, so the boot would have started them..."
+    systemctl start --no-block "${start[@]}" || true
+  fi
+  if [ "${#units[@]}" -gt 0 ]; then
+    settled=0
+    while :; do
+      pending=()
+      for i in "${!units[@]}"; do
+        unit="${units[$i]}"
+        seen[i]="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+        if ! { systemctl is-active --quiet "$unit" 2>/dev/null && [ -n "${seen[i]}" ] && [ "${seen[i]}" != "${before[i]}" ]; }; then
+          pending+=("$i")
+        fi
+      done
+      if [ "${#pending[@]}" -eq 0 ]; then
+        # Active is not up: systemd calls a Type=simple unit active the moment
+        # it forks (see ENGINE_SETTLE_S). The SAME invocation, still active a
+        # settle later, is — a unit that died, or died and came back, is not.
+        sleep "$settle"
+        n=$((n + settle))
+        for i in "${!units[@]}"; do
+          unit="${units[$i]}"
+          now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          if ! { systemctl is-active --quiet "$unit" 2>/dev/null && [ "$now" = "${seen[i]}" ]; }; then
+            pending+=("$i")
+          fi
+        done
+        if [ "${#pending[@]}" -eq 0 ]; then settled=1; break; fi
+      fi
+      # No point waiting on units that have all failed again: nothing restarts
+      # a failed unit by itself.
+      terminal=1
+      for i in "${pending[@]}"; do
+        now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
+        if [ "$(systemctl is-active "${units[$i]}" 2>/dev/null || true)" != failed ] \
+          || [ -z "$now" ] || [ "$now" = "${before[i]}" ]; then
+          terminal=0
+          break
+        fi
+      done
+      if [ "$n" -ge "$looks" ] || [ "$terminal" = 1 ]; then break; fi
+      sleep 1
+      n=$((n + 1))
+    done
+    # The other two ways out — the bound, and everything still down having
+    # failed — come from a first look alone: the units that passed it still owe
+    # the settle look before anything calls them back.
+    if [ "$settled" != 1 ]; then
+      sleep "$settle"
+      n=$((n + settle))
+      for i in "${!units[@]}"; do
+        case " ${pending[*]} " in *" $i "*) continue ;; esac
+        now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
+        [ -n "$now" ] || now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
+        # The state as a word here too, asked once more: this is the last look
+        # a unit gets, and a query that failed is not a unit that went down.
+        state="$(systemctl is-active "${units[$i]}" 2>/dev/null || true)"
+        [ -n "$state" ] || state="$(systemctl is-active "${units[$i]}" 2>/dev/null || true)"
+        if ! { [ "$state" = active ] && [ "$now" = "${seen[i]}" ]; }; then
+          pending+=("$i")
+        fi
+      done
+    fi
+    for i in "${!units[@]}"; do
+      unit="${units[$i]}"
+      case " ${pending[*]} " in
+        *" $i "*)
+          # Short names and the state in words: the updater cuts a warning at
+          # 300 characters, and "active" under "not back" is one of three
+          # things — a restart that never took (the old invocation), a unit
+          # that was up on a new one and is on a third (a crash loop), or one
+          # that only came up after the wait.
+          state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+          now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          if [ "$state" != active ]; then
+            label="${state:-unknown}"
+          elif [ -z "$now" ]; then
+            label="unknown"
+          elif [ "$now" = "${before[i]}" ]; then
+            label="old process"
+          elif [ -n "${seen[i]}" ] && [ "${seen[i]}" != "${before[i]}" ] && [ "$now" != "${seen[i]}" ]; then
+            label="crashed and restarted"
+          else
+            label="up late"
+          fi
+          short="${unit#clawbox-}"
+          down="${down:+$down, }${short%.service} ($label)"
+          count=$((count + 1))
+          ;;
+        *) echo "    [ok] $unit is running on the updated files" ;;
+      esac
+    done
+  fi
+  if [ "$count" -gt 0 ] || [ -n "$unchecked" ]; then
+    # The hint and the count first: the updater cuts a warning at 300
+    # characters, and a cut list still says how many. A unit whose invocation
+    # systemd would not give is its own clause: its restart was queued, so most
+    # likely it is fine, and it is not counted among the ones that are not.
+    line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot."
+    if [ "$count" -gt 0 ]; then
+      line="$line $count clawbox-* services not back ${n} s after the update restarted them: $down."
+    fi
+    if [ -n "$unchecked" ]; then
+      line="$line Restarted but not checked (systemd did not answer): $unchecked."
+    fi
+    echo "$line"
+    warnings+=("$line")
+  fi
+  # do_rebuild's own: the engines it paused for the build that did not come
+  # back, on ONE line (the updater keeps one card per code) and under a code
+  # of its own, so post_update's own engine warning is not masked by it.
+  engines="${ENGINE_NOT_RESUMED[*]-}"
+  if [ -n "$engines" ]; then
+    line="CLAWBOX-WARN[engine-not-resumed:rebuild]: running before the update's rebuild and not back after it: ${engines// /, }. They start again on the next request that needs them."
+    echo "$line"
+    warnings+=("$line")
+  fi
+  ENGINE_NOT_RESUMED=()
+  if has_hermes_harness; then
+    # `1`: the gateway is on files this update replaced — its MCP child's.
+    out="$(hermes_gateway_refresh_after_install 1)" || true
+    if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+    while IFS= read -r line; do
+      case "$line" in CLAWBOX-WARN*) warnings+=("$line") ;; esac
+    done <<< "$out"
+  fi
+  if [ "${#warnings[@]}" -gt 0 ]; then
+    # Never through a symlink: root writes this file. /run/clawbox is root's
+    # (/run is root-only), so this is a second line, not the first.
+    { mkdir -p "$(dirname "$relay")" && [ ! -L "$relay" ] && printf '%s\n' "${warnings[@]}" >> "$relay"; } 2>/dev/null \
+      || echo "  Warning: could not keep these warnings for post_update at $relay" >&2
+  fi
+  echo "  Restarting clawbox-setup.service last: the update's second half resumes from it"
+  # `reset-failed` first, for the reason the test-mode arm of
+  # step_rebuild_reboot gives.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+  systemctl restart clawbox-setup.service
+  # The hotspot AFTER the dashboard: clawbox-setup is After= clawbox-ap, so a
+  # restart queued before it would hold the dashboard for the whole of
+  # start-ap.sh. Queued here and proved by post_update, minutes later, from the
+  # invocation this marker keeps (report_update_ap_restart): after setup nothing
+  # else would notice a hotspot whose new script failed.
+  if [ "$ap_restart" = 1 ]; then
+    ap_before="$(systemctl show clawbox-ap.service -p InvocationID --value 2>/dev/null || true)"
+    { mkdir -p "$(dirname "$ap_marker")" && [ ! -L "$ap_marker" ] && printf '%s\n' "${ap_before:-none}" > "$ap_marker"; } 2>/dev/null \
+      || echo "  Warning: could not keep the hotspot restart for post_update to check at $ap_marker" >&2
+    if ! systemctl restart --no-block clawbox-ap.service; then
+      echo "CLAWBOX-WARN[ap-not-restarted]: the update could not restart the hotspot (clawbox-ap) after changing its scripts; it runs the previous ones until a reboot"
+    fi
+  fi
+}
+
+# post_update's check of the hotspot restart restart_services_after_update
+# queued: back on a NEW invocation, or a warning that says how it is instead.
+# Waits while the unit is still starting, in one-second looks up to
+# CLAWBOX_AP_RESTART_WAIT_S — short, because on an OpenClaw box the gateway is
+# stopped for post_update and this wait is the assistant's too; the restart was
+# queued minutes earlier — then drops the marker either way. Without a record
+# of the run it replaced it says so, and never calls the hotspot restarted.
+report_update_ap_restart() {
+  local marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}"
+  local looks="${CLAWBOX_AP_RESTART_WAIT_S:-60}" before="" now state n=0
+  [ -f "$marker" ] || return 0
+  case "$looks" in ''|*[!0-9]*) looks=60 ;; esac
+  # `|| :`: read fails on a last line with no newline but has still read it.
+  read -r before < "$marker" 2>/dev/null || :
+  while :; do
+    state="$(systemctl is-active clawbox-ap.service 2>/dev/null || true)"
+    case "$state" in activating|deactivating|reloading) ;; *) break ;; esac
+    if [ "$n" -ge "$looks" ]; then break; fi
+    sleep 1
+    n=$((n + 1))
+  done
+  now="$(systemctl show clawbox-ap.service -p InvocationID --value 2>/dev/null || true)"
+  if [ -z "$before" ] || [ "$before" = none ]; then
+    echo "CLAWBOX-WARN[ap-not-restarted]: the update restarted the hotspot (clawbox-ap) but could not record its previous run, so whether it restarted is unknown; it is ${state:-unknown} now"
+  elif [ "$state" = active ] && [ -n "$now" ] && [ "$now" != "$before" ]; then
+    echo "  clawbox-ap.service is back on the hotspot scripts this update installed"
+  elif [ "$state" = activating ] || [ "$state" = deactivating ] || [ "$state" = reloading ]; then
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted was still $state ${n} s into this check; it finishes on its own if it can, and a reboot starts it again if not"
+  elif [ "$state" = active ]; then
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted is still on its previous run; it applies the new scripts at the next reboot"
+  else
+    echo "CLAWBOX-WARN[ap-not-restarted]: the hotspot (clawbox-ap) the update restarted is ${state:-unknown} now, and nothing retries it after setup; a reboot starts it again"
+  fi
+  rm -f "$marker" 2>/dev/null || true
+  return 0
+}
+
+# post_update's half of the warnings restart_services_after_update kept: stated
+# again here, where the updater reads them (collectRootStepWarnings), then
+# dropped so a second post_update does not repeat them.
+relay_update_restart_warnings() {
+  local relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}" line
+  [ -f "$relay" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in CLAWBOX-WARN*) echo "$line" ;; esac
+  done < "$relay"
+  rm -f "$relay" 2>/dev/null || true
+  return 0
+}
+
 step_rebuild_reboot() {
   # Redeploy config files and scripts that may have changed after git pull.
   #
@@ -12809,7 +13272,24 @@ step_rebuild_reboot() {
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
   # sees the new restore.py / scheduler logic.
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
-  # The flag, on the arm that really reboots: see do_rebuild. In test mode
+  # HOW THE UPDATE ENDS, decided here (update_reboot_reasons): after the redeploy
+  # above, so a marker one of those steps leaves counts, and before the rebuild,
+  # because the answer decides what the rebuild gives back. Test mode is left
+  # exactly as it was — no decision, the setup restart below — so a container
+  # that grows a reboot-required flag can never reboot the e2e host.
+  local reboot_reasons="" served_commit=""
+  if ! is_test_mode; then
+    reboot_reasons="$(update_reboot_reasons)"
+    if [ -n "$reboot_reasons" ]; then
+      echo "This update ends in a reboot: ${reboot_reasons//$'\n'/; }"
+    else
+      # Read before the rebuild replaces the stamp: the hotspot is restarted only
+      # when its scripts changed since this commit.
+      served_commit="$(served_build_commit)"
+      echo "Nothing in this update needs a boot (no reboot-required flag, no kernel or boot change, no ClawBox marker): the ClawBox services restart after the rebuild"
+    fi
+  fi
+  # The flag, on the arm that really reboots: see do_rebuild. On the other two
   # nothing reboots, so the engines this rebuild stopped are this function's to
   # give back and do_rebuild is called without it.
   #
@@ -12818,10 +13298,10 @@ step_rebuild_reboot() {
   # (TASK-1427). A trap, not `do_rebuild || …`: errexit must stay live inside
   # do_rebuild (see its comments).
   arm_rebuild_checkout_guard
-  if is_test_mode; then
-    do_rebuild
-  else
+  if [ -n "$reboot_reasons" ]; then
     do_rebuild --reboot-follows
+  else
+    do_rebuild
   fi
   disarm_rebuild_checkout_guard
   # Reached only with a new build verified on disk: do_rebuild returns non-zero
@@ -12847,8 +13327,20 @@ step_rebuild_reboot() {
     systemctl restart clawbox-setup.service
     return 0
   fi
-  echo "Rebooting system..."
-  reboot
+  # Asked once more on the arm that was going to restart: unattended-upgrades
+  # does not wait for an update, and a kernel it installed while the build ran
+  # is a reason the first look could not see. The engines the rebuild gave
+  # back cost that reboot nothing.
+  if [ -z "$reboot_reasons" ]; then
+    reboot_reasons="$(update_reboot_reasons)"
+  fi
+  if [ -n "$reboot_reasons" ]; then
+    echo "Rebooting: ${reboot_reasons//$'\n'/; }"
+    reboot
+  else
+    echo "Restarting ClawBox services — no reboot needed"
+    restart_services_after_update "$served_commit"
+  fi
 }
 
 step_browser_launch() {

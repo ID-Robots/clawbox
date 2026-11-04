@@ -344,8 +344,8 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   // Bumped by the fetchError-branch "Retry" to re-run the status GET below.
   // Retry must only re-check status — never kick off a full update+reboot.
   const [statusReloadCount, setStatusReloadCount] = useState(0);
-  // The update reboots the device at the "Updating ClawBox and restarting"
-  // step. Once the server stops answering, hand off to the reconnecting overlay
+  // The update restarts ClawBox (or reboots the device, when it needs a boot) at
+  // the "Updating ClawBox and restarting" step. Once the server stops answering, hand off to the reconnecting overlay
   // so the user gets the same animated loop as a manual restart; it polls until
   // the server is back, then reloads (the status route resumes post-reboot).
   const [serverDown, setServerDown] = useState(false);

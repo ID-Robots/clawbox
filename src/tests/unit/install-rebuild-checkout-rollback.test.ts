@@ -75,6 +75,7 @@ function runStep(rebuildRc: number, rebuildBody?: string): { status: number | nu
     fn("arm_rebuild_checkout_guard"),
     fn("disarm_rebuild_checkout_guard"),
     fn("rebuild_checkout_guard"),
+    fn("served_build_commit"),
     fn("restore_checkout_to_served_build"),
     fn("step_rebuild_reboot"),
     "step_rebuild_reboot",

@@ -24,7 +24,7 @@
  * for the release body of `v<version>`, which is the same Markdown.
  *
  * SURVIVES THE RESTART. The rebuild stops this server for minutes and the
- * closing reboot restarts the gateway, so an answer read from notes is kept in
+ * second half restarts the gateway, so an answer read from notes is kept in
  * `data/update-whats-new.json`, keyed by the version it describes. The screen
  * keeps what it was given in memory across the outage; the file is for the
  * server that comes back (a reload, a second device) and for a moment when git

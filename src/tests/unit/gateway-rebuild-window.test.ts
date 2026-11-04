@@ -153,12 +153,14 @@ describe("every rebuild-ending restart clears a latched start limit", () => {
     return INSTALL_SH.slice(start, end);
   }
 
-  it.each(["step_rebuild", "step_rebuild_reboot", "restore_previous_build"])(
+  it.each(["step_rebuild", "step_rebuild_reboot", "restart_services_after_update", "restore_previous_build"])(
     "%s resets the limit before restarting",
     (fn) => {
       // restore_previous_build is the THIRD rebuild-ending restart — the
       // rollback path — and it got its `reset-failed` in 5e268479 with the
       // others. Left out of this list, a regression there would pass.
+      // restart_services_after_update is the fourth: the update's end when
+      // nothing needs a boot.
       const body = shellFn(fn);
       const reset = body.indexOf("systemctl reset-failed clawbox-setup.service");
       const restart = body.indexOf("systemctl restart clawbox-setup.service");

@@ -185,7 +185,7 @@ function UpdatingScreen() {
               title: tr("update.heroUpdatingSub", "Don't power off until this finishes."),
               note: tr(
                 "update.offlineHint",
-                "The device is restarting and is not answering yet. This screen will return "
+                "ClawBox is restarting and is not answering yet. This screen will return "
                   + "to the desktop on its own.",
               ),
             }
