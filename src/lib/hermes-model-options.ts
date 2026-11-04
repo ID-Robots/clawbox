@@ -676,6 +676,19 @@ async function fetchFromDashboard(refresh: boolean): Promise<ModelOptionsPayload
   };
 }
 
+/**
+ * Hermes' `authenticated` flag per provider id, from ONE live dashboard read
+ * of the caller's own — never the cached payload, never a load already in
+ * flight (which may have begun before the caller's change landed), and no CLI
+ * spawn. `null` when the dashboard did not answer. For a caller PROVING a
+ * change took (the provider sign-out's verify step); everything that reads
+ * the catalogue goes through {@link getModelOptions}.
+ */
+export async function readLiveProviderAuth(): Promise<Map<string, boolean | null> | null> {
+  const dash = await fetchFromDashboard(false);
+  return dash ? new Map(dash.providers.map((row) => [row.id, row.authenticated])) : null;
+}
+
 interface DiskCatalog {
   providers?: Record<string, { models?: { id?: unknown; description?: unknown }[] }>;
 }

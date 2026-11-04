@@ -237,7 +237,7 @@ vi.mock("@/lib/hermes-env", () => hermesEnv);
 vi.mock("@/lib/hermes-image-plugin", () => ({ HERMES_IMAGE_TOKEN_ENV: "CLAWBOX_AI_TOKEN" }));
 const hermesCli = vi.hoisted(() => ({ runHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => hermesCli);
-const modelOptions = vi.hoisted(() => ({ invalidateModelOptions: vi.fn(), getModelOptions: vi.fn(), probeStillOwed: vi.fn(async () => false) }));
+const modelOptions = vi.hoisted(() => ({ invalidateModelOptions: vi.fn(), getModelOptions: vi.fn(), readLiveProviderAuth: vi.fn(), probeStillOwed: vi.fn(async () => false) }));
 vi.mock("@/lib/hermes-model-options", () => modelOptions);
 const bounce = vi.hoisted(() => ({ bounceHermesDashboardShared: vi.fn(async () => box.bounce) }));
 vi.mock("@/lib/hermes-bounce-claim", () => bounce);
@@ -818,9 +818,31 @@ describe("signOutOfProvider — Hermes", () => {
     // Hermes lists a provider defined in config.yaml as signed in while its
     // block has a base URL, key or no key: the block goes with the key.
     box.hermesConfig["providers.clawai.models"] = "deepseek-v4-pro";
+    // The auxiliary slots the link pointed at it go back to Hermes' own; an
+    // owner's slot on another provider stays.
+    box.hermesConfig["auxiliary.vision.provider"] = "clawai";
+    box.hermesConfig["auxiliary.vision.model"] = "deepseek-v4-flash";
+    box.hermesConfig["auxiliary.title_generation.provider"] = "clawai";
+    box.hermesConfig["auxiliary.title_generation.model"] = "deepseek-v4-flash";
+    box.hermesConfig["auxiliary.compression.provider"] = "openrouter";
+    box.hermesConfig["auxiliary.compression.model"] = "openrouter/auto";
     expect(await signOutOfProvider("clawai")).toEqual({ ok: true, changed: true, gatewayRestarting: false });
-    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({ unset: ["providers.clawai", "tts.openai.api_key"] });
-    expect(box.hermesConfig).toEqual({ "model.provider": "openrouter", "model.default": "openrouter/auto" });
+    expect(hermesYaml.patchHermesConfig).toHaveBeenCalledWith({
+      unset: [
+        "providers.clawai",
+        "tts.openai.api_key",
+        "auxiliary.vision.provider",
+        "auxiliary.vision.model",
+        "auxiliary.title_generation.provider",
+        "auxiliary.title_generation.model",
+      ],
+    });
+    expect(box.hermesConfig).toEqual({
+      "model.provider": "openrouter",
+      "model.default": "openrouter/auto",
+      "auxiliary.compression.provider": "openrouter",
+      "auxiliary.compression.model": "openrouter/auto",
+    });
     expect(box.hermesEnv).toEqual({ TELEGRAM_BOT_TOKEN: "owners-bot-token" });
     // Hermes' own fingerprint row is not the key: it is pruned once the key is gone.
     expect(removed()).toEqual([]);
@@ -971,6 +993,7 @@ describe("signOutOfProvider — Hermes", () => {
 describe("signOutOfProvider — a dual box", () => {
   it("running OpenClaw: ClawBox AI out of Hermes' config too, which is not restarted", async () => {
     hermesBox();
+    box.hermesConfig["auxiliary.vision.provider"] = "clawai";
     box.harness = "openclaw";
     box.edition = "dual";
     box.config = signedInConfig();
@@ -979,8 +1002,13 @@ describe("signOutOfProvider — a dual box", () => {
     expect(cli.spawnOpenclawCli).toHaveBeenCalledTimes(1);
     expect(box.hermesConfig).not.toHaveProperty("providers.clawai.api_key");
     // Hermes' default may be ClawBox AI on the half that does not answer the
-    // chat: its block stays, so Hermes keeps a provider it can resolve.
-    expect(box.hermesConfig).toMatchObject({ "model.provider": "clawai", "providers.clawai.base_url": "https://proxy" });
+    // chat: its block stays, so Hermes keeps a provider it can resolve — and
+    // so do the slots pointed at it.
+    expect(box.hermesConfig).toMatchObject({
+      "model.provider": "clawai",
+      "providers.clawai.base_url": "https://proxy",
+      "auxiliary.vision.provider": "clawai",
+    });
     expect(box.hermesEnv).not.toHaveProperty("CLAWBOX_AI_TOKEN");
     expect(gateway.awaitGatewayHotApply).toHaveBeenCalledTimes(1);
     expect(bounce.bounceHermesDashboardShared).not.toHaveBeenCalled();
@@ -1014,37 +1042,24 @@ describe("signOutOfProvider — a dual box", () => {
 });
 
 describe("hermesStillSignedIn — Hermes' own list, which the sign-out task's verify step asks", () => {
-  const payload = (providers: { id: string; authenticated: boolean | null }[], extra: Record<string, unknown> = {}) => ({
-    providers: providers.map((row) => ({ ...row, name: row.id, verified: null, isUserDefined: null, source: "dashboard", total: 0, models: [] })),
-    current: { provider: "openrouter", model: "openrouter/auto" },
-    reasoning: "",
-    fetchedAt: Date.now(),
-    source: "dashboard",
-    stale: false,
-    ...extra,
-  });
-
-  it("answers from a fresh live read: the row's own flag, and a row Hermes does not list is not signed in", async () => {
-    modelOptions.getModelOptions.mockResolvedValue(payload([{ id: "clawai", authenticated: true }, { id: "openrouter", authenticated: false }]));
+  it("answers from a live dashboard read of its own: the row's own flag, and a row Hermes does not list is not signed in", async () => {
+    modelOptions.readLiveProviderAuth.mockResolvedValue(new Map([["clawai", true], ["openrouter", false]]));
     expect(await hermesStillSignedIn("clawai")).toBe(true);
     expect(await hermesStillSignedIn("openrouter")).toBe(false);
     expect(await hermesStillSignedIn("gemini")).toBe(false);
-    // Never the copy cached from before the restart.
+    // Never the cached catalogue, nor a load begun before the restart.
+    expect(modelOptions.getModelOptions).not.toHaveBeenCalled();
+    // A verdict drops the cached catalogue, so the list route reads it fresh.
     expect(modelOptions.invalidateModelOptions).toHaveBeenCalledTimes(3);
-    expect(modelOptions.invalidateModelOptions.mock.invocationCallOrder[0]).toBeLessThan(modelOptions.getModelOptions.mock.invocationCallOrder[0]);
   });
 
-  it("cannot say over anything but a live verdict: a fallback, a kept copy, a row with no flag, a failed read", async () => {
-    const rows = [{ id: "clawai", authenticated: true }];
-    for (const answer of [
-      payload(rows, { source: "catalog-file", stale: true }),
-      payload(rows, { degraded: "dashboard-unreachable" }),
-      payload([{ id: "clawai", authenticated: null }]),
-    ]) {
-      modelOptions.getModelOptions.mockResolvedValueOnce(answer);
-      expect(await hermesStillSignedIn("clawai"), JSON.stringify(answer)).toBeNull();
-    }
-    modelOptions.getModelOptions.mockRejectedValueOnce(new Error("dashboard down"));
+  it("cannot say while the dashboard does not answer, over a row with no flag, or when the read throws", async () => {
+    modelOptions.readLiveProviderAuth.mockResolvedValueOnce(null);
+    expect(await hermesStillSignedIn("clawai")).toBeNull();
+    expect(modelOptions.invalidateModelOptions).not.toHaveBeenCalled();
+    modelOptions.readLiveProviderAuth.mockResolvedValueOnce(new Map([["clawai", null]]));
+    expect(await hermesStillSignedIn("clawai")).toBeNull();
+    modelOptions.readLiveProviderAuth.mockRejectedValueOnce(new Error("dashboard down"));
     expect(await hermesStillSignedIn("clawai")).toBeNull();
   });
 });

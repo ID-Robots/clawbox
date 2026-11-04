@@ -27,8 +27,13 @@
  *    key, so a block left behind kept ClawBox AI signed in to Hermes' own list
  *    (GET /setup-api/hermes/models) after its token was gone. That is safe
  *    there because the sign-out of Hermes' default is refused
- *    (src/lib/provider-sign-out.ts): nothing the chat runs on names the block.
- *    The re-link writes it again. On the other half of a dual box, which does
+ *    (src/lib/provider-sign-out.ts): the chat does not run on the block. The
+ *    auxiliary slots the link pointed at it go with it — vision and title
+ *    generation (hermes-clawai.ts), Local AI's compression summariser
+ *    (hermes-local-ai.ts) — back to Hermes' own `auto`, rather than naming a
+ *    provider that is no longer there (a vision slot left on it kept image
+ *    attach offered, src/lib/harness/hermes-features.ts). The re-link writes
+ *    all of it again. On the other half of a dual box, which does
  *    not answer the chat and whose default it may be, the block STAYS, so that
  *    Hermes keeps a provider it can resolve (src/lib/hermes-local-ai.ts says
  *    what an unknown one costs).
@@ -50,7 +55,7 @@ import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue, type Her
 import { runHermesCli } from "@/lib/hermes-cli";
 import { clearHermesEnvValues, getHermesEnvValue, hermesEnvPath, hermesHome } from "@/lib/hermes-env";
 import { HERMES_IMAGE_TOKEN_ENV } from "@/lib/hermes-image-plugin";
-import { getModelOptions, invalidateModelOptions } from "@/lib/hermes-model-options";
+import { invalidateModelOptions, readLiveProviderAuth } from "@/lib/hermes-model-options";
 import { logSafe } from "@/lib/log-safe";
 import { forgetClawaiKeyProbe } from "@/lib/provider-status";
 import type { HarnessSignOut } from "@/lib/provider-sign-out-types";
@@ -67,6 +72,14 @@ const HERMES_CLAWAI_BLOCK = "providers.clawai";
 const HERMES_CLAWAI_API_KEY = "providers.clawai.api_key";
 const HERMES_MODEL_API_KEY = "model.api_key";
 const HERMES_VOICE_API_KEY = "tts.openai.api_key";
+
+/** The auxiliary slots the link may point at ClawBox AI: each one's provider, and the model beside it. */
+const HERMES_AUX_VISION_PROVIDER = "auxiliary.vision.provider";
+const HERMES_AUX_VISION_MODEL = "auxiliary.vision.model";
+const HERMES_AUX_TITLE_PROVIDER = "auxiliary.title_generation.provider";
+const HERMES_AUX_TITLE_MODEL = "auxiliary.title_generation.model";
+const HERMES_AUX_COMPRESSION_PROVIDER = "auxiliary.compression.provider";
+const HERMES_AUX_COMPRESSION_MODEL = "auxiliary.compression.model";
 
 /** An entry id `hermes auth remove` can be handed as an argument (never one that reads as a flag). */
 const SAFE_ENTRY_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
@@ -182,6 +195,22 @@ async function configKeysFor(slug: string, token: string | null): Promise<{ keys
   return { keys, values, unreadable };
 }
 
+/** The auxiliary slots naming ClawBox AI, provider and model keys both; each read on its own. */
+async function auxSlotsOnClawai(): Promise<{ keys: string[]; unreadable: boolean }> {
+  const slots: [string, string, HermesConfigRead][] = [
+    [HERMES_AUX_VISION_PROVIDER, HERMES_AUX_VISION_MODEL, await resolveHermesConfigValue(HERMES_AUX_VISION_PROVIDER)],
+    [HERMES_AUX_TITLE_PROVIDER, HERMES_AUX_TITLE_MODEL, await resolveHermesConfigValue(HERMES_AUX_TITLE_PROVIDER)],
+    [HERMES_AUX_COMPRESSION_PROVIDER, HERMES_AUX_COMPRESSION_MODEL, await resolveHermesConfigValue(HERMES_AUX_COMPRESSION_PROVIDER)],
+  ];
+  const keys: string[] = [];
+  let unreadable = false;
+  for (const [providerKey, modelKey, read] of slots) {
+    if (read.state === "unreadable") unreadable = true;
+    else if (read.state === "value" && read.value.trim() === CLAWAI) keys.push(providerKey, modelKey);
+  }
+  return { keys, unreadable };
+}
+
 /** The files Hermes reads its credentials from: a value still in one is not gone. */
 function liveFiles(): string[] {
   return [hermesConfigPath(), authJsonPath(), hermesEnvPath()];
@@ -227,9 +256,14 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
   const takesBlock = slug === CLAWAI && active;
   const block = takesBlock ? await resolveHermesConfigValue(HERMES_CLAWAI_BLOCK) : null;
   const blockHeld = block !== null && (block.state === "present" || block.state === "value");
-  const unset = blockHeld
-    ? [HERMES_CLAWAI_BLOCK, ...config.keys.filter((key) => !key.startsWith(`${HERMES_CLAWAI_BLOCK}.`))]
-    : config.keys;
+  // The slots pointed at it hold no credential: they go, but restart nothing.
+  const aux = takesBlock ? await auxSlotsOnClawai() : { keys: [], unreadable: false };
+  const unset = [
+    ...(blockHeld
+      ? [HERMES_CLAWAI_BLOCK, ...config.keys.filter((key) => !key.startsWith(`${HERMES_CLAWAI_BLOCK}.`))]
+      : config.keys),
+    ...aux.keys,
+  ];
   const held = heldInAuth(auth) || config.keys.length > 0 || envToken !== null || blockHeld;
   const secrets = [...new Set([
     ...config.values,
@@ -303,8 +337,9 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
       const blockAfter = takesBlock ? await resolveHermesConfigValue(HERMES_CLAWAI_BLOCK) : null;
       const blockLeft = blockAfter !== null && (blockAfter.state === "present" || blockAfter.state === "value");
       const blockUnread = block?.state === "unreadable" || blockAfter?.state === "unreadable";
-      if (again.keys.length > 0 || blockLeft) left.push("Hermes' config.yaml");
-      else if (again.unreadable || config.unreadable || blockUnread) unread.push("Hermes' config.yaml");
+      const auxAfter = takesBlock ? await auxSlotsOnClawai() : { keys: [], unreadable: false };
+      if (again.keys.length > 0 || blockLeft || auxAfter.keys.length > 0) left.push("Hermes' config.yaml");
+      else if (again.unreadable || config.unreadable || blockUnread || aux.unreadable || auxAfter.unreadable) unread.push("Hermes' config.yaml");
       if (slug === CLAWAI) {
         try {
           if ((await getHermesEnvValue(HERMES_IMAGE_TOKEN_ENV)) !== null) left.push("Hermes' .env");
@@ -330,20 +365,20 @@ export async function prepareHermesSignOut(slug: string, token: string | null, a
  * Does Hermes ITSELF still list `slug` as signed in — the `authenticated` flag
  * GET /setup-api/hermes/models hands the panel and the chat? The files the
  * read-back looked at are ClawBox's view; this is the harness's, and a
- * sign-out is not done while the two disagree. A fresh read, never the cached
- * answer from before the restart. `null` while it cannot say: the dashboard
- * did not answer live (still restarting, or a fallback or kept copy stood in),
- * or it reported no verdict for the row. A row it does not list is not signed
- * in. Never throws.
+ * sign-out is not done while the two disagree. A live read of its own
+ * (`readLiveProviderAuth`), never the cached catalogue or a load begun before
+ * the restart. `null` while it cannot say: the dashboard did not answer (still
+ * restarting), or it reported no verdict for the row. A row it does not list
+ * is not signed in. A verdict also drops the cached catalogue, so the list
+ * route's next read is the one after the sign-out. Never throws.
  */
 export async function hermesStillSignedIn(slug: string): Promise<boolean | null> {
   try {
+    const auth = await readLiveProviderAuth();
+    if (!auth) return null;
     invalidateModelOptions();
-    const payload = await getModelOptions();
-    if (payload.source !== "dashboard" || payload.stale || payload.degraded) return null;
-    const row = payload.providers.find((entry) => entry.id === slug);
-    if (!row) return false;
-    return typeof row.authenticated === "boolean" ? row.authenticated : null;
+    const flag = auth.has(slug) ? auth.get(slug) : false;
+    return typeof flag === "boolean" ? flag : null;
   } catch {
     return null;
   }
