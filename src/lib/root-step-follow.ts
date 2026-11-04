@@ -13,6 +13,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { startRootStep } from "@/lib/root-step-runner";
+import { monotonicNow } from "@/lib/monotonic-clock";
 import { isJournalNoise } from "@/lib/journal-noise";
 import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
@@ -304,7 +305,10 @@ async function followLoop(
 ): Promise<FollowRootStepResult> {
   const { step, sinceMs: startedAt } = run;
   const unit = rootStepUnit(step);
-  const deadline = Date.now() + opts.timeoutMs;
+  // `startedAt` bounds journal reads and stays wall clock; the budget does not:
+  // a run adopted as the web server starts is followed while timesyncd steps
+  // the clock of a box with no RTC.
+  const deadline = monotonicNow() + opts.timeoutMs;
   let lastLine: string | null = null;
   let lastSeen: string | null = null;
   // An adopted run that carries its invocation WAS seen running by whoever
@@ -314,7 +318,7 @@ async function followLoop(
   let gracePolls = 0;
   let unknownPolls = 0;
 
-  while (Date.now() < deadline) {
+  while (monotonicNow() < deadline) {
     const { active, result } = await unitState(unit);
     // systemd did not answer (a failed query, a busy bus at boot): that is
     // not "inactive", and must not count as the run having ended or as a

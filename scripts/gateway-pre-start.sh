@@ -17,9 +17,11 @@
 # reconfigure, AI-provider change, Local-only toggle, chat model
 # switch, and crash-triggered restart.
 set -euo pipefail
-# When this pre-start began, for the step timings below (bash 5's microsecond
-# clock; empty on an older bash, which then times from the first step).
-CLAWBOX_PRESTART_T0_US="${EPOCHREALTIME:-}"
+# When this pre-start began: one reading of /proc/uptime, the monotonic clock
+# the step timings and the time budgets below are counted on (clawbox_now_ms
+# says why not bash's own). Empty where it cannot be read, which then times
+# from the first step.
+read -r CLAWBOX_PRESTART_T0_UPTIME _ < /proc/uptime 2>/dev/null || CLAWBOX_PRESTART_T0_UPTIME=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -285,9 +287,24 @@ clawbox_stamp_remember() {
   return 0
 }
 
-# Milliseconds on bash 5's clock (or date's), into CLAWBOX_NOW_MS.
+# Milliseconds on the box's MONOTONIC clock, into CLAWBOX_NOW_MS: /proc/uptime
+# (CLOCK_BOOTTIME, "12345.67 …"; `read` is a builtin, so no fork), or the
+# reading of it given as $1. Not bash's SECONDS or EPOCHREALTIME, which are wall
+# clock: the box has no battery-backed RTC, boots on the clock it saved at
+# shutdown, and timesyncd steps it forward — half a day after a night off —
+# while this script runs. On those, one cold boot logged a 12-hour "pre-start
+# total" and handed both time budgets below 0 s, though systemd, which counts
+# the unit's TimeoutStartSec on a monotonic clock, had used 40 s of it. Without
+# /proc/uptime the wall clock is all there is.
 clawbox_now_ms() {
-  local us="${EPOCHREALTIME:-}"
+  local up="${1:-}" rest us
+  [ -n "$up" ] || read -r up rest < /proc/uptime 2>/dev/null || up=""
+  if [[ "$up" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    rest="${up#*.}00"
+    CLAWBOX_NOW_MS=$(( 10#${up%%.*} * 1000 + 10#${rest:0:3} ))
+    return 0
+  fi
+  us="${EPOCHREALTIME:-}"
   if [ -n "$us" ]; then
     us="${us/[.,]/}"
     CLAWBOX_NOW_MS=$(( 10#$us / 1000 ))
@@ -296,16 +313,19 @@ clawbox_now_ms() {
   fi
 }
 CLAWBOX_STEP_NAME="startup and version probe"
-CLAWBOX_STEP_STARTED_MS=0
-CLAWBOX_PRESTART_STARTED_MS=0
-if [ -n "${CLAWBOX_PRESTART_T0_US:-}" ]; then
-  _t0="${CLAWBOX_PRESTART_T0_US/[.,]/}"
-  CLAWBOX_PRESTART_STARTED_MS=$(( 10#$_t0 / 1000 ))
-else
-  clawbox_now_ms
-  CLAWBOX_PRESTART_STARTED_MS="$CLAWBOX_NOW_MS"
-fi
+clawbox_now_ms "${CLAWBOX_PRESTART_T0_UPTIME:-}"
+CLAWBOX_PRESTART_STARTED_MS="$CLAWBOX_NOW_MS"
 CLAWBOX_STEP_STARTED_MS="$CLAWBOX_PRESTART_STARTED_MS"
+
+# Whole seconds this pre-start has run on that clock, into
+# CLAWBOX_PRESTART_ELAPSED_S: what the time budgets below take off the unit's
+# ceiling. Called as "${CLAWBOX_ELAPSED:-:}", like the step marks, so a section
+# run on its own counts none.
+clawbox_prestart_elapsed() {
+  clawbox_now_ms
+  CLAWBOX_PRESTART_ELAPSED_S=$(( (CLAWBOX_NOW_MS - CLAWBOX_PRESTART_STARTED_MS) / 1000 ))
+}
+CLAWBOX_ELAPSED=clawbox_prestart_elapsed
 
 # Close the step that is open and open the next one (an empty name opens none).
 clawbox_step_mark() {
@@ -380,7 +400,8 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -x "$OPENCLAW_BIN" ] && [ -f 
   [[ "$_sg_restarts" =~ ^[0-9]+$ ]] || _sg_restarts=0
   _sg_ceiling="${CLAWBOX_PRESTART_CEILING_S:-600}"
   [[ "$_sg_ceiling" =~ ^[0-9]+$ ]] || _sg_ceiling=600
-  _sg_budget=$(( _sg_ceiling - 150 - SECONDS ))
+  "${CLAWBOX_ELAPSED:-:}"
+  _sg_budget=$(( _sg_ceiling - 150 - ${CLAWBOX_PRESTART_ELAPSED_S:-0} ))
   if [ "$_sg_budget" -lt 0 ]; then _sg_budget=0; fi
   _sg_rc=0
   timeout -k 10 "$(( _sg_budget + 30 ))" python3 -I "$CLAWBOX_START_GUARD" start-guard \
@@ -10297,7 +10318,8 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_DB_MAINTENANCE" 
   # and the gateway's own start. Non-numeric overrides fall back to the defaults.
   [[ "$CLAWBOX_PRESTART_CEILING_S" =~ ^[0-9]+$ ]] || CLAWBOX_PRESTART_CEILING_S=600
   [[ "$CLAWBOX_DB_COMPACT_BUDGET_S" =~ ^[0-9]+$ ]] || CLAWBOX_DB_COMPACT_BUDGET_S=360
-  _dbm_left=$(( CLAWBOX_PRESTART_CEILING_S - 90 - SECONDS ))
+  "${CLAWBOX_ELAPSED:-:}"
+  _dbm_left=$(( CLAWBOX_PRESTART_CEILING_S - 90 - ${CLAWBOX_PRESTART_ELAPSED_S:-0} ))
   _dbm_budget="$CLAWBOX_DB_COMPACT_BUDGET_S"
   if [ "$_dbm_left" -lt "$_dbm_budget" ]; then _dbm_budget="$_dbm_left"; fi
   if [ "$_dbm_budget" -lt 0 ]; then _dbm_budget=0; fi

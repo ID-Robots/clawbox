@@ -1662,6 +1662,51 @@ describe("updater", () => {
       expect(subStateQueriesBeforeStop.length).toBeGreaterThanOrEqual(3);
     });
 
+    it("keeps waiting for the pre-start across a forward step of the wall clock", async () => {
+      // The box has no battery-backed RTC: after a cold boot it runs on the
+      // clock it saved at shutdown until timesyncd steps it forward — half a
+      // day after a night off — while the gateway's pre-start is still going.
+      // On the wall clock that step spent the whole 600 s at once and failed
+      // a healthy update with "did not leave its pre-start". Only `Date` moves
+      // here, as only the wall clock moves on the box.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const preStart = { stdout: "start-pre\n", stderr: "" };
+        setupExecFileMock({
+          "show clawbox-gateway.service -p SubState": preStart,
+          "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        const answer = mockExecFile.getMockImplementation()!;
+        let preStartQueries = 0;
+        mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+          if (args.join(" ").includes("clawbox-gateway.service -p SubState")) {
+            preStartQueries += 1;
+            // The step lands while the first answer is still `start-pre`.
+            if (preStartQueries === 1) vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+            else preStart.stdout = "running\n";
+          }
+          return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+        }) as unknown as typeof childProcess.execFile);
+
+        updater.resetUpdateState();
+        mockGet.mockResolvedValue(true);
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => {
+          expect(["completed", "failed"]).toContain(updater.getUpdateState().phase);
+        });
+
+        const state = updater.getUpdateState();
+        expect(state.steps.find((step) => step.status === "failed")?.error).toBeUndefined();
+        expect(state.phase).toBe("completed");
+        expect(preStartQueries).toBeGreaterThanOrEqual(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
@@ -1710,6 +1755,59 @@ describe("updater", () => {
       expect(mockSetMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ update_completed: true }),
       );
+    });
+
+    it("waits an overrun root step out across a forward step of the wall clock before lifting the gateway's mask", async () => {
+      // The settle wait mirrors the root unit's own ceiling and keeps the
+      // gateway masked while the unit still writes OpenClaw's state. A clock
+      // stepped forward while it polls (no RTC, timesyncd after a cold boot)
+      // must not end it after one look at a unit that is still running.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
+        const activeState = { stdout: "activating\n", stderr: "" };
+        setupExecFileMock({
+          "clawbox-run-root-step.sh post_update": timeoutErr,
+          "show clawbox-root-update@post_update.service -p ActiveState": activeState,
+          "show clawbox-root-update@post_update.service -p Result": { stdout: "exit-code\n", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-root-update@post_update.service": {
+            stdout: "post_update exited with status 1\n",
+            stderr: "",
+          },
+          "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: "", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        const answer = mockExecFile.getMockImplementation()!;
+        let settleQueries = 0;
+        mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+          if (args.join(" ").includes("clawbox-root-update@post_update.service -p ActiveState")) {
+            settleQueries += 1;
+            // Still running at the first look, and the clock steps meanwhile.
+            if (settleQueries === 1) vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+            else activeState.stdout = "failed\n";
+          }
+          return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+        }) as unknown as typeof childProcess.execFile);
+
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockRebuiltBox();
+        updater = await import("@/lib/updater");
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(
+          () => expect(updater.getUpdateState().phase).toBe("failed"),
+          { timeout: 10_000 },
+        );
+
+        const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+        expect(postStep?.error).toBe("post_update exited with status 1");
+        expect(settleQueries).toBeGreaterThanOrEqual(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
@@ -1831,7 +1929,8 @@ describe("updater", () => {
         // The pre-start's database housekeeping may run most of the unit's 600 s,
         // past the 60 s client and 360 s settle the restart waits: that restart is
         // still going, and the update used to fail it as "still restarting".
-        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        // `performance` too: the settle budget is counted on the monotonic clock.
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
         try {
           process.env.GATEWAY_START_LIMIT_MS = "60000";
           setupExecFileMock({

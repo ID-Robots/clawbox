@@ -1,5 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { monotonicNow } from "./monotonic-clock";
 
 const exec = promisify(execFile);
 
@@ -82,6 +83,7 @@ export interface GatewayStartWaitOptions {
   crashLoopRestarts?: number;
   /** Told on every round the gateway is still starting. */
   onStillStarting?: (state: GatewayStartState | null, waitedMs: number) => void;
+  /** Monotonic by default: this wait runs at boot, while timesyncd steps the clock (see `monotonicNow`). */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -103,7 +105,7 @@ export function gatewayStartPhase(state: GatewayStartState | null): "starting" |
 }
 
 export async function waitForGatewayStart(options: GatewayStartWaitOptions): Promise<GatewayStartVerdict> {
-  const now = options.now ?? Date.now;
+  const now = options.now ?? monotonicNow;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const crashLoopRestarts = options.crashLoopRestarts ?? GATEWAY_CRASH_LOOP_RESTARTS;
   const started = now();

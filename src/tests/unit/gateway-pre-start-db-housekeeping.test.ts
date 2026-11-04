@@ -481,6 +481,46 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     expect(opt("--budget-seconds")).toBe("0");
   });
 
+  // The box has no battery-backed RTC: after a cold boot it runs on the clock
+  // it saved at shutdown until timesyncd steps it forward, half a day after a
+  // night off, while this script runs. bash takes SECONDS from its environment
+  // as where its count starts, so this is a shell twelve hours of WALL clock
+  // into a run that has really just begun. The unit's TimeoutStartSec, which
+  // the budget is what is left of, is counted by systemd on a monotonic clock.
+  it("keeps the whole budget when the wall clock steps forward during the pre-start", () => {
+    const { r, opt } = housekeeping({ SECONDS: "43200" });
+    expect(opt("--budget-seconds")).toBe("360");
+    expect(r.stdout).toMatch(/Agent databases: checking \(compaction budget 360s\)/);
+  });
+
+  it.skipIf(!existsSync("/proc/uptime"))("takes off what the pre-start has already run on the monotonic clock, and logs that total", () => {
+    // The step timings ahead of the block, as in the script, with the start
+    // taken 100 s ago on /proc/uptime and the wall clock twelve hours on:
+    // only the 100 s count, in the budget and in the closing timing line.
+    stubPython(path.join(dir, "bin"));
+    const args = path.join(dir, "py-args");
+    const timings = between("# ── Step timings, and the checks a start may take on trust", "# OpenClaw 2026.10 or later.");
+    const up = Number(readFileSync("/proc/uptime", "utf-8").split(" ")[0]);
+    const r = runBlock(`${timings}\n${BLOCK}`, {
+      SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
+      CLAWBOX_ROOT: dir,
+      CLAWBOX_OPENCLAW_2026_10: "1",
+      OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
+      OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
+      OPENCLAW_BIN: "/opt/oc/bin/openclaw",
+      CLAWBOX_PRESTART_T0_UPTIME: (up - 100).toFixed(2),
+    }, { PY_ARGS: args, SECONDS: "43200", CLAWBOX_PRESTART_CEILING_S: "300" });
+    expect(r.status).toBe(0);
+    const argv = existsSync(args) ? readFileSync(args, "utf-8").trim().split("\n") : [];
+    const budget = Number(argv[argv.indexOf("--budget-seconds") + 1]);
+    // 300 s of ceiling, 90 held back, 100 already run.
+    expect(budget).toBeGreaterThanOrEqual(108);
+    expect(budget).toBeLessThanOrEqual(110);
+    const total = Number(/Timing: pre-start total (\d+) ms/.exec(r.stdout)?.[1]);
+    expect(total).toBeGreaterThanOrEqual(100_000);
+    expect(total).toBeLessThan(110_000);
+  });
+
   it("falls back to the defaults over a non-numeric override", () => {
     const { opt } = housekeeping({ CLAWBOX_DB_COMPACT_BUDGET_S: "lots", CLAWBOX_PRESTART_CEILING_S: "soon" });
     expect(opt("--budget-seconds")).toBe("360");
@@ -569,7 +609,9 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     expect(BLOCK).toContain('CLAWBOX_PRESTART_CEILING_S="${CLAWBOX_PRESTART_CEILING_S:-600}"');
     // budget + 30 s of helper slack + 10 s kill-after, all inside what is held back.
     expect(BLOCK).toContain('timeout -k 10 "$(( _dbm_budget + 30 ))"');
-    expect(BLOCK).toContain("CLAWBOX_PRESTART_CEILING_S - 90 - SECONDS");
+    // What the pre-start has run, on the monotonic clock systemd counts the ceiling on.
+    expect(BLOCK).toContain("CLAWBOX_PRESTART_CEILING_S - 90 - ${CLAWBOX_PRESTART_ELAPSED_S:-0}");
+    expect(BLOCK).not.toMatch(/\bSECONDS\b/);
   });
 
   it("is the last thing the pre-start does", () => {
@@ -624,6 +666,14 @@ describe("gateway-pre-start.sh start-loop recovery block", () => {
     expect(Number(opt("--budget-seconds"))).toBeLessThanOrEqual(450);
   });
 
+  it("keeps most of the unit's ceiling when the wall clock steps forward during the pre-start", () => {
+    // SECONDS twelve hours on, as after timesyncd's first step on a box with
+    // no RTC (see the housekeeping block's case): the repair still gets its time.
+    const { opt } = guard({ SECONDS: "43200" });
+    expect(Number(opt("--budget-seconds"))).toBeGreaterThanOrEqual(440);
+    expect(Number(opt("--budget-seconds"))).toBeLessThanOrEqual(450);
+  });
+
   it("counts an unreadable restart count as none", () => {
     const { opt } = guard({ NRESTARTS: "[not set]" });
     expect(opt("--restarts")).toBe("0");
@@ -644,7 +694,8 @@ describe("gateway-pre-start.sh start-loop recovery block", () => {
   it("runs before the first config repair, and inside the unit's TimeoutStartSec", () => {
     expect(SRC.indexOf("# ── Start-loop recovery")).toBeLessThan(SRC.indexOf("# ── First boot on a NEW OpenClaw core"));
     expect(SRC.indexOf("# ── Start-loop recovery")).toBeGreaterThan(SRC.indexOf("export CLAWBOX_OPENCLAW_2026_10"));
-    expect(BLOCK).toContain("_sg_budget=$(( _sg_ceiling - 150 - SECONDS ))");
+    expect(BLOCK).toContain("_sg_budget=$(( _sg_ceiling - 150 - ${CLAWBOX_PRESTART_ELAPSED_S:-0} ))");
+    expect(BLOCK).not.toMatch(/\bSECONDS\b/);
     expect(BLOCK).toContain('timeout -k 10 "$(( _sg_budget + 30 ))"');
   });
 });

@@ -1,5 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { monotonicNow } from "./monotonic-clock";
 
 const exec = promisify(execFile);
 
@@ -130,12 +131,12 @@ export async function readUnitState(
 export async function waitForUnitJob(options: UnitJobOptions): Promise<UnitJobOutcome> {
   const budgetMs = options.settleBudgetMs ?? UNIT_JOB_SETTLE_BUDGET_MS;
   const pollMs = options.pollMs ?? UNIT_JOB_POLL_MS;
-  const started = Date.now();
+  const started = monotonicNow();
   let last: UnitState | null = null;
   for (;;) {
     const state = await readUnitState(options.unit, options);
     if (state) last = state;
-    const waitedMs = Date.now() - started;
+    const waitedMs = monotonicNow() - started;
     if (state && !state.job) return { kind: "settled", state, waitedMs };
     if (waitedMs >= budgetMs) return { kind: "in-flight", state: last, waitedMs };
     await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, budgetMs - waitedMs)));
