@@ -46,6 +46,26 @@ describe("repairOpenclawConfig", () => {
     expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
+  it("lets the gateway finish starting before it restarts it", async () => {
+    // A repair's write is held until the core says `started`, so the restart
+    // after it lands just before the channel providers start, by construction:
+    // a stop there waits out the unit's whole stop timeout.
+    const started = deferred<void>();
+    const letGatewayFinishStarting = vi.fn(() => started.promise);
+    const restartGateway = vi.fn(async () => {});
+    const done = repairOpenclawConfig({
+      ensureLocalAiProxyUrls: async () => true,
+      ensureMicrosoftTtsExcluded: async () => false,
+      restartGateway,
+      letGatewayFinishStarting,
+    });
+    await vi.waitFor(() => expect(letGatewayFinishStarting).toHaveBeenCalledTimes(1));
+    expect(restartGateway).not.toHaveBeenCalled();
+    started.resolve();
+    await done;
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves the gateway alone when nothing changed", async () => {
     const restartGateway = vi.fn(async () => {});
     await repairOpenclawConfig({

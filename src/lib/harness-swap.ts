@@ -37,6 +37,7 @@ import {
 import { CLAWAI_TIER_INFO, type ClawaiTier } from "@/lib/clawbox-ai-tiers";
 import { CONFIG_ROOT, DATA_DIR, get } from "@/lib/config-store";
 import type { EditionSource } from "@/lib/edition-source";
+import { waitForGatewayStartBeforeStop } from "@/lib/gateway-start-guard";
 import { HARNESSES, type Harness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
@@ -727,6 +728,23 @@ function errorText(err: unknown): string {
 }
 
 /**
+ * A restart of a gateway that is still starting waits out the unit's whole
+ * stop timeout (`waitForGatewayStartBeforeStop` says why), and both restarts of
+ * a swap to OpenClaw land in that window by construction: the step returns once
+ * the new gateway has bound its port, seconds before it has started, and the
+ * Telegram carry follows the persona refresh's own restart.
+ */
+async function letOpenclawGatewayFinishStarting(emit: SwapEmit): Promise<void> {
+  const outcome = await waitForGatewayStartBeforeStop({
+    onHold: (waitedMs, first) => emit(first
+      ? "Waiting for the OpenClaw gateway to finish starting…"
+      : `Still waiting for the OpenClaw gateway to finish starting (${Math.round(waitedMs / 1000)} s)…`),
+  });
+  if (outcome === "settled") emit("The OpenClaw gateway has finished starting.");
+  else if (outcome === "timed-out") emit("The OpenClaw gateway is still starting; restarting it anyway.");
+}
+
+/**
  * Move the per-harness credentials the root step cannot: the ClawBox AI
  * sign-in and the Telegram bot, each into the TARGET harness's own store
  * through the writer that harness's Settings page already uses.
@@ -802,6 +820,9 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
     // this is the runtime switcher's own refresh — the script guards the
     // introduction ritual itself and leaves a never-introduced workspace alone.
     emit("Refreshing the agent's persona for OpenClaw…");
+    // The sync restarts the gateway, which the step has just started and only
+    // seen bind its port: see letOpenclawGatewayFinishStarting.
+    await letOpenclawGatewayFinishStarting(emit);
     try {
       await execFile("bash", [path.join(CONFIG_ROOT, "scripts", "clawbox-identity-sync.sh"), "openclaw"], {
         timeout: 60_000,
@@ -868,7 +889,9 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
       // A COLD start: the step has just installed and provisioned this
       // gateway, so it gets the installer's own readiness budget, not the
       // 30 s a warm restart does — that wait called a gateway that was up
-      // 35.5 s later "did not come back" (2026-10-14).
+      // 35.5 s later "did not come back" (2026-10-14). The persona refresh
+      // above has just restarted it, so its start is let finish first.
+      await letOpenclawGatewayFinishStarting(emit);
       await restartGateway({ readyWaitMs: GATEWAY_COLD_START_WAIT_MS });
       serving = true;
     }

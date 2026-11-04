@@ -449,3 +449,134 @@ describe("a config write while the gateway is starting", () => {
     quiet.mockRestore();
   });
 });
+
+/**
+ * A PLANNED stop of a gateway that is still starting (the update's quiesce
+ * for post_update, the after-update plugin repair) waited out the unit's
+ * whole TimeoutStopSec: the pinned core runs its start on after SIGTERM, its
+ * Telegram provider starts after the signal and keeps a retained consumer,
+ * and shutdown waits to its deadline. The wait lets the start finish first:
+ * the core's own `/startupz`, then a settle for the channel providers that
+ * start just after it.
+ */
+describe("waitForGatewayStartBeforeStop", () => {
+  const pending = Symbol("pending");
+  const settled = <T>(p: Promise<T>) => Promise.race([p, Promise.resolve(pending)]);
+
+  it("waits for the core to say it has started, then for its channels, before a stop", async () => {
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["silent", "starting", "starting", "started"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(await settled(waited)).toBe(pending);
+    // Started, but the channel providers start just after `started`.
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS - 2_000);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("gives up at its bound, so the stop still happens", async () => {
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["starting"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_START_WAIT_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_START_WAIT_MS + 2_000);
+    await expect(waited).resolves.toBe("timed-out");
+  });
+
+  it("does not wait on a gateway long past its start, a unit running nothing, or one already draining", async () => {
+    const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
+    host.ageS = 900;
+    for (const answer of ["started", "silent"] as const) {
+      host.probes = 0;
+      host.startup = [answer];
+      await expect(waitForGatewayStartBeforeStop(), answer).resolves.toBe("not-starting");
+      expect(host.probes, answer).toBe(1);
+    }
+    host.procs = null;
+    await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
+    host.procs = "4242\n";
+    host.ageS = 20;
+    host.startup = ["draining"];
+    await expect(waitForGatewayStartBeforeStop()).resolves.toBe("not-starting");
+  });
+
+  it("takes the core's own `starting` over the process's age", async () => {
+    // A slow start (a cold box, large agent databases under inspection) can
+    // still answer `starting` at five minutes.
+    vi.useFakeTimers();
+    host.ageS = 900;
+    host.startup = ["starting", "starting", "started"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS + 2_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("does not let a probe that goes unanswered end the settle early", async () => {
+    // A busy event loop right after `started` is when the providers start.
+    vi.useFakeTimers();
+    host.ageS = 40;
+    host.startup = ["started", "silent"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS - 3_000);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("waits anew when the core says it is starting again after it had started", async () => {
+    // A restart under someone else: the settle counts from the second `started`.
+    vi.useFakeTimers();
+    host.ageS = 40;
+    host.startup = ["started", "starting", "starting", "started"];
+    const { waitForGatewayStartBeforeStop, GATEWAY_STOP_SETTLE_MS } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    // The second `started` is at 3 s: 20 s from the first is not enough.
+    await vi.advanceTimersByTimeAsync(GATEWAY_STOP_SETTLE_MS + 1_500);
+    expect(await settled(waited)).toBe(pending);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+
+  it("says the gateway went away, not that it finished starting, and tells a waiting page it is holding", async () => {
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["starting"];
+    const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
+    const holds: [number, boolean][] = [];
+    const waited = waitForGatewayStartBeforeStop({ onHold: (ms, first) => holds.push([ms, first]) });
+    await vi.advanceTimersByTimeAsync(31_500);
+    host.procs = null;
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(waited).resolves.toBe("gone");
+    // Once at the start of the hold, then once 30 s on.
+    expect(holds.map(([, first]) => first)).toEqual([true, false]);
+    expect(holds[1][0]).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("does not count a forward step of the wall clock against the start", async () => {
+    // The update's second half quiesces the gateway at boot, while timesyncd
+    // steps the clock of a box with no RTC forward by half a day.
+    vi.useFakeTimers();
+    host.ageS = 20;
+    host.startup = ["starting"];
+    const { waitForGatewayStartBeforeStop } = await import("@/lib/gateway-start-guard");
+    const waited = waitForGatewayStartBeforeStop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await settled(waited)).toBe(pending);
+    host.probes = 0;
+    host.startup = ["started"];
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(waited).resolves.toBe("settled");
+  });
+});

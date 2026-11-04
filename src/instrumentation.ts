@@ -29,6 +29,12 @@ export async function repairOpenclawConfig(repairs: {
   /** Points the gateway's browser tool at the box's one browser (src/lib/shared-browser.ts). */
   ensureSharedBrowserProfile?: () => Promise<boolean>
   restartGateway: (options?: { awaitReady?: boolean }) => Promise<void>
+  /**
+   * Lets a gateway still starting finish first (`waitForGatewayStartBeforeStop`):
+   * a repair's write is held until the core says `started`, so the restart
+   * after it lands just before the channel providers start, by construction.
+   */
+  letGatewayFinishStarting?: () => Promise<unknown>
 }): Promise<void> {
   const steps: Array<[label: string, run: () => Promise<boolean>]> = [
     ['migrate Local AI proxy URLs', repairs.ensureLocalAiProxyUrls],
@@ -46,10 +52,15 @@ export async function repairOpenclawConfig(repairs: {
   }
   if (!changed) return
   try {
-    // No readiness wait: nothing here reads the answer, and this promise gates
-    // `armUpdateContinuation`, which resumes a half-finished update. Spending
-    // the restart budget at boot would eat the margin the memory-probe delay
-    // is sized against for no information.
+    // The START wait is spent on purpose: the repair's write was held until
+    // the core said `started`, so a restart now would land just before its
+    // channel providers start and wait out the unit's whole stop timeout. It
+    // leaves the memory-probe gate alone, which reads the persisted
+    // continuation flag rather than this promise.
+    await repairs.letGatewayFinishStarting?.()
+    // No readiness wait after the restart: nothing here reads the answer, and
+    // this promise gates `armUpdateContinuation`, which resumes a half-finished
+    // update; spending the restart budget would buy no information.
     await repairs.restartGateway({ awaitReady: false })
   } catch (err) {
     console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
@@ -289,7 +300,12 @@ export async function register() {
       console.error('[instrumentation] Could not load the shared-browser repair:', err instanceof Error ? err.message : err)
     }
   }
-  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, ensureSharedBrowserProfile, restartGateway })
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { waitForGatewayStartBeforeStop } = require('./lib/gateway-start-guard')
+  const configRepaired = repairOpenclawConfig({
+    ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, ensureSharedBrowserProfile, restartGateway,
+    letGatewayFinishStarting: () => waitForGatewayStartBeforeStop(),
+  })
   try {
     // An update that rebooted the box still has its second half to run. Ask
     // here, so it starts whether or not anyone opens the Update page — see

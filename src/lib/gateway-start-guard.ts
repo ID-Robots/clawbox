@@ -261,6 +261,81 @@ export async function holdWhileGatewayStarts(label: string, budgetMs = GATEWAY_S
   throw new GatewayStillStartingError();
 }
 
+/** How long a planned stop waits for a starting gateway to say `started` (install.sh's let_gateway_finish_starting). */
+export const GATEWAY_STOP_START_WAIT_MS = 180_000;
+/**
+ * And then, before the stop: the core says `started` just BEFORE its channel
+ * providers start (a second on a warm start, 13 s on a box's boot while its DNS
+ * was not up yet), and nothing it serves says when they have.
+ */
+export const GATEWAY_STOP_SETTLE_MS = 20_000;
+
+/**
+ * Before a PLANNED stop of the gateway, let a gateway that is still starting
+ * finish, its channels included.
+ *
+ * The pinned core (OpenClaw 2026.10.9) does not end its start on SIGTERM:
+ * startup runs on, the Telegram provider starts after the signal and keeps a
+ * retained consumer, and shutdown waits out the unit's whole TimeoutStopSec
+ * and writes a `gateway.stop_shutdown_timeout` stability bundle. On a box's
+ * journal every stop that landed between the core's SIGTERM handler (about
+ * 16 s into a start; a stop before it ends the process at once) and its
+ * `ready` hit that deadline, and every stop after `ready` settled in a second.
+ *
+ * `/startupz` 200 is the core's own "startup done" (docs/gateway/health.md);
+ * `/readyz` is no later a signal, as it counts a starting channel account as
+ * healthy. So: `started`, then {@link GATEWAY_STOP_SETTLE_MS}, through which a
+ * probe that goes unanswered (a busy event loop) is no news. `starting` is the
+ * core's word at any age, and after `started` it is a restart, waited for anew.
+ * Not starting at all: a gateway that is gone or draining, and one older than
+ * {@link RECENT_START_MS} that answers `started` or nothing without having said
+ * `starting` in this wait. One that has not
+ * started within `budgetMs` is the caller's to stop anyway. The pre-start is
+ * the caller's own wait.
+ */
+export async function waitForGatewayStartBeforeStop(
+  options: {
+    budgetMs?: number;
+    settleMs?: number;
+    /** Called when the wait first holds (`first`), then every 30 s it goes on holding: a caller with a page to keep informed. */
+    onHold?: (waitedMs: number, first: boolean) => void;
+  } = {},
+): Promise<"not-starting" | "settled" | "gone" | "timed-out"> {
+  const { budgetMs = GATEWAY_STOP_START_WAIT_MS, settleMs = GATEWAY_STOP_SETTLE_MS, onHold } = options;
+  const began = monotonicNow();
+  let startedAt: number | null = null;
+  let seenStarting = false;
+  let notedAt: number | null = null;
+  for (;;) {
+    const unit = readGatewayUnit();
+    // Gone, or already stopping: nothing left to let finish, and nothing that
+    // finished either, once this has held.
+    const over = notedAt === null ? "not-starting" : "gone";
+    if (unit?.kind !== "gateway") return over;
+    const probe = await probeStartup();
+    const now = monotonicNow();
+    if (probe === "draining") return over;
+    if (probe === "starting") {
+      startedAt = null;
+      seenStarting = true;
+    } else if (startedAt === null && !seenStarting && unit.ageMs >= RECENT_START_MS) {
+      return "not-starting";
+    } else if (probe === "started") {
+      startedAt ??= now;
+    }
+    if (startedAt !== null) {
+      if (now - startedAt >= settleMs) return "settled";
+    } else if (now - began >= budgetMs) {
+      return "timed-out";
+    }
+    if (notedAt === null || now - notedAt >= 30_000) {
+      onHold?.(now - began, notedAt === null);
+      notedAt = now;
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+}
+
 /** CLI verbs that write openclaw.json themselves. Read-only verbs never wait. */
 export function cliWritesConfig(args: readonly string[]): boolean {
   const [noun, verb, sub] = args;

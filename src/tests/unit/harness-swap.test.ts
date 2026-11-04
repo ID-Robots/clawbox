@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   readConfig: vi.fn(async (): Promise<Record<string, unknown>> => ({})),
   setTelegramToken: vi.fn(async () => {}),
   restartGateway: vi.fn(async () => {}),
+  /** The wait that lets a gateway still starting finish before a restart. */
+  waitForStart: vi.fn(async (): Promise<"not-starting" | "settled" | "timed-out"> => "not-starting"),
   getCodingAgentStatus: vi.fn(async () => ({ running: 0 })),
   updateLocked: vi.fn(async () => false),
   /** Where the OpenClaw core is — an absolute path — or the bare name when it is not installed. */
@@ -62,6 +64,10 @@ vi.mock("@/lib/openclaw-config", async (orig) => ({
   setTelegramToken: h.setTelegramToken,
   restartGateway: h.restartGateway,
   findOpenclawBin: () => h.openclawBin,
+}));
+vi.mock("@/lib/gateway-start-guard", async (orig) => ({
+  ...(await orig<typeof import("@/lib/gateway-start-guard")>()),
+  waitForGatewayStartBeforeStop: h.waitForStart,
 }));
 vi.mock("@/lib/project-import", () => ({ freeBytes: vi.fn(async () => null) }));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => null) }));
@@ -153,12 +159,19 @@ beforeEach(() => {
   h.readConfig.mockReset().mockResolvedValue({});
   h.setTelegramToken.mockReset().mockResolvedValue(undefined);
   h.restartGateway.mockReset().mockResolvedValue(undefined);
+  // Recorded among the commands, so its place beside the restarts can be read.
+  h.waitForStart.mockReset().mockImplementation(async () => {
+    h.execCalls.push([WAIT_FOR_START]);
+    return "settled";
+  });
   h.getCodingAgentStatus.mockReset().mockResolvedValue({ running: 0 });
 });
 
 afterEach(async () => {
   await fs.rm(REQUEST_PATH, { force: true });
 });
+
+const WAIT_FOR_START = "<wait for the gateway to finish starting>";
 
 /** A store holding the keys given and nothing else. */
 function store(values: Record<string, unknown>): void {
@@ -708,6 +721,26 @@ describe("the carry-over after the lock has flipped", () => {
     expect(notes).toEqual([SWAP_NOTES.clawaiCarried, SWAP_NOTES.telegramApprovals]);
     expect(h.applyClawaiToHermes).not.toHaveBeenCalled();
     expect(h.setHermesTelegramToken).not.toHaveBeenCalled();
+  });
+
+  it("→ OpenClaw: lets the gateway finish starting before each of its two restarts", async () => {
+    // A restart of a gateway still starting waits out its unit's whole stop
+    // timeout. The step returns once the new gateway has bound its port, before
+    // it has started; the persona refresh restarts it; and the Telegram carry
+    // restarts the one that refresh has just started.
+    store({ telegram_bot_token: "123:bot" });
+    await carryOverAfterSwap("openclaw", emit);
+    const commands = h.execCalls.map((call) => call.at(-1) === "openclaw" && call.some((arg) => arg.endsWith("scripts/clawbox-identity-sync.sh")) ? "sync" : call[0]);
+    const sync = commands.indexOf("sync");
+    expect(sync).toBeGreaterThan(-1);
+    expect(commands.indexOf(WAIT_FOR_START)).toBeLessThan(sync);
+    expect(commands.lastIndexOf(WAIT_FOR_START)).toBeGreaterThan(sync);
+    expect(h.waitForStart).toHaveBeenCalledTimes(2);
+    expect(h.waitForStart.mock.invocationCallOrder[1]).toBeLessThan(h.restartGateway.mock.invocationCallOrder[0]);
+    // Towards Hermes there is no OpenClaw gateway to wait for.
+    h.waitForStart.mockClear();
+    await carryOverAfterSwap("hermes", emit);
+    expect(h.waitForStart).not.toHaveBeenCalled();
   });
 
   it("→ OpenClaw: refreshes the shared identity into the OpenClaw workspace, the runtime switcher's way", async () => {

@@ -204,6 +204,19 @@ vi.mock("@/lib/openclaw-gateway-ws", async (orig) => ({
   gatewayWsMainChatHistory: mockMainChatHistory,
 }));
 
+// The wait that lets a gateway still starting finish before a planned stop;
+// its rule is gateway-start-guard.test.ts's. "Not starting" by default, so
+// only the case about it moves; the rest of that module is the real one.
+const { mockWaitForGatewayStart } = vi.hoisted(() => ({
+  mockWaitForGatewayStart: vi.fn<() => Promise<"not-starting" | "settled" | "timed-out">>(
+    async () => "not-starting",
+  ),
+}));
+vi.mock("@/lib/gateway-start-guard", async (orig) => ({
+  ...(await orig<typeof import("@/lib/gateway-start-guard")>()),
+  waitForGatewayStartBeforeStop: mockWaitForGatewayStart,
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
 import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import { waitForPortOpen } from "@/lib/port-probe";
@@ -1639,6 +1652,41 @@ describe("updater", () => {
       // asked, saw the pre-start running, asked again, and only then stopped.
       expect(subStateQueries[0]).toBeGreaterThan(firstMask);
       expect(subStateQueries.filter((index) => index < firstStop).length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("does not stop the gateway while it is still starting, nor in the moment after", async () => {
+      // Out of its pre-start is not started: Type=simple goes straight to
+      // `running`, and the core runs its startup sidecars and channels for
+      // half a minute after. A stop in that window waits out the unit's whole
+      // TimeoutStopSec (the core's Telegram provider starts after the SIGTERM
+      // and holds shutdown to its deadline), so the quiesce lets the start
+      // finish first, masked, so nothing can start the unit behind the wait.
+      setupExecFileMock({
+        "show clawbox-gateway.service -p SubState": { stdout: "running\n", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const start = deferred<"settled">();
+      mockWaitForGatewayStart.mockImplementationOnce(() => start.promise);
+      const calls = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(mockWaitForGatewayStart).toHaveBeenCalled());
+      const masked = calls().findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
+      expect(masked).toBeGreaterThan(-1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(calls().some((call) => call.includes("systemctl stop clawbox-gateway.service"))).toBe(false);
+
+      start.resolve("settled");
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+      const stop = calls().findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      expect(stop).toBeGreaterThan(masked);
     });
 
     it("keeps waiting when the pre-start state cannot be read", async () => {
@@ -3604,6 +3652,20 @@ describe("updater", () => {
       // Asked again only after that restart, and once was enough.
       expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
       expect(restarts[0]).toBeLessThan(mockMainChatHistory.mock.invocationCallOrder[1]);
+    });
+
+    it("lets a gateway that has just started finish before that restart", async () => {
+      // The store failure is answered on the first ask, moments after the
+      // gateway began answering: a restart then lands before its channel
+      // providers have started and waits out the unit's whole stop timeout.
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      await runVerify();
+      const firstAsk = mockMainChatHistory.mock.invocationCallOrder[0];
+      const [restart] = restartsAfterFirstAsk();
+      expect(restart).toBeGreaterThan(firstAsk);
+      expect(
+        mockWaitForGatewayStart.mock.invocationCallOrder.some((order) => order > firstAsk && order < restart),
+      ).toBe(true);
     });
 
     it("fails the step, in words the owner can act on, when the gateway still answers UNAVAILABLE after that restart", async () => {

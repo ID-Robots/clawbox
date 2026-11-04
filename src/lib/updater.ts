@@ -26,6 +26,7 @@ import { runHermesCli } from "./hermes-cli";
 import { hermesHome } from "./hermes-env";
 import { waitForPortOpen } from "./port-probe";
 import { monotonicNow } from "./monotonic-clock";
+import { waitForGatewayStartBeforeStop } from "./gateway-start-guard";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
@@ -2714,6 +2715,34 @@ async function waitForGatewayPreStart(): Promise<void> {
 }
 
 /**
+ * And a gateway out of its pre-start can still be starting: Type=simple goes
+ * straight to `running`, and the core runs its startup sidecars and channels
+ * for half a minute after. A stop in that window waits out the unit's whole
+ * TimeoutStopSec (see `waitForGatewayStartBeforeStop`), and both callers that
+ * matter land in it by construction: post_update quiesces a gateway the build
+ * or the boot has just started, and the after-update plugin repair one that
+ * has just come back. Masked first for the reason waitForGatewayPreStart
+ * gives. Never a failure: a start that does not finish in time is stopped
+ * anyway, as it always was.
+ */
+async function letGatewayFinishStarting(): Promise<void> {
+  const began = monotonicNow();
+  const outcome = await waitForGatewayStartBeforeStop({
+    onHold: (_waitedMs, first) => {
+      if (first) console.log("[Updater] clawbox-gateway is still starting; letting it finish before stopping it");
+    },
+  });
+  if (outcome === "not-starting") return;
+  const waited = formatWaited(monotonicNow() - began);
+  const said = {
+    settled: `clawbox-gateway finished starting; stopping it after ${waited}`,
+    gone: `clawbox-gateway stopped running during the ${waited} wait for its start`,
+    "timed-out": `clawbox-gateway had not finished starting after ${waited}; stopping it anyway`,
+  } as const;
+  console.log(`[Updater] ${said[outcome]}`);
+}
+
+/**
  * Keep systemd from starting the gateway while an OpenClaw writer is active.
  * A root-owned runtime drop-in condition works even for /etc units, unlike
  * a /run unit mask (TASK-789). The guard comes before stop so a root update step cannot race the stop with its
@@ -2730,6 +2759,7 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
     masked = true;
     await setGatewayMaintenanceMask(true);
     await waitForGatewayPreStart();
+    await letGatewayFinishStarting();
     await stopGatewayForMaintenance();
     outcome = { ok: true, value: await operation() };
   } catch (err) {
@@ -3892,6 +3922,10 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
  * and the restart that cleared it in the field was nothing more.
  */
 async function restartGatewayAndWait(): Promise<void> {
+  // The store failure is answered on the first ask, which lands moments after
+  // the gateway began answering — just after it started, before its channel
+  // providers have (see letGatewayFinishStarting).
+  await letGatewayFinishStarting();
   await restartGatewayForRecovery();
   if (hasX64DesktopIntegration(PROJECT_DIR)) {
     if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
