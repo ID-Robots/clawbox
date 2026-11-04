@@ -906,7 +906,7 @@ async function readBuildId(): Promise<string> {
  */
 async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
   const deadline = monotonicNow() + REBUILD_TAKEOVER_TIMEOUT_MS;
-  let message = "Rebuild did not restart the device within the expected window";
+  let message = "Rebuild did not restart ClawBox within the expected window";
   while (monotonicNow() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     if (rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP))) {
@@ -5349,8 +5349,8 @@ async function resumeContinuation(): Promise<boolean> {
       // readRootStepFailure.
       ? (await readRootStepFailure(REBUILD_ROOT_STEP, null)) ?? "Rebuild failed before the restart"
       : buildMissing
-        ? `The device restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
-        : `The device restarted without producing a new build — see ${logs}`;
+        ? `ClawBox restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
+        : `ClawBox restarted without producing a new build — see ${logs}`;
     runtime.state = createInitialState(steps);
     runtime.state.warnings = await restoreWarnings();
     runtime.state.phase = "failed";

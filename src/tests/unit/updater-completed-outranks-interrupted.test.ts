@@ -208,7 +208,7 @@ describe("an interruption never outlives a completion newer than it", () => {
     // re-opened by the markers.
     expect(updater.isInterruptedVerdict({
       ...settled,
-      error: "The device restarted without producing a new build",
+      error: "ClawBox restarted without producing a new build",
     })).toBe(false);
   });
 

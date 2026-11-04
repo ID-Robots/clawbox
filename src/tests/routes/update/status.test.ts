@@ -329,7 +329,7 @@ describe("GET /setup-api/update/status", () => {
       mockIsInterruptedVerdict.mockReturnValue(false);
       mockGetUpdateState.mockReturnValue({
         ...interrupted,
-        error: "The device restarted without producing a new build",
+        error: "ClawBox restarted without producing a new build",
       });
 
       const body = await (await updateStatusGet()).json();
