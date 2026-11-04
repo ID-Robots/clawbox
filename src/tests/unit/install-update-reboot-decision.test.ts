@@ -319,6 +319,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     late?: string[];
     /** Unit → how many of its first InvocationID reads answer nothing. */
     noInvocation?: Record<string, number>;
+    /** Unit → how many of its first is-active queries answer nothing. */
+    noState?: Record<string, number>;
   }
 
   function run(box: Box): { status: number | null; events: string[]; out: string; relay: string } {
@@ -336,6 +338,7 @@ d("restart_services_after_update: what the reboot used to restart", () => {
     // A running unit has an invocation; one that is not running has none yet.
     for (const u of box.active) fs.writeFileSync(path.join(state, `${u}.inv`), "inv-boot");
     for (const [u, k] of Object.entries(box.noInvocation ?? {})) fs.writeFileSync(path.join(state, `${u}.noinv`), String(k));
+    for (const [u, k] of Object.entries(box.noState ?? {})) fs.writeFileSync(path.join(state, `${u}.nostate`), String(k));
     const types = Object.entries(box.types ?? {}).map(([u, t]) => `${u}) echo ${t} ;;`).join(" ");
     const failing = (box.failing ?? []).join(" ");
     const flaky = (box.flaky ?? []).join(" ");
@@ -353,7 +356,8 @@ d("restart_services_after_update: what the reboot used to restart", () => {
       `EV=${JSON.stringify(events)}; ST=${JSON.stringify(state)}`,
       "sleep() { echo \"sleep $*\" >> \"$EV\"; }",
       // A late unit answers "activating" for its first N looks after its restart.
-      "unit_state() { local n; if [ -f \"$ST/$1.late\" ]; then n=$(cat \"$ST/$1.late\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.late\"; echo activating; return; fi; fi; if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
+      // A unit whose state query fails answers nothing for its first N looks.
+      "unit_state() { local n; if [ -f \"$ST/$1.nostate\" ]; then n=$(cat \"$ST/$1.nostate\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.nostate\"; echo; return; fi; fi; if [ -f \"$ST/$1.late\" ]; then n=$(cat \"$ST/$1.late\"); if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$ST/$1.late\"; echo activating; return; fi; fi; if [ -f \"$ST/$1.dead\" ]; then echo failed; elif [ -f \"$ST/$1.inv\" ]; then echo active; else echo inactive; fi; }",
       "systemctl() {",
       "  echo \"systemctl $*\" >> \"$EV\"",
       "  case \"$1\" in",
@@ -593,14 +597,38 @@ d("restart_services_after_update: what the reboot used to restart", () => {
   });
 
   it("never counts a restart back when the unit's invocation could not be read", () => {
-    // RED on 84cafe0: an empty pre-restart invocation differed from any later one.
     const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], noInvocation: { "clawbox-vnc.service": 2 }, looks: 0 });
     expect(r.out).not.toContain("[ok] clawbox-vnc.service");
-    expect(r.relay).toContain("vnc (not checked)");
+    // Its own clause, not counted among the units that are down.
+    expect(r.relay).toContain("Not checked (systemd did not answer): vnc.");
+    expect(r.relay).not.toMatch(/\d+ clawbox-\* services not back/);
   });
 
   it("asks once more when the first read of an invocation comes back empty", () => {
+    // RED on 84cafe0: an empty pre-restart invocation differed from any later one, so the stuck unit was [ok].
     const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], noInvocation: { "clawbox-vnc.service": 1 }, looks: 0 });
+    expect(r.relay).toContain("vnc (old process)");
+  });
+
+  it("never sends a running unit to `start` because its state query failed", () => {
+    // RED on b4ddb2a: an empty is-active read as "not running", and `start`
+    // on a running unit kept its old process under an [ok].
+    const r = run({
+      active: BOX,
+      types: TYPES,
+      stuck: ["clawbox-vnc.service"],
+      noState: { "clawbox-vnc.service": 2 },
+      noInvocation: { "clawbox-vnc.service": 1 },
+      looks: 0,
+    });
+    expect(r.out).not.toContain("[ok] clawbox-vnc.service");
+    expect(r.relay).toContain("Not checked (systemd did not answer): vnc.");
+    expect(calls(r.events, "start").join(" ")).not.toContain("clawbox-vnc.service");
+  });
+
+  it("asks once more when the first state query comes back empty", () => {
+    const r = run({ active: BOX, types: TYPES, stuck: ["clawbox-vnc.service"], noState: { "clawbox-vnc.service": 1 }, looks: 0 });
+    expect(calls(r.events, "restart")[0]).toContain("clawbox-vnc.service");
     expect(r.relay).toContain("vnc (old process)");
   });
 

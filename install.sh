@@ -12968,7 +12968,7 @@ ap_sources_changed() {
 # dashboard stopped.
 restart_services_after_update() {
   local served="${1:-}" relay="${CLAWBOX_UPDATE_RESTART_RELAY:-/run/clawbox/update-restart-warnings}"
-  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n=0 terminal engines down="" ap_restart=0 settled state short label count=0
+  local looks="${CLAWBOX_RESTART_WAIT_S:-90}" settle="${ENGINE_SETTLE_S:-3}" unit rc out line now i n=0 terminal engines down="" ap_restart=0 settled state short label count=0 unchecked=""
   local ap_marker="${CLAWBOX_UPDATE_AP_RESTART:-/run/clawbox/update-ap-restart}" ap_before
   local -a candidates=() restart=() start=() units=() before=() seen=() pending=() warnings=()
   case "$looks" in ''|*[!0-9]*) looks=90 ;; esac
@@ -13013,22 +13013,27 @@ restart_services_after_update() {
         ;;
       *) continue ;;
     esac
+    # The state as a WORD, never the exit status: a query that failed (a
+    # D-Bus stall right after the build) answers nothing, and read as "not
+    # running" it would send a running unit to `start`, which leaves it on its
+    # old process. Asked once more; still nothing, the unit is not checked.
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    [ -n "$state" ] || state="$(systemctl is-active "$unit" 2>/dev/null || true)"
     now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
-      restart+=("$unit")
-      # A running unit always has an invocation, so an empty answer is a query
-      # that failed. Asked once more; still empty, nothing could prove its
-      # restart, and it is named as not checked rather than counted back.
-      [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
-      if [ -z "$now" ]; then
-        short="${unit#clawbox-}"
-        down="${down:+$down, }${short%.service} (not checked)"
-        count=$((count + 1))
-        continue
-      fi
-    else
-      start+=("$unit")
-    fi
+    short="${unit#clawbox-}"
+    short="${short%.service}"
+    case "$state" in
+      '') unchecked="${unchecked:+$unchecked, }$short"; continue ;;
+      active|reloading)
+        # A running unit always has an invocation, so an empty answer is a
+        # query that failed: asked once more, and still empty nothing can prove
+        # its restart.
+        [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+        restart+=("$unit")
+        if [ -z "$now" ]; then unchecked="${unchecked:+$unchecked, }$short"; continue; fi
+        ;;
+      *) start+=("$unit") ;;
+    esac
     units+=("$unit")
     before+=("$now")
   done
@@ -13063,6 +13068,7 @@ restart_services_after_update() {
         for i in "${!units[@]}"; do
           unit="${units[$i]}"
           now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
           if ! { systemctl is-active --quiet "$unit" 2>/dev/null && [ "$now" = "${seen[i]}" ]; }; then
             pending+=("$i")
           fi
@@ -13093,6 +13099,7 @@ restart_services_after_update() {
       for i in "${!units[@]}"; do
         case " ${pending[*]} " in *" $i "*) continue ;; esac
         now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
+        [ -n "$now" ] || now="$(systemctl show "${units[$i]}" -p InvocationID --value 2>/dev/null || true)"
         if ! { systemctl is-active --quiet "${units[$i]}" 2>/dev/null && [ "$now" = "${seen[i]}" ]; }; then
           pending+=("$i")
         fi
@@ -13109,6 +13116,7 @@ restart_services_after_update() {
           # that only came up after the wait.
           state="$(systemctl is-active "$unit" 2>/dev/null || true)"
           now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
+          [ -n "$now" ] || now="$(systemctl show "$unit" -p InvocationID --value 2>/dev/null || true)"
           if [ "$state" != active ]; then
             label="${state:-unknown}"
           elif [ -z "$now" ]; then
@@ -13128,10 +13136,18 @@ restart_services_after_update() {
       esac
     done
   fi
-  if [ "$count" -gt 0 ]; then
+  if [ "$count" -gt 0 ] || [ -n "$unchecked" ]; then
     # The hint and the count first: the updater cuts a warning at 300
-    # characters, and a cut list still says how many.
-    line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot. $count clawbox-* services not back ${n} s after the update restarted them: $down"
+    # characters, and a cut list still says how many. A unit systemd could not
+    # be asked about is its own clause: most likely it is fine, and it is not
+    # counted among the ones that are not.
+    line="CLAWBOX-WARN[service-not-restarted]: a reboot brings back the ones that start at boot."
+    if [ "$count" -gt 0 ]; then
+      line="$line $count clawbox-* services not back ${n} s after the update restarted them: $down."
+    fi
+    if [ -n "$unchecked" ]; then
+      line="$line Not checked (systemd did not answer): $unchecked."
+    fi
     echo "$line"
     warnings+=("$line")
   fi
