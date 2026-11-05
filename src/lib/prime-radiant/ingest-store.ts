@@ -52,7 +52,7 @@ export interface IngestJob {
   /** Files whose page was written. */
   done: number;
   failed: number;
-  /** Files with nothing to keep, or whose page is verified (never overwritten). */
+  /** Files with nothing to keep, or whose page is verified (left as it was; `skips.verified` counts these). */
   skipped: number;
   /** Files already turned into pages by this job or an earlier one. */
   duplicates: number;

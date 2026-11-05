@@ -136,6 +136,13 @@ retired everywhere they appeared, and their old ids are never used again, so the
 disagreement cannot come back on its own. A page you have verified is never rewritten
 by the nightly pass without asking you first.
 
+When a document behind a page you have verified changes, Prime Radiant tells you. An
+import keeps the page as you verified it, lists the document under **Left out**, and
+asks you in **Review**, showing what the document says now. The nightly pass writes the
+change on its copy with your verified facts kept as they are, and holds the night: the
+**Review** item lists what the change adds and drops. Dismiss it, then **Merge** the
+night to take the change.
+
 Below the questions, **Review** lists the wiki's failed checks (see [Checks](#checks)).
 
 ## History and undo

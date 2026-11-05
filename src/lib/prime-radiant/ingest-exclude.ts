@@ -204,6 +204,8 @@ export function compileExcludes(patterns: readonly string[]): (name: string) => 
  * Every reason an ingest leaves a file or a folder out, counted per job (and
  * per preview) rather than dropped silently. `codeProject` and
  * `excludedFolder` count FOLDERS not gone into; the rest count files.
+ * `verified` counts changed documents whose page a person verified, left as
+ * it was by an import that writes to the wiki directly (never in a preview).
  */
 export const SKIP_REASONS = [
   "codeProject",
@@ -213,12 +215,13 @@ export const SKIP_REASONS = [
   "machineText",
   "tooLarge",
   "unsupported",
+  "verified",
 ] as const;
 export type SkipReason = (typeof SKIP_REASONS)[number];
 export type SkipCounts = Record<SkipReason, number>;
 
 export function emptySkipCounts(): SkipCounts {
-  return { codeProject: 0, excludedFolder: 0, boilerplate: 0, temp: 0, machineText: 0, tooLarge: 0, unsupported: 0 };
+  return { codeProject: 0, excludedFolder: 0, boilerplate: 0, temp: 0, machineText: 0, tooLarge: 0, unsupported: 0, verified: 0 };
 }
 
 /** Counts read back from storage: every known reason a whole number, anything else dropped. */

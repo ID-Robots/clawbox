@@ -100,6 +100,7 @@ import {
 import { primeRadiantRoot, vaultDir } from "./paths";
 import { repairPluginWritesOnce } from "./plugin-repair";
 import { DEFAULT_INGEST_PARALLEL, MAX_INGEST_PARALLEL, effectiveCostRates, readSettings } from "./settings";
+import { addReviewItem } from "./review-store";
 import { readRetiredLedger, stateDbPathFor, syncActiveClaims } from "./state-db";
 import type { VaultAuthor } from "./git";
 import { INDEX_FILE, VaultLintBlockedError, ensureVault, readVaultSnapshot, vaultOperation } from "./vault";
@@ -162,6 +163,14 @@ export interface IngestDeps {
   requeueDelayMs?: number;
   /** The rates calls are priced with (default: the settings file's). */
   costRates?: CostRates;
+  /**
+   * A changed document whose page a person verified: `refuse` (the default,
+   * an import that writes to the wiki itself) leaves the page as it was,
+   * counts the file in `skips.verified`, notes it and asks the owner in
+   * Review; `update` (the nightly pass, whose branch the gate holds on a
+   * verified page) writes the page with every verification kept.
+   */
+  verifiedPages?: "refuse" | "update";
 }
 
 interface LiveJob {
@@ -547,6 +556,8 @@ async function runJob(
     const inFlight = new Set<Promise<void>>();
     /** Files whose first round failed for a reason that may pass: the job's retry queue. */
     const requeue: PreparedFile[] = [];
+    /** Changed documents behind a page a person verified, as their batches settled them. */
+    const verifiedDocs: VerifiedDocument[] = [];
     let batch: PreparedFile[] = [];
     let batchChars = 0;
 
@@ -596,6 +607,7 @@ async function runJob(
         });
       }
       settle(updates, labels);
+      if (results.verified) verifiedDocs.push(...results.verified);
       if (results.cost) {
         job.calls += results.cost.calls;
         job.usdEstimate = Math.round((job.usdEstimate + results.cost.usd) * 1_000_000) / 1_000_000;
@@ -693,6 +705,23 @@ async function runJob(
       while (inFlight.size > 0) await Promise.race(inFlight);
     }
 
+    // A verified page never changes silently: what was left out is counted, noted and asked
+    // about in Review; what was written with its verifications kept says where it waits.
+    const left = verifiedDocs.filter((d) => !d.updated);
+    if (left.length > 0) {
+      job.skips.verified += left.length;
+      const asked = askAboutVerifiedPages(vault, left, now().toISOString());
+      job.notes.push(
+        `${left.length} changed document(s) behind a page you verified were left out, each page kept as you verified it (${pageList(left)})${asked > 0 ? `; Review asks you about ${asked}` : ""}.`,
+      );
+    }
+    const rewritten = verifiedDocs.filter((d) => d.updated);
+    if (rewritten.length > 0) {
+      job.notes.push(
+        `${rewritten.length} page(s) you verified were updated from their changed documents, every verification kept; the change waits for your answer in Review before it reaches the wiki (${pageList(rewritten)}).`,
+      );
+    }
+
     // Files the loop never reached after a fatal error are failed — dead
     // letters like any other; a document is skipped only once some job wrote
     // its pages, so the next run of the same folders picks them up too.
@@ -786,6 +815,64 @@ interface BatchResult {
   fatal: string | null;
   /** A spent allowance refused the batch's call: it stops the job, and the batch's files (left out of `updates`) stay queued. */
   allowance?: AllowanceStop | null;
+  /** The batch's changed documents behind a page a person verified. */
+  verified?: VerifiedDocument[];
+}
+
+/** A changed document whose page a person verified: left out (`refuse`), or written with every verification kept (`update`). */
+interface VerifiedDocument {
+  label: string;
+  page: string;
+  sha256: string;
+  /** What the document says now: the facts the model drew from it. */
+  facts: string[];
+  updated: boolean;
+}
+
+/** The facts of a changed document a review item shows. */
+const MAX_FACTS_SHOWN = 8;
+
+function pageList(docs: readonly VerifiedDocument[]): string {
+  const pages = [...new Set(docs.map((d) => d.page))];
+  return `${pages.slice(0, 5).join(", ")}${pages.length > 5 ? ` and ${pages.length - 5} more` : ""}`;
+}
+
+/**
+ * Review's question about each changed document an import left out because a
+ * person verified its page: the page stays as it was, and the item shows what
+ * the document says now. One item per page and document version — a later
+ * import of the same version asks nothing new, and a dismissed one is not
+ * asked again until the document changes once more. Answers how many wait in
+ * Review.
+ */
+function askAboutVerifiedPages(vault: string, docs: readonly VerifiedDocument[], at: string): number {
+  let waiting = 0;
+  for (const d of docs) {
+    try {
+      const asked = addReviewItem(
+        vault,
+        {
+          kind: "verified-touch",
+          pages: [d.page],
+          evidence: [
+            {
+              kind: "source-changed",
+              note: `The document ${d.label} behind this verified page changed; the import left the page as you verified it. Dismiss keeps it so; to take what the document says now, ask the assistant to update the page.`,
+              source: d.label,
+            },
+            ...d.facts.slice(0, MAX_FACTS_SHOWN).map((fact) => ({ kind: "document-says", note: fact, source: d.label })),
+          ],
+          dedupeKey: `source-changed:${d.page}:${d.sha256}`,
+          keepDismissed: true,
+        },
+        at,
+      );
+      if (!asked.dismissed) waiting += 1;
+    } catch (err) {
+      console.error("[prime-radiant] ingest: raising a review item failed:", err instanceof Error ? err.message : err);
+    }
+  }
+  return waiting;
 }
 
 const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
@@ -907,6 +994,7 @@ async function processBatch(
   let pagesWritten = 0;
   let commit: string | null = null;
   let written: Array<{ id: string; page: string; updatedAt: string }> = [];
+  let verified: VerifiedDocument[] = [];
   // Files whose page lint refused, with why. They fail alone; the rest of the
   // batch is written again without them (the vault is put back after a refusal,
   // and index.md is rebuilt from it, so a dropped page leaves no trace there).
@@ -916,6 +1004,7 @@ async function processBatch(
     transient = new Set<number>();
     pagesWritten = 0;
     written = [];
+    verified = [];
     const pageOf = new Map<string, number>();
     const titleOf = new Map<number, string>();
     try {
@@ -939,6 +1028,7 @@ async function processBatch(
             now: now(),
             // The owner a domain's new pages get: the settings' domain list, unless the caller names one.
             ownerFor: deps.ownerFor ?? ownerLookup(readSettings().domains),
+            verifiedPages: deps.verifiedPages ?? "refuse",
           };
           const indexed: Array<{ path: string; title: string }> = [];
           for (let i = 0; i < files.length; i++) {
@@ -961,8 +1051,10 @@ async function processBatch(
             const built = buildPage(v.draft, f.file.label, build);
             if (!built.ok) {
               updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "its page is verified" });
+              verified.push({ label: f.file.label, page: built.path, sha256: f.sha256, facts: v.draft.facts.map((x) => x.fact), updated: false });
               continue;
             }
+            if (built.keptVerification) verified.push({ label: f.file.label, page: built.path, sha256: f.sha256, facts: [], updated: true });
             await tx.writePage(built.path, built.frontmatter, built.body);
             pageOf.set(built.path, i);
             titleOf.set(i, built.frontmatter.title);
@@ -1000,5 +1092,5 @@ async function processBatch(
       // The ledger is a second copy; the pages hold the claims.
     }
   }
-  return { updates, transient, pagesWritten, commit, cost, fatal: null };
+  return { updates, transient, pagesWritten, commit, cost, fatal: null, verified };
 }

@@ -66,6 +66,7 @@ export const SKIP_ORDER: readonly SkipReason[] = [
   "machineText",
   "tooLarge",
   "unsupported",
+  "verified",
 ];
 
 /** A job's or a preview's skips worth showing, in {@link SKIP_ORDER}: the reasons with a count. */

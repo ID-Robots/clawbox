@@ -2671,6 +2671,7 @@ const table: Record<string, string> = {
   "primeRadiant.ingest.skip.temp": "Tillfälliga eller ofullständiga filer: {n}",
   "primeRadiant.ingest.skip.tooLarge": "För stora att läsa: {n}",
   "primeRadiant.ingest.skip.unsupported": "Andra sorters filer: {n}",
+  "primeRadiant.ingest.skip.verified": "Ändrade dokument för sidor du har bekräftat (se ”Granska”): {n}",
   "primeRadiant.ingest.source.retry": "Nytt försök från en tidigare import",
   "primeRadiant.ingest.source.upload": "Släppta filer",
   "primeRadiant.ingest.start": "Lägg till de här mapparna",

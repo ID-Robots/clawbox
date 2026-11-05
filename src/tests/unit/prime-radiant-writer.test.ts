@@ -358,6 +358,51 @@ describe("buildPage", () => {
     }
   });
 
+  it("updates a verified page only when the caller asks, keeping every verification as it is", () => {
+    const stamp = { at: "2026-01-01T00:00:00Z", by: "owner" };
+    const verified = claim("sales/acme-widgets-ltd/acme-widgets-ltd-pays-suppliers-within-45-days", "Acme Widgets Ltd pays suppliers within 45 days.", {
+      status: "verified",
+      confidence: 1,
+      verified: stamp,
+    });
+    const old = frontmatter({ sources: ["~/a.md"], verified: stamp, claims: [verified, claim("sales/acme-widgets-ltd/old-fact", "Acme Widgets Ltd sells red widgets.")] });
+    const pages = [{ path: "entities/acme.md", frontmatter: old }];
+    const facts = [
+      // The verified fact said again: the verified claim already says it.
+      { fact: "Acme Widgets Ltd pays suppliers within 45 days", quote: "", confidence: 0.6 },
+      { fact: "Acme Widgets Ltd sells blue widgets.", quote: "", confidence: 0.9 },
+    ];
+    const c = ctx({
+      takenPaths: new Set(["entities/acme.md"]),
+      pagesBySource: new Map([["~/a.md", pages[0]]]),
+      claimIndex: buildClaimIndex(pages),
+      verifiedPages: "update",
+    });
+    const built = buildPage(draft({ facts }), "~/a.md", c);
+    if (!built.ok) throw new Error("expected a page");
+    expect(built).toMatchObject({ path: "entities/acme.md", updated: true, keptVerification: true });
+    expect(built.frontmatter.verified).toEqual(stamp);
+    expect(built.frontmatter.claims[0]).toEqual(verified);
+    expect(built.frontmatter.claims.map((x) => x.text)).toEqual([verified.text, "Acme Widgets Ltd sells blue widgets."]);
+    expect(built.frontmatter.claims[1]).toMatchObject({ status: "proposed" });
+    expect(built.body).toContain(`- ${verified.text}`);
+    expect(validateFrontmatter(built.frontmatter).ok).toBe(true);
+
+    // The lint's claim cap holds with the verified claims counted.
+    const many = Array.from({ length: 19 }, (_, i) => claim(`sales/acme-widgets-ltd/verified-${i}`, `Verified fact number ${i}.`, { status: "verified", verified: stamp }));
+    const full = [{ path: "entities/acme.md", frontmatter: frontmatter({ sources: ["~/a.md"], claims: many }) }];
+    const capped = buildPage(
+      draft({ facts: [1, 2, 3].map((i) => ({ fact: `New fact number ${i}.`, quote: "", confidence: 0.5 })) }),
+      "~/a.md",
+      ctx({ takenPaths: new Set(["entities/acme.md"]), pagesBySource: new Map([["~/a.md", full[0]]]), claimIndex: buildClaimIndex(full), verifiedPages: "update" }),
+    );
+    expect(capped.ok && capped.frontmatter.claims.length).toBe(20);
+
+    // An unverified page's update says it kept no verification.
+    const plain = buildPage(draft(), "~/a.md", ctx({ pagesBySource: new Map([["~/a.md", { path: "entities/acme.md", frontmatter: frontmatter({ sources: ["~/a.md"] }) }]]) }));
+    expect(plain.ok && plain.keptVerification).toBe(false);
+  });
+
   it("uses the owner the caller maps the domain to", () => {
     const built = buildPage(draft(), "~/a.md", ctx({ ownerFor: (d) => (d === "sales" ? "sales-team" : undefined) }));
     expect(built.ok && built.frontmatter.owner).toBe("sales-team");

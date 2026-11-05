@@ -337,7 +337,15 @@ describe("verified gate", () => {
       deleted: false,
       pageVerified: false,
       claims: [{ claimId: PRICE_A.id, before: PRICE_A.text, after: "A blue widget costs 99 EUR." }],
+      added: [],
+      removed: [],
     });
+    // Beside a verified claim kept as it is: what the branch adds, and the unverified claim it rewords.
+    const beside = pageText({ claims: [claim(PRICE_A.id, PRICE_A.text, { status: "verified", verified: { at: "2026-02-01T00:00:00.000Z", by: "owner" } }), PRICE_B] });
+    const grown = pageText({
+      claims: [claim(PRICE_A.id, PRICE_A.text, { status: "verified", verified: { at: "2026-02-01T00:00:00.000Z", by: "owner" } }), claim(PRICE_B.id, "A blue widget costs 15 EUR."), claim("acme-sales/pricing/free-shipping", "Orders over 100 units ship free.")],
+    });
+    expect(judgeTouch("p.md", beside, grown)).toMatchObject({ claims: [], added: ["A blue widget costs 15 EUR.", "Orders over 100 units ship free."], removed: [PRICE_B.text] });
     expect(judgeTouch("p.md", verifiedPage, verifiedPage.replace("sells widgets", "sells gadgets"))).toMatchObject({ claims: [] });
     expect(judgeTouch("p.md", verifiedPage, null)).toMatchObject({ deleted: true, claims: [{ claimId: PRICE_A.id, after: null }] });
   });

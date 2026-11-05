@@ -2671,6 +2671,7 @@ const table: Record<string, string> = {
   "primeRadiant.ingest.skip.temp": "临时或未完成的文件：{n}",
   "primeRadiant.ingest.skip.tooLarge": "太大无法读取：{n}",
   "primeRadiant.ingest.skip.unsupported": "其他类型的文件：{n}",
+  "primeRadiant.ingest.skip.verified": "你已核实页面的已更改文档（见“待审核”）：{n}",
   "primeRadiant.ingest.source.retry": "重试先前导入的文档",
   "primeRadiant.ingest.source.upload": "拖放的文件",
   "primeRadiant.ingest.start": "添加这些文件夹",

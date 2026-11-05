@@ -13,6 +13,7 @@ import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-clie
 import { git, headCommit } from "@/lib/prime-radiant/git";
 import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
 import { readGoldenItems } from "@/lib/prime-radiant/golden";
+import { getIngestJob } from "@/lib/prime-radiant/ingest";
 import { goldenStatus } from "@/lib/prime-radiant/golden-score";
 import { addGoldenQuestion } from "@/lib/prime-radiant/golden-store";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
@@ -36,6 +37,7 @@ import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { defaultSettings, type PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
 import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
+import { verifyClaim } from "@/lib/prime-radiant/verify";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
 
@@ -311,6 +313,62 @@ describe("nightly pass", () => {
     expect(lint.some((i) => i.runId === second!.id)).toBe(true);
     // The first night's items are still open; the second night's are its own.
     await expect(mergeHeldNight("dream/2026-05-21")).rejects.toMatchObject({ code: "open_items" });
+  });
+
+  // TASK-2180 B2: the owner verified a page, its document changed, Run now merged a night that had silently
+  // skipped it (no review item, nothing held, no note). Now the change waits on the held branch and Review asks.
+  it("holds a night whose import changes a verified page's document; Review asks, and Merge takes it once settled", async () => {
+    await ensureVault();
+    const d = defaultSettings();
+    const s = settings({
+      contradictions: { ...d.contradictions, enabled: false },
+      structure: { ...d.structure, enabled: false },
+      summaries: { ...d.summaries, enabled: false },
+    });
+    expect((await runNightly("manual", deps({ settings: s })))?.status).toBe("merged");
+    const v = vaultDir();
+    const pricing = (await readVaultSnapshot(v)).pages.find((p) => p.parsed.ok && p.parsed.frontmatter.sources.some((src) => src.endsWith("pricing.md")));
+    if (!pricing?.parsed.ok) throw new Error("expected the pricing page");
+    const fact = pricing.parsed.frontmatter.claims[0];
+    // Review's "Keep this answer": the fact becomes verified by the owner.
+    await verifyClaim({ claimId: fact.id, text: fact.text, by: "owner", page: pricing.path, vault: v });
+    const onMain = fs.readFileSync(path.join(v, pricing.path), "utf8");
+
+    fs.writeFileSync(path.join(filesRoot, "Documents", "pricing.md"), "The blue widget costs 10 EUR per unit.\n\nAddendum: orders over 100 units ship free.");
+    const night = await runNightly("manual", deps({ settings: s, now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect(night).toMatchObject({ status: "held", branch: "dream/2026-05-21" });
+    const summary = night!.summary as unknown as NightlySummary;
+    expect(summary.held).toEqual(["verified"]);
+    expect(summary.gate.touched).toEqual([pricing.path]);
+    expect(summary.reviewItems.raised).toBe(1);
+    expect(summary.ingest).toMatchObject({ status: "done", pages: 1 });
+    expect(summary.notes.join(" ")).toMatch(/The night is held: it changes 1 page\(s\) you verified/);
+    const job = getIngestJob((summary.ingest as { jobId: string }).jobId, v)!;
+    expect(job.notes.join(" ")).toMatch(/1 page\(s\) you verified were updated from their changed documents, every verification kept/);
+
+    // main still has the page as the owner verified it; the change waits on the branch.
+    expect(fs.readFileSync(path.join(v, pricing.path), "utf8")).toBe(onMain);
+    expect(await branches()).toEqual(["dream/2026-05-21", "main"]);
+    const items = listReviewItems(v, { kind: "verified-touch" }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ runId: night!.id, pages: [pricing.path], claimId: null });
+    const said = items[0].evidence.map((e) => `${e.kind}: ${e.note ?? ""}`).join("\n");
+    expect(said).toMatch(/source-changed: Its document .*pricing\.md changed/);
+    expect(said).toMatch(/nightly-proposal: .*ship free/);
+
+    await expect(mergeHeldNight("dream/2026-05-21", v)).rejects.toMatchObject({ code: "open_items" });
+    await resolveReviewItem(items[0].id, { action: "dismiss" }, { by: "owner", vault: v });
+    const merged = await mergeHeldNight("dream/2026-05-21", v);
+    expect(merged.changed).toContain(pricing.path);
+    expect(await branches()).toEqual(["main"]);
+    expect(listNightlyRuns(v)[0]).toMatchObject({ id: night!.id, status: "merged" });
+
+    // The new content reached the wiki, and the owner's verification is still there.
+    const page = (await readVaultSnapshot(v)).pages.find((p) => p.path === pricing.path);
+    if (!page?.parsed.ok) throw new Error("expected the page");
+    const claims = page.parsed.frontmatter.claims;
+    expect(claims.find((c) => c.id === fact.id)).toMatchObject({ text: fact.text, status: "verified", verified: { by: "owner" } });
+    expect(claims.some((c) => !c.verified && /ship free/.test(c.text))).toBe(true);
   });
 
   it("a night whose judge failed is not the full comparison: the next night judges its pairs and raises the item", async () => {

@@ -13,6 +13,7 @@
  */
 
 import { allocateClaimId, claimFactKey, claimTextKey, slugify, type ClaimIndex } from "./claims";
+import { LIMITS } from "./lint";
 import { redactText } from "./redact";
 import { selfContainedClaim } from "./subject";
 import { historicalClaim, isValidityDate, textValidity, validityRange } from "./validity";
@@ -20,6 +21,7 @@ import {
   PAGE_TYPES,
   SLUG_RE,
   folderForType,
+  hasVerification,
   isIsoDate,
   type Claim,
   type PageFrontmatter,
@@ -418,10 +420,26 @@ export interface BuildContext {
   claimIndex: ClaimIndex;
   now: Date;
   ownerFor?: (domain: string) => string | undefined;
+  /**
+   * What a changed document does to the page a person verified (the page or
+   * one of its claims): `refuse` (the default) leaves the page alone;
+   * `update` rewrites it with every verification kept as it is — for a caller
+   * whose write a person answers before it lands (the nightly pass's branch,
+   * which the gate holds on a verified page).
+   */
+  verifiedPages?: "refuse" | "update";
 }
 
 export type BuiltPage =
-  | { ok: true; path: string; frontmatter: PageFrontmatter; body: string; updated: boolean }
+  | {
+      ok: true;
+      path: string;
+      frontmatter: PageFrontmatter;
+      body: string;
+      updated: boolean;
+      /** The page carried a verification, kept as it was (`verifiedPages: "update"`). */
+      keptVerification: boolean;
+    }
   | { ok: false; reason: "verified-page"; path: string };
 
 /** File names a page never takes: `<folder>/index.md` is memory-wiki's (see plugin-files.ts). */
@@ -437,12 +455,13 @@ export function pathFor(type: PageType, title: string, taken: ReadonlySet<string
   return candidate;
 }
 
-export function pageBody(draft: PageDraft, source: string): string {
+/** `verified`: the texts of the verified claims a page keeps, listed first. */
+export function pageBody(draft: PageDraft, source: string, verified: readonly string[] = []): string {
   const parts = [draft.summary];
   if (draft.details) parts.push(draft.details);
   // A fact the draft repeats is listed once, as it is one claim.
   const seen = new Set<string>();
-  const facts = draft.facts.map((f) => f.fact).filter((f) => !seen.has(claimTextKey(f)) && !!seen.add(claimTextKey(f)));
+  const facts = [...verified, ...draft.facts.map((f) => f.fact)].filter((f) => !seen.has(claimTextKey(f)) && !!seen.add(claimTextKey(f)));
   if (facts.length > 0) parts.push(["## Key facts", "", ...facts.map((f) => `- ${f}`)].join("\n"));
   parts.push(["## Sources", "", `- \`${source.replace(/`/g, "'")}\``].join("\n"));
   return `${parts.join("\n\n")}\n`;
@@ -451,23 +470,28 @@ export function pageBody(draft: PageDraft, source: string): string {
 /**
  * Turn a draft into a page. A document already ingested (same source label)
  * updates its page in place — unless that page carries a human verification,
- * which the writer never touches. Claim ids are allocated in the global
- * namespace against `ctx.claimIndex`, and the index is updated so the next
- * page of the same batch sees them.
+ * which the writer refuses to touch, or, with `verifiedPages: "update"`,
+ * keeps as it is: the verified claims stay first, word for word under their
+ * ids, the page's own stamp stays, and only the rest of the page is the
+ * draft's (a fact a verified claim already says is not added beside it).
+ * Claim ids are allocated in the global namespace against `ctx.claimIndex`,
+ * and the index is updated so the next page of the same batch sees them.
  */
 export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): BuiltPage {
   const existing = ctx.pagesBySource.get(source);
   const updatedAt = ctx.now.toISOString();
   let path: string;
   let updated = false;
+  const keptVerification = !!existing?.frontmatter && hasVerification(existing.frontmatter);
   if (existing) {
     const fm = existing.frontmatter;
-    if (fm && (fm.verified || fm.claims.some((c) => c.verified))) return { ok: false, reason: "verified-page", path: existing.path };
+    if (keptVerification && ctx.verifiedPages !== "update") return { ok: false, reason: "verified-page", path: existing.path };
     path = existing.path;
     updated = true;
-    // The page's own previous claims stop holding their ids; they are replaced, not retired.
+    // The page's own previous claims stop holding their ids; they are replaced, not retired. A verified one stays.
     if (fm) {
       for (const c of fm.claims) {
+        if (c.verified) continue;
         const list = (ctx.claimIndex.active.get(c.id) ?? []).filter((loc) => loc.page !== path);
         if (list.length > 0) ctx.claimIndex.active.set(c.id, list);
         else ctx.claimIndex.active.delete(c.id);
@@ -478,11 +502,17 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
   }
   ctx.takenPaths.add(path);
 
+  const previous = existing?.frontmatter ?? null;
+  // What a person verified stays as it is, first; the draft's facts fill the rest of the lint's claim cap.
+  const kept = previous?.claims.filter((c) => !!c.verified) ?? [];
+  const keptText = new Set(kept.map((c) => claimTextKey(c.text)));
+  const room = Math.max(0, LIMITS.maxClaims - kept.length);
   const entity = slugify(draft.title, 48);
   const claims: Claim[] = [];
-  const usedOnPage = new Set<string>();
+  const usedOnPage = new Set<string>(kept.map((c) => c.id));
   const byFact = new Map<string, Claim>();
   for (const fact of draft.facts) {
+    if (keptText.has(claimTextKey(fact.fact))) continue;
     const confidence = Math.round(fact.confidence * 100) / 100;
     const dates = claimDates(fact, updatedAt);
     // The same fact said twice is one claim (the first, at the higher confidence), never a `-2` id beside it.
@@ -492,6 +522,7 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
       twin.confidence = Math.max(twin.confidence, confidence);
       continue;
     }
+    if (claims.length >= room) continue;
     const id = allocateClaimId(ctx.claimIndex, draft.domain, entity, slugify(fact.fact, 48), path, usedOnPage);
     usedOnPage.add(id);
     const claim: Claim = {
@@ -511,7 +542,6 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
     ctx.claimIndex.active.set(id, list);
   }
 
-  const previous = existing?.frontmatter ?? null;
   const frontmatter: PageFrontmatter = {
     ...(previous ?? {}),
     type: draft.type,
@@ -520,15 +550,15 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
     owner: previous?.owner ?? ctx.ownerFor?.(draft.domain) ?? DEFAULT_OWNER,
     status: previous?.status ?? "draft",
     generated: { at: updatedAt, by: "flash" },
-    verified: null,
+    verified: previous?.verified ?? null,
     stale_after: previous?.stale_after ?? null,
     sources: [...new Set([...(previous?.sources ?? []), source])],
     privacy: draft.privacy,
     checked_by: "flash",
-    claims,
+    claims: [...kept, ...claims],
     retiredClaimIds: previous?.retiredClaimIds ?? [],
   };
-  return { ok: true, path, frontmatter, body: pageBody(draft, source), updated };
+  return { ok: true, path, frontmatter, body: pageBody(draft, source, kept.map((c) => c.text)), updated, keptVerification };
 }
 
 /** The line index.md lists a page with. */

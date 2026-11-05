@@ -295,6 +295,8 @@ describe("previewFolders", () => {
     expect(preview.documents).toBe(6);
     expect(preview.skips).toEqual({
       codeProject: 1, excludedFolder: 1, boilerplate: 1, temp: 1, machineText: 1, tooLarge: 1, unsupported: 1,
+      // Only an import that wrote nothing over a verified page counts these; a preview reads no page.
+      verified: 0,
     });
     expect(preview.topFolders).toEqual([
       { label: sourceLabel(path.join(docs, "Documents")), documents: 4 },

@@ -2671,6 +2671,7 @@ const table: Record<string, string> = {
   "primeRadiant.ingest.skip.temp": "一時ファイル・未完成のファイル: {n}",
   "primeRadiant.ingest.skip.tooLarge": "大きすぎて読み込めないもの: {n}",
   "primeRadiant.ingest.skip.unsupported": "その他の種類のファイル: {n}",
+  "primeRadiant.ingest.skip.verified": "あなたが確認したページの変更された文書（「確認待ち」を参照）: {n}",
   "primeRadiant.ingest.source.retry": "以前の取り込みの再試行",
   "primeRadiant.ingest.source.upload": "ドロップしたファイル",
   "primeRadiant.ingest.start": "これらのフォルダーを追加",

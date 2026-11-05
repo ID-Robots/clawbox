@@ -44,6 +44,9 @@ export interface VerifiedTouch {
   pageVerified: boolean;
   /** Verified claims the branch changed or removed. */
   claims: VerifiedClaimChange[];
+  /** The texts of the claims the branch adds (a new id, or new words under an id), and of the unverified ones it drops or rewords. */
+  added: string[];
+  removed: string[];
 }
 
 function sameJson(a: unknown, b: unknown): boolean {
@@ -63,18 +66,33 @@ export function judgeTouch(path: string, baseText: string | null, headText: stri
       deleted: true,
       pageVerified,
       claims: verifiedClaims.map((c) => ({ claimId: c.id, before: c.text, after: null })),
+      added: [],
+      removed: base.frontmatter.claims.filter((c) => !c.verified).map((c) => c.text),
     };
   }
   const head = parsePage(headText);
   if (head.ok && sameJson(head.frontmatter, base.frontmatter) && head.body === base.body) return null;
-  const headClaims = new Map<string, Claim>((head.ok ? head.frontmatter.claims : []).map((c) => [c.id, c]));
+  const headList = head.ok ? head.frontmatter.claims : [];
+  const headClaims = new Map<string, Claim>(headList.map((c) => [c.id, c]));
   const claims: VerifiedClaimChange[] = [];
   for (const c of verifiedClaims) {
     const now = headClaims.get(c.id);
     if (!now) claims.push({ claimId: c.id, before: c.text, after: null });
     else if (!sameJson(now, c)) claims.push({ claimId: c.id, before: c.text, after: now.text });
   }
-  return { path, deleted: false, pageVerified, claims };
+  // A verified claim's change is in `claims`, never again here.
+  const verifiedIds = new Set(verifiedClaims.map((c) => c.id));
+  const said = (c: Claim) => `${c.id}\n${c.text}`;
+  const baseSaid = new Set(base.frontmatter.claims.map(said));
+  const headSaid = new Set(headList.map(said));
+  return {
+    path,
+    deleted: false,
+    pageVerified,
+    claims,
+    added: headList.filter((c) => !verifiedIds.has(c.id) && !baseSaid.has(said(c))).map((c) => c.text),
+    removed: base.frontmatter.claims.filter((c) => !c.verified && !headSaid.has(said(c))).map((c) => c.text),
+  };
 }
 
 /**
