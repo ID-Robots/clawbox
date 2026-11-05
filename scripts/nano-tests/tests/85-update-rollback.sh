@@ -71,11 +71,8 @@ else
 fi
 
 # The box must be usable whatever the updater said.
-if wait_gateway_settled 300; then
-  ok "gateway settled after the failed update (${SETTLE_WAITED}s)"
-else
-  not_ok "gateway not settled after the failed update: ${SETTLE_STATE:-unknown}"
-fi
+runtime_settled_line "after the failed update"
+runtime_kept
 # shellcheck disable=SC2016  # expanded on the board
 LOGIN=$(board 'for _ in $(seq 1 24); do c=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 "$DASHBOARD/login"); [ "$c" = 200 ] && break; sleep 5; done; echo "$c"' | tail -n 1)
 if [ "$LOGIN" = 200 ]; then ok "dashboard still serves /login"; else not_ok "dashboard answered /login with ${LOGIN:-nothing} after the rollback"; fi
@@ -87,5 +84,5 @@ if [ "$rc" -eq 0 ]; then
 else
   not_ok "drift after the rollback: the served build is not the checked-out commit ${HEAD1:0:12}: $(tr '\n' ' ' <<<"$IDENT" | cut -c1-200)"
 fi
-chat_turn
+runtime_chat_turn
 finish
