@@ -56,6 +56,9 @@ const LABELS: [string, string][] = [
   ["gateway_health", "Verifying gateway health"],
 ];
 
+/** Not listed, counted or metered on the screen (TASK-2199), though the box reports them. */
+const HIDDEN_LABELS = ["Installing Chromium", "Installing VNC (Remote Desktop)"];
+
 /** Ten steps: the first `done` completed, the next one `at`, the rest pending. */
 function steps(done: number, at: Partial<StepState> = { status: "running" }): StepState[] {
   return LABELS.map(([id, label], index) => ({
@@ -193,7 +196,7 @@ describe("/updating draws the System Update run view", () => {
     const run = view.getByTestId("update-run");
     expect(run).toHaveAttribute("data-status", "updating");
     expect(within(run).getByRole("heading", { level: 1, name: "Updating your device" })).toBeTruthy();
-    expect(within(run).getByTestId("update-step-count")).toHaveTextContent("7 / 10 steps complete");
+    expect(within(run).getByTestId("update-step-count")).toHaveTextContent("5 / 8 steps complete");
     // The step the box is on, by name, with the line it last logged.
     expect(within(run).getAllByText("Updating ClawBox and restarting").length).toBeGreaterThan(0);
     expect(within(run).getByTestId("update-step-detail")).toHaveTextContent("Building the web app");
@@ -207,6 +210,51 @@ describe("/updating draws the System Update run view", () => {
     // Not the older wait screen.
     expect(view.queryByTestId("reconnect-stage-with-aside")).toBeNull();
     expect(document.querySelector("[data-testid^='reconnect-stage']")).toBeNull();
+  });
+
+  it("lists eight of the box's ten steps: Chromium and VNC run but are not shown or counted", async () => {
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const panel = view.getByTestId("update-steps-panel");
+    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("5 / 8 steps complete");
+    const meter = within(panel).getByRole("progressbar");
+    expect(meter).toHaveAttribute("aria-valuemax", "8");
+    expect(meter.children).toHaveLength(8);
+    const rows = within(view.getByTestId("update-step-list")).getAllByRole("listitem");
+    expect(rows).toHaveLength(8);
+    // Numbered without a gap: the running step is the sixth listed, not the eighth reported.
+    expect(rows[5]).toHaveAttribute("aria-current", "step");
+    expect(rows[5].textContent?.slice(0, 2)).toBe("06");
+    expect(rows[7].textContent?.slice(0, 2)).toBe("08");
+    for (const label of HIDDEN_LABELS) expect(view.getByTestId("update-run").textContent).not.toContain(label);
+  });
+
+  it("holds the count while a hidden step runs, and names it in the error panel if it stops the run", async () => {
+    stubBox(inOrder(
+      { body: { phase: "running", currentStepIndex: 2, steps: steps(2) } },
+      { body: FAILED, locked: false },
+    ));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    // Chromium running: nothing listed is running, the line says the run is.
+    const panel = view.getByTestId("update-steps-panel");
+    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
+    expect(within(panel).getByText("In progress")).toBeTruthy();
+    expect(panel.querySelector("[aria-current]")).toBeNull();
+    for (const label of HIDDEN_LABELS) expect(view.getByTestId("update-run").textContent).not.toContain(label);
+
+    // Chromium failed: the panel names it; the list and the count still leave it out.
+    await advance(2_000);
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "failed");
+    const error = view.getByTestId("update-error-panel");
+    expect(within(error).getByRole("heading", { name: "Installing Chromium" })).toBeTruthy();
+    expect(within(error).getByTestId("update-error-reason")).toHaveTextContent("apt could not reach the mirror");
+    const stopped = view.getByTestId("update-steps-panel");
+    expect(within(stopped).getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
+    for (const label of HIDDEN_LABELS) expect(stopped.textContent).not.toContain(label);
   });
 
   it("is the System Update app's own run view, word for word", async () => {
@@ -235,7 +283,7 @@ describe("/updating draws the System Update run view", () => {
     expect(panel).toHaveAttribute("data-offline", "true");
     expect(within(panel).getByText("Restarting — not answering yet")).toBeTruthy();
     // The progress last seen stays; the line the step last logged does not.
-    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("7 / 10 steps complete");
+    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("5 / 8 steps complete");
     expect(view.queryByTestId("update-step-detail")).toBeNull();
     expect(view.getByTestId("update-run-notice")).toHaveTextContent(
       "ClawBox is restarting and is not answering yet. This screen will return to the desktop on its own.",
@@ -326,7 +374,7 @@ describe("/updating draws the System Update run view", () => {
     expect(posts).toEqual(["/setup-api/update/run"]);
     await advance(2_000);
     expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
-    expect(view.getByTestId("update-step-count")).toHaveTextContent("4 / 10 steps complete");
+    expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
     expect(replace).not.toHaveBeenCalled();
   });
 
@@ -387,7 +435,7 @@ describe("/updating draws the System Update run view", () => {
     await advance();
     await advance(2_000);
     expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
-    expect(view.getByTestId("update-step-count")).toHaveTextContent("4 / 10 steps complete");
+    expect(view.getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
   });
 
   it("does not give up on a resumed run that answers 'idle' while the lock is held", async () => {
