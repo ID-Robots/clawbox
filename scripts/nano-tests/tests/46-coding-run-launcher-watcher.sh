@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 1500
+# timeout: 900
 # covers: scripts/coding-run-hook.mjs src/lib/coding-run-inbox.ts
 #
 # The keep-alive Stop hook, and the settle's "left running", count only what
@@ -25,8 +25,9 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 # A run that only writes one file settles in a minute or two; the old loop ran
-# until the hook's refusals were spent.
-QUICK_SECONDS=420
+# until the hook's refusals were spent. Two waits (each may overrun by one 60 s
+# poll) fit the 900 s deadline.
+QUICK_SECONDS=300
 PORT=$(( 18000 + RANDOM % 2000 ))
 LAUNCHER_LOG=$BOARD_HOME/.cache/nano-ci-launcher.log
 
