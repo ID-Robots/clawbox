@@ -20,6 +20,7 @@ import {
   type IngestJob,
   type IngestPreview,
   type SkipCounts,
+  useStableT,
 } from "./prime-radiant-ui";
 
 /** What a drop may carry: the extensions the extractor reads, 9 MiB each (the route's cap). */
@@ -65,6 +66,7 @@ interface FileLine {
  */
 export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => void }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [folders, setFolders] = useState<string[]>([]);
   const [jobs, setJobs] = useState<IngestJob[]>([]);
   const [running, setRunning] = useState<IngestJob | null>(null);
@@ -89,9 +91,9 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
       const answer = await prJson<{ running: string | null; jobs: IngestJob[] }>(`${API}/ingest`);
       setJobs(answer.jobs ?? []);
     } catch (err) {
-      setError(errorText(err, t));
+      setError(errorText(err, stableT));
     }
-  }, [t]);
+  }, [stableT]);
 
   const detach = useCallback(() => {
     streamRef.current?.close();
@@ -173,12 +175,12 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
         const job = answer.running ? answer.jobs.find((j) => j.id === answer.running) : undefined;
         if (job) follow(job);
       })
-      .catch((err) => { if (alive) setError(errorText(err, t)); });
+      .catch((err) => { if (alive) setError(errorText(err, stableT)); });
     return () => {
       alive = false;
       detach();
     };
-  }, [follow, detach, t]);
+  }, [follow, detach, stableT]);
 
   // Count what the chosen folders would read, again whenever the list changes.
   const folderKey = JSON.stringify(folders);
@@ -191,14 +193,14 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
         .then(({ preview: data }) => setPreview({ key: folderKey, data, error: null }))
         .catch((err) => {
           if ((err as Error)?.name === "AbortError") return;
-          setPreview({ key: folderKey, data: null, error: errorText(err, t) });
+          setPreview({ key: folderKey, data: null, error: errorText(err, stableT) });
         });
     }, PREVIEW_DELAY_MS);
     return () => {
       clearTimeout(timer);
       ctl.abort();
     };
-  }, [folderKey, t]);
+  }, [folderKey, stableT]);
   // A preview counts only for the list it was made for.
   const current = folders.length > 0 && preview && preview.key === folderKey ? preview : null;
   const counting = folders.length > 0 && !current;

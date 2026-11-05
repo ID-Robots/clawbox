@@ -715,7 +715,8 @@ async function runJob(
           // Stopped during the cooldown: dispatch below leaves the queue waiting.
         }
       }
-      const half = Math.max(1, Math.ceil(batchSize / 2));
+      // Half the writer's own batch, not the progress batch: a retry round is no progress step.
+      const half = Math.max(1, Math.ceil(Math.min(WRITER_BATCH_SIZE, Math.max(1, Math.floor(deps.batchSize ?? WRITER_BATCH_SIZE))) / 2));
       let chunk: PreparedFile[] = [];
       let chunkChars = 0;
       for (const f of queued) {

@@ -222,12 +222,18 @@ function evidenceWho(t: T, who: string): string {
   return who === "owner" || who === "assistant" ? worded(t, `primeRadiant.evidence.by.${who}`, who) : who;
 }
 
-/** The notes the server words in English for a person to read, by their one variable part. */
-const EVIDENCE_NOTES: ReadonlyArray<[RegExp, string, string]> = [
-  [/^added by (.+)$/, "primeRadiant.evidence.addedBy", "by"],
-  [/^stated by (.+)$/, "primeRadiant.evidence.statedBy", "by"],
-  [/^edited by (.+)$/, "primeRadiant.evidence.editedBy", "by"],
-  [/^Expected by (.+)$/, "primeRadiant.evidence.expectedBy", "owner"],
+/**
+ * The notes the server words in English for a person to read, by their one
+ * variable part — and only those: a source's note is a quote from the
+ * document, which may well begin "added by …", so an edit's note is matched
+ * whole with the server's own two names (edit.ts), and "Expected by" only on
+ * a golden question's expected answer (golden-score.ts).
+ */
+const EVIDENCE_NOTES: ReadonlyArray<{ re: RegExp; key: string; param: string; kind?: string }> = [
+  { re: /^added by (owner|assistant)$/, key: "primeRadiant.evidence.addedBy", param: "by" },
+  { re: /^stated by (owner|assistant)$/, key: "primeRadiant.evidence.statedBy", param: "by" },
+  { re: /^edited by (owner|assistant)$/, key: "primeRadiant.evidence.editedBy", param: "by" },
+  { re: /^Expected by (.+)$/, key: "primeRadiant.evidence.expectedBy", param: "owner", kind: "golden-expected" },
 ];
 
 /**
@@ -250,7 +256,8 @@ export function evidenceLine(
         return e.verdict ? worded(t, `primeRadiant.evidence.verdict.${keyPart(e.verdict)}`, e.verdict) : undefined;
       case "note": {
         if (!e.note) return undefined;
-        for (const [re, key, param] of EVIDENCE_NOTES) {
+        for (const { re, key, param, kind } of EVIDENCE_NOTES) {
+          if (kind && e.kind !== kind) continue;
           const m = re.exec(e.note);
           if (m) return worded(t, key, e.note, { [param]: evidenceWho(t, m[1]) });
         }
@@ -284,16 +291,24 @@ const GENERATED_HEADINGS: Readonly<Record<string, string>> = {
 };
 
 /**
- * A page body with the headings Prime Radiant wrote ("## Key facts",
+ * A page body with the headings Prime Radiant writes ("## Key facts",
  * "## Sources" …) in the reader's language, for display only: the file keeps
- * them in English, which stale-text.ts and the hubs read back. A heading the
- * owner wrote is left as it is.
+ * them in English, which stale-text.ts and the hubs read back. Any other
+ * heading is left as it is (one the owner wrote in the same words reads the
+ * same, translated), and nothing inside a fenced code block is touched.
  */
 export function localizeGeneratedHeadings(body: string, t: T): string {
-  return body.replace(/^(#{2,3}) +([^\n]+?) *$/gm, (line, hashes: string, title: string) => {
-    const key = GENERATED_HEADINGS[title.toLowerCase()];
-    return key ? `${hashes} ${worded(t, `primeRadiant.heading.${key}`, title)}` : line;
-  });
+  let fenced = false;
+  return body
+    .split("\n")
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+      if (fenced) return line;
+      const m = /^(#{2,3}) +(.+?) *$/.exec(line);
+      const key = m ? GENERATED_HEADINGS[m[2].toLowerCase()] : undefined;
+      return m && key ? `${m[1]} ${worded(t, `primeRadiant.heading.${key}`, m[2])}` : line;
+    })
+    .join("\n");
 }
 
 /** A short commit id for display. */

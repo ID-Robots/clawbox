@@ -40,6 +40,7 @@ import {
   type ReviewResolution,
 } from "./review-store";
 import type { ClaimEvidence } from "./schema";
+import { readClaimPages } from "./state-db";
 import { readPage, type VaultPage } from "./vault";
 import { cleanVerifiedText, MAX_VERIFIED_TEXT, verifyClaim, VerifyError } from "./verify";
 
@@ -243,10 +244,18 @@ export interface ReviewItemView extends ReviewItem {
 const MAX_CLAIM_TEXT_PAGES = 100;
 
 /**
- * Each item with its disputed fact's words. Only the pages the items name are
- * read — never the whole vault — once each, however many items share them.
+ * Each item with its disputed fact's words. Only the pages the items name
+ * (and, for a fact none of them holds, the page the claim registry last saw
+ * it on) are read — never the whole vault — once each, however many items
+ * share them.
  */
 export async function withClaimTexts(items: readonly ReviewItem[], vault: string = vaultDir()): Promise<ReviewItemView[]> {
+  let registry: Map<string, string>;
+  try {
+    registry = readClaimPages(vault, items.flatMap((i) => (i.claimId ? [i.claimId] : [])));
+  } catch {
+    registry = new Map();
+  }
   const pages = new Map<string, Promise<VaultPage | null>>();
   const read = (rel: string): Promise<VaultPage | null> | null => {
     if (!pages.has(rel)) {
@@ -260,7 +269,8 @@ export async function withClaimTexts(items: readonly ReviewItem[], vault: string
       if (!item.claimId) return { ...item, claimText: null };
       const raised = item.candidates.find((c) => c.claimId === item.claimId);
       // The claim's own page first: the one it was raised on, then the item's pages.
-      const where = [...new Set([...(raised?.page ? [raised.page] : []), ...item.pages])];
+      const recorded = registry.get(item.claimId);
+      const where = [...new Set([...(raised?.page ? [raised.page] : []), ...item.pages, ...(recorded ? [recorded] : [])])];
       for (const rel of where) {
         const page = await read(rel);
         const claim = page?.parsed.ok ? page.parsed.frontmatter.claims.find((c) => c.id === item.claimId) : undefined;

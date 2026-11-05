@@ -278,7 +278,8 @@ export default function PrimeRadiantApp() {
     if (!ready || !el) return;
     measureTabStrip();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measureTabStrip);
-    observer?.observe(el);
+    // The tabs too: a language switch changes their width, not the strip's.
+    for (const box of [el, ...Array.from(el.children)]) observer?.observe(box);
     window.addEventListener("resize", measureTabStrip);
     return () => {
       observer?.disconnect();

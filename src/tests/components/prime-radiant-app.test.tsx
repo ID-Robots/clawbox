@@ -1439,19 +1439,26 @@ describe("PrimeRadiantApp — Bulgarian (B10)", () => {
   it("words a page's fact evidence and the headings Prime Radiant wrote in Bulgarian, leaving the owner's own", async () => {
     pageOverride = {
       ...PAGE,
-      frontmatter: { ...FM, claims: [{ ...FM.claims[0], evidence: [{ kind: "source", path: "~/Documents/Acme/faq.txt", note: "added by owner" }] }] },
-      body: "Acme Widgets Ltd sells widgets.\n\n## Key facts\n\n- Based in Springfield.\n\n## Our notes\n\nKept.\n\n## Sources\n\n- `~/Documents/Acme/faq.txt`\n",
+      frontmatter: { ...FM, claims: [{ ...FM.claims[0], evidence: [
+        { kind: "source", path: "~/Documents/Acme/faq.txt", note: "added by owner" },
+        // A quote from the document that happens to read like the server's note: data, kept as written.
+        { kind: "source", path: "~/Documents/Acme/minutes.txt", note: "added by the board on 3 May" },
+      ] }] },
+      body: "Acme Widgets Ltd sells widgets.\n\n## Key facts\n\n- Based in Springfield.\n\n## Our notes\n\nKept.\n\n```\n## Sources\n```\n\n## Sources\n\n- `~/Documents/Acme/faq.txt`\n",
     };
     await mountBg();
     await openTab("browse");
     fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
     const claim = await screen.findByTestId("prime-radiant-claim");
     expect(claim).toHaveTextContent("Източник · ~/Documents/Acme/faq.txt · добавено от собственика");
+    expect(claim).toHaveTextContent("Източник · ~/Documents/Acme/minutes.txt · added by the board on 3 May");
     const body = screen.getByTestId("prime-radiant-page-body");
     expect(body).toHaveTextContent("Основни факти");
     expect(body).toHaveTextContent("Източници");
     expect(body).toHaveTextContent("Our notes");
-    expect(body.textContent).not.toMatch(/Key facts|Sources/);
+    expect(body.textContent).not.toMatch(/Key facts/);
+    // Inside a code block the heading is text, left as written; the real one is translated.
+    expect(body.textContent?.match(/Sources/g)).toHaveLength(1);
   });
 });
 
