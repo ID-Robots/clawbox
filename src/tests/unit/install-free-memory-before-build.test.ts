@@ -106,6 +106,8 @@ function sourceInstallShellFns(tmp: string): string[] {
     "report_gateway_build_pause",
     "uptime_s",
     "let_gateway_finish_starting",
+    "wait_note",
+    "stop_gateway_unit",
   ];
   return [
     `: > "${tmp}/fns.sh"`,
@@ -115,7 +117,7 @@ function sourceInstallShellFns(tmp: string): string[] {
     // The top-level state the pair keeps between the stop and the start, and
     // the settle the check waits out. Cut from install.sh too, so a test cannot
     // pass by declaring them itself.
-    `grep -E '^(PAUSED_ENGINE_[A-Z_]+|ENGINE_SETTLE_S|RUNTIME_WOKEN_UNITS|BUILD_GATEWAY_ROOM_MB|GATEWAY_PAUSED_FOR_BUILD_AT)=' "$1" >> "${tmp}/fns.sh" || true`,
+    `grep -E '^(PAUSED_ENGINE_[A-Z_]+|ENGINE_SETTLE_S|RUNTIME_WOKEN_UNITS|BUILD_GATEWAY_ROOM_MB|GATEWAY_PAUSED_FOR_BUILD_AT|WAIT_NOTE_EVERY_S|WAIT_NOTE_LAST)=' "$1" >> "${tmp}/fns.sh" || true`,
     // …and the guard that turns a junk threshold back into the default, which
     // is a `case` line rather than an assignment.
     `grep -E '^case "[$]BUILD_GATEWAY_ROOM_MB"' "$1" >> "${tmp}/fns.sh" || true`,
