@@ -342,8 +342,55 @@ async function readHead(abs: string): Promise<string | null> {
 
 /** Folders a preview names, biggest first. */
 export const PREVIEW_TOP_FOLDERS = 8;
-/** Files a preview looks at in parallel. */
+/** Files a preview (or a job's scan) looks at in parallel. */
 const PREVIEW_PARALLEL = 16;
+
+/** Why a scanned file is left out by its size or its opening, before it is read whole; null: it is read. */
+async function contentSkipReason(file: ScannedFile, machineText: boolean): Promise<"tooLarge" | "machineText" | null> {
+  let size: number;
+  try {
+    size = (await fs.lstat(file.abs)).size;
+  } catch {
+    // Gone since the scan: kept, so the job says it could not be read.
+    return null;
+  }
+  if (size > MAX_DOCUMENT_BYTES) return "tooLarge";
+  if (machineText && (file.ext === ".txt" || file.ext === ".md")) {
+    const head = await readHead(file.abs);
+    if (head !== null && machineTextFile(file.ext, head)) return "machineText";
+  }
+  return null;
+}
+
+/**
+ * The scanned files that are documents: `files` without those too large to
+ * read and, with `machineText`, the logs and data exports, each counted into
+ * `skips`. The preview and a job both count with this, so the number a
+ * preview promises is the total the job then counts to (B16). Order kept.
+ */
+export async function documentsOf(
+  files: readonly ScannedFile[],
+  skips: SkipCounts,
+  options: { machineText: boolean; signal?: AbortSignal },
+): Promise<ScannedFile[]> {
+  const reasons = new Array<"tooLarge" | "machineText" | null>(files.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < files.length) {
+      const i = next++;
+      options.signal?.throwIfAborted();
+      reasons[i] = await contentSkipReason(files[i], options.machineText);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PREVIEW_PARALLEL, files.length) }, worker));
+  const kept: ScannedFile[] = [];
+  files.forEach((file, i) => {
+    const reason = reasons[i];
+    if (reason) skips[reason] += 1;
+    else kept.push(file);
+  });
+  return kept;
+}
 
 export interface IngestPreview {
   /** Documents a job over the same folders would read (before the already-ingested ones are recognised). */
@@ -372,44 +419,13 @@ export async function previewFolders(
 ): Promise<IngestPreview> {
   const scan = await scanFolders(folders, { ...options, labelOf: (abs) => abs, folderLabelOf: sourceLabel });
   const skips = { ...scan.skips };
-  const keep = new Array<boolean>(scan.files.length).fill(false);
-  let next = 0;
-  const worker = async () => {
-    while (next < scan.files.length) {
-      const i = next++;
-      options.signal?.throwIfAborted();
-      const file = scan.files[i];
-      let size: number;
-      try {
-        const st = await fs.lstat(file.abs);
-        if (!st.isFile()) continue;
-        size = st.size;
-      } catch {
-        continue;
-      }
-      if (size > MAX_DOCUMENT_BYTES) {
-        skips.tooLarge += 1;
-        continue;
-      }
-      if (file.ext === ".txt" || file.ext === ".md") {
-        const head = await readHead(file.abs);
-        if (head !== null && machineTextFile(file.ext, head)) {
-          skips.machineText += 1;
-          continue;
-        }
-      }
-      keep[i] = true;
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(PREVIEW_PARALLEL, scan.files.length) }, worker));
+  const kept = await documentsOf(scan.files, skips, { machineText: true, signal: options.signal });
 
   // Overlapping picks (~ and ~/Documents): a file counts under the most specific one.
   const roots = folders.map((f) => path.resolve(f)).sort((a, b) => b.length - a.length);
   const byFolder = new Map<string, number>();
-  let documents = 0;
-  scan.files.forEach((file, i) => {
-    if (!keep[i]) return;
-    documents += 1;
+  const documents = kept.length;
+  kept.forEach((file) => {
     const root = roots.find((r) => inside(r, file.abs)) ?? path.dirname(file.abs);
     const parts = path.relative(root, file.abs).split(path.sep);
     const group = parts.length > 1 ? path.join(root, parts[0]) : root;

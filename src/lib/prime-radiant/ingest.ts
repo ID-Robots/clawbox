@@ -59,6 +59,7 @@ import {
   type RetryOptions,
 } from "./flash-client";
 import {
+  documentsOf,
   extractText,
   isIngestExtension,
   machineTextFile,
@@ -524,8 +525,14 @@ async function runJob(
             skipCodeProjects: deps.skipCodeProjects ?? settings.ingest.skipCodeProjects,
             skipByName: !chosen,
           });
-    job.total = scan.files.length;
-    job.skips = { ...scan.skips };
+    // What the preview counted as documents is what the job counts to: a file
+    // too large to read, or (from folders) a log or a data export, is left out
+    // here with the code projects and the temporary files, never a "file" of
+    // the job's total (B16).
+    const skips = { ...scan.skips };
+    const files = input.kind === "retry" ? scan.files : await documentsOf(scan.files, skips, { machineText: input.kind === "folders", signal });
+    job.total = files.length;
+    job.skips = skips;
     job.notes.push(...scan.notes);
     const s = scan.skips;
     if (s.unsupported > 0) job.notes.push(`${s.unsupported} file(s) of a kind Prime Radiant does not read were left out.`);
@@ -533,10 +540,11 @@ async function runJob(
     if (s.codeProject > 0) job.notes.push(`${s.codeProject} code project(s) were left out.`);
     if (s.boilerplate > 0) job.notes.push(`${s.boilerplate} licence, changelog or other boilerplate file(s) were left out.`);
     if (s.temp > 0) job.notes.push(`${s.temp} temporary or partial file(s) were left out.`);
-    const labels = new Map<number, string>(scan.files.map((f, seq) => [seq, f.label]));
-    insertFiles(vault, job.id, scan.files.map((f, seq) => ({ seq, label: f.label, source: f.abs })));
+    const labels = new Map<number, string>(files.map((f, seq) => [seq, f.label]));
+    insertFiles(vault, job.id, files.map((f, seq) => ({ seq, label: f.label, source: f.abs })));
     if (input.kind === "folders") {
-      // What an earlier Stop or spent allowance left waiting is this job's now.
+      // What an earlier Stop or spent allowance left waiting is this job's now —
+      // a file this run leaves out (a log, one too large) included: it is decided.
       try {
         for (const id of takeOverQueued(vault, job.id, scan.files.map((f) => f.abs))) {
           const earlier = store.live.get(id);
@@ -619,8 +627,8 @@ async function runJob(
     };
 
     const gone: Array<{ seq: number; source: null }> = [];
-    for (let seq = 0; seq < scan.files.length; seq++) {
-      const file = scan.files[seq];
+    for (let seq = 0; seq < files.length; seq++) {
+      const file = files[seq];
       if (signal.aborted || fatal || spent) break;
       const read = await readFileOnce(file.abs);
       if (!read.ok) {
@@ -730,7 +738,7 @@ async function runJob(
     // nothing), and the next run of these folders, or Retry, takes them.
     const stopped = signal.aborted && !fatal && !spent;
     const missing: FileUpdate[] = [];
-    for (let seq = 0; seq < scan.files.length; seq++) {
+    for (let seq = 0; seq < files.length; seq++) {
       if (settledSeqs.has(seq)) continue;
       missing.push(
         spent

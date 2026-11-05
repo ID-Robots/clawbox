@@ -29,6 +29,8 @@ import {
 import { insertFiles, insertJob, readCosts, readDeadLetter, readFiles, type IngestJob } from "@/lib/prime-radiant/ingest-store";
 import { deadLetterRoot } from "@/lib/prime-radiant/ingest-dead-letter";
 import { emptySkipCounts } from "@/lib/prime-radiant/ingest-exclude";
+import { previewFolders } from "@/lib/prime-radiant/ingest-sources";
+import { MAX_DOCUMENT_BYTES } from "@/lib/memory-extract";
 import { writeSettings } from "@/lib/prime-radiant/settings";
 import { resolveReviewItem } from "@/lib/prime-radiant/review";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
@@ -749,14 +751,30 @@ describe("settings an ingest follows", () => {
     write("notes/worker.log.txt", log);
     const model = fakeClient();
     const job = await run({ kind: "folders", folders: [docs] }, deps({ client: model.client }));
-    expect(job).toMatchObject({ total: 2, done: 1, skipped: 1 });
+    // The log is left out with the rest, before the count: it is not a file of the job's total.
+    expect(job).toMatchObject({ total: 1, done: 1, skipped: 0 });
     expect(job.skips).toMatchObject({ codeProject: 1, boilerplate: 1, temp: 2, machineText: 1 });
     expect(job.notes).toContain("1 code project(s) were left out.");
     expect(job.notes).toContain("1 machine-generated text file(s) (logs, data exports) were left out.");
     // The log never reached the model.
     expect(model.prompts.map((p) => p.user).join("\n")).not.toContain("worker-3");
-    expect(readFiles(vault, job.id).find((f) => f.label.endsWith("worker.log.txt"))).toMatchObject({ status: "skipped", error: "machine-text" });
+    expect(readFiles(vault, job.id).map((f) => f.label)).toEqual([expect.stringMatching(/plan\.md$/)]);
     expect(getIngestJob(job.id, vault)?.skips).toEqual(job.skips);
+  });
+
+  it("counts to the number of documents the preview promised for the same folders (B16)", async () => {
+    write("notes/plan.md", "Our plan for the Acme launch is to start in spring with the northern stores first.");
+    write("notes/faq.txt", "Customers ask how long a Sprocket X200 lasts. It lasts about five years with care.");
+    write("exports/scanner.txt", Array.from({ length: 30 }, (_, i) => `2026-10-14 08:00:${String(i).padStart(2, "0")} INFO scan ${i} ok in 12ms`).join("\n"));
+    write("exports/stock.txt", Array.from({ length: 30 }, (_, i) => `${1000 + i};SPR-${i};${i * 3};EUR;2026-10-01`).join("\n"));
+    fs.truncateSync(write("scans/archive.pdf", ""), MAX_DOCUMENT_BYTES + 1);
+    const preview = await previewFolders([docs]);
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(preview.documents).toBe(2);
+    expect(job.total).toBe(preview.documents);
+    expect(job).toMatchObject({ done: 2, skipped: 0, failed: 0 });
+    expect(job.skips).toMatchObject({ machineText: preview.skips.machineText, tooLarge: preview.skips.tooLarge });
+    expect(preview.skips).toMatchObject({ machineText: 2, tooLarge: 1 });
   });
 
   it("reads code projects too when the settings say not to skip them", async () => {
