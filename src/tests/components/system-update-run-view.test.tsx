@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import UpdatingPage from "@/app/updating/page";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
-import UpdateStep, { describeUpdateFailure } from "@/components/UpdateStep";
+import UpdateStep, { describeUpdateFailure, HIDDEN_UPDATE_STEP_IDS } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel, {
   pickHighlights,
   UPDATE_COMPACT_PICKS,
@@ -130,23 +130,24 @@ describe("/updating — a run in progress", () => {
     expect(within(versions).getByTestId("update-run-channel")).toHaveTextContent("beta channel");
 
     const panel = screen.getByTestId("update-steps-panel");
-    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("4 / 10 steps complete");
+    // Ten steps reported, eight listed: Chromium and VNC are not (TASK-2199).
+    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
     // The current step is named above the meter and marked in the list.
     expect(within(panel).getAllByText("Updating OpenClaw")).toHaveLength(2);
     const meter = within(panel).getByRole("progressbar");
-    expect(meter).toHaveAttribute("aria-valuenow", "4");
-    expect(meter).toHaveAttribute("aria-valuemax", "10");
+    expect(meter).toHaveAttribute("aria-valuenow", "2");
+    expect(meter).toHaveAttribute("aria-valuemax", "8");
 
     const rows = within(screen.getByTestId("update-step-list")).getAllByRole("listitem");
     expect(rows.map((row) => row.getAttribute("data-status"))).toEqual([
-      "completed", "completed", "completed", "completed", "running",
+      "completed", "completed", "running",
       "pending", "pending", "pending", "pending", "pending",
     ]);
-    expect(rows[4]).toHaveAttribute("aria-current", "step");
-    expect(within(rows[4]).getByText("In progress")).toBeInTheDocument();
-    expect(rows[4].textContent).toContain("05");
-    expect(rows[9].textContent).toContain("10");
-    expect(within(rows[4]).getByTestId("update-step-detail")).toHaveTextContent("Installing openclaw@2026.10.7");
+    expect(rows[2]).toHaveAttribute("aria-current", "step");
+    expect(within(rows[2]).getByText("In progress")).toBeInTheDocument();
+    expect(rows[2].textContent).toContain("03");
+    expect(rows[7].textContent).toContain("08");
+    expect(within(rows[2]).getByTestId("update-step-detail")).toHaveTextContent("Installing openclaw@2026.10.7");
 
     const notice = screen.getByTestId("update-run-notice");
     expect(notice).toHaveTextContent("Don't power off until this finishes.");
@@ -238,15 +239,15 @@ describe("SystemUpdateApp — a failed run", () => {
 
     const stepsPanel = screen.getByTestId("update-steps-panel");
     expect(within(stepsPanel).getByText("Update stopped")).toBeInTheDocument();
-    const failedRow = within(stepsPanel).getAllByRole("listitem")[4];
+    const failedRow = within(stepsPanel).getAllByRole("listitem")[2];
     expect(failedRow).toHaveAttribute("data-status", "failed");
     expect(within(failedRow).getByText("Stopped")).toBeInTheDocument();
     // The failure is read before the steps, wherever the columns put it.
     expect(panel.compareDocumentPosition(stepsPanel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     const log = within(screen.getByTestId("update-log")).getAllByRole("listitem");
-    expect(log.map((line) => line.textContent?.slice(0, 2))).toEqual(["01", "02", "03", "04", "05"]);
-    expect(log[4].textContent).toContain(`Updating OpenClaw: ${reason}`);
+    expect(log.map((line) => line.textContent?.slice(0, 2))).toEqual(["01", "02", "03"]);
+    expect(log[2].textContent).toContain(`Updating OpenClaw: ${reason}`);
   });
 
   it("says the device gave no reason, rather than 'Unknown error', when it gave none", async () => {
@@ -265,7 +266,7 @@ describe("SystemUpdateApp — a failed run", () => {
     const panel = await screen.findByTestId("update-error-panel");
     expect(within(panel).getByRole("heading", { name: "Updating ClawBox and restarting" })).toBeInTheDocument();
     expect(within(panel).getByTestId("update-error-reason")).toHaveTextContent(reason);
-    const row = within(screen.getByTestId("update-step-list")).getAllByRole("listitem")[7];
+    const row = within(screen.getByTestId("update-step-list")).getAllByRole("listitem")[5];
     expect(row).toHaveAttribute("data-status", "failed");
     expect(screen.queryByText("In progress")).toBeNull();
     expect(screen.queryByTestId("update-run-notice")).toBeNull();
@@ -352,17 +353,17 @@ describe("UpdateStep — the wizard's failed step", () => {
   it("says the device gave no reason instead of 'Unknown error'", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ phase: "failed", currentStepIndex: -1, steps: steps(2, { status: "failed", error: "Unknown error" }) })),
+      vi.fn(async () => jsonResponse({ phase: "failed", currentStepIndex: -1, steps: steps(4, { status: "failed", error: "Unknown error" }) })),
     );
     render(<UpdateStep onNext={() => {}} />);
 
     const error = await screen.findByTestId("update-step-error");
-    expect(error.textContent).toContain("Installing Chromium:");
+    expect(error.textContent).toContain("Updating OpenClaw:");
     expect(error.textContent).toContain(NO_REASON);
     expect(document.body.textContent).not.toContain("Unknown error");
     const rows = within(screen.getByTestId("update-step-list")).getAllByRole("listitem");
     expect(rows[2]).toHaveAttribute("data-status", "failed");
-    expect(screen.getByTestId("update-step-count")).toHaveTextContent("2 / 10 steps complete");
+    expect(screen.getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
   });
 });
 
@@ -403,7 +404,109 @@ describe("UpdateStepList — every row's state in words", () => {
 
     const rows = within(await screen.findByTestId("update-step-list")).getAllByRole("listitem");
     expect(within(rows[0]).getByText("Completed")).toHaveClass("sr-only");
-    expect(within(rows[4]).getByText("In progress")).not.toHaveClass("sr-only");
-    expect(within(rows[5]).getByText("Waiting")).toHaveClass("sr-only");
+    expect(within(rows[2]).getByText("In progress")).not.toHaveClass("sr-only");
+    expect(within(rows[3]).getByText("Waiting")).toHaveClass("sr-only");
+  });
+});
+
+// TASK-2199: the updater still runs "Installing Chromium" and "Installing VNC
+// (Remote Desktop)" and reports them in its status; the screen does not list
+// them, count them or give them a meter segment. The fixture is the box's own
+// ten-step payload, so these assert what the screen makes of it.
+describe("Chromium and VNC — run by the updater, never listed on the screen", () => {
+  const HIDDEN = ["Installing Chromium", "Installing VNC (Remote Desktop)"];
+  const LISTED = LABELS.filter(([id]) => !HIDDEN_UPDATE_STEP_IDS.has(id)).map(([, label]) => label);
+
+  it("hides exactly those two steps", () => {
+    expect([...HIDDEN_UPDATE_STEP_IDS].sort()).toEqual(["chromium_install", "vnc_install"]);
+    expect(LISTED).toHaveLength(8);
+  });
+
+  it("lists the other eight numbered 01 to 08, and counts and meters eight", async () => {
+    mount({ phase: "running", currentStepIndex: 0, steps: steps(0) }, { page: true });
+
+    const panel = await screen.findByTestId("update-steps-panel");
+    const rows = within(screen.getByTestId("update-step-list")).getAllByRole("listitem");
+    expect(rows).toHaveLength(8);
+    expect(rows.map((row) => row.textContent?.slice(0, 2))).toEqual(["01", "02", "03", "04", "05", "06", "07", "08"]);
+    rows.forEach((row, index) => expect(row.textContent).toContain(LISTED[index]));
+    for (const label of HIDDEN) expect(screen.getByTestId("update-run").textContent).not.toContain(label);
+
+    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("0 / 8 steps complete");
+    const meter = within(panel).getByRole("progressbar");
+    expect(meter).toHaveAttribute("aria-valuemax", "8");
+    expect(meter.children).toHaveLength(8);
+  });
+
+  it("holds the progress where it was while a hidden step runs, and still says the run is in progress", async () => {
+    // Chromium done, VNC running: two listed steps done, none listed running.
+    mount({ phase: "running", currentStepIndex: 3, steps: steps(3, { status: "running", detail: "Setting up the VNC server" }) }, { page: true });
+
+    const panel = await screen.findByTestId("update-steps-panel");
+    expect(within(panel).getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
+    expect(within(panel).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "2");
+    expect(within(panel).getByText("In progress")).toBeInTheDocument();
+    const rows = within(screen.getByTestId("update-step-list")).getAllByRole("listitem");
+    expect(rows.map((row) => row.getAttribute("data-status"))).toEqual([
+      "completed", "completed", "pending", "pending", "pending", "pending", "pending", "pending",
+    ]);
+    expect(rows.some((row) => row.hasAttribute("aria-current"))).toBe(false);
+    expect(screen.queryByTestId("update-step-detail")).toBeNull();
+    for (const label of HIDDEN) expect(screen.getByTestId("update-run").textContent).not.toContain(label);
+    expect(screen.getByTestId("update-run-notice")).toHaveTextContent("Don't power off until this finishes.");
+  });
+
+  it("still names a hidden step that stopped the run, with its reason, while the list and log leave it out", async () => {
+    mount({
+      phase: "failed",
+      error: "Step failed with exit code 100",
+      steps: steps(2, { status: "failed", error: "apt could not reach the mirror" }),
+    });
+
+    const panel = await screen.findByTestId("update-error-panel");
+    expect(within(panel).getByRole("heading", { name: "Installing Chromium" })).toBeInTheDocument();
+    expect(within(panel).getByTestId("update-error-reason")).toHaveTextContent("apt could not reach the mirror");
+    expect(within(panel).getByTestId("update-error-context")).toHaveTextContent("Step failed with exit code 100");
+
+    const stepsPanel = screen.getByTestId("update-steps-panel");
+    expect(within(stepsPanel).getByText("Update stopped")).toBeInTheDocument();
+    expect(within(stepsPanel).getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
+    const rows = within(stepsPanel).getAllByRole("listitem");
+    expect(rows).toHaveLength(8);
+    expect(rows.map((row) => row.getAttribute("data-status"))).not.toContain("failed");
+    for (const label of HIDDEN) expect(stepsPanel.textContent).not.toContain(label);
+
+    const log = screen.getByTestId("update-log");
+    expect(within(log).getAllByRole("listitem").map((line) => line.textContent?.slice(0, 2))).toEqual(["01", "02"]);
+    expect(log.textContent).toContain("2 / 8");
+    for (const label of HIDDEN) expect(log.textContent).not.toContain(label);
+  });
+
+  it("leaves them out of the setup wizard's ledger too, and says 'In progress' while one runs", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ phase: "running", currentStepIndex: 2, steps: steps(2) })));
+    render(<UpdateStep onNext={() => {}} />);
+
+    const list = await screen.findByTestId("update-step-list");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(8);
+    expect(screen.getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuemax", "8");
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+    for (const label of HIDDEN) expect(document.body.textContent).not.toContain(label);
+  });
+
+  it("names a hidden step that failed in the setup wizard's error box", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ phase: "failed", currentStepIndex: -1, steps: steps(3, { status: "failed", error: "x11vnc could not be installed" }) })),
+    );
+    render(<UpdateStep onNext={() => {}} />);
+
+    const error = await screen.findByTestId("update-step-error");
+    expect(error).toHaveTextContent("Installing VNC (Remote Desktop): x11vnc could not be installed");
+    const list = screen.getByTestId("update-step-list");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(8);
+    for (const label of HIDDEN) expect(list.textContent).not.toContain(label);
+    // Chromium completed before VNC failed: done, but not counted.
+    expect(screen.getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
   });
 });

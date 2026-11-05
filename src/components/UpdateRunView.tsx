@@ -9,6 +9,7 @@ import {
   UpdateStepCount,
   UpdateStepList,
   UpdateStepMeter,
+  visibleUpdateSteps,
 } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
@@ -910,7 +911,11 @@ export function UpdateRunView({
   // The screen's verdict wins over a stale poll: a run this screen calls
   // failed has no step still "in progress".
   const phase: UpdatePhase | undefined = failed ? "failed" : state?.phase;
-  const steps = state?.steps ?? [];
+  // The steps the screen lists, counts, meters and logs (TASK-2199). While a
+  // step it does not list runs, none of these is running: the count line says
+  // "In progress" and the progress holds. The failure is read from every step,
+  // so the error panel still names a hidden step that stopped the run.
+  const steps = visibleUpdateSteps(state?.steps ?? []);
   const running = steps.find((s) => shownStepStatus(s, phase) === "running");
   const failure = failed ? describeUpdateFailure(state, error) : null;
   // A refused downgrade (or the backup its override could not take) is said

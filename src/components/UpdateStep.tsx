@@ -99,6 +99,20 @@ export function describeUpdateFailure(state: UpdateState | null, clientError?: s
   return { step, reason, context: said.find((message) => message !== reason) ?? null };
 }
 
+/**
+ * Steps the updater runs but the screen does not list (TASK-2199). They run
+ * exactly as before; the list, the "N / M steps complete" count and the meter
+ * leave them out, so the steps shown are numbered without gaps and the
+ * progress holds where it was while one of them runs. A failure in one is
+ * still named: `describeUpdateFailure` reads every step the run reported.
+ */
+export const HIDDEN_UPDATE_STEP_IDS: ReadonlySet<string> = new Set(["chromium_install", "vnc_install"]);
+
+/** The run's steps as the screen lists, counts and meters them. */
+export function visibleUpdateSteps(steps: StepState[]): StepState[] {
+  return steps.filter((step) => !HIDDEN_UPDATE_STEP_IDS.has(step.id));
+}
+
 /** The reason one failed step gives, or null — for a step that is not the run's headline failure. */
 export function stepFailureReason(step: StepState): string | null {
   return realMessage(step.error);
@@ -699,7 +713,10 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   // step that threw a non-Error leaves "Unknown error" here as well as on the
   // step, and drawn in the box below it hid the ledger that names the step.
   const runError = realMessage(state.error);
-  const showLedger = !(isFailed && runError) && state.steps.length > 0;
+  // The ledger leaves out the steps the screen does not list; the failed-step
+  // boxes below read every step, so a hidden one that fails is still named.
+  const listedSteps = visibleUpdateSteps(state.steps);
+  const showLedger = !(isFailed && runError) && listedSteps.length > 0;
 
   return (
     <Card>
@@ -735,9 +752,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
             className="mb-[var(--s-2)] flex items-center justify-end text-[var(--text-secondary)]"
             style={{ fontSize: "var(--t-2)" }}
           >
-            <UpdateStepCount steps={state.steps} />
+            <UpdateStepCount steps={listedSteps} />
           </div>
-          <UpdateStepMeter steps={state.steps} phase={state.phase} label={t("update.title")} />
+          <UpdateStepMeter steps={listedSteps} phase={state.phase} label={t("update.title")} />
 
           {/* What is happening right now, said once. The list below marks the
               same step, but a customer watching a twelve-minute install should
@@ -756,13 +773,16 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                 className="min-w-0 text-[var(--text-primary)]"
                 style={{ fontSize: "var(--t-5)", fontWeight: "var(--w-label)", lineHeight: 1.35 }}
               >
-                {runningStep.label}
+                {/* A step the list does not show is not named here either. */}
+                {HIDDEN_UPDATE_STEP_IDS.has(runningStep.id)
+                  ? tr("update.progressRunning", "In progress")
+                  : runningStep.label}
               </span>
             </div>
           )}
 
           <div className="mt-[var(--s-4)] mb-[var(--s-5)]">
-            <UpdateStepList steps={state.steps} phase={state.phase} />
+            <UpdateStepList steps={listedSteps} phase={state.phase} />
           </div>
         </>
       )}
