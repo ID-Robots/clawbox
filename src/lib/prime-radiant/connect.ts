@@ -456,7 +456,6 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
       sources: topSources(members, 10),
       privacy: strictestPrivacy(members),
       checked_by: "flash",
-      opus_pending: false,
       claims: [],
       retiredClaimIds: [],
     };
@@ -548,7 +547,6 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
         sources: topSources(leafPages, 20),
         privacy: strictestPrivacy(leafPages),
         checked_by: "flash",
-        opus_pending: false,
         claims: [],
         retiredClaimIds: [],
         hub: { kind: info.kind, month: info.month, ...(info.qualifier ? { qualifier: info.qualifier } : {}), leaves: slice.length },

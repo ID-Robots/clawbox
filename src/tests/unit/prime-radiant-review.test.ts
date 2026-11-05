@@ -274,7 +274,7 @@ describe("resolving review items", () => {
 
   it("pick: the chosen text is verified, the other candidate's id retired, the item resolved, the reindex hook told", async () => {
     const item = await disputed();
-    const otherItem = addReviewItem(vault, { kind: "opus", claimId: PRICE_B.id }).item;
+    const otherItem = addReviewItem(vault, { kind: "lint", claimId: PRICE_B.id }).item;
     const hook = vi.fn();
     setVaultReindexHook(hook);
     const r = await resolveReviewItem(item.id, { action: "pick", candidate: 1 }, { by: "owner" });

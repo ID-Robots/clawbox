@@ -73,7 +73,7 @@ export function summaryMaxTokens(pages: number): number {
   return 128 + 160 * pages;
 }
 
-/** What one call may cost at most: every prompt token uncached (three characters a token, plus slack, as opus.ts reckons) and its whole answer cap. */
+/** What one call may cost at most: every prompt token uncached (three characters a token, plus 500 for slack) and its whole answer cap. */
 export function worstCaseCallUsd(model: string, prompt: { system: string; user: string }, maxTokens: number, rates: CostRates): number {
   const promptTokens = Math.ceil((prompt.system.length + prompt.user.length) / 3) + 500;
   return estimateUsd(model, { promptTokens, completionTokens: maxTokens, cacheHitTokens: 0 }, rates);

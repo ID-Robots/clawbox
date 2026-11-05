@@ -343,9 +343,6 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
             </div>
           )}
 
-          {fm?.opus_pending && (
-            <p className="text-[11px] text-amber-200">{t("primeRadiant.page.opusPending")}</p>
-          )}
 
           {fm && fm.claims.length > 0 && (
             <section className={`${CARD_SURFACE} p-3`} data-testid="prime-radiant-claims">

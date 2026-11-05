@@ -525,7 +525,6 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
     sources: [...new Set([...(previous?.sources ?? []), source])],
     privacy: draft.privacy,
     checked_by: "flash",
-    opus_pending: false,
     claims,
     retiredClaimIds: previous?.retiredClaimIds ?? [],
   };

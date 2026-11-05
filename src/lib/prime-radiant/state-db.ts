@@ -197,9 +197,10 @@ ALTER TABLE ingest_jobs ADD COLUMN skips TEXT NOT NULL DEFAULT '{}';
 `;
 
 /**
- * v7 — what a cost row's dollar figure IS: `estimate` (priced from the rates in
- * force, every row before v7) or `subscription` (a call the owner's Claude
- * subscription answered: its tokens are real, its marginal cost is $0).
+ * v7 — what a cost row's dollar figure IS. Every row ClawBox writes now is an
+ * `estimate` (priced from the rates in force); `subscription` rows ($0, a call
+ * the owner's Claude subscription answered) were written only by the nightly
+ * Opus tier, which is gone. The column stays: a migration is never undone.
  */
 const SCHEMA_V7 = `
 ALTER TABLE costs ADD COLUMN basis TEXT NOT NULL DEFAULT 'estimate';

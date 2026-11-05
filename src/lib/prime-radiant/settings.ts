@@ -5,10 +5,11 @@
  * This module owns every section: ingest (the exclude list, whether code
  * projects are skipped, the model-call parallelism, the folders the nightly
  * pass re-reads), the cost rates, the
- * nightly schedule, the optional Opus tier, the contradiction pass, the
+ * nightly schedule, the contradiction pass, the
  * search index's size limit and the domains with their owners. Keys it does not know are kept on every
  * write, so a section another module adds survives an ingest setting being
- * changed. A read never creates the file; a file that cannot be parsed reads
+ * changed — except a section listed in `RETIRED_SECTIONS`, which is read
+ * past and dropped on the next save. A read never creates the file; a file that cannot be parsed reads
  * as the defaults (and is logged), so a bad edit cannot stop an ingest.
  *
  * SERVER ONLY.
@@ -37,22 +38,12 @@ const MAX_FOLDER_CHARS = 4096;
 /** The nightly pass, by default: on, at 03:00 local time. */
 export const DEFAULT_NIGHTLY_TIME = "03:00";
 
-/** The Opus tier: off until the owner turns it on, and never past its cap. */
-export const DEFAULT_OPUS_MODEL = "claude-opus-5-5";
-export const DEFAULT_OPUS_CAP_USD = 2;
-export const MIN_OPUS_CAP_USD = 0.01;
-export const MAX_OPUS_CAP_USD = 1000;
-/** The share of flash-checked pages a night samples beyond the ones that are owed a check. */
-export const DEFAULT_OPUS_SAMPLE_RATE = 0.02;
 /**
- * The most pages one night sends to Opus, whichever account answers — the
- * cap that holds on a Claude SUBSCRIPTION, where a dollar figure means nothing
- * and the owner's own allowance is what a night spends. Pages past it stay
- * `opus_pending` for the next night.
+ * Sections a save drops from the file: `opus`, the removed nightly Opus
+ * tier's. A file that still holds it reads as if it did not (nothing here
+ * reads it), and the next save leaves it out.
  */
-export const DEFAULT_OPUS_MAX_PAGES = 100;
-export const MIN_OPUS_MAX_PAGES = 4;
-export const MAX_OPUS_MAX_PAGES = 2000;
+export const RETIRED_SECTIONS: readonly string[] = Object.freeze(["opus"]);
 
 /**
  * How big the vault's search index may grow, in MB (MiB: 1 MB = 1,048,576
@@ -119,17 +110,6 @@ export interface NightlySettings {
   time: string;
 }
 
-export interface OpusSettings {
-  enabled: boolean;
-  /** Hard ceiling on one night's estimated Opus spend, USD. */
-  capUsd: number;
-  /** 0..1 — the random share of flash-checked pages sampled each night. */
-  sampleRate: number;
-  model: string;
-  /** Hard ceiling on the pages one night sends to Opus (any account). */
-  maxPages: number;
-}
-
 export interface ContradictionSettings {
   enabled: boolean;
 }
@@ -194,7 +174,6 @@ export interface PrimeRadiantSettings {
   /** The owner's rate overrides, model by model (empty = the defaults). */
   costRates: Record<string, ModelRate>;
   nightly: NightlySettings;
-  opus: OpusSettings;
   contradictions: ContradictionSettings;
   search: SearchSettings;
   structure: StructureSettings;
@@ -209,7 +188,6 @@ export function defaultSettings(): PrimeRadiantSettings {
     ingest: { exclude: [...DEFAULT_INGEST_EXCLUDES], skipCodeProjects: true, parallel: DEFAULT_INGEST_PARALLEL, folders: [] },
     costRates: {},
     nightly: { enabled: true, time: DEFAULT_NIGHTLY_TIME },
-    opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL, maxPages: DEFAULT_OPUS_MAX_PAGES },
     contradictions: { enabled: true },
     search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
     structure: { enabled: true, company: "", enrichTop: DEFAULT_STRUCTURE_ENRICH_TOP, modelFallback: DEFAULT_STRUCTURE_MODEL_FALLBACK },
@@ -266,7 +244,6 @@ function readNumber(v: unknown, min: number, max: number, field: string): Read<n
     : { ok: false, error: `${field} must be a number from ${min} to ${max}.` };
 }
 
-const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const DOMAIN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function readDomains(v: unknown): Read<DomainSetting[]> {
@@ -308,17 +285,6 @@ const FIELDS = {
     enabled: (v: unknown) => readBool(v, "nightly.enabled"),
     time: (v: unknown): Read<string> =>
       typeof v === "string" && parseNightlyTime(v) ? { ok: true, value: v } : { ok: false, error: "nightly.time must be HH:MM (24 h)." },
-  },
-  opus: {
-    enabled: (v: unknown) => readBool(v, "opus.enabled"),
-    capUsd: (v: unknown) => readNumber(v, MIN_OPUS_CAP_USD, MAX_OPUS_CAP_USD, "opus.capUsd"),
-    sampleRate: (v: unknown) => readNumber(v, 0, 1, "opus.sampleRate"),
-    model: (v: unknown): Read<string> =>
-      typeof v === "string" && MODEL_RE.test(v) ? { ok: true, value: v } : { ok: false, error: "opus.model is not a model id." },
-    maxPages: (v: unknown): Read<number> =>
-      typeof v === "number" && Number.isInteger(v) && v >= MIN_OPUS_MAX_PAGES && v <= MAX_OPUS_MAX_PAGES
-        ? { ok: true, value: v }
-        : { ok: false, error: `opus.maxPages must be a whole number from ${MIN_OPUS_MAX_PAGES} to ${MAX_OPUS_MAX_PAGES}.` },
   },
   contradictions: {
     enabled: (v: unknown) => readBool(v, "contradictions.enabled"),
@@ -433,7 +399,6 @@ export interface SettingsPatch {
   ingest?: { exclude?: unknown; skipCodeProjects?: unknown; parallel?: unknown; folders?: unknown };
   costRates?: unknown;
   nightly?: { enabled?: unknown; time?: unknown } | null;
-  opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown; maxPages?: unknown } | null;
   contradictions?: { enabled?: unknown } | null;
   search?: { indexLimitMb?: unknown } | null;
   structure?: { enabled?: unknown; company?: unknown; enrichTop?: unknown; modelFallback?: unknown } | null;
@@ -447,7 +412,6 @@ export interface SettingsPatch {
 const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   ingest: ["exclude", "skipCodeProjects", "parallel", "folders"],
   nightly: Object.keys(FIELDS.nightly),
-  opus: Object.keys(FIELDS.opus),
   contradictions: Object.keys(FIELDS.contradictions),
   search: Object.keys(FIELDS.search),
   golden: Object.keys(FIELDS.golden),
@@ -498,6 +462,7 @@ export class SettingsError extends Error {
 export function writeSettings(patch: SettingsPatch, root: string = primeRadiantRoot()): PrimeRadiantSettings {
   const raw = readRaw(root);
   const next: Record<string, unknown> = { ...raw };
+  for (const name of RETIRED_SECTIONS) delete next[name];
   const ingest = { ...((raw.ingest && typeof raw.ingest === "object" ? raw.ingest : {}) as Record<string, unknown>) };
   if (patch.ingest) {
     if (patch.ingest.exclude === null) {

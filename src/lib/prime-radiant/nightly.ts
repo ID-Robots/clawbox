@@ -13,13 +13,11 @@
  *                (every claim, the first night) against their 5 nearest
  *                neighbours, judged by Flash; findings become review items,
  *                they never hold the night;
- *   4. Opus      optional, capped, sampled (opus.ts); its proposals are
- *                review items, its bookkeeping a commit on the branch;
- *   4b. structure  monthly record hubs, domain hubs, the company's root
+ *   4. structure  monthly record hubs, domain hubs, the company's root
  *                page, entity enrichment and the decisions register
  *                (structure.ts), written on the branch — deterministic; the
  *                capped cheap-model fallback for record types only online;
- *   4c. summaries  every node's summary written from its connections and
+ *   4b. summaries  every node's summary written from its connections and
  *                sources (node-summary.ts), entities first, on the branch —
  *                the cheap model within its page and dollar caps when online,
  *                the facts' own words otherwise; unchanged neighbourhoods
@@ -73,9 +71,7 @@ import { lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, vaultDir } from "./paths";
 import { adoptPluginPages, repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
 import { notifyVaultChanged } from "./reindex-hook";
-import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
-import { buildOpusQueue, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
-import { resolveOpusClient } from "./opus-source";
+import { addReviewItem, countWaitingForRuns } from "./review-store";
 import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecord, type RunStatus, type RunTrigger } from "./runs";
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
@@ -102,7 +98,6 @@ export interface NightlySummary {
   contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "capped" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped" | "allowance"> & {
     findings: number;
   };
-  opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
   structure:
     | (Pick<StructureNowResult, "leaves" | "leavesInHubs" | "recordHubs" | "counterpartyHubs" | "domainHubs" | "root" | "entitiesEnriched" | "claimsAdded" | "decisions" | "registerPages" | "skippedVerified" | "linksMedianBefore" | "linksMedianAfter" | "written" | "created"> & {
         model: StructureNowResult["model"];
@@ -132,11 +127,9 @@ export interface NightlyDeps {
   vault?: string;
   client?: FlashClient;
   embedder?: ClaimEmbedder;
-  opus?: OpusClient;
   settings?: PrimeRadiantSettings;
   rates?: CostRates;
   now?: () => Date;
-  random?: () => number;
   /** Whether ClawBox AI can be asked (default: a credential is on the box). */
   online?: () => Promise<boolean>;
   /** The vault search the golden check answers with (default: Memory Shard's index of the vault, when it is there). */
@@ -357,7 +350,6 @@ function emptySummary(): NightlySummary {
       allowance: null,
       findings: 0,
     },
-    opus: { skipped: "not_run" },
     structure: { skipped: "not_run" },
     summaries: { skipped: "not_run" },
     gate: { touched: [] },
@@ -449,7 +441,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       }
     }
 
-    // What the branch changed so far: the Opus queue's scope.
+    // What the branch changed so far (tonight's ingest): pages the contradiction pass compares anyway.
     let changed = await changedPages(wt, VAULT_MAIN_BRANCH, "HEAD");
     const compared = (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();
     const snapshot = await readVaultSnapshot(wt);
@@ -517,52 +509,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       notes.push(`The open contradiction items could not be re-checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
     }
 
-    // 4. Opus, optional
-    if (!settings.opus.enabled) summary.opus = { skipped: "disabled" };
-    else {
-      const reviewPages = new Set(listReviewItems(vault, { status: "open", limit: 200 }).items.flatMap((i) => i.pages));
-      const queue = buildOpusQueue(snapshot.pages, { changed: new Set(changed), reviewPages, sampleRate: settings.opus.sampleRate, random: deps.random });
-      if (queue.length === 0) summary.opus = { skipped: "nothing_queued" };
-      else {
-        try {
-          // Resolved once for the night: an API key, else the Claude subscription, else none.
-          const client = deps.opus ?? (await resolveOpusClient(settings.opus.model));
-          const op = await vaultOperation(
-            "nightly: opus check",
-            (tx) =>
-              runOpusTier(tx, queue, {
-                stateVault: vault,
-                capUsd: settings.opus.capUsd,
-                maxPages: settings.opus.maxPages,
-                rates,
-                client,
-                runId: run.id,
-                now,
-              }),
-            { vault: wt, now: now() },
-          );
-          const o = op.result;
-          summary.opus = {
-            queued: o.queued,
-            reviewed: o.reviewed,
-            pending: o.pending,
-            calls: o.calls,
-            usdEstimate: o.usdEstimate,
-            capUsd: o.capUsd,
-            maxPages: o.maxPages,
-            source: o.source,
-            stopped: o.stopped,
-          };
-          summary.reviewItems.raised += o.reviewItems.length;
-          notes.push(...o.notes);
-          run.usdEstimate += o.usdEstimate;
-        } catch (err) {
-          summary.opus = { skipped: "failed" };
-          notes.push(`The Opus check could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
-        }
-      }
-    }
-    // 4b. structure: hubs, the root, enrichment and the register, on the branch
+    // 4. structure: hubs, the root, enrichment and the register, on the branch
     if (!settings.structure.enabled) summary.structure = { skipped: "disabled" };
     else {
       try {
@@ -597,7 +544,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         notes.push(`The structure pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
       }
     }
-    // 4c. summaries: every node's summary from its connections and sources, on the branch (after the structure pass, whose hubs and enrichment it reads);
+    // 4b. summaries: every node's summary from its connections and sources, on the branch (after the structure pass, whose hubs and enrichment it reads);
     // a page whose summary the lint refuses is left out (`refused`), only a failed commit fails the step
     if (!settings.summaries.enabled) summary.summaries = { skipped: "disabled" };
     else {

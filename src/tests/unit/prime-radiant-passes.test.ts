@@ -1,7 +1,7 @@
 /**
  * The nightly pass's parts with every model replaced: the contradiction pass
- * (kNN blocking, the judge, its caches), the Opus tier (queue, hard cap,
- * absent provider), the scheduler's clock and the new settings sections.
+ * (kNN blocking, the judge, its caches), what the removed Opus tier left on
+ * pages, the scheduler's clock and the settings sections.
  * Fixtures are synthetic.
  */
 import fs from "fs";
@@ -18,18 +18,18 @@ import {
   SAME_SUBJECT_PARTNERS,
   type ClaimEmbedder,
 } from "@/lib/prime-radiant/contradictions";
-import { DEFAULT_COST_RATES, mergeCostRates } from "@/lib/prime-radiant/cost-rates";
+import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
 import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { createStubFlashClient, stubVerdict } from "@/lib/prime-radiant/flash-stub";
 import { buildJudgePrompt, JudgeParseError, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
 import { computeNextNightlyMs } from "@/lib/prime-radiant/nightly-scheduler";
-import { buildOpusQueue, createAnthropicOpusClient, OpusUnavailableError, parseOpusResponse, runOpusTier, worstCaseUsd, type OpusClient } from "@/lib/prime-radiant/opus";
+import { parsePage, serializePage } from "@/lib/prime-radiant/frontmatter";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { readCostSummary } from "@/lib/prime-radiant/runs";
 import { readSettings, readSettingsPatch, SettingsError, writeSettings } from "@/lib/prime-radiant/settings";
 import { runInTransaction } from "@/lib/prime-radiant/state-db";
-import { readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
+import { readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText, snapshot } from "../helpers/prime-radiant-fixtures";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -339,132 +339,22 @@ describe("contradiction pass", () => {
   });
 });
 
-describe("opus tier", () => {
-  const verified = { status: "verified" as const, verified: { at: "2026-02-01T00:00:00.000Z", by: "owner" } };
-
-  it("queues owed, changed, reviewed and sampled pages; never verified or human ones", () => {
-    const snap = snapshot({
-      "concepts/a.md": pageText({ opus_pending: true }),
-      "concepts/b.md": pageText(),
-      "concepts/c.md": pageText(),
-      "concepts/d.md": pageText({ claims: [claim("acme-sales/d/x", "Verified fact.", verified)] }),
-      "concepts/e.md": pageText({ checked_by: "human" }),
-      "concepts/f.md": pageText(),
-    });
-    const q = buildOpusQueue(snap.pages, {
-      changed: new Set(["concepts/b.md", "concepts/d.md"]),
-      reviewPages: new Set(["concepts/c.md", "concepts/e.md"]),
-      sampleRate: 0.5,
-      random: () => 0.1,
-    });
-    expect(q).toEqual([
-      { path: "concepts/a.md", reason: "pending" },
-      { path: "concepts/b.md", reason: "changed" },
-      { path: "concepts/c.md", reason: "review" },
-      { path: "concepts/f.md", reason: "sample" },
-    ]);
-  });
-
-  it("reads Opus's answer strictly", () => {
-    const m = parseOpusResponse('[{"k":0,"verdict":"edit","claims":[{"id":"a/b/c","text":"New.","why":"body says so"},{"text":"no id"}],"note":"one fix"},{"k":1,"verdict":"bogus"}]', 2);
-    expect(m.get(0)).toEqual({ verdict: "edit", claims: [{ id: "a/b/c", text: "New.", why: "body says so" }], note: "one fix" });
-    expect(m.has(1)).toBe(false);
-  });
-
-  async function seedOpus() {
-    await vaultOperation("seed: pages", async (tx) => {
-      for (const [p, t] of Object.entries(PAGES)) await tx.write(p, t);
-    });
-  }
-
-  it("marks every page pending when no provider can answer, and the operation still commits", async () => {
-    await seedOpus();
-    const absent: OpusClient = {
-      model: "claude-opus-5-5",
-      complete: async () => {
-        throw new OpusUnavailableError("no Anthropic provider is connected");
-      },
-    };
-    const queue = Object.keys(PAGES).map((p) => ({ path: p, reason: "changed" as const }));
-    const op = await vaultOperation("nightly: opus check", (tx) =>
-      runOpusTier(tx, queue, { stateVault: vaultDir(), capUsd: 5, rates: DEFAULT_COST_RATES, client: absent }),
-    );
-    expect(op.result).toMatchObject({ reviewed: 0, pending: 3, stopped: "unavailable" });
-    const page = await readPage("concepts/pricing.md");
-    expect(page!.parsed.ok && page!.parsed.frontmatter.opus_pending).toBe(true);
-  });
-
-  it("reviews within the cap, raises an item for a proposed edit, and stops at the cap", async () => {
-    await seedOpus();
-    let calls = 0;
-    const opus: OpusClient = {
-      model: "claude-opus-5-5",
-      async complete() {
-        calls += 1;
-        return {
-          text: JSON.stringify([
-            { k: 0, verdict: "edit", claims: [{ id: "acme-sales/pricing/blue-widget", text: "The blue widget costs 11 EUR per unit.", why: "body" }], note: "price" },
-          ]),
-          model: "claude-opus-5-5",
-          usage: { promptTokens: 2000, completionTokens: 500, cacheHitTokens: 0 },
-        };
-      },
-    };
-    const queue = Object.keys(PAGES).map((p) => ({ path: p, reason: "sample" as const }));
-    // One call's worst case fits under this cap, two do not.
-    const oneCall = worstCaseUsd("claude-opus-5-5", 3000, DEFAULT_COST_RATES);
-    const op = await vaultOperation("nightly: opus check", (tx) =>
-      runOpusTier(tx, queue, { stateVault: vaultDir(), capUsd: oneCall * 1.2, rates: DEFAULT_COST_RATES, client: opus, runId: "run-0000000000bb" }),
-    );
-    expect(calls).toBe(1);
-    expect(op.result.reviewed).toBeGreaterThanOrEqual(1);
-    expect(op.result.usdEstimate).toBeLessThanOrEqual(oneCall * 1.2);
-    expect(op.result.reviewItems).toHaveLength(1);
-    expect(op.result.reviewItems[0]).toMatchObject({ kind: "opus", claimId: "acme-sales/pricing/blue-widget" });
-    const first = await readPage(queue[0].path);
-    expect(first!.parsed.ok && first!.parsed.frontmatter.checked_by).toBe("opus");
-
-    // Smaller than one call's worst case: nothing is sent.
-    calls = 0;
-    const capped = await vaultOperation("nightly: opus check", (tx) =>
-      runOpusTier(tx, queue, { stateVault: vaultDir(), capUsd: 0.01, rates: DEFAULT_COST_RATES, client: opus }),
-    );
-    expect(calls).toBe(0);
-    expect(capped.result.stopped).toBe("cap");
-  });
-
-  it("calls Anthropic with an API key only, and is unavailable without one", async () => {
-    const ok = {
-      content: [{ type: "text", text: "[]" }],
-      usage: { input_tokens: 10, output_tokens: 2 },
-      stop_reason: "end_turn",
-    };
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(ok), { status: 200 }));
-    const withKey = createAnthropicOpusClient("claude-opus-5-5", fetchImpl as unknown as typeof fetch, async () => "sk-ant-api03-placeholder");
-    await expect(withKey.complete({ system: "s", user: "u", maxTokens: 10 })).resolves.toMatchObject({ text: "[]" });
-    const headers = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>;
-    expect(headers["x-api-key"]).toBe("sk-ant-api03-placeholder");
-    expect(headers.authorization).toBeUndefined();
-    expect(headers["anthropic-beta"]).toBeUndefined();
-
-    fetchImpl.mockClear();
-    const noKey = createAnthropicOpusClient("claude-opus-5-5", fetchImpl as unknown as typeof fetch, async () => null);
-    await expect(noKey.complete({ system: "s", user: "u", maxTokens: 10 })).rejects.toBeInstanceOf(OpusUnavailableError);
-    const throwing = createAnthropicOpusClient("claude-opus-5-5", fetchImpl as unknown as typeof fetch, async () => {
-      throw new Error("store unreadable");
-    });
-    await expect(throwing.complete({ system: "s", user: "u", maxTokens: 10 })).rejects.toBeInstanceOf(OpusUnavailableError);
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("does not start without a rate for the model, because the cap could not be kept", async () => {
-    await seedOpus();
-    const opus: OpusClient = { model: "some-unpriced-model", complete: vi.fn() };
-    const op = await vaultOperation("nightly: opus check", (tx) =>
-      runOpusTier(tx, [{ path: "concepts/pricing.md", reason: "sample" }], { stateVault: vaultDir(), capUsd: 100, rates: mergeCostRates({}), client: opus }),
-    );
-    expect(opus.complete).not.toHaveBeenCalled();
-    expect(op.result).toMatchObject({ stopped: "cap", pending: 1 });
+describe("pages the removed Opus tier left", () => {
+  it("still parse and re-serialise byte for byte with `opus_pending` and `checked_by: opus`; a new page carries neither", () => {
+    const fresh = pageText();
+    const parsed = parsePage(fresh);
+    expect(parsed.ok && "opus_pending" in parsed.frontmatter).toBe(false);
+    expect(fresh).not.toMatch(/opus_pending/);
+    // An older box wrote the flag between checked_by and claims: it stays there, untouched.
+    const old = fresh.replace("checked_by: flash\n", "checked_by: opus\nopus_pending: true\n");
+    expect(old).toMatch(/checked_by: opus\nopus_pending: true\nclaims:/);
+    const reread = parsePage(old);
+    expect(reread.ok).toBe(true);
+    if (!reread.ok) return;
+    expect(reread.frontmatter).toMatchObject({ checked_by: "opus", opus_pending: true });
+    expect(serializePage(reread.frontmatter, reread.body)).toBe(old);
+    // Whatever value it holds, it is no longer the contract's to judge.
+    expect(parsePage(fresh.replace("checked_by: flash\n", "checked_by: flash\nopus_pending: maybe\n")).ok).toBe(true);
   });
 });
 
@@ -479,10 +369,10 @@ describe("nightly schedule", () => {
 });
 
 describe("settings: the slice 3 sections", () => {
-  it("defaults: nightly on at 03:00, Opus off with a cap, contradictions on, no domains", () => {
+  it("defaults: nightly on at 03:00, contradictions on, no domains, no Opus section", () => {
     const s = readSettings();
     expect(s.nightly).toEqual({ enabled: true, time: "03:00" });
-    expect(s.opus).toMatchObject({ enabled: false, capUsd: 2, sampleRate: 0.02, model: "claude-opus-5-5" });
+    expect("opus" in s).toBe(false);
     expect(s.contradictions).toEqual({ enabled: true });
     expect(s.domains).toEqual([]);
     expect(s.ingest.folders).toEqual([]);
@@ -491,19 +381,18 @@ describe("settings: the slice 3 sections", () => {
   it("writes and resets fields, and refuses a bad one whole", () => {
     const s = writeSettings({
       nightly: { time: "04:30" },
-      opus: { enabled: true, capUsd: 5 },
+      contradictions: { enabled: false },
       domains: [{ name: "acme-sales", owner: "Sales team" }],
       ingest: { folders: ["/srv/docs", "/srv/docs/"] },
     });
     expect(s.nightly).toEqual({ enabled: true, time: "04:30" });
-    expect(s.opus).toMatchObject({ enabled: true, capUsd: 5 });
+    expect(s.contradictions).toEqual({ enabled: false });
     expect(s.domains).toEqual([{ name: "acme-sales", owner: "Sales team" }]);
     expect(s.ingest.folders).toEqual(["/srv/docs"]);
     for (const bad of [
       { nightly: { time: "4:30" } },
-      { opus: { capUsd: 0 } },
-      { opus: { capUsd: 5000 } },
-      { opus: { sampleRate: 2 } },
+      { contradictions: { enabled: "yes" } },
+      { summaries: { capUsd: 5000 } },
       { domains: [{ name: "Acme Sales", owner: "x" }] },
       { domains: [{ name: "a", owner: "x" }, { name: "a", owner: "y" }] },
       { ingest: { folders: ["relative/path"] } },
@@ -511,14 +400,48 @@ describe("settings: the slice 3 sections", () => {
       expect(() => writeSettings(bad as never)).toThrow(SettingsError);
     }
     expect(readSettings().nightly.time).toBe("04:30");
-    expect(writeSettings({ opus: null }).opus.enabled).toBe(false);
+    expect(writeSettings({ contradictions: null }).contradictions.enabled).toBe(true);
     expect(writeSettings({ nightly: { time: null } }).nightly.time).toBe("03:00");
   });
 
   it("refuses unknown sections and keys in a patch", () => {
     expect(() => readSettingsPatch({ schedule: "x" })).toThrow(SettingsError);
-    expect(() => readSettingsPatch({ opus: { budget: 1 } })).toThrow(SettingsError);
+    expect(() => readSettingsPatch({ nightly: { budget: 1 } })).toThrow(SettingsError);
     expect(() => readSettingsPatch([])).toThrow(SettingsError);
-    expect(readSettingsPatch({ opus: { enabled: true } })).toEqual({ opus: { enabled: true } });
+    // The removed Opus tier's section is no setting any more.
+    expect(() => readSettingsPatch({ opus: { enabled: true } })).toThrow(/Unknown setting: opus/);
+    expect(readSettingsPatch({ nightly: { enabled: true } })).toEqual({ nightly: { enabled: true } });
+  });
+
+  it("an older settings.json that still holds `opus` loads without error, and the next save drops it", () => {
+    const file = path.join(process.env.PRIME_RADIANT_DIR!, "settings.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const old = {
+      nightly: { enabled: true, time: "02:15" },
+      opus: { enabled: true, capUsd: 5, sampleRate: 0.5, model: "claude-opus-5-5", maxPages: 40 },
+      contradictions: { enabled: false },
+      domains: [{ name: "acme-sales", owner: "Sales team" }],
+      laterSection: { kept: true },
+    };
+    fs.writeFileSync(file, JSON.stringify(old));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const s = readSettings();
+      expect("opus" in s).toBe(false);
+      expect(s.nightly).toEqual({ enabled: true, time: "02:15" });
+      expect(s.contradictions).toEqual({ enabled: false });
+      expect(s.domains).toEqual([{ name: "acme-sales", owner: "Sales team" }]);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+    // Reading never rewrites the file.
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).opus).toEqual(old.opus);
+    const saved = writeSettings({ nightly: { time: "04:00" } });
+    expect(saved.nightly.time).toBe("04:00");
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect("opus" in stored).toBe(false);
+    // Every other section, one this ClawBox does not know included, is kept.
+    expect(stored).toMatchObject({ contradictions: { enabled: false }, domains: old.domains, laterSection: { kept: true } });
   });
 });

@@ -1,8 +1,7 @@
 /**
  * GET /setup-api/prime-radiant/costs?since=<ISO date>&runId=<ing-…|run-…> —
  * what Prime Radiant's model calls cost, as ESTIMATES from the rates in force
- * (`basis: "estimate"`): totals, by operation, by model, by basis (`subscription`
- * rows are calls a Claude subscription answered: real tokens, $0) and by run (ingest
+ * (`basis: "estimate"`): totals, by operation, by model and by run (ingest
  * jobs and nightly passes). Never creates the state database.
  *
  * `&allowance=1` adds `allowance`: Prime Radiant's calls through ClawBox AI in

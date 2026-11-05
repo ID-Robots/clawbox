@@ -32,7 +32,6 @@ export function frontmatter(extra: Partial<PageFrontmatter> = {}): PageFrontmatt
     sources: ["sources/acme-catalogue.md"],
     privacy: "internal",
     checked_by: "flash",
-    opus_pending: false,
     claims: [],
     retiredClaimIds: [],
     ...extra,

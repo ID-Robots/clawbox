@@ -29,8 +29,9 @@ const MAX_ANSWER = 240;
 
 /**
  * Review: the questions the vault cannot settle alone — two pages that
- * disagree, a nightly change to a verified page, a lint finding, an Opus
- * proposal. Each shows the disputed fact, the candidate answers with their
+ * disagree, a nightly change to a verified page, a lint finding (and an
+ * `opus` proposal an older box raised, still shown and settled the same
+ * way). Each shows the disputed fact, the candidate answers with their
  * evidence, and three ways out: keep one candidate, write the right answer,
  * or come back later. Keeping or writing an answer is a VERIFICATION — one
  * commit that replaces the claim and retires the losing ids — so it is the

@@ -39,12 +39,15 @@ import { json, LIST_MAX_CHARS, text, type Registrar, type ToolOpts } from "../li
 import { zBool, zConfirm, zEnumOf, zInt, zOptText, zText } from "../lib/schema";
 
 /**
- * The review queue's kinds and states (`REVIEW_KINDS` / `REVIEW_STATUSES` in
- * src/lib/prime-radiant/review-store.ts). Declared here, not imported: that
- * module opens sqlite and reaches the `@/` alias, which this stdio process may
- * not load. Kept in step by src/tests/unit/mcp-prime-radiant-tools.test.ts.
+ * The review queue's kinds and states (`REVIEW_KINDS` / `RAISED_REVIEW_KINDS` /
+ * `REVIEW_STATUSES` in src/lib/prime-radiant/review-store.ts). Declared here,
+ * not imported: that module opens sqlite and reaches the `@/` alias, which this
+ * stdio process may not load. Kept in step by
+ * src/tests/unit/mcp-prime-radiant-tools.test.ts. `opus` is only listed: an
+ * older box's nightly Opus tier (removed) raised such items; nothing raises one now.
  */
 export const REVIEW_KINDS = ["contradiction", "verified-touch", "lint", "opus"] as const;
+export const RAISED_REVIEW_KINDS = ["contradiction", "verified-touch", "lint"] as const;
 export const REVIEW_STATUSES = ["open", "later", "resolved"] as const;
 
 /** Every tool this module registers, for mcp/check-tools.ts and the tests. */
@@ -733,11 +736,11 @@ function registerReadTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings",
-    "Read Prime Radiant's settings: nightly schedule, contradiction pass, Opus second opinion and caps, search index limit (MB), domains and owners, golden-question check, daily questions (per owner, languages, sending), import excludes, parallelism, nightly folders — with defaults and limits.",
+    "Read Prime Radiant's settings: nightly schedule, contradiction pass, search index limit (MB), domains and owners, golden-question check, daily questions (per owner, languages, sending), import excludes, parallelism, nightly folders — with defaults and limits.",
     {},
     { ...READ, maxChars: 8_000 },
     async () => {
-      const s = await pr<{ settings?: Record<string, unknown>; defaults?: Record<string, unknown>; limits?: unknown; nightly?: { nextRunAt?: number }; opusSource?: string }>("GET", "/settings");
+      const s = await pr<{ settings?: Record<string, unknown>; defaults?: Record<string, unknown>; limits?: unknown; nightly?: { nextRunAt?: number } }>("GET", "/settings");
       const defaults = s.defaults ?? {};
       return json({
         settings: s.settings,
@@ -745,7 +748,6 @@ function registerReadTools(reg: Registrar): void {
         defaults: { ...defaults, ingest: { ...((defaults.ingest as Record<string, unknown>) ?? {}), exclude: "(the built-in list — reset ingest_exclude to restore it)" } },
         limits: s.limits,
         next_nightly_run: isoOf(s.nightly?.nextRunAt) ?? "off",
-        opus_account: s.opusSource ?? "unknown",
       });
     },
   );
@@ -1132,7 +1134,7 @@ function registerReviewTools(reg: Registrar): void {
       pages: zOptList(20, 512, "The pages the question is about."),
       candidates: zOptList(8, 1000, "Possible answers, one line each."),
       note: zOptText(500, "What is in doubt and why, in a sentence."),
-      kind: zEnumOf(REVIEW_KINDS, "Leave out for contradiction.").optional(),
+      kind: zEnumOf(RAISED_REVIEW_KINDS, "Leave out for contradiction.").optional(),
     },
     WRITE,
     async (a: { claim_id?: string; pages?: string[]; candidates?: string[]; note?: string; kind?: string }) => {
@@ -1224,7 +1226,7 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_nightly_run",
-    "Start Prime Radiant's nightly pass now — re-import the nightly folders, look for contradictions, the optional Opus check, then merge — when the user asked. It spends the owner's model allowance.",
+    "Start Prime Radiant's nightly pass now — re-import the nightly folders, look for contradictions, build hubs and summaries, then merge — when the user asked. It spends the owner's model allowance.",
     {},
     WRITE,
     async () => {
@@ -1261,14 +1263,11 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings_update",
-    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, Opus second opinion and caps, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders.",
+    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders.",
     {
       nightly_enabled: zOptBool("Run the nightly pass on its schedule."),
       nightly_time: z.string().regex(TIME_RE, "HH:MM, 24-hour").optional().describe("When the nightly pass runs, box time, HH:MM."),
       contradictions_enabled: zOptBool("Look for contradictions in the nightly pass."),
-      opus_enabled: zOptBool("Have Opus give a second opinion on a sample of pages (it costs money)."),
-      opus_cap_usd: z.number().min(0.01).max(1000).optional().describe("Most the Opus check may spend a night, in US dollars."),
-      opus_max_pages: z.number().int().min(4).max(2000).optional().describe("Most pages the Opus check reads a night."),
       search_index_limit_mb: z.number().int().min(32).max(4096).optional()
         .describe("Most MB the wiki's search index may take (default 160); more lets a big wiki be searched, using that much more memory."),
       domains: zOptList(100, 150, "The whole domain list, each name=owner, e.g. acme-widgets=Sales team."),
@@ -1281,17 +1280,17 @@ function registerPassTools(reg: Registrar): void {
       daily_per_owner: z.number().int().min(1).max(20).optional().describe("Most daily questions an owner gets a day."),
       owner_languages: zOptList(100, 100, `The whole list of owners' languages, each owner=code (${DAILY_LANGUAGES.join(", ")}).`),
       reset: z.array(zEnumOf(
-        ["nightly", "contradictions", "opus", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages"],
+        ["nightly", "contradictions", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages"],
         "A setting to put back to its default.",
       ))
-        .max(12)
+        .max(11)
         .optional()
         .describe("Settings to put back to their defaults."),
       confirm: zConfirm("Must be true. Set it only when the user asked for these settings."),
     },
     DESTRUCTIVE,
     async (a: {
-      nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; opus_enabled?: boolean; opus_cap_usd?: number; opus_max_pages?: number; search_index_limit_mb?: number;
+      nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; search_index_limit_mb?: number;
       domains?: string[]; ingest_exclude?: string[]; ingest_parallel?: number; skip_code_projects?: boolean; nightly_folders?: string[]; reset?: string[]; confirm: true;
       golden_enabled?: boolean; golden_max_questions?: number; daily_per_owner?: number; owner_languages?: string[];
     }) => {
@@ -1300,9 +1299,6 @@ function registerPassTools(reg: Registrar): void {
       if (a.nightly_enabled !== undefined) section("nightly").enabled = a.nightly_enabled;
       if (a.nightly_time !== undefined) section("nightly").time = a.nightly_time;
       if (a.contradictions_enabled !== undefined) section("contradictions").enabled = a.contradictions_enabled;
-      if (a.opus_enabled !== undefined) section("opus").enabled = a.opus_enabled;
-      if (a.opus_cap_usd !== undefined) section("opus").capUsd = a.opus_cap_usd;
-      if (a.opus_max_pages !== undefined) section("opus").maxPages = a.opus_max_pages;
       if (a.search_index_limit_mb !== undefined) section("search").indexLimitMb = a.search_index_limit_mb;
       if (a.ingest_exclude !== undefined) section("ingest").exclude = a.ingest_exclude;
       if (a.ingest_parallel !== undefined) section("ingest").parallel = a.ingest_parallel;
@@ -1322,7 +1318,7 @@ function registerPassTools(reg: Registrar): void {
         patch.domains = a.domains.map((d) => ({ name: d.slice(0, d.indexOf("=")), owner: d.slice(d.indexOf("=") + 1).trim() }));
       }
       for (const r of a.reset ?? []) {
-        if (r === "nightly" || r === "contradictions" || r === "opus" || r === "domains") patch[r] = null;
+        if (r === "nightly" || r === "contradictions" || r === "domains") patch[r] = null;
         else if (r === "ingest_exclude") section("ingest").exclude = null;
         else if (r === "ingest_parallel") section("ingest").parallel = null;
         else if (r === "skip_code_projects") section("ingest").skipCodeProjects = null;

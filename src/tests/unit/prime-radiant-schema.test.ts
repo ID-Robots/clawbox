@@ -43,7 +43,6 @@ describe("prime radiant frontmatter", () => {
       verified: null,
       stale_after: null,
       checked_by: "flash",
-      opus_pending: false,
       claims: [],
       retiredClaimIds: [],
       generated: { at: "2026-01-15", by: "someone" },

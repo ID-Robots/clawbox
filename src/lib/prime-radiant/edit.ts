@@ -485,7 +485,6 @@ export async function createPage(input: NewPage, who: EditWho, options: EditOpti
         sources: input.sources.length > 0 ? input.sources : [who.by],
         privacy: input.privacy,
         checked_by: who.person ? "human" : "flash",
-        opus_pending: false,
         claims: written,
         retiredClaimIds: [],
       };

@@ -40,6 +40,7 @@ import { runningNightlyId } from "@/lib/prime-radiant/nightly";
 import { stop as stopScheduler } from "@/lib/prime-radiant/nightly-scheduler";
 import { stateDbPath } from "@/lib/prime-radiant/paths";
 import { addReviewItem } from "@/lib/prime-radiant/review-store";
+import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault, vaultOperation } from "@/lib/prime-radiant/vault";
 import { setFlashClientOverride } from "@/lib/prime-radiant/flash-client";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
@@ -140,22 +141,18 @@ describe("auth", () => {
     expect((await raised.json()).item.evidence[0]).toMatchObject({ kind: "raised-by", source: "assistant" });
   });
 
-  it("lets the assistant change the schedule and the Opus cap, never what the cap is measured in", async () => {
+  it("lets the assistant change the schedule and a cap, never what the caps are measured in", async () => {
     owner.hasPersonSession.mockResolvedValue(false);
     const asAssistant = { authorization: "Bearer test-assistant-bearer" };
-    for (const body of [
-      { costRates: { "claude-opus-5-5": { input: 0, output: 0 } } },
-      { opus: { enabled: true, model: "some-unpriced-model" } },
-    ]) {
-      const res = await settingsPUT(req("PUT", "/settings", body, asAssistant));
-      expect(res.status, JSON.stringify(body)).toBe(403);
-      expect((await res.json()).code).toBe("owner_only");
-    }
-    const ok = await settingsPUT(req("PUT", "/settings", { nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 } }, asAssistant));
+    const zero = { costRates: { "deepseek-v4-flash": { input: 0, output: 0 } } };
+    const refused = await settingsPUT(req("PUT", "/settings", zero, asAssistant));
+    expect(refused.status).toBe(403);
+    expect((await refused.json()).code).toBe("owner_only");
+    const ok = await settingsPUT(req("PUT", "/settings", { nightly: { time: "04:30" }, summaries: { capUsd: 0.5 } }, asAssistant));
     expect(ok.status).toBe(200);
-    expect((await ok.json()).settings).toMatchObject({ nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 } });
+    expect((await ok.json()).settings).toMatchObject({ nightly: { time: "04:30" }, summaries: { capUsd: 0.5 } });
     owner.hasPersonSession.mockResolvedValue(true);
-    const owners = await settingsPUT(req("PUT", "/settings", { opus: { model: "claude-opus-5-5" } }));
+    const owners = await settingsPUT(req("PUT", "/settings", zero));
     expect(owners.status).toBe(200);
   });
 
@@ -235,6 +232,47 @@ describe("review", () => {
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("lint_blocked");
   });
+
+  it("still lists and settles an Opus item an older box raised; nobody can raise a new one", async () => {
+    await seed();
+    const vault = root + "/vault";
+    // Rows as the removed nightly Opus tier wrote its proposals.
+    const opusItem = (id: string, text: string) =>
+      withStateDb(vault, (db) =>
+        db
+          .prepare(
+            "INSERT INTO review_items (id, kind, claim_id, pages, candidates, evidence, status, created_at, dedupe_key, run_id) VALUES (?, 'opus', ?, ?, ?, ?, 'open', ?, ?, ?)",
+          )
+          .run(
+            id,
+            A.id,
+            JSON.stringify(["concepts/pricing.md"]),
+            JSON.stringify([{ text, page: "concepts/pricing.md", claimId: A.id, evidence: [{ kind: "opus", note: "the body says otherwise" }] }]),
+            JSON.stringify([{ kind: "opus", note: "price" }]),
+            "2026-05-01T03:00:00.000Z",
+            `opus:${id}`,
+            "run-0000000000bb",
+          ),
+      );
+    opusItem("rev-0000000000a1", "The blue widget costs 11 EUR.");
+    opusItem("rev-0000000000a2", "The blue widget costs 9 EUR.");
+    const list = await (await reviewGET(req("GET", "/review?status=open&kind=opus"))).json();
+    expect(list.items.map((i: { id: string }) => i.id).sort()).toEqual(["rev-0000000000a1", "rev-0000000000a2"]);
+    expect(list.items[0]).toMatchObject({ kind: "opus", claimId: A.id, pages: ["concepts/pricing.md"] });
+
+    const dismissed = await resolvePOST(req("POST", "/x", { action: "dismiss" }), idCtx("rev-0000000000a1"));
+    expect(dismissed.status).toBe(200);
+    expect((await dismissed.json()).item).toMatchObject({ kind: "opus", status: "resolved", resolution: { action: "dismiss" } });
+    const picked = await resolvePOST(req("POST", "/x", { action: "pick", candidate: 0 }), idCtx("rev-0000000000a2"));
+    expect(picked.status).toBe(200);
+    expect((await picked.json()).item).toMatchObject({ kind: "opus", status: "resolved", resolution: { action: "pick" } });
+    expect((await headCommit(vault))?.subject).toBe(`verify: ${A.id}`);
+
+    const raise = await reviewPOST(req("POST", "/review", { kind: "opus", claimId: A.id, note: "Second opinion" }));
+    expect(raise.status).toBe(400);
+    expect((await raise.json()).code).toBe("invalid");
+    expect((await (await reviewGET(req("GET", "/review?status=open&kind=opus"))).json()).items).toEqual([]);
+  });
 });
 
 describe("history, diff, revert", () => {
@@ -263,10 +301,14 @@ describe("history, diff, revert", () => {
 describe("settings", () => {
   it("exposes every section, saves a patch, validates folders and refuses a bad field whole", async () => {
     const get = await (await settingsGET(req("GET", "/settings"))).json();
-    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "opus", "search", "structure", "summaries", "verification"]);
+    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "search", "structure", "summaries", "verification"]);
     expect(get.limits.summariesMaxPages).toEqual({ min: 0, max: 2000 });
     expect(get.defaults.summaries).toEqual({ enabled: true, maxPages: 150, capUsd: 0.25 });
-    expect(get.limits.opusCapUsd).toEqual({ min: 0.01, max: 1000 });
+    // The removed Opus tier: no section, no limits, no account source.
+    expect(get.defaults).not.toHaveProperty("opus");
+    expect(Object.keys(get.limits).filter((k) => /opus/i.test(k))).toEqual([]);
+    expect(get).not.toHaveProperty("opusSource");
+    expect(Object.keys(get.rates.models)).toEqual(["deepseek-v4-flash"]);
     expect(get.limits.searchIndexLimitMb).toEqual({ min: 32, max: 4096 });
     expect(get.defaults.search).toEqual({ indexLimitMb: 160 });
     // The golden check, the daily questions and the structure pass answer their limits and defaults side by side.
@@ -281,17 +323,17 @@ describe("settings", () => {
     expect(get.defaults.structure).toMatchObject({ enabled: true, enrichTop: 25, modelFallback: 25 });
     expect(get.rates.basis).toBe("estimate");
 
-    const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "02:15" }, opus: { enabled: true, capUsd: 3 }, ingest: { folders: ["Documents"], parallel: 32 } }));
+    const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "02:15" }, contradictions: { enabled: false }, ingest: { folders: ["Documents"], parallel: 32 } }));
     expect(saved.status).toBe(200);
     const s = (await saved.json()).settings;
     expect(s.nightly.time).toBe("02:15");
-    expect(s.opus).toMatchObject({ enabled: true, capUsd: 3 });
+    expect(s.contradictions).toEqual({ enabled: false });
     expect(s.ingest).toMatchObject({ parallel: 32, folders: [fs.realpathSync(path.join(filesRoot, "Documents"))] });
 
     const missing = await settingsPUT(req("PUT", "/settings", { ingest: { folders: ["Documents", "nope"] } }));
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ code: "folder_not_found", index: 1 });
-    for (const bad of [{ nightly: { time: "9pm" } }, { opus: { capUsd: -1 } }, { unknown: 1 }, { opus: { budget: 1 } }]) {
+    for (const bad of [{ nightly: { time: "9pm" } }, { summaries: { capUsd: -1 } }, { unknown: 1 }, { nightly: { budget: 1 } }]) {
       const res = await settingsPUT(req("PUT", "/settings", bad));
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("invalid");
@@ -324,6 +366,36 @@ describe("settings", () => {
     const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "05:00" } }));
     expect(saved.status).toBe(200);
     expect((await saved.json()).settings.nightly.time).toBe("05:00");
+  });
+
+  it("loads a file that still has the removed Opus section, refuses a patch that names it, and drops it on the next save", async () => {
+    // A box that had the second opinion switched on before the tier was removed.
+    fs.mkdirSync(root, { recursive: true });
+    const file = path.join(root, "settings.json");
+    const opus = { enabled: true, capUsd: 5, sampleRate: 0.5, model: "claude-opus-5-5", maxPages: 40 };
+    fs.writeFileSync(file, JSON.stringify({ opus, nightly: { time: "04:30" }, contradictions: { enabled: false } }));
+    const get = await settingsGET(req("GET", "/settings"));
+    expect(get.status).toBe(200);
+    const body = await get.json();
+    expect(body.settings).not.toHaveProperty("opus");
+    expect(body.defaults).not.toHaveProperty("opus");
+    expect(body).not.toHaveProperty("opusSource");
+    expect(body.settings).toMatchObject({ nightly: { time: "04:30" }, contradictions: { enabled: false } });
+
+    const before = fs.readFileSync(file, "utf8");
+    for (const bad of [{ opus: { enabled: false } }, { opus: null }, { nightly: { time: "05:00" }, opus: { maxPages: 10 } }]) {
+      const res = await settingsPUT(req("PUT", "/settings", bad));
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(await res.json()).toMatchObject({ code: "invalid", error: "Unknown setting: opus." });
+    }
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+
+    const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "05:00" } }));
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).settings).toMatchObject({ nightly: { time: "05:00" }, contradictions: { enabled: false } });
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(stored).not.toHaveProperty("opus");
+    expect(stored).toMatchObject({ nightly: { time: "05:00" }, contradictions: { enabled: false } });
   });
 });
 

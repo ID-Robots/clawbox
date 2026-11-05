@@ -68,7 +68,6 @@ function pageText(i: number): string {
     sources: [`notes/source-${i % 400}.md`],
     privacy: "internal",
     checked_by: "flash",
-    opus_pending: false,
     claims: [0, 1, 2].map((k) => ({
       id: `${domain}/${entity}/fact-${k}`,
       text: `Fact ${k} about page ${i}: ${words(i + k, 8)}.`,
