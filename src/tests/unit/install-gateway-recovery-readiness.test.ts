@@ -167,6 +167,7 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
         "gateway_port_listening",
         "gateway_unit_running_or_starting",
         "wait_for_gateway_port",
+        "stop_gateway_unit",
         "step_gateway_legacy_state_recovery",
       ].map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
       `. "${tmp}/fns.sh"`,

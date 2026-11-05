@@ -332,6 +332,13 @@ if [ "$EDITION" = "hermes" ]; then
   rm -rf /etc/systemd/system/clawbox-gateway.service.d
   systemctl daemon-reload
   systemctl mask clawbox-gateway.service >/dev/null 2>&1 || true
+  # A start or restart queued while the first stop ran takes its place
+  # ("Job for clawbox-gateway.service canceled.") and can leave the unit up or
+  # coming up (TASK-2200). Masked now, nothing can start it again, so a second
+  # stop is the last word.
+  case "$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)" in
+    active|activating|reloading) systemctl stop clawbox-gateway.service >/dev/null 2>&1 || true ;;
+  esac
   if [ "$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)" = "active" ]; then
     fail "clawbox-gateway.service is still ACTIVE after disable+mask"
   else

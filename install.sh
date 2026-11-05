@@ -4358,7 +4358,8 @@ handover_legacy_updater() {
       bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" leave || true
       return 1
     fi
-    systemctl stop clawbox-gateway.service || rc=$?
+    # A stop another start replaced is not a failed one (TASK-2200).
+    stop_gateway_unit || rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
     # do_rebuild restores the OLD app on failure. Do not revoke that app's
@@ -5415,6 +5416,12 @@ step_edition_gateway_state() {
     rm -rf "/etc/systemd/system/$unit.d"
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl mask "$unit" >/dev/null 2>&1 || true
+    # A start or restart queued while the first stop ran takes its place ("Job
+    # for clawbox-gateway.service canceled.") and can leave the unit up
+    # (TASK-2200). Masked now, nothing can start it again: this stop is final.
+    case "$(systemctl is-active "$unit" 2>/dev/null || true)" in
+      active|activating|reloading) systemctl stop "$unit" >/dev/null 2>&1 || true ;;
+    esac
     echo "  [hermes edition] clawbox-gateway.service stopped, disabled and masked"
   else
     # Re-installing a previously-Hermes box as openclaw/dual: the mask is a
@@ -10297,6 +10304,54 @@ gateway_unit_running_or_starting() {
   esac
 }
 
+# Stop the gateway, and tell a stop that LOST to another job from one that
+# failed (TASK-2200).
+#
+# systemd keeps one job per unit, and a `start` or `restart` queued while the
+# stop runs — the web server's restart after a settings save, another step's
+# start, an operator's — takes its place: `systemctl stop` then prints "Job for
+# clawbox-gateway.service canceled." and exits 1, whatever the unit does next.
+# Under the updater's maintenance guard the start that won is skipped by its
+# condition once the unit has drained, so the gateway ends down anyway; without
+# the guard it can come back up. So the UNIT decides, once its queue is empty:
+# down is what the stop was for, up is asked to stop again (three times in
+# all), and every other failure of the stop is returned as it was.
+stop_gateway_unit() {
+  local attempt=1 attempts=3 rc out state waited
+  while :; do
+    rc=0
+    out="$(systemctl stop clawbox-gateway.service 2>&1)" || rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ "$rc" -eq 0 ] && return 0
+    case "$out" in
+      *"Job for clawbox-gateway.service canceled."*) ;;
+      *) return "$rc" ;;
+    esac
+    # The job that replaced the stop finishes on systemd's own clocks (the
+    # unit's TimeoutStopSec for a drain, its condition for a start): a fact to
+    # wait for, not a deadline. A systemctl that cannot answer ends the wait.
+    waited=0
+    while [ -n "$(systemctl show clawbox-gateway.service -p Job --value 2>/dev/null)" ]; do
+      sleep 2
+      waited=$((waited + 2))
+      wait_note "$waited" "the job that replaced the gateway's stop to finish"
+    done
+    state="$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null || true)"
+    case "$state" in
+      inactive|failed)
+        echo "  Another job for the gateway replaced its stop; the unit is $state, which is what the stop was for"
+        return 0
+        ;;
+    esac
+    if [ "$attempt" -ge "$attempts" ]; then
+      echo "  Warning: another start of the gateway canceled its stop $attempt times and it is ${state:-unreadable}" >&2
+      return "$rc"
+    fi
+    attempt=$((attempt + 1))
+    echo "  Another start of the gateway canceled its stop and it is ${state:-unreadable}; stopping it again ($attempt/$attempts)"
+  done
+}
+
 # The same question as gateway_port_listening, asked with a budget.
 #
 # `gateway_port_listening` asks ONCE. That is the right question for
@@ -10439,7 +10494,10 @@ step_gateway_legacy_state_recovery() {
   mkdir -p "$qdir"
 
   echo "  Quarantining known legacy OpenClaw migration blockers in $qdir"
-  systemctl stop clawbox-gateway.service || true
+  # Not under the maintenance guard (this step stands down while it is held),
+  # so a start that replaces this stop can bring the gateway back up beside the
+  # files being moved: stop_gateway_unit asks again until it stays down.
+  stop_gateway_unit || true
   for f in \
     "$CLAWBOX_HOME/.openclaw/plugins/installs.json"* \
     "$CLAWBOX_HOME/.openclaw/memory/carl_pir.sqlite"* \

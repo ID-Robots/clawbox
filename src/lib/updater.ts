@@ -53,6 +53,9 @@ import {
   describeUnitState,
   readUnitState,
   runUnitJob,
+  unitIsStopped,
+  unitJobWasCanceled,
+  waitForUnitJob,
   type UnitJobOutcome,
 } from "./gateway-unit-job";
 import { probeMainChatSession, verifyGatewaySessions, withSimulatedSessionFault } from "./gateway-session-check";
@@ -2590,20 +2593,15 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
 
 const GATEWAY_STOP_CLIENT_MS = 30_000;
 const GATEWAY_STOP_UNCLEAN = "gateway-stop-unclean";
+// How many times the stop is asked for while other jobs keep replacing it. Each
+// ask first waits out the job that replaced the last one, so this counts whole
+// rounds of a competing restarter, not tries in a second.
+const GATEWAY_STOP_ATTEMPTS = 3;
 
 async function stopGatewayForMaintenance(): Promise<void> {
   // Read before the stop so an earlier crash's result is not blamed on it.
   const before = await readUnitState("clawbox-gateway.service").catch(() => null);
-  // The client's 30 s is not the unit's stop deadline: TimeoutStopSec=330
-  // (config/clawbox-gateway.service), and OpenClaw sizes its graceful drain
-  // from it, so a clean stop can outlive the client by minutes. That stop is
-  // waited for on the unit, never reported as a failure, and never raced: a
-  // gateway still draining is a second writer of the state the maintenance
-  // step is about to touch.
-  const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
-    unit: "clawbox-gateway.service",
-    timeoutMs: GATEWAY_STOP_CLIENT_MS,
-  });
+  const stop = await stopGatewayUnit();
   if (stop.kind === "in-flight") {
     throw new Error(`clawbox-gateway was still stopping ${Math.round(stop.waitedMs / 1000)}s after it was asked to — not starting maintenance beside it`);
   }
@@ -2613,6 +2611,67 @@ async function stopGatewayForMaintenance(): Promise<void> {
   // Judged only over a unit that was up: one crash-looping in auto-restart
   // already carries a failed result the stop did not cause.
   if (before?.activeState === "active") await warnIfGatewayStopUnclean(stop);
+}
+
+/**
+ * The stop itself, asked again when another job REPLACED it (TASK-2200).
+ *
+ * The client's 30 s is not the unit's stop deadline: TimeoutStopSec=330
+ * (config/clawbox-gateway.service), and OpenClaw sizes its graceful drain from
+ * it, so a clean stop can outlive the client by minutes. That stop is waited
+ * for on the unit, never reported as a failure, and never raced: a gateway
+ * still draining is a second writer of the state the maintenance step is about
+ * to touch.
+ *
+ * Nor is a stop that LOST to another job a failed one. systemd keeps one job
+ * per unit, and a `start` or `restart` queued while the stop runs — the web
+ * server's restart after a settings save, a root step's own start, anyone's
+ * `systemctl restart` — takes its place: the client prints "Job for
+ * clawbox-gateway.service canceled." and exits 1. Thrown as it was, that
+ * sentence ended "Applying system fixups" before it ran a single fixup, on a
+ * box whose gateway was down a moment later all the same: the maintenance
+ * guard is in place before this runs, so the start that won is skipped by its
+ * condition once the unit has drained.
+ *
+ * So the unit decides, never the client. Once the job that replaced the stop
+ * has finished, a unit that is down is what the stop was for. One that is up —
+ * a start queued before the stop began finds the unit still active and has
+ * nothing to skip — is asked to stop again, up to GATEWAY_STOP_ATTEMPTS times,
+ * and still up after that is the failure it always was. Any other failure of
+ * the stop (a refused sudo, an unknown unit) is thrown untouched, at once.
+ */
+async function stopGatewayUnit(): Promise<UnitJobOutcome> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+        unit: "clawbox-gateway.service",
+        timeoutMs: GATEWAY_STOP_CLIENT_MS,
+      });
+    } catch (err) {
+      if (!unitJobWasCanceled(err, "clawbox-gateway.service")) throw err;
+      const after = await waitForUnitJob({
+        unit: "clawbox-gateway.service",
+        timeoutMs: GATEWAY_STOP_CLIENT_MS,
+        pollMs: GATEWAY_WAIT_INTERVAL_MS,
+      });
+      const now = after.state ? describeUnitState(after.state) : "unreadable";
+      if (after.kind === "settled" && unitIsStopped(after.state)) {
+        console.log(
+          `[Updater] another job for clawbox-gateway replaced the update's stop; the unit ended ${now}, which is what the stop was for`,
+        );
+        // Read afresh by the caller's checks, which is the state just judged.
+        return { kind: "returned" };
+      }
+      if (attempt >= GATEWAY_STOP_ATTEMPTS) {
+        throw new Error(
+          `clawbox-gateway did not stop: another start or restart of the unit canceled the update's stop ${attempt} times, and it is ${now}`,
+        );
+      }
+      console.warn(
+        `[Updater] another job for clawbox-gateway canceled the update's stop and the unit is ${now}; asking again (${attempt + 1}/${GATEWAY_STOP_ATTEMPTS})`,
+      );
+    }
+  }
 }
 
 /**

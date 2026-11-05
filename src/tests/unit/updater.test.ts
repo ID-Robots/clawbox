@@ -3887,6 +3887,149 @@ describe("updater", () => {
     });
   });
 
+  /**
+   * A start or restart queued while the update's stop ran took the stop's
+   * place, and `systemctl stop` said "Job for clawbox-gateway.service
+   * canceled." — on a box whose gateway was down a moment later all the same.
+   * That sentence ended "Applying system fixups" before a single fixup ran
+   * (an update from an old beta, 2026-11).
+   */
+  describe("a gateway stop another job replaced (TASK-2200)", () => {
+    const RUNNING = "ActiveState=active\nSubState=running\nResult=success\nJob=\n";
+    const DOWN = "ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n";
+    const CANCELED = "Job for clawbox-gateway.service canceled.\n";
+
+    type Callback = (error: Error | null, result: { stdout: string; stderr: string }) => void;
+
+    /**
+     * The gateway as the update stops it. Stop n (from 0) is replaced by
+     * another job when `afterCancel[n]` is given — the client is answered as
+     * systemctl answers it, and `afterCancel[n]` is the unit once that job has
+     * finished, which takes `pending` more reads; a stop past the list stops
+     * the unit. `failure` answers every stop with that error instead.
+     */
+    function racedGateway(afterCancel: string[], options: { pending?: number; failure?: Error } = {}) {
+      const base = mockExecFile.getMockImplementation() as ((...call: unknown[]) => unknown) | undefined;
+      let current = RUNNING;
+      let stops = 0;
+      let pending = 0;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        const argv = Array.isArray(args) ? args.join(" ") : "";
+        const callback = rest.find((part) => typeof part === "function") as Callback | undefined;
+        if (argv.includes("systemctl stop clawbox-gateway.service")) {
+          const n = stops++;
+          if (options.failure) {
+            callback?.(options.failure, { stdout: "", stderr: "" });
+            return {};
+          }
+          if (n < afterCancel.length) {
+            current = afterCancel[n];
+            pending = options.pending ?? 0;
+            const canceled = Object.assign(
+              new Error(`Command failed: /usr/bin/sudo -n /usr/bin/systemctl stop clawbox-gateway.service\n${CANCELED}`),
+              { code: 1, stdout: "", stderr: CANCELED },
+            );
+            callback?.(canceled, { stdout: "", stderr: CANCELED });
+            return {};
+          }
+          current = DOWN;
+        }
+        if (argv.includes("systemctl restart clawbox-gateway.service")) current = RUNNING;
+        // The unit-state read (`readUnitState`), not the start wait's, which asks for NRestarts too.
+        if (argv.startsWith("show clawbox-gateway.service") && argv.includes("-p Result") && !argv.includes("NRestarts")) {
+          const shown = pending > 0 ? current.replace("Job=\n", "Job=4242\n") : current;
+          if (pending > 0) pending--;
+          callback?.(null, { stdout: shown, stderr: "" });
+          return {};
+        }
+        return base?.(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+      return { stops: () => stops };
+    }
+
+    async function runSecondHalf(): Promise<ReturnType<typeof updater.getUpdateState>> {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+      return updater.getUpdateState();
+    }
+
+    const calls = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    const fixupsRan = () => calls().some((call) => call.includes("clawbox-run-root-step.sh post_update"));
+    const fixups = (state: ReturnType<typeof updater.getUpdateState>) =>
+      state.steps.find((step) => step.id === "post_update");
+    // The stops the quiesce asked for before the fixups ran. gateway_verify can
+    // stop the gateway again afterwards, which is not this race.
+    const stopsBeforeFixups = () => {
+      const all = calls();
+      const at = all.findIndex((call) => call.includes("clawbox-run-root-step.sh post_update"));
+      return (at < 0 ? all : all.slice(0, at)).filter((call) => call.includes("systemctl stop clawbox-gateway.service")).length;
+    };
+
+    it("runs the fixups when the job that replaced the stop left the gateway down", async () => {
+      // The maintenance guard is up before the stop: a start that wins waits
+      // for the drain and is then skipped by its condition. Down is what the
+      // stop was for, however the client's exit code reads.
+      racedGateway([DOWN], { pending: 2 });
+      const state = await runSecondHalf();
+      expect(fixups(state)?.status).toBe("completed");
+      expect(fixups(state)?.error).toBeUndefined();
+      expect(fixupsRan()).toBe(true);
+      expect(stopsBeforeFixups()).toBe(1);
+      expect(state.phase).toBe("completed");
+      expect(state.warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+    });
+
+    it("waits for the job that replaced the stop before it judges the unit", async () => {
+      racedGateway([DOWN], { pending: 3 });
+      await runSecondHalf();
+      const all = calls();
+      const stop = all.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const fixupsAt = all.findIndex((call) => call.includes("clawbox-run-root-step.sh post_update"));
+      // Every unit read between the stop and the fixups: the job, still queued,
+      // was read until it was gone.
+      const reads = all.slice(stop, fixupsAt).filter((call) => call.includes("show clawbox-gateway.service -p Job"));
+      expect(reads.length).toBeGreaterThanOrEqual(4);
+    });
+
+    it("stops it again when the gateway is still up after the job that replaced the stop", async () => {
+      // A start queued before the stop began draining finds the unit active:
+      // nothing to skip, so it stays up, and the stop is asked for again.
+      racedGateway([RUNNING]);
+      const state = await runSecondHalf();
+      expect(stopsBeforeFixups()).toBe(2);
+      expect(fixups(state)?.status).toBe("completed");
+      expect(fixupsRan()).toBe(true);
+    });
+
+    it("still fails the step, and runs no fixup beside a live gateway, when every stop is replaced and it stays up", async () => {
+      const gateway = racedGateway([RUNNING, RUNNING, RUNNING]);
+      const state = await runSecondHalf();
+      expect(gateway.stops()).toBe(3);
+      expect(fixups(state)?.status).toBe("failed");
+      expect(fixups(state)?.error).toMatch(
+        /clawbox-gateway did not stop: another start or restart of the unit canceled the update's stop 3 times, and it is active \(running\)/,
+      );
+      expect(fixupsRan()).toBe(false);
+      // The guard is lifted on the way out, as on every failure.
+      expect(calls().some((call) => call.includes("clawbox-gateway-maintenance.sh leave"))).toBe(true);
+    });
+
+    it("throws any other failure of the stop at once, as it was", async () => {
+      const refused = Object.assign(
+        new Error("Command failed: /usr/bin/sudo -n /usr/bin/systemctl stop clawbox-gateway.service\nFailed to stop clawbox-gateway.service: Access denied\n"),
+        { code: 1, stdout: "", stderr: "Failed to stop clawbox-gateway.service: Access denied\n" },
+      );
+      const gateway = racedGateway([], { failure: refused });
+      const state = await runSecondHalf();
+      expect(gateway.stops()).toBe(1);
+      expect(fixups(state)?.status).toBe("failed");
+      expect(fixups(state)?.error).toContain("Access denied");
+      expect(fixupsRan()).toBe(false);
+    });
+  });
+
   describe("checkContinuation", () => {
     it("returns false when already running", async () => {
       updater.resetUpdateState();

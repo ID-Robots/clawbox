@@ -35,6 +35,7 @@ do_rebuild() { echo build >> "$PROJECT_DIR/events"; return ${buildRc}; }
 step_systemd_services() { echo services >> "$PROJECT_DIR/events"; }
 step_polkit_rules() { echo policy >> "$PROJECT_DIR/events"; }
 ${fn("legacy_updater_needs_handover")}
+${fn("stop_gateway_unit")}
 ${fn("handover_legacy_updater")}
 handover_legacy_updater
 `;

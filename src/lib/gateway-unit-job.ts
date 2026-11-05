@@ -125,6 +125,22 @@ export async function readUnitState(
 }
 
 /**
+ * systemctl's own sentence for a job that was REPLACED rather than failed.
+ *
+ * systemd keeps one job per unit, and a conflicting one queued while it is
+ * pending cancels it: a `start` or `restart` asked for while a `stop` runs
+ * takes the stop's place, and the stop's client prints "Job for <unit>
+ * canceled." and exits 1 — whatever the unit goes on to do. That exit says
+ * nothing about where the unit ends up; its state once the queue is empty
+ * does.
+ */
+export function unitJobWasCanceled(err: unknown, unit: string): boolean {
+  const failure = err as { stderr?: unknown; message?: unknown } | null;
+  const sentence = `Job for ${unit} canceled.`;
+  return [failure?.stderr, failure?.message].some((text) => typeof text === "string" && text.includes(sentence));
+}
+
+/**
  * Wait until the unit has no job pending, or the budget is spent. A question
  * systemctl does not answer is asked again: "could not look" is not "done".
  */
