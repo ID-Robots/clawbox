@@ -28,7 +28,7 @@
  *     final merge; `--disallowedTools` refuses the plain prefixes too, and this
  *     catches the same commands inside `bash -c`, after `&&`, behind `env`.
  *
- *   node coding-run-hook.mjs keepalive <state-dir> [<inbox-dir>]
+ *   node coding-run-hook.mjs keepalive <state-dir> [<inbox-dir>] [--first-command=<file>]
  *     Stop. A run is `claude -p`: once the model ends its turn the process
  *     exits and nothing wakes it again, so a run that started a long job in
  *     the background (a board test matrix, an in-app update, a review
@@ -49,10 +49,30 @@
  *         was told it could list a pid there listed its 3-minute test job and
  *         stopped (seen on a board), which is the very stop this hook exists
  *         to refuse.
+ *     "Started" is decided by the spawn's COMMAND CLOCK (`--first-command`,
+ *     see commandClock): the cgroup is shared with whatever launched the
+ *     harness, and a launcher's own watcher (`<launcher> --heal-watch
+ *     <session dir>`, forked at session start, reparented to init, alive
+ *     until the session ends) was refused as "a process you started" on
+ *     every stop, so finished runs looped on sleep and ps until the cap
+ *     (2026-11-05, three runs in an hour). A process counts only when it, and
+ *     every ancestor of it up to the harness's command shell or up to where
+ *     it was reparented, started at or after the run's first command — so a
+ *     server the run backgrounded and that init adopted is still the run's.
  *     Bounded: at most MAX_BLOCKS refusals and MAX_BLOCK_SPAN_MS from the
  *     first one, counted in <state-dir>/.run-jobs/stop-blocks.json (the box
  *     reads that file to say a run ended with work still live). A sub-agent's
  *     stop (`agent_id` in the input) is not the run's.
+ *
+ *   node coding-run-hook.mjs leftovers --first-command=<file> [--unit=<scope>] [--pgid=<n>]
+ *     Not a hook: the web server asks this once the harness has gone, to
+ *     decide whether a settled run LEFT something running (its record's
+ *     `leftover`, the MCP tools' `left_running`). It looks at the processes
+ *     still in the run's scope and in its process group and answers, by the
+ *     same command-clock rule, the ones the run started:
+ *     `{"seen": <processes looked at>, "procs": ["pid N: argv", ...]}` — the
+ *     roots only, listening servers included (a server left for the owner is
+ *     exactly what the record keeps for the Kill button).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -100,6 +120,13 @@ const MAX_BLOCK_SPAN_MS = 4 * 60 * 60 * 1000;
 /** A registered job with no pid counts as running for this long after it was written. */
 const JOB_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 const SHELLS = new Set(["bash", "sh", "dash", "zsh"]);
+/**
+ * USER_HZ: the unit of a process's start time in /proc/<pid>/stat. Fixed at
+ * 100 by the kernel ABI on arm64 and x86-64 whatever CONFIG_HZ is, and the
+ * same 1/100 s that /proc/uptime prints, which is what the command clock is
+ * stamped with.
+ */
+const TICKS_PER_SECOND = 100;
 
 function readText(file) {
   try {
@@ -109,13 +136,72 @@ function readText(file) {
   }
 }
 
-/** pid → { ppid, state } from /proc/<pid>/stat; null when the process is gone. */
+/**
+ * pid → { state, ppid, pgid, start } from /proc/<pid>/stat (`start` in ticks
+ * since boot, field 22); null when the process is gone.
+ */
 function procStat(pid) {
   const raw = readText(`/proc/${pid}/stat`);
   if (!raw) return null;
   const close = raw.lastIndexOf(")");
   const rest = raw.slice(close + 2).split(" ");
-  return { state: rest[0], ppid: Number(rest[1]) };
+  return { state: rest[0], ppid: Number(rest[1]), pgid: Number(rest[2]), start: Number(rest[19]) };
+}
+
+/**
+ * When this spawn's first command began, in ticks since boot: the earliest
+ * stamp in the file the run's PreToolUse guard appends /proc/uptime to before
+ * a tool call (coding-run-inbox.ts `runHookSettings`). The web server creates
+ * the file EMPTY when it spawns the harness, so:
+ *   - a number: everything that started before it was there before the run
+ *     ran anything — the harness, its MCP servers, the launcher's watchers;
+ *   - Infinity: the file is there and unstamped — no tool has been called in
+ *     this spawn, so nothing in the cgroup can be the run's work yet;
+ *   - null: no clock (not given, gone, unreadable, or nothing in it reads as
+ *     a stamp) — the rule before the clock existed applies, every process
+ *     counts, rather than waving work through on a guess.
+ * The EARLIEST stamp, because two parallel tool calls may both append: each
+ * call's command starts after its own guard stamped, so the earliest stamp is
+ * at or before every command of the run.
+ */
+function commandClock(file) {
+  if (!file) return null;
+  const raw = readText(file);
+  if (raw === null) return null;
+  const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return Infinity;
+  let earliest = Infinity;
+  for (const line of lines) {
+    const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(line);
+    if (!m) continue;
+    const ticks = Number(m[1]) * TICKS_PER_SECOND + Number((m[2] ?? "0").padEnd(2, "0"));
+    if (ticks < earliest) earliest = ticks;
+  }
+  return Number.isFinite(earliest) ? earliest : null;
+}
+
+/**
+ * Did the RUN start this process? Walks up from it through the processes
+ * being looked at (`parentOf`): every one on the way must have started at or
+ * after the first command (`since`), until the walk reaches the harness — the
+ * process was started by one of its command shells — or leaves the set — it
+ * was reparented to init or a subreaper, which is how a server the run
+ * backgrounded with nohup or setsid ends up. A process that predates the
+ * first command, or descends from one that does (a launcher's watcher and
+ * whatever it forks later), is not the run's. `since` null: no clock, the
+ * old rule — every process counts.
+ */
+function startedByRun(pid, { parentOf, startOf, harness, since }) {
+  if (since === null) return true;
+  let cur = pid;
+  for (let i = 0; i < 64; i++) {
+    if (!((startOf.get(cur) ?? -1) >= since)) return false;
+    const parent = parentOf.get(cur);
+    if (harness !== null && parent === harness) return true;
+    if (parent === undefined || !parentOf.has(parent)) return true;
+    cur = parent;
+  }
+  return false;
 }
 
 function procArgv(pid) {
@@ -219,21 +305,26 @@ function describe(pid) {
 
 /**
  * The run's own processes that are still doing work: everything in its
- * cgroup (else the harness's descendants) minus this hook's chain, the
- * harness's non-shell children (its MCP servers) and their trees, and servers
- * that listen on a TCP port. Answers the
- * roots only — a background shell, not every child under it.
+ * cgroup (else the harness's descendants) that the run started
+ * (`startedByRun`, by the command clock `since`), minus this hook's chain,
+ * the harness's non-shell children (its MCP servers) and their trees, and
+ * servers that listen on a TCP port. Answers the roots only — a background
+ * shell, not every child under it.
  */
-function liveRunProcesses(selfPid) {
+function liveRunProcesses(selfPid, since) {
   const chain = ancestors(selfPid);
   const harness = harnessPid(chain);
   if (harness === null) return [];
   const scoped = cgroupPids();
   const parentOf = new Map();
+  const startOf = new Map();
   const universe = scoped ?? allPids();
   for (const pid of universe) {
     const st = procStat(pid);
-    if (st && st.state !== "Z" && st.state !== "X") parentOf.set(pid, st.ppid);
+    if (st && st.state !== "Z" && st.state !== "X") {
+      parentOf.set(pid, st.ppid);
+      startOf.set(pid, st.start);
+    }
   }
   // Without a cgroup, the run is the harness's descendants only.
   const inRun = (pid) => {
@@ -266,6 +357,9 @@ function liveRunProcesses(selfPid) {
   for (const pid of parentOf.keys()) {
     if (pid === harness || chain.has(pid) || !inRun(pid)) continue;
     if (under(pid, helperRoots)) continue;
+    // Sharing the cgroup is not enough: the launcher that started the harness
+    // put its own watcher there before the run ran anything.
+    if (!startedByRun(pid, { parentOf, startOf, harness, since })) continue;
     candidates.push(pid);
   }
   const candidateSet = new Set(candidates);
@@ -280,6 +374,40 @@ function liveRunProcesses(selfPid) {
   return candidates
     .filter((pid) => !candidateSet.has(parentOf.get(pid) ?? 0) && !serverRoots.has(pid))
     .sort((a, b) => a - b);
+}
+
+/** Is this process in that systemd unit's cgroup? Any hierarchy's line naming it, so cgroup v1 boxes answer too. */
+function inUnit(pid, unit) {
+  const raw = readText(`/proc/${pid}/cgroup`);
+  if (!raw) return false;
+  return raw.split("\n").some((line) => line.endsWith(`/${unit}`));
+}
+
+/**
+ * What a settled run left running (the `leftovers` mode): the processes still
+ * in its scope `unit` or its process group `pgid` that the run started, by
+ * the command clock. The harness is gone by now, so every one of them is
+ * either an orphan the run left or something that was there before its first
+ * command; `startedByRun` with no harness tells them apart. `seen` is how many
+ * processes were looked at — 0 tells the caller this side could not see into
+ * the scope at all, which is not the same as "nothing of the run's is left".
+ */
+function settledLeftovers({ clock, unit, pgid }) {
+  const since = commandClock(clock);
+  const parentOf = new Map();
+  const startOf = new Map();
+  for (const pid of allPids()) {
+    if (pid === process.pid) continue;
+    const st = procStat(pid);
+    if (!st || st.state === "Z" || st.state === "X") continue;
+    if (!((pgid !== null && st.pgid === pgid) || (unit !== null && inUnit(pid, unit)))) continue;
+    parentOf.set(pid, st.ppid);
+    startOf.set(pid, st.start);
+  }
+  const own = [...parentOf.keys()].filter((pid) => startedByRun(pid, { parentOf, startOf, harness: null, since }));
+  const ownSet = new Set(own);
+  const roots = own.filter((pid) => !ownSet.has(parentOf.get(pid) ?? 0)).sort((a, b) => a - b);
+  return { seen: parentOf.size, procs: roots.map(describe) };
 }
 
 /** Jobs the run registered and that still count as running. */
@@ -335,14 +463,24 @@ function writeBlocks(file, blocks) {
   }
 }
 
-function keepalive(stateDir, inboxDir, input) {
+function keepalive(stateDir, inboxDir, input, clockFile) {
   if (!stateDir || typeof input.agent_id === "string") return null;
+  // Said beside the clock: the harness runs this spawn's hooks. An unstamped
+  // clock is then "no command ran" for the settle too, not "a harness that
+  // never ran its hooks", which it cannot tell apart on its own.
+  if (clockFile && !fs.existsSync(`${clockFile}.stop-ran`)) {
+    try {
+      fs.writeFileSync(`${clockFile}.stop-ran`, "");
+    } catch {
+      // Best effort: without it the settle keeps its old answer.
+    }
+  }
   const jobsDir = path.join(stateDir, ".run-jobs");
   const blocksFile = path.join(jobsDir, "stop-blocks.json");
   const now = Date.now();
   const messages = inboxDir ? takeInbox(inboxDir) : [];
   const jobs = liveJobs(jobsDir, now);
-  const procs = liveRunProcesses(process.pid);
+  const procs = liveRunProcesses(process.pid, commandClock(clockFile));
   if (!messages.length && !jobs.length && !procs.length) return null;
   const blocks = readBlocks(blocksFile);
   const first = blocks.first || now;
@@ -394,8 +532,36 @@ function takeInbox(dir) {
   return contexts;
 }
 
+/**
+ * The command line: positional words, and `--name=value` options wherever
+ * they stand, so a hook spawned before an option existed still reads its
+ * positions the same way.
+ */
+function parseArgs(argv) {
+  const words = [];
+  const options = {};
+  for (const arg of argv) {
+    const m = /^--([a-z-]+)=(.*)$/s.exec(arg);
+    if (m) options[m[1]] = m[2];
+    else words.push(arg);
+  }
+  return { words, options };
+}
+
 function main() {
-  const [mode, dir] = process.argv.slice(2);
+  const { words, options } = parseArgs(process.argv.slice(2));
+  const [mode, dir] = words;
+  if (mode === "leftovers") {
+    // Run by the web server, not the harness: there is no hook input, and
+    // reading stdin would wait on a pipe nobody closes.
+    const pgid = Number(options.pgid);
+    process.stdout.write(JSON.stringify(settledLeftovers({
+      clock: options["first-command"] || null,
+      unit: options.unit || null,
+      pgid: Number.isInteger(pgid) && pgid > 1 ? pgid : null,
+    })));
+    return;
+  }
   const input = hookInput();
   if (mode === "inbox") {
     if (!dir || typeof input.agent_id === "string") return;
@@ -407,7 +573,7 @@ function main() {
     return;
   }
   if (mode === "keepalive") {
-    const reason = keepalive(dir, process.argv[4], input);
+    const reason = keepalive(dir, words[2], input, options["first-command"] || null);
     if (reason) process.stdout.write(JSON.stringify({ decision: "block", reason }));
     return;
   }
