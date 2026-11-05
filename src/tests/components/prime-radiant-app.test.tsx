@@ -219,6 +219,8 @@ let initRepair: Record<string, unknown> | null;
 let listed: unknown[];
 /** The box's UI language, as `GET preferences` answers it. */
 let uiLanguage: string;
+/** A server whose `GET daily` knows no `pick`. */
+let olderDailyServer: boolean;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -328,7 +330,8 @@ function installFetch() {
       goldenQuestions = goldenQuestions.filter((q) => !url.endsWith((q as { id: string }).id));
       return ok({ question: GOLDEN_Q, commit: "d".repeat(40) });
     }
-    if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") ? DAILY_MINE : DAILY_OWNERS);
+    // `pick=1`: today's server answers for the owner shown first; an older one ignores it.
+    if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") || (url.includes("pick=1") && !olderDailyServer) ? DAILY_MINE : DAILY_OWNERS);
     if (url === `${p}/settings` && method === "PUT" && refuseSettingsPut) return ok({ error: "The settings could not be saved.", code: "vault_unavailable" }, 503);
     if (url === `${p}/settings`) {
       const settings = {
@@ -417,6 +420,7 @@ beforeEach(() => {
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
   uiLanguage = "en";
+  olderDailyServer = false;
   goldenQuestions = [GOLDEN_Q];
   refuseSettingsPut = false;
   FakeEventSource.last = null;
@@ -1448,6 +1452,65 @@ describe("PrimeRadiantApp — Bulgarian (B10)", () => {
     expect(body).toHaveTextContent("Източници");
     expect(body).toHaveTextContent("Our notes");
     expect(body.textContent).not.toMatch(/Key facts|Sources/);
+  });
+});
+
+describe("PrimeRadiantApp — speed (B12)", () => {
+  /** Switches the desktop's language, as Settings does. */
+  function LanguageSwitch() {
+    const { setLocale } = useT();
+    return <button type="button" data-testid="switch-to-bg" onClick={() => setLocale("bg")}>bg</button>;
+  }
+  const reads = () => calls.filter((c) => c.method === "GET" && c.url.startsWith("/setup-api/prime-radiant/")).map((c) => c.url);
+
+  it("re-words an open page in another language without reading the vault again", async () => {
+    render(<I18nProvider><CatalogueProbe /><LanguageSwitch /><PrimeRadiantApp /></I18nProvider>);
+    await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("living wiki"));
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    const before = reads();
+    fireEvent.click(screen.getByTestId("switch-to-bg"));
+    await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("живо уики"), { timeout: 5000 });
+    expect(screen.getByTestId("prime-radiant-tab-browse")).toHaveTextContent("Страници");
+    // Give any effect that would re-fire time to: none may.
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(reads()).toEqual(before);
+  });
+
+  it("shows the usage totals without waiting for the ClawBox AI portal behind the allowance meter", async () => {
+    let release: () => void = () => undefined;
+    const portal = new Promise<void>((r) => { release = r; });
+    const inner = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).endsWith("/costs?allowance=1")) await portal;
+      return (inner as typeof fetch)(input as RequestInfo, init);
+    }));
+    await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-total")).toHaveTextContent("Tokens: 1.5K");
+    expect(screen.queryByTestId("prime-radiant-usage-allowance")).toBeNull();
+    release();
+    expect(await screen.findByTestId("prime-radiant-usage-allowance")).toBeInTheDocument();
+  });
+
+  it("reads the daily questions once, for the owner the server picked", async () => {
+    await mount();
+    await openTab("questions");
+    expect((await screen.findAllByTestId("prime-radiant-daily-question"))).toHaveLength(1);
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(reads().filter((u) => u.includes("/daily"))).toEqual(["/setup-api/prime-radiant/daily?pick=1"]);
+  });
+
+  it("still shows the first owner's questions from an older server that knows no pick, with a second read", async () => {
+    olderDailyServer = true;
+    await mount();
+    await openTab("questions");
+    expect((await screen.findAllByTestId("prime-radiant-daily-question"))).toHaveLength(1);
+    expect(reads().filter((u) => u.includes("/daily"))).toEqual([
+      "/setup-api/prime-radiant/daily?pick=1",
+      `/setup-api/prime-radiant/daily?owner=${encodeURIComponent("Иван Иванов")}`,
+    ]);
   });
 });
 

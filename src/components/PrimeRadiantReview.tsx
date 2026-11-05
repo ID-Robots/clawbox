@@ -15,6 +15,7 @@ import {
   type ReviewItem,
   type ReviewStatus,
   type RunRecord,
+  useStableT,
 } from "./prime-radiant-ui";
 
 interface ReviewList {
@@ -45,6 +46,7 @@ export default function PrimeRadiantReview({ revision, onChanged, onOpenPage, on
   onOpenSettings: () => void;
 }) {
   const { t } = useT();
+  const stableT = useStableT();
   const [status, setStatus] = useState<ReviewStatus>("open");
   const [list, setList] = useState<ReviewList | null>(null);
   const [held, setHeld] = useState(0);
@@ -68,9 +70,9 @@ export default function PrimeRadiantReview({ revision, onChanged, onOpenPage, on
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError" || id !== latest.current) return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
-  }, [status, t]);
+  }, [status, stableT]);
 
   // A resolve calls `onChanged`, which bumps `revision`: this re-reads,
   // abortably, rather than a second unaborted read racing a filter change.

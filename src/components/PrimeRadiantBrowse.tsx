@@ -19,6 +19,7 @@ import {
   verifierKey,
   type PageDetail,
   type PageListEntry,
+  useStableT,
 } from "./prime-radiant-ui";
 import PrimeRadiantSearch, { type SearchRequest } from "./PrimeRadiantSearch";
 
@@ -62,6 +63,7 @@ const EMPTY: Filters = { type: "", domain: "", verified: "", q: "" };
  */
 export default function PrimeRadiantBrowse({ domains, revision, selected, onSelect, onHistory, onIngest }: Props) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [filters, setFilters] = useState<Filters>(EMPTY);
   const [list, setList] = useState<{ total: number; pages: PageListEntry[] } | null>(null);
   const [page, setPage] = useState<PageDetail | null>(null);
@@ -87,9 +89,9 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
       setError(null);
     } catch (err) {
       if ((err as Error)?.name === "AbortError" || signal.aborted) return;
-      setError(errorText(err, t));
+      setError(errorText(err, stableT));
     }
-  }, [filters, t]);
+  }, [filters, stableT]);
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -111,10 +113,10 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setPageError({ path: selected, message: errorText(err, t) });
+        setPageError({ path: selected, message: errorText(err, stableT) });
       });
     return () => ctl.abort();
-  }, [selected, revision, t]);
+  }, [selected, revision, stableT]);
 
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }));
   const searchInside = () => {

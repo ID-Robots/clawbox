@@ -6,7 +6,7 @@ import type { VaultGraph } from "@/lib/prime-radiant/graph";
 import type { GraphInsights } from "@/lib/prime-radiant/graph-communities";
 import { isRelatedWeight, LINK_WEIGHT } from "@/lib/prime-radiant/graph-weights";
 import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, FIELD } from "./coding-agent-ui";
-import { API, errorText, pageUrl, prJson } from "./prime-radiant-ui";
+import { API, errorText, pageUrl, prJson, useStableT } from "./prime-radiant-ui";
 import { STATE_DIM, STATE_HIDDEN, STATE_MATCH, STATE_SELECTED } from "./prime-radiant-map/renderer-gl";
 import { MapView, type CameraState, type MapKind } from "./prime-radiant-map/view";
 
@@ -236,6 +236,7 @@ function prefersFlat(): boolean {
 
 export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Props) {
   const { t } = useT();
+  const stableT = useStableT();
   const [data, setData] = useState<{ model: Model; analysis: Analysis | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -305,10 +306,10 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError" || ctl.signal.aborted) return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [revision, reload, t]);
+  }, [revision, reload, stableT]);
 
   // The picked page's summary: asked for once it is picked, never with the graph (thousands of pages).
   useEffect(() => {

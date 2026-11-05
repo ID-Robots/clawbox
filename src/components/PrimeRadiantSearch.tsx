@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_QUIET, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
-import { API, PrimeRadiantError, errorText, pageLabel, prJson } from "./prime-radiant-ui";
+import { API, PrimeRadiantError, errorText, pageLabel, prJson, useStableT } from "./prime-radiant-ui";
 
 /** One hit as the search route answers it (Memory Shard's engine over the vault). */
 interface SearchHit {
@@ -66,6 +66,7 @@ export default function PrimeRadiantSearch({ request, onOpenPage, onClose, onBus
   onBusy?: (busy: boolean) => void;
 }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [results, setResults] = useState<SearchHit[] | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [error, setError] = useState<string | null>(null);
@@ -89,7 +90,7 @@ export default function PrimeRadiantSearch({ request, onOpenPage, onClose, onBus
           setError(null);
         } else {
           setNotice(null);
-          setError(errorText(err, t));
+          setError(errorText(err, stableT));
         }
       })
       .finally(() => {
@@ -98,7 +99,7 @@ export default function PrimeRadiantSearch({ request, onOpenPage, onClose, onBus
     return () => ctl.abort();
     // `onBusy` is the parent's setter; a new request is what runs a search.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [request, t]);
+  }, [request, stableT]);
 
   const percent = (n: number) => new Intl.NumberFormat(locale, { style: "percent" }).format(Math.max(0, Math.min(1, n)));
 

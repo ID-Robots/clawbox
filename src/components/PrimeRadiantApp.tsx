@@ -15,6 +15,7 @@ import {
   prJson,
   type PrimeRadiantStatus,
   type Tab,
+  useStableT,
 } from "./prime-radiant-ui";
 import PrimeRadiantBrowse from "./PrimeRadiantBrowse";
 import PrimeRadiantReview from "./PrimeRadiantReview";
@@ -90,6 +91,7 @@ function tabStripFade(overflow: { left: boolean; right: boolean }): CSSPropertie
 
 export default function PrimeRadiantApp() {
   const { t, locale } = useT();
+  const stableT = useStableT();
   /** For what shows before the dictionaries load (the window can be the first thing on screen): English, never a key. */
   const tr = useTr();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
@@ -188,9 +190,9 @@ export default function PrimeRadiantApp() {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;
     // A refused init is shown with a retry button, never retried on its own.
     initRequest.current = null;
-    setError(errorText(err, t));
+    setError(errorText(err, stableT));
     setPhase("failed");
-  }, [t]);
+  }, [stableT]);
 
   useEffect(() => {
     const ctl = new AbortController();

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
-import { API, errorText, pageLabel, prJson, type LintFinding, type LintReport } from "./prime-radiant-ui";
+import { API, errorText, pageLabel, prJson, type LintFinding, type LintReport, useStableT } from "./prime-radiant-ui";
 
 /**
  * Lint: the whole vault against its rules — size caps, summaries, orphans,
@@ -14,6 +14,7 @@ import { API, errorText, pageLabel, prJson, type LintFinding, type LintReport } 
  */
 export default function PrimeRadiantLint({ revision, onOpenPage }: { revision: number; onOpenPage: (path: string) => void }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [report, setReport] = useState<LintReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,10 +24,10 @@ export default function PrimeRadiantLint({ revision, onOpenPage }: { revision: n
       .then((r) => { setReport(r); setError(null); })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [revision, t]);
+  }, [revision, stableT]);
 
   const byPage = useMemo(() => {
     const groups = new Map<string, LintFinding[]>();

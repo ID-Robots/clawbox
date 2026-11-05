@@ -17,6 +17,7 @@ import {
   type GoldenStatus,
   type GoldenVerdict,
   type PrimeRadiantSettings,
+  useStableT,
 } from "./prime-radiant-ui";
 
 /**
@@ -289,6 +290,7 @@ function bodyOf(d: Draft, editing: boolean): Record<string, unknown> {
 
 function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revision" | "domains" | "onChanged" | "onOpenPage">) {
   const { t } = useT();
+  const stableT = useStableT();
   const [list, setList] = useState<GoldenListAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -303,10 +305,10 @@ function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revis
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [revision, t]);
+  }, [revision, stableT]);
 
   /** One change; whether it was saved (a refused one keeps its form open). */
   const write = async (url: string, init: RequestInit): Promise<boolean> => {
@@ -378,36 +380,45 @@ function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revis
 
 function Daily({ revision, onOpenPage, onOpenReview }: Pick<Props, "revision" | "onOpenPage" | "onOpenReview">) {
   const { t } = useT();
+  const stableT = useStableT();
   const [owner, setOwner] = useState<string | null>(null);
   const [answer, setAnswer] = useState<DailyAnswerBody | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const latest = useRef(0);
+  /** The owner the server picked with the first read: their questions are already on screen, not read again. */
+  const picked = useRef<string | null>(null);
 
   const load = useCallback(
     (who: string | null, signal?: AbortSignal) => {
       const n = ++latest.current;
-      const url = who ? `${API}/daily?owner=${encodeURIComponent(who)}` : `${API}/daily`;
+      // No owner yet: the server answers for the one shown first, in the same read (B12).
+      const url = who ? `${API}/daily?owner=${encodeURIComponent(who)}` : `${API}/daily?pick=1`;
       prJson<DailyAnswerBody>(url, { signal })
         .then((r) => {
           if (n !== latest.current) return;
           setAnswer(r);
           setError(null);
-          // The first owner with something to ask is the one shown first.
+          // The first owner with something to ask is the one shown first (an older server names none: read again for them).
           if (!who && r.owners.length > 0) {
-            const first = r.owners.find((o) => o.waiting > 0) ?? r.owners[0];
-            setOwner(first.owner);
+            const first = r.owner ?? (r.owners.find((o) => o.waiting > 0) ?? r.owners[0]).owner;
+            if (r.owner) picked.current = first;
+            setOwner(first);
           }
         })
         .catch((err) => {
           if ((err as Error)?.name === "AbortError" || n !== latest.current) return;
-          setError(errorText(err, t));
+          setError(errorText(err, stableT));
         });
     },
-    [t],
+    [stableT],
   );
 
   useEffect(() => {
+    if (owner !== null && picked.current === owner) {
+      picked.current = null;
+      return;
+    }
     const ctl = new AbortController();
     load(owner, ctl.signal);
     return () => ctl.abort();
@@ -573,6 +584,7 @@ interface CheckLimits {
 /** The two checks' own settings: the nightly golden check (on, its cap) and the daily questions an owner gets. */
 function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) {
   const { t } = useT();
+  const stableT = useStableT();
   const [settings, setSettings] = useState<PrimeRadiantSettings | null>(null);
   const [limits, setLimits] = useState<CheckLimits>({});
   const [error, setError] = useState<string | null>(null);
@@ -588,10 +600,10 @@ function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) 
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [revision, t]);
+  }, [revision, stableT]);
 
   /** One change; whether it was saved. */
   const save = async (patch: Record<string, unknown>): Promise<boolean> => {

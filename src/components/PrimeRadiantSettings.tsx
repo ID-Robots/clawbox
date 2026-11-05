@@ -15,6 +15,7 @@ import {
   shortSha,
   type PrimeRadiantSettings as Settings,
   type RunRecord,
+  useStableT,
 } from "./prime-radiant-ui";
 
 interface SettingsAnswer {
@@ -85,6 +86,7 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  */
 export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revision?: number; onChanged: () => void }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [answer, setAnswer] = useState<SettingsAnswer | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -97,10 +99,10 @@ export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revi
       .then((a) => { setAnswer(a); setDraft(draftOf(a.settings)); })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [t]);
+  }, [stableT]);
 
   const set = (patch: Partial<Draft>) => {
     setSaved(false);
@@ -309,6 +311,7 @@ function Toggle({ label, checked, onChange, testId }: { label: string; checked: 
 /** The nightly pass: Run now, recent nights, and Merge for a held one. */
 function PrimeRadiantNightly({ revision, onChanged }: { revision: number; onChanged: () => void }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [state, setState] = useState<NightlyAnswer | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -317,8 +320,8 @@ function PrimeRadiantNightly({ revision, onChanged }: { revision: number; onChan
   const [started, setStarted] = useState<string | null>(null);
 
   const load = useCallback(
-    () => prJson<NightlyAnswer>(`${API}/nightly`).then(setState).catch((err) => setError(errorText(err, t))),
-    [t],
+    () => prJson<NightlyAnswer>(`${API}/nightly`).then(setState).catch((err) => setError(errorText(err, stableT))),
+    [stableT],
   );
 
   // Again on the window's Refresh, so a pass that ended meanwhile is shown as ended.

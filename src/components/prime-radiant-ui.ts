@@ -6,6 +6,8 @@
  * build erases, so nothing here pulls `fs`, `node:sqlite` or git into the
  * desktop bundle (the BatteryIndicator precedent).
  */
+import { useCallback, useLayoutEffect, useRef } from "react";
+import { useT } from "@/lib/i18n";
 import type { CommitInfo } from "@/lib/prime-radiant/git";
 import type { LintFinding, LintReport } from "@/lib/prime-radiant/lint";
 import type { ReviewItem as StoredReviewItem, ReviewStatus } from "@/lib/prime-radiant/review-store";
@@ -189,6 +191,24 @@ export function errorText(err: unknown, t: T): string {
     return t("primeRadiant.error.network");
   }
   return t("primeRadiant.error.network");
+}
+
+/**
+ * The catalogue's `t` with one identity for the component's life, for the
+ * effects and callbacks that READ: a language switch (or the catalogue
+ * arriving) changes `useT().t`, and every read that listed it re-fired at
+ * once — status, the page list and the open page each a full vault read,
+ * all queued on one server — which is what made Pages take 10 s right after
+ * a switch to Bulgarian (B12). The words on screen still come from `useT()`;
+ * this one only words an error with the latest catalogue.
+ */
+export function useStableT(): T {
+  const { t } = useT();
+  const latest = useRef(t);
+  useLayoutEffect(() => {
+    latest.current = t;
+  }, [t]);
+  return useCallback<T>((key, params) => latest.current(key, params), []);
 }
 
 /** The catalogue's word for `key`, or `fallback` when it has none: never a raw key. */
