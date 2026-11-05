@@ -51,10 +51,14 @@ export function defaultDocsRoots(): DocsRoots {
   return { site: join(DEFAULT_CWD, "docs-site"), agents: join(DEFAULT_CWD, "docs", "agents") };
 }
 
-/** How a page under each root is named and which files count as pages. */
-const ROOT_SPEC: Record<RootKey, { ext: string; prefix: string; recursive: boolean }> = {
-  site: { ext: ".mdx", prefix: "", recursive: true },
-  agents: { ext: ".md", prefix: "agents/", recursive: false },
+/**
+ * How a page under each root is named and which files count as pages. `mdx`
+ * says whether `<Component>` tags are markup to reduce: in a plain Markdown
+ * note `<Provider>` in prose is text, and must stay.
+ */
+const ROOT_SPEC: Record<RootKey, { ext: string; prefix: string; recursive: boolean; mdx: boolean }> = {
+  site: { ext: ".mdx", prefix: "", recursive: true, mdx: true },
+  agents: { ext: ".md", prefix: "agents/", recursive: false, mdx: false },
 };
 
 /** The published copy of a docs-site page, for the owner's own browser. */
@@ -151,12 +155,20 @@ function attr(tag: string, name: string): string {
 const CALLOUTS = new Set(["Note", "Tip", "Warning", "Info", "Check", "Danger", "Callout"]);
 const TITLED = new Set(["Accordion", "Card", "Tab", "Expandable", "ParamField", "ResponseField"]);
 
+/** A component tag that opens on this line and does not close on it. */
+const OPEN_TAG_TAIL_RE = /<(?:[A-Z][A-Za-z0-9]*|img)\b[^<>]*$/;
+/** Inline code: protected from every rewrite below, because `<x>` inside it is text. */
+const CODE_SPAN_RE = /`[^`\n]*`/g;
+const CODE_SPAN_MARK = "\u0000";
+
 /**
  * MDX to readable text: components become their titles and callout labels,
- * images their alt text, wrappers nothing; fenced code and everything in it
- * is kept as written (a `<Tag>` inside a code block is content, not markup).
+ * images their alt text, wrappers nothing; fenced code, inline code and
+ * everything in them are kept as written (a `<Tag>` inside either is content,
+ * not markup). With `mdx` false — a plain Markdown note — only comments,
+ * `<img>` and `<br>` are touched, and a `<Provider>` in prose stays text.
  */
-export function mdxToText(body: string): string {
+export function mdxToText(body: string, mdx = true): string {
   const out: string[] = [];
   let inFence = false;
   let fence = "";
@@ -165,6 +177,13 @@ export function mdxToText(body: string): string {
   const lines = body.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     let line = lines[i];
+    // A comment still open from an earlier line swallows this one up to its
+    // close — before the fence test, so a fence inside a comment is not a
+    // fence. What follows the close is handled as an ordinary line.
+    if (inComment) {
+      line = stripComments(line, (state) => { inComment = state; }, inComment);
+      if (inComment) continue;
+    }
     const fenceOpen = FENCE_RE.exec(line);
     if (inFence) {
       out.push(line);
@@ -177,24 +196,39 @@ export function mdxToText(body: string): string {
       out.push(line);
       continue;
     }
+    // Inline code is set aside first and put back last: nothing between the
+    // backticks is markup, whatever it looks like.
+    const spans: string[] = [];
+    const protect = (text: string) => text.replace(CODE_SPAN_RE, (span) => {
+      spans.push(span);
+      return `${CODE_SPAN_MARK}${spans.length - 1}${CODE_SPAN_MARK}`;
+    });
+    line = protect(line);
     // A tag that opens on this line and closes on a later one is joined first,
     // so its attributes are read whole (an <img> with alt on its own line).
-    if (/<[A-Za-z][^<>]*$/.test(line) && !line.includes(">")) {
-      let joined = line;
+    // Only a tag that does close within a few lines — a blank line, a heading
+    // or a fence ends the attempt, and a stray `<` in prose joins nothing.
+    if (mdx && OPEN_TAG_TAIL_RE.test(line)) {
       let j = i + 1;
-      while (j < lines.length && j - i < 12 && !lines[j].includes(">")) {
-        joined += " " + lines[j].trim();
+      let closes = false;
+      while (j < lines.length && j - i <= 12) {
+        const next = lines[j];
+        if (!next.trim() || HEADING_RE.test(next) || FENCE_RE.test(next)) break;
+        if (next.includes(">")) {
+          closes = true;
+          break;
+        }
         j += 1;
       }
-      if (j < lines.length) {
-        joined += " " + lines[j].trim();
-        line = joined;
+      if (closes) {
+        line = [line, ...lines.slice(i + 1, j + 1).map((l) => protect(l.trim()))].join(" ");
         i = j;
       }
     }
-    // Comments, HTML and JSX, possibly spanning lines.
-    line = stripComments(line, (state) => { inComment = state; }, inComment);
-    if (inComment) continue;
+    // Comments, HTML and JSX, possibly spanning lines; what stood before a
+    // comment that runs on is kept.
+    line = stripComments(line, (state) => { inComment = state; }, null);
+    if (inComment && !line.trim()) continue;
     if (/^\s*(import\s.+\sfrom\s+["'].+["']|export\s+(const|default|function)\b)/.test(line)) continue;
 
     line = line.replace(IMG_TAG_RE, (tag) => {
@@ -202,30 +236,33 @@ export function mdxToText(body: string): string {
       return alt ? `[Image: ${alt}]` : "";
     });
     line = line.replace(BR_TAG_RE, "\n");
-    line = line.replace(COMPONENT_TAG_RE, (_whole, closing: string, name: string, attrs: string) => {
-      if (closing) return "";
-      if (name === "Steps") {
-        steps = 0;
+    if (mdx) {
+      line = line.replace(COMPONENT_TAG_RE, (_whole, closing: string, name: string, attrs: string) => {
+        if (closing) return "";
+        if (name === "Steps") {
+          steps = 0;
+          return "";
+        }
+        if (name === "Step") {
+          steps += 1;
+          const title = attr(attrs, "title");
+          return title ? `${steps}. **${title}**` : `${steps}.`;
+        }
+        if (TITLED.has(name)) {
+          const title = attr(attrs, "title");
+          const href = attr(attrs, "href");
+          if (!title) return "";
+          return href ? `**${title}** (${href})` : `**${title}**`;
+        }
+        if (name === "Frame") {
+          const caption = attr(attrs, "caption");
+          return caption ? `_${caption}_` : "";
+        }
+        if (CALLOUTS.has(name)) return `**${name}:** `;
         return "";
-      }
-      if (name === "Step") {
-        steps += 1;
-        const title = attr(attrs, "title");
-        return title ? `${steps}. **${title}**` : `${steps}.`;
-      }
-      if (TITLED.has(name)) {
-        const title = attr(attrs, "title");
-        const href = attr(attrs, "href");
-        if (!title) return "";
-        return href ? `**${title}** (${href})` : `**${title}**`;
-      }
-      if (name === "Frame") {
-        const caption = attr(attrs, "caption");
-        return caption ? `_${caption}_` : "";
-      }
-      if (CALLOUTS.has(name)) return `**${name}:** `;
-      return "";
-    });
+      });
+    }
+    line = line.replace(/\u0000(\d+)\u0000/g, (_m, n: string) => spans[Number(n)] ?? "");
     out.push(line.replace(/[ \t]+$/, ""));
   }
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -319,7 +356,7 @@ export function splitSections(readable: string): DocSection[] {
 /** One page from its raw text: title and summary from the frontmatter or the H1, sections from the rest. */
 export function parseDocPage(raw: string, path: string, root: RootKey, file: string): DocPage {
   const { meta, body } = parseFrontmatter(raw);
-  const readable = mdxToText(body);
+  const readable = mdxToText(body, ROOT_SPEC[root].mdx);
   let sections = splitSections(readable);
   let title = meta.title ?? "";
   // A Markdown page carries its title as the first H1; it is the title, not a
@@ -346,17 +383,19 @@ const STOPWORDS = new Set([
 
 /**
  * A light suffix stemmer, applied to the index and the query alike, so the
- * two sides agree on "update" / "updates" / "updated" / "updating" without a
- * dictionary. It is not English — "hermes" becomes "herm" on both sides — and
- * that is fine: only equality between the two sides matters.
+ * two sides agree on "update" / "updates" / "updated" / "updating", "file" /
+ * "files", "note" / "notes" without a dictionary. The plural goes first and
+ * the verb ending after it, each rule once, so a form never strips past what
+ * its base form keeps. It is not English — "hermes" becomes "herm" on both
+ * sides — and that is fine: only equality between the two sides matters.
  */
 export function normaliseToken(token: string): string {
   let s = token;
-  if (s.length > 4 && s.endsWith("ing")) s = s.slice(0, -3);
-  else if (s.length > 4 && s.endsWith("ies")) s = `${s.slice(0, -3)}y`;
-  else if (s.length > 3 && s.endsWith("ed")) s = s.slice(0, -2);
-  else if (s.length > 3 && s.endsWith("es")) s = s.slice(0, -2);
+  if (s.length > 4 && s.endsWith("ies")) s = `${s.slice(0, -3)}y`;
+  else if (s.length > 4 && /(ss|x|z|ch|sh)es$/.test(s)) s = s.slice(0, -2);
   else if (s.length > 3 && s.endsWith("s") && !s.endsWith("ss")) s = s.slice(0, -1);
+  if (s.length > 5 && s.endsWith("ing")) s = s.slice(0, -3);
+  else if (s.length > 4 && s.endsWith("ed")) s = s.slice(0, -2);
   if (s.length > 4 && s.endsWith("e")) s = s.slice(0, -1);
   return s;
 }
@@ -497,7 +536,9 @@ export function loadDocsIndex(roots: DocsRoots, now: number = Date.now()): DocPa
 function loadIndexed(roots: DocsRoots, now: number): IndexedPage[] {
   const key = `${roots.site}\n${roots.agents}`;
   const have = cache.get(key);
-  if (have && now - have.checkedAt < REVALIDATE_MS) return have.pages;
+  // A clock that went backwards re-checks at once rather than waiting to
+  // catch up with the old stamp.
+  if (have && now >= have.checkedAt && now - have.checkedAt < REVALIDATE_MS) return have.pages;
   const files = [...listRoot("site", roots.site), ...listRoot("agents", roots.agents)];
   const fingerprint = files.map((f) => `${f.file}:${f.size}:${f.mtimeMs}`).join("\n");
   if (have && have.fingerprint === fingerprint) {
@@ -775,14 +816,21 @@ export function resolveDocPath(input: string, roots: DocsRoots, pages?: readonly
     );
   }
   const candidate = `${join(realRoot, ...segs)}${spec.ext}`;
-  // The FOLDER first, before anything says whether the page exists: a linked
-  // folder that leaves the root must not even answer "no such page" about
-  // what is on the other side of it.
-  const realDir = tryRealpath(dirname(candidate));
-  if (!realDir) throw notFound(path, pages);
-  if (!within(realDir, realRoot)) {
+  // The FOLDERS first, before anything says whether the page exists: the
+  // nearest folder on the way that does exist is resolved, and when it is a
+  // link out of the root the answer is the refusal — never "no such page",
+  // which would say what is and is not on the other side of the link, at any
+  // depth below it.
+  let probe = dirname(candidate);
+  let realDir = tryRealpath(probe);
+  while (!realDir && probe !== realRoot) {
+    probe = dirname(probe);
+    realDir = tryRealpath(probe);
+  }
+  if (realDir && !within(realDir, realRoot)) {
     throw blocked("That path leads out of the docs folder.", "Pass the path of a page, as docs_search returns it.");
   }
+  if (!realDir || probe !== dirname(candidate)) throw notFound(path, pages);
   let link = false;
   try {
     link = lstatSync(candidate).isSymbolicLink();
@@ -790,7 +838,12 @@ export function resolveDocPath(input: string, roots: DocsRoots, pages?: readonly
     throw notFound(path, pages);
   }
   const realFile = tryRealpath(candidate);
-  if (!realFile) throw notFound(path, pages);
+  // A link that resolves to nothing is refused like one that resolves
+  // outside: whether its target exists is not this tool's to tell.
+  if (!realFile) {
+    if (link) throw blocked("That page is a link to a file outside the docs, which is never opened.", "Pass the path of a page, as docs_search returns it.");
+    throw notFound(path, pages);
+  }
   if (!within(realFile, realRoot)) {
     throw blocked(
       link ? "That page is a link to a file outside the docs, which is never opened." : "That path leads out of the docs folder.",
@@ -825,18 +878,20 @@ export function findSection(sections: readonly DocSection[], wanted: string): nu
   return at;
 }
 
-/** Section headings as one line, capped, for a note or a refusal. */
+/** Section headings as one line, never longer than HEADING_LIST_CAP, for a note or a refusal. */
 export function headingList(sections: readonly DocSection[], maxLevel = 3): string {
   const names = sections.filter((s) => s.level > 0 && s.level <= maxLevel).map((s) => s.heading);
-  const shown: string[] = [];
-  let used = 0;
+  let out = "";
+  let shown = 0;
   for (const name of names) {
-    if (used + name.length + 3 > HEADING_LIST_CAP) break;
-    shown.push(name);
-    used += name.length + 3;
+    const piece = `${shown ? " | " : ""}"${name}"`;
+    // Room for this one AND for the "+N more" tail that may follow it.
+    if (out.length + piece.length + 16 > HEADING_LIST_CAP) break;
+    out += piece;
+    shown += 1;
   }
-  const rest = names.length - shown.length;
-  return `${shown.map((n) => `"${n}"`).join(" | ")}${rest > 0 ? ` | +${rest} more` : ""}`;
+  const rest = names.length - shown;
+  return `${out}${rest > 0 ? `${shown ? " | " : ""}+${rest} more` : ""}`;
 }
 
 function renderBlock(section: DocSection): string {
@@ -855,10 +910,11 @@ export interface RenderedPage {
  * that says what is missing and how to get it.
  */
 export function renderDocPage(page: DocPage, section?: string): RenderedPage {
+  const clip = (value: string, max: number) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
   const header = [
-    `# ${page.title}`,
+    `# ${clip(page.title, 200)}`,
     `path: ${page.path}${page.root === "site" ? ` · ${PUBLISHED_DOCS}/${page.path}` : ""}`,
-    page.summary ? `summary: ${page.summary}` : "",
+    page.summary ? `summary: ${clip(page.summary, 400)}` : "",
   ].filter(Boolean).join("\n");
 
   let body: string;
@@ -894,11 +950,16 @@ export function renderDocPage(page: DocPage, section?: string): RenderedPage {
   }
 
   let truncated = false;
-  if (body.length > BODY_CAP) {
-    let cut = body.lastIndexOf("\n", BODY_CAP);
-    if (cut < BODY_CAP * 0.6) cut = BODY_CAP;
-    const omitted = body.length - cut;
-    body = `${body.slice(0, cut).trimEnd()}\n\n…[truncated: this ${scope} goes on for ${omitted.toLocaleString("en-US")} more characters. ${hint}]`;
+  // The note is sized BEFORE the body is cut, and the body gives way to it:
+  // header, body and note together always fit under the tool's cap, so the
+  // register's own generic cut never reaches a note that says what is missing.
+  const note = (omitted: number) => `\n\n…[truncated: this ${scope} goes on for ${omitted.toLocaleString("en-US")} more characters. ${hint}]`;
+  const room = DOCS_READ_MAX_CHARS - header.length - 2 - note(body.length).length;
+  const cap = Math.min(BODY_CAP, room);
+  if (body.length > cap) {
+    let cut = body.lastIndexOf("\n", cap);
+    if (cut < cap * 0.6) cut = cap;
+    body = `${body.slice(0, cut).trimEnd()}${note(body.length - cut)}`;
     truncated = true;
   }
   return { text: `${header}\n\n${body}`, truncated };
@@ -950,17 +1011,22 @@ export function registerDocsTools(reg: Registrar, roots?: DocsRoots): void {
     async ({ query, limit }: { query: string; limit?: number }) => {
       const pages = pagesNow();
       const result = searchDocs(pages, query, limit ?? DEFAULT_LIMIT);
-      const shown = result.hits.length;
-      return json({
+      const hits = result.hits.map(({ title, path, section, snippet }) => ({ title, path, section, snippet }));
+      const payload = (shown: typeof hits) => ({
         query,
-        hits: result.hits.map(({ title, path, section, snippet }) => ({ title, path, section, snippet })),
+        hits: shown,
         matches: result.matches,
         pages: result.pages,
-        ...(result.matches > shown ? { not_shown: result.matches - shown } : {}),
-        next: shown
+        ...(result.matches > shown.length ? { not_shown: result.matches - shown.length } : {}),
+        next: shown.length
           ? "Read a hit with docs_read { path, section }. For a fault on this box, support/troubleshooting is the page whose steps to follow in order."
           : "No page mentions those words. Try other words for the symptom, or docs_read support/troubleshooting and support/faq.",
       });
+      // Whole hits only: the register's cut would leave the agent half a JSON
+      // document, so the last hits move into `not_shown` until the answer fits.
+      let shown = hits;
+      while (shown.length > 1 && JSON.stringify(payload(shown), null, 2).length > LIST_MAX_CHARS) shown = shown.slice(0, -1);
+      return json(payload(shown));
     },
   );
 

@@ -9,6 +9,7 @@ import {
   DOCS_READ_MAX_CHARS,
   type DocsRoots,
   findSection,
+  headingList,
   headingSlug,
   loadDocsIndex,
   mdxToText,
@@ -94,7 +95,9 @@ Collect the logs and open a ticket.
 
 ## Reading logs
 
-Use \`journalctl -u clawbox-setup\`.
+Use \`journalctl -u clawbox-setup\`. Reach the box at \`http://<LAN-IP>\`; the guide's fences are \`<!-- edition:x -->\` blocks.
+Some text <!-- a comment that
+runs on to the next line --> and the rest of it.
 `;
 
 const UPDATING = `---
@@ -123,7 +126,7 @@ Welcome. An update arrives every few weeks.
 
 const MCP_MD = `# MCP server
 
-The ClawBox MCP server: the tool set per edition.
+The ClawBox MCP server: the tool set per edition. Each <Provider> row names a provider; a < b holds.
 
 ## Registration
 
@@ -142,23 +145,25 @@ A \`git fetch\` then \`git reset --hard\`; a failed step is recorded.
 beforeAll(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mcp-docs-"));
   roots = { site: path.join(tmp, "docs-site"), agents: path.join(tmp, "docs", "agents") };
-  write(".env", "SECRET_IN_ENV=1\n");
+  write(".env", "SECRETINENV=1\n");
   write("package.json", '{"name":"not-a-doc"}\n');
-  write("outside/page.mdx", '---\ntitle: "Outside"\n---\n\nOUTSIDE_PAGE_TEXT\n');
+  write("outside/page.mdx", '---\ntitle: "Outside"\n---\n\nOUTSIDEPAGETEXT\n');
+  write("outside/sub/deeper.mdx", '---\ntitle: "Deeper"\n---\n\nOUTSIDEDEEPERTEXT\n');
   write("docs-site/index.mdx", INDEX);
   write("docs-site/.gitignore", "export.zip\n");
-  write("docs-site/README.md", "# README_NOT_A_PAGE\n");
-  write("docs-site/llms.txt", "LLMS_NOT_A_PAGE\n");
+  write("docs-site/README.md", "# READMENOTAPAGE\n");
+  write("docs-site/llms.txt", "LLMSNOTAPAGE\n");
   write("docs-site/images/x.png", "PNG");
-  write("docs-site/_site/leak.mdx", '---\ntitle: "Leak"\n---\n\nBUILD_FOLDER_LEAK\n');
+  write("docs-site/_site/leak.mdx", '---\ntitle: "Leak"\n---\n\nBUILDFOLDERLEAK\n');
   write("docs-site/support/troubleshooting.mdx", TROUBLESHOOTING);
   write("docs-site/support/updating.mdx", UPDATING);
   fs.symlinkSync(path.join(tmp, ".env"), path.join(tmp, "docs-site", "support", "escape.mdx"));
   fs.symlinkSync(path.join(tmp, "docs-site", "support", "troubleshooting.mdx"), path.join(tmp, "docs-site", "support", "twin.mdx"));
   fs.symlinkSync(path.join(tmp, "outside"), path.join(tmp, "docs-site", "linkdir"));
+  fs.symlinkSync(path.join(tmp, "nowhere", "gone.mdx"), path.join(tmp, "docs-site", "support", "broken.mdx"));
   write("docs/agents/mcp.md", MCP_MD);
   write("docs/agents/update-and-install.md", UPDATE_MD);
-  write("docs/agents/nested/deep.md", "# Deep\n\nNESTED_NOT_A_PAGE\n");
+  write("docs/agents/nested/deep.md", "# Deep\n\nNESTEDNOTAPAGE\n");
 });
 
 afterAll(() => {
@@ -287,7 +292,8 @@ describe("search ranking", () => {
   });
 
   it("never indexes what is not a docs page: dotfiles, README, build folders, images, nested notes, links out", async () => {
-    for (const word of ["SECRET_IN_ENV", "README_NOT_A_PAGE", "LLMS_NOT_A_PAGE", "BUILD_FOLDER_LEAK", "OUTSIDE_PAGE_TEXT", "NESTED_NOT_A_PAGE"]) {
+    // One word each, so the tokenizer cannot split a marker into words a real page has.
+    for (const word of ["SECRETINENV", "READMENOTAPAGE", "LLMSNOTAPAGE", "BUILDFOLDERLEAK", "OUTSIDEPAGETEXT", "OUTSIDEDEEPERTEXT", "NESTEDNOTAPAGE"]) {
       const { hits, matches } = await search(word);
       expect({ word, hits, matches }).toEqual({ word, hits: [], matches: 0 });
     }
@@ -306,9 +312,14 @@ describe("reading a page", () => {
     expect(text).toContain("**Use the plain IP**");
     expect(text).toContain("1. **Restart the services**");
     expect(text).toContain("2. **Re-run the installer**");
-    // Everything inside a fence is content, tags and hash lines included.
+    // Everything inside a fence is content, tags and hash lines included…
     expect(text).toContain("<Fake>kept verbatim</Fake>");
     expect(text).toContain("# not a heading");
+    // …and so is everything inside inline code, however much it looks like markup.
+    expect(text).toContain("Reach the box at `http://<LAN-IP>`; the guide's fences are `<!-- edition:x -->` blocks.");
+    // Text on either side of a comment that runs over lines survives.
+    expect(text).toContain("Some text\n and the rest of it.");
+    expect(text).not.toContain("runs on to the next line");
     for (const heading of ["## I can't reach the ClawBox", "## Update finished but the box misbehaves", "### Still broken after that", "## Reading logs"]) {
       expect(text).toContain(heading);
     }
@@ -322,6 +333,8 @@ describe("reading a page", () => {
       const text = await readText({ path: spelling });
       expect(text, spelling).toMatch(/^# MCP server\npath: agents\/mcp\n/);
       expect(text).toContain("## Registration");
+      // A Markdown note is not MDX: an angle-bracketed word in prose is text.
+      expect(text).toContain("Each <Provider> row names a provider; a < b holds.");
     }
   });
 
@@ -399,6 +412,22 @@ describe("truncation", () => {
     expect(truncated).toBe(false);
     expect(text).not.toContain("truncated");
   });
+
+  it("keeps header, body and its own note under the cap however long the summary and the heading list", async () => {
+    const summary = "S".repeat(600);
+    const sections = Array.from({ length: 160 }, (_, i) => `## A rather long heading number ${i + 1} about something\n\n${"Words words words.\n".repeat(20)}`);
+    write("docs-site/support/wide-and-deep-page-with-a-long-path-name.mdx", `---\ntitle: "${"T".repeat(300)}"\nsummary: "${summary}"\n---\n\n${sections.join("\n")}`);
+    resetDocsIndexCache();
+    const out = await read({ path: "support/wide-and-deep-page-with-a-long-path-name" });
+    expect(out.isError).toBe(false);
+    const text = out.isError ? "" : out.text;
+    expect(text.length).toBeLessThanOrEqual(DOCS_READ_MAX_CHARS);
+    expect(text).toMatch(/…\[truncated: this page goes on for [\d,]+ more characters\. Read one part at a time with docs_read .*\+\d+ more\.\]$/s);
+    expect(text).not.toContain("narrow the query");
+    // The heading list itself never outgrows its own cap.
+    const page = loadDocsIndex(roots).find((p) => p.path === "support/wide-and-deep-page-with-a-long-path-name")!;
+    expect(headingList(page.sections).length).toBeLessThanOrEqual(1_200);
+  });
 });
 
 describe("the path guard", () => {
@@ -419,12 +448,17 @@ describe("the path guard", () => {
     "_site/leak",
     "node_modules/x",
     "https://docs.clawbox.com/support/troubleshooting",
-    // A page that is a link to a file outside the docs.
+    // A page that is a link to a file outside the docs, and one whose link
+    // resolves to nothing at all.
     "support/escape",
-    // A page behind a linked folder that leaves the docs — and one that
-    // does not exist behind it: neither may say anything about the far side.
+    "support/broken",
+    // Pages behind a linked folder that leaves the docs — existing or not, at
+    // any depth: none may say anything about the far side.
     "linkdir/page",
     "linkdir/missing",
+    "linkdir/sub/deeper",
+    "linkdir/sub/missing",
+    "linkdir/nope/missing",
   ];
 
   it.each(BLOCKED)("refuses %s with BLOCKED_PATH", async (p) => {
@@ -488,11 +522,22 @@ describe("the pure parts", () => {
   });
 
   it("stems the common suffixes the same way on both sides", () => {
-    for (const word of ["update", "updates", "updated", "updating"]) expect(normaliseToken(word)).toBe("updat");
-    for (const word of ["fail", "fails", "failed", "failing"]) expect(normaliseToken(word)).toBe("fail");
+    for (const word of ["update", "updates", "updated", "updating"]) expect(normaliseToken(word), word).toBe("updat");
+    for (const word of ["fail", "fails", "failed", "failing"]) expect(normaliseToken(word), word).toBe("fail");
+    // A short plural meets its singular, and a plural -es only where English puts one.
+    for (const [a, b] of [["file", "files"], ["note", "notes"], ["page", "pages"], ["setting", "settings"], ["box", "boxes"], ["address", "addresses"], ["release", "releases"], ["match", "matches"]]) {
+      expect(normaliseToken(a), `${a} vs ${b}`).toBe(normaliseToken(b));
+    }
+    expect(normaliseToken("note")).toBe("note");
     expect(normaliseToken("address")).toBe("address");
     expect(normaliseToken("entries")).toBe("entry");
     expect(normaliseToken("ssh")).toBe("ssh");
+  });
+
+  it("joins a tag that runs over lines, but never prose with a stray angle bracket", () => {
+    expect(mdxToText('<img src="/x.png"\n  alt="Two lines"\n/>\n\nAfter.')).toBe("[Image: Two lines]\n\nAfter.");
+    expect(mdxToText("a <b holds here\n\n## Next\n\nText.")).toBe("a <b holds here\n\n## Next\n\nText.");
+    expect(mdxToText("<Unclosed forever\n## Next\n\nText.")).toBe("<Unclosed forever\n## Next\n\nText.");
   });
 
   it("splits sections outside fences only, and finds one by text, slug or prefix", () => {
@@ -580,6 +625,20 @@ describe("the docs shipped in this checkout", () => {
     expect(reachHits.hits.map((hit) => hit.path)).toContain("support/troubleshooting");
   });
 
+  it("answer whole JSON under the list cap at the widest limit and the longest query", async () => {
+    const h = captureRegistrar("openclaw");
+    registerDocsTools(h.reg, real);
+    const query = "update gateway network password hermes openclaw telegram backup memory shard prime radiant coding agent ".repeat(2).slice(0, 200);
+    const out = await h.call("docs_search", { query, limit: 20 });
+    expect(out.isError).toBe(false);
+    const text = out.isError ? "" : out.text;
+    expect(text.length).toBeLessThanOrEqual(8_000);
+    expect(text).not.toContain("narrow the query");
+    const parsed = JSON.parse(text) as { hits: unknown[]; matches: number; not_shown?: number };
+    expect(parsed.hits.length).toBeGreaterThan(0);
+    expect(parsed.hits.length + (parsed.not_shown ?? 0)).toBe(parsed.matches);
+  });
+
   it("read the troubleshooting page whole and by section, with no heading taken from a code block", async () => {
     const h = captureRegistrar("hermes");
     registerDocsTools(h.reg, real);
@@ -604,11 +663,28 @@ describe("the docs shipped in this checkout", () => {
   it("are not left out of the install by the packaging or the installers", () => {
     const text = (rel: string) => fs.readFileSync(path.join(REPO_ROOT, rel), "utf-8");
     // A full clone, kept by fetch + reset --hard: no sparse checkout, no
-    // export-ignore, no ignore rule that would strip the two roots.
-    for (const file of [".dockerignore", ".gitattributes"]) {
-      const offending = text(file).split("\n").filter((line) => /^\s*\/?docs(-site)?(\/|\s|$)/.test(line) || /export-ignore/.test(line));
-      expect(offending, file).toEqual([]);
-    }
+    // export-ignore, and no ignore RULE — however spelled — that matches a
+    // docs page or a folder on the way to one.
+    const SAMPLES = ["docs-site", "docs-site/support", "docs-site/support/troubleshooting.mdx", "docs", "docs/agents", "docs/agents/mcp.md"];
+    const ruleMatches = (rule: string, sample: string): boolean => {
+      // gitignore semantics, the part that matters here: a pattern without a
+      // slash matches a basename anywhere; `**` crosses folders; `*` and `?`
+      // stay within one; a leading `/` anchors; a trailing `/` names a folder.
+      let pattern = rule.trim().replace(/\/$/, "");
+      const anchored = pattern.startsWith("/") || pattern.slice(0, -1).includes("/");
+      pattern = pattern.replace(/^\//, "");
+      const re = pattern
+        .split("**").map((part) => part.split("*").map((p) => p.split("?").map((q) => q.replace(/[.+^${}()|[\]\\]/g, "\\$&")).join("[^/]")).join("[^/]*")).join(".*");
+      return new RegExp(anchored ? `^${re}$` : `(^|/)${re}$`).test(sample);
+    };
+    const rules = text(".dockerignore").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !l.startsWith("!"));
+    const offending = rules.filter((rule) => SAMPLES.some((sample) => ruleMatches(rule, sample)));
+    expect(offending, ".dockerignore").toEqual([]);
+    expect(ruleMatches("docs-site", "docs-site")).toBe(true); // the matcher sees what it is for
+    expect(ruleMatches("**/*.mdx", "docs-site/support/troubleshooting.mdx")).toBe(true);
+    expect(ruleMatches("*.md", "docs/agents/mcp.md")).toBe(true);
+    expect(ruleMatches("node_modules", "docs/agents/mcp.md")).toBe(false);
+    expect(text(".gitattributes")).not.toMatch(/export-ignore/);
     for (const file of ["install.sh", "install-x64.sh", "src/lib/updater.ts"]) {
       expect(text(file), file).not.toMatch(/sparse-checkout/);
     }
