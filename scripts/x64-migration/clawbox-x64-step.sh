@@ -727,10 +727,41 @@ update_openclaw() {
   fi
 }
 
+# The core needs no change: already at the pin, with nothing an earlier step
+# left to settle (a pending replacement, a stage, links set aside). Stopping the
+# gateway for it would be downtime only, and every agent run it holds would be
+# killed mid-task (GitHub #1269).
+openclaw_core_settled() {
+  local target current marker
+  target=$(head -n 1 "$MIRROR/config/openclaw-target.txt" 2>/dev/null) || return 1
+  current=$(installed_openclaw_version)
+  [ -n "$current" ] && [ "$current" = "$target" ] || return 1
+  marker=$(core_replacement_marker)
+  if [ -e "$marker" ] || [ -L "$marker" ]; then return 1; fi
+  if [ -e "$NPM_PREFIX/.openclaw-stage" ]; then return 1; fi
+  if compgen -G "$(core_recovery_root)/*/set-aside-links.txt" >/dev/null; then return 1; fi
+  return 0
+}
+
 with_gateway_stopped() {
-  local owns_guard=0 was_active=0 rc=0
+  local owns_guard=0 was_active=0 rc=0 stamp changed=
   exec 8>>/run/clawbox-x64-core.lock
   /usr/bin/flock -w 600 8 || return $?
+  if openclaw_core_settled; then
+    # Re-applied patches and the config check run beside the live gateway. A
+    # patch that did change a core file needs the gateway restarted to load it:
+    # only then does it go through the stop below.
+    stamp=$(mktemp)
+    update_openclaw || rc=$?
+    changed=$(find "$NPM_PREFIX/lib/node_modules/openclaw/" -newer "$stamp" -type f -print -quit 2>/dev/null || true)
+    rm -f "$stamp"
+    [ "$rc" -eq 0 ] || return "$rc"
+    if [ -z "$changed" ]; then
+      echo 'OpenClaw needed no change; the gateway kept running'
+      return 0
+    fi
+    echo 'A core patch changed the installed OpenClaw; restarting the gateway to load it'
+  fi
   if [ ! -d /run/clawbox-gateway-maintenance ]; then
     /usr/local/libexec/clawbox/clawbox-x64-gateway.sh is-active && was_active=1
     /usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh enter
@@ -743,7 +774,7 @@ with_gateway_stopped() {
   if [ "$rc" -eq 0 ]; then
     /usr/local/libexec/clawbox/clawbox-x64-gateway.sh stop || rc=$?
   fi
-  if [ "$rc" -eq 0 ]; then update_openclaw || rc=$?; fi
+  if [ "$rc" -eq 0 ] && [ -z "$changed" ]; then update_openclaw || rc=$?; fi
   if [ "$owns_guard" -eq 1 ]; then
     /usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh leave || return $?
     if [ "$was_active" -eq 1 ]; then /usr/bin/systemctl start clawbox-gateway.service || return $?; fi

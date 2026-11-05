@@ -601,6 +601,12 @@ start_app_update() {
   board_api POST /setup-api/system/update-branch "$(jq -cn --arg b "$1" '{branch: $b}')"
   [ "$API_STATUS" = 200 ] || return 1
   board_owner_api POST /setup-api/update/run '{"force":true}'
+  # A build with the busy gate (GitHub #1269) answers 409 while agent work runs
+  # on the box; the test is the owner who updates anyway, and says so.
+  if [ "$API_STATUS" = 409 ] && [ "$(api_json '.busy // empty')" = true ]; then
+    note "update/run: agent work running ($(api_json -c '.work // {}')): updating anyway"
+    board_owner_api POST /setup-api/update/run '{"force":true,"ignoreBusy":true}'
+  fi
   [ "$API_STATUS" = 200 ] && [ "$(api_json '.started // empty')" = true ]
 }
 

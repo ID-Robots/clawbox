@@ -687,6 +687,44 @@ describe("Update goes straight to /updating", () => {
     expect(app.getByRole("button", { name: "Dismiss" })).toBeTruthy();
   });
 
+  it("asks first while agents are working (GitHub #1269): Cancel starts nothing, Update anyway sends ignoreBusy", async () => {
+    const bodies: unknown[] = [];
+    let anyway = false;
+    const box = stubBox(
+      () => (anyway ? { body: RUNNING } : { body: IDLE, locked: false }),
+      async () => {
+        const call = box.fetchMock.mock.calls.filter(([u]) => String(u) === "/setup-api/update/run").at(-1);
+        const body = JSON.parse(String(call?.[1]?.body ?? "{}"));
+        bodies.push(body);
+        if (body.ignoreBusy === true) { anyway = true; return respond({ started: true }); }
+        return respond({ started: false, busy: true, work: { coding: 1, agents: 1, total: 2 } }, {}, 409);
+      },
+    );
+    const app = render(<SystemUpdateApp />);
+    await advance();
+    fireEvent.click(app.getByRole("button", { name: "Update everything" }));
+    await advance();
+    const dialog = app.getByRole("dialog");
+    expect(dialog).toHaveTextContent("Agents are working right now");
+    expect(dialog).toHaveTextContent("2 agent runs are active");
+    expect(bodies).toEqual([{ force: true }]);
+    expect(replace).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="update-handover"]')).toBeNull();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await advance();
+    expect(app.queryByRole("dialog")).toBeNull();
+    expect(bodies).toHaveLength(1);
+    expect(app.getByRole("button", { name: "Update everything" })).toBeTruthy();
+
+    fireEvent.click(app.getByRole("button", { name: "Update everything" }));
+    await advance();
+    fireEvent.click(within(app.getByRole("dialog")).getByRole("button", { name: "Update anyway" }));
+    await advance();
+    expect(bodies.at(-1)).toEqual({ force: true, ignoreBusy: true });
+    expect(document.querySelector('[data-testid="update-handover"]')).not.toBeNull();
+  });
+
   it("leaves anyway when the click's request never answers: /updating follows what the box has", async () => {
     const { click } = await openWindow(() => new Promise<Response>(() => {}));
     click();
