@@ -236,7 +236,7 @@ describe("the words", () => {
     expect(buildAlertText([item({ count: 3 })], en)).toBe("Scheduled job “Backup” failed 3 times in a row.");
     expect(buildAlertText([item({ problem: "skipping", count: 3 })], en)).toBe("Scheduled job “Backup” was skipped 3 times in a row.");
     expect(buildAlertText([item({ problem: "overdue", count: 0 })], en)).toBe("Scheduled job “Backup” did not run when it was due.");
-    expect(buildAlertText([item({ problem: "stopped" })], en)).toBe("Scheduled job “Backup” was switched off after failing repeatedly.");
+    expect(buildAlertText([item({ problem: "stopped" })], en)).toBe("Scheduled job “Backup” failed and is now switched off.");
     expect(buildRecoveryText([item({})], en)).toBe("Scheduled job “Backup” is running normally again.");
     expect(buildRecoveryText([item({}), item({ id: "y", name: "Sync" })], en)).toBe("2 scheduled jobs are running normally again: “Backup”, “Sync”.");
   });

@@ -176,7 +176,9 @@ export default function JobAlertsPanel() {
               )}
               {status.problems.length === 0 && (
                 <span className="block">
-                  {status.watched === 0 ? t("jobAlerts.none") : t("jobAlerts.allGood", { count: status.watched })}
+                  {status.watched === 0
+                    ? t("jobAlerts.none")
+                    : status.watched === 1 ? t("jobAlerts.allGoodOne") : t("jobAlerts.allGood", { count: status.watched })}
                 </span>
               )}
               <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">

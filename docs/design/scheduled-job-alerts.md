@@ -15,14 +15,16 @@ Only the **active** harness (`getActiveHarness()`) is watched. After a harness s
 
 **Not watched:**
 - OpenClaw's heartbeat (`payload.kind: "heartbeat"`). Skipping is part of how it works ("no-route", quiet hours, an empty HEARTBEAT.md), and Settings → Working on its own is where it is switched on or off.
-- Jobs the owner paused or disabled.
-- Finished one-shot jobs.
+- Paused or disabled jobs whose last run was fine.
+- Finished one-shot jobs whose last run was fine.
 
 ## What counts as a failure
 
 Each job gets at most one problem. When several apply, the earlier one in this list wins:
 
-1. **stopped**: the scheduler switched the job off by itself. On OpenClaw that is `autoDisabled`, after 10 failures in a row. On Hermes it is `state: error`: a recurring job whose next run could not be computed.
+1. **stopped**: the job is switched off and its last run failed. This includes OpenClaw's `autoDisabled` (after 10 failures in a row), Hermes' `state: error` (a recurring job whose next run could not be computed), and a job paused or disabled after a failure.
+
+   On a board (OpenClaw 2026.10.9), a silent command job that had failed twice was switched off 45 s after OpenClaw's own failure alert could not be delivered ("no configured channels"). The job had `enabled: false`, no `autoDisabled`, and nothing went out on any channel: the exact case this feature exists for. The row does not say who switched the job off. If the owner switched off a broken job themselves, they get one notice, which is still true.
 2. **failing**: the last run errored (a non-zero exit, a timeout, a model error). The rule depends on when the next try is:
    - next try more than an hour away (or no next try): alert on the **first** failure, so a daily job is not left broken for a day;
    - next try within the hour: alert on the **second failure in a row**, which filters out one-off glitches.

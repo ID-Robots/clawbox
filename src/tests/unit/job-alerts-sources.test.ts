@@ -65,9 +65,15 @@ describe("openclawJob", () => {
     });
   });
 
-  it("leaves out the heartbeat — skipping is how it works — and a job the owner disabled", () => {
+  it("leaves out the heartbeat — skipping is how it works — and a disabled job whose last run was fine", () => {
     expect(openclawJob(HEARTBEAT)).toBeNull();
-    expect(openclawJob({ ...COMMAND_JOB, enabled: false })).toBeNull();
+    expect(openclawJob({ ...COMMAND_JOB, enabled: false, state: { ...COMMAND_JOB.state, lastRunStatus: "ok", lastStatus: "ok" } })).toBeNull();
+  });
+
+  it("keeps a job that was switched off after it failed, as stopped — whoever switched it off", () => {
+    // Read off a board: a silent command job that failed twice, its failure
+    // alert undeliverable, then `enabled: false` with no `autoDisabled`.
+    expect(openclawJob({ ...COMMAND_JOB, enabled: false })).toMatchObject({ stopped: true, lastStatus: "error", consecutiveErrors: 2 });
   });
 
   it("keeps a job the scheduler disabled after repeated failures, as stopped", () => {
@@ -148,11 +154,17 @@ describe("hermesJob", () => {
     expect(hermesJob({ ...ENTRY, last_status: "delivery_failed", failure_streak: 0 }, NOW)?.lastStatus).toBe("ok");
   });
 
-  it("leaves out paused and completed jobs; a recurring job in state error is stopped", () => {
-    expect(hermesJob({ ...ENTRY, state: "paused", enabled: false }, NOW)).toBeNull();
-    expect(hermesJob({ ...ENTRY, paused_at: "2026-11-05T11:00:00+00:00" }, NOW)).toBeNull();
-    expect(hermesJob({ ...ENTRY, state: "completed" }, NOW)).toBeNull();
+  it("leaves out paused and completed jobs whose last run was fine; a recurring job in state error is stopped", () => {
+    const fine = { ...ENTRY, last_status: "ok", failure_streak: 0 };
+    expect(hermesJob({ ...fine, state: "paused", enabled: false }, NOW)).toBeNull();
+    expect(hermesJob({ ...fine, paused_at: "2026-11-05T11:00:00+00:00" }, NOW)).toBeNull();
+    expect(hermesJob({ ...fine, state: "completed" }, NOW)).toBeNull();
     expect(hermesJob({ ...ENTRY, state: "error" }, NOW)?.stopped).toBe(true);
+  });
+
+  it("a job paused after a failure is stopped; a one-shot that ended in an error is still failing", () => {
+    expect(hermesJob({ ...ENTRY, state: "paused", enabled: false }, NOW)).toMatchObject({ stopped: true });
+    expect(hermesJob({ ...ENTRY, state: "completed", next_run_at: null }, NOW)).toMatchObject({ stopped: false, lastStatus: "error", nextRunAtMs: null });
   });
 
   it("a fresh fire claim is a run in flight; a stale one is a crashed run", () => {

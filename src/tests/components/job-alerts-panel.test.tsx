@@ -68,6 +68,12 @@ describe("JobAlertsPanel", () => {
     await waitFor(() => expect(screen.getByTestId("job-alerts-status").textContent).toContain("Watching 4 scheduled jobs"));
   });
 
+  it("says one job in the singular", async () => {
+    route({ ...STATUS, watched: 1, problems: [] });
+    render(<JobAlertsPanel />);
+    await waitFor(() => expect(screen.getByTestId("job-alerts-status").textContent).toContain("Watching 1 scheduled job — it ran as expected."));
+  });
+
   it("switches off through the route and draws the box's answer", async () => {
     const fetchMock = route(STATUS, () => new Response(JSON.stringify({ ok: true, ...STATUS, enabled: false, off: "pref" }), { status: 200 }));
     render(<JobAlertsPanel />);

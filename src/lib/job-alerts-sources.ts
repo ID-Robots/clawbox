@@ -112,7 +112,15 @@ const OPENCLAW_TIMED_KINDS = new Set(["at", "every", "cron"]);
  * One `cron.list` row as a {@link WatchedJob}, or null for a row this feature
  * does not watch: the heartbeat (its skips — "no-route", quiet hours, an empty
  * HEARTBEAT.md — are how it is meant to work, and Settings → Working on its own
- * is its switch) and a job the owner disabled.
+ * is its switch) and a disabled job whose last run was fine.
+ *
+ * A DISABLED JOB WHOSE LAST RUN FAILED IS WATCHED, as stopped. Measured on a
+ * board (2026.10.9): a silent command job that failed twice was switched off
+ * 45 s after its failure alert could not be delivered — `enabled: false`, no
+ * `autoDisabled`, nothing on any channel. Who switched it off (the scheduler's
+ * repair turn, the agent, the owner) is not on the row, and a job that broke
+ * and is now off is the job that died quietly; an owner who switched off a
+ * broken job themselves is told once, which is true.
  */
 export function openclawJob(row: unknown): WatchedJob | null {
   const job = record(row);
@@ -120,15 +128,16 @@ export function openclawJob(row: unknown): WatchedJob | null {
   const payload = record(job.payload);
   if (payload?.kind === "heartbeat") return null;
   const state = record(job.state) ?? {};
-  const stopped = job.enabled === false && record(state.autoDisabled) !== null;
+  const status = state.lastRunStatus ?? state.lastStatus;
+  const lastStatus: JobLastStatus | null = status === "ok" || status === "error" || status === "skipped" ? status : null;
+  const stopped = job.enabled === false && (record(state.autoDisabled) !== null || lastStatus === "error");
   if (job.enabled === false && !stopped) return null;
   const schedule = record(job.schedule);
-  const status = state.lastRunStatus ?? state.lastStatus;
   return {
     id: job.id,
     name: cleanJobName(job.name, job.id),
     timed: typeof schedule?.kind === "string" && OPENCLAW_TIMED_KINDS.has(schedule.kind),
-    lastStatus: status === "ok" || status === "error" || status === "skipped" ? status : null,
+    lastStatus,
     lastRunAtMs: finiteMs(state.lastRunAtMs),
     nextRunAtMs: finiteMs(state.nextRunAtMs),
     running: finiteMs(state.runningAtMs) !== null,
@@ -179,7 +188,9 @@ const HERMES_TIMED_KINDS = new Set(["once", "interval", "cron"]);
 
 /**
  * One `jobs.json` entry as a {@link WatchedJob}, or null for one this feature
- * does not watch: paused by the owner, or a one-shot that has completed.
+ * does not watch: a paused job or a finished one-shot whose last run was fine.
+ * Paused after a failure is watched as stopped and a one-shot that ended in an
+ * error as failing, for the reason {@link openclawJob} gives.
  * `delivery_failed` is a run that worked whose output did not arrive — not a
  * failed job; Hermes keeps it apart from `failure_streak` too.
  */
@@ -187,12 +198,12 @@ export function hermesJob(entry: unknown, nowMs: number): WatchedJob | null {
   const job = record(entry);
   if (!job || typeof job.id !== "string" || !job.id) return null;
   const state = typeof job.state === "string" ? job.state : "";
-  if (state === "completed") return null;
-  if (state === "paused" || job.enabled === false || job.paused_at) return null;
-  const schedule = record(job.schedule);
   const status = job.last_status === "ok" || job.last_status === "delivery_failed"
     ? "ok"
     : job.last_status === "error" ? "error" : null;
+  const paused = state === "paused" || job.enabled === false || Boolean(job.paused_at);
+  if ((state === "completed" || paused) && status !== "error") return null;
+  const schedule = record(job.schedule);
   const claim = record(job.fire_claim);
   const claimedAt = isoMs(claim?.at);
   return {
@@ -207,7 +218,7 @@ export function hermesJob(entry: unknown, nowMs: number): WatchedJob | null {
     consecutiveSkipped: null,
     // Hermes marks a RECURRING job `state: error` when it could not compute the
     // next run, and leaves it enabled so the schedule is not silently dropped.
-    stopped: state === "error",
+    stopped: state === "error" || (paused && state !== "completed"),
     error: cleanError(job.last_error),
   };
 }
