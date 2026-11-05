@@ -341,13 +341,17 @@ export function buildRecoveryText(items: NoticeItem[], t: Translate): string {
  * text says where to look instead.
  */
 async function deliver(text: string, t: Translate): Promise<void> {
+  const telegramText = `${text} ${t("jobAlerts.notice.where", { section: t("settings.harness") })}`;
+  // The words themselves, once, in the journal: "the alert said X" is the
+  // first thing support asks, and neither leg records what it was handed.
+  console.log(`[job-alerts] notice: ${telegramText}`);
   try {
     await notifyOwner(text.slice(0, MAX_TOAST_CHARS), OPEN_HARNESS_SETTINGS);
   } catch (err) {
     console.error("[job-alerts] desktop notice failed:", err instanceof Error ? err.message : err);
   }
   try {
-    await notifyOwnerTelegram(`${text} ${t("jobAlerts.notice.where", { section: t("settings.harness") })}`, "job-alerts");
+    await notifyOwnerTelegram(telegramText, "job-alerts");
   } catch (err) {
     console.error("[job-alerts] telegram notice failed:", err instanceof Error ? err.message : err);
   }
