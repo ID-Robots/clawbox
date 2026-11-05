@@ -83,6 +83,7 @@ import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
 import { registerAppPublishTools, registerCodingAgentTools, registerCodingTeamTools, registerSoloRunTools, registerTeamRunTools } from "./tools/coding-agent";
 import { registerDesktopTools } from "./tools/desktop";
+import { registerDocsTools } from "./tools/docs";
 import {
   hasMailboxSurface,
   registerEmailTools,
@@ -272,6 +273,11 @@ export async function buildServer(
   // ONE exception: the mailbox read tools follow Settings → Email afterwards
   // (see `watchEmailReadability` in main()). Nothing else here is re-asked.
   registerOrientationTools(reg, ctx);
+  // The manual on the box: the docs shipped with THIS install, searched and
+  // read offline (TASK-2177). Beside orientation because that is when they are
+  // wanted — when something on the box fails, the agent searches the symptom
+  // first and follows support/troubleshooting.
+  registerDocsTools(reg);
   registerSkillTools(reg);
   // Hermes-only, and the registrar drops it on OpenClaw. It is next to the skill
   // family because the two are how a Hermes box gains abilities — but a skill is

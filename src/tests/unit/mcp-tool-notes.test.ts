@@ -43,6 +43,7 @@ import { registerBrowserTools } from "../../../mcp/tools/browser";
 import { registerCodingTools } from "../../../mcp/tools/coding";
 import { registerCodingAgentTools, registerCodingTeamTools, registerTeamRunTools } from "../../../mcp/tools/coding-agent";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
+import { registerDocsTools } from "../../../mcp/tools/docs";
 import { registerEmailTools } from "../../../mcp/tools/email";
 import { registerHermesPluginTools } from "../../../mcp/tools/hermes-plugins";
 import { registerLocalAiTools } from "../../../mcp/tools/local-ai";
@@ -114,6 +115,7 @@ function server(p: Posture): CaptureHarness {
   const c = ctx(p.edition, p.capable);
   try {
     registerOrientationTools(h.reg, c);
+    registerDocsTools(h.reg);
     registerSkillTools(h.reg);
     registerHermesPluginTools(h.reg);
     registerMemoryTools(h.reg);

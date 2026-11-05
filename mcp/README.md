@@ -154,12 +154,56 @@ says how to hand work to the coding agent and then steer and check it — and
 - **"Why is my run waiting?" / before retrying an Anthropic run**:
   `anthropic_accounts` — how many of the owner's Anthropic accounts can answer,
   which one is in use, and when a limited one is back.
+- **Something on the box fails** — an update, the network, a login, the
+  assistant itself: `docs_search` the symptom first, then `docs_read` the hit
+  and follow `support/troubleshooting` in order (see "Docs" below).
 
 | Tool | What it does |
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
 | `clawbox_context` | The device field guide, the tool notes (what the short tool descriptions leave out, for the tools this server registered — see "Tool descriptions"), the webapp storage/styling rules, and whose screen the browser tools drive (`BROWSER_GUIDE` — the desktop's window while the owner's real-browser setting is on, an invisible one when it is off). The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
+| `docs_search` | Offline full-text search over the official docs **installed with this version** — `docs-site/**/*.mdx` (user guide, support/troubleshooting, recovery, updating, FAQ, technical reference) and `docs/agents/*.md`. `{ query, limit? }` → hits with `title`, `path`, `section`, `snippet`, title and heading matches first; `matches`/`pages` count what the limit left out. |
+| `docs_read` | One page as plain text — frontmatter title, MDX components reduced to their titles and captions — or one `section` of it (heading text or anchor; `path#anchor` works too). `{ path, section? }`, with `path` exactly as `docs_search` returned it. A long page is cut at a line under the cap with a note naming its sections. |
+
+### Docs — the manual on the box (both editions, core profile)
+
+`mcp/tools/docs.ts`. The box that most needs the docs is the one whose update,
+network or gateway just failed, so the two tools read the pages that ship with
+the install rather than docs.clawbox.com: the checkout is a full git clone kept
+by `git fetch` + `git reset --hard` (install.sh, `src/lib/updater.ts`), and
+nothing in `.dockerignore` or the installers leaves `docs-site/` or
+`docs/agents/` out — `src/tests/unit/mcp-docs-tools.test.ts` holds that. The
+roots are resolved from the install folder the server already knows
+(`DEFAULT_CWD`, the same answer `Clawbox.md` is read from).
+
+- **Paths** are relative to the roots and spelled as the published site spells
+  them: `support/troubleshooting`, `guides/memory-shard`, `technical/networking`;
+  the engineering notes are `agents/<name>` (`agents/mcp`). `docs-site/…`,
+  `docs/agents/…` and a trailing `.mdx`/`.md` are accepted and normalised.
+- **The guard.** `..`, an absolute or `~` path, a URL, a backslash, a hidden or
+  `_build` segment → `BLOCKED_PATH`, judged on the typed path before anything is
+  resolved. Then the real path: a page, or a folder on the way to it, that is a
+  link out of its root → `BLOCKED_PATH`; the folder is checked before the page
+  exists is answered, so a linked folder cannot even leak "no such page" about
+  the far side. Only `.mdx` under docs-site and `.md` under docs/agents are ever
+  opened — the extension is appended by the tool, never taken from the caller —
+  so `README`, `llms.txt`, `docs.json` and every image are `NOT_FOUND`, and a
+  misspelt page comes back with up to five near paths.
+- **Ranking** (one heading block is one unit): a term in the section heading 8,
+  in the page title 6, in the summary 2, in the body 1 per occurrence up to 2;
+  the whole phrase in the title 20, heading 12, body 6; coverage up to 4; the
+  block holding every term 2; and an area prior — support pages 4, the rest of
+  docs-site 2, docs/agents 0 — so a symptom finds the page whose steps to follow
+  before the developer note using the same words. At most three hits per page.
+  A light suffix stemmer is applied to both sides, so "update failed" finds
+  "Updates fail" and "updating".
+- **Caps.** `docs_search` answers under `LIST_MAX_CHARS`; `docs_read` under
+  `DOCS_READ_MAX_CHARS` (16,000), cutting the body itself at a line under 14,000
+  so the note that says what was left out — and which sections to ask for —
+  always fits. The index is built on first use and re-checked against the
+  files' sizes and mtimes every 30 s, so an update that replaced the pages under
+  a long-lived server is seen without a restart.
 
 ### Hermes plugins (Hermes only)
 `hermes_plugins_reload`

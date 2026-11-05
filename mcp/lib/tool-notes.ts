@@ -39,6 +39,14 @@ export const TOOL_NOTES: readonly ToolNote[] = [
     note: "A part it cannot read says \"unknown\" rather than failing the whole call.",
   },
   {
+    tool: "docs_search",
+    note: "When something on this box fails — an update, the network, a login, the assistant itself — docs_search the symptom first, then follow support/troubleshooting: `docs_read` the section a hit named and work through its steps in order; support/recovery, support/updating and support/faq are the other pages to reach for. The pages are the ones installed with this version of ClawBox, read offline, and a hit's `path` is exactly what `docs_read` takes.",
+  },
+  {
+    tool: "docs_read",
+    note: "A long page is cut under the cap and the note lists its sections: ask for one with `section`. Paths under docs-site (support/…, guides/…, technical/…) are the owner's manual; agents/… pages are the engineering notes behind the code, for when the manual does not say how something works.",
+  },
+  {
     tool: "system_stats",
     note: "An empty `cpu.perCore` means the per-core figures have not been measured yet (the first read after a restart has nothing to diff against), not that the cores are idle — call again for them.",
   },

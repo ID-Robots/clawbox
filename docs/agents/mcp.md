@@ -16,11 +16,18 @@ of them kept failing.
 
 - **`clawbox-mcp.ts`** — server entry: resolve edition → probe capabilities →
   register → connect. Tool families live in `mcp/tools/` (`orientation`,
-  `skills`, `ai`, `system`, `desktop`, `browser`, `media`, `email`, `coding`,
-  `coding-agent`, `memory`, `prime-radiant`, `local-ai`) and the shared
+  `docs`, `skills`, `ai`, `system`, `desktop`, `browser`, `media`, `email`,
+  `coding`, `coding-agent`, `memory`, `prime-radiant`, `local-ai`) and the shared
   machinery in `mcp/lib/` (`edition`, `guard`, `api`, `errors`, `schema`,
   `register`, `context`, `run-context`, `jobs`, `web`).
   - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
+    `docs_search`, `docs_read` (TASK-2177, `mcp/tools/docs.ts`: offline
+    full-text search and plain-text reading of the docs shipped with the
+    install — `docs-site/**/*.mdx` and `docs/agents/*.md` under the install
+    folder — path-guarded to those two roots: `..`, absolute paths, hidden
+    segments and links out of a root are `BLOCKED_PATH`, and only `.mdx`/`.md`
+    are ever opened; the field guide and the tool notes tell the agent to
+    `docs_search` a symptom first and follow `support/troubleshooting`),
     `system_stats`, `system_info`, `system_power`, `disk_usage`, `disk_cleanup`,
     `update_check`, `logs_tail`, `screen_capture`, `backup_status`,
     `telegram_status`, `email_send`, `wifi_scan`, `wifi_status`, `vnc_status`,

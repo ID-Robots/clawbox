@@ -18,11 +18,13 @@ const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
  * `clawbox_context`'s output cap. 24,000 until TASK-1080 moved the caveats out
  * of the tool descriptions and into the tool notes it now serves too; the
  * widest box (a dual install with every family registered, the coding family
- * too) came to about 27,600. The cap truncates the TAIL — the browser guide
- * goes first — so
+ * too) came to about 27,600 then, and 32,000 held it until TASK-2177 added the
+ * docs tools' section and house rule to the guide and their two notes, with
+ * the widest OpenClaw box measured at about 32,600. The cap truncates the TAIL
+ * — the browser guide goes first — so
  * src/tests/unit/clawbox-field-guide-edition.test.ts holds every box under it.
  */
-export const FIELD_GUIDE_MAX_CHARS = 32_000;
+export const FIELD_GUIDE_MAX_CHARS = 36_000;
 
 // The OpenClaw answer to CURRENT_CHAT_MODEL_NOTE, and it is the opposite one.
 // The chat header's pick is POSTed to /setup-api/chat/model, which writes

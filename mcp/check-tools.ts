@@ -275,6 +275,10 @@ const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
  */
 const UNGATED_COMMON = [
   "memory_shard_status", "local_ai_status", "clawbox_ai_usage",
+  // The docs shipped with the install (TASK-2177): a box whose docs folder is
+  // missing answers "not installed" from the tool, never with a missing tool —
+  // the agent needs them most on the box where something has gone wrong.
+  "docs_search", "docs_read",
   // The Anthropic account pool's state (TASK-902): "no account connected" is
   // an answer, and a queue needs it most on the box where every one is limited.
   "anthropic_accounts",

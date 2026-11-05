@@ -55,6 +55,9 @@ export const CLAWBOX_READ_ONLY_TOOLS = [
   "coding_team_status",
   "device_status",
   "disk_usage",
+  // The docs shipped with the install, searched and read offline (TASK-2177).
+  "docs_read",
+  "docs_search",
   "email_list",
   "email_read",
   "glob",
