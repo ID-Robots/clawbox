@@ -1420,9 +1420,12 @@ describe("PrimeRadiantApp — Bulgarian (B10)", () => {
   it("words a review item's evidence in Bulgarian, keeping the judge's own reason as written", async () => {
     reviewItems = [{
       ...REVIEW_ITEM,
-      evidence: [{ kind: "judge", verdict: "contradiction", note: "1.5 kg against 1.2 kg", source: "flash" }],
+      evidence: [
+        { kind: "judge", verdict: "contradiction", note: "1.5 kg against 1.2 kg", source: "flash" },
+        { kind: "source-changed", note: "Its document ~/Documents/Acme/faq.txt changed.", source: "~/Documents/Acme/faq.txt" },
+      ],
       candidates: [
-        { ...REVIEW_ITEM.candidates[0], evidence: [{ kind: "claim", page: "entities/acme-widgets.md" }] },
+        { ...REVIEW_ITEM.candidates[0], evidence: [{ kind: "claim", page: "entities/acme-widgets.md" }, { kind: "document-says", note: "The X200 weighs 1.5 kg.", source: "~/Documents/Acme/faq.txt" }] },
         { ...REVIEW_ITEM.candidates[1], evidence: [{ kind: "raised-by", source: "assistant" }] },
       ],
     }];
@@ -1430,6 +1433,8 @@ describe("PrimeRadiantApp — Bulgarian (B10)", () => {
     await openTab("review");
     const item = await screen.findByTestId("prime-radiant-review-item");
     expect(item).toHaveTextContent("Преценка на модела · противоречие · 1.5 kg against 1.2 kg · Модел Flash");
+    expect(item).toHaveTextContent("Документът е променен · Документът му ~/Documents/Acme/faq.txt е променен. · ~/Documents/Acme/faq.txt");
+    expect(item).toHaveTextContent("Документът сега казва · The X200 weighs 1.5 kg. · ~/Documents/Acme/faq.txt");
     const [first, second] = within(item).getAllByTestId("prime-radiant-review-candidate");
     expect(within(first).getByText("Факт")).toBeInTheDocument();
     expect(within(second).getByText("Повдигнато от · асистента")).toBeInTheDocument();

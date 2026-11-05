@@ -226,14 +226,16 @@ function evidenceWho(t: T, who: string): string {
  * The notes the server words in English for a person to read, by their one
  * variable part — and only those: a source's note is a quote from the
  * document, which may well begin "added by …", so an edit's note is matched
- * whole with the server's own two names (edit.ts), and "Expected by" only on
- * a golden question's expected answer (golden-score.ts).
+ * whole with the server's own two names (edit.ts), "Expected by" only on a
+ * golden question's expected answer (golden-score.ts) and "Its document …
+ * changed." only on a changed source (nightly.ts).
  */
 const EVIDENCE_NOTES: ReadonlyArray<{ re: RegExp; key: string; param: string; kind?: string }> = [
   { re: /^added by (owner|assistant)$/, key: "primeRadiant.evidence.addedBy", param: "by" },
   { re: /^stated by (owner|assistant)$/, key: "primeRadiant.evidence.statedBy", param: "by" },
   { re: /^edited by (owner|assistant)$/, key: "primeRadiant.evidence.editedBy", param: "by" },
   { re: /^Expected by (.+)$/, key: "primeRadiant.evidence.expectedBy", param: "owner", kind: "golden-expected" },
+  { re: /^Its document (.+) changed\.$/, key: "primeRadiant.evidence.documentChanged", param: "document", kind: "source-changed" },
 ];
 
 /**
