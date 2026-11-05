@@ -122,6 +122,24 @@ import {
 } from "./writer";
 
 /** Model calls in flight at once, by default (the settings file may say otherwise). */
+/** Steps a job's write phase is cut into at least, so "written" moves while it runs (B8). */
+export const PROGRESS_STEPS = 8;
+/** Fewest files one model call carries for the sake of progress: below it the prompt's overhead outweighs the step. */
+export const MIN_PROGRESS_BATCH = 4;
+
+/**
+ * Files per writer call for a job of `files` documents: small enough that the
+ * job settles in about {@link PROGRESS_STEPS} steps (each batch commits and
+ * counts as written when it lands, so one batch for a whole small import
+ * read "0 of 14 written" until the end), never under
+ * {@link MIN_PROGRESS_BATCH} nor over {@link WRITER_BATCH_SIZE}. The writer
+ * answers each document on its own, so the pages are the same either way;
+ * the batches run in parallel.
+ */
+export function progressBatchSize(files: number): number {
+  return Math.min(WRITER_BATCH_SIZE, Math.max(MIN_PROGRESS_BATCH, Math.ceil(files / PROGRESS_STEPS)));
+}
+
 export const DEFAULT_PARALLEL = DEFAULT_INGEST_PARALLEL;
 export const MAX_PARALLEL = MAX_INGEST_PARALLEL;
 /** How long the job's retry queue waits before its second round. */
@@ -462,7 +480,6 @@ async function runJob(
   const settings = readSettings();
   const rates = deps.costRates ?? effectiveCostRates();
   const parallel = Math.min(MAX_PARALLEL, Math.max(1, Math.floor(deps.parallel ?? settings.ingest.parallel)));
-  const batchSize = Math.min(WRITER_BATCH_SIZE, Math.max(1, Math.floor(deps.batchSize ?? WRITER_BATCH_SIZE)));
   const maxBatchChars = deps.maxBatchChars ?? MAX_BATCH_CHARS;
   const scratch = path.join(primeRadiantRoot(), "tmp", job.id);
   const signal = live.abort.signal;
@@ -533,6 +550,7 @@ async function runJob(
     const files = input.kind === "retry" ? scan.files : await documentsOf(scan.files, skips, { machineText: input.kind === "folders", signal });
     job.total = files.length;
     job.skips = skips;
+    const batchSize = Math.min(WRITER_BATCH_SIZE, Math.max(1, Math.floor(deps.batchSize ?? progressBatchSize(files.length))));
     job.notes.push(...scan.notes);
     const s = scan.skips;
     if (s.unsupported > 0) job.notes.push(`${s.unsupported} file(s) of a kind Prime Radiant does not read were left out.`);

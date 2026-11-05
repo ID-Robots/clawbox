@@ -19,6 +19,7 @@ import {
   getIngestJob,
   ingestFinished,
   listIngestJobs,
+  progressBatchSize,
   safeJobId,
   startIngest,
   stopIngest,
@@ -353,7 +354,25 @@ describe("an ingest job", () => {
     expect(subscribeIngest("ing-000000000000", () => undefined)).toBeNull();
   });
 
-  it("runs one job at a time", async () => {
+  it("moves \"written\" while a small import's write phase runs, not only at its end (B8)", async () => {
+    for (let i = 0; i < 14; i++) write(`doc-${String(i).padStart(2, "0")}.md`, `Acme document ${i} says the depot ${i} opens at ${i + 6} o'clock.`);
+    const model = fakeClient(undefined, 20);
+    const job = await startIngest({ kind: "folders", folders: [docs] }, deps({ client: model.client }));
+    const done: number[] = [];
+    const off = subscribeIngest(job.id, (e) => { if (e.type === "job" && e.job.phase === "write") done.push(e.job.done); });
+    await ingestFinished(job.id);
+    off?.();
+    // Batches of four: each lands, commits and counts on its own.
+    expect(model.prompts.map((p) => readWriterItems(p.user)?.length)).toEqual([4, 4, 4, 2]);
+    expect(done.filter((d) => d > 0 && d < 14).length).toBeGreaterThanOrEqual(2);
+    expect(getIngestJob(job.id, vault)).toMatchObject({ total: 14, done: 14 });
+  });
+
+  it("cuts a write phase into about eight steps, four to fifty files each", () => {
+    expect([1, 14, 17, 40, 100, 400, 5000].map(progressBatchSize)).toEqual([4, 4, 4, 5, 13, 50, 50]);
+  });
+
+    it("runs one job at a time", async () => {
     write("a.md", "Doc a.");
     const slow = fakeClient(undefined, 100);
     const first = await startIngest({ kind: "folders", folders: [docs] }, deps({ client: slow.client }));
