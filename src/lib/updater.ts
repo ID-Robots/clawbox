@@ -2654,7 +2654,8 @@ async function stopGatewayUnit(): Promise<UnitJobOutcome> {
         timeoutMs: GATEWAY_STOP_CLIENT_MS,
         pollMs: GATEWAY_WAIT_INTERVAL_MS,
       });
-      const now = after.state ? describeUnitState(after.state) : "unreadable";
+      const state = after.kind === "returned" ? null : after.state;
+      const now = state ? describeUnitState(state) : "unreadable";
       if (after.kind === "settled" && unitIsStopped(after.state)) {
         console.log(
           `[Updater] another job for clawbox-gateway replaced the update's stop; the unit ended ${now}, which is what the stop was for`,
