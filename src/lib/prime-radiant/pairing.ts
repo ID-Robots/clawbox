@@ -33,7 +33,12 @@
  *     ones). The later claim is current.
  *  4. DIFFERENT SUBJECTS by words (subject.ts): what the claims are about
  *     differs once template words are out ("the net amount of credit note
- *     draft A" against "of credit note draft B").
+ *     draft A" against "of credit note draft B"). A claim whose subject is
+ *     the document that states it is about what it says, not about the
+ *     document's name ("Acme Widgets Ltd Employee Handbook grants … 25 working
+ *     days" and "Acme Widgets Ltd Annual Leave Policy HR-07 grants … 20" are
+ *     one subject; two policies of one company saying different things are
+ *     two).
  *
  * What none of these parts goes to the judge as before. Errs towards a pair:
  * an unknown page, a claim with no period, a title with no identifiers part

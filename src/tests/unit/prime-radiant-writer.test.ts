@@ -176,6 +176,18 @@ describe("self-contained claims", () => {
     expect(system).toMatch(/that item's own text only/);
   });
 
+  // TASK-2188: "Acme Widgets Ltd Employee Handbook grants … 25 working days" against "Acme Widgets Ltd Annual Leave
+  // Policy HR-07 grants … 20 working days" — two documents' names as subjects, and the planted contradiction was never judged.
+  it("tells the model a fact's subject is the real-world thing, never the document that states it", () => {
+    const { system } = buildWriterPrompt(items);
+    expect(system).toMatch(/subject of a fact is the real-world thing it is about — the company, team, product, place or person — never the document that states it/);
+    expect(system).toMatch(/Write "Every driver at Bluefield Haulage must rest for 11 hours between two shifts", never "The Bluefield Haulage Fleet Safety Manual requires/);
+    expect(system).toMatch(/never [^.]*"According to the manual, …"/);
+    expect(system).toMatch(/Only a fact about the document itself \(its version, date, code or owner\) has the document as its subject/);
+    // The example is made up and shares nothing with the board test's Acme documents, so a board run shows the rule generalises.
+    expect(system).not.toMatch(/Acme|annual leave|working days|pallet|remote/i);
+  });
+
   it("repairs a fact that opens with a stand-in for the page, and drops one that could mean anyone", () => {
     const book: WriterItem = { i: 0, path: "~/Books/art-of-war.txt", kind: "txt", text: "The Project Gutenberg eBook of The Art of War. EBook #132. The oldest military treatise in the world." };
     const answer = JSON.stringify([
