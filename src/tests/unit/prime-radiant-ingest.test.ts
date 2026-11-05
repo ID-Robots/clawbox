@@ -30,6 +30,8 @@ import { insertFiles, insertJob, readCosts, readDeadLetter, readFiles, type Inge
 import { deadLetterRoot } from "@/lib/prime-radiant/ingest-dead-letter";
 import { emptySkipCounts } from "@/lib/prime-radiant/ingest-exclude";
 import { writeSettings } from "@/lib/prime-radiant/settings";
+import { resolveReviewItem } from "@/lib/prime-radiant/review";
+import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { readWriterItems, type WriterItem } from "@/lib/prime-radiant/writer";
@@ -215,6 +217,27 @@ describe("an ingest job", () => {
     expect(job).toMatchObject({ done: 0, skipped: 1, pages: 0 });
     expect((await readPage("concepts/acme-a.md", vault))?.text).toContain("Verified body.");
     expect(readFiles(vault, job.id)[0]).toMatchObject({ status: "skipped", error: "its page is verified" });
+
+    // Never silently: the job's row counts it, its notes say it, and Review asks the owner.
+    expect(job.skips.verified).toBe(1);
+    expect(job.notes.join(" ")).toMatch(/1 changed document\(s\) behind a page you verified were left out.*concepts\/acme-a\.md/);
+    const items = listReviewItems(vault, { kind: "verified-touch" }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ claimId: null, pages: ["concepts/acme-a.md"], runId: null, status: "open" });
+    const said = items[0].evidence.map((e) => `${e.kind}: ${e.note ?? ""} ${e.source ?? ""}`).join("\n");
+    expect(said).toContain(label);
+    expect(said).toMatch(/left the page as you verified it\. Dismiss keeps it so\. To take what it says now, add its folder to the folders read each night/);
+    expect(said).toMatch(/document-says: Acme a is a synthetic document\./);
+
+    // The same changed document read again asks once; dismissed, it is not asked again until it changes once more.
+    await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(listReviewItems(vault, { kind: "verified-touch" }).items).toHaveLength(1);
+    await resolveReviewItem(items[0].id, { action: "dismiss" }, { by: "owner", vault });
+    await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(listReviewItems(vault, { kind: "verified-touch", status: "open" }).items).toHaveLength(0);
+    write("a.md", "Acme pricing notes, revised.");
+    await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(listReviewItems(vault, { kind: "verified-touch", status: "open" }).items).toHaveLength(1);
   });
 
   it("gives two facts that slug alike on one page distinct claim ids instead of a lint refusal", async () => {

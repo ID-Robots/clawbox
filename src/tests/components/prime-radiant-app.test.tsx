@@ -102,7 +102,7 @@ const JOB_BASE = {
   kind: "folders", folders: ["~/acme-docs"], total: 3, done: 0, failed: 0, skipped: 0, duplicates: 0, pages: 0, commits: 0, calls: 0,
   usdEstimate: 0, createdAt: "2026-01-06T10:00:00.000Z", updatedAt: "2026-01-06T10:00:00.000Z", finishedAt: null, error: null, notes: [],
   retryOf: null, requeued: 0, deadLetter: 0,
-  skips: { codeProject: 0, excludedFolder: 0, boilerplate: 0, temp: 0, machineText: 0, tooLarge: 0, unsupported: 0 },
+  skips: { codeProject: 0, excludedFolder: 0, boilerplate: 0, temp: 0, machineText: 0, tooLarge: 0, unsupported: 0, verified: 0 },
 };
 const NO_SKIPS = JOB_BASE.skips;
 /** What the fake preview route answers for the picked folders. */
@@ -1262,10 +1262,13 @@ describe("PrimeRadiantApp", () => {
 
   it("shows what a running and a finished job left out, by reason", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
-    ingestJobs = [{ ...DEAD_JOB, skips: { ...NO_SKIPS, temp: 3 } }];
+    ingestJobs = [{ ...DEAD_JOB, skips: { ...NO_SKIPS, temp: 3, verified: 1 } }];
     await mount();
     await openTab("ingest");
-    expect(await screen.findByTestId("prime-radiant-ingest-job-skips")).toHaveTextContent("Temporary or partial files: 3");
+    // A changed document behind a verified page is never left out silently.
+    expect(await screen.findByTestId("prime-radiant-ingest-job-skips")).toHaveTextContent(
+      "Temporary or partial files: 3 · Changed documents of pages you verified (see Review): 1",
+    );
     await pickFolder();
     fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
     const running = await screen.findByTestId("prime-radiant-ingest-running");

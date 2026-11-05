@@ -2671,6 +2671,7 @@ const table: Record<string, string> = {
   "primeRadiant.ingest.skip.temp": "Временни или непълни файлове: {n}",
   "primeRadiant.ingest.skip.tooLarge": "Твърде големи за четене: {n}",
   "primeRadiant.ingest.skip.unsupported": "Други видове файлове: {n}",
+  "primeRadiant.ingest.skip.verified": "Променени документи на страници, които сте потвърдили (вижте „За преглед“): {n}",
   "primeRadiant.ingest.source.retry": "Нов опит от по-ранно внасяне",
   "primeRadiant.ingest.source.upload": "Пуснати файлове",
   "primeRadiant.ingest.start": "Добави тези папки",

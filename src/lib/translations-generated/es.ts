@@ -2671,6 +2671,7 @@ const table: Record<string, string> = {
   "primeRadiant.ingest.skip.temp": "Archivos temporales o incompletos: {n}",
   "primeRadiant.ingest.skip.tooLarge": "Demasiado grandes para leer: {n}",
   "primeRadiant.ingest.skip.unsupported": "Otros tipos de archivo: {n}",
+  "primeRadiant.ingest.skip.verified": "Documentos cambiados de páginas que verificaste (ver «Revisar»): {n}",
   "primeRadiant.ingest.source.retry": "Reintento de una importación anterior",
   "primeRadiant.ingest.source.upload": "Archivos soltados",
   "primeRadiant.ingest.start": "Añadir estas carpetas",

@@ -7,7 +7,10 @@
  *                beside the vault (`<root>/dream-worktree`), so the owner's
  *                daytime operations keep committing to `main` meanwhile;
  *   2. ingest    the folders the settings name, into the branch (new and
- *                changed documents only: the ingest's hash-first dedupe);
+ *                changed documents only: the ingest's hash-first dedupe); a
+ *                changed document behind a verified page rewrites that page
+ *                on the branch keeping its verified claims — never on
+ *                `main`: the gate (6) holds the night on it;
  *   3. contradictions  claims on every page changed since the last finished
  *                comparison — the branch's and what reached `main` by day —
  *                (every claim, the first night) against their 5 nearest
@@ -27,7 +30,9 @@
  *                commits to it); an ERROR holds the night and becomes a
  *                `lint` review item;
  *   6. gate      a verified page the branch touched holds the night and
- *                becomes a `verified-touch` review item;
+ *                becomes a `verified-touch` review item (one per changed
+ *                verified claim, else one for the page, naming its changed
+ *                documents and what the branch adds and drops);
  *   7. merge     when lint is green and the gate is clean: `main` takes the
  *                branch (fast-forward, else one merge commit), the result is
  *                linted for the blocking rules once more (and put back if it
@@ -67,6 +72,7 @@ import { runGoldenScore, type GoldenScoreResult } from "./golden-score";
 import type { GoldenHit } from "./golden";
 import { getIngestJob, ingestFinished, IngestBusyError, startIngest } from "./ingest";
 import { isOwnOutput } from "./ingest-sources";
+import { readFiles } from "./ingest-store";
 import { lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, vaultDir } from "./paths";
 import { adoptPluginPages, repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
@@ -254,11 +260,34 @@ function lintItem(vault: string, f: LintFinding, branch: string, runId: string, 
   ).created;
 }
 
-function touchItem(vault: string, t: VerifiedTouch, branch: string, runId: string, at: string): number {
+/** The facts a page-level touch item lists, each way (what the branch adds, what it drops). */
+const MAX_TOUCH_FACTS = 8;
+
+/**
+ * The gate's question about one verified page. A page whose verified claims
+ * the branch left as they are (the nightly import keeps them when the page's
+ * document changed) is ONE item about the page — naming the changed
+ * `documents` and listing what the branch adds and drops, since main still
+ * shows the page as it was; the owner takes it by dismissing the item and
+ * merging the night. A changed or removed verified claim is an item each.
+ */
+function touchItem(vault: string, t: VerifiedTouch, branch: string, runId: string, at: string, documents: readonly string[] = []): number {
   let raised = 0;
   const note = t.deleted ? `The nightly branch ${branch} deletes this verified page.` : `The nightly branch ${branch} changes this verified page.`;
   if (t.claims.length === 0) {
-    if (addReviewItem(vault, { kind: "verified-touch", pages: [t.path], evidence: [{ kind: "gate", note, source: branch }], dedupeKey: `touch:${branch}:${t.path}`, runId }, at).created) {
+    // A stamp on the page as a whole vouched for its old text: the night's version does not carry it (writer.ts).
+    const kept = t.pageVerified ? "It was verified as a whole; the night's version is not, until you verify it again." : "Its verified facts stay as they are.";
+    const evidence = [
+      {
+        kind: "gate",
+        note: t.deleted ? note : `${note} ${kept} To take the change, dismiss this item, then Merge the night in the nightly card.`,
+        source: branch,
+      },
+      ...documents.map((label) => ({ kind: "source-changed", note: `Its document ${label} changed.`, source: label })),
+      ...t.added.slice(0, MAX_TOUCH_FACTS).map((text) => ({ kind: "nightly-proposal", note: text, source: branch })),
+      ...t.removed.slice(0, MAX_TOUCH_FACTS).map((text) => ({ kind: "nightly-removes", note: text, source: branch })),
+    ];
+    if (addReviewItem(vault, { kind: "verified-touch", pages: [t.path], evidence, dedupeKey: `touch:${branch}:${t.path}`, runId }, at).created) {
       raised++;
     }
     return raised;
@@ -283,6 +312,21 @@ function touchItem(vault: string, t: VerifiedTouch, branch: string, runId: strin
     if (created) raised++;
   }
   return raised;
+}
+
+/** The documents tonight's import wrote each page from, by page. Empty when it did not run or its rows cannot be read. */
+function ingestDocuments(vault: string, ingest: NightlySummary["ingest"]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  if (!("jobId" in ingest)) return out;
+  try {
+    for (const row of readFiles(vault, ingest.jobId)) {
+      if (row.status !== "done") continue;
+      for (const page of row.pages) out.set(page, [...(out.get(page) ?? []), row.label]);
+    }
+  } catch {
+    // The item still names the page; the documents are a courtesy.
+  }
+  return out;
 }
 
 /**
@@ -426,7 +470,8 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       if (folders.length === 0) summary.ingest = { skipped: "no_folders" };
       else {
         try {
-          const job = await startIngest({ kind: "folders", folders }, { vault: wt, client: deps.client, costRates: rates });
+          // A verified page whose document changed is written on the branch, its verifications kept: the gate (6) holds the night on it.
+          const job = await startIngest({ kind: "folders", folders }, { vault: wt, client: deps.client, costRates: rates, verifiedPages: "update" });
           await ingestFinished(job.id);
           const done = getIngestJob(job.id, vault) ?? job;
           summary.ingest = { jobId: done.id, status: done.status, pages: done.pages, failed: done.failed };
@@ -600,7 +645,14 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     // 6. gate
     const touches = await verifiedTouches(vault, VAULT_MAIN_BRANCH, branch);
     summary.gate.touched = touches.map((t) => t.path);
-    for (const t of touches) summary.reviewItems.raised += touchItem(vault, t, branch, run.id, now().toISOString());
+    const documents = touches.length > 0 ? ingestDocuments(vault, summary.ingest) : new Map<string, string[]>();
+    for (const t of touches) summary.reviewItems.raised += touchItem(vault, t, branch, run.id, now().toISOString(), documents.get(t.path));
+    if (touches.length > 0) {
+      const shown = touches.slice(0, 5).map((t) => t.path).join(", ");
+      notes.push(
+        `The night is held: it changes ${touches.length} page(s) you verified (${shown}${touches.length > 5 ? ` and ${touches.length - 5} more` : ""}). Settle their items in Review, then Merge the night.`,
+      );
+    }
 
     changed = await changedPaths(vault, VAULT_MAIN_BRANCH, branch);
     summary.changedCount = changed.length;

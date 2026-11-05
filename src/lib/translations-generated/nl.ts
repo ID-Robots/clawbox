@@ -2671,6 +2671,7 @@ const table: Record<string, string> = {
   "primeRadiant.ingest.skip.temp": "Tijdelijke of onvolledige bestanden: {n}",
   "primeRadiant.ingest.skip.tooLarge": "Te groot om te lezen: {n}",
   "primeRadiant.ingest.skip.unsupported": "Andere soorten bestanden: {n}",
+  "primeRadiant.ingest.skip.verified": "Gewijzigde documenten van pagina's die je hebt bevestigd (zie 'Beoordelen'): {n}",
   "primeRadiant.ingest.source.retry": "Nieuwe poging uit een eerdere import",
   "primeRadiant.ingest.source.upload": "Neergezette bestanden",
   "primeRadiant.ingest.start": "Deze mappen toevoegen",
