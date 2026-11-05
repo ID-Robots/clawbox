@@ -35,7 +35,7 @@
  * screen reader still heard in English (UI sweep 2026-09-07, shell-7).
  */
 export const NOTIFY_ACTION_TARGETS = {
-  settings: { email: "settings.email", ai: "settings.providers" },
+  settings: { email: "settings.email", ai: "settings.providers", harness: "settings.harness" },
 } as const;
 
 type NotifyActionApp = keyof typeof NOTIFY_ACTION_TARGETS;
@@ -61,6 +61,8 @@ export type NotifyTranslate = (key: string, params?: Record<string, string | num
 export const NOTIFY_ACTION_FOCUS = {
   /** The Anthropic accounts, behind the disclosure on the Providers list's Anthropic row. */
   anthropicAccounts: { open: "settings", section: "ai" },
+  /** The Scheduled job alerts card, below the harness picker and the background jobs. */
+  jobAlerts: { open: "settings", section: "harness" },
 } as const;
 
 export type NotifyActionFocus = keyof typeof NOTIFY_ACTION_FOCUS;
@@ -76,6 +78,14 @@ export type NotifyAction = {
 
 /** The email queue's destination. */
 export const OPEN_EMAIL_SETTINGS: NotifyAction = { open: "settings", section: "email" };
+
+/**
+ * The scheduled-job alerts' destination (src/lib/job-alerts.ts): Settings →
+ * Harness, scrolled to the card that lists the jobs. The card sits under the
+ * harness tiles and four more panels — below the fold of a desktop window —
+ * so the section alone would land the owner on the harness picker.
+ */
+export const OPEN_JOB_ALERTS_SETTINGS: NotifyAction = { open: "settings", section: "harness", focus: "jobAlerts" };
 
 /**
  * Settings → Providers with the Anthropic accounts open and scrolled into view

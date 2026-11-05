@@ -775,6 +775,18 @@ export async function register() {
     console.error('[instrumentation] Could not load the OpenClaw database maintenance scheduler:', err instanceof Error ? err.message : err)
   }
   try {
+    // The scheduled-job alerts (src/lib/job-alerts.ts): every two minutes the
+    // active harness's own record of its scheduled jobs is read, and the owner
+    // is told — desktop notice and Telegram — when one fails, keeps being
+    // skipped or does not run when it is due. The owner's switch is in
+    // Settings → Harness and is read at every check.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const jobAlertsScheduler = require('./lib/job-alerts-scheduler')
+    jobAlertsScheduler.start()
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the scheduled-job alerts:', err instanceof Error ? err.message : err)
+  }
+  try {
     // The app servers that were on the desktop before the reboot (see
     // restartServerAppsAtBoot). They used to be restarted by a
     // `clawbox-app-<id>.service` the OWNER hand-wrote, uncapped and outside

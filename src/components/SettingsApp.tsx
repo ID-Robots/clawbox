@@ -44,6 +44,7 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import JobAlertsPanel from "./JobAlertsPanel";
 import DbMaintenancePanel from "./DbMaintenancePanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
 import PathGuardPanel from "./PathGuardPanel";
@@ -655,6 +656,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // then cleared, so a later visit to Providers is not the same ask again.
   const [showAnthropicAccounts, setShowAnthropicAccounts] = useState(false);
   const anthropicAccountsShown = useCallback(() => setShowAnthropicAccounts(false), []);
+  // The same ask for the Scheduled job alerts card on Harness (the job alert's
+  // "Open Settings → Harness"): spent once the card has scrolled itself into view.
+  const [showJobAlerts, setShowJobAlerts] = useState(false);
+  const jobAlertsShown = useCallback(() => setShowJobAlerts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
   // Which of System's two views is open (System → Users or the device's
@@ -748,6 +753,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // Providers list has not got to yet.
     monitorsLink.current = false;
     setShowAnthropicAccounts(false);
+    setShowJobAlerts(false);
     if (next === "remote" && requireLoginFor("remote")) return;
     // The old Local Models section is part of Local AI now.
     if (next === "localModels") next = "localAi";
@@ -787,6 +793,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // this one on another section, is ignored like an unknown section — and
       // every link replaces the last one's ask, as it does the section.
       setShowAnthropicAccounts(next === "ai" && focus === "anthropicAccounts");
+      setShowJobAlerts(next === "harness" && focus === "jobAlerts");
     };
     const requestClawAiOffer = () => {
       monitorsLink.current = false;
@@ -6292,6 +6299,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 unless CLAWBOX_COMPUTER_USE_SETTING=1 (its route is a 404). */}
             <ComputerUsePanel />
             <BackgroundJobsPanel />
+            {/* The scheduled-job alerts (TASK-2179): the switch, and which of
+                the assistant's scheduled jobs are failing — where the alert's
+                desktop notice and Telegram message send the owner. */}
+            <JobAlertsPanel show={showJobAlerts} onShown={jobAlertsShown} />
 
             {/* Desktop environment and Performance mode, moved here from
                 System at the owner's request (2026-09-09): set once and then
