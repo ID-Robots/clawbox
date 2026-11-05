@@ -4,9 +4,16 @@ icon: "brain"
 summary: "Turn your notes, your past conversations and folders of your own documents into something the assistant can search — on the box or in the ClawBox AI cloud."
 ---
 
-**Memory Shard** reads what your box already remembers — its notes and your past
-conversations — and turns it into a searchable index the assistant can draw on. Point it
-at folders of your own and it indexes those too.
+**Memory Shard** reads what your box already remembers — the assistant's own memory
+notes — and turns it into a searchable index the assistant can draw on. Point it at folders
+of your own and it indexes those too.
+
+<Note>
+On the OpenClaw edition the index holds the assistant's memory files, not a copy of every
+past chat: indexing every conversation again made the assistant's databases grow without
+end. A box whose owner had set this up differently keeps that setting; on the others the
+index was rebuilt once after the update to 4.3.
+</Note>
 
 Open it from the **Memory Shard** icon on the desktop.
 
@@ -53,6 +60,10 @@ edition**:
 
 <Frame caption="Memory Shard indexing through the ClawBox AI cloud">
   <img src="/images/memory-shard.webp" alt="The Memory Shard window: the memory index card marked Cloud and Healthy, with files, chunks, sources, index size, Index now and Full reindex buttons, and the automatic indexing schedule below." />
+</Frame>
+
+<Frame caption="The same card on a box that embeds on the device">
+  <img src="/images/4.3/memory-shard.png" alt="Memory Shard on a ClawBox: the memory index card, embedding on the device with qwen3-embedding-0.6b and marked Healthy, with its file, chunk and source counts, Index now and Full reindex, and indexing every day at 03:00" />
 </Frame>
 
 **The cloud is the default** wherever your plan covers it. A box that is connected to
@@ -126,6 +137,9 @@ schedule and runs setup again, keeping your folders, the model and the existing 
 What comes back from your own documents is information for the assistant to read, never
 instructions for it to follow. That rule is written into the tool itself.
 </Note>
+
+With Memory Shard switched on, [Prime Radiant](/guides/prime-radiant)'s **Pages** view can
+search inside the wiki's pages as well.
 
 ## Where it lives
 

@@ -25,7 +25,7 @@ startup from the device's edition lock.
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Loading a Hermes plugin added after boot | — | `hermes_plugins_reload` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own |
-| Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
+| Coordinate browser control (`browser_click`/`type`/`fill`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Coding agent (`coding_*`) | only while you have it switched on in the Coding Agent app | same |
 | Memory Shard status, Local AI, ClawBox AI usage | yes | yes |
 | Field guide (`clawbox_context`) | the OpenClaw sections of `Clawbox.md` | the Hermes sections — identity, its own skills and model, its dashboard |
@@ -62,9 +62,10 @@ installed with that very version — `docs_search`, then `docs_read` — and fol
 | `system_power` | Restart or shut down — requires explicit confirmation and a reason |
 | `disk_usage` / `disk_cleanup` | Space report and reclaim |
 | `update_check` | Reports whether an update is waiting. It never installs one |
+| `update_run` | Asks to install the waiting update — only when you asked for it in the conversation. Nothing starts until **you** tap **Update** on the confirmation the box shows on the desktop and in Telegram; the assistant cannot start a system or OpenClaw update on its own |
 | `logs_tail` / `screen_capture` | Recent logs, screenshot of the desktop |
 | `wifi_scan` / `wifi_status` / `vnc_status` | Network and remote-display state |
-| `backup_status` / `backup_list` / `backup_now` | ClawKeep backups |
+| `backup_status` / `backup_list` / `backup_now` | ClawKeep backups (`backup_now` on the OpenClaw edition only) |
 | `telegram_status` | Telegram connection state |
 | `preferences_get` / `preferences_set` | Persistent user preferences |
 
@@ -75,6 +76,7 @@ startup — if the device cannot support one, it is simply not offered.
 | Tool | Purpose |
 |---|---|
 | `ui_open_app` / `ui_list_apps` / `ui_notify` | Open desktop apps, list them, send a desktop notification |
+| `ui_open_card` | Open a card in your chat for you to fill in — today the one card **A new app for your desktop** (name, what it should do, which starter, or an existing project and its next run) |
 | `app_search` / `app_install` | The App Store — **OpenClaw edition only** |
 | `app_uninstall` | Remove an installed app |
 | `webapp_create` / `webapp_update` | Single-file HTML webapps installed straight onto the desktop |
@@ -136,11 +138,18 @@ tool — when asked "which model are you". On the OpenClaw edition the header wr
 default for every session, so there the default is the chat's model.
 
 ### Browser (drives the real desktop Chromium — visible in Remote Desktop)
+Since 4.3 this is **the** browser on the box's desktop — the one you see in **Agent Browser**,
+with one profile — not a hidden browser of its own. Sites you signed in to there are signed in
+for the assistant too, you can watch it work, and it opens and closes only its own tabs.
+
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close` —
 both editions.
 
-`browser_click` · `browser_type` · `browser_keypress` · `browser_scroll` —
-**OpenClaw edition only**.
+`browser_click` · `browser_type` · `browser_fill` · `browser_keypress` · `browser_scroll` —
+**OpenClaw edition only**. `browser_view_local` exists only inside a Coding Agent run.
+
+`describe_image` (both editions) gives a written description of a local picture through the
+box's vision model.
 
 `browser_type` reports a character count, never the text — it is the tool that
 types passwords.
@@ -165,6 +174,9 @@ harness is ready).
 | `coding_project_status` | Your projects in one table: how to name each to a run, last commit, desktop or server app, latest run, and how many runs are working, waiting, unmerged or left running |
 | `coding_team_run` / `coding_team_status` / `coding_team_stop` | The same for a team of runs |
 | `coding_secret_list` | Which secrets a run may use — names only |
+| `coding_project_import` | Bring an existing project into your project folder — clone one of your GitHub repositories or copy a folder already on the box — only when you ask |
+| `coding_settings_get` / `coding_settings_set` | Read and change the coding team's settings |
+| `app_publish` | Publish a project that has a `clawbox.json` to the ClawBox Store under this box's account — only when you ask, after confirming the version; until publishing is open to your account it says so |
 
 A typical exchange: the agent checks `coding_project_status`, starts `coding_agent_run`, tells you
 it is running and stops. When you change your mind mid-run it sends `coding_run_message` rather
@@ -180,15 +192,19 @@ own signed-in browser session, so the agent points you at the button instead.
 </Note>
 
 ### Email — both editions
-`email_send` · `email_list` · `email_read`
+`email_send` · `email_list` · `email_read` · `email_connect`
+
+`email_connect` connects your mail account from the chat — only with an address and app
+password you typed yourself, never ones read from a page, file or email.
 
 `email_send` does not put a message on the wire while **Ask me before sending** is
 on, which is the default: it queues a draft that you approve in the chat or in
-**Settings → Email**. Turn that switch off and the same tool sends directly. See
+**Settings → Channels → Email**. Turn that switch off and the same tool sends directly. See
 [Messaging channels](/guides/messaging-channels#email).
 
 ### Pictures and audio — both editions
-`generate_image` · `generate_audio`
+`generate_image` · `generate_audio` — and `image_generate`, registered only on a box that
+**cannot** draw, so the assistant can tell you why and what to do instead of failing.
 
 ### Prime Radiant — both editions
 Everything the [Prime Radiant](/guides/prime-radiant) app does, plus the edits it has no
@@ -205,6 +221,8 @@ buttons for, through the same routes the app uses:
 | `prime_radiant_review_resolve` · `prime_radiant_review_raise` · `prime_radiant_undo` | Settle or raise a review item, undo a change |
 | `prime_radiant_ingest_preview` · `prime_radiant_ingest_start` · `prime_radiant_ingest_stop` · `prime_radiant_ingest_retry` | Import folders or files from your Files, stop an import, retry what failed |
 | `prime_radiant_nightly_run` · `prime_radiant_nightly_merge` · `prime_radiant_connect_run` · `prime_radiant_settings_update` | Run the nightly or connect pass now, merge a held night, change settings |
+| `prime_radiant_golden_list` · `prime_radiant_golden_add` · `prime_radiant_golden_edit` · `prime_radiant_golden_delete` | The wiki's golden questions and their last verdicts; add, edit or delete one |
+| `prime_radiant_daily_questions` | Whether the assistant may send the daily questions over chat (off by default) — it never sends anything itself |
 
 Every change the assistant makes is one commit in the page's **History**, authored
 **ClawBox assistant**, and a fact it verifies is stamped as verified by the assistant —
@@ -251,7 +269,7 @@ happens from **Settings → Local AI** in your browser.
 
 ### ClawBox AI usage — both editions
 `clawbox_ai_usage` reads how much of your ClawBox AI allowance is used: the weekly allowance and
-the 5-hour limit (and when each frees up), the weekly meters for pictures, spoken replies,
+the short-term limit (5 hours), and when each frees up, the weekly meters for pictures, spoken replies,
 transcribed audio and memory indexing, and your prepaid credits. Where clawbox.com does not share
 the figures with the box yet, the agent says so and points you at your account there. No tool
 changes your plan or buys credits.
@@ -281,6 +299,12 @@ accounts is yours to do, in Settings. See
 - **Confirmation on irreversible actions.** `system_power` and
   `code_project_delete` require an explicit confirm flag — something a web page
   the agent happens to be reading cannot supply by accident.
+- **Protected ClawBox files.** With **Settings → Harness → Protect ClawBox files from the
+  agent** on (the default), the harness's own file and shell tools cannot delete, overwrite,
+  truncate or move ClawBox's own files or the local AI models — see
+  [Architecture](/technical/architecture).
+- **Tool output is scrubbed.** Tokens, keys and other credentials are removed from what a tool
+  hands back before the assistant sees it.
 - **Timeouts and output caps everywhere**, so one slow call cannot stall a turn.
 - **Errors are instructions, not stack traces.** Every failure comes back as a
   short code, a message and a suggested next step — never a raw trace or an

@@ -84,8 +84,18 @@ before running the installer:
 sudo CLAWBOX_EDITION=hermes bash install.sh
 ```
 
-Valid values are `openclaw`, `hermes` and `dual`. An unrecognised value prints a
-warning and installs as `openclaw`.
+Valid values are `openclaw`, `hermes`, `dual` and `unselected`. An unrecognised value
+prints a warning and installs as `openclaw`.
+
+`unselected` is the one image for every box: it installs **both** agents, starts neither,
+and records `CLAWBOX_EDITION=unselected`. The setup wizard then asks **Choose your
+assistant** between Wi-Fi and Update, and the choice locks the box to that agent, starts it
+and removes the other, so the box ends up a plain single-edition box. Add
+`CLAWBOX_EDITION_HINT=hermes` (or `openclaw`) to have the wizard preselect that card:
+
+```bash
+sudo CLAWBOX_EDITION=unselected CLAWBOX_EDITION_HINT=hermes bash install.sh
+```
 
 That variable chooses the edition on a **first** install. On a device that has
 already been installed, the installer compares it against the recorded edition
@@ -149,21 +159,23 @@ OpenClaw device it is the other way round.
 ## What is the same on every edition
 
 Nearly everything else. The setup wizard, the desktop environment and its
-windows, Terminal, Files, Coding, Remote Desktop, the browser automation,
-webapps and the code assistant, System Update, updates, networking and
-mDNS, and the login model are all edition-independent. So are
-[Memory Shard](/guides/memory-shard), [Local AI](/guides/local-ai), the
-[mascot pet](/guides/appearance), the [chat](/guides/chat) and the four guided
+windows, Terminal, Files, the Coding Agent, Remote Desktop, **Agent Browser** (the one
+browser you and the assistant share), the **Screenshot** app, webapps and their public
+links, System Update, updates, networking and mDNS, and the login model are all
+edition-independent. So are [Memory Shard](/guides/memory-shard),
+[Prime Radiant](/guides/prime-radiant), [Local AI](/guides/local-ai), the
+[mascot pet](/guides/appearance), the [chat](/guides/chat), the **Protect ClawBox files from
+the agent** switch in Settings → Harness, and the four guided
 [messaging channels](/guides/messaging-channels).
 
 ## What differs
 
 - **The agent**, and therefore the chat backend.
 - **The capability store** — App Store on OpenClaw, [Hermes Skills](/editions/hermes-skills) on Hermes.
-- **How AI providers are configured** — see [AI Providers on Hermes](/editions/hermes-providers).
+- **How AI providers are configured** — see [AI Providers on Hermes](/editions/hermes-providers). xAI Grok is an OpenClaw provider.
 - **The agent's own tool set** — some [MCP tools](/technical/agent-interface) exist on one edition only.
 - **Telegram plumbing** — the messages and the pairing-approval flow work the same way for you; the process behind them is the harness's own.
-- **What a ClawKeep backup archives** — every edition backs up, and the backup daemon picks its backend from the agent the box runs: the OpenClaw agent through the `openclaw` CLI, the Hermes agent through the daemon's own Hermes backend. A snapshot can only be restored onto a box running the agent that wrote it.
+- **What a ClawKeep backup archives** — every edition backs up, and the backup daemon picks its backend from the agent the box runs: the OpenClaw agent through the `openclaw` CLI, the Hermes agent through the daemon's own Hermes backend. A dual box backs up the runtime it is switched to, and ClawKeep's status says which. A snapshot can only be restored onto a box running the agent that wrote it.
 - **Who owns the memory index** — on OpenClaw it is the agent's own and the agent searches it while answering; on Hermes, ClawBox builds it and gives the agent a search tool for it. See [Memory Shard](/guides/memory-shard#how-the-assistant-uses-it).
 - **Spoken replies on messaging channels** — OpenClaw and dual only. Every edition speaks in the desktop chat.
 - **Receiving email** — Hermes only. Sending mail you approve works on every edition.

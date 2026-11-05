@@ -651,9 +651,9 @@ describe("the docs shipped in this checkout", () => {
     expect(text.length).toBeLessThanOrEqual(DOCS_READ_MAX_CHARS);
     const page = loadDocsIndex(real).find((p) => p.path === "support/troubleshooting")!;
     expect(page.sections.map((s) => s.heading)).not.toContain(expect.stringContaining("[access]"));
-    const section = await h.call("docs_read", { path: "support/troubleshooting", section: "Updates say up to date" });
+    const section = await h.call("docs_read", { path: "support/troubleshooting", section: "Update finished but the box misbehaves" });
     expect(section.isError).toBe(false);
-    expect(section.isError ? "" : section.text).toContain('## Updates say "up to date" but the version is old');
+    expect(section.isError ? "" : section.text).toContain("## Update finished but the box misbehaves");
     expect(section.isError ? "" : section.text).not.toContain("## Reading logs");
     const note = await h.call("docs_read", { path: "agents/mcp" });
     expect(note.isError).toBe(false);

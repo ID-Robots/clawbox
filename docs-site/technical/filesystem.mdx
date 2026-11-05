@@ -67,7 +67,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | Portal device identity (`data/cloudflared/device-id`) | ✅ kept | ⚠️ the file is deleted, but the id is re-derived identically from `/etc/machine-id` — the box reappears in the portal as the same device |
 | Ollama models | ✅ kept | ❌ deleted |
 | Saved Wi-Fi networks | ✅ kept | ❌ deleted (box returns to AP mode) |
-| SSH `authorized_keys`, shell history, browser profile (ClawBox's own, and one of yours the Browser app was pointed at) | ✅ kept | ❌ wiped |
+| SSH `authorized_keys`, shell history, browser profile (ClawBox's own, and one of yours Agent Browser was pointed at) | ✅ kept | ❌ wiped |
 | System password | ✅ kept | ❌ reset to `clawbox` |
 | Voice models (Whisper/Kokoro caches) | ✅ kept | ✅ kept (can't re-download in AP mode) |
 
@@ -112,7 +112,7 @@ DevTools port (`18800`), started by `clawbox-browser.service`:
 - The assistant opens **tabs of its own** and closes only those. It does not navigate or close the tab
   you are using.
 - The browser is kept running. It comes back after a reboot, and within about twenty seconds if you
-  close its window. **Open Browser** brings the window forward; the Browser app has no Close for it.
+  close its window. **Open Browser** brings the window forward; **Agent Browser** (the app called Browser before 4.3) has no Close for it.
   Close the tabs you no longer need instead.
 
 **Updating from a version with two browsers.** Earlier versions gave the assistant a hidden browser
@@ -122,7 +122,7 @@ with a profile of its own under `~/.openclaw/browser/`. On the first start after
 |---|---|
 | Only the desktop profile exists | Nothing changes for you. |
 | Only the assistant's profile exists (you never opened the Browser app) | It is **copied** to `~/.config/clawbox-browser` and becomes the one profile, sign-ins included. |
-| Both exist | Your desktop profile is used as it is. The assistant's profile is **left on disk, untouched**, and no longer used. Sites that only the assistant was signed in to need one sign-in in the shared browser. **Settings → Browser** shows where the old profile is. |
+| Both exist | Your desktop profile is used as it is. The assistant's profile is **left on disk, untouched**, and no longer used. Sites that only the assistant was signed in to need one sign-in in the shared browser. **Agent Browser**'s settings show where the old profile is. |
 
 Two Chromium profiles cannot be merged safely, which is why the third case asks for a sign-in instead
 of guessing. The assistant's old profile is never deleted by the update. It is also not copied when it
@@ -135,7 +135,7 @@ again, with its own sign-ins, add this line to `~/.cache/clawbox/browser.env` an
 CLAWBOX_BROWSER_AGENT_ISOLATED=1
 ```
 
-The desktop browser is then opened and closed by hand from the Browser app, as before, and the
+The desktop browser is then opened and closed by hand from **Agent Browser**, as before, and the
 assistant's old profile under `~/.openclaw/browser/` is used again. Remove the line to go back to one
 browser.
 

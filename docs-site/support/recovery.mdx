@@ -55,6 +55,19 @@ journalctl -u clawbox-setup -n 50 --no-pager
 journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
 ```
 
+The desktop chat and the **Hermes** app run through the dashboard units above. Once a messaging
+channel such as Telegram is set up, Hermes also runs its **messaging gateway** — what receives
+channel messages and runs scheduled tasks. Hermes manages that service with its own command, and
+it usually runs as the `clawbox` user's service:
+
+```bash
+hermes gateway status                                   # running or not, user or system service
+hermes gateway restart --yes                            # lets a turn in progress finish first
+journalctl --user -u hermes-gateway -n 50 --no-pager
+```
+
+On a box with no channel set up, `hermes gateway status` saying it is not running is normal.
+
 Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If it recurs, capture the logs above before the
 next restart.
 
@@ -95,7 +108,7 @@ The script defaults to `main`; `CLAWBOX_BRANCH` keeps a box on its own channel.
 ## D — Factory reset (wipes everything)
 
 <Warning>
-**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, shell history, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
+**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, the files in Documents, Downloads, Desktop, Projects, Music, Pictures, Videos, Public and Templates (the folders themselves are kept), loose files in the home folder, SSH authorized keys, shell history, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
 </Warning>
 
 <Info>
@@ -113,7 +126,7 @@ portal as the same device.
 
 ### From the UI (preferred)
 
-Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into the **ClawBox-Setup** hotspot. This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
+Open **Settings → About → Factory Reset**, enter the system password and type **RESET** to confirm. The device wipes itself and reboots into the **ClawBox-Setup** hotspot; a Hermes box starts its assistant again once setup is done. This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
 
 ### Over SSH (when you can't log in to the UI)
 

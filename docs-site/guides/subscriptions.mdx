@@ -1,7 +1,7 @@
 ---
 title: "ClawBox AI Subscriptions"
 icon: "credit-card"
-summary: "The ClawBox AI plans, what each one unlocks on the device, and where to see your usage."
+summary: "The ClawBox AI plans and their prices, what each one unlocks on the device, and where to see your usage."
 ---
 
 ClawBox hardware is yours to own. A **ClawBox AI subscription** is optional and powers the
@@ -10,16 +10,21 @@ support tier.
 
 ## Plans
 
-| Plan | Price | ClawBox AI | ClawKeep backups | Support |
-|---|---|---|---|---|
-| **Free** | €0, free forever | Managed ClawBox AI — the standard usage allowance · portal access | 1 GB | Hardware, warranty, shipping, billing + **basic setup guidance** by email |
-| **Pro** | €9 / month | 5× the Free usage · Remote Desktop · priority processing | 5 GB | **Email support** for setup & configuration |
-| **Max** | €49 / month (30-day trial) | Maximum usage · Remote Desktop · highest priority | 50 GB | **Full support — real humans via call/meeting** |
+| Plan | Monthly | Yearly | ClawBox AI | ClawKeep backups | Support |
+|---|---|---|---|---|---|
+| **Free** | €0, free forever | — | Standard usage · portal access | 1 GB | Hardware, warranty, shipping, billing + **basic setup guidance** by email |
+| **Pro** | €9 / month | €89 / year | 5× more usage than Free · Remote Desktop · priority processing | 5 GB | **Email support** for setup & configuration |
+| **Max** | €49 / month (30-day trial) | €479 / year | Maximum usage · Remote Desktop · highest priority | 50 GB | **Full support — real humans via call/meeting** |
+
+Yearly billing costs less than twelve monthly payments; the usage card on the box says how
+much you save and links to the plan cards in your account.
 
 <Note>
 There is no model to pick in ClawBox AI chat on any plan. What the plan buys is how much
-you get, plus the device features below. Your plan is shown on the ClawBox AI card in **Settings → Providers** and comes
-from your portal account, not from a local setting.
+you get, plus the device features below. Your plan is shown on the ClawBox AI card in
+**Settings → Providers** and comes from your account on clawbox.com, not from a local
+setting. When the box cannot read its own settings for a moment, the plan shows as unknown
+rather than as Free.
 </Note>
 
 ## What a plan unlocks on the device
@@ -27,39 +32,50 @@ from your portal account, not from a local setting.
 | Feature | Free | Pro | Max |
 |---|---|---|---|
 | Chat, and speech-to-text in the cloud | ✓ | ✓ | ✓ |
+| [Prime Radiant](/guides/prime-radiant) — adding documents (reading and reviewing work without it) | ✓ | ✓ | ✓ |
 | [Memory Shard](/guides/memory-shard) | — | ✓ | ✓ |
 | Coding Agent | — | ✓ | ✓ |
 | Memory index in the ClawBox AI cloud | — | ✓ | ✓ |
+| Remote Desktop | — | ✓ | ✓ |
 | Spoken replies in the ClawBox AI cloud | — | — | ✓ |
 | [Switching the box's edition](/editions/switching) | — | — | ✓ |
-| Remote Desktop | — | ✓ | ✓ |
 
 Where a feature needs a plan, its own first step says so and offers the upgrade — nothing
-is hidden without an explanation.
+is hidden without an explanation. An upgrade reaches the box without a restart: cloud voices
+appear as soon as the box reads the new plan.
 
 <Note>
 You can also run ClawBox with **your own** provider key or subscription, or with
 **[local models](/guides/local-ai)**, instead of ClawBox AI — see
 [Choose Your AI Provider](/setup/choose-ai-provider). The provider list depends on your
-edition: on [Hermes](/editions/hermes-providers) it is OpenRouter, Anthropic, Google
-Gemini, z.ai/GLM and Kimi by key, plus sign-in for OpenAI (Codex), GitHub Copilot, Anthropic
-and Nous Portal.
+edition: see [AI Providers on Hermes](/editions/hermes-providers) for the Hermes list.
 </Note>
 
 ## Usage, allowances and credits
 
-**Settings → Providers** shows what this box's account has used: a **weekly chat
-allowance**, a **5-hour burst** window on top of it, meters for images, text-to-speech
-minutes, speech-to-text minutes and memory indexing, and your **credit balance**.
+**Settings → Providers** shows a **ClawBox AI usage** card with what this box's account
+has used:
 
-Credits are spent only after an allowance runs out, and paid plans can top them up. When
-an allowance does run out, the chat says which one and when it frees up rather than
-failing silently. See [ClawBox AI → Usage and credits](/guides/clawbox-ai#usage-and-credits).
+- **Weekly chat allowance**, and when it frees up.
+- **Short-term limit (5 hours)** — a shorter rolling window on top of the weekly one.
+  Hitting it does not mean your week is gone.
+- **This week** — meters for images, text-to-speech minutes, speech-to-text minutes and
+  memory indexing.
+- **Credits** — your balance, and what you have spent from it this week.
+
+Credits are spent only after an allowance runs out, and paid plans can top them up with
+**Top up**. When an allowance does run out, a failed chat message says which allowance is
+spent and when it frees up — and, for the weekly allowance, how to add an extra-usage pack —
+instead of a generic rate-limit error. See
+[ClawBox AI → Usage and credits](/guides/clawbox-ai#usage-and-credits).
 
 ## Managing your subscription
 
-Subscriptions are billed through Stripe. Use the customer portal link in your billing
-email to update payment details, change plan, or cancel.
+Plans are managed in your account on [clawbox.com](https://clawbox.com/portal): the
+**Upgrade** and **Open clawbox.com** buttons on the usage card take you there. Change plan,
+switch between monthly and yearly billing, update payment details or cancel from there;
+payments are handled by Stripe, and the customer portal link in your billing email works
+too.
 
 ## Questions
 

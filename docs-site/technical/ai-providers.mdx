@@ -28,6 +28,7 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 | **ChatGPT subscription** | ChatGPT OAuth sign-in | `openai/…` + Codex runtime | `openai/gpt-5.5` | Uses your ChatGPT plan. Models: `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` only (no `-pro` variants) |
 | **Google Gemini** | API key | `google/…` | `gemini-2.5-flash` | Routed via Google's OpenAI-compat endpoint |
 | **OpenRouter** | API key | `openrouter/<org>/<model>` | (curated) | Explicit provider definition required — written automatically |
+| **xAI Grok** | `xai-…` API key, or a SuperGrok / X Premium sign-in | `xai/…` | the newest of `grok-4.7`, `grok-4.6`, `grok-4.5` | New in 4.3. The sign-in is run by the core's own xAI plugin through `/setup-api/ai-models/xai-login` and approved on any device |
 | **Ollama** (local) | none (per-install bearer) | `ollama/…` | `llama3.2:3b` | Context capped 32k / 8k output for Jetson RAM |
 | **llama.cpp** (local) | none (per-install bearer) | `llamacpp/…` | (bundled model) | OpenAI-compat local server |
 
@@ -36,6 +37,17 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 
 The older `codex/…` and `openai-codex/…` namespaces are **retired**: the core answers `Unknown model` for them and `openclaw doctor --fix` rewrites them to `openai/…` while keeping the runtime key. The setup UI still calls the row "OpenAI Codex" — that is a label, not a namespace. A box that signed in before the upgrade holds a `codex:default` profile the core never consults, and the chat model list shows that row greyed with "Sign in again in Settings"; reconnecting OpenAI in Settings files it where the core looks.
 </Warning>
+
+## Signing out of a provider
+
+`POST /setup-api/providers/sign-out { provider }` (owner only; `ai-models/clawai/sign-out` for
+ClawBox AI) removes the row provider's credential everywhere the box and the **active** harness
+keep it, then reads the result back. On OpenClaw that is `openclaw models auth logout <id>` for
+every auth profile filed under the provider, then `config unset` for what logout leaves (an
+`auth.profiles` entry, the provider's `auth.order`, an inline `apiKey`); on Hermes the provider's
+entries in the credential pool, `config.yaml` and `.env`, followed by a Hermes restart. The
+**default** provider's sign-out is refused (`is_default`) — make another provider the default
+first.
 
 ## Where credentials actually go
 
@@ -131,11 +143,12 @@ The chat header's reasoning-effort picker is **uniform across every cloud provid
 |---|---|---|
 | ClawBox AI | Off, Low, Medium, High | **Medium** — a fresh session reasons, and the owner turns it *down* rather than up. The gateway folds Low/Medium up to DeepSeek's single reasoning tier |
 | Anthropic, OpenAI, ChatGPT subscription, Google, OpenRouter | Off, Low, Medium, High | Medium |
-| Local llama.cpp (Gemma) | Off only — **the picker is hidden** | Off |
+| xAI Grok | Off, Low, Medium, High | Medium |
+| Local llama.cpp (Gemma) | Off, and any level above it as **thinking on** | **Off** |
 
 Two consequences worth knowing:
 
-- **A model with only one level shows no control at all.** The header renders the picker only when more than one level is available, which is why the on-device local model has no reasoning dial.
+- **The on-device model's thinking is a switch.** Its server takes `chat_template_kwargs.enable_thinking` per request and has no graded middle, so OpenClaw's llama.cpp row declares reasoning as binary: every level above Off is sent as thinking on, Off as none. Hermes shows the same switch as *Thinking off* / *Thinking on*. A model with only one level shows no control at all.
 - **An unsupported level falls back to that provider's default**, not to the nearest neighbouring level. Switching provider mid-conversation therefore resets the effort to the new provider's default if the current one is not in its list. The selection is remembered per provider.
 
 Provider-specific extras that the gateway vocabulary also accepts (`minimal`, `xhigh`, `max`, `adaptive`) are deliberately **not** offered in the picker, to keep the control consistent across models.
@@ -157,7 +170,7 @@ If a level is not declared as supported, the gateway rejects it. Changes must th
 
 ## Self-healing on boot (beta channel)
 
-`gateway-pre-start.sh` runs before every gateway start and repairs known-bad provider states. On the **beta channel** (and the next stable release) this includes:
+`gateway-pre-start.sh` runs before every gateway start and repairs known-bad provider states. This includes:
 
 | Heal | Broken state it fixes |
 |---|---|
@@ -172,7 +185,7 @@ All heals are idempotent — a healthy config is left untouched.
 
 ## Troubleshooting pointers
 
-- `401 Incorrect API key (sk-proj-…)` after switching to the subscription → [Troubleshooting → AI provider errors](/support/troubleshooting#ai-provider-errors-401-incorrect-api-key)
+- `401 Incorrect API key (sk-proj-…)` after switching to the subscription, a missing sign-in, or a spent allowance → [Troubleshooting → Chat says the provider refused](/support/troubleshooting#chat-says-the-provider-refused-or-the-sign-in-is-missing)
 - `Config validation failed: … Unrecognized key` → stale OpenClaw core; `sudo bash install.sh --step openclaw_install`
 - Codex chats crash immediately (`createDiagnosticTraceContext… is not a function`) → `@openclaw/codex` plugin version skew vs core; re-run `sudo bash install.sh --step openclaw_install` (re-pins plugins)
 - Model picker rejects a model ID → each lane validates against its own catalog; remember the two OpenAI lanes have different catalogs.

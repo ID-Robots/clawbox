@@ -97,23 +97,41 @@ is not a refusal: the cloud stays selectable.
 
 - **Weekly chat allowance** — how much of this week's allowance you have spent, and when
   it frees up.
-- **5-hour burst** — a shorter rolling window on top of the weekly one. Hitting it does
-  not mean your week is gone.
+- **Short-term limit (5 hours)** — a shorter rolling window on top of the weekly one.
+  Hitting it does not mean your week is gone.
 - **This week** — separate meters for images, text-to-speech minutes, speech-to-text
   minutes and memory indexing.
 - **Credits** — your balance, and what you have spent from it this week. Credits are used
   only after an allowance runs out, and paid plans can top them up.
 
-If an allowance runs out mid-conversation the chat says exactly which one, and when it
-frees up, instead of failing silently.
+If an allowance runs out mid-conversation, the failed message says which allowance is
+spent and when it frees up — for the weekly allowance also how to add an extra-usage pack —
+instead of a generic rate-limit error. [Prime Radiant](/guides/prime-radiant) counts its
+work against the same allowance.
 
 <Note>
 The numbers come from your ClawBox account. If the box cannot read them the card says so
 and tries again shortly — it never invents a figure.
 </Note>
 
+## When the sign-in stops working
+
+- **A chat turn fails with a ClawBox AI sign-in error.** The chat shows the failed turn
+  with a way to sign in again. Do that from **Settings → Providers → ClawBox AI**.
+- **The sign-in was revoked in your account.** Saving ClawBox AI again clears the revoked
+  sign-in and asks you to sign in once more, instead of sitting on **Warming up**. A model
+  save the box has not answered within 90 seconds stops and says so.
+
+See [Troubleshooting → Chat says the provider refused](/support/troubleshooting#chat-says-the-provider-refused-or-the-sign-in-is-missing)
+for the full checklist.
+
 ## Changing or leaving
 
 Switch to any other provider any time from **Settings → Providers**; the next message
-uses it. Billing is handled in your ClawBox account — use the customer portal link in
-your billing email to change plan or cancel.
+uses it. To unlink the box from your ClawBox account, use **Sign out of ClawBox AI** on its
+row in the provider list and tap it again to confirm. The box removes the ClawBox AI
+sign-in everywhere it is kept; when ClawBox AI is the default provider, make another
+provider the default first.
+
+Billing is handled in your account on [clawbox.com](https://clawbox.com/portal) — see
+[Subscriptions → Managing your subscription](/guides/subscriptions#managing-your-subscription).
