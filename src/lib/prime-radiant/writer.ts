@@ -84,7 +84,7 @@ export const WRITER_SYSTEM_PROMPT = [
   'Write "The Art of War is Project Gutenberg eBook #132", never "It is Project Gutenberg eBook #132"; "The Art of War is called the oldest military treatise", never "The work is called …".',
   "Never open a fact with a pronoun (it, its, this, they, he, she) or a stand-in (the document, the work, the book, the company, the author).",
   "The subject of a fact is the real-world thing it is about — the company, team, product, place or person — never the document that states it.",
-  'Write "Every full-time employee of Acme Widgets Ltd is entitled to 25 working days of paid annual leave per year", never "The Acme Widgets Ltd Employee Handbook grants full-time employees 25 working days …" or "According to the handbook, …". Only a fact about the document itself (its version, date, code or owner) has the document as its subject.',
+  'Write "Every driver at Bluefield Haulage must rest for 11 hours between two shifts", never "The Bluefield Haulage Fleet Safety Manual requires drivers to rest for 11 hours …" or "According to the manual, …". Only a fact about the document itself (its version, date, code or owner) has the document as its subject.',
   "An item's facts and quotes come from that item's own text only — never from another item in the same call.",
   'When the item says WHEN a fact holds — since a date ("since 22.09.2026"), until one ("until February"), or as of one ("as of 30.09") — give it as valid_from, valid_until or as_of (ISO dates; a date without a year is in the year the item was written). A fact about a past state that no longer holds (a launch price, a former address) gets "historical": true. Leave these out when the item does not say; never guess.',
 ].join("\n");
