@@ -10,7 +10,7 @@ options — whether you're on a ClawBox or a DIY install.
 
 ## Prerequisites
 
-- **Node.js 24.16–24.x, or 26.1+** installed (pre-installed on ClawBox; the core refuses 25 and 26.0)
+- **Node.js 24.22.1 or newer in the 24 line, or 26.12.1+** installed — the October 2026 Node.js security releases the pinned OpenClaw requires (pre-installed on ClawBox, and a ClawBox update moves an older Node up by itself; the core refuses 25)
 - **4 GB+ RAM** recommended
 - Linux, macOS, or Windows
 - Always-on internet connection
@@ -18,7 +18,7 @@ options — whether you're on a ClawBox or a DIY install.
 ## Telegram
 
 <Note>
-For ClawBox's guided setup, use **Settings → Telegram** and see
+For ClawBox's guided setup, use **Settings → Channels → Telegram** and see
 [Messaging Channels](/guides/messaging-channels). Use the manual steps below for
 self-hosted OpenClaw setups or fallback configuration.
 </Note>
@@ -41,8 +41,9 @@ self-hosted OpenClaw setups or fallback configuration.
 ## Discord
 
 <Note>
-ClawBox's guided setup manages Telegram. Configure Discord only if your installed
-OpenClaw version and channel plugins support it.
+On a ClawBox, **Settings → Channels → Discord** does all of this for you: paste the bot
+token and the box sets the channel up. Use the manual steps below only on a self-hosted
+OpenClaw install.
 </Note>
 
 <Steps>
@@ -62,13 +63,18 @@ OpenClaw version and channel plugins support it.
 
 ## Voice pipeline
 
-- Install **Whisper** for speech-to-text
-- Install **Kokoro TTS** for text-to-speech
-- Configure your audio devices
+On a ClawBox, voice is set up from the desktop:
+
+- **Settings → Local AI** installs **Whisper** (speech to text on the box) and the **Kokoro**
+  voice (spoken replies on the box). With ClawBox AI, speech to text runs in the cloud on every
+  plan and spoken replies on Max — see [ClawBox AI](/guides/clawbox-ai#what-your-plan-powers).
+- **Settings → Voice** chooses how replies are spoken: **Auto-play every spoken reply** and
+  **Short spoken answers** are there, both off by default.
+- In the chat, hold the microphone button (or **F8**) to talk — see [Chat](/guides/chat).
 
 ## AI models
 
-- Add your **API key** (Anthropic, OpenAI, Google, OpenRouter), **or** download local models
+- Add your **API key** (Anthropic, OpenAI, Google, OpenRouter, xAI), sign in with a subscription you already pay for, **or** use the model on the box
 - Configure model preferences
 - Test with a simple prompt
 

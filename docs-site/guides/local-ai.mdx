@@ -41,8 +41,17 @@ Rows are grouped by job: *AI agent model*, *Voice (text to speech)*, *Speech to 
 row for a model that is installed and running, so you can see what a model costs before you keep it.
 
 <Frame caption="Settings → Local AI on an OpenClaw-edition box">
-  <img src="/images/local-ai.webp" alt="The Local AI panel, with rows for the agent model, voice, speech to text and other models, each showing what it is doing." />
+  <img src="/images/4.3/settings-local-ai.png" alt="Settings → Local AI: the Local-only mode switch, Gemma 4 ready as the agent's on-box fallback, the Kokoro voice switched off, and Whisper speech to text off until you speak" />
 </Frame>
+
+### Installs run in the background
+
+Every **Install** is accepted at once and runs as a background task with a card in the
+desktop's corner, so you can close Settings while it works. An install that cannot run beside
+what is already running waits its turn — its row says what it waits for, for example
+"Queued — starts after Kokoro" — and starts by itself when that work ends. Model downloads
+work the same way. **Cancel** on the corner card removes a task that is still waiting and stops a
+model download; an install that is already running as a system step finishes.
 
 <Warning>
 **Uninstall** is not offered while Gemma is the primary model — pick another primary
@@ -94,6 +103,11 @@ appears in this panel. It routes everything to the local model and switches ever
 provider off, fallbacks included, and switching it back restores the providers it saved.
 Until the local model has one of those two roles the switch is not drawn — there would be
 nothing for it to route to.
+
+On OpenClaw, installing or switching Local AI and the local-only switch take effect without
+restarting the assistant wherever the change can be applied live. Turning Local AI off
+removes only the local model from the fallback list: ClawBox AI, or another cloud model you
+chose, stays as the backup, and a local primary is moved back to a cloud model.
 
 Use it when nothing may leave the box. Note that it is about the **AI providers** — see
 [Networking](/technical/networking) for what else a ClawBox talks to.

@@ -5,8 +5,8 @@ summary: "Connect more than one Claude subscription or Anthropic API key, put th
 ---
 
 The Coding Agent runs Claude Code on your box, and the chat can run on your Claude
-subscription too. A Claude Pro or Max subscription has a five-hour session window and a
-weekly cap. Once one of them is used up, a box with a single account stops until the
+subscription too. A Claude Pro or Max subscription has a session window, a weekly cap for the
+account and, for some models, a weekly limit of their own. Once one of them is used up, a box with a single account stops until the
 limit resets. That includes a coding queue left running overnight, and the chat's
 scheduled tasks.
 
@@ -51,6 +51,11 @@ tried last, after the accounts on this list.
     with it. Nothing restarts.
   - a message you sent in the **desktop chat**, a scheduled task or a check-in that
     still failed on the limit is **sent again once** on the new account.
+- **A model's own weekly limit moves only that model's work.** When an account has spent the
+  week of one model but not its own week, coding runs on that model are passed to the next
+  account, while the chat and runs on other models stay on it, and the active account does
+  not change. When the same model's week is spent on two accounts, the box waits for the
+  later of the two resets before it counts on that model again.
 - **A refused sign-in moves everything too.** If Anthropic refuses an account (a 401,
   a revoked sign-in or key), the box first checks with Anthropic. If the sign-in really
   is dead, the account is marked **Needs re-authentication** and everything moves on. If

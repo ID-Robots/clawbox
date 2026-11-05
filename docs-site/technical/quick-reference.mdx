@@ -16,7 +16,7 @@ Everything load-bearing about a ClawBox on one page. Facts only — explanations
 | System user | `clawbox` (uid 1000) · one password for SSH **and** browser login |
 | Web UI | `http://<box-ip>` (port 80) · `http://clawbox.local` when mDNS works |
 | Setup hotspot | SSID `ClawBox-Setup` → `http://10.42.0.1` (fallback subnet `10.43.0.1`) |
-| Stack | Next.js 16 / React 19 / Node 24 runtime / Bun builds · AI harness: OpenClaw gateway (npm-pinned) on OpenClaw/dual, Hermes CLI + dashboard on Hermes/dual |
+| Stack | Next.js 16 / React 19 / Node 24.22.1+ runtime / Bun builds · AI harness: OpenClaw gateway (npm-pinned, 2026.10.9 on 4.3) on OpenClaw/dual, Hermes Agent (v0.22.5 on 4.3: CLI, gateway + dashboard) on Hermes/dual |
 
 ## Ports
 
@@ -73,10 +73,10 @@ Also closed at the firewall: **631** CUPS (left running — loopback printing st
 
 ## Services (systemd)
 
-**Every edition:** `clawbox-setup` (web, port 80) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (the one shared browser, CDP; kept running) · `clawbox-heartbeat.timer` (+ `.service`) · `clawbox-tunnel` (optional, off by default) · `clawbox-performance` · `clawbox-embed` (memory-search embedder, on demand) · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
+**Every edition:** `clawbox-setup` (web, port 80) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (the one shared browser, CDP; kept running) · `clawbox-heartbeat.timer` (+ `.service`) · `clawbox-tunnel` (optional, off by default; named `<name>.clawbox.tech` tunnel or quick tunnel) · `clawbox-wifi-failover` · `clawbox-build-heal` (boot-time heal of a build an interrupted update left) · `clawbox-performance` · `clawbox-embed` (memory-search embedder, on demand) · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
 
 **OpenClaw / dual:** `clawbox-gateway` (pre-start self-heal script).
-**Hermes / dual:** `clawbox-hermes-dashboard` · `clawbox-hermes-dashboard-proxy`. On Hermes the gateway unit is **masked** — an active `clawbox-gateway` there is a hard install failure.
+**Hermes / dual:** `hermes-gateway` (the Hermes Agent gateway — usually the `clawbox` user's service; manage it with `hermes gateway status|restart`) · `clawbox-hermes-dashboard` · `clawbox-hermes-dashboard-proxy`. On Hermes the OpenClaw gateway unit is **masked** — an active `clawbox-gateway` there is a hard install failure.
 
 ## Commands (over SSH)
 
@@ -93,8 +93,11 @@ systemctl status clawbox-gateway --no-pager
 journalctl -u clawbox-gateway -n 50 --no-pager    # AI/providers/channels
 sudo systemctl restart clawbox-setup clawbox-gateway
 
-# Health / logs — Hermes / dual (the gateway unit is masked; restarting it fails)
+# Health / logs — Hermes / dual (clawbox-gateway is masked; restarting it fails)
+hermes gateway status
+journalctl --user -u hermes-gateway -n 50 --no-pager      # the assistant/providers/channels
 journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
+hermes gateway restart --yes
 sudo systemctl restart clawbox-setup clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
 
 # Update (full, correct way) — == sudo bash /home/clawbox/clawbox/install.sh
@@ -138,8 +141,8 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `POST /setup-api/system/credentials` | Change password |
 | `POST /setup-api/system/power` | Restart/shutdown |
 | `GET /setup-api/update/versions?force=1` | Version check (fresh) |
-| `POST /setup-api/update/run` · `GET update/status` | Run update / poll progress |
-| `POST /setup-api/update/reset` | Reset-to-channel & update *(beta)* |
+| `POST /setup-api/update/run` · `GET update/status` | Run (or resume) the update / poll progress. `409 { busy: true, work }` while agent work runs; `{ ignoreBusy: true }` = **Update anyway** |
+| `POST /setup-api/update/dismiss` | Clear a finished or failed result |
 | `GET/POST /setup-api/system/update-branch` | Read/set channel |
 | `POST /setup-api/ai-models/configure` | Write provider config |
 | `GET /setup-api/ai-models/status` · `catalog?provider=…` | Provider status / live model catalog |
@@ -155,7 +158,8 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token — **OpenClaw/dual**; on Hermes health always reports unavailable |
 | `/setup-api/hermes/{chat,models,provider-key,oauth,clawai,skills}` · `/setup-api/harness/active` | **Hermes/dual** — chat, model catalog, provider key/OAuth, ClawBox AI, Skills |
 | `GET/POST /setup-api/hermes/plugins/reload` | **Hermes/dual** — what the box declares beside what the running agent loaded, and the restart that makes a plugin installed after boot reach the chat (404 off the editions with a dashboard) |
-| `GET /setup-api/portal/status` · `POST portal/start` · `portal/stop` | Remote access (Cloudflare Quick Tunnel). **Not** `/setup-api/tunnel/*`, which the UI does not use |
+| `GET /setup-api/portal/status` · `POST portal/start` · `portal/stop` | Remote access (the named tunnel, or a Cloudflare quick tunnel). **Not** `/setup-api/tunnel/*`, which the UI does not use |
+| `POST /setup-api/providers/sign-out` `{provider}` · `ai-models/clawai/sign-out` | Sign out of a provider / of ClawBox AI (owner only; the default provider is refused) |
 | `POST /setup-api/setup/reset` | **Factory reset** (destructive) — needs a session **and** `{ password, confirm: "RESET" }`; the password is throttled like `/login-api` |
 | `/setup-api/wifi/*` · `files/*` · `apps/*` · `clawkeep/*` · `code/*` · `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs (all under `/setup-api/`) |
 
@@ -164,11 +168,11 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 1. **`:18789` never accepts your password** — it's the OpenClaw gateway (OpenClaw/dual); use plain `http://<ip>`. On Hermes it is closed entirely (connection refused) and the equivalent surface is the session-gated dashboard proxy on `:8090`.
 2. **Browser login ≠ separate password** — same Linux password as SSH; failures are usually autofill, `unix_chkpwd` perms (`-rwxr-sr-x root shadow`), a stale build, or password encoding. Ladder: [Troubleshooting](/support/troubleshooting#the-browser-rejects-my-password-but-ssh-accepts-it).
 3. **`git pull` is not an update** — always finish with `sudo bash install.sh`; otherwise service files + the agent core go stale (`token mismatch`, `Unrecognized key`). Hard-sync to the box's own `.update-branch`, not a hardcoded `main`.
-4. **Local commits silently block updates** on stable ≤ current release ("up to date" forever); beta shows "Updates paused" + one-click reset. Manual fix = hard-sync ([Recovery C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss)).
-5. **Two OpenAI lanes (OpenClaw/dual)**: both are `openai/…` since OpenClaw 2 — API key = profile `openai:default` + `sk-…`; ChatGPT subscription = OAuth profile `openai:chatgpt` plus `agents.defaults.models."openai/<id>".agentRuntime.id = "codex"`. Different catalogs (the API lane carries the `-pro` tiers in addition to `gpt-5.4/5.5/5.6`; the subscription carries no `-pro`), different credentials. The `codex/…` namespace is retired (`Unknown model`); `doctor --fix` rewrites it. Stale-key 401s after switching are self-healed on beta. **On Hermes there is no OpenAI API-key lane at all** — OpenAI is sign-in (Codex) only, and the key providers are OpenRouter, Anthropic, Gemini, z.ai and Kimi.
+4. **Local edits to the checkout are discarded by every update** — the updater hard-syncs `/home/clawbox/clawbox` to `origin/<branch>` (`reset --hard` + `clean -fd`, gitignored paths untouched). Keep your own code elsewhere. The same hard-sync by hand = [Recovery C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss).
+5. **Two OpenAI lanes (OpenClaw/dual)**: both are `openai/…` since OpenClaw 2 — API key = profile `openai:default` + `sk-…`; ChatGPT subscription = OAuth profile `openai:chatgpt` plus `agents.defaults.models."openai/<id>".agentRuntime.id = "codex"`. Different catalogs (the API lane carries the `-pro` tiers in addition to `gpt-5.4/5.5/5.6`; the subscription carries no `-pro`), different credentials. The `codex/…` namespace is retired (`Unknown model`); `doctor --fix` rewrites it. Stale-key 401s after switching are self-healed at every gateway start. **On Hermes there is no OpenAI API-key lane at all** — OpenAI is sign-in (Codex) only, and the key providers are OpenRouter, Anthropic, Gemini, z.ai and Kimi.
 6. **Secrets live in `auth-profiles.json`** (OpenClaw/dual), not `openclaw.json` (metadata only). The codex session is *additionally* per-agent in `codex-home/auth.json`. On Hermes, credentials are held by `hermes auth add` under `~/.hermes`.
 7. **`clawbox.local` failing ≠ box down** — mDNS/Windows/router multicast issue; the IP always works.
-8. **The last update step reboots the box** — 1–2 min offline is normal, not a hang.
+8. **An update restarts the services, and reboots only when something needs a boot** (a JetPack/kernel or core-library upgrade) — 1–2 min offline is normal, not a hang. With agent work running, **Update** first asks (*Agents are working right now* → Cancel / Update anyway). An update that would install an older OpenClaw/Hermes than the one that wrote the box's data is refused (OpenClaw's 2026.10.6+ data move is one-way).
 9. **Factory reset password is `clawbox`** — and the box comes back in AP mode (`ClawBox-Setup` → `10.42.0.1`). It keeps `data/network.env`, `data/llamacpp/models` and the Hermes agent install (`~/.hermes/hermes-agent`, `installs/`, `tools/`, `bin/`), and the portal device id is re-derived from `/etc/machine-id`. Never hand-roll it with `rm -rf ~/.hermes` or `rm -rf data/*` — see [Recovery D](/support/recovery#d--factory-reset-wipes-everything).
 10. **Version label ≠ running code** — `package.json` is read live; verify actual deployment via `.next/BUILD_ID` mtime.
 11. **Plan gates are internal names off by one** — the internal `flash` tier is marketed **Pro**, internal `pro` is **Max**. Memory Shard and the Coding Agent need either paid tier; the cloud voice and the [edition swap](/editions/switching) need **Max**; cloud transcription is on every connected box including Free.
