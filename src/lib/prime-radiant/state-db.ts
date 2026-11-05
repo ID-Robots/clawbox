@@ -342,6 +342,20 @@ export function readRetiredLedger(vault: string): string[] {
   );
 }
 
+/** The page each of `ids` was last recorded on (active or retired), for the ids the registry knows. */
+export function readClaimPages(vault: string, ids: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  if (ids.length === 0 || !fs.existsSync(stateDbPathFor(vault))) return out;
+  withStateDb(vault, (db) => {
+    const stmt = db.prepare("SELECT page FROM claim_registry WHERE id = ?");
+    for (const id of new Set(ids)) {
+      const row = stmt.get(id) as { page?: unknown } | undefined;
+      if (typeof row?.page === "string") out.set(id, row.page);
+    }
+  });
+  return out;
+}
+
 /** Record retirements. A retired id stays retired whatever is recorded later. */
 export function recordRetired(vault: string, ids: ReadonlyArray<{ id: string; page: string }>, at: string = new Date().toISOString()): void {
   if (ids.length === 0) return;

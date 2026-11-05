@@ -18,6 +18,8 @@ import {
   GOLDEN_FILE,
   goldenEvidence,
   goldenMaxTokens,
+  GOLDEN_LAST_TRY_MAX_TOKENS,
+  GOLDEN_MAX_TOKENS,
   goldenRegressions,
   goldenTally,
   GoldenInputError,
@@ -180,6 +182,15 @@ describe("golden questions: the judge", () => {
       [1, { verdict: "stale", why: "" }],
     ]);
     expect(() => parseGoldenResponse("I cannot say.", 2)).toThrow(GoldenParseError);
+  });
+
+  it("takes the judge's usual words for a verdict, and a lone question's one verdict whatever it numbered it (B7)", () => {
+    expect([...parseGoldenResponse('[{"i":0,"verdict":"Incorrect"},{"i":1,"verdict":"outdated"},{"i":2,"verdict":"not found"}]', 3).values()].map((a) => a.verdict)).toEqual(["wrong", "stale", "missing"]);
+    // One question asked, numbered from 1: still its answer.
+    expect(parseGoldenResponse('[{"i":1,"verdict":"correct","why":"same"}]', 1).get(0)).toEqual({ verdict: "correct", why: "same" });
+    // Two different verdicts for one question, or a guess past the list in a longer batch, stay no verdict.
+    expect(() => parseGoldenResponse('[{"i":1,"verdict":"correct"},{"i":2,"verdict":"wrong"}]', 1)).toThrow(GoldenParseError);
+    expect(() => parseGoldenResponse('[{"i":2,"verdict":"correct"}]', 2)).toThrow(GoldenParseError);
   });
 
   it("tallies the % correct of what was judged, and names correct → wrong only as a regression", () => {
@@ -435,13 +446,14 @@ describe("golden questions: the nightly score", () => {
     };
     const r = await runGoldenScore({ runId: "run-0000000000c1", client: tight, online: true, now: () => NOW });
     expect(sizes).toEqual([6, 3, 2, 1, 3, 2, 1]);
-    expect(caps[0]).toBe(goldenMaxTokens(6));
+    // Only the first call is sized to its questions: every re-ask gets the whole cap (B7).
+    expect(caps).toEqual([goldenMaxTokens(6), ...Array(6).fill(GOLDEN_MAX_TOKENS)]);
     expect(r.tally).toMatchObject({ asked: 6, correct: 6, failed: 0, percent: 100 });
     // Every call is a cost row; an empty answer brings no usage, so it is charged its whole output cap.
     expect(r.calls).toBe(7);
     const costs = readCosts(vaultDir(), "run-0000000000c1");
     expect(costs).toHaveLength(7);
-    expect(costs.filter((c) => c.tokensOut >= goldenMaxTokens(3)).map((c) => c.tokensOut)).toEqual([goldenMaxTokens(6), goldenMaxTokens(3), goldenMaxTokens(3)]);
+    expect(costs.filter((c) => c.tokensOut >= goldenMaxTokens(3)).map((c) => c.tokensOut)).toEqual([goldenMaxTokens(6), GOLDEN_MAX_TOKENS, GOLDEN_MAX_TOKENS]);
     expect(costs.every((c) => c.tokensIn > 0 && c.usdEstimate > 0)).toBe(true);
     expect(r.notes.join(" ")).toMatch(/asked again in smaller calls/);
   });
@@ -485,8 +497,9 @@ describe("golden questions: the nightly score", () => {
     const r = await runGoldenScore({ runId: "run-0000000000c2", client: stuck, online: true, now: () => NOW });
     expect(r.skipped).toBeNull();
     expect(r.tally).toMatchObject({ asked: 18, correct: 12, failed: 6 });
-    expect(calls).toBe(11 + 2); // the first batch split down to six single calls, then the two others
-    expect(r.calls).toBe(13);
+    // The first batch split down to six single calls, each tried once more with the most room, then the two others.
+    expect(calls).toBe(11 + 6 + 2);
+    expect(r.calls).toBe(19);
     expect(r.notes.join(" ")).not.toMatch(/in a row failed/);
     expect(r.notes.join(" ")).toMatch(/no verdict for 6 question\(s\) even asked alone/);
     expect(readGoldenHistory()[0]).toMatchObject({ asked: 18, correct: 12, failed: 6, percent: 100 });
@@ -609,13 +622,65 @@ describe("golden questions: the nightly score", () => {
     await seedPages();
     await addGoldenQuestion(PRICE_Q, { domains: [] });
     await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    // The judge answers the price question and never the office one, however it is asked.
+    const asked: number[] = [];
     const partial: FlashClient = {
       model: "deepseek-v4-flash",
-      async complete() {
-        return { text: '[{"i":0,"verdict":"correct"}]', model: "deepseek-v4-flash", usage: { promptTokens: 1, completionTokens: 1, cacheHitTokens: 0 } };
+      async complete(request) {
+        const items = readGoldenItems(request.user) ?? [];
+        asked.push(items.length);
+        const answers = items.filter((g) => g.question === PRICE_Q.question).map((g) => ({ i: g.i, verdict: "correct" }));
+        return { text: JSON.stringify(answers), model: "deepseek-v4-flash", usage: { promptTokens: 1, completionTokens: 1, cacheHitTokens: 0 } };
       },
     };
     const r = await runGoldenScore({ client: partial, online: true });
     expect(r.tally).toMatchObject({ asked: 2, correct: 1, failed: 1, percent: 100 });
+    // The left-out question was asked again, alone, before it counted as not judged.
+    expect(asked).toEqual([2, 1, 1]);
+    expect(r.notes.join(" ")).toMatch(/no verdict for 1 question\(s\) even asked alone/);
+  });
+
+  it("asks a question the judge's thinking cut off again alone with more room, until it gets a verdict (B7)", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const base = judge();
+    for (const needs of [GOLDEN_MAX_TOKENS, GOLDEN_LAST_TRY_MAX_TOKENS]) {
+      const caps: number[] = [];
+      // A model that thinks before it answers: below `needs` tokens of room it is cut off before the verdict.
+      const thinker: FlashClient = {
+        model: base.model,
+        async complete(request) {
+          caps.push(request.maxTokens);
+          if (request.maxTokens < needs) throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+          return base.complete(request);
+        },
+      };
+      const r = await runGoldenScore({ client: thinker, online: true, now: () => NOW });
+      expect(r.skipped).toBeNull();
+      expect(r.tally).toMatchObject({ asked: 1, correct: 1, failed: 0, percent: 100 });
+      expect(caps).toEqual([goldenMaxTokens(1), GOLDEN_MAX_TOKENS, GOLDEN_LAST_TRY_MAX_TOKENS].filter((c) => c <= needs));
+      expect(r.notes.join(" ")).not.toMatch(/no verdict/);
+    }
+  });
+
+  it("skips the night, keeping the last score, when even the last try gives no verdict: never a pass, never a fail (B7)", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const first = await runGoldenScore({ client: judge(), online: true, now: () => NOW });
+    expect(first.tally).toMatchObject({ correct: 1, percent: 100 });
+    let calls = 0;
+    const mute: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+      },
+    };
+    const r = await runGoldenScore({ client: mute, online: true, now: () => NOW });
+    expect(calls).toBe(3);
+    expect(r.skipped).toBe("model_unavailable");
+    expect(r.scoreId).toBeNull();
+    expect(readGoldenHistory()).toHaveLength(1);
+    expect(readGoldenHistory()[0]).toMatchObject({ correct: 1, percent: 100 });
   });
 });

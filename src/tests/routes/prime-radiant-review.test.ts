@@ -40,7 +40,7 @@ import { runningNightlyId } from "@/lib/prime-radiant/nightly";
 import { stop as stopScheduler } from "@/lib/prime-radiant/nightly-scheduler";
 import { stateDbPath } from "@/lib/prime-radiant/paths";
 import { addReviewItem } from "@/lib/prime-radiant/review-store";
-import { withStateDb } from "@/lib/prime-radiant/state-db";
+import { syncActiveClaims, withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault, vaultOperation } from "@/lib/prime-radiant/vault";
 import { setFlashClientOverride } from "@/lib/prime-radiant/flash-client";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
@@ -223,6 +223,34 @@ describe("review", () => {
     const again = await resolvePOST(req("POST", "/x", { action: "dismiss" }), idCtx(item.id));
     expect(again.status).toBe(409);
     expect((await again.json()).code).toBe("already_resolved");
+  });
+
+  it("words each disputed fact as its page says it now, not by its id (B14)", async () => {
+    await seed();
+    const raised = { text: A.text, page: "concepts/pricing.md", claimId: A.id, evidence: [] };
+    addReviewItem(root + "/vault", {
+      kind: "contradiction",
+      claimId: A.id,
+      pages: ["concepts/pricing.md", "concepts/catalogue.md"],
+      candidates: [raised, { text: B.text, page: "concepts/catalogue.md", claimId: B.id, evidence: [] }],
+    });
+    // An item about a fact whose page is gone keeps the words it was raised about; one about no fact has none.
+    addReviewItem(root + "/vault", { kind: "contradiction", claimId: "acme-sales/gone/old-fact", pages: ["concepts/gone.md"], candidates: [{ text: "An old fact.", page: "concepts/gone.md", claimId: "acme-sales/gone/old-fact", evidence: [] }] });
+    addReviewItem(root + "/vault", { kind: "lint", claimId: null, pages: ["concepts/pricing.md"], candidates: [], evidence: [{ kind: "lint", verdict: "no-sources" }] });
+    // Raised by hand about a fact alone, naming no page: the claim registry knows where it lives.
+    syncActiveClaims(root + "/vault", [{ id: B.id, page: "concepts/catalogue.md", updatedAt: B.updatedAt }]);
+    expect((await reviewPOST(req("POST", "/review", { kind: "contradiction", claimId: B.id }))).status).toBe(201);
+    const texts = async () => {
+      const list = await (await reviewGET(req("GET", "/review?status=open"))).json();
+      return Object.fromEntries(list.items.map((i: { claimId: string | null; claimText: string | null }) => [i.claimId ?? "none", i.claimText]));
+    };
+    expect(await texts()).toEqual({ [A.id]: A.text, [B.id]: B.text, "acme-sales/gone/old-fact": "An old fact.", none: null });
+
+    // An edit keeps the id and changes the words: the queue shows the new words.
+    await vaultOperation("edit: pricing", async (tx) => {
+      await tx.write("concepts/pricing.md", pageText({ claims: [{ ...A, text: "The blue widget costs 11 EUR." }] }));
+    });
+    expect((await texts())[A.id]).toBe("The blue widget costs 11 EUR.");
   });
 
   it("answers lint_blocked for an answer that carries a secret", async () => {

@@ -18,6 +18,7 @@ import {
   type CommitInfo,
   type DiffResult,
   type PageListEntry,
+  useStableT,
 } from "./prime-radiant-ui";
 
 /**
@@ -40,6 +41,7 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
   onOpenPage: (path: string) => void;
 }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [pages, setPages] = useState<PageListEntry[]>([]);
   const [path, setPath] = useState<string | null>(initialPage);
   const [commits, setCommits] = useState<CommitInfo[] | null>(null);
@@ -76,10 +78,10 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
         setCommits(null);
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [path, revision, t]);
+  }, [path, revision, stableT]);
 
   useEffect(() => {
     if (!selected || !path) return;
@@ -89,10 +91,10 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
         setDiff(null);
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [selected, path, t]);
+  }, [selected, path, stableT]);
 
   const revert = async (commit: CommitInfo) => {
     setConfirm(null);

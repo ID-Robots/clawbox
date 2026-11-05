@@ -6,6 +6,7 @@ import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, FIELD, INSET_SURFA
 import {
   API,
   errorText,
+  evidenceLine,
   formatWhen,
   jsonInit,
   keyPart,
@@ -14,6 +15,7 @@ import {
   type ReviewItem,
   type ReviewStatus,
   type RunRecord,
+  useStableT,
 } from "./prime-radiant-ui";
 
 interface ReviewList {
@@ -44,6 +46,7 @@ export default function PrimeRadiantReview({ revision, onChanged, onOpenPage, on
   onOpenSettings: () => void;
 }) {
   const { t } = useT();
+  const stableT = useStableT();
   const [status, setStatus] = useState<ReviewStatus>("open");
   const [list, setList] = useState<ReviewList | null>(null);
   const [held, setHeld] = useState(0);
@@ -67,9 +70,9 @@ export default function PrimeRadiantReview({ revision, onChanged, onOpenPage, on
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError" || id !== latest.current) return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
-  }, [status, t]);
+  }, [status, stableT]);
 
   // A resolve calls `onChanged`, which bumps `revision`: this re-reads,
   // abortably, rather than a second unaborted read racing a filter change.
@@ -136,6 +139,10 @@ function ReviewCard({ item, onSettled, onOpenPage }: {
   const [answer, setAnswer] = useState("");
   const open = item.status !== "resolved";
   const canVerify = open && !!item.claimId;
+  // What the page says now (the server's join); an older server's item: the text it was raised about.
+  const claimText = item.claimId
+    ? (item.claimText ?? item.candidates.find((c) => c.claimId === item.claimId)?.text ?? null)
+    : null;
 
   const resolve = async (body: Record<string, unknown>, label: string) => {
     if (busy) return;
@@ -165,8 +172,14 @@ function ReviewCard({ item, onSettled, onOpenPage }: {
 
       <div>
         <h3 className="text-[11px] uppercase tracking-wider text-[var(--text-muted)]">{t("primeRadiant.review.disputed")}</h3>
-        <p className="mt-0.5 font-mono text-xs text-[var(--text-primary)] break-all" data-testid="prime-radiant-review-claim">
-          {item.claimId ?? t("primeRadiant.review.noClaim")}
+        {/* The fact in words; its id (a slug of the words it was first written with) only on hover. */}
+        <p
+          className={`mt-0.5 text-[var(--text-primary)] ${claimText ? "text-sm" : "font-mono text-xs break-all"}`}
+          title={claimText && item.claimId ? item.claimId : undefined}
+          data-testid="prime-radiant-review-claim"
+          data-claim-id={item.claimId ?? undefined}
+        >
+          {claimText ?? item.claimId ?? t("primeRadiant.review.noClaim")}
         </p>
         {item.pages.length > 0 && (
           <p className="mt-1 flex flex-wrap gap-2 text-[11px]">
@@ -182,7 +195,7 @@ function ReviewCard({ item, onSettled, onOpenPage }: {
       {item.evidence.length > 0 && (
         <ul className="text-[11px] text-[var(--text-secondary)] space-y-0.5">
           {item.evidence.map((e, i) => (
-            <li key={i}>{[e.kind, e.verdict, e.note, e.page, e.source].filter(Boolean).join(" · ")}</li>
+            <li key={i}>{evidenceLine(t, e, ["kind", "verdict", "note", "page", "source"])}</li>
           ))}
         </ul>
       )}
@@ -192,7 +205,7 @@ function ReviewCard({ item, onSettled, onOpenPage }: {
           <h3 className="text-[11px] uppercase tracking-wider text-[var(--text-muted)]">{t("primeRadiant.review.candidates")}</h3>
           <ol className="mt-1.5 space-y-2">
             {item.candidates.map((c, i) => (
-              <li key={i} className={`${INSET_SURFACE} px-3 py-2`} data-testid="prime-radiant-review-candidate">
+              <li key={i} className={`${INSET_SURFACE} px-3 py-2`} title={c.claimId ?? undefined} data-testid="prime-radiant-review-candidate" data-claim-id={c.claimId ?? undefined}>
                 <p className="text-sm text-[var(--text-primary)]">{c.text}</p>
                 <p className="mt-1 text-[11px] text-[var(--text-muted)] flex flex-wrap gap-x-3">
                   {c.page ? (
@@ -202,12 +215,11 @@ function ReviewCard({ item, onSettled, onOpenPage }: {
                   ) : (
                     <span>{t("primeRadiant.review.newAnswer")}</span>
                   )}
-                  {c.claimId && <span className="font-mono">{c.claimId}</span>}
                 </p>
                 {c.evidence.length > 0 && (
                   <ul className="mt-1 text-[11px] text-[var(--text-secondary)] space-y-0.5">
                     {c.evidence.map((e, j) => (
-                      <li key={j}>{[e.kind, e.verdict, e.note, e.source].filter(Boolean).join(" · ")}</li>
+                      <li key={j}>{evidenceLine(t, e, ["kind", "verdict", "note", "source"])}</li>
                     ))}
                   </ul>
                 )}

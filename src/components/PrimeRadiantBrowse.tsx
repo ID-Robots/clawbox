@@ -9,14 +9,17 @@ import {
   API,
   PAGE_TYPES,
   errorText,
+  evidenceLine,
   formatWhen,
   keyPart,
+  localizeGeneratedHeadings,
   pageLabel,
   pageUrl,
   prJson,
   verifierKey,
   type PageDetail,
   type PageListEntry,
+  useStableT,
 } from "./prime-radiant-ui";
 import PrimeRadiantSearch, { type SearchRequest } from "./PrimeRadiantSearch";
 
@@ -60,6 +63,7 @@ const EMPTY: Filters = { type: "", domain: "", verified: "", q: "" };
  */
 export default function PrimeRadiantBrowse({ domains, revision, selected, onSelect, onHistory, onIngest }: Props) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   const [filters, setFilters] = useState<Filters>(EMPTY);
   const [list, setList] = useState<{ total: number; pages: PageListEntry[] } | null>(null);
   const [page, setPage] = useState<PageDetail | null>(null);
@@ -85,9 +89,9 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
       setError(null);
     } catch (err) {
       if ((err as Error)?.name === "AbortError" || signal.aborted) return;
-      setError(errorText(err, t));
+      setError(errorText(err, stableT));
     }
-  }, [filters, t]);
+  }, [filters, stableT]);
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -109,10 +113,10 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setPageError({ path: selected, message: errorText(err, t) });
+        setPageError({ path: selected, message: errorText(err, stableT) });
       });
     return () => ctl.abort();
-  }, [selected, revision, t]);
+  }, [selected, revision, stableT]);
 
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }));
   const searchInside = () => {
@@ -328,9 +332,10 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                 ["primeRadiant.page.generated", formatWhen(fm.generated?.at, locale)],
                 ["primeRadiant.page.staleAfter", recheckLabel(fm, t)],
               ] as const).map(([key, value]) => (
-                <div key={key} className={`${INSET_SURFACE} px-2.5 py-1.5`}>
+                <div key={key} className={`${INSET_SURFACE} px-2.5 py-1.5 min-w-0`}>
                   <dt className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{t(key)}</dt>
-                  <dd className="mt-0.5 text-[var(--text-primary)] truncate">{value}</dd>
+                  {/* Wrapped, never cut: "2027-11-05 (by page type)" is longer than a phone's half width. */}
+                  <dd className="mt-0.5 text-[var(--text-primary)] break-words" data-testid="prime-radiant-page-meta-value">{value}</dd>
                 </div>
               ))}
             </dl>
@@ -376,7 +381,7 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                         {c.evidence.map((e, i) => (
                           <li key={i} className="flex gap-1.5">
                             <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 13 }} aria-hidden="true">link</span>
-                            <span className="break-all">{[e.kind, e.path ?? e.sourceId, e.lines, e.note].filter(Boolean).join(" · ")}</span>
+                            <span className="break-all">{evidenceLine(t, e, ["kind", "where", "lines", "note"])}</span>
                           </li>
                         ))}
                       </ul>
@@ -417,7 +422,7 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
           )}
 
           <section className={`${CARD_SURFACE} p-4 text-sm text-[var(--text-secondary)] leading-relaxed`} data-testid="prime-radiant-page-body">
-            {renderText(page.body, t("chat.table"))}
+            {renderText(localizeGeneratedHeadings(page.body, t), t("chat.table"))}
           </section>
         </>
       )}

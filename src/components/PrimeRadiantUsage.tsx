@@ -4,7 +4,7 @@ import { useEffect, useId, useState } from "react";
 import { formatFreesUpAt } from "@/lib/clawai-allowance";
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
-import { API, errorText, formatCount, formatTokens, formatWhen, prJson, type CostSummary } from "./prime-radiant-ui";
+import { API, errorText, formatCount, formatTokens, formatWhen, prJson, type CostSummary, useStableT } from "./prime-radiant-ui";
 
 /**
  * Tokens per run id — each ingest job and each night — from the usage route
@@ -48,6 +48,7 @@ export function useTokensByRun(key: unknown, everyMs = 0): ReadonlyMap<string, n
  */
 export default function PrimeRadiantUsage({ revision }: { revision: number }) {
   const { t, locale } = useT();
+  const stableT = useStableT();
   /** The "per run" heading names the table (two windows must not share an id). */
   const byRunId = useId();
   const [summary, setSummary] = useState<CostSummary | null>(null);
@@ -55,14 +56,23 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
 
   useEffect(() => {
     const ctl = new AbortController();
+    // The totals at once: the allowance answer waits on the ClawBox AI portal
+    // (up to five seconds), the totals only on this box (B12). Whichever comes
+    // second never replaces the one with the meter.
+    let withMeter = false;
+    prJson<CostSummary>(`${API}/costs`, { signal: ctl.signal })
+      .then((s) => {
+        if (!withMeter) setSummary(s);
+      })
+      .catch(() => undefined);
     prJson<CostSummary>(`${API}/costs?allowance=1`, { signal: ctl.signal })
-      .then((s) => { setSummary(s); setError(null); })
+      .then((s) => { withMeter = true; setSummary(s); setError(null); })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        setError(errorText(err, t));
+        setError(errorText(err, stableT));
       });
     return () => ctl.abort();
-  }, [revision, t]);
+  }, [revision, stableT]);
 
   const n = (v: number) => formatCount(v, locale);
   const tok = (v: number) => formatTokens(v, locale);

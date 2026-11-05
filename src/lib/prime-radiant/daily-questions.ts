@@ -76,7 +76,7 @@ function openItems(vault: string): DailyReviewItem[] {
  */
 export async function readDailyQuestions(
   owner: string | null,
-  options: { vault?: string; now?: Date; settings?: PrimeRadiantSettings } = {},
+  options: { vault?: string; now?: Date; settings?: PrimeRadiantSettings; pick?: boolean } = {},
 ): Promise<DailyAnswerBody> {
   const vault = options.vault ?? vaultDir();
   const settings = options.settings ?? readSettings();
@@ -88,7 +88,12 @@ export async function readDailyQuestions(
   const input = { pages: dailyPages(await readVaultSnapshot(vault)), reviewItems: openItems(vault), domains: settings.domains, now };
   const ask = (o: string) => pickDailyQuestions(input, o, { perOwner: settings.verification.perOwner, language: languageOf(o, settings) });
   const owners = dailyOwners(input).map((o) => ({ ...o, language: languageOf(o.owner, settings), waiting: ask(o.owner).length }));
-  const named = owner ? (owners.find((o) => o.owner.toLowerCase() === owner.toLowerCase())?.owner ?? owner) : null;
+  // `pick`: no owner named, the one the Questions tab shows first — the first with something waiting.
+  const named = owner
+    ? (owners.find((o) => o.owner.toLowerCase() === owner.toLowerCase())?.owner ?? owner)
+    : options.pick
+      ? ((owners.find((o) => o.waiting > 0) ?? owners[0])?.owner ?? null)
+      : null;
   return {
     initialised: true,
     ...base,

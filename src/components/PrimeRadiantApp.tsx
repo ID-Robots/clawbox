@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY, SECTION_LABEL } from "./coding-agent-ui";
@@ -15,6 +15,7 @@ import {
   prJson,
   type PrimeRadiantStatus,
   type Tab,
+  useStableT,
 } from "./prime-radiant-ui";
 import PrimeRadiantBrowse from "./PrimeRadiantBrowse";
 import PrimeRadiantReview from "./PrimeRadiantReview";
@@ -81,8 +82,16 @@ function isDrawableStatus(s: unknown): s is PrimeRadiantStatus {
   if (typeof st.initialised !== "boolean") return false;
   return !st.initialised || (!!st.vault && typeof st.vault === "object" && !!st.plugin && typeof st.plugin === "object");
 }
+/** The tab strip's edge fade: a side fades only while more tabs wait past it. */
+function tabStripFade(overflow: { left: boolean; right: boolean }): CSSProperties | undefined {
+  if (!overflow.left && !overflow.right) return undefined;
+  const mask = `linear-gradient(to right, ${overflow.left ? "transparent, black 28px" : "black"}, ${overflow.right ? "black calc(100% - 28px), transparent" : "black"})`;
+  return { maskImage: mask, WebkitMaskImage: mask };
+}
+
 export default function PrimeRadiantApp() {
   const { t, locale } = useT();
+  const stableT = useStableT();
   /** For what shows before the dictionaries load (the window can be the first thing on screen): English, never a key. */
   const tr = useTr();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
@@ -181,9 +190,9 @@ export default function PrimeRadiantApp() {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;
     // A refused init is shown with a retry button, never retried on its own.
     initRequest.current = null;
-    setError(errorText(err, t));
+    setError(errorText(err, stableT));
     setPhase("failed");
-  }, [t]);
+  }, [stableT]);
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -252,13 +261,50 @@ export default function PrimeRadiantApp() {
 
   const ready = phase === "ready" && status?.initialised;
 
+  // The tab strip scrolls sideways on a narrow window: its edges fade where
+  // more tabs wait, so the owner can see it does (B11), and the open tab is
+  // brought into view whenever it changes.
+  const tabStrip = useRef<HTMLElement | null>(null);
+  const [tabOverflow, setTabOverflow] = useState({ left: false, right: false });
+  const measureTabStrip = useCallback(() => {
+    const el = tabStrip.current;
+    if (!el) return;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setTabOverflow((o) => (o.left === left && o.right === right ? o : { left, right }));
+  }, []);
+  useLayoutEffect(() => {
+    const el = tabStrip.current;
+    if (!ready || !el) return;
+    measureTabStrip();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measureTabStrip);
+    // The tabs too: a language switch changes their width, not the strip's.
+    for (const box of [el, ...Array.from(el.children)]) observer?.observe(box);
+    window.addEventListener("resize", measureTabStrip);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measureTabStrip);
+    };
+  }, [ready, measureTabStrip]);
+  useEffect(() => {
+    // The strip alone scrolls: scrollIntoView could move the desktop's window too.
+    const el = tabStrip.current;
+    const open = el?.querySelector<HTMLElement>("[data-selected]");
+    if (!el || !open) return;
+    const strip = el.getBoundingClientRect();
+    const at = open.getBoundingClientRect();
+    if (at.left < strip.left) el.scrollLeft -= strip.left - at.left + 12;
+    else if (at.right > strip.right) el.scrollLeft += at.right - strip.right + 12;
+  }, [tab, ready]);
+
   return (
     <div
       className={`h-full flex flex-col ${APP_GROUND} text-white overflow-hidden @container`}
       data-testid="prime-radiant-app"
       data-help-bounds
     >
-      <header className="flex items-center justify-between gap-4 px-5 pt-4 pb-3 border-b border-white/[0.06]">
+      {/* On a phone the counts drop under the title and wrap, rather than being cut at the window's edge. */}
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 pt-4 pb-3 border-b border-white/[0.06]">
         <div className="flex items-center gap-2 min-w-0">
           <PrimeRadiantIcon className="w-5 h-5 shrink-0" />
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{PRODUCT_NAME}</h1>
@@ -267,7 +313,7 @@ export default function PrimeRadiantApp() {
           </span>
         </div>
         {ready && status && (
-          <div className="flex items-center gap-3 text-[11px] text-[var(--text-muted)] shrink-0" data-testid="prime-radiant-counts">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 min-w-0 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-counts">
             <span>{t("primeRadiant.countPages", { n: status.vault.pages })}</span>
             <span>{t("primeRadiant.countClaims", { n: status.vault.claims })}</span>
             <span>{t("primeRadiant.countVerified", { n: status.vault.verifiedPages })}</span>
@@ -283,7 +329,7 @@ export default function PrimeRadiantApp() {
             )}
             {status.links && status.links.pages > 0 && (
               <span
-                data-testid="prime-radiant-links"
+                data-testid="prime-radiant-count-links"
                 className={status.links.median >= status.links.target ? undefined : "text-amber-200/80"}
                 title={t("primeRadiant.countLinksHint", { target: status.links.target })}
               >
@@ -295,13 +341,22 @@ export default function PrimeRadiantApp() {
       </header>
 
       {ready && (
-        <nav className="flex gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto" role="tablist" aria-label={t("primeRadiant.tabsLabel")}>
+        <nav
+          ref={tabStrip}
+          onScroll={measureTabStrip}
+          className="flex gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto"
+          role="tablist"
+          aria-label={t("primeRadiant.tabsLabel")}
+          data-overflow={[tabOverflow.left && "left", tabOverflow.right && "right"].filter(Boolean).join(" ") || undefined}
+          style={tabStripFade(tabOverflow)}
+        >
           {TABS.map((id) => (
             <button
               key={id}
               type="button"
               role="tab"
               aria-selected={tab === id}
+              data-selected={tab === id || undefined}
               data-testid={`prime-radiant-tab-${id}`}
               onClick={() => showTab(id)}
               className={`inline-flex items-center gap-1.5 shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
@@ -426,7 +481,7 @@ export default function PrimeRadiantApp() {
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}
             {tab === "settings" && (
               <div className="space-y-4">
-                <PrimeRadiantSettings onChanged={changed} />
+                <PrimeRadiantSettings revision={revision} onChanged={changed} />
                 <PrimeRadiantUsage revision={revision} />
               </div>
             )}

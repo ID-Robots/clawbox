@@ -260,6 +260,11 @@ describe("daily questions: settings", () => {
     expect(mine.language).toBe("bg");
     expect(mine.questions.map((q) => q.kind)).toEqual(["review", "claim"]);
     expect(mine.questions[0].question).toBe("Кое е вярно за „A note“?");
+    // `pick`: with no owner named, the first with something waiting, in the same read (B12).
+    expect(all.owner).toBeNull();
+    const picked = await readDailyQuestions(null, { now: NOW, pick: true });
+    expect(picked).toMatchObject({ owner: "Иван Иванов", language: "bg", owners: all.owners });
+    expect(picked.questions).toEqual(mine.questions);
   });
 
   it("finds an owner's oldest review item behind hundreds of newer ones", async () => {

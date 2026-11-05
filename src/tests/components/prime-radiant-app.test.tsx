@@ -193,6 +193,8 @@ let searchAnswer: Record<string, unknown>;
 let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
+/** The pass `GET nightly` says is running (a Run now sets it). */
+let nightlyRunning: string | null;
 const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" };
 let historyCommits: unknown[];
 /** What POST revert answers instead of success (a refusal), when set. */
@@ -215,6 +217,10 @@ let structureSettings: { enabled: boolean; company: string; enrichTop: number; m
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
 let listed: unknown[];
+/** The box's UI language, as `GET preferences` answers it. */
+let uiLanguage: string;
+/** A server whose `GET daily` knows no `pick`. */
+let olderDailyServer: boolean;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -226,7 +232,7 @@ function installFetch() {
     }
     calls.push({ url, method, body });
     const ok = (json: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => json });
-    if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: "en" });
+    if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: uiLanguage });
     const p = "/setup-api/prime-radiant";
     if (url === `${p}/status`) return ok(status);
     if (url === `${p}/init` && method === "POST") {
@@ -250,7 +256,13 @@ function installFetch() {
       reviewItems = [];
       return ok({ item: { ...REVIEW_ITEM, status: "resolved" }, commit: "abc1234", retired: [] });
     }
-    if (url === `${p}/nightly`) return ok({ running: null, nextRunAt: null, runs: nightlyRuns });
+    if (url === `${p}/nightly`) return ok({ running: nightlyRunning, nextRunAt: null, runs: nightlyRuns });
+    if (url === `${p}/nightly/run` && method === "POST" && (body as { merge?: unknown } | undefined)?.merge === undefined) {
+      const run = { id: "run-started00001", kind: "nightly", branch: null, status: "running", trigger: "manual", startedAt: "2026-01-06T09:00:00.000Z", finishedAt: null, usdEstimate: 0, summary: null };
+      nightlyRunning = run.id;
+      nightlyRuns = [run, ...nightlyRuns];
+      return ok({ run }, 202);
+    }
     if (url === `${p}/nightly/run` && method === "POST") return ok({ branch: "dream/2026-01-05", commit: "def5678abc", changed: [] });
     if (url.startsWith(`${p}/history/`)) {
       return ok({ path: "entities/acme-widgets.md", commits: historyCommits });
@@ -318,7 +330,8 @@ function installFetch() {
       goldenQuestions = goldenQuestions.filter((q) => !url.endsWith((q as { id: string }).id));
       return ok({ question: GOLDEN_Q, commit: "d".repeat(40) });
     }
-    if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") ? DAILY_MINE : DAILY_OWNERS);
+    // `pick=1`: today's server answers for the owner shown first; an older one ignores it.
+    if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") || (url.includes("pick=1") && !olderDailyServer) ? DAILY_MINE : DAILY_OWNERS);
     if (url === `${p}/settings` && method === "PUT" && refuseSettingsPut) return ok({ error: "The settings could not be saved.", code: "vault_unavailable" }, 503);
     if (url === `${p}/settings`) {
       const settings = {
@@ -387,6 +400,7 @@ beforeEach(() => {
   reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
+  nightlyRunning = null;
   allowanceAccount = {
     available: true, plan: "max", timeZone: "UTC",
     weekly: { used: 3_400_000, limit: 10_000_000, percentUsed: 34, isOverLimit: false, resetAt: "2026-01-09T14:05:00.000Z" },
@@ -405,6 +419,8 @@ beforeEach(() => {
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
+  uiLanguage = "en";
+  olderDailyServer = false;
   goldenQuestions = [GOLDEN_Q];
   refuseSettingsPut = false;
   FakeEventSource.last = null;
@@ -616,13 +632,60 @@ describe("PrimeRadiantApp", () => {
   it("shows the median links per page beside the counts, flagged while under its target", async () => {
     status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
     await mount();
-    const links = await screen.findByTestId("prime-radiant-links");
+    const links = await screen.findByTestId("prime-radiant-count-links");
     expect(links).toHaveTextContent("3 links/page");
     expect(links).toHaveAttribute("title", "Median meaningful links per page (target 5)");
     expect(links.className).toMatch(/amber/);
   });
 
-  it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
+  it("names the header's links-per-page count and a page's own links list apart (B15)", async () => {
+    status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
+    pageOverride = { ...PAGE, links: ["concepts/widget-pricing.md"] };
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    // One element per test id: the page's list is the only "prime-radiant-links".
+    expect(screen.getAllByTestId("prime-radiant-links")).toHaveLength(1);
+    expect(screen.getByTestId("prime-radiant-links")).toHaveTextContent("widget-pricing");
+    expect(screen.getByTestId("prime-radiant-count-links")).toHaveTextContent("3 links/page");
+  });
+
+    it("shows a phone that the tab strip scrolls, and wraps the counts and a page's values rather than cutting them (B11)", async () => {
+    // A 390 px strip holding 600 px of tabs.
+    const wide = vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) { return this.getAttribute("role") === "tablist" ? 600 : 0; });
+    const narrow = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) { return this.getAttribute("role") === "tablist" ? 390 : 0; });
+    try {
+      await mount();
+      const strip = await screen.findByRole("tablist");
+      await waitFor(() => expect(strip).toHaveAttribute("data-overflow", "right"));
+      Object.defineProperty(strip, "scrollLeft", { value: 210, configurable: true });
+      fireEvent.scroll(strip);
+      await waitFor(() => expect(strip).toHaveAttribute("data-overflow", "left"));
+      Object.defineProperty(strip, "scrollLeft", { value: 100, configurable: true });
+      fireEvent.scroll(strip);
+      await waitFor(() => expect(strip).toHaveAttribute("data-overflow", "left right"));
+    } finally {
+      wide.mockRestore();
+      narrow.mockRestore();
+    }
+    const counts = screen.getByTestId("prime-radiant-counts");
+    expect(counts.className).toMatch(/flex-wrap/);
+    expect(counts.className).not.toMatch(/shrink-0/);
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const values = await screen.findAllByTestId("prime-radiant-page-meta-value");
+    expect(values.length).toBeGreaterThan(0);
+    for (const v of values) expect(v.className).not.toMatch(/truncate/);
+  });
+
+  it("draws no fade when every tab fits", async () => {
+    await mount();
+    const strip = await screen.findByRole("tablist");
+    expect(strip).not.toHaveAttribute("data-overflow");
+  });
+
+    it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
     await mount();
     expect(await screen.findByTestId("prime-radiant-counts")).toBeInTheDocument();
     const reads = () => calls.filter((c) => c.url === "/setup-api/prime-radiant/status").length;
@@ -639,7 +702,8 @@ describe("PrimeRadiantApp", () => {
     await mount();
     await openTab("review");
     const item = await screen.findByTestId("prime-radiant-review-item");
-    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveTextContent("sales/acme-widgets/employees");
+    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveTextContent("Acme Widgets Ltd has 40 employees.");
+    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveAttribute("data-claim-id", "sales/acme-widgets/employees");
     expect(within(item).getAllByTestId("prime-radiant-review-candidate")).toHaveLength(2);
     fireEvent.click(within(item).getAllByTestId("prime-radiant-review-pick")[1]);
     await waitFor(() => {
@@ -647,6 +711,19 @@ describe("PrimeRadiantApp", () => {
       expect(post?.body).toEqual({ action: "pick", candidate: 1 });
     });
     expect(await screen.findByTestId("prime-radiant-review-empty")).toBeInTheDocument();
+  });
+
+  it("words the disputed fact as its page says it now, never by its id slug (B14)", async () => {
+    // The fact was edited after the item was raised: its id still says 40, its page now says 42.
+    reviewItems = [{ ...REVIEW_ITEM, claimText: "Acme Widgets Ltd has 42 employees." }];
+    await mount();
+    await openTab("review");
+    const item = await screen.findByTestId("prime-radiant-review-item");
+    const claim = within(item).getByTestId("prime-radiant-review-claim");
+    expect(claim).toHaveTextContent("Acme Widgets Ltd has 42 employees.");
+    expect(claim).toHaveAttribute("title", "sales/acme-widgets/employees");
+    // No claim-id slug is shown as text anywhere on the card.
+    expect(item.textContent).not.toMatch(/sales\/acme-widgets\//);
   });
 
   it("still shows and dismisses an Opus proposal an older box raised", async () => {
@@ -917,6 +994,19 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.find((c) => c.url.endsWith("/nightly/run"))?.body).toEqual({ merge: "dream/2026-01-05" });
     });
+  });
+
+  it("says a started nightly pass has started only while it runs, and no longer once it has ended (B9)", async () => {
+    await mount();
+    await openTab("settings");
+    fireEvent.click(await screen.findByTestId("prime-radiant-nightly-run"));
+    expect(await screen.findByText("The nightly pass has started.")).toBeInTheDocument();
+    // The pass merges; the window's Refresh reads the nightly card again.
+    nightlyRunning = null;
+    nightlyRuns = [{ ...(nightlyRuns[0] as object), status: "done", finishedAt: "2026-01-06T09:05:00.000Z" }];
+    fireEvent.click(screen.getByTestId("prime-radiant-refresh"));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-nightly-run-row")).toHaveAttribute("data-status", "done"));
+    expect(screen.queryByText("The nightly pass has started.")).toBeNull();
   });
 
   it("offers no second opinion and never sends an Opus section, even to an older server that still has one", async () => {
@@ -1316,6 +1406,123 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.endsWith("/ingest/job-queued/retry") && c.method === "POST")).toBe(true);
     });
+  });
+});
+
+describe("PrimeRadiantApp — Bulgarian (B10)", () => {
+  /** Mount on a Bulgarian box, and wait for its catalogue. */
+  async function mountBg() {
+    uiLanguage = "bg";
+    render(<I18nProvider><CatalogueProbe /><PrimeRadiantApp /></I18nProvider>);
+    await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("живо уики"), { timeout: 5000 });
+  }
+
+  it("words a review item's evidence in Bulgarian, keeping the judge's own reason as written", async () => {
+    reviewItems = [{
+      ...REVIEW_ITEM,
+      evidence: [
+        { kind: "judge", verdict: "contradiction", note: "1.5 kg against 1.2 kg", source: "flash" },
+        { kind: "source-changed", note: "Its document ~/Documents/Acme/faq.txt changed.", source: "~/Documents/Acme/faq.txt" },
+      ],
+      candidates: [
+        { ...REVIEW_ITEM.candidates[0], evidence: [{ kind: "claim", page: "entities/acme-widgets.md" }, { kind: "document-says", note: "The X200 weighs 1.5 kg.", source: "~/Documents/Acme/faq.txt" }] },
+        { ...REVIEW_ITEM.candidates[1], evidence: [{ kind: "raised-by", source: "assistant" }] },
+      ],
+    }];
+    await mountBg();
+    await openTab("review");
+    const item = await screen.findByTestId("prime-radiant-review-item");
+    expect(item).toHaveTextContent("Преценка на модела · противоречие · 1.5 kg against 1.2 kg · Модел Flash");
+    expect(item).toHaveTextContent("Документът е променен · Документът му ~/Documents/Acme/faq.txt е променен. · ~/Documents/Acme/faq.txt");
+    expect(item).toHaveTextContent("Документът сега казва · The X200 weighs 1.5 kg. · ~/Documents/Acme/faq.txt");
+    const [first, second] = within(item).getAllByTestId("prime-radiant-review-candidate");
+    expect(within(first).getByText("Факт")).toBeInTheDocument();
+    expect(within(second).getByText("Повдигнато от · асистента")).toBeInTheDocument();
+    expect(item.textContent).not.toMatch(/judge|contradiction ·|claim\b|flash/);
+  });
+
+  it("words a page's fact evidence and the headings Prime Radiant wrote in Bulgarian, leaving the owner's own", async () => {
+    pageOverride = {
+      ...PAGE,
+      frontmatter: { ...FM, claims: [{ ...FM.claims[0], evidence: [
+        { kind: "source", path: "~/Documents/Acme/faq.txt", note: "added by owner" },
+        // A quote from the document that happens to read like the server's note: data, kept as written.
+        { kind: "source", path: "~/Documents/Acme/minutes.txt", note: "added by the board on 3 May" },
+      ] }] },
+      body: "Acme Widgets Ltd sells widgets.\n\n## Key facts\n\n- Based in Springfield.\n\n## Our notes\n\nKept.\n\n```\n## Sources\n```\n\n## Sources\n\n- `~/Documents/Acme/faq.txt`\n",
+    };
+    await mountBg();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const claim = await screen.findByTestId("prime-radiant-claim");
+    expect(claim).toHaveTextContent("Източник · ~/Documents/Acme/faq.txt · добавено от собственика");
+    expect(claim).toHaveTextContent("Източник · ~/Documents/Acme/minutes.txt · added by the board on 3 May");
+    const body = screen.getByTestId("prime-radiant-page-body");
+    expect(body).toHaveTextContent("Основни факти");
+    expect(body).toHaveTextContent("Източници");
+    expect(body).toHaveTextContent("Our notes");
+    expect(body.textContent).not.toMatch(/Key facts/);
+    // Inside a code block the heading is text, left as written; the real one is translated.
+    expect(body.textContent?.match(/Sources/g)).toHaveLength(1);
+  });
+});
+
+describe("PrimeRadiantApp — speed (B12)", () => {
+  /** Switches the desktop's language, as Settings does. */
+  function LanguageSwitch() {
+    const { setLocale } = useT();
+    return <button type="button" data-testid="switch-to-bg" onClick={() => setLocale("bg")}>bg</button>;
+  }
+  const reads = () => calls.filter((c) => c.method === "GET" && c.url.startsWith("/setup-api/prime-radiant/")).map((c) => c.url);
+
+  it("re-words an open page in another language without reading the vault again", async () => {
+    render(<I18nProvider><CatalogueProbe /><LanguageSwitch /><PrimeRadiantApp /></I18nProvider>);
+    await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("living wiki"));
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    const before = reads();
+    fireEvent.click(screen.getByTestId("switch-to-bg"));
+    await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("живо уики"), { timeout: 5000 });
+    expect(screen.getByTestId("prime-radiant-tab-browse")).toHaveTextContent("Страници");
+    // Give any effect that would re-fire time to: none may.
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(reads()).toEqual(before);
+  });
+
+  it("shows the usage totals without waiting for the ClawBox AI portal behind the allowance meter", async () => {
+    let release: () => void = () => undefined;
+    const portal = new Promise<void>((r) => { release = r; });
+    const inner = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).endsWith("/costs?allowance=1")) await portal;
+      return (inner as typeof fetch)(input as RequestInfo, init);
+    }));
+    await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-total")).toHaveTextContent("Tokens: 1.5K");
+    expect(screen.queryByTestId("prime-radiant-usage-allowance")).toBeNull();
+    release();
+    expect(await screen.findByTestId("prime-radiant-usage-allowance")).toBeInTheDocument();
+  });
+
+  it("reads the daily questions once, for the owner the server picked", async () => {
+    await mount();
+    await openTab("questions");
+    expect((await screen.findAllByTestId("prime-radiant-daily-question"))).toHaveLength(1);
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(reads().filter((u) => u.includes("/daily"))).toEqual(["/setup-api/prime-radiant/daily?pick=1"]);
+  });
+
+  it("still shows the first owner's questions from an older server that knows no pick, with a second read", async () => {
+    olderDailyServer = true;
+    await mount();
+    await openTab("questions");
+    expect((await screen.findAllByTestId("prime-radiant-daily-question"))).toHaveLength(1);
+    expect(reads().filter((u) => u.includes("/daily"))).toEqual([
+      "/setup-api/prime-radiant/daily?pick=1",
+      `/setup-api/prime-radiant/daily?owner=${encodeURIComponent("Иван Иванов")}`,
+    ]);
   });
 });
 

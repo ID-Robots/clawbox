@@ -134,10 +134,13 @@ test.describe("Prime Radiant", () => {
     const candidates = item.getByTestId("prime-radiant-review-candidate");
     await expect(candidates).toHaveCount(2);
     await expect(candidates.filter({ hasText: "1200 crates" })).toHaveCount(1);
-    const claimId = (await item.getByTestId("prime-radiant-review-claim").textContent())?.trim() ?? "";
+    // The disputed fact is shown in words; its id rides on the element.
+    const disputed = item.getByTestId("prime-radiant-review-claim");
+    const claimId = (await disputed.getAttribute("data-claim-id")) ?? "";
     expect(claimId).toMatch(/^[a-z0-9-]+\/[a-z0-9-]+\/[a-z0-9-]+$/);
+    await expect(disputed).not.toHaveText(claimId);
     await candidates.filter({ hasText: WINNER }).getByTestId("prime-radiant-review-pick").click();
-    await expect(app.getByTestId("prime-radiant-review-item").filter({ hasText: claimId })).toHaveCount(0);
+    await expect(app.locator(`[data-testid="prime-radiant-review-claim"][data-claim-id="${claimId}"]`)).toHaveCount(0);
 
     // ── browse again: the page carrying the claim is verified, the claim
     // holds the picked text and says who verified it; the losing figure is gone
