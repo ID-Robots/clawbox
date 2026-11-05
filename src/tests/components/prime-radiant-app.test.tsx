@@ -128,6 +128,19 @@ const QUEUED_JOB = {
   finishedAt: "2026-01-05T10:00:00.000Z",
 };
 
+/** A job the owner stopped: one document written, two never reached wait. */
+const STOPPED_JOB = {
+  ...JOB_BASE,
+  id: "job-stopped",
+  status: "stopped",
+  phase: "done",
+  done: 1,
+  pages: 1,
+  queued: 2,
+  error: "The ingest was stopped. The documents it did not reach wait for the next run of these folders, or Retry.",
+  finishedAt: "2026-01-05T10:00:00.000Z",
+};
+
 /** A stand-in for the browser's EventSource: the test plays the server's frames. */
 class FakeEventSource {
   static last: FakeEventSource | null = null;
@@ -279,6 +292,9 @@ function installFetch() {
     if (url === `${p}/ingest/job-dead/retry` && method === "POST") return ok({ job: { ...RUNNING_JOB, id: "job-retry", kind: "retry" } }, 202);
     if (url === `${p}/ingest/job-dead`) return ok({ job: DEAD_JOB, deadLetter: [{ seq: 1, label: "~/acme-docs/broken.pdf", error: "unreadable", attempts: 2, bytes: 10 }] });
     if (url === `${p}/ingest/job-queued`) return ok({ job: QUEUED_JOB, deadLetter: [] });
+    if (url === `${p}/ingest/job-stopped`) return ok({ job: STOPPED_JOB, deadLetter: [] });
+    if (url === `${p}/ingest/job-stopped/retry` && method === "POST") return ok({ job: { ...RUNNING_JOB, id: "job-retry", kind: "retry" } }, 202);
+    if (url.startsWith(`${p}/ingest/upload?`) && method === "POST") return ok({ batch: "fac237031c582092" }, 201);
     if (url.startsWith(`${p}/ingest/`) && method === "DELETE") {
       const refusal = stopRefusals.shift();
       if (refusal) return ok({ error: "The job could not be stopped", code: "stop_failed" }, refusal);
@@ -974,9 +990,90 @@ describe("PrimeRadiantApp", () => {
       expect(calls.some((c) => c.url.endsWith("/ingest/job-run") && c.method === "DELETE")).toBe(true);
     });
 
-    act(() => { FakeEventSource.last?.emit("end", { ...RUNNING_JOB, status: "interrupted", phase: "done" }); });
+    // A Stop settles the job as stopped: the row says so, and what it did not reach waits.
+    const stopped = { ...STOPPED_JOB, id: RUNNING_JOB.id };
+    ingestJobs = [stopped];
+    act(() => { FakeEventSource.last?.emit("end", stopped); });
     await waitFor(() => expect(screen.queryByTestId("prime-radiant-ingest-running")).toBeNull());
     expect(FakeEventSource.last?.closed).toBe(true);
+    const row = await screen.findByTestId("prime-radiant-ingest-job");
+    expect(row).toHaveTextContent(/^Stopped/);
+    expect(row).not.toHaveTextContent(/Finished|Not added/);
+    expect(within(row).getByTestId("prime-radiant-dead-letter-toggle")).toHaveTextContent(/^Waiting for the next run: 2$/);
+  });
+
+  it("shows a stopped import as Stopped, what it did not reach waiting — never as failed — and retries it", async () => {
+    ingestJobs = [STOPPED_JOB];
+    await mount();
+    await openTab("ingest");
+    const job = await screen.findByTestId("prime-radiant-ingest-job");
+    expect(job).toHaveTextContent(/^Stopped/);
+    expect(job).not.toHaveTextContent(/Finished|Interrupted|Not added/);
+    // The owner's own Stop is no error: said in their language, never in red.
+    const note = within(job).getByTestId("prime-radiant-ingest-job-stopped");
+    expect(note).toHaveTextContent("What was already written stays. The documents it did not reach did not fail; “Try these again” writes them.");
+    expect(note.className).not.toMatch(/red/);
+    expect(job).not.toHaveTextContent("The ingest was stopped.");
+    const toggle = within(job).getByTestId("prime-radiant-dead-letter-toggle");
+    expect(toggle).toHaveTextContent(/^Waiting for the next run: 2$/);
+    fireEvent.click(toggle);
+    fireEvent.click(await screen.findByTestId("prime-radiant-dead-letter-retry"));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith(`/ingest/${STOPPED_JOB.id}/retry`) && c.method === "POST")).toBe(true);
+    });
+  });
+
+  it("says only that the written pages stay for a stop that left nothing waiting", async () => {
+    ingestJobs = [{ ...STOPPED_JOB, queued: 0, done: 3, pages: 3, error: "The ingest was stopped." }];
+    await mount();
+    await openTab("ingest");
+    const job = await screen.findByTestId("prime-radiant-ingest-job");
+    expect(within(job).getByTestId("prime-radiant-ingest-job-stopped")).toHaveTextContent(/^What was already written stays\.$/);
+    expect(within(job).queryByTestId("prime-radiant-dead-letter-toggle")).toBeNull();
+  });
+
+  it("names a dropped-files job and a retry by what they are, never by their staging path", async () => {
+    ingestJobs = [
+      { ...DEAD_JOB, id: "job-drop", kind: "upload", folders: ["upload/fac237031c582092"] },
+      { ...DEAD_JOB, id: "job-again", kind: "retry", folders: ["retry/job-dead"], retryOf: "job-dead" },
+      DEAD_JOB,
+    ];
+    await mount();
+    await openTab("ingest");
+    const sources = (await screen.findAllByTestId("prime-radiant-ingest-job-source")).map((s) => s.textContent);
+    expect(sources).toEqual(["Dropped files", "Tried again from an earlier import", "~/acme-docs"]);
+    expect(screen.getByTestId("prime-radiant-ingest-jobs").textContent).not.toMatch(/upload\/|retry\//);
+  });
+
+  it("keeps a drag over the drop zone to itself: the desktop under it never hears it, and nothing stays lit after the drop", async () => {
+    const heard: string[] = [];
+    const listen = (e: Event) => heard.push(e.type);
+    const types = ["dragenter", "dragover", "dragleave", "drop"];
+    for (const type of types) document.addEventListener(type, listen);
+    try {
+      await mount();
+      await openTab("ingest");
+      const zone = await screen.findByTestId("prime-radiant-dropzone");
+      const child = within(zone).getByText("Drop documents here");
+      const dataTransfer = { types: ["Files"], files: [new File(["Acme canteen menu."], "canteen-menu.md", { type: "text/markdown" })] };
+      fireEvent.dragEnter(zone, { dataTransfer });
+      expect(zone).toHaveAttribute("data-dragging", "true");
+      // Onto a child of the zone: the zone is left and the child entered, and the zone stays lit.
+      fireEvent.dragEnter(child, { dataTransfer });
+      fireEvent.dragLeave(zone, { dataTransfer });
+      fireEvent.dragOver(child, { dataTransfer });
+      expect(zone).toHaveAttribute("data-dragging", "true");
+      fireEvent.drop(child, { dataTransfer });
+      expect(zone).not.toHaveAttribute("data-dragging");
+      await waitFor(() => expect(calls.some((c) => c.url.includes("/ingest/upload"))).toBe(true));
+      // Out and back in, then away: lit only while the drag is over it.
+      fireEvent.dragEnter(zone, { dataTransfer });
+      fireEvent.dragLeave(zone, { dataTransfer });
+      expect(zone).not.toHaveAttribute("data-dragging");
+      expect(heard).toEqual([]);
+    } finally {
+      for (const type of types) document.removeEventListener(type, listen);
+    }
   });
 
   it("clears a failed stop's error when the next stop goes through", async () => {

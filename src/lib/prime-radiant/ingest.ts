@@ -90,6 +90,7 @@ import {
   saveJob,
   setFileSources,
   settleOrphanJobs,
+  takeOverQueued,
   updateFiles,
   type DeadLetterSource,
   type FileStatus,
@@ -123,6 +124,8 @@ export const DEFAULT_PARALLEL = DEFAULT_INGEST_PARALLEL;
 export const MAX_PARALLEL = MAX_INGEST_PARALLEL;
 /** How long the job's retry queue waits before its second round. */
 export const REQUEUE_DELAY_MS = 30_000;
+/** Why a file waits after a Stop: it was never reached (or its call was cut), nothing went wrong with it. */
+export const INGEST_STOPPED = "stopped";
 /** Events a late subscriber can catch up on. */
 const BACKLOG = 300;
 
@@ -366,8 +369,9 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
 }
 
 /**
- * Stop a running job. Files it did not reach are marked failed and become its
- * dead letters; re-running the same folders (or retrying the job) picks them up.
+ * Stop a running job: it ends `stopped`, what it wrote stays. Files it did not
+ * reach (or whose call the stop cut) wait — `pending`, never dead letters —
+ * and re-running the same folders (or retrying the job) picks them up.
  */
 export function stopIngest(id: string): boolean {
   const live = store.live.get(id);
@@ -522,6 +526,17 @@ async function runJob(
     if (s.temp > 0) job.notes.push(`${s.temp} temporary or partial file(s) were left out.`);
     const labels = new Map<number, string>(scan.files.map((f, seq) => [seq, f.label]));
     insertFiles(vault, job.id, scan.files.map((f, seq) => ({ seq, label: f.label, source: f.abs })));
+    if (input.kind === "folders") {
+      // What an earlier Stop or spent allowance left waiting is this job's now.
+      try {
+        for (const id of takeOverQueued(vault, job.id, scan.files.map((f) => f.abs))) {
+          const earlier = store.live.get(id);
+          if (earlier) earlier.job.queued = countQueued(vault, id);
+        }
+      } catch (err) {
+        console.error("[prime-radiant] ingest: taking over waiting files failed:", err instanceof Error ? err.message : err);
+      }
+    }
     job.phase = "write";
     publish();
     persist();
@@ -538,16 +553,17 @@ async function runJob(
     const dispatch = async (files: PreparedFile[], round: 1 | 2) => {
       if (files.length === 0) return;
       while (inFlight.size >= parallel) await Promise.race(inFlight);
-      // Past a spent allowance nothing more is asked: the files stay unsettled, queued below.
+      // Past a spent allowance or a Stop nothing more is asked: the files stay unsettled, queued below.
       if (spent) return;
-      if (fatal || signal.aborted) {
+      if (fatal) {
         settle(
-          files.map((f) => ({ seq: f.seq, status: "failed" as const, sha256: f.sha256, bytes: f.bytes, error: fatal ?? "stopped", attempts: round - 1 })),
+          files.map((f) => ({ seq: f.seq, status: "failed" as const, sha256: f.sha256, bytes: f.bytes, error: fatal, attempts: round - 1 })),
           labels,
         );
         publish();
         return;
       }
+      if (signal.aborted) return;
       const p = writeBatch(files, round).finally(() => inFlight.delete(p));
       inFlight.add(p);
     };
@@ -658,7 +674,7 @@ async function runJob(
         try {
           await (deps.retry?.sleep ?? abortableSleep)(Math.max(0, deps.requeueDelayMs ?? REQUEUE_DELAY_MS), signal);
         } catch {
-          // Stopped during the cooldown: dispatch below settles the queue as stopped.
+          // Stopped during the cooldown: dispatch below leaves the queue waiting.
         }
       }
       const half = Math.max(1, Math.ceil(batchSize / 2));
@@ -677,25 +693,34 @@ async function runJob(
       while (inFlight.size > 0) await Promise.race(inFlight);
     }
 
-    // Files the loop never reached (stopped, or a fatal error) are failed —
-    // dead letters like any other; a document is skipped only once some job
-    // wrote its pages, so the next run of the same folders picks them up too.
-    // Past a spent allowance they are QUEUED instead (`pending`), never failed:
-    // nothing was wrong with them, and the next run takes them once it frees up.
+    // Files the loop never reached after a fatal error are failed — dead
+    // letters like any other; a document is skipped only once some job wrote
+    // its pages, so the next run of the same folders picks them up too.
+    // Past a spent allowance or a Stop they are QUEUED instead (`pending`),
+    // never failed: nothing was wrong with them (a call the Stop cut wrote
+    // nothing), and the next run of these folders, or Retry, takes them.
+    const stopped = signal.aborted && !fatal && !spent;
     const missing: FileUpdate[] = [];
     for (let seq = 0; seq < scan.files.length; seq++) {
       if (settledSeqs.has(seq)) continue;
-      missing.push(spent ? { seq, status: "pending", error: ALLOWANCE_SPENT } : { seq, status: "failed", error: fatal ?? "stopped" });
+      missing.push(
+        spent
+          ? { seq, status: "pending", error: ALLOWANCE_SPENT }
+          : stopped
+            ? { seq, status: "pending", error: INGEST_STOPPED }
+            : { seq, status: "failed", error: fatal ?? INGEST_STOPPED },
+      );
     }
     settle(missing, labels);
-    job.status = spent ? "interrupted" : fatal && job.done === 0 ? "failed" : "done";
+    job.status = spent ? "interrupted" : fatal && job.done === 0 ? "failed" : stopped ? "stopped" : "done";
+    const nextRun = `the next run${input.kind === "folders" ? " of these folders" : ""}, or Retry`;
     if (spent) {
       job.allowance = spent;
-      job.error = `${allowanceSpentText(spent)}. The documents not written yet wait for the next run${input.kind === "folders" ? " of these folders" : ""}, or Retry, once it frees up.`;
+      job.error = `${allowanceSpentText(spent)}. The documents not written yet wait for ${nextRun}, once it frees up.`;
     } else if (fatal) job.error = fatal;
-    else if (signal.aborted) job.error = "The ingest was stopped.";
+    else if (stopped) job.error = missing.length > 0 ? `The ingest was stopped. The documents it did not reach wait for ${nextRun}.` : "The ingest was stopped.";
   } catch (err) {
-    job.status = "failed";
+    job.status = signal.aborted ? "stopped" : "failed";
     job.error = signal.aborted ? "The ingest was stopped." : "The ingest could not finish.";
     console.error("[prime-radiant] ingest failed:", err instanceof Error ? err.message : err);
   } finally {
@@ -711,13 +736,19 @@ async function runJob(
       /* the tally stays as it was */
     }
     if (job.deadLetter > 0) job.notes.push(`${job.deadLetter} document(s) still failed; they can be retried.`);
-    if (spent) {
+    if (spent || job.status === "stopped") {
       try {
         job.queued = countQueued(vault, job.id, { ended: true });
       } catch {
         /* the tally stays as it was */
       }
-      if (job.queued > 0) job.notes.push(`${job.queued} document(s) wait for the ClawBox AI allowance; they were not tried and did not fail.`);
+      if (job.queued > 0) {
+        job.notes.push(
+          spent
+            ? `${job.queued} document(s) wait for the ClawBox AI allowance; they were not tried and did not fail.`
+            : `${job.queued} document(s) were not reached before the stop; they wait for the next run and did not fail.`,
+        );
+      }
     }
     job.phase = "done";
     job.finishedAt = now().toISOString();
@@ -835,6 +866,10 @@ async function processBatch(
       const allowance = allowanceStopOf(err);
       if (allowance) return { updates: [], transient: new Set(), pagesWritten: 0, commit: null, cost: cost.calls ? cost : null, fatal: null, allowance };
       const e = err instanceof FlashCallError ? err : null;
+      // A call the owner's Stop cut wrote nothing and failed nothing: the batch stays unsettled, waiting with the rest.
+      if (e?.kind === "aborted" && signal.aborted) {
+        return { updates: [], transient: new Set(), pagesWritten: 0, commit: null, cost: cost.calls ? cost : null, fatal: null };
+      }
       const fatal = e ? (FATAL_MESSAGES[e.kind] ?? null) : null;
       return failAll(
         e?.kind === "aborted" ? "stopped" : `model call failed${e ? ` (${e.kind})` : ""}`,

@@ -422,7 +422,8 @@ describe("an ingest job", () => {
     expect(stopIngest(job.id)).toBe(true);
     await ingestFinished(job.id);
     const final = getIngestJob(job.id, vault)!;
-    expect(final.error).toBe("The ingest was stopped.");
+    expect(final.status).toBe("stopped");
+    expect(final.error).toMatch(/^The ingest was stopped\./);
     expect(final.done).toBeLessThan(4);
     const rerun = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
     expect(rerun.done + rerun.duplicates).toBe(4);
@@ -562,7 +563,7 @@ describe("the retry queue and the dead-letter list", () => {
     await expect(startIngest({ kind: "retry", retryOf: "ing-ffffffffffff" }, deps({ client: fake.client }))).rejects.toBeInstanceOf(UnknownJobError);
   });
 
-  it("makes the files a stop never reached dead letters", async () => {
+  it("leaves the files a stop never reached waiting, never as dead letters", async () => {
     for (let i = 0; i < 4; i++) write(`f${i}.md`, `Doc ${i}.`);
     const slow = fakeClient(undefined, 80);
     const job = await startIngest({ kind: "folders", folders: [docs] }, deps({ client: slow.client, batchSize: 1, parallel: 1 }));
@@ -570,8 +571,88 @@ describe("the retry queue and the dead-letter list", () => {
     stopIngest(job.id);
     await ingestFinished(job.id);
     const final = getIngestJob(job.id, vault)!;
-    expect(final.deadLetter).toBe(4 - final.done);
-    expect(final.deadLetter).toBeGreaterThan(0);
+    expect(final).toMatchObject({ status: "stopped", failed: 0, deadLetter: 0, queued: 4 - final.done });
+    expect(final.queued).toBeGreaterThan(0);
+    expect(final.error).toBe("The ingest was stopped. The documents it did not reach wait for the next run of these folders, or Retry.");
+    expect(final.notes).toContain(`${final.queued} document(s) were not reached before the stop; they wait for the next run and did not fail.`);
+    expect(readDeadLetter(vault, job.id)).toEqual([]);
+    const waiting = readFiles(vault, job.id).filter((f) => f.status === "pending");
+    expect(waiting).toHaveLength(final.queued);
+    expect(waiting.every((f) => f.error === "stopped")).toBe(true);
+    // The row as the list reads it from the database says the same.
+    expect(listIngestJobs(vault).find((j) => j.id === job.id)).toMatchObject({ status: "stopped", deadLetter: 0, queued: final.queued });
+  });
+
+  it("does not fail a batch whose model call the stop cut; a re-run of the folders writes it and takes it over", async () => {
+    for (let i = 0; i < 3; i++) write(`f${i}.md`, `Doc ${i}.`);
+    // A model that honours the job's signal, like the ClawBox AI client: the stop cuts its call.
+    let calls = 0;
+    const hanging: FlashClient = {
+      model: "deepseek-v4-flash",
+      complete: (request) => {
+        calls += 1;
+        return new Promise((_resolve, reject) => {
+          const cut = () => reject(new FlashCallError("aborted", "The ingest was stopped."));
+          if (request.signal?.aborted) cut();
+          else request.signal?.addEventListener("abort", cut, { once: true });
+        });
+      },
+    };
+    const job = await startIngest({ kind: "folders", folders: [docs] }, deps({ client: hanging, batchSize: 1, parallel: 1 }));
+    for (let i = 0; i < 100 && calls === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    expect(stopIngest(job.id)).toBe(true);
+    await ingestFinished(job.id);
+    const stopped = getIngestJob(job.id, vault)!;
+    // The cut batch and the two never reached all wait; none failed.
+    expect(stopped).toMatchObject({ status: "stopped", done: 0, failed: 0, deadLetter: 0, queued: 3 });
+    expect(readFiles(vault, job.id).map((f) => [f.status, f.error])).toEqual([
+      ["pending", "stopped"],
+      ["pending", "stopped"],
+      ["pending", "stopped"],
+    ]);
+
+    const rerun = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(rerun).toMatchObject({ status: "done", done: 3, failed: 0 });
+    expect((await readVaultSnapshot(vault)).pages).toHaveLength(3);
+    // The stopped job no longer says they wait: the re-run has them.
+    expect(getIngestJob(job.id, vault)).toMatchObject({ status: "stopped", queued: 0, deadLetter: 0 });
+    expect(listIngestJobs(vault).find((j) => j.id === job.id)).toMatchObject({ queued: 0 });
+    expect(readFiles(vault, job.id).every((f) => f.retriedBy === rerun.id)).toBe(true);
+    await expect(startIngest({ kind: "retry", retryOf: job.id }, deps({ client: fakeClient().client }))).rejects.toBeInstanceOf(NothingToRetryError);
+  });
+
+  it("retries what a stop left waiting with Try these again", async () => {
+    for (let i = 0; i < 4; i++) write(`f${i}.md`, `Doc ${i}.`);
+    const slow = fakeClient(undefined, 80);
+    const job = await startIngest({ kind: "folders", folders: [docs] }, deps({ client: slow.client, batchSize: 1, parallel: 1 }));
+    await new Promise((r) => setTimeout(r, 40));
+    stopIngest(job.id);
+    await ingestFinished(job.id);
+    const waiting = getIngestJob(job.id, vault)!.queued;
+    expect(waiting).toBeGreaterThan(0);
+    const retried = await run({ kind: "retry", retryOf: job.id }, deps({ client: fakeClient().client }));
+    expect(retried).toMatchObject({ status: "done", total: waiting, done: waiting, failed: 0, deadLetter: 0 });
+    expect(getIngestJob(job.id, vault)).toMatchObject({ queued: 0, deadLetter: 0 });
+  });
+
+  it("keeps an upload's files a stop never reached for a retry", async () => {
+    const staged = path.join(root, "staged-stop");
+    fs.mkdirSync(staged);
+    for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(staged, `note-${i}.md`), `Acme note ${i}.`);
+    const slow = fakeClient(undefined, 80);
+    const job = await startIngest({ kind: "upload", dir: staged, batch: "00000000000000ab" }, deps({ client: slow.client, batchSize: 1, parallel: 1 }));
+    await new Promise((r) => setTimeout(r, 40));
+    stopIngest(job.id);
+    await ingestFinished(job.id);
+    const stopped = getIngestJob(job.id, vault)!;
+    expect(stopped).toMatchObject({ status: "stopped", failed: 0, deadLetter: 0 });
+    expect(stopped.queued).toBe(3 - stopped.done);
+    expect(stopped.error).toBe("The ingest was stopped. The documents it did not reach wait for the next run, or Retry.");
+    expect(fs.existsSync(staged)).toBe(false);
+    const retried = await run({ kind: "retry", retryOf: job.id }, deps({ client: fakeClient().client }));
+    expect(retried).toMatchObject({ done: stopped.queued, failed: 0 });
+    expect(fs.existsSync(path.join(deadLetterRoot(), job.id))).toBe(false);
   });
 
   it("keeps a dropped file that still failed, retries it from the kept copy, then removes the copy", async () => {
