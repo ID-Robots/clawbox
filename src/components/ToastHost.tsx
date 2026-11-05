@@ -126,7 +126,24 @@ function ToastHost({ onArrive }: { onArrive?: () => void }) {
             <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
               notifications
             </span>
-            <span className="block flex-1 min-w-0 text-sm text-white break-words">{toast.message}</span>
+            <span className="block flex-1 min-w-0 text-sm text-white break-words">
+              {toast.message}
+              {/* Where the click goes, SAID on an actionable notice: the whole
+                  bubble is the button, and a bubble that only reads like a
+                  remark gave the owner no reason to click it. Hidden from the
+                  accessibility tree because the button's label already ends
+                  with the same words. */}
+              {action && (
+                <span
+                  className="mt-1 flex items-center gap-0.5 text-xs font-medium text-[var(--coral-bright)]"
+                  aria-hidden="true"
+                  data-testid="toast-action-label"
+                >
+                  {notifyActionLabel(action, t)}
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }}>chevron_right</span>
+                </span>
+              )}
+            </span>
           </>
         );
         // The bubble's own padding sits on these two children rather than on

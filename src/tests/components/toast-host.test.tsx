@@ -106,6 +106,18 @@ describe("ToastHost — a notice that can be acted on", () => {
     return () => window.removeEventListener(name, on);
   }
 
+  it("says where the click goes on the bubble itself, and nothing extra on a plain notice", () => {
+    render(<ToastHost />);
+    dispatch({ message: "plain notice" });
+    dispatch({ message: "⚠️ Scheduled job “Backup” failed.", action: { open: "settings", section: "harness" } });
+    const labels = screen.getAllByTestId("toast-action-label");
+    expect(labels).toHaveLength(1);
+    expect(labels[0].textContent).toContain("Open Settings → Harness");
+    // Already the end of the button's name; said twice it would be read twice.
+    expect(labels[0].getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByRole("button", { name: "⚠️ Scheduled job “Backup” failed. — Open Settings → Harness" })).toBeInTheDocument();
+  });
+
   it("opens Settings on the email section when the body is clicked, and takes the toast away", () => {
     const sections: unknown[] = [];
     const apps: unknown[] = [];
