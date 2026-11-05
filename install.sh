@@ -9071,9 +9071,12 @@ step_uefi_boot_order() {
   #
   # The firmware rewrites BootOrder by itself: an option it re-creates (after a
   # bootloader capsule update, an NVRAM reset, a boot where the SSD enumerated
-  # late) is appended at the END. A box whose SSD slid below the network, USB
+  # late) goes to the top or the END. A box whose SSD slid below the network, USB
   # and shell entries does not boot until someone moves it back in the UEFI
-  # menu. The factory installs this guard on units it flashes now; units from
+  # menu: the active "UEFI Shell" entry boots instead and waits at its prompt.
+  # The guard keeps NVMe first, network entries last but active (the firmware
+  # re-creates deactivated ones on every boot, TASK-2175), and new devices on
+  # top. The factory installs this guard on units it flashes now; units from
   # before that only get it here, which is why post_update calls this too.
   #
   # Jetson only: an x64 PC's boot order belongs to its owner. Idempotent: the
@@ -9104,8 +9107,8 @@ step_uefi_boot_order() {
   /usr/local/sbin/clawbox-nvme-boot-order | sed 's/^/  /'
   # (Re)start the unit as well, so its ExecStop re-applies the order at shutdown.
   systemctl restart clawbox-nvme-boot-order.service >/dev/null 2>&1 || true
-  # Prove it: --check exits 0 only when NVMe is first, network boot is inactive
-  # and new devices are added at the bottom.
+  # Prove it: --check exits 0 only when NVMe is first, network entries are last
+  # and active, and new devices are added at the top.
   local check rc=0
   check="$(/usr/local/sbin/clawbox-nvme-boot-order --check 2>&1)" || rc=$?
   echo "  $check"

@@ -1,5 +1,5 @@
 [Unit]
-Description=ClawBox: keep NVMe first in UEFI BootOrder, network boot inactive
+Description=ClawBox: keep NVMe first in UEFI BootOrder, network boot last
 ConditionPathIsDirectory=/sys/firmware/efi/efivars
 After=local-fs.target
 
