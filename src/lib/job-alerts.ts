@@ -45,7 +45,7 @@ import { notifyOwner } from "@/lib/email-notify";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { readJobs, type JobSource, type WatchedJob } from "@/lib/job-alerts-sources";
-import { OPEN_HARNESS_SETTINGS } from "@/lib/notify-action";
+import { OPEN_JOB_ALERTS_SETTINGS } from "@/lib/notify-action";
 import { notifyOwnerTelegram } from "@/lib/owner-telegram";
 import { isPreferenceLanguage, PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 import { processStore } from "@/lib/process-store";
@@ -359,7 +359,7 @@ export function buildRecoveryText(items: NoticeItem[], t: Translate): string {
 
 /**
  * Both legs, best-effort. The desktop notice carries the button into Settings
- * → Harness, where the card lists the jobs; Telegram has no button, so its
+ * → Harness, scrolled to the card that lists the jobs; Telegram has no button, so its
  * text says where to look instead.
  */
 async function deliver(text: string, t: Translate): Promise<void> {
@@ -368,7 +368,7 @@ async function deliver(text: string, t: Translate): Promise<void> {
   // first thing support asks, and neither leg records what it was handed.
   console.log(`[job-alerts] notice: ${telegramText}`);
   try {
-    await notifyOwner(text.slice(0, MAX_TOAST_CHARS), OPEN_HARNESS_SETTINGS);
+    await notifyOwner(text.slice(0, MAX_TOAST_CHARS), OPEN_JOB_ALERTS_SETTINGS);
   } catch (err) {
     console.error("[job-alerts] desktop notice failed:", err instanceof Error ? err.message : err);
   }

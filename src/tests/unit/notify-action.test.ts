@@ -28,6 +28,7 @@ import {
   NOTIFY_ACTION_TARGETS,
   OPEN_ANTHROPIC_ACCOUNTS_SETTINGS,
   OPEN_EMAIL_SETTINGS,
+  OPEN_JOB_ALERTS_SETTINGS,
   notifyActionLabel,
   parseNotifyAction,
   toastDetailForNotice,
@@ -246,5 +247,16 @@ describe("the allowlist points at things that exist", () => {
       expect(Object.keys(NOTIFY_ACTION_TARGETS[home.open])).toContain(home.section);
       expect(src, `SettingsApp never compares against the "${focus}" focus`).toContain(`focus === "${focus}"`);
     }
+  });
+});
+
+describe("the scheduled-job alerts' destination", () => {
+  it("is Settings → Harness with the job alerts card asked for, and survives the parse whole", () => {
+    expect(OPEN_JOB_ALERTS_SETTINGS).toEqual({ open: "settings", section: "harness", focus: "jobAlerts" });
+    expect(parseNotifyAction(OPEN_JOB_ALERTS_SETTINGS)).toEqual(OPEN_JOB_ALERTS_SETTINGS);
+  });
+
+  it("drops the job alerts focus anywhere but Harness, and keeps the section", () => {
+    expect(parseNotifyAction({ open: "settings", section: "email", focus: "jobAlerts" })).toEqual({ open: "settings", section: "email" });
   });
 });

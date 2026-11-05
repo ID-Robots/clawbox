@@ -102,6 +102,43 @@ describe("JobAlertsPanel", () => {
     expect(screen.getByTestId("job-alerts-status").textContent).toContain("CLAWBOX_JOB_ALERTS");
   });
 
+  it("scrolls itself into view when Settings asks for it, once it has drawn, and hands the ask back", async () => {
+    const scrolled: Element[] = [];
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value(this: Element) { scrolled.push(this); },
+    });
+    try {
+      const onShown = vi.fn();
+      render(<JobAlertsPanel show onShown={onShown} />);
+      const card = await screen.findByTestId("settings-job-alerts");
+      await waitFor(() => expect(onShown).toHaveBeenCalledTimes(1));
+      expect(scrolled[0]).toBe(card);
+      // …and once more after the panels above it have had time to grow.
+      await waitFor(() => expect(scrolled.filter((el) => el === card).length).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
+    } finally {
+      if (original) Object.defineProperty(Element.prototype, "scrollIntoView", original);
+      else delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });
+
+  it("does not scroll when nothing asked", async () => {
+    const scroll = vi.fn();
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, writable: true, value: scroll });
+    try {
+      render(<JobAlertsPanel />);
+      await screen.findByTestId("settings-job-alerts");
+      await settle();
+      expect(scroll).not.toHaveBeenCalled();
+    } finally {
+      if (original) Object.defineProperty(Element.prototype, "scrollIntoView", original);
+      else delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });
+
   it.each([[{}], [{ ...STATUS, problems: [null] }], [{ ...STATUS, problems: [{ ...STATUS.problems[0], problem: "weird" }] }]])(
     "hides itself for a body it cannot draw (%#)",
     async (body) => {

@@ -290,7 +290,7 @@ describe("checkScheduledJobs", () => {
     expect(notifyOwner).toHaveBeenCalledTimes(1);
     expect(notifyOwner).toHaveBeenCalledWith(
       "⚠️ Scheduled job “Daily report” failed 2 times in a row.",
-      { open: "settings", section: "harness" },
+      { open: "settings", section: "harness", focus: "jobAlerts" },
     );
     expect(notifyOwnerTelegram).toHaveBeenCalledWith(
       "⚠️ Scheduled job “Daily report” failed 2 times in a row. Details: Settings → Harness.",

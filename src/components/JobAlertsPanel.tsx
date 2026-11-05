@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useT } from "@/lib/i18n";
 
@@ -75,11 +75,50 @@ function problemLabel(p: JobAlertsProblem, t: (key: string, params?: Record<stri
   }
 }
 
-export default function JobAlertsPanel() {
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+}
+
+/** How long after the first scroll the card is brought into view once more (see below). */
+const SETTLE_SCROLL_MS = 600;
+
+interface JobAlertsPanelProps {
+  /**
+   * Settings asks for the card: the job alert's notice was clicked
+   * (`OPEN_JOB_ALERTS_SETTINGS`, focus `jobAlerts`). The card scrolls itself
+   * into view once it has something to draw, then hands the ask back through
+   * `onShown`, so coming back to Harness later lands at the top again.
+   */
+  show?: boolean;
+  onShown?: () => void;
+}
+
+export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanelProps = {}) {
   const { t, locale } = useT();
   const [status, setStatus] = useState<JobAlertsStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const drawn = status !== null;
+
+  // After the commit that drew the card, so there is a card to scroll to. Once
+  // more a moment later: the panels above it read their own routes and can
+  // still grow after this one has answered, pushing it back below the fold.
+  // The second pass outlives the ask (handing it back re-renders with
+  // `show` false), so its timer is cleared on unmount only.
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!show || !drawn) return;
+    // Guarded: jsdom ships an Element without it.
+    const reveal = () => cardRef.current?.scrollIntoView?.({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+    reveal();
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = setTimeout(reveal, SETTLE_SCROLL_MS);
+    onShown?.();
+  }, [show, drawn, onShown]);
 
   useEffect(() => {
     let alive = true;
@@ -123,7 +162,7 @@ export default function JobAlertsPanel() {
   const lockedOff = status.off === "env";
 
   return (
-    <div className="max-w-xl" data-testid="settings-job-alerts">
+    <div ref={cardRef} className="max-w-xl scroll-mt-4" data-testid="settings-job-alerts">
       <div className="flex items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">
           notification_important
