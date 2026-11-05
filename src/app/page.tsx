@@ -13,6 +13,7 @@ import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, OPEN_CHAT_EVENT, n
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { noteBoxClock } from "@/lib/box-clock";
 import { useAutoHide } from "@/lib/use-auto-hide";
+import { useDesktopFileDrag } from "@/lib/use-desktop-file-drag";
 import { useWhatsNew } from "@/lib/use-whats-new";
 import { DESKTOP_LAYERS, dockedChatWidth, shelfHeight, type SnapZone } from "@/lib/window-snap";
 import { desktopLayoutKey, restoreDesktopWindows, snapshotDesktop, type SavedRect, type SavedTerminalTabs } from "@/lib/desktop-state";
@@ -3309,24 +3310,11 @@ function ChromeDesktopInner() {
   const closeTray = useCallback(() => setTrayOpen(false), []);
 
   // ─── Global drag-and-drop file upload ───
-  const [desktopDragOver, setDesktopDragOver] = useState(false);
+  // The overlay comes down on any drop in the page, also one an app's own
+  // drop zone took, and when the drags go quiet: it never outlives a drag.
+  const { dragOver: desktopDragOver, reset: resetDesktopDrag, dropHandlers: desktopDragHandlers } = useDesktopFileDrag();
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const dragCountRef = useRef(0);
-
-  const handleDesktopDragEnter = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    if (e.dataTransfer.types.includes("Files")) {
-      dragCountRef.current++;
-      setDesktopDragOver(true);
-    }
-  }, []);
-  const handleDesktopDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); }, []);
-  const handleDesktopDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    dragCountRef.current--;
-    if (dragCountRef.current <= 0) { dragCountRef.current = 0; setDesktopDragOver(false); }
-  }, []);
   const formatBytes = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -3361,8 +3349,7 @@ function ChromeDesktopInner() {
 
   const handleDesktopDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
-    dragCountRef.current = 0;
-    setDesktopDragOver(false);
+    resetDesktopDrag();
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
     const dir = "/home/clawbox/Downloads";
@@ -3403,7 +3390,7 @@ function ChromeDesktopInner() {
     setUploadStatus(`Uploaded ${ok}/${total} file(s)`);
     setUploadProgress(100);
     setTimeout(() => { setUploadStatus(null); setUploadProgress(0); }, 3000);
-  }, [uploadFileWithProgress]);
+  }, [uploadFileWithProgress, resetDesktopDrag]);
 
   // Long work Settings started (an install, a model download), which runs on
   // whether or not Settings is open: one card each, with its steps, bar, time
@@ -3475,9 +3462,9 @@ function ChromeDesktopInner() {
         if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable) return;
         e.preventDefault();
       }}
-      onDragEnter={handleDesktopDragEnter}
-      onDragOver={handleDesktopDragOver}
-      onDragLeave={handleDesktopDragLeave}
+      onDragEnter={desktopDragHandlers.onDragEnter}
+      onDragOver={desktopDragHandlers.onDragOver}
+      onDragLeave={desktopDragHandlers.onDragLeave}
       onDrop={handleDesktopDrop}
     >
       {/* The owner's widgets mount only once the box has said this IS the

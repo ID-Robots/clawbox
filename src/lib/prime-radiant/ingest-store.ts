@@ -26,7 +26,12 @@ import type { AllowanceStop } from "./flash-client";
 import { readSkipCounts, type SkipCounts } from "./ingest-exclude";
 import { withStateDb } from "./state-db";
 
-export const INGEST_STATUSES = ["running", "done", "failed", "interrupted"] as const;
+/**
+ * `stopped`: the owner pressed Stop — what was written stays, what it did not
+ * reach waits (`pending`, never a dead letter). `interrupted`: a spent
+ * allowance, or a box that restarted under the job.
+ */
+export const INGEST_STATUSES = ["running", "done", "failed", "interrupted", "stopped"] as const;
 export type IngestStatus = (typeof INGEST_STATUSES)[number];
 
 export const INGEST_PHASES = ["queued", "scan", "write", "done"] as const;
@@ -67,8 +72,8 @@ export interface IngestJob {
   /** Files still failed after both rounds and not taken over by a later job. */
   deadLetter: number;
   /**
-   * Files a spent ClawBox AI allowance left waiting (`pending`, never failed)
-   * and no later job has taken over; 0 while the job runs.
+   * Files a spent ClawBox AI allowance or a Stop left waiting (`pending`,
+   * never failed) and no later job has taken over; 0 while the job runs.
    */
   queued: number;
   /** Files and folders left out, by reason (see `SkipCounts`). */
@@ -423,6 +428,37 @@ export function claimDeadLetter(vault: string, jobId: string, retryJobId: string
       recountDeadLetter(db, jobId);
     });
     return rows;
+  });
+}
+
+/**
+ * A re-run of the same folders takes over what earlier jobs left waiting
+ * (`pending`: a Stop or a spent allowance) for the files it reads again: those
+ * rows are marked `retried_by` `jobId`, so an earlier job no longer says they
+ * wait once a later one has them in hand. Answers the jobs it took rows from.
+ */
+export function takeOverQueued(vault: string, jobId: string, sources: readonly string[]): string[] {
+  if (sources.length === 0) return [];
+  return withStateDb(vault, (db) => {
+    const touched = new Set<string>();
+    inTransaction(db, () => {
+      // Few rows wait at any time: read them once, match the job's sources here.
+      const waiting = db
+        .prepare(
+          `SELECT f.job_id AS jobId, f.seq, f.source FROM ingest_files f JOIN ingest_jobs j ON j.id = f.job_id
+            WHERE f.status = 'pending' AND f.retried_by IS NULL AND f.source IS NOT NULL AND f.job_id != ? AND j.status != 'running'`,
+        )
+        .all(jobId) as Array<{ jobId: string; seq: number; source: string }>;
+      if (waiting.length === 0) return;
+      const wanted = new Set(sources);
+      const take = db.prepare("UPDATE ingest_files SET retried_by = ? WHERE job_id = ? AND seq = ?");
+      for (const r of waiting) {
+        if (!wanted.has(r.source)) continue;
+        take.run(jobId, r.jobId, r.seq);
+        touched.add(r.jobId);
+      }
+    });
+    return [...touched];
   });
 }
 

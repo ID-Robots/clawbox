@@ -8,8 +8,9 @@
  * Read-only: never creates the state database.
  *
  * DELETE — stop the job. 202 `{ stopping: true, job }`; the job settles on
- * its own (files it did not reach become dead letters) and its events stream
- * ends. 409 `not_running` (with the job) for one that already finished,
+ * its own as `stopped` (what it wrote stays; files it did not reach wait —
+ * its `queued`, never dead letters — for the next run or a retry) and its
+ * events stream ends. 409 `not_running` (with the job) for one that already finished,
  * 404 `not_found`. The owner (cookie AND same origin) or the assistant
  * through the MCP bearer, like the start.
  */

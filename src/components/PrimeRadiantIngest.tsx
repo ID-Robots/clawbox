@@ -81,6 +81,8 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
   const streamRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  /** Elements of the drop zone a drag has entered and not left yet. */
+  const dragDepth = useRef(0);
 
   const loadJobs = useCallback(async () => {
     try {
@@ -408,17 +410,33 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
         )}
       </section>
 
+      {/* Every drag event over the zone stops HERE: the desktop under it has a
+          drop zone of its own ("saved to Downloads") that would otherwise light
+          up over this one and — never hearing the drop taken here — stay lit. */}
       <section
         className={`rounded-xl border-2 border-dashed p-6 text-center transition-colors ${dragging ? "border-[var(--coral-bright)] bg-white/[0.04]" : "border-white/[0.12]"}`}
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          dragDepth.current += 1;
+          setDragging(true);
+        }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onDragLeave={(e) => {
+          e.stopPropagation();
+          // Crossing onto a child of the zone leaves the zone too: lit until the last one is left.
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (dragDepth.current === 0) setDragging(false);
+        }}
         onDrop={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          dragDepth.current = 0;
           setDragging(false);
           void uploadFiles(Array.from(e.dataTransfer.files ?? []));
         }}
         data-testid="prime-radiant-dropzone"
+        data-dragging={dragging ? "true" : undefined}
       >
         <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 28 }} aria-hidden="true">upload_file</span>
         <p className="mt-1 text-sm text-[var(--text-primary)]">{t("primeRadiant.ingest.dropTitle")}</p>
@@ -456,21 +474,30 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
                   {t("primeRadiant.ingest.jobSummary", { pages: job.pages, done: job.done, total: job.total })}
                   {tokens(job.id) && ` · ${tokens(job.id)}`}
                 </span>
-                {/* What a spent allowance left queued is retried with the dead letters, but never counted as one. */}
+                {/* What a spent allowance or a Stop left queued is retried with the dead letters, but never counted as one. */}
                 {(job.deadLetter > 0 || (job.queued ?? 0) > 0) && (
                   <button type="button" className={`${BTN_SECONDARY} ml-auto`} onClick={() => void showDeadLetter(job.id)} aria-expanded={openJob === job.id} data-testid="prime-radiant-dead-letter-toggle">
                     {[
                       job.deadLetter > 0 ? t("primeRadiant.ingest.deadLetter", { n: job.deadLetter }) : null,
-                      (job.queued ?? 0) > 0 ? t("primeRadiant.ingest.queued", { n: job.queued }) : null,
+                      (job.queued ?? 0) > 0
+                        ? t(job.status === "stopped" ? "primeRadiant.ingest.waiting" : "primeRadiant.ingest.queued", { n: job.queued })
+                        : null,
                     ]
                       .filter(Boolean)
                       .join(" · ")}
                   </button>
                 )}
               </div>
-              {job.folders.length > 0 && <p className="mt-0.5 font-mono text-[11px] text-[var(--text-muted)] truncate">{job.folders.join(", ")}</p>}
+              <JobSource job={job} />
               <SkipLine skips={job.skips} testId="prime-radiant-ingest-job-skips" />
-              {job.error && <p className="mt-0.5 text-[11px] text-red-300">{job.error}</p>}
+              {/* A Stop is the owner's own doing, not a failure: said in their language, not in red. */}
+              {job.status === "stopped" ? (
+                <p className="mt-0.5 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-ingest-job-stopped">
+                  {(job.queued ?? 0) > 0 ? t("primeRadiant.ingest.stoppedWaiting") : t("primeRadiant.ingest.stoppedNote")}
+                </p>
+              ) : (
+                job.error && <p className="mt-0.5 text-[11px] text-red-300">{job.error}</p>
+              )}
               {openJob === job.id && (
                 <div className="mt-2 space-y-2" data-testid="prime-radiant-dead-letter">
                   {deadLetter === null ? (
@@ -499,6 +526,27 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
         </ul>
       </section>
     </div>
+  );
+}
+
+/**
+ * What a job read: its folders, as labels; a drop or a retry by what it is —
+ * their `upload/<batch>` and `retry/<job>` are the box's own staging names.
+ */
+function JobSource({ job }: { job: IngestJob }) {
+  const { t } = useT();
+  if (job.kind === "upload" || job.kind === "retry") {
+    return (
+      <p className="mt-0.5 text-[11px] text-[var(--text-muted)] truncate" data-testid="prime-radiant-ingest-job-source">
+        {t(`primeRadiant.ingest.source.${job.kind}`)}
+      </p>
+    );
+  }
+  if (job.folders.length === 0) return null;
+  return (
+    <p className="mt-0.5 font-mono text-[11px] text-[var(--text-muted)] truncate" data-testid="prime-radiant-ingest-job-source">
+      {job.folders.join(", ")}
+    </p>
   );
 }
 

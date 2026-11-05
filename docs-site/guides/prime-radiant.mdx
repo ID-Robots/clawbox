@@ -72,8 +72,11 @@ start it again for the rest.
 
 Progress shows live: how many files are written, skipped or failed, the pages made so
 far, and what was left out for each reason. **Stop** ends the import; what was already
-written stays. A file that still fails after the import's own second try is listed
-under **Not added**, and **Try these again** retries exactly those files.
+written stays. The import reads **Stopped**, and the documents it did not reach are not
+failures: they wait (**Waiting for the next run**) until you add the same folders again
+or press **Try these again**. A file that still fails after the import's own second try
+is listed under **Not added**, and **Try these again** retries exactly those files.
+Documents you drop on **Add** are listed as **Dropped files**.
 
 <Warning>
 To write a page, the text of each document is sent to ClawBox AI. Before anything
