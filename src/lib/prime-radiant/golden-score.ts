@@ -52,7 +52,9 @@ import {
 } from "./flash-client";
 import {
   buildGoldenPrompt,
+  GOLDEN_LAST_TRY_MAX_TOKENS,
   GOLDEN_LIMITS,
+  GOLDEN_MAX_TOKENS,
   GOLDEN_VERDICTS,
   goldenEvidence,
   goldenMaxTokens,
@@ -213,12 +215,11 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     return stop !== null;
   };
 
-  /** One call: the questions a readable answer left out (`cut`: it reached the output cap), or why there was none. Never throws for the model. */
-  async function judgeOnce(batch: readonly GoldenQuestion[]): Promise<{ ok: true; missing: GoldenQuestion[]; cut: boolean } | { ok: false; kind: string }> {
+  /** One call with `maxTokens` of room: the questions a readable answer left out (`cut`: it reached the output cap), or why there was none. Never throws for the model. */
+  async function judgeOnce(batch: readonly GoldenQuestion[], maxTokens: number): Promise<{ ok: true; missing: GoldenQuestion[]; cut: boolean } | { ok: false; kind: string }> {
     const { system, user } = buildGoldenPrompt(
       batch.map((q) => ({ question: redactText(q.question).text, expected: redactText(q.expected).text, evidence: evidence.get(q.id) ?? [] })),
     );
-    const maxTokens = goldenMaxTokens(batch.length);
     const charge = (model: string, usage: FlashResponse["usage"]) => {
       result.calls++;
       const usd = estimateUsd(model, usage, options.rates);
@@ -269,27 +270,38 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   }
 
   /**
-   * Judge `batch`. An empty, cut-off or unreadable answer is asked again in
-   * halves, down to one question a call, and the questions a cut-off answer
-   * left out in one smaller call; only then is a question not judged. A
-   * refusal or an outage leaves the batch for the next night.
+   * Judge `batch` with `room` tokens to answer in. An empty, cut-off or
+   * unreadable answer is asked again in halves, down to one question a call,
+   * and the questions a readable answer left out in one smaller call. Every
+   * re-ask gets the whole output cap: the call before it ran out of room, and
+   * a smaller call must not get less (a question asked alone used to get the
+   * least of all, and a model that thinks before it answers was cut off there
+   * night after night, B7). A question still without a verdict alone is asked
+   * once more with {@link GOLDEN_LAST_TRY_MAX_TOKENS}; only then is it not
+   * judged. A refusal or an outage leaves the batch for the next night.
    */
-  async function judge(batch: readonly GoldenQuestion[]): Promise<void> {
+  async function judge(batch: readonly GoldenQuestion[], room = goldenMaxTokens(batch.length)): Promise<void> {
     if (halted()) return;
-    const out = await judgeOnce(batch);
+    const out = await judgeOnce(batch, room);
     if (!out.ok && out.kind !== "bad_response") return;
-    const again = out.ok ? (out.cut ? out.missing : []) : batch;
+    const again = out.ok ? out.missing : batch;
     if (again.length === 0) return;
     if (again.length < batch.length) {
       askedAgain++;
-      await judge(again);
-    } else if (batch.length === 1) {
-      unanswered++;
-    } else {
+      await judge(again, GOLDEN_MAX_TOKENS);
+    } else if (batch.length > 1) {
       askedAgain++;
       const half = Math.ceil(batch.length / 2);
-      await judge(batch.slice(0, half));
-      await judge(batch.slice(half));
+      await judge(batch.slice(0, half), GOLDEN_MAX_TOKENS);
+      await judge(batch.slice(half), GOLDEN_MAX_TOKENS);
+    } else if (room < GOLDEN_MAX_TOKENS) {
+      askedAgain++;
+      await judge(batch, GOLDEN_MAX_TOKENS);
+    } else if (room < GOLDEN_LAST_TRY_MAX_TOKENS) {
+      askedAgain++;
+      await judge(batch, GOLDEN_LAST_TRY_MAX_TOKENS);
+    } else {
+      unanswered++;
     }
   }
 

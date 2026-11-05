@@ -396,7 +396,8 @@ export function parseGoldenResponse(text: string, count: number): Map<number, Go
     const { i, verdict, why } = o as { i?: unknown; verdict?: unknown; why?: unknown };
     const idx = typeof i === "number" ? i : typeof i === "string" && /^\d+$/.test(i) ? Number(i) : Number.NaN;
     if (!Number.isInteger(idx) || idx < 0 || idx >= count) continue;
-    const v = typeof verdict === "string" ? verdict.trim().toLowerCase() : "";
+    const word = typeof verdict === "string" ? verdict.trim().toLowerCase() : "";
+    const v = VERDICT_SYNONYMS[word] ?? word;
     if (!(GOLDEN_VERDICTS as readonly string[]).includes(v)) continue;
     const answer = { verdict: v as GoldenVerdict, why: typeof why === "string" ? oneLine(why).slice(0, 120) : "" };
     const prior = found.get(idx);
@@ -404,12 +405,46 @@ export function parseGoldenResponse(text: string, count: number): Map<number, Go
     else if (!prior) found.set(idx, answer);
   }
   for (const idx of conflicted) found.delete(idx);
+  // One question asked: its one verdict is its answer, whatever number the judge gave it (some count from 1).
+  if (count === 1 && found.size === 0 && conflicted.size === 0) {
+    const only = soleVerdict(objects);
+    if (only) found.set(0, only);
+  }
   if (found.size === 0 && conflicted.size === 0) throw new GoldenParseError("the judge's answer held no verdict");
   return found;
 }
 
-/** The output ceiling of any golden judge call. */
+/** Words a judge uses for the four verdicts; the four themselves need none. */
+const VERDICT_SYNONYMS: Readonly<Record<string, GoldenVerdict>> = {
+  incorrect: "wrong",
+  outdated: "stale",
+  "out of date": "stale",
+  "not found": "missing",
+};
+
+/** The verdict of an answer that holds exactly one object with a known verdict, else null. */
+function soleVerdict(objects: readonly string[]): GoldenAnswer | null {
+  const answers: GoldenAnswer[] = [];
+  for (const raw of objects) {
+    let o: unknown;
+    try {
+      o = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!o || typeof o !== "object") continue;
+    const { verdict, why } = o as { verdict?: unknown; why?: unknown };
+    const word = typeof verdict === "string" ? verdict.trim().toLowerCase() : "";
+    const v = VERDICT_SYNONYMS[word] ?? word;
+    if ((GOLDEN_VERDICTS as readonly string[]).includes(v)) answers.push({ verdict: v as GoldenVerdict, why: typeof why === "string" ? oneLine(why).slice(0, 120) : "" });
+  }
+  return answers.length === 1 ? answers[0] : null;
+}
+
+/** The output ceiling of a golden judge call; a re-ask (after an empty, cut-off or unreadable answer) gets all of it. */
 export const GOLDEN_MAX_TOKENS = 4_096;
+/** The room of the last try: one question, asked alone, whose answer was still cut off or unreadable with {@link GOLDEN_MAX_TOKENS}. */
+export const GOLDEN_LAST_TRY_MAX_TOKENS = 8_192;
 /** A judge call's output budget: this much, plus {@link GOLDEN_TOKENS_PER_QUESTION} a question. */
 export const GOLDEN_BASE_TOKENS = 1_024;
 /**
