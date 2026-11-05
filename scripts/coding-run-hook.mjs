@@ -59,6 +59,16 @@
  *     every ancestor of it up to the harness's command shell or up to where
  *     it was reparented, started at or after the run's first command — so a
  *     server the run backgrounded and that init adopted is still the run's.
+ *     The clock alone cannot tell that watcher from the run's work when the
+ *     launcher (re)starts it LATER — on an account failover mid-run, after
+ *     the first command, adopted by init just like a job the run backgrounded
+ *     (2026-11-05, again: a run held for all twenty refusals, three more that
+ *     killed the watcher themselves). So the launcher's watcher for THIS
+ *     session is never the run's, nor is anything under it, whenever it
+ *     started (launcherWatchers): a process whose command line names
+ *     `--heal-watch` with the harness's own session folder (sessionDirs) and
+ *     that no shell of the harness is the parent of. A job the run starts
+ *     never carries that flag with that folder, so it is still caught.
  *     Bounded: at most MAX_BLOCKS refusals and MAX_BLOCK_SPAN_MS from the
  *     first one, counted in <state-dir>/.run-jobs/stop-blocks.json (the box
  *     reads that file to say a run ended with work still live). A sub-agent's
@@ -69,12 +79,15 @@
  *     decide whether a settled run LEFT something running (its record's
  *     `leftover`, the MCP tools' `left_running`). It looks at the processes
  *     still in the run's scope and in its process group and answers, by the
- *     same command-clock rule, the ones the run started:
+ *     same command-clock rule, the ones the run started — minus the
+ *     launcher's watcher for the session the run's Stop hook recorded in
+ *     `<file>.stop-ran`:
  *     `{"seen": <processes looked at>, "procs": ["pid N: argv", ...]}` — the
  *     roots only, listening servers included (a server left for the owner is
  *     exactly what the record keeps for the Kill button).
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 /**
@@ -127,6 +140,8 @@ const SHELLS = new Set(["bash", "sh", "dash", "zsh"]);
  * stamped with.
  */
 const TICKS_PER_SECOND = 100;
+/** What a launcher's own watcher is started with, followed by the session folder it watches. */
+const WATCHER_FLAG = "--heal-watch";
 
 function readText(file) {
   try {
@@ -236,6 +251,85 @@ function harnessPid(chain) {
   return null;
 }
 
+/** Is `pid` one of `roots`, or under one of them, walking up `parentOf`? */
+function under(pid, roots, parentOf) {
+  let cur = pid;
+  for (let i = 0; i < 64 && cur > 1; i++) {
+    if (roots.has(cur)) return true;
+    cur = parentOf.get(cur) ?? 0;
+  }
+  return false;
+}
+
+/**
+ * The spellings one folder is compared by: absolute and without a trailing
+ * slash, and with its symlinks resolved where it exists. None for a relative
+ * path: a session folder is named in full.
+ */
+function dirForms(dir) {
+  if (typeof dir !== "string" || !path.isAbsolute(dir)) return [];
+  const forms = new Set([path.resolve(dir)]);
+  try {
+    forms.add(fs.realpathSync(dir));
+  } catch {
+    // Gone or unreadable: its spelling alone.
+  }
+  return [...forms];
+}
+
+/**
+ * The harness's SESSION folder, every spelling of it: the config folder it
+ * runs on — its CLAUDE_CONFIG_DIR, Claude Code's default ~/.claude without
+ * one. A launcher that gives each session a folder of its own hands it to the
+ * harness there, and its watcher names that same folder (`<launcher>
+ * --heal-watch <session dir>`). Read from the harness's own environment and
+ * from this hook's, which the harness passed down.
+ */
+function sessionDirs(harness) {
+  const named = [];
+  for (const entry of (readText(`/proc/${harness}/environ`) || "").split("\0")) {
+    if (entry.startsWith("CLAUDE_CONFIG_DIR=")) named.push(entry.slice("CLAUDE_CONFIG_DIR=".length));
+  }
+  named.push(process.env.CLAUDE_CONFIG_DIR || "");
+  const given = named.filter(Boolean);
+  if (!given.length) given.push(path.join(os.homedir(), ".claude"));
+  return new Set(given.flatMap(dirForms));
+}
+
+/** The session folder the run's Stop hook recorded beside its clock (`<clock>.stop-ran`, see keepalive). */
+function recordedSessions(clock) {
+  const raw = clock ? readText(`${clock}.stop-ran`) : null;
+  return new Set((raw || "").split("\n").map((l) => l.trim()).filter(Boolean).flatMap(dirForms));
+}
+
+/**
+ * The launcher's own watchers for THIS session, among `pids`: a process whose
+ * command line names `--heal-watch` with one of `sessions` (the session
+ * folder's spellings), unless it is `attached` — a process a shell of the
+ * harness is still above is the run's, whatever it is called. When it started
+ * does not matter: the launcher forks one at session start and again when it
+ * moves the session to another account, mid-run, after the first command,
+ * and init adopts it either way. The flag with the harness's own session
+ * folder is the launcher's mark; a job the run backgrounds (nohup, setsid, a
+ * server) never carries it.
+ */
+function launcherWatchers(pids, sessions, attached) {
+  const out = new Set();
+  if (!sessions.size) return out;
+  for (const pid of pids) {
+    if (attached(pid)) continue;
+    const argv = procArgv(pid);
+    for (let i = 0; i < argv.length; i++) {
+      const dir = argv[i] === WATCHER_FLAG ? argv[i + 1] : argv[i].startsWith(`${WATCHER_FLAG}=`) ? argv[i].slice(WATCHER_FLAG.length + 1) : null;
+      if (dir && dirForms(dir).some((d) => sessions.has(d))) {
+        out.add(pid);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The pids in the run's own cgroup (v2): only when this process sits in a
  * run's transient scope (`clawbox-run-<runId>-….scope`, coding-run-unit.ts).
@@ -307,13 +401,12 @@ function describe(pid) {
  * The run's own processes that are still doing work: everything in its
  * cgroup (else the harness's descendants) that the run started
  * (`startedByRun`, by the command clock `since`), minus this hook's chain,
- * the harness's non-shell children (its MCP servers) and their trees, and
- * servers that listen on a TCP port. Answers the roots only — a background
- * shell, not every child under it.
+ * the harness's non-shell children (its MCP servers) and their trees, the
+ * launcher's watchers for the harness's session (`sessions`, see
+ * launcherWatchers) and their trees, and servers that listen on a TCP port.
+ * Answers the roots only — a background shell, not every child under it.
  */
-function liveRunProcesses(selfPid, since) {
-  const chain = ancestors(selfPid);
-  const harness = harnessPid(chain);
+function liveRunProcesses({ chain, harness, since, sessions }) {
   if (harness === null) return [];
   const scoped = cgroupPids();
   const parentOf = new Map();
@@ -345,18 +438,19 @@ function liveRunProcesses(selfPid, since) {
     const name = path.basename(procArgv(pid)[0] || "");
     if (!SHELLS.has(name)) helperRoots.add(pid);
   }
-  const under = (pid, roots) => {
-    let cur = pid;
-    for (let i = 0; i < 64 && cur > 1; i++) {
-      if (roots.has(cur)) return true;
-      cur = parentOf.get(cur) ?? 0;
-    }
-    return false;
-  };
+  // The launcher's watcher for this session, at session start or restarted
+  // mid-run: only a process in the scope that the harness is not above can
+  // be one (without a scope the run is the harness's tree, and has none).
+  const harnessRoot = new Set([harness]);
+  const watcherRoots = launcherWatchers(
+    scoped ? [...parentOf.keys()].filter((pid) => pid !== harness && !chain.has(pid)) : [],
+    sessions,
+    (pid) => under(pid, harnessRoot, parentOf),
+  );
   const candidates = [];
   for (const pid of parentOf.keys()) {
     if (pid === harness || chain.has(pid) || !inRun(pid)) continue;
-    if (under(pid, helperRoots)) continue;
+    if (under(pid, helperRoots, parentOf) || under(pid, watcherRoots, parentOf)) continue;
     // Sharing the cgroup is not enough: the launcher that started the harness
     // put its own watcher there before the run ran anything.
     if (!startedByRun(pid, { parentOf, startOf, harness, since })) continue;
@@ -388,9 +482,13 @@ function inUnit(pid, unit) {
  * in its scope `unit` or its process group `pgid` that the run started, by
  * the command clock. The harness is gone by now, so every one of them is
  * either an orphan the run left or something that was there before its first
- * command; `startedByRun` with no harness tells them apart. `seen` is how many
- * processes were looked at — 0 tells the caller this side could not see into
- * the scope at all, which is not the same as "nothing of the run's is left".
+ * command; `startedByRun` with no harness tells them apart. The launcher's
+ * watcher for the run's session, which it may have restarted after the first
+ * command, is not the run's either: the session is the one the run's Stop
+ * hook recorded (`recordedSessions`), and with the harness gone nothing is
+ * attached to it any more. `seen` is how many processes were looked at — 0
+ * tells the caller this side could not see into the scope at all, which is
+ * not the same as "nothing of the run's is left".
  */
 function settledLeftovers({ clock, unit, pgid }) {
   const since = commandClock(clock);
@@ -404,7 +502,10 @@ function settledLeftovers({ clock, unit, pgid }) {
     parentOf.set(pid, st.ppid);
     startOf.set(pid, st.start);
   }
-  const own = [...parentOf.keys()].filter((pid) => startedByRun(pid, { parentOf, startOf, harness: null, since }));
+  const watcherRoots = launcherWatchers(parentOf.keys(), recordedSessions(clock), () => false);
+  const own = [...parentOf.keys()].filter(
+    (pid) => !under(pid, watcherRoots, parentOf) && startedByRun(pid, { parentOf, startOf, harness: null, since }),
+  );
   const ownSet = new Set(own);
   const roots = own.filter((pid) => !ownSet.has(parentOf.get(pid) ?? 0)).sort((a, b) => a - b);
   return { seen: parentOf.size, procs: roots.map(describe) };
@@ -465,12 +566,18 @@ function writeBlocks(file, blocks) {
 
 function keepalive(stateDir, inboxDir, input, clockFile) {
   if (!stateDir || typeof input.agent_id === "string") return null;
+  const chain = ancestors(process.pid);
+  const harness = harnessPid(chain);
+  const sessions = harness === null ? new Set() : sessionDirs(harness);
   // Said beside the clock: the harness runs this spawn's hooks. An unstamped
   // clock is then "no command ran" for the settle too, not "a harness that
-  // never ran its hooks", which it cannot tell apart on its own.
+  // never ran its hooks", which it cannot tell apart on its own. And the
+  // harness's session folder, one spelling a line: once the harness is gone
+  // the settle cannot read it anywhere else, and needs it to know the
+  // launcher's watcher (settledLeftovers).
   if (clockFile && !fs.existsSync(`${clockFile}.stop-ran`)) {
     try {
-      fs.writeFileSync(`${clockFile}.stop-ran`, "");
+      fs.writeFileSync(`${clockFile}.stop-ran`, [...sessions].map((dir) => `${dir}\n`).join(""));
     } catch {
       // Best effort: without it the settle keeps its old answer.
     }
@@ -480,7 +587,7 @@ function keepalive(stateDir, inboxDir, input, clockFile) {
   const now = Date.now();
   const messages = inboxDir ? takeInbox(inboxDir) : [];
   const jobs = liveJobs(jobsDir, now);
-  const procs = liveRunProcesses(process.pid, commandClock(clockFile));
+  const procs = liveRunProcesses({ chain, harness, since: commandClock(clockFile), sessions });
   if (!messages.length && !jobs.length && !procs.length) return null;
   const blocks = readBlocks(blocksFile);
   const first = blocks.first || now;

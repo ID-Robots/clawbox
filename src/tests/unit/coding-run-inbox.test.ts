@@ -438,8 +438,17 @@ setTimeout(() => {
 `,
       { mode: 0o755 },
     );
-    const out = spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000 });
+    const config = path.join(root, "harness-config");
+    const out = spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000, env: { ...process.env, CLAUDE_CONFIG_DIR: config } });
     expect(out.stdout).toMatch(/Processes you started are still running:[\s\S]*sh -c sleep 30/);
+    // Beside the clock, the harness's session folder, for the settle: its CLAUDE_CONFIG_DIR…
+    expect(fs.readFileSync(`${clock}.stop-ran`, "utf8")).toBe(`${config}\n`);
+    // …or, without one, Claude Code's default.
+    fs.rmSync(`${clock}.stop-ran`);
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: root };
+    delete env.CLAUDE_CONFIG_DIR;
+    spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000, env });
+    expect(fs.readFileSync(`${clock}.stop-ran`, "utf8")).toBe(`${path.join(root, ".claude")}\n`);
   });
 
   describe("after the run: what it left in its process group (the settle's `leftovers` question)", () => {
@@ -488,6 +497,37 @@ setTimeout(() => {
       }
     });
 
+    it("leaves out the launcher's watcher for the session the Stop hook recorded, though it started after the first command", async () => {
+      const session = path.join(root, "launcher-session");
+      const other = path.join(root, "other-session");
+      fs.mkdirSync(session);
+      fs.mkdirSync(other);
+      // The group's leader stamps the clock, then leaves three things in its
+      // group: the launcher's watcher for the session (restarted mid-run, by
+      // a launcher that does not give it a session of its own), a process
+      // naming ANOTHER session folder, and the run's own job.
+      const loop = "while :; do sleep 1; done";
+      const leader = spawn(
+        "sh",
+        ["-c", `sh -c "$1"; sleep 0.05; sh -c "$2" launcher --heal-watch "$3" & sh -c "$2" launcher --heal-watch "$4" & sleep 32 & exit 0`, "sh", guardOf(settingsWith()), loop, session, other],
+        { detached: true, stdio: "ignore" },
+      );
+      leader.unref();
+      const pgid = leader.pid as number;
+      const left = (args: string[]) => leftovers(args).procs.map((p) => p.replace(/^pid \d+: /, "")).sort();
+      const watcherOf = (dir: string) => `sh -c ${loop} launcher --heal-watch ${dir}`;
+      try {
+        await vi.waitFor(() => expect(left([`--pgid=${pgid}`])).toHaveLength(3), { timeout: 5_000 });
+        // No session recorded (a Stop hook that never ran, or one from before): the clock's answer alone.
+        expect(left([`--first-command=${clock}`, `--pgid=${pgid}`])).toEqual([watcherOf(other), watcherOf(session), "sleep 32"].sort());
+        // The session the run's Stop hook recorded, however it is spelled: its watcher and what runs under it are not the run's.
+        fs.writeFileSync(`${clock}.stop-ran`, `${session}/\n`);
+        expect(left([`--first-command=${clock}`, `--pgid=${pgid}`])).toEqual([watcherOf(other), "sleep 32"].sort());
+      } finally {
+        process.kill(-pgid, "SIGKILL");
+      }
+    });
+
     it("says it saw nothing, rather than 'nothing is left', where it cannot look", () => {
       expect(leftovers([`--first-command=${clock}`, "--unit=clawbox-run-run-nothere1-zz.scope"])).toEqual({ seen: 0, procs: [] });
     });
@@ -506,10 +546,40 @@ setTimeout(() => {
   describe.skipIf(!scopeWorks)("in the run's own scope, with the launcher's watcher in it", () => {
     let unit: string;
     let session: string;
+    let launcher: string;
     beforeEach(() => {
       unit = `clawbox-run-run-hooktest-${Date.now().toString(36)}.scope`;
       session = path.join(root, "launcher-session");
       fs.mkdirSync(session);
+      const bin = path.join(root, "bin");
+      fs.mkdirSync(bin, { recursive: true });
+      launcher = path.join(bin, "launcher");
+      // A stand-in launcher. `launcher <session dir> <clock> start|midrun`
+      // forks its watcher — `<sh> <launcher> --heal-watch <session dir>`, the
+      // real one's shape — into a session of its own and lets go of it (init
+      // adopts it). `midrun`: that watcher waits for the run's first command
+      // and then restarts itself, as the launcher does when it moves a session
+      // to another account, so the watcher left is one started AFTER the
+      // clock. The one that stays writes its pid to <session dir>/watcher.pid.
+      fs.writeFileSync(
+        launcher,
+        `#!/bin/sh
+if [ "$1" = --heal-watch ]; then
+  if [ -n "$3" ]; then
+    while [ ! -s "$3" ]; do sleep 0.05; done
+    sleep 0.2
+    setsid "$0" --heal-watch "$2" </dev/null >/dev/null 2>&1 &
+    exit 0
+  fi
+  echo "$$" > "$2/watcher.pid"
+  while :; do sleep 1; done
+fi
+if [ "$3" = midrun ]; then clock=$2; else clock=; fi
+setsid "$0" --heal-watch "$1" $clock </dev/null >/dev/null 2>&1 &
+exit 0
+`,
+        { mode: 0o755 },
+      );
     });
     afterEach(() => {
       // The watcher and any job outlive the stand-in: the scope goes with them.
@@ -518,56 +588,124 @@ setTimeout(() => {
 
     /**
      * A stand-in for the launcher and the harness it becomes: the launcher
-     * forks its watcher into a session of its own and lets go of it (init
-     * adopts it), with the session folder on its command line; then the
-     * harness runs its first tool call — the guard first, as Claude Code runs
-     * PreToolUse hooks — which, with `job`, backgrounds a job with nohup that
-     * outlives the tool call's shell; then it stops, running the Stop hook.
+     * forks its watcher; then the harness runs its first tool call — the
+     * guard first, as Claude Code runs PreToolUse hooks — which, with `job`,
+     * backgrounds a job that outlives the tool call's shell; once the
+     * watcher that stays is up, it stops, running the Stop hook. `config` is
+     * the harness's CLAUDE_CONFIG_DIR — its session folder; by default not
+     * the one the watcher names, so only the command clock can tell them
+     * apart.
      */
-    function runInScope(job: boolean): string {
-      const bin = path.join(root, "bin");
-      fs.mkdirSync(bin, { recursive: true });
-      const harness = path.join(bin, "claude");
+    function runInScope(opts: { job?: string; midRun?: boolean; config?: string } = {}): string {
+      const harness = path.join(root, "bin", "claude");
       const s = settingsWith();
       fs.writeFileSync(
         harness,
         `#!${process.execPath}
 const { spawnSync } = require("child_process");
-spawnSync("sh", ["-c", "setsid sh -c 'while :; do sleep 1; done' launcher --heal-watch \\"$1\\" </dev/null >/dev/null 2>&1 & exit 0", "sh", ${JSON.stringify(session)}], { stdio: "ignore" });
+const fs = require("fs");
+spawnSync(${JSON.stringify(launcher)}, [${JSON.stringify(session)}, ${JSON.stringify(clock)}, ${JSON.stringify(opts.midRun ? "midrun" : "start")}], { stdio: "ignore" });
 spawnSync("sleep", ["0.3"]);
 const guard = ${JSON.stringify(guardOf(s))};
 if (guard) spawnSync("sh", ["-c", guard], { input: "{}" });
-if (${job}) spawnSync("sh", ["-c", "nohup sh -c 'sleep 30; : run-job' >/dev/null 2>&1 & exit 0"], { stdio: "ignore" });
+const job = ${JSON.stringify(opts.job ?? "")};
+if (job) spawnSync("sh", ["-c", job + " </dev/null >/dev/null 2>&1 & exit 0"], { stdio: "ignore" });
+for (let i = 0; i < 200 && !fs.existsSync(${JSON.stringify(path.join(session, "watcher.pid"))}); i++) spawnSync("sleep", ["0.05"]);
 spawnSync("sleep", ["1.2"]);
 const r = spawnSync("sh", ["-c", ${JSON.stringify(stopOf(s))}], { input: JSON.stringify(${JSON.stringify(STOP)}), encoding: "utf-8" });
 process.stdout.write(r.stdout);
 `,
         { mode: 0o755 },
       );
-      const r = spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, harness], { encoding: "utf-8", timeout: 30_000 });
+      const config = opts.config ?? path.join(root, "harness-config");
+      fs.mkdirSync(config, { recursive: true });
+      const r = spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, harness], {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: { ...process.env, CLAUDE_CONFIG_DIR: config },
+      });
       expect(r.status).toBe(0);
       return r.stdout;
     }
 
-    it("lets a run that started nothing stop, though the watcher is in its scope", () => {
-      const out = runInScope(false);
-      // The watcher really is in the scope, adopted by init, its session folder on its command line.
+    /** The watcher that stayed: in the scope, adopted (its parent is not in the scope), and when it started against the clock. */
+    function watcherLeft(): { argv: string; adopted: boolean; afterClock: boolean } {
       const cgroup = spawnSync("systemctl", ["--user", "show", "-p", "ControlGroup", "--value", unit], { encoding: "utf-8" }).stdout.trim();
       const pids = fs.readFileSync(`/sys/fs/cgroup${cgroup}/cgroup.procs`, "utf8").split("\n").filter(Boolean);
-      const watcher = pids.map((p) => ({ p, argv: fs.readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0").join(" ") })).find((x) => x.argv.includes("--heal-watch"));
-      expect(watcher?.argv).toContain(session);
-      // Adopted: its parent is not in the scope (init, or a subreaper outside it).
-      const ppid = fs.readFileSync(`/proc/${watcher?.p}/stat`, "utf8").split(") ")[1].split(" ")[1];
-      expect(pids).not.toContain(ppid);
+      const pid = fs.readFileSync(path.join(session, "watcher.pid"), "utf8").trim();
+      expect(pids).toContain(pid);
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ");
+      const stamp = Math.round(Number(fs.readFileSync(clock, "utf8").trim().split("\n")[0]) * 100);
+      return {
+        argv: fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ").trim(),
+        adopted: !pids.includes(stat[1]),
+        afterClock: Number(stat[19]) >= stamp,
+      };
+    }
+
+    const SETSID_JOB = "setsid sh -c 'sleep 30; : run-job'";
+    const blockOf = (out: string) => JSON.parse(out) as { decision: string; reason: string };
+
+    it("lets a run that started nothing stop, though the watcher is in its scope", () => {
+      const out = runInScope();
+      // The watcher really is in the scope, adopted by init, its session folder on its command line.
+      const watcher = watcherLeft();
+      expect(watcher.argv).toBe(`/bin/sh ${launcher} --heal-watch ${session}`);
+      expect(watcher.adopted).toBe(true);
+      expect(watcher.afterClock).toBe(false);
       expect(out).toBe("");
       expect(fs.existsSync(path.join(state, ".run-jobs", "stop-blocks.json"))).toBe(false);
     });
 
     it("still refuses the stop over a job a tool call backgrounded, after init adopted it — and names only that", () => {
-      const out = JSON.parse(runInScope(true)) as { decision: string; reason: string };
+      const out = blockOf(runInScope({ job: "nohup sh -c 'sleep 30; : run-job'" }));
       expect(out.decision).toBe("block");
       expect(out.reason).toMatch(/Processes you started are still running:\n- pid \d+: sh -c sleep 30; : run-job\n\n/);
       expect(out.reason).not.toMatch(/heal-watch/);
     });
+
+    it("lets a run stop when the launcher restarted its watcher for this session MID-RUN, after the first command", () => {
+      const out = runInScope({ midRun: true, config: session });
+      const watcher = watcherLeft();
+      expect(watcher.argv).toBe(`/bin/sh ${launcher} --heal-watch ${session}`);
+      expect(watcher.adopted).toBe(true);
+      // The clock cannot tell this one from the run's work: it started after the first command.
+      expect(watcher.afterClock).toBe(true);
+      expect(out).toBe("");
+      expect(fs.existsSync(path.join(state, ".run-jobs", "stop-blocks.json"))).toBe(false);
+      // The Stop hook left the session beside the clock, for the settle.
+      expect(fs.readFileSync(`${clock}.stop-ran`, "utf8")).toBe(`${session}\n`);
+    });
+
+    it("still refuses the stop over a setsid job beside the restarted watcher, and names only the job", () => {
+      const out = blockOf(runInScope({ midRun: true, config: session, job: SETSID_JOB }));
+      expect(watcherLeft().afterClock).toBe(true);
+      expect(out.decision).toBe("block");
+      expect(out.reason).toMatch(/Processes you started are still running:\n- pid \d+: sh -c sleep 30; : run-job\n\n/);
+      expect(out.reason).not.toMatch(/heal-watch/);
+    });
+
+    it("counts a --heal-watch process for ANOTHER session folder as the run's", () => {
+      // The harness runs on its own config folder; the watcher names a different one.
+      const out = blockOf(runInScope({ midRun: true }));
+      expect(watcherLeft().afterClock).toBe(true);
+      expect(out.decision).toBe("block");
+      expect(out.reason).toContain(`launcher --heal-watch ${session}`);
+    });
+
+    it.skipIf(spawnSync("python3", ["--version"]).status !== 0)(
+      "after the run, names the setsid python3 http.server it left, and not the restarted watcher",
+      async () => {
+        const out = runInScope({ midRun: true, config: session, job: "setsid python3 -m http.server 0 --bind 127.0.0.1" });
+        expect(watcherLeft().afterClock).toBe(true);
+        expect(out).not.toMatch(/heal-watch/);
+        // The harness is gone: what is left in its scope is asked the settle's question.
+        await vi.waitFor(() => {
+          const r = spawnSync(process.execPath, [SCRIPT, "leftovers", `--first-command=${clock}`, `--unit=${unit}`], { encoding: "utf-8", timeout: 10_000 });
+          const left = JSON.parse(r.stdout) as { seen: number; procs: string[] };
+          expect(left.procs.map((p) => p.replace(/^pid \d+: /, ""))).toEqual(["python3 -m http.server 0 --bind 127.0.0.1"]);
+        }, { timeout: 10_000, interval: 250 });
+      },
+    );
   });
 });
