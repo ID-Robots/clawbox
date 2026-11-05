@@ -206,6 +206,12 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   disk_full: { code: "CONFLICT", next: "The box is out of room: tell the user (disk_usage shows what can be cleared)." },
 };
 
+/** A refused undo of a verification (the revert route's finding `verification-undo`): nobody can undo it, so nothing to change and retry. */
+const VERIFICATION_UNDO = {
+  code: "CONFLICT" as const,
+  next: "A verification is never undone, by you or the owner. Do not retry. To change the fact, verify the right answer with prime_radiant_claim_verify once the user confirms it, or ask the owner with prime_radiant_review_raise.",
+};
+
 function refusalOf(err: ApiError): ToolError | null {
   let body: RouteRefusal;
   try {
@@ -215,7 +221,10 @@ function refusalOf(err: ApiError): ToolError | null {
   }
   const code = typeof body.code === "string" ? body.code : "";
   const said = typeof body.error === "string" && body.error.trim() !== "" ? body.error.trim().slice(0, 300) : "Prime Radiant refused that.";
-  const rule = NEXT[code] ?? (err.status === 400 || code.startsWith("invalid") ? { code: "BAD_ARGUMENT" as const, next: "Fix that argument and call once more." } : null);
+  const verification = Array.isArray(body.findings) && body.findings.some((f) => !!f && typeof f === "object" && (f as { rule?: unknown }).rule === "verification-undo");
+  const rule = verification
+    ? VERIFICATION_UNDO
+    : (NEXT[code] ?? (err.status === 400 || code.startsWith("invalid") ? { code: "BAD_ARGUMENT" as const, next: "Fix that argument and call once more." } : null));
   if (!rule) return null;
   let message = said;
   if (typeof body.index === "number") message += ` (item ${body.index + 1} of the list)`;
@@ -784,17 +793,19 @@ function registerReadTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_history",
-    "List a wiki page's changes, newest first: each commit's id, what it did, when and who (Prime Radiant for the owner's app and the passes, ClawBox assistant for yours). Read one with prime_radiant_diff.",
+    "List a wiki page's changes, newest first: each commit's id, what it did, when and who (Prime Radiant for the owner's app and the passes, ClawBox assistant for yours); undo: false marks a verification, which is never undone. Read one with prime_radiant_diff.",
     {
       path: zPagePath("The page's vault path."),
       limit: zInt(1, 100, 20, "How many commits to return."),
     },
     { ...READ, maxChars: 6_000 },
     async ({ path, limit }: { path: string; limit: number }) => {
-      const body = await pr<{ path?: string; commits?: Array<{ sha: string; subject?: string; at?: string; author?: string }> }>("GET", `/history/${segments(path)}`, { query: { limit } });
+      const body = await pr<{ path?: string; commits?: Array<{ sha: string; subject?: string; at?: string; author?: string; noUndo?: string }> }>("GET", `/history/${segments(path)}`, {
+        query: { limit },
+      });
       return json({
         path: body.path ?? path,
-        commits: (body.commits ?? []).map((c) => ({ commit: short(c.sha), what: c.subject, at: c.at, by: c.author })),
+        commits: (body.commits ?? []).map((c) => ({ commit: short(c.sha), what: c.subject, at: c.at, by: c.author, ...(c.noUndo ? { undo: false } : {}) })),
       });
     },
   );
@@ -1156,7 +1167,7 @@ function registerReviewTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_undo",
-    "Undo one wiki commit (or only its change to one page) as a new commit, when the user asked. You can undo only commits you made; anything else is the owner's, in Prime Radiant → History.",
+    "Undo one wiki commit (or only its change to one page) as a new commit, when the user asked. You can undo only commits you made; anything else is the owner's, in Prime Radiant → History. A verification (a verify: commit, a settled review question) is never undone, by anyone.",
     {
       commit: z.string().regex(COMMIT_RE, "7 to 40 hex characters").describe("The commit id from prime_radiant_history or a change you made."),
       path: zOptPagePath("Undo only the commit's change to this page."),

@@ -96,7 +96,7 @@ export const TOOL_NOTES: readonly ToolNote[] = [
   },
   {
     tool: "prime_radiant_undo",
-    note: "Only the commits you made can be undone here — the answer refuses any other as the owner's. A later commit that touched the same lines blocks the undo: undo that one first. Undoing a verification that retired other ids is refused by the wiki's rules.",
+    note: "Only the commits you made can be undone here — the answer refuses any other as the owner's. A later commit that touched the same lines blocks the undo: undo that one first. A verification — a `verify:` commit, a settled review question — is never undone, whole or one page of it, by you or the owner: to change the fact, verify the right answer once the user confirms it.",
   },
   {
     tool: "prime_radiant_ingest_start",

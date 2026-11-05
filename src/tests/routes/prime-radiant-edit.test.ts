@@ -527,6 +527,38 @@ describe("undo, review and passes for the assistant", () => {
     expect(ownerVerified(verified!)).toBe(true);
   });
 
+  it("refuses an undo of a settled review question to the owner and to the assistant, whole or one page, and changes nothing", async () => {
+    await ensureVault();
+    await seed();
+    const { item } = addReviewItem(vault, {
+      kind: "contradiction",
+      claimId: PRICE.id,
+      pages: ["concepts/pricing.md"],
+      candidates: [
+        { text: "The blue widget costs 10 EUR.", page: "concepts/pricing.md", claimId: PRICE.id, evidence: [] },
+        { text: "The blue widget costs 12 EUR.", page: null, evidence: [] },
+      ],
+    });
+    // The assistant settles it (its commit), so "only your own" is no reason to refuse it.
+    expect((await resolvePOST(req("POST", `/review/${item.id}/resolve`, "assistant", { action: "pick", candidate: 1, confirm: true }), reviewCtx(item.id))).status).toBe(200);
+    const verify = execFileSync("git", ["-C", vault, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const page = read("concepts/pricing.md");
+    for (const [as, body] of [
+      ["owner", { commit: verify, path: "concepts/pricing.md" }],
+      ["owner", { commit: verify }],
+      ["assistant", { commit: verify, path: "concepts/pricing.md" }],
+      ["assistant", { commit: verify.slice(0, 7) }],
+    ] as const) {
+      const res = await revertPOST(req("POST", "/revert", as, body));
+      expect(res.status).toBe(409);
+      const answer = await res.json();
+      expect(answer).toMatchObject({ code: "lint_blocked", findings: [{ rule: "verification-undo", path: "concepts/pricing.md" }] });
+      expect(answer.error).toMatch(/verification is never undone/);
+    }
+    expect(execFileSync("git", ["-C", vault, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(verify);
+    expect(read("concepts/pricing.md")).toBe(page);
+  });
+
   it("lets the assistant run the connect pass, and only that pass", async () => {
     await ensureVault();
     await seed();

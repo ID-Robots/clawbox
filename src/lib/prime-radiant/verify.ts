@@ -38,7 +38,9 @@
  * the owner: they win nothing here.
  *
  * The commit carries who verified as its trailers (`Verified-by`,
- * `Verified-via`; git.ts `verifiedTrailers`), so History says it.
+ * `Verified-via`; git.ts `verifiedTrailers`), so History says it. A
+ * verification is never undone (history.ts refuses it, whole or one page of
+ * it): the ids it retired stay retired, so an undo would lose the answer.
  *
  * SERVER ONLY.
  */
@@ -381,8 +383,10 @@ export function planAssistantVerificationUpgrade(snapshot: Pick<VaultSnapshot, "
  * The maintenance route's `upgrade-assistant-verifications` (owner only, run
  * once): {@link planAssistantVerificationUpgrade} as ONE commit
  * `migrate: N assistant verifications -> owner via the assistant` (trailers
- * `Verified-by: owner`, `Verified-via: assistant`), which Undo reverses whole;
- * none when nothing is left to upgrade, so a second run changes nothing.
+ * `Verified-by: owner`, `Verified-via: assistant`), which Undo reverses whole
+ * (it keeps each verification's moment and retires nothing, so history.ts does
+ * not count it a verification); none when nothing is left to upgrade, so a
+ * second run changes nothing.
  * `dryRun` answers the same and writes nothing — run it first. Contradiction
  * items waiting on an upgraded claim are not touched here: the
  * `rejudge-reviews` pass settles them now that one side is owner-verified.

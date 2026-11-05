@@ -1353,7 +1353,7 @@ owner when it touches a verified page.
 | Review: pick / new answer (verifies); — verify a claim directly | `POST review/<id>/resolve`; `POST claims/verify` | `prime_radiant_review_resolve`, `prime_radiant_claim_verify` |
 | Review: later / dismiss | `POST review/<id>/resolve` | `prime_radiant_review_resolve` |
 | — raise a review item | `POST review` | `prime_radiant_review_raise` |
-| History: Undo | `POST revert` | `prime_radiant_undo` (own commits only) |
+| History: Undo (never a verification) | `POST revert` | `prime_radiant_undo` (own commits only; a verification is refused) |
 | Add: count a folder (preview) | `POST ingest/preview` | `prime_radiant_ingest_preview` |
 | Add: Start (folders) / drop files | `POST ingest { folders }` / `ingest/upload` + `POST ingest { upload }` | `prime_radiant_ingest_start` (folders, or files by path: `POST ingest { files }`) |
 | Add: Stop | `DELETE ingest/<id>` | `prime_radiant_ingest_stop` |
