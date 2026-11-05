@@ -274,7 +274,7 @@ describe("one review item per question", () => {
     const side = (x: Claim, page: string) => ({ text: x.text, page, claimId: x.id, evidence: [] });
     const pair = addReviewItem(vault, { kind: "contradiction", claimId: kept.id, candidates: [side(kept, "entities/initech.md"), side(gone, "entities/globex.md")] }).item;
     const own = addReviewItem(vault, { kind: "lint", claimId: gone.id }).item;
-    const other = addReviewItem(vault, { kind: "opus", claimId: kept.id, candidates: [side(gone, "entities/globex.md")] }).item;
+    const other = addReviewItem(vault, { kind: "verified-touch", claimId: kept.id, candidates: [side(gone, "entities/globex.md")] }).item;
     const r = await deleteClaim(gone.id, null, OWNER, { now: NOW });
     expect(r.commit).not.toBeNull();
     for (const id of [pair.id, own.id]) {

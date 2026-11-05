@@ -1313,9 +1313,9 @@ whose author is the assistant (403 `owner_only` otherwise).
 document drop (`ingest/upload` — the assistant names files by path,
 `POST ingest { files }`, staged through the same `stageUpload`), and the
 `reindex`, `rejudge-reviews` and `migrate-frontmatter` maintenance passes (the
-bearer may run `connect` only), and the settings' cost rates and Opus model —
-what the Opus dollar cap is measured in (a rate of 0, or an unpriced model, and
-the cap never trips); the bearer may change the cap itself. So is
+bearer may run `connect` only), and the settings' cost rates — what the
+nightly dollar caps (summaries, golden check) are measured in (a rate of 0 and
+a cap never trips). So is
 `verification.outbound`, whether the assistant may send the daily questions
 over chat at all: off by default, and `prime_radiant_daily_questions` says
 which way it is set — it never sends anything itself.
@@ -1363,7 +1363,7 @@ owner when it touches a verified page.
 | Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`; a review item with no claim to verify carries `fix_first`: the page is put right, then the item dismissed; a page still current is answered with the `recheck_after` its type gives it from today, or `by_type` for a type never re-checked) |
 | Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
 | — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
-| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, exclude list, parallel, skip code projects, nightly folders); Questions → Question settings (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
+| Settings: Save (schedule, contradictions, domains and owners, exclude list, parallel, skip code projects, nightly folders); Questions → Question settings (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
 
 The route refusals become instructions (`NEXT` in the module): `owner_only` says
 it is the owner's and not to retry, `not_initialised` sends the agent to

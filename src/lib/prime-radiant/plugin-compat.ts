@@ -202,7 +202,7 @@ export function adoptPluginFrontmatter(rel: string, raw: Record<string, unknown>
   }
 
   const kept = { ...raw };
-  for (const key of ["status", "claims", "verified", "stale_after", "retiredClaimIds", "checked_by", "opus_pending"]) delete kept[key];
+  for (const key of ["status", "claims", "verified", "stale_after", "retiredClaimIds", "checked_by"]) delete kept[key];
   const frontmatter: PageFrontmatter = {
     ...kept,
     type,
@@ -216,7 +216,6 @@ export function adoptPluginFrontmatter(rel: string, raw: Record<string, unknown>
     sources,
     privacy: privacyOf(raw),
     checked_by: "flash",
-    opus_pending: false,
     claims,
     retiredClaimIds: [],
   };

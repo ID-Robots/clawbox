@@ -508,7 +508,6 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
       sources: fresh.sources,
       privacy: fresh.privacy,
       checked_by: "flash",
-      opus_pending: false,
       claims: [],
       retiredClaimIds: [],
       structure: fresh.structure,

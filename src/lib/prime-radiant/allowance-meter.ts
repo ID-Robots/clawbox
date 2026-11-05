@@ -32,10 +32,12 @@ export const ALLOWANCE_WINDOW_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Operations whose model call does NOT go through ClawBox AI. The optional
- * Opus tier answers from the owner's Anthropic key or Claude subscription.
- * Every other operation is a Flash call through the proxy. A new operation
- * that answers from somewhere else belongs here.
+ * Operations whose model call did NOT go through ClawBox AI. Every operation
+ * ClawBox runs today is a Flash call through the proxy; `opus-review` rows
+ * were written by the nightly Opus tier (removed), which answered from the
+ * owner's Anthropic key or Claude subscription — kept here only so such rows
+ * still in a box's rolling week are never counted against the allowance. A
+ * new operation that answers from somewhere else belongs here.
  */
 export const OFF_ALLOWANCE_OPERATIONS: readonly string[] = Object.freeze(["opus-review"]);
 

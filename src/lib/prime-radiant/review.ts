@@ -33,10 +33,10 @@ import {
   cleanCandidates,
   closeItemsForRetired,
   getReviewItem,
-  REVIEW_KINDS,
+  RAISED_REVIEW_KINDS,
   settleReviewItem,
+  type RaisedReviewKind,
   type ReviewItem,
-  type ReviewKind,
   type ReviewResolution,
 } from "./review-store";
 import type { ClaimEvidence } from "./schema";
@@ -187,7 +187,7 @@ export async function resolveReviewItem(
 
 /** A review item a caller raises by hand (`POST review`), read strictly. */
 export function readNewItem(body: unknown): {
-  kind: ReviewKind;
+  kind: RaisedReviewKind;
   claimId: string | null;
   pages: string[];
   candidates: ReturnType<typeof cleanCandidates>;
@@ -195,8 +195,8 @@ export function readNewItem(body: unknown): {
 } {
   const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   const kind = b.kind ?? "contradiction";
-  if (typeof kind !== "string" || !(REVIEW_KINDS as readonly string[]).includes(kind)) {
-    throw new ReviewError("invalid", `kind must be one of ${REVIEW_KINDS.join(", ")}.`, 400);
+  if (typeof kind !== "string" || !(RAISED_REVIEW_KINDS as readonly string[]).includes(kind)) {
+    throw new ReviewError("invalid", `kind must be one of ${RAISED_REVIEW_KINDS.join(", ")}.`, 400);
   }
   if (b.claimId !== undefined && b.claimId !== null && !isClaimId(b.claimId)) throw new ReviewError("invalid", "claimId is not a claim id.", 400);
   if (b.pages !== undefined && !Array.isArray(b.pages)) throw new ReviewError("invalid", "pages must be a list.", 400);
@@ -208,7 +208,7 @@ export function readNewItem(body: unknown): {
     throw new ReviewError("invalid", "Say what the item is about: a claim, a page or candidates.", 400);
   }
   const note = typeof b.note === "string" && b.note.trim() !== "" ? b.note.trim().slice(0, 500) : null;
-  return { kind: kind as ReviewKind, claimId, pages, candidates, note };
+  return { kind: kind as RaisedReviewKind, claimId, pages, candidates, note };
 }
 
 export function createReviewItem(body: unknown, options: { by: string; vault?: string; now?: Date }): { item: ReviewItem; created: boolean } {

@@ -39,7 +39,7 @@
  *    verified claim or page is left as it is. In commits of 50 pages Undo
  *    reverses; idempotent. `{ pages, folds, skipped, commits }`; `dryRun: true`
  *    lists them — run it first.
- *  - `structure`: the structure pass (structure.ts, also step 4b of the
+ *  - `structure`: the structure pass (structure.ts, also step 4 of the
  *    nightly pass) — monthly record hubs, domain hubs, the company's root
  *    page, entity enrichment and the decisions register, written in commits.
  *    `dryRun: true` answers what it would write (`would`) and never asks the
@@ -47,7 +47,7 @@
  *  - `classify-records`: read only — the record leaves by type and month
  *    (records.ts), and the record-like pages the rules could not type (what
  *    the capped model fallback would be asked).
- *  - `summaries`: the summaries pass (node-summary.ts, also step 4c of the
+ *  - `summaries`: the summaries pass (node-summary.ts, also step 4b of the
  *    nightly pass) — every node's summary written from its connections and
  *    sources, entities first, the cheap model within `summaries.maxPages` and
  *    `summaries.capUsd`, written in commits. Its answer carries the duplicate

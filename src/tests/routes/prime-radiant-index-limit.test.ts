@@ -15,7 +15,6 @@ vi.mock("@/lib/route-auth", () => auth);
 const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
 vi.mock("@/lib/mcp-token", () => ({ verifyMcpBearer: (h: string | null) => h === "Bearer test-assistant-bearer" }));
-vi.mock("@/lib/prime-radiant/opus-source", () => ({ detectOpusSource: async () => ({ source: "none" }) }));
 vi.mock("@/lib/prime-radiant/nightly-scheduler", () => ({ nextRunAtMs: () => null, refresh: async () => undefined }));
 const MB = 1024 * 1024;
 const shard = vi.hoisted(() => ({

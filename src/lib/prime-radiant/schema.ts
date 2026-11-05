@@ -30,6 +30,10 @@ export type PageStatus = (typeof PAGE_STATUSES)[number];
 export const PRIVACY_TIERS = ["public", "internal", "confidential", "secret-ref"] as const;
 export type PrivacyTier = (typeof PRIVACY_TIERS)[number];
 
+/**
+ * Who last checked a page. `opus` is only ever READ: pages the nightly Opus
+ * tier checked (removed) still carry it and must stay valid; nothing writes it.
+ */
 export const CHECKED_BY = ["flash", "opus", "human"] as const;
 export type CheckedBy = (typeof CHECKED_BY)[number];
 
@@ -99,7 +103,6 @@ export interface PageFrontmatter {
   sources: string[];
   privacy: PrivacyTier;
   checked_by: CheckedBy;
-  opus_pending: boolean;
   claims: Claim[];
   retiredClaimIds: string[];
   /** The page this one is a version of (a draft of that final, a copy of that original): versions.ts never pairs their claims. */
@@ -126,6 +129,8 @@ export const FRONTMATTER_KEY_ORDER = [
   "sources",
   "privacy",
   "checked_by",
+  // Legacy, never written: the removed nightly Opus tier's flag. A page that
+  // still carries it keeps it where it was, so it re-serialises byte for byte.
   "opus_pending",
   "claims",
   "retiredClaimIds",
@@ -248,7 +253,7 @@ function validateClaim(raw: unknown, index: number, errors: SchemaError[]): Clai
  *
  * Defaults are filled only for the bookkeeping fields a page written by a
  * person may reasonably omit (`claims`, `retiredClaimIds`, `checked_by`,
- * `opus_pending`, `verified`, `stale_after`); every field the contract names
+ * `verified`, `stale_after`); every field the contract names
  * as REQUIRED must be there.
  */
 export function validateFrontmatter(raw: unknown): ValidationResult {
@@ -291,8 +296,6 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
 
   const checkedBy = raw.checked_by ?? "flash";
   if (!oneOf(CHECKED_BY, checkedBy)) errors.push({ field: "checked_by", message: `must be one of ${CHECKED_BY.join(", ")}` });
-  const opusPending = raw.opus_pending ?? false;
-  if (typeof opusPending !== "boolean") errors.push({ field: "opus_pending", message: "must be true or false" });
 
   const claims: Claim[] = [];
   const rawClaims = raw.claims ?? [];
@@ -328,7 +331,6 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
       sources: (raw.sources as string[]).map((s) => s.trim()),
       privacy: raw.privacy as PrivacyTier,
       checked_by: checkedBy as CheckedBy,
-      opus_pending: opusPending as boolean,
       claims,
       retiredClaimIds: [...new Set((retired as string[]).map((s) => s.trim()))],
     },

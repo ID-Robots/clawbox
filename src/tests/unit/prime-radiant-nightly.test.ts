@@ -29,7 +29,6 @@ import {
   worktreePath,
   type NightlySummary,
 } from "@/lib/prime-radiant/nightly";
-import type { OpusClient } from "@/lib/prime-radiant/opus";
 import { stateDbPath, vaultDir } from "@/lib/prime-radiant/paths";
 import { setVaultReindexHook } from "@/lib/prime-radiant/reindex-hook";
 import { resolveReviewItem } from "@/lib/prime-radiant/review";
@@ -168,7 +167,7 @@ describe("nightly pass", () => {
     expect(summary.contradictions.findings).toBe(1);
     expect(summary.gate.touched).toEqual([]);
     expect(run!.usdEstimate).toBeGreaterThan(0);
-    // Step 4c: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them, not marked tried).
+    // Step 4b: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them, not marked tried).
     expect(summary.summaries).toMatchObject({ planned: 2, written: 2, byModel: 0, byFacts: 2, rejectedPages: 0, model: { calls: 1 } });
 
     // main has the pages; the branch and the worktree are gone.
@@ -275,16 +274,11 @@ describe("nightly pass", () => {
       await tx.write("concepts/long.md", pageText({ title: "Long", claims: [claim("acme-sales/long/fact", "A long page fact.")] }, `${"Acme widgets. ".repeat(1000)}\n`));
       await tx.write("index.md", "# Index\n\n- [[concepts/long]]\n");
     });
-    const opus: OpusClient = {
-      model: "claude-opus-5-5",
-      complete: async () => ({ text: '[{"k":0,"verdict":"ok","claims":[],"note":"fine"}]', model: "claude-opus-5-5", usage: { promptTokens: 1000, completionTokens: 50, cacheHitTokens: 0 } }),
-    };
-    const s = settings({ opus: { ...defaultSettings().opus, enabled: true, capUsd: 5 } });
-    const run = await runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, opus, online: async () => false, random: () => 0 }));
+    const s = settings();
+    const run = await runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false }));
     expect(run?.status).toBe("held");
     const summary = run!.summary as unknown as NightlySummary;
     expect(summary.held).toEqual(["lint"]);
-    expect(summary.opus).toMatchObject({ reviewed: 1 });
     expect(await branches()).toEqual(["dream/2026-05-20", "main"]);
     expect(fs.existsSync(worktreePath(vaultDir()))).toBe(false);
     const lint = listReviewItems(vaultDir(), { kind: "lint" }).items;
@@ -305,13 +299,9 @@ describe("nightly pass", () => {
       await tx.write("concepts/long.md", pageText({ title: "Long", claims: [claim("acme-sales/long/fact", "A long page fact.")] }, `${"Acme widgets. ".repeat(1000)}\n`));
       await tx.write("index.md", "# Index\n\n- [[concepts/long]]\n");
     });
-    const opus: OpusClient = {
-      model: "claude-opus-5-5",
-      complete: async () => ({ text: '[{"k":0,"verdict":"ok","claims":[],"note":"fine"}]', model: "claude-opus-5-5", usage: { promptTokens: 1000, completionTokens: 50, cacheHitTokens: 0 } }),
-    };
-    const s = settings({ opus: { ...defaultSettings().opus, enabled: true, capUsd: 5 } });
+    const s = settings();
     const night = (day: number) =>
-      runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, opus, online: async () => false, random: () => 0, now: () => new Date(2026, 4, day, 3, 0) }));
+      runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false, now: () => new Date(2026, 4, day, 3, 0) }));
     const first = await night(20);
     const second = await night(21);
     expect(first?.status).toBe("held");

@@ -3,8 +3,8 @@
  *
  * An item is one question only a person can settle — a disputed fact (two
  * claims the judge says cannot both be true), a nightly change that touched a
- * verified page, a lint error that keeps a night from merging, or an Opus
- * proposal. It names the claim it is about (`claimId`, when there is one),
+ * verified page, or a lint error that keeps a night from merging (an `opus`
+ * item is an older box's: see {@link REVIEW_KINDS}). It names the claim it is about (`claimId`, when there is one),
  * the pages involved, the candidate answers with their evidence, and why it
  * was raised. Resolving it is review.ts's business; this module only stores.
  *
@@ -29,8 +29,18 @@ import { claimTextKey, isClaimId } from "./claims";
 import { safePagePath } from "./paths";
 import { stateDbExists, withStateDb } from "./state-db";
 
+/**
+ * Every kind an item may have. `opus` is only ever READ: the nightly Opus
+ * tier (removed) raised such items, and one still waiting on a box must keep
+ * rendering and stay resolvable and dismissable. Nothing raises one now —
+ * new items take {@link RAISED_REVIEW_KINDS}.
+ */
 export const REVIEW_KINDS = ["contradiction", "verified-touch", "lint", "opus"] as const;
 export type ReviewKind = (typeof REVIEW_KINDS)[number];
+
+/** The kinds a new item may be raised as. */
+export const RAISED_REVIEW_KINDS = ["contradiction", "verified-touch", "lint"] as const satisfies readonly ReviewKind[];
+export type RaisedReviewKind = (typeof RAISED_REVIEW_KINDS)[number];
 
 export const REVIEW_STATUSES = ["open", "resolved", "later"] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -89,7 +99,7 @@ export interface ReviewItem {
 }
 
 export interface NewReviewItem {
-  kind: ReviewKind;
+  kind: RaisedReviewKind;
   claimId?: string | null;
   pages?: readonly string[];
   candidates?: readonly ReviewCandidate[];

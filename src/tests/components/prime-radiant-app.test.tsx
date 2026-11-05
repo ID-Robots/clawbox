@@ -37,7 +37,6 @@ const FM = {
   sources: ["upload/batch-1/acme-overview.md"],
   privacy: "internal",
   checked_by: "flash",
-  opus_pending: false,
   claims: [
     {
       id: "sales/acme-widgets/hq-city",
@@ -191,8 +190,8 @@ let allowanceAccount: unknown;
 let stopRefusals: number[];
 let previewAnswer: Record<string, unknown> | null;
 let skipCodeProjects: boolean;
-/** The settings GET's Opus source and page cap; null answers as an older server (neither field). */
-let opusExtras: { source: "api_key" | "subscription" | "none"; maxPages: number } | null;
+/** An older server's Opus section, limits and account (the tier is removed); false answers as today's server. */
+let olderOpusServer: boolean;
 /** The search index size limit, MB, on a server that has the setting (null: an older one). */
 let searchIndexLimitMb: number | null;
 /** The structure pass's settings section; null: a server from before it. */
@@ -304,7 +303,7 @@ function installFetch() {
       const settings = {
         ingest: { exclude: [".git", "node_modules"], skipCodeProjects, parallel: 128, folders: [] },
         costRates: {}, nightly: { enabled: true, time: "03:00" },
-        opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus", ...(opusExtras ? { maxPages: opusExtras.maxPages } : {}) },
+        ...(olderOpusServer ? { opus: { enabled: true, capUsd: 2, sampleRate: 0.02, model: "opus", maxPages: 100 } } : {}),
         contradictions: { enabled: true }, domains: [],
         golden: { enabled: true, maxQuestions: 50 }, verification: { perOwner: 5, outbound: false, languages: [] },
         ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
@@ -313,14 +312,14 @@ function installFetch() {
       return ok({
         settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
         limits: {
-          ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100,
+          ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, domains: 100,
           // A per-owner bound unlike the app's own default, so a test sees the field follow the server.
           goldenMaxQuestions: { min: 1, max: 500 }, dailyPerOwner: { min: 1, max: 12 },
-          ...(opusExtras ? { opusMaxPages: { min: 4, max: 2000 } } : {}),
+          ...(olderOpusServer ? { opusCapUsd: { min: 0.01, max: 1000 }, opusMaxPages: { min: 4, max: 2000 } } : {}),
           ...(searchIndexLimitMb !== null ? { searchIndexLimitMb: { min: 32, max: 4096 } } : {}),
         },
         nightly: { nextRunAt: null }, rates: {},
-        ...(opusExtras ? { opusSource: opusExtras.source } : {}),
+        ...(olderOpusServer ? { opusSource: "subscription" } : {}),
       });
     }
     return ok({}, 404);
@@ -378,7 +377,7 @@ beforeEach(() => {
   stopRefusals = [];
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
-  opusExtras = null;
+  olderOpusServer = false;
   searchIndexLimitMb = null;
   structureSettings = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
@@ -552,6 +551,17 @@ describe("PrimeRadiantApp", () => {
     }
   });
 
+  it("shows a page the removed Opus tier checked as checked by Opus, with no \"Opus pending\" note", async () => {
+    pageOverride = { ...PAGE, frontmatter: { ...FM, checked_by: "opus", opus_pending: true } };
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    const app = screen.getByTestId("prime-radiant-app");
+    expect(app).toHaveTextContent("Opus model");
+    expect(app.textContent).not.toMatch(/second opinion/i);
+  });
+
   it("shows the summary written from the page's connections in its header, and none when the page has none of ours", async () => {
     pageOverride = { ...PAGE, nodeSummary: { text: "Acme Widgets Ltd makes widgets and buys housings from Globex Ltd.", method: "model", at: "2026-10-17T03:00:00.000Z" } };
     const view = await mount();
@@ -615,6 +625,21 @@ describe("PrimeRadiantApp", () => {
       expect(post?.body).toEqual({ action: "pick", candidate: 1 });
     });
     expect(await screen.findByTestId("prime-radiant-review-empty")).toBeInTheDocument();
+  });
+
+  it("still shows and dismisses an Opus proposal an older box raised", async () => {
+    reviewItems = [{ ...REVIEW_ITEM, id: "rev-00000000000f", kind: "opus", evidence: [{ kind: "opus", note: "the body says 48" }] }];
+    await mount();
+    await openTab("review");
+    const item = await screen.findByTestId("prime-radiant-review-item");
+    expect(item).toHaveAttribute("data-kind", "opus");
+    expect(item).toHaveTextContent("Second opinion");
+    expect(within(item).getAllByTestId("prime-radiant-review-candidate")).toHaveLength(2);
+    fireEvent.click(within(item).getByTestId("prime-radiant-review-dismiss"));
+    await waitFor(() => {
+      const post = calls.find((c) => c.url.includes("/review/rev-00000000000f/resolve"));
+      expect(post?.body).toEqual({ action: "dismiss" });
+    });
   });
 
   it("never lets a late read for one filter draw over another's queue", async () => {
@@ -824,38 +849,19 @@ describe("PrimeRadiantApp", () => {
     });
   });
 
-  it("switches the second opinion on without a price on screen, keeping the cap the box has", async () => {
+  it("offers no second opinion and never sends an Opus section, even to an older server that still has one", async () => {
+    olderOpusServer = true;
     await mount();
     await openTab("settings");
-    fireEvent.click(await screen.findByTestId("prime-radiant-opus-enabled"));
-    expect(screen.queryByTestId("prime-radiant-opus-cap")).toBeNull();
-    expect(screen.getByTestId("prime-radiant-settings").textContent).not.toMatch(/\$|USD|spending/i);
+    await screen.findByTestId("prime-radiant-settings-save");
+    const settings = screen.getByTestId("prime-radiant-settings");
+    expect(settings.textContent).not.toMatch(/second opinion|Opus|Claude subscription|Pages per night/i);
+    expect(settings.querySelector('[data-testid^="prime-radiant-opus"]')).toBeNull();
     fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
     await waitFor(() => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
-      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2 });
-    });
-  });
-
-  it("says the second opinion runs on the Claude subscription and saves the pages-per-night cap", async () => {
-    opusExtras = { source: "subscription", maxPages: 100 };
-    await mount();
-    await openTab("settings");
-    const source = await screen.findByTestId("prime-radiant-opus-source");
-    expect(source).toHaveAttribute("data-source", "subscription");
-    expect(source).toHaveTextContent(/Claude subscription/);
-    expect(screen.getByTestId("prime-radiant-settings").textContent).not.toMatch(/needs an Anthropic API key/i);
-    fireEvent.click(screen.getByTestId("prime-radiant-opus-enabled"));
-    const pages = screen.getByTestId("prime-radiant-opus-max-pages");
-    expect(pages).toHaveValue(100);
-    fireEvent.change(pages, { target: { value: "3" } });
-    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Pages per night must be a whole number from 4 to 2000.");
-    fireEvent.change(pages, { target: { value: "40" } });
-    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
-    await waitFor(() => {
-      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
-      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2, maxPages: 40 });
+      expect(put).toBeDefined();
+      expect(put?.body as Record<string, unknown>).not.toHaveProperty("opus");
     });
   });
 
@@ -884,25 +890,6 @@ describe("PrimeRadiantApp", () => {
       expect(put).toBeDefined();
       expect((put?.body as Record<string, unknown>).structure).toBeUndefined();
     });
-  });
-
-  it("never lets the page cap block a save while the second opinion is off", async () => {
-    opusExtras = { source: "api_key", maxPages: 100 };
-    await mount();
-    await openTab("settings");
-    fireEvent.change(await screen.findByTestId("prime-radiant-opus-max-pages"), { target: { value: "" } });
-    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
-    await waitFor(() => {
-      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
-      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: false, capUsd: 2 });
-    });
-  });
-
-  it("says when no account can give a second opinion", async () => {
-    opusExtras = { source: "none", maxPages: 100 };
-    await mount();
-    await openTab("settings");
-    expect(await screen.findByTestId("prime-radiant-opus-source")).toHaveTextContent(/no Anthropic API key and no Claude sign-in/);
   });
 
   it("shows the search index size limit with its default, refuses one out of range and saves it", async () => {

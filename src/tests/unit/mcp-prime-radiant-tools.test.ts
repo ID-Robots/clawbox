@@ -13,8 +13,12 @@ vi.mock("../../../mcp/lib/api", () => ({ api: (...a: unknown[]) => api(...a) }))
 
 import { ApiError } from "../../../mcp/lib/errors";
 import { contractViolations, paramDescriptionViolations } from "../../../mcp/lib/register";
-import { PRIME_RADIANT_TOOLS, REVIEW_KINDS, REVIEW_STATUSES, registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
-import { REVIEW_KINDS as LIB_REVIEW_KINDS, REVIEW_STATUSES as LIB_REVIEW_STATUSES } from "@/lib/prime-radiant/review-store";
+import { PRIME_RADIANT_TOOLS, RAISED_REVIEW_KINDS, REVIEW_KINDS, REVIEW_STATUSES, registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
+import {
+  RAISED_REVIEW_KINDS as LIB_RAISED_REVIEW_KINDS,
+  REVIEW_KINDS as LIB_REVIEW_KINDS,
+  REVIEW_STATUSES as LIB_REVIEW_STATUSES,
+} from "@/lib/prime-radiant/review-store";
 import { captureRegistrar, type CaptureHarness } from "../helpers/mcp-registrar";
 
 const BASE = "/setup-api/prime-radiant";
@@ -144,7 +148,7 @@ const CASES: Case[] = [
   {
     tool: "prime_radiant_settings",
     args: {},
-    reply: { settings: { nightly: { enabled: true, time: "03:00" } }, defaults: { ingest: { exclude: ["node_modules"] } }, limits: {}, nightly: { nextRunAt: 0 }, opusSource: "none" },
+    reply: { settings: { nightly: { enabled: true, time: "03:00" } }, defaults: { ingest: { exclude: ["node_modules"] } }, limits: {}, nightly: { nextRunAt: 0 } },
     method: "GET",
     path: `${BASE}/settings`,
     says: /"time": "03:00"[\s\S]*"next_nightly_run": "off"/,
@@ -407,11 +411,11 @@ const CASES: Case[] = [
   },
   {
     tool: "prime_radiant_settings_update",
-    args: { nightly_time: "04:30", opus_enabled: true, opus_cap_usd: 5, domains: ["acme-sales=Sales team"], reset: ["ingest_exclude"], confirm: true },
+    args: { nightly_time: "04:30", contradictions_enabled: false, domains: ["acme-sales=Sales team"], reset: ["ingest_exclude"], confirm: true },
     reply: { settings: { nightly: { time: "04:30" } }, nightly: { nextRunAt: Date.UTC(2026, 9, 17, 4, 30) } },
     method: "PUT",
     path: `${BASE}/settings`,
-    sent: { body: { nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 }, domains: [{ name: "acme-sales", owner: "Sales team" }], ingest: { exclude: null } } },
+    sent: { body: { nightly: { time: "04:30" }, contradictions: { enabled: false }, domains: [{ name: "acme-sales", owner: "Sales team" }], ingest: { exclude: null } } },
     says: /"result": "Saved\.[\s\S]*"next_nightly_run": "2026-10-17T04:30:00\.000Z"/,
     bad: { nightly_time: "25:00", confirm: true },
   },
@@ -513,7 +517,26 @@ describe("the family", () => {
 
   it("keeps the review queue's vocabulary in step with the library", () => {
     expect([...REVIEW_KINDS]).toEqual([...LIB_REVIEW_KINDS]);
+    expect([...RAISED_REVIEW_KINDS]).toEqual([...LIB_RAISED_REVIEW_KINDS]);
     expect([...REVIEW_STATUSES].sort()).toEqual([...LIB_REVIEW_STATUSES].sort());
+  });
+
+  it("offers no Opus second opinion: no setting, no reset, no account, and no new opus item — only old ones listed", () => {
+    const h = harness();
+    const update = z.object(h.get("prime_radiant_settings_update").shape);
+    expect(Object.keys(h.get("prime_radiant_settings_update").shape).filter((k) => /opus/i.test(k))).toEqual([]);
+    expect(update.safeParse({ reset: ["opus"], confirm: true }).success).toBe(false);
+    for (const name of PRIME_RADIANT_TOOLS) expect(h.get(name).description, name).not.toMatch(/opus|second opinion/i);
+    const raise = z.object(h.get("prime_radiant_review_raise").shape);
+    expect(raise.safeParse({ kind: "opus", note: "x" }).success).toBe(false);
+    expect(raise.safeParse({ kind: "lint", note: "x" }).success).toBe(true);
+    expect(z.object(h.get("prime_radiant_review_list").shape).safeParse({ kind: "opus" }).success).toBe(true);
+  });
+
+  it("answers the settings without an Opus account, even from an older server that still names one", async () => {
+    api.mockResolvedValue({ settings: { nightly: { enabled: true, time: "03:00" } }, defaults: {}, limits: {}, nightly: { nextRunAt: 0 }, opusSource: "subscription" });
+    const out = await harness().call("prime_radiant_settings", {});
+    expect(JSON.stringify(out)).not.toMatch(/opus/i);
   });
 });
 

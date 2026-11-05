@@ -34,6 +34,7 @@ import {
 import { createClawboxAiFlashClient, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { getIngestJob, ingestFinished, listIngestJobs, NothingToRetryError, startIngest, stopIngest } from "@/lib/prime-radiant/ingest";
 import { readDeadLetter, readFiles, readJob, recordCost } from "@/lib/prime-radiant/ingest-store";
+import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault } from "@/lib/prime-radiant/vault";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
 
@@ -179,11 +180,16 @@ describe("the allowance meter", () => {
     recordCost(vault, { ...row, runId: "run-0000000000bb", operation: "contradiction-judge", tokensIn: 200, tokensOut: 20, at: ago(6.9) });
     // Older than the rolling week: it has aged out of the allowance.
     recordCost(vault, { ...row, runId: "run-0000000000cc", operation: "golden", tokensIn: 5000, tokensOut: 500, at: ago(7.1) });
-    // The Opus tier answers from the owner's own Anthropic key or subscription: never the ClawBox AI allowance.
-    recordCost(vault, { runId: "run-0000000000bb", operation: "opus-review", model: "claude-opus-5-5", tokensIn: 9000, tokensOut: 900, usdEstimate: 0, at: ago(1), basis: "subscription" });
+    // A row an older box's nightly Opus tier (removed) wrote: the owner's own Anthropic key or
+    // subscription answered it, never the ClawBox AI allowance, so the meter still leaves it out.
+    withStateDb(vault, (db) =>
+      db
+        .prepare("INSERT INTO costs (run_id, operation, model, tokens_in, tokens_out, usd_estimate, at, basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run("run-0000000000bb", "opus-review", "claude-opus-5-5", 9000, 900, 0, ago(1), "subscription"),
+    );
   }
 
-  it("counts the ClawBox AI calls of the rolling week, never the Opus tier's, never older ones", async () => {
+  it("counts the ClawBox AI calls of the rolling week, never an old Opus row, never older ones", async () => {
     await seedCosts();
     const meter = await readAllowanceMeter(vault, { now: () => NOW, account: null });
     expect(ALLOWANCE_WINDOW_DAYS).toBe(7);

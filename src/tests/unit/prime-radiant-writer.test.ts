@@ -288,8 +288,9 @@ describe("buildPage", () => {
       verified: null,
       sources: ["~/Documents/acme/catalogue.md"],
       checked_by: "flash",
-      opus_pending: false,
     });
+    // The removed Opus tier's flag is never written on a new page.
+    expect("opus_pending" in built.frontmatter).toBe(false);
     expect(built.frontmatter.claims).toEqual([
       expect.objectContaining({
         id: "sales/acme-widgets-ltd/acme-widgets-ltd-sells-blue-widgets",
