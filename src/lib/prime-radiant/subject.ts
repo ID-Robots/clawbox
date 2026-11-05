@@ -41,9 +41,9 @@
  * subjects, so the planted contradiction never reached the judge. Such a
  * claim is about what its document says, never about the document's name: it
  * is one subject with a claim of the same organisation that says nearly the
- * same thing ({@link STATED_TOPIC_SIMILARITY} of their words, values out) and
- * with a claim whose own subject it names, and with nothing else — all the
- * facts of one company's documents are not one subject.
+ * same thing ({@link STATED_TOPIC_SIMILARITY} of all their words shared,
+ * values out) and with a claim whose own subject it names, and with nothing
+ * else — all the facts of one company's documents are not one subject.
  *
  * Pure.
  */
@@ -322,17 +322,17 @@ const STATEMENT_VERBS: ReadonlySet<string> = new Set(
 );
 /** Words between a document and its verb that change nothing: "the policy also allows", "the guide does not permit". */
 const AUXILIARIES: ReadonlySet<string> = new Set(["will", "shall", "does", "do", "also", "only", "still", "now", "currently", "explicitly", "expressly", "clearly", "not", "no", "longer"]);
-/** Openers that cite a document for what follows the comma: "According to the handbook, …", "Under policy HR-07, …". */
+/** Openers that cite a document for what follows the comma: "According to the Acme handbook, …", "Under Acme Widgets Ltd policy HR-07, …". */
 const ATTRIBUTION = /^(?:according\s+to|under|per|as\s+per|as\s+(?:stated|set\s+out|laid\s+down|defined|specified|described|written)\s+in|in\s+line\s+with)\s+/i;
 /** The most words a document's name runs to before its verb: "Acme Widgets Ltd Travel and Expense Policy FIN-03". */
 const MAX_DOCUMENT_NAME_WORDS = 10;
 /** Words that tell a fact's value, not what it is about: amounts, counts, times, a lone digit group. */
 const VALUE_WORD = /^[€$£]?\d[\d.,:%]*(?:[a-z]{0,3})?$/;
 
-/** A word that tags a document's name: a code ("HR-07", "PUR-01"), a version ("v3.2", "version 3.2"), a year, a format. */
+/** A word that tags a document's name: a code ("HR-07", "PUR-01"), a version ("v3.2", "version 3.2", "2026 edition"), a year, a format. */
 function documentTag(raw: string): boolean {
   const w = normWord(raw.replace(/^[(\[]+|[)\],;:]+$/g, ""));
-  return w === "" || /\d/.test(w) || VERSION_WORDS.has(w) || FORMAT_WORDS.has(w) || w === "no" || w === "nr";
+  return w === "" || /\d/.test(w) || VERSION_WORDS.has(w) || FORMAT_WORDS.has(w) || w === "edition" || w === "no" || w === "nr";
 }
 
 /** What a claim says, as words: its content words, values, dates and words that name nothing out. */
@@ -347,7 +347,11 @@ export function topicWords(text: string): Set<string> {
 
 /** A claim a document states: whose document it is, and what the document says. */
 export interface StatedBy {
-  /** The document's name without its kind, code or version: whose it is and what of ("acme widgets ltd employee"). */
+  /**
+   * Whose document it is: the words of its name, its kind, code and version out, that the statement does not write as
+   * a common word — "Acme Widgets Ltd Employee Handbook grants full-time employees …" gives "acme widgets ltd". Empty:
+   * the name tells no owner.
+   */
   name: ReadonlySet<string>;
   /** What it says: {@link topicWords} of the claim after the document and its verb (or the comma that ends a citation). */
   topic: ReadonlySet<string>;
@@ -371,14 +375,46 @@ function documentName(phrase: string): Set<string> | null {
 }
 
 /**
+ * Whether the word at `at` is the verb after a document's name. A capitalised
+ * word belongs to a title-case name ("Price List", "Returns Policy", "1 May
+ * 2026"), and so does a document noun that a statement verb follows ("the
+ * price list states …").
+ */
+function verbAt(words: readonly string[], at: number): boolean {
+  const raw = words[at];
+  const w = bare(raw);
+  if (!VERBS.has(w) && !STATEMENT_VERBS.has(w) && !AUXILIARIES.has(w)) return false;
+  if (/^\p{Lu}/u.test(raw)) return false;
+  if (!DOCUMENT_NOUNS.has(normWord(raw))) return true;
+  let next = at + 1;
+  while (next < words.length && AUXILIARIES.has(bare(words[next]))) next += 1;
+  return !(next < words.length && STATEMENT_VERBS.has(bare(words[next])));
+}
+
+/**
+ * A statement of the document `name` saying `said`. Its owner is the name's
+ * words that are not what it says: a word the statement writes in lower case
+ * ("grants full-time employees …") is a thing of the statement, not whose
+ * document it is, and a name it repeats as a name ("states that Acme Widgets
+ * Ltd pays …") still is.
+ */
+function statedBy(name: ReadonlySet<string>, said: string): StatedBy {
+  const common = contentWords(rawWords(said).filter((w) => !/^["“'(]?\p{Lu}/u.test(w)).join(" "));
+  return { name: new Set([...name].filter((w) => !common.has(w))), topic: topicWords(said) };
+}
+
+/**
  * A claim whose subject is the DOCUMENT that states it, read for what the
  * document says, or null for any other claim: "Acme Widgets Ltd Annual
  * Leave Policy HR-07 grants full-time employees 20 working days …", "The
  * Acme guide states that the Plovdiv warehouse has 1,200 pallet spaces",
  * "According to the Acme Widgets employee handbook, every full-time employee
- * …". A fact about the document itself — "The handbook is version 3.2", "The
- * policy carries the code HR-07" — is no statement: its verb is no
- * {@link STATEMENT_VERBS} one, and the document is its subject.
+ * …". The document must be named beyond its kind: "According to the
+ * handbook, …" is none. A fact about the document itself, worded with a verb
+ * of being or having — "The handbook is version 3.2", "The policy is
+ * effective 1 January 2026", "The procedure carries the code PUR-01" — is no
+ * statement: its verb is no {@link STATEMENT_VERBS} one, and the document is
+ * its subject.
  */
 export function documentStatement(text: string): StatedBy | null {
   const words = rawWords(text);
@@ -386,23 +422,21 @@ export function documentStatement(text: string): StatedBy | null {
   if (cited) {
     const skip = rawWords(cited[0]).length;
     const comma = words.findIndex((w, i) => i >= skip && /,$/.test(w));
-    if (comma < 0 || comma - skip >= MAX_DOCUMENT_NAME_WORDS) return null;
+    if (comma < 0 || comma - skip >= MAX_DOCUMENT_NAME_WORDS || comma + 1 >= words.length) return null;
     const name = documentName(words.slice(skip, comma + 1).join(" "));
-    return name && comma + 1 < words.length ? { name, topic: topicWords(words.slice(comma + 1).join(" ")) } : null;
+    return name ? statedBy(name, words.slice(comma + 1).join(" ")) : null;
   }
   let at = 0;
   while (at < words.length && ARTICLES.has(bare(words[at]))) at += 1;
   const start = at;
-  for (; at < words.length && at - start <= MAX_DOCUMENT_NAME_WORDS; at++) {
-    const w = bare(words[at]);
-    if (at > start && (VERBS.has(w) || STATEMENT_VERBS.has(w) || AUXILIARIES.has(w))) break;
+  for (; at < words.length && at - start < MAX_DOCUMENT_NAME_WORDS; at++) {
+    if (at > start && verbAt(words, at)) break;
   }
   let verb = at;
   while (verb < words.length && AUXILIARIES.has(bare(words[verb]))) verb += 1;
   if (verb >= words.length || !STATEMENT_VERBS.has(bare(words[verb]))) return null;
   const name = documentName(words.slice(start, at).join(" "));
-  if (!name) return null;
-  return { name, topic: topicWords(words.slice(verb + 1).join(" ")) };
+  return name ? statedBy(name, words.slice(verb + 1).join(" ")) : null;
 }
 
 export interface ClaimSubject {
@@ -479,7 +513,8 @@ export function sameSubject(a: ClaimSubject, b: ClaimSubject): boolean {
   if (a.entity !== "" && a.entity === b.entity && a.entityNamed !== false) return true;
   // A document's statement is one subject by what it says, never by what its document is called: "Acme Widgets Ltd
   // IT Security Policy" and "Acme Widgets Ltd Annual Leave Policy" share most of their words. The other claim's own
-  // subject named in it still is one ("The Acme FAQ states that the Sprocket X200 weighs …", "The Sprocket X200 …").
+  // subject named in it still is one ("The Acme FAQ states that the Sprocket X200 weighs …", "The Sprocket X200 …");
+  // two statements name no subject of their own, so they are one by what they say alone.
   if (a.stated && b.stated) return statedAlike(a.stated, b);
   if (a.stated) return statedAlike(a.stated, b) || named(b, a);
   if (b.stated) return statedAlike(b.stated, a) || named(a, b);
@@ -491,23 +526,24 @@ function named(a: ClaimSubject, b: ClaimSubject): boolean {
   return a.words.size >= 2 && within(a.words, b.mentions);
 }
 
-/** The share of their topic words (values out) a document's statement and another claim must have in common to be one subject. */
+/** The share of all their topic words (values out; shared over the union) a document's statement and another claim must have in common to be one subject. */
 export const STATED_TOPIC_SIMILARITY = 0.5;
 
 /**
  * Whether a document's statement and another claim say the same thing of one
  * organisation: the other names the document's owner (all of a one-word
- * name, two words of a longer one — "Acme Widgets Ltd Employee Handbook" and
- * "Every full-time employee of Acme Widgets …"), and once those words are out
- * of both, at least {@link STATED_TOPIC_SIMILARITY} of their topic words are
- * shared ("full-time employees 25 working days of paid annual leave per
- * calendar year" against the same with 20). Two facts of one company's
- * documents that say different things — passwords against expense receipts —
- * are two subjects, and so are two differently numbered things.
+ * owner, two words of a longer one — "Acme Widgets Ltd Employee Handbook" and
+ * "Every full-time employee of Acme Widgets …"; a document whose name tells
+ * no owner meets nothing here), and once those words are out of both, the
+ * words their topics share are at least {@link STATED_TOPIC_SIMILARITY} of
+ * all their topic words ("full-time employees 25 working days of paid annual
+ * leave per calendar year" against the same with 20). Two facts of one
+ * company's documents that say different things — passwords against expense
+ * receipts — are two subjects, and so are two differently numbered things.
  */
 function statedAlike(s: StatedBy, other: ClaimSubject): boolean {
   const topic = other.topic;
-  if (!topic) return false;
+  if (!topic || s.name.size === 0 || other.stated?.name.size === 0) return false;
   const theirs = other.stated?.name ?? other.mentions;
   let org = 0;
   for (const w of s.name) if (theirs.has(w)) org += 1;

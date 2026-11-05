@@ -215,11 +215,24 @@ const PLANTED: Array<[string, [string, string, string], [string, string, string]
 const side = ([id, title, text]: [string, string, string]) => ({ text, subject: claimSubject(id, text, title), ids: sideIdentifiers(title, text, "concept") });
 
 describe("a document named as the subject is about what it says", () => {
+  const S = claimSubject;
+
   it("reads whose document it is and what it says, and nothing from a fact about the document itself", () => {
     const leave = documentStatement(`${HANDBOOK} grants full-time employees 25 working days of paid annual leave per calendar year.`);
-    expect([...leave!.name]).toEqual(["acme", "widget", "ltd", "employee"]);
+    // Its owner: the name's words that are not what it says ("Employee" is both).
+    expect([...leave!.name]).toEqual(["acme", "widget", "ltd"]);
     expect([...leave!.topic]).toEqual(["full", "time", "employee", "working", "day", "annual", "leave", "calendar", "year"]);
-    expect([...documentStatement("Acme Widgets Ltd Annual Leave Policy HR-07 also does not allow unpaid leave.")!.name]).toEqual(["acme", "widget", "ltd", "annual", "leave"]);
+    expect([...documentStatement("Acme Widgets Ltd Annual Leave Policy HR-07 also does not allow unpaid leave.")!.name]).toEqual(["acme", "widget", "ltd", "annual"]);
+    // Names whose words look like verbs, and a tail after the document noun.
+    for (const [text, name] of [
+      ["Acme Widgets Ltd Price List states that the Sprocket X200 costs EUR 12.", ["acme", "widget", "ltd", "price"]],
+      ["The Acme price list states that the Sprocket X200 costs EUR 12.", ["acme", "price"]],
+      ["Acme Widgets Ltd Returns Policy RP-01 allows customers 30 days to send goods back.", ["acme", "widget", "ltd", "return"]],
+      ["Acme Widgets Ltd Leave Policy of 1 May 2026 grants full-time employees 25 working days.", ["acme", "widget", "ltd", "leave"]],
+      ["Acme Widgets Ltd Employee Handbook 2026 edition grants full-time employees 25 working days.", ["acme", "widget", "ltd"]],
+    ] as const) {
+      expect([...(documentStatement(text)?.name ?? ["(none)"])], text).toEqual(name);
+    }
     expect([...documentStatement("Acme Widgets Ltd Management Review of 5 October 2026 notes that the Plovdiv warehouse has 950 pallet spaces.")!.name]).toEqual(["acme", "widget", "ltd", "management"]);
     expect([...documentStatement("According to the Acme Widgets employee handbook, every full-time employee gets 25 working days of leave.")!.topic]).toEqual(["full", "time", "employee", "get", "working", "day", "leave"]);
     for (const text of [
@@ -240,6 +253,14 @@ describe("a document named as the subject is about what it says", () => {
     }
   });
 
+  it("keeps a name the statement repeats as a name as its owner", () => {
+    const procedure = "Acme Widgets Ltd Purchasing Procedure PUR-01 states that Acme Widgets Ltd pays its suppliers within 30 days of the invoice date.";
+    const list = "Acme Widgets Ltd Approved Supplier List 2026 sets payment terms of 45 days after the invoice date for all approved suppliers.";
+    expect([...documentStatement(procedure)!.name]).toEqual(["acme", "widget", "ltd", "purchasing"]);
+    expect([...documentStatement(list)!.name]).toEqual(["acme", "widget", "ltd"]);
+    expect(sameSubject(S("purchasing/purchasing-procedure-pur-01/a", procedure, "Purchasing Procedure PUR-01"), S("purchasing/approved-supplier-list-2026/b", list, "Approved Supplier List 2026"))).toBe(true);
+  });
+
   it.each(PLANTED)("pairs the planted %s, whatever their documents are called", (_, a, b) => {
     const [x, y] = [side(a), side(b)];
     expect(sameSubject(x.subject, y.subject)).toBe(true);
@@ -248,7 +269,6 @@ describe("a document named as the subject is about what it says", () => {
     expect(pairable(y, x)).toBe(true);
   });
 
-  const S = claimSubject;
   /** The same planted facts as the writer worded them on the board for TASK-2188's beta runs: a document on one side only. */
   it.each([
     [
@@ -288,6 +308,11 @@ describe("a document named as the subject is about what it says", () => {
       "the leave of another company",
       S("hr/acme-widgets-ltd-employee-handbook/a", `${HANDBOOK} grants full-time employees 25 working days of paid annual leave per calendar year.`, HANDBOOK),
       S("hr/globex-staff-handbook/b", "Globex Corporation Staff Handbook grants full-time employees 20 working days of paid annual leave per calendar year.", "Globex Staff Handbook"),
+    ],
+    [
+      "the leave of another company, the handbook naming no owner",
+      S("hr/employee-handbook/a", "Employee Handbook grants full-time employees 25 working days of paid annual leave per calendar year.", "Employee Handbook"),
+      S("hr/globex-benefits/b", "Globex's employees get 20 working days of paid annual leave per calendar year.", "Globex benefits"),
     ],
     [
       "two numbered products",
