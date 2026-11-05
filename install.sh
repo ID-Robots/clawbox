@@ -2317,8 +2317,14 @@ pause_engine_unit() {
     let_gateway_finish_starting
   fi
   echo "  Stopping $unit..."
-  systemctl stop "$unit" 2>/dev/null \
-    || echo "  Warning: could not stop $unit" >&2
+  if [ "$unit" = "clawbox-gateway.service" ]; then
+    # No maintenance guard here, so a start that replaces the stop brings the
+    # gateway back beside the build: asked again, and judged by the unit.
+    stop_gateway_unit || echo "  Warning: could not stop $unit" >&2
+  else
+    systemctl stop "$unit" 2>/dev/null \
+      || echo "  Warning: could not stop $unit" >&2
+  fi
 }
 
 # The same, for a USER unit reached through the clawbox user's session bus.
@@ -10317,7 +10323,7 @@ gateway_unit_running_or_starting() {
 # down is what the stop was for, up is asked to stop again (three times in
 # all), and every other failure of the stop is returned as it was.
 stop_gateway_unit() {
-  local attempt=1 attempts=3 rc out state waited
+  local attempt=1 attempts=3 rc out state waited unanswered job
   while :; do
     rc=0
     out="$(systemctl stop clawbox-gateway.service 2>&1)" || rc=$?
@@ -10329,9 +10335,18 @@ stop_gateway_unit() {
     esac
     # The job that replaced the stop finishes on systemd's own clocks (the
     # unit's TimeoutStopSec for a drain, its condition for a start): a fact to
-    # wait for, not a deadline. A systemctl that cannot answer ends the wait.
-    waited=0
-    while [ -n "$(systemctl show clawbox-gateway.service -p Job --value 2>/dev/null)" ]; do
+    # wait for, not a deadline. A query systemctl does not answer is not "no
+    # job" and is asked again — for a minute, after which the unit is judged
+    # as it stands.
+    waited=0 unanswered=0
+    while :; do
+      if job="$(systemctl show clawbox-gateway.service -p Job --value 2>/dev/null)"; then
+        [ -n "$job" ] || break
+        unanswered=0
+      else
+        unanswered=$((unanswered + 1))
+        [ "$unanswered" -lt 30 ] || break
+      fi
       sleep 2
       waited=$((waited + 2))
       wait_note "$waited" "the job that replaced the gateway's stop to finish"
@@ -10496,8 +10511,14 @@ step_gateway_legacy_state_recovery() {
   echo "  Quarantining known legacy OpenClaw migration blockers in $qdir"
   # Not under the maintenance guard (this step stands down while it is held),
   # so a start that replaces this stop can bring the gateway back up beside the
-  # files being moved: stop_gateway_unit asks again until it stays down.
-  stop_gateway_unit || true
+  # files being moved: stop_gateway_unit asks again, and a gateway it still
+  # could not stop keeps its files — a recorded warning (optional_step), never
+  # a database moved out from under a live writer.
+  if ! stop_gateway_unit; then
+    echo "  Warning: could not stop the gateway; leaving its state files where they are" >&2
+    rmdir "$qdir" 2>/dev/null || true
+    return 1
+  fi
   for f in \
     "$CLAWBOX_HOME/.openclaw/plugins/installs.json"* \
     "$CLAWBOX_HOME/.openclaw/memory/carl_pir.sqlite"* \

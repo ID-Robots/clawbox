@@ -14,9 +14,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * The updater's own stop said exactly that on a box updating from an old beta,
  * and "Applying system fixups" ended before it ran a fixup — over a gateway
  * that was down a moment later all the same. install.sh stops the gateway on
- * the update path too (the legacy handover, under the maintenance guard, and
- * the legacy-state quarantine), so the same sentence is judged there the same
- * way: by the unit once its queue is empty.
+ * the update path too (the legacy handover, under the maintenance guard; the
+ * build's memory pause and the legacy-state quarantine, without it), so the
+ * same sentence is judged there the same way: by the unit once its queue is
+ * empty.
  *
  * Driven against a stubbed `systemctl`, cut from the shipped install.sh with
  * install.sh's own shell options.
@@ -66,6 +67,8 @@ describe("stop_gateway_unit judges a canceled stop by the unit", () => {
         '      *) printf inactive > "$T/state"; exit 0 ;;',
         "    esac ;;",
         '  *" -p Job "*)',
+        // JOB_UNANSWERED: that many Job queries fail before any is answered.
+        '    u=$(cat "$T/unanswered"); if [ "$u" -gt 0 ]; then printf %s "$((u - 1))" > "$T/unanswered"; exit 1; fi',
         '    p=$(cat "$T/pending"); if [ "$p" -gt 0 ]; then printf %s "$((p - 1))" > "$T/pending"; echo 4242; fi',
         "    exit 0 ;;",
         '  *" -p ActiveState "*) cat "$T/state"; echo; exit 0 ;;',
@@ -82,12 +85,13 @@ describe("stop_gateway_unit judges a canceled stop by the unit", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  function run(stops: string, pending = 0) {
+  function run(stops: string, pending = 0, unanswered = 0) {
     const log = path.join(tmp, "systemctl.log");
     fs.writeFileSync(log, "");
     fs.writeFileSync(path.join(tmp, "stops"), "0");
     fs.writeFileSync(path.join(tmp, "state"), "active");
     fs.writeFileSync(path.join(tmp, "pending"), "0");
+    fs.writeFileSync(path.join(tmp, "unanswered"), String(unanswered));
     const script = [
       "set -euo pipefail",
       `export PATH="${tmp}/bin:$PATH"`,
@@ -133,6 +137,15 @@ describe("stop_gateway_unit judges a canceled stop by the unit", () => {
     expect(r.jobReads).toBe(4);
   });
 
+  it("asks again when the job query goes unanswered, instead of reading it as no job", () => {
+    // "Could not look" is not "done": two failed queries, then the job still
+    // queued for two reads, then gone.
+    const r = run("canceled:inactive", 2, 2);
+    expect(r.rc).toBe(0);
+    expect(r.stops).toBe(1);
+    expect(r.jobReads).toBe(5);
+  });
+
   it("counts a unit that ended failed as stopped too", () => {
     const r = run("canceled:failed");
     expect(r.rc).toBe(0);
@@ -169,10 +182,18 @@ describe("the update path stops the gateway through stop_gateway_unit", () => {
     expect(body).not.toMatch(/systemctl stop clawbox-gateway/);
   });
 
-  it("in the legacy-state quarantine, which runs without the guard", () => {
+  it("in the legacy-state quarantine, which runs without the guard and moves no file beside a live gateway", () => {
     const body = shellFunction("step_gateway_legacy_state_recovery");
-    expect(body).toContain("stop_gateway_unit || true");
+    const stop = body.indexOf("if ! stop_gateway_unit; then");
+    expect(stop).toBeGreaterThan(0);
+    expect(body.slice(stop, body.indexOf(`${NL}  fi${NL}`, stop))).toContain("return 1");
+    expect(stop).toBeLessThan(body.indexOf('mv -v "$f" "$qdir/"'));
     expect(body).not.toMatch(/systemctl stop clawbox-gateway/);
+  });
+
+  it("in the build's memory pause, which runs without the guard", () => {
+    const body = shellFunction("pause_engine_unit");
+    expect(body).toMatch(/if \[ "\$unit" = "clawbox-gateway\.service" \]; then\s+#[^\n]*\n(?:\s+#[^\n]*\n)*\s+stop_gateway_unit \|\|/);
   });
 
   it("stops a Hermes gateway once more after the mask, where nothing can start it again", () => {

@@ -2594,8 +2594,10 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
 const GATEWAY_STOP_CLIENT_MS = 30_000;
 const GATEWAY_STOP_UNCLEAN = "gateway-stop-unclean";
 // How many times the stop is asked for while other jobs keep replacing it. Each
-// ask first waits out the job that replaced the last one, so this counts whole
-// rounds of a competing restarter, not tries in a second.
+// ask first waits out the job that replaced the last one (up to the settle
+// budget, UNIT_JOB_SETTLE_BUDGET_MS — a job still queued past it is a start
+// the guard is there to refuse, and the next stop takes its place), so this
+// counts whole rounds of a competing restarter, not tries in a second.
 const GATEWAY_STOP_ATTEMPTS = 3;
 
 async function stopGatewayForMaintenance(): Promise<void> {

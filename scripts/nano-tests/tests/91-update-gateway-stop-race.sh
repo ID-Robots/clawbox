@@ -47,6 +47,9 @@ RACE_TAG=${RACE_DIR##*/}
 RACE_ONCE='
 gw() { systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null; }
 sudo -n /usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh enter >/dev/null 2>&1 || { echo "guard=unavailable"; exit 0; }
+# Never leave the guard up behind a dropped session: it holds the gateway down
+# until a reboot. `leave` is idempotent, so the normal path running it too is fine.
+trap "sudo -n /usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh leave >/dev/null 2>&1" EXIT HUP INT TERM
 echo "before=$(gw)"
 out=$(mktemp)
 ( sudo -n /usr/bin/systemctl stop clawbox-gateway.service >"$out" 2>&1; echo "rc=$?" >>"$out" ) &
@@ -150,14 +153,9 @@ cat "$dir/race.log" 2>/dev/null
 rm -rf -- "$dir"
 '
 
-UNTIL=$(( $(date +%s) + 4200 ))
-OUT=$(board "$START_RACER" "$RACE_DIR" "$RACE_TAG" "$UNTIL" "$RACER")
-if [ "$(field racer "$OUT")" = up ]; then
-  ok "the restart racer runs on the board (and from @reboot: $(field cron "$OUT"))"
-else
-  not_ok "the restart racer did not start: $(tr '\n' ' ' <<<"$OUT" | cut -c1-200)"
-  finish
-fi
+# The racer ends itself at UNTIL; until then the test takes it down on every
+# way out — finish, a failure, and the runner's SIGTERM at the deadline, which
+# an EXIT trap alone does not see.
 RACE_LOG=
 stop_racer() {
   [ -n "$RACE_LOG" ] && return 0
@@ -165,6 +163,15 @@ stop_racer() {
   RACE_LOG=${RACE_LOG:-(empty)}
 }
 trap stop_racer EXIT
+trap 'stop_racer; exit 1' INT TERM HUP
+UNTIL=$(( $(date +%s) + 3600 ))
+OUT=$(board "$START_RACER" "$RACE_DIR" "$RACE_TAG" "$UNTIL" "$RACER")
+if [ "$(field racer "$OUT")" = up ]; then
+  ok "the restart racer runs on the board (and from @reboot: $(field cron "$OUT"))"
+else
+  not_ok "the restart racer did not start: $(tr '\n' ' ' <<<"$OUT" | cut -c1-200)"
+  finish
+fi
 
 START=$(date +%s)
 if start_app_update "$NANO_BRANCH"; then
@@ -203,10 +210,27 @@ else
   not_ok "no restart was raced against the update's gateway stop after the racer's last start ($BOOTS start(s)): the fixups ran unraced"
 fi
 
-# The updater's own account, when the journal is readable as clawbox.
+# The updater's own account, when the journal is readable as clawbox: which
+# step's stop another job replaced. The race log above cannot say whose stop it
+# raced; the updater's step lines around its own "replaced" line can.
 # shellcheck disable=SC2016  # expanded on the board
-SAID=$(board 'journalctl -u clawbox-setup.service --since "@$1" --no-pager 2>/dev/null | grep -E "replaced the update.s stop|canceled the update.s stop|did not stop" | tail -n 6' "$START")
-while IFS= read -r l; do [ -n "$l" ] && note "updater: ${l#*]: }"; done <<<"$SAID"
+SAID=$(board 'journalctl -u clawbox-setup.service --since "@$1" --no-pager -o cat 2>/dev/null | grep -E "\[Updater\] (Running step: |Completed: )|replaced the update.s stop|canceled the update.s stop|did not stop" | tail -n 60' "$START")
+while IFS= read -r l; do
+  case "$l" in *"Running step: "*|*"Completed: "*) ;; *) [ -n "$l" ] && note "updater: $l" ;; esac
+done <<<"$SAID"
+RACED_IN=$(awk '/\[Updater\] Running step: / { sub(/.*Running step: /, ""); step = $0 }
+                /replaced the update.s stop/ { print step }' <<<"$SAID" | sort -u | paste -sd, -)
+if [ -z "$SAID" ]; then
+  note "the clawbox-setup journal is not readable here: the race is shown by the racer's log only"
+elif [ -n "$RACED_IN" ]; then
+  note "the updater says another job replaced its stop during: $RACED_IN"
+  if [ "$RUNTIME" != hermes ]; then
+    case ",$RACED_IN," in
+      *",Applying system fixups,"*) ok "the stop another job replaced was the fixups step's own, and the step still completed" ;;
+      *) note "no replaced stop fell inside \"Applying system fixups\" this time" ;;
+    esac
+  fi
+fi
 
 HEAD1=$(board_head)
 if [ "$HEAD1" = "$NANO_SHA" ]; then
