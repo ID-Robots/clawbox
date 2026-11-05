@@ -5,10 +5,12 @@
  * Transport: stdio. Backend: the device's own /setup-api/* over loopback, plus
  * the local filesystem.
  *
- * It is also a DISPOSABLE process. A harness spawns one of these per session
- * and holds it; this one hangs up on its own once nothing has asked it for
- * anything (see `armIdleExit`), because reconnecting costs a third of a second
- * and not reconnecting cost a real box nine resident copies of itself.
+ * Under OpenClaw it is also a DISPOSABLE process. The gateway spawns one of
+ * these per session and holds it; this one hangs up on its own once nothing has
+ * asked it for anything (see `armIdleExit`), because reconnecting costs a third
+ * of a second and not reconnecting cost a real box nine resident copies of
+ * itself. Under Hermes it is not: Hermes holds one per process, and a call it
+ * sends to one that hung up fails rather than reconnects (`idleExitDefaultMs`).
  *
  * THE ONE THING TO UNDERSTAND BEFORE CHANGING THIS FILE: the tool set depends
  * on the device EDITION, and that decision is made ONCE, here, before
@@ -54,7 +56,9 @@
  *   CLAWBOX_MCP_IDLE_EXIT_MS  milliseconds with no request in flight after which
  *                             this process closes its transport and exits 0, so
  *                             the harness reconnects on the next call. Default
- *                             600000 (10 min); 0 disables it. See `armIdleExit`
+ *                             600000 (10 min) on OpenClaw and OFF on Hermes
+ *                             (`idleExitDefaultMs`); 0 disables it, and a value
+ *                             set is obeyed on either. See `armIdleExit`
  *   CLAWBOX_RUN_DIR           inside a coding-agent run: its working folder
  *   CLAWBOX_RUN_ARTIFACTS_DIR inside a coding-agent run: its evidence folder
  *   CLAWBOX_RUN_MEDIA         "images", "audio" or both — which media tools the
@@ -376,11 +380,37 @@ export function armMailboxWatch(
  * short enough that a session the owner walked away from is gone before the
  * next one is opened.
  *
- * Edition-neutral on purpose. Hermes spawns the same process from the same
- * entry and reconnects the same way on the next tool call, so the rule is not
- * gated on edition; only the env below turns it off.
+ * OpenClaw's number only — see `idleExitDefaultMs` for why Hermes has none.
  */
 export const IDLE_EXIT_DEFAULT_MS = 10 * 60 * 1000;
+
+/**
+ * The idle period a server gets when `CLAWBOX_MCP_IDLE_EXIT_MS` names none, by
+ * the harness it runs under: `IDLE_EXIT_DEFAULT_MS` on OpenClaw, OFF on Hermes.
+ *
+ * The rule used to be edition-neutral, on the belief that Hermes reconnects
+ * the way the gateway does. It does not (TASK-2189). Hermes notices a server
+ * that went away only once a call is already on its way, and then refuses to
+ * replay it — a write may have landed — so the FIRST tool call after every
+ * idle period failed: `prime_radiant_page_create` answered "MCP server
+ * 'clawbox' lost its stdio subprocess after the tool call began. The operation
+ * may have completed, so Hermes did not replay it" (`~/.hermes/logs/errors.log`)
+ * on a box left alone for more than ten minutes, and the assistant had to check
+ * and call again. A shorter or longer period only moves that failure around;
+ * any idle exit at all hands Hermes a dead pipe to find mid-call.
+ *
+ * And nothing on Hermes needs reaping. It holds ONE clawbox server per Hermes
+ * process — the dashboard's, a `hermes chat` that ends with its turn — and
+ * restarts it only on `reload.mcp` (src/lib/hermes-mcp-reload.ts), so the
+ * per-session pile-up this rule exists for does not happen there; the process
+ * goes when the Hermes that spawned it closes its stdin.
+ *
+ * `harness` is the edition `main()` resolved, the same answer that picks the
+ * tool set. An operator's explicit value still wins on either harness.
+ */
+export function idleExitDefaultMs(harness: Ed): number {
+  return harness === "hermes" ? 0 : IDLE_EXIT_DEFAULT_MS;
+}
 
 /**
  * The longest delay a timer can actually hold: 2^31-1 ms, about 24.8 days.
@@ -397,22 +427,32 @@ export const IDLE_EXIT_MAX_MS = 2_147_483_647;
 
 /**
  * Read `CLAWBOX_MCP_IDLE_EXIT_MS`: milliseconds, `0` to disable, anything
- * unreadable falls back to the default.
+ * unset or unreadable falls back to the harness's default (`idleExitDefaultMs`).
  *
  * Unreadable must NOT collapse to `0`. Zero is the one value that switches the
- * whole rule off, and a typo that reached it would put the pile-up back on a
- * box with no sign in the journal that anything had changed.
+ * whole rule off, and a typo that reached it would put the pile-up back on an
+ * OpenClaw box with no sign in the journal that anything had changed.
  */
-export function resolveIdleExitMs(raw = process.env.CLAWBOX_MCP_IDLE_EXIT_MS): number {
-  if (raw === undefined || raw.trim() === "") return IDLE_EXIT_DEFAULT_MS;
+export function resolveIdleExitMs(
+  raw = process.env.CLAWBOX_MCP_IDLE_EXIT_MS,
+  harness: Ed = "openclaw",
+): number {
+  const fallback = idleExitDefaultMs(harness);
+  if (raw === undefined || raw.trim() === "") return fallback;
   const ms = Number(raw);
-  if (!Number.isFinite(ms) || ms < 0) return IDLE_EXIT_DEFAULT_MS;
+  if (!Number.isFinite(ms) || ms < 0) return fallback;
   return Math.min(Math.floor(ms), IDLE_EXIT_MAX_MS);
 }
 
 export interface IdleExitOptions {
   /** Overridden by tests only; production reads the env above. */
   idleMs?: number;
+  /**
+   * The harness this server runs under, which picks the default period when
+   * the env names none. `main()` passes the edition it resolved; left out,
+   * it is OpenClaw's.
+   */
+  harness?: Ed;
   /**
    * Work this process owns that has no request outstanding: a running
    * background job, or a handler still going after its request was cancelled.
@@ -494,7 +534,7 @@ export function armIdleExit(
   transport: Transport,
   options: IdleExitOptions = {},
 ): IdleExit | null {
-  const idleMs = options.idleMs ?? resolveIdleExitMs();
+  const idleMs = options.idleMs ?? resolveIdleExitMs(undefined, options.harness);
   if (idleMs <= 0) return null;
 
   const setTimer =
@@ -632,7 +672,7 @@ async function main(): Promise<void> {
   // main() does; the idle watch goes after the mailbox one so its wrapper is
   // the outer of the two and the mailbox poll still stops on close.
   armMailboxWatch(server, reg, ctx.emailCanRead);
-  const idle = armIdleExit(server, transport);
+  const idle = armIdleExit(server, transport, { harness: edition });
   // The model is named because "why do I only have 16 tools?" is the first
   // question a slimmed device raises, and this line is the answer.
   const because = model?.provider

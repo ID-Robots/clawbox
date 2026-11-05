@@ -15,7 +15,9 @@
  * request gives its id back but still defers while its handler runs on — the
  * SDK's abort never reaches a handler — `0` disables the whole thing, and
  * arming it leaves any close handler already installed — `armMailboxWatch`'s —
- * still running.
+ * still running. Under Hermes nothing is armed unless an operator names a
+ * period: Hermes fails the first call after an exit instead of reconnecting
+ * (TASK-2189), and holds one server per process, so there is nothing to reap.
  *
  * The idle clock is injected, so no case waits out a period. The one real wait
  * in the file is a real background job being reaped, in the case that holds the
@@ -38,6 +40,7 @@ import {
   armMailboxWatch,
   IDLE_EXIT_DEFAULT_MS,
   IDLE_EXIT_MAX_MS,
+  idleExitDefaultMs,
   resolveIdleExitMs,
   type IdleExit,
 } from "../../../mcp/clawbox-mcp";
@@ -488,6 +491,92 @@ describe("the MCP server's idle self-exit", () => {
     // And it is the env that production reads, with no argument.
     process.env.CLAWBOX_MCP_IDLE_EXIT_MS = "45000";
     expect(resolveIdleExitMs()).toBe(45_000);
+  });
+
+  it("has no default period under Hermes, which fails the call after an exit instead of reconnecting", () => {
+    // TASK-2189: Hermes finds a server that hung up only once a call is on its
+    // way, and does not replay it — so every idle exit cost the next tool call.
+    expect(idleExitDefaultMs("hermes")).toBe(0);
+    expect(idleExitDefaultMs("openclaw")).toBe(IDLE_EXIT_DEFAULT_MS);
+    expect(resolveIdleExitMs(undefined, "hermes")).toBe(0);
+    expect(resolveIdleExitMs("", "hermes")).toBe(0);
+    // Unreadable falls back to the harness's default, and on Hermes that is off.
+    for (const typo of ["off", "10m", "-1", "NaN"]) {
+      expect(resolveIdleExitMs(typo, "hermes")).toBe(0);
+    }
+    // An operator's value is obeyed on Hermes too: the default changed, not the knob.
+    expect(resolveIdleExitMs("30000", "hermes")).toBe(30_000);
+    expect(resolveIdleExitMs("2592000000", "hermes")).toBe(IDLE_EXIT_MAX_MS);
+    process.env.CLAWBOX_MCP_IDLE_EXIT_MS = "45000";
+    expect(resolveIdleExitMs(undefined, "hermes")).toBe(45_000);
+  });
+
+  it("keeps OpenClaw's period exactly as it was, named or not", () => {
+    // The gateway spawns one server per session key and reconnects on its own;
+    // the pile-up this rule reaps is OpenClaw's, and nothing about it moved.
+    expect(resolveIdleExitMs(undefined, "openclaw")).toBe(IDLE_EXIT_DEFAULT_MS);
+    expect(resolveIdleExitMs(undefined, "openclaw")).toBe(resolveIdleExitMs(undefined));
+    expect(resolveIdleExitMs("ten", "openclaw")).toBe(IDLE_EXIT_DEFAULT_MS);
+    expect(resolveIdleExitMs("0", "openclaw")).toBe(0);
+  });
+
+  it("arms nothing under Hermes when the env names no period, so the first call after a pause finds its server", async () => {
+    // The production path main() takes on a Hermes box: no idleMs, the
+    // harness, and the env as the box has it — unset.
+    const h = await connected();
+    const onmessage = h.transport.onmessage;
+    const send = h.transport.send;
+    const clock = fakeClock();
+    let exits = 0;
+    const idle = armIdleExit(h.server, h.transport, {
+      harness: "hermes",
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      log: () => {},
+      exit: () => {
+        exits += 1;
+      },
+    });
+    expect(idle).toBeNull();
+    expect(h.transport.onmessage).toBe(onmessage);
+    expect(h.transport.send).toBe(send);
+    expect(clock.pending()).toBe(0);
+
+    await h.client.listTools();
+    clock.advance(IDLE_EXIT_DEFAULT_MS * 10);
+    expect(exits).toBe(0);
+    // Hours later, the call still reaches a live server and is answered.
+    const late = h.client.callTool({ name: "slow", arguments: {} });
+    h.openGate();
+    await expect(late).resolves.toMatchObject({ content: [{ type: "text", text: "woke" }] });
+    expect(exits).toBe(0);
+  });
+
+  it("still hangs up under OpenClaw by default, and under Hermes when an operator sets a period", async () => {
+    for (const [harness, env, expected] of [
+      ["openclaw", undefined, IDLE_EXIT_DEFAULT_MS],
+      ["hermes", "90000", 90_000],
+    ] as const) {
+      if (env === undefined) delete process.env.CLAWBOX_MCP_IDLE_EXIT_MS;
+      else process.env.CLAWBOX_MCP_IDLE_EXIT_MS = env;
+      const h = await connected();
+      const clock = fakeClock();
+      let exits = 0;
+      const idle = armIdleExit(h.server, h.transport, {
+        harness,
+        setTimer: clock.setTimer,
+        clearTimer: clock.clearTimer,
+        log: () => {},
+        exit: () => {
+          exits += 1;
+        },
+      });
+      expect(idle?.idleMs).toBe(expected);
+      clock.advance(expected - 1);
+      expect(exits).toBe(0);
+      clock.advance(1);
+      expect(exits).toBe(1);
+    }
   });
 
   it("clamps a period longer than a timer can hold, instead of firing in 1ms", () => {
