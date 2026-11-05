@@ -24,7 +24,7 @@ Each job gets at most one problem. When several apply, the earlier one in this l
 
 1. **stopped**: the job is switched off and its last run failed. This includes OpenClaw's `autoDisabled` (after 10 failures in a row), Hermes' `state: error` (a recurring job whose next run could not be computed), and a job paused or disabled after a failure.
 
-   On a board (OpenClaw 2026.10.9), a silent command job that had failed twice was switched off 45 s after OpenClaw's own failure alert could not be delivered ("no configured channels"). The job had `enabled: false`, no `autoDisabled`, and nothing went out on any channel: the exact case this feature exists for. The row does not say who switched the job off. If the owner switched off a broken job themselves, they get one notice, which is still true.
+   On a board (OpenClaw 2026.10.9), a silent command job failed twice and OpenClaw's own failure alert could not be delivered ("no configured channels"). An agent turn started 5 s later, and 40 s after that the job was switched off. The row showed `enabled: false` and no `autoDisabled`, and nothing went out on any channel: the exact case this feature exists for. The row does not say who switched the job off. If the owner switched off a broken job themselves, they get one notice, which is still true.
 2. **failing**: the last run errored (a non-zero exit, a timeout, a model error). The rule depends on when the next try is:
    - next try more than an hour away (or no next try): alert on the **first** failure, so a daily job is not left broken for a day;
    - next try within the hour: alert on the **second failure in a row**, which filters out one-off glitches.
@@ -32,6 +32,8 @@ Each job gets at most one problem. When several apply, the earlier one in this l
    A skipped run after failures does not clear the failure streak. OpenClaw counts skips and errors separately.
 3. **skipping** (blocked): skipped **3 times in a row**, for example a local model provider that is down, or a run still busy from last time. One skip is often by design.
 4. **overdue**: a job on a clock (`at`/`every`/`cron`, or Hermes `once`/`interval`/`cron`) is more than **15 minutes** past its `nextRunAt` and is not running. This catches a ticker that died, a gateway that is down, or a Hermes box whose gateway was never installed (Hermes cron only fires inside `hermes gateway`).
+
+   Lateness is **not** judged in the web server's first 15 minutes. A box that was off or updating comes back with every due time in the past, and the scheduler's own catch-up runs those jobs in its first minutes. Calling each of them overdue and then recovered would cost two messages per job after every reboot. An overdue incident from before the restart stays open until the job has actually run.
 
    When the scheduler cannot be read at all (the OpenClaw gateway is down, or `jobs.json` is half-written), its jobs are judged against the due times it last reported, and **no incident is closed**: the scheduler being unreadable doesn't mean anything has recovered.
 

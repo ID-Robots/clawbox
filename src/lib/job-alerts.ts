@@ -10,8 +10,9 @@
  * (src/lib/owner-telegram.ts, the coding agent's fan-out).
  *
  * WHAT IS A PROBLEM ({@link judgeJob})
- *   stopped   the scheduler switched the job off itself (OpenClaw after ten
- *             failures in a row, Hermes' `state: error`).
+ *   stopped   switched off after its last run failed (OpenClaw's auto-disable
+ *             after ten failures, Hermes' `state: error`, or — seen on a
+ *             board — an agent repair turn that quietly disabled it).
  *   failing   the last run failed — at once when the next try is more than an
  *             hour away, on the SECOND failure in a row when it is sooner: a
  *             job that retries within the hour gets one more chance before the
@@ -20,7 +21,8 @@
  *             run still busy). One skip is often by design.
  *   overdue   a job on a clock whose next run is more than fifteen minutes in
  *             the past and is not running — the ticker died, the gateway is
- *             down, a Hermes box has no gateway at all.
+ *             down, a Hermes box has no gateway at all. Not judged in the web
+ *             server's first fifteen minutes, while the scheduler catches up.
  *
  * NOISE: one notice per job per INCIDENT — when the job goes from fine to a
  * problem — and one more when it runs normally again, only if the first was
@@ -105,7 +107,11 @@ export interface JobVerdict {
   count: number;
 }
 
-export function judgeJob(job: WatchedJob, now: number): JobVerdict {
+/**
+ * `lateness: false` leaves "overdue" out — see {@link advanceJobAlerts}'s
+ * warm-up. Every other verdict stands.
+ */
+export function judgeJob(job: WatchedJob, now: number, lateness = true): JobVerdict {
   if (job.stopped) return { problem: "stopped", count: job.consecutiveErrors ?? 0 };
   // A skip after failures leaves the failure streak standing (OpenClaw counts
   // the two apart), so a failing job that is skipped once has not recovered.
@@ -119,7 +125,7 @@ export function judgeJob(job: WatchedJob, now: number): JobVerdict {
   if (job.lastStatus === "skipped" && (job.consecutiveSkipped ?? 0) >= SKIP_THRESHOLD) {
     return { problem: "skipping", count: job.consecutiveSkipped ?? 0 };
   }
-  if (job.timed && !job.running && job.nextRunAtMs !== null && now - job.nextRunAtMs > OVERDUE_GRACE_MS) {
+  if (lateness && job.timed && !job.running && job.nextRunAtMs !== null && now - job.nextRunAtMs > OVERDUE_GRACE_MS) {
     return { problem: "overdue", count: 0 };
   }
   return { problem: null, count: 0 };
@@ -206,8 +212,20 @@ function unknownJob(id: string, known: KnownJob): WatchedJob {
  * While the scheduler does not answer, the jobs it last listed are judged on
  * their due times alone and no incident is closed: an unreachable gateway has
  * recovered nothing.
+ *
+ * WARM-UP (`lateness: false`, the web server's first {@link OVERDUE_GRACE_MS}):
+ * no job is newly judged late, and an open "overdue" closes only once the job
+ * has actually run. A box that was off or
+ * updating comes back with every due time in the past, and the scheduler's
+ * own catch-up runs them in its first minutes — calling each one overdue and
+ * then recovered would be two messages per job after every reboot.
  */
-export function advanceJobAlerts(prev: JobAlertsState, source: JobSource, now: number): CheckOutcome {
+export function advanceJobAlerts(
+  prev: JobAlertsState,
+  source: JobSource,
+  now: number,
+  { lateness = true }: { lateness?: boolean } = {},
+): CheckOutcome {
   const sameRuntime = prev.runtime === source.runtime;
   const before = sameRuntime ? prev.jobs : {};
   const known: Record<string, KnownJob> = {};
@@ -236,7 +254,11 @@ export function advanceJobAlerts(prev: JobAlertsState, source: JobSource, now: n
 
   for (const job of jobs) {
     const was = Object.hasOwn(before, job.id) ? before[job.id] : undefined;
-    let verdict = judgeJob(job, now);
+    let verdict = judgeJob(job, now, lateness);
+    // Still late by the plain rule: the warm-up holds it open, neither new nor closed.
+    if (!lateness && was?.problem === "overdue" && !verdict.problem && judgeJob(job, now).problem === "overdue") {
+      verdict = { problem: "overdue", count: 0 };
+    }
     if (!source.reachable && was?.problem && !verdict.problem) {
       verdict = { problem: was.problem, count: was.count };
     }
@@ -457,7 +479,8 @@ async function checkOnce(now: number): Promise<JobAlertsStatus> {
   const harness = await getActiveHarness();
   const source = await readJobs(harness);
   const prev = await readJobAlertsState();
-  const { state, alerts, recoveries } = advanceJobAlerts(prev, source, now);
+  const lateness = process.uptime() * 1000 >= OVERDUE_GRACE_MS;
+  const { state, alerts, recoveries } = advanceJobAlerts(prev, source, now, { lateness });
   // Remembered BEFORE anything is sent: a state that cannot be written would
   // otherwise repeat the same alert every few minutes for as long as it fails.
   await writeJobAlertsState(state);

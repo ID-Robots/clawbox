@@ -115,9 +115,10 @@ const OPENCLAW_TIMED_KINDS = new Set(["at", "every", "cron"]);
  * is its switch) and a disabled job whose last run was fine.
  *
  * A DISABLED JOB WHOSE LAST RUN FAILED IS WATCHED, as stopped. Measured on a
- * board (2026.10.9): a silent command job that failed twice was switched off
- * 45 s after its failure alert could not be delivered — `enabled: false`, no
- * `autoDisabled`, nothing on any channel. Who switched it off (the scheduler's
+ * board (2026.10.9): a silent command job failed twice, its failure alert could
+ * not be delivered, an agent turn started 5 s later and the job was switched
+ * off 40 s after that — `enabled: false`, no `autoDisabled`, nothing on any
+ * channel. Who switched it off (the scheduler's
  * repair turn, the agent, the owner) is not on the row, and a job that broke
  * and is now off is the job that died quietly; an owner who switched off a
  * broken job themselves is told once, which is true.

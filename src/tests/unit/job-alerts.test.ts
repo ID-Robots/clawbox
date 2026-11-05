@@ -207,6 +207,21 @@ describe("advanceJobAlerts", () => {
     expect(stillDown.state.known.hourly).toBeTruthy();
   });
 
+  it("in the warm-up after a start nothing is called late, and an open 'overdue' is not closed", () => {
+    const late = job({ nextRunAtMs: NOW - 3 * 60 * MIN });
+    const warm = advanceJobAlerts(emptyJobAlertsState(), src([late]), NOW, { lateness: false });
+    expect(warm.alerts).toEqual([]);
+    // Failures are judged as ever.
+    expect(advanceJobAlerts(emptyJobAlertsState(), src([job({ lastStatus: "error", consecutiveErrors: 1 })]), NOW, { lateness: false }).alerts).toHaveLength(1);
+    // An overdue incident from before the restart stays open through the warm-up…
+    const before = advanceJobAlerts(emptyJobAlertsState(), src([late]), NOW);
+    const during = advanceJobAlerts(before.state, src([late]), NOW + 2 * MIN, { lateness: false });
+    expect(during.recoveries).toEqual([]);
+    expect(during.state.jobs["daily-report"].problem).toBe("overdue");
+    // …and closes once the job has run.
+    expect(advanceJobAlerts(during.state, src([job()]), NOW + 4 * MIN, { lateness: false }).recoveries).toHaveLength(1);
+  });
+
   it("a job that disappears (deleted, paused) is forgotten without a word", () => {
     const bad = advanceJobAlerts(emptyJobAlertsState(), src([failing]), NOW);
     const gone = advanceJobAlerts(bad.state, src([]), NOW + 2 * MIN);
