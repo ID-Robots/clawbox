@@ -3,7 +3,9 @@
  *
  * GET `?status=open|later|resolved|all&kind=&claimId=&offset&limit` →
  * `{ total, counts: { open, later, resolved }, items }`, newest first
- * (default `open`). Never creates the state database.
+ * (default `open`); each item carries `claimText`, its disputed fact as the
+ * page words it now (review.ts `withClaimTexts`). Never creates the state
+ * database.
  *
  * POST `{ kind?, claimId?, pages?, candidates?: [{ text, page?, claimId?,
  * evidence? }], note? }` — raise an item by hand (a fact someone disputes):
@@ -14,7 +16,7 @@
  */
 import { requireSession } from "@/lib/route-auth";
 import { vaultDir } from "@/lib/prime-radiant/paths";
-import { createReviewItem, ReviewError } from "@/lib/prime-radiant/review";
+import { createReviewItem, ReviewError, withClaimTexts } from "@/lib/prime-radiant/review";
 import { listReviewItems, REVIEW_KINDS, REVIEW_STATUSES, type ReviewKind, type ReviewStatus } from "@/lib/prime-radiant/review-store";
 import { isClaimId } from "@/lib/prime-radiant/claims";
 import { hasPersonSession } from "@/lib/owner-session";
@@ -39,15 +41,15 @@ export async function GET(req: Request) {
   const claimId = q.get("claimId");
   if (claimId !== null && !isClaimId(claimId)) return fail("invalid", "That is not a claim id.", 400);
   try {
-    return json(
-      listReviewItems(vaultDir(), {
-        status: status as ReviewStatus | "all",
-        kind: (kind as ReviewKind | null) ?? undefined,
-        claimId: claimId ?? undefined,
-        offset: int(q.get("offset")),
-        limit: int(q.get("limit")),
-      }),
-    );
+    const vault = vaultDir();
+    const list = listReviewItems(vault, {
+      status: status as ReviewStatus | "all",
+      kind: (kind as ReviewKind | null) ?? undefined,
+      claimId: claimId ?? undefined,
+      offset: int(q.get("offset")),
+      limit: int(q.get("limit")),
+    });
+    return json({ ...list, items: await withClaimTexts(list.items, vault) });
   } catch (err) {
     return vaultFailure("review list", err);
   }

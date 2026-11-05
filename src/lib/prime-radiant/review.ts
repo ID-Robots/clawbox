@@ -40,6 +40,7 @@ import {
   type ReviewResolution,
 } from "./review-store";
 import type { ClaimEvidence } from "./schema";
+import { readPage, type VaultPage } from "./vault";
 import { cleanVerifiedText, MAX_VERIFIED_TEXT, verifyClaim, VerifyError } from "./verify";
 
 export type ResolveAction = (
@@ -225,5 +226,47 @@ export function createReviewItem(body: unknown, options: { by: string; vault?: s
       dedupeKey: input.claimId ? `manual:${input.kind}:${input.claimId}` : null,
     },
     (options.now ?? new Date()).toISOString(),
+  );
+}
+
+/** A review item as the Review screen shows it: the disputed fact in words, not only its id. */
+export interface ReviewItemView extends ReviewItem {
+  /**
+   * The disputed claim's text as its page says it NOW (an edit keeps the id
+   * but changes the words); else the text it was raised about; null when the
+   * item is about no one fact or neither is known.
+   */
+  claimText: string | null;
+}
+
+/** Pages one listing reads at most to word its disputed facts; past it, the raised text stands. */
+const MAX_CLAIM_TEXT_PAGES = 100;
+
+/**
+ * Each item with its disputed fact's words. Only the pages the items name are
+ * read — never the whole vault — once each, however many items share them.
+ */
+export async function withClaimTexts(items: readonly ReviewItem[], vault: string = vaultDir()): Promise<ReviewItemView[]> {
+  const pages = new Map<string, Promise<VaultPage | null>>();
+  const read = (rel: string): Promise<VaultPage | null> | null => {
+    if (!pages.has(rel)) {
+      if (pages.size >= MAX_CLAIM_TEXT_PAGES) return null;
+      pages.set(rel, readPage(rel, vault).catch(() => null));
+    }
+    return pages.get(rel) ?? null;
+  };
+  return Promise.all(
+    items.map(async (item): Promise<ReviewItemView> => {
+      if (!item.claimId) return { ...item, claimText: null };
+      const raised = item.candidates.find((c) => c.claimId === item.claimId);
+      // The claim's own page first: the one it was raised on, then the item's pages.
+      const where = [...new Set([...(raised?.page ? [raised.page] : []), ...item.pages])];
+      for (const rel of where) {
+        const page = await read(rel);
+        const claim = page?.parsed.ok ? page.parsed.frontmatter.claims.find((c) => c.id === item.claimId) : undefined;
+        if (claim) return { ...item, claimText: claim.text };
+      }
+      return { ...item, claimText: raised?.text ?? null };
+    }),
   );
 }

@@ -217,6 +217,8 @@ let structureSettings: { enabled: boolean; company: string; enrichTop: number; m
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
 let listed: unknown[];
+/** The box's UI language, as `GET preferences` answers it. */
+let uiLanguage: string;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -228,7 +230,7 @@ function installFetch() {
     }
     calls.push({ url, method, body });
     const ok = (json: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => json });
-    if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: "en" });
+    if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: uiLanguage });
     const p = "/setup-api/prime-radiant";
     if (url === `${p}/status`) return ok(status);
     if (url === `${p}/init` && method === "POST") {
@@ -414,6 +416,7 @@ beforeEach(() => {
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
+  uiLanguage = "en";
   goldenQuestions = [GOLDEN_Q];
   refuseSettingsPut = false;
   FakeEventSource.last = null;
@@ -661,7 +664,8 @@ describe("PrimeRadiantApp", () => {
     await mount();
     await openTab("review");
     const item = await screen.findByTestId("prime-radiant-review-item");
-    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveTextContent("sales/acme-widgets/employees");
+    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveTextContent("Acme Widgets Ltd has 40 employees.");
+    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveAttribute("data-claim-id", "sales/acme-widgets/employees");
     expect(within(item).getAllByTestId("prime-radiant-review-candidate")).toHaveLength(2);
     fireEvent.click(within(item).getAllByTestId("prime-radiant-review-pick")[1]);
     await waitFor(() => {
@@ -669,6 +673,19 @@ describe("PrimeRadiantApp", () => {
       expect(post?.body).toEqual({ action: "pick", candidate: 1 });
     });
     expect(await screen.findByTestId("prime-radiant-review-empty")).toBeInTheDocument();
+  });
+
+  it("words the disputed fact as its page says it now, never by its id slug (B14)", async () => {
+    // The fact was edited after the item was raised: its id still says 40, its page now says 42.
+    reviewItems = [{ ...REVIEW_ITEM, claimText: "Acme Widgets Ltd has 42 employees." }];
+    await mount();
+    await openTab("review");
+    const item = await screen.findByTestId("prime-radiant-review-item");
+    const claim = within(item).getByTestId("prime-radiant-review-claim");
+    expect(claim).toHaveTextContent("Acme Widgets Ltd has 42 employees.");
+    expect(claim).toHaveAttribute("title", "sales/acme-widgets/employees");
+    // No claim-id slug is shown as text anywhere on the card.
+    expect(item.textContent).not.toMatch(/sales\/acme-widgets\//);
   });
 
   it("still shows and dismisses an Opus proposal an older box raised", async () => {
@@ -1351,6 +1368,52 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.endsWith("/ingest/job-queued/retry") && c.method === "POST")).toBe(true);
     });
+  });
+});
+
+describe("PrimeRadiantApp — Bulgarian (B10)", () => {
+  /** Mount on a Bulgarian box, and wait for its catalogue. */
+  async function mountBg() {
+    uiLanguage = "bg";
+    render(<I18nProvider><CatalogueProbe /><PrimeRadiantApp /></I18nProvider>);
+    await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("живо уики"), { timeout: 5000 });
+  }
+
+  it("words a review item's evidence in Bulgarian, keeping the judge's own reason as written", async () => {
+    reviewItems = [{
+      ...REVIEW_ITEM,
+      evidence: [{ kind: "judge", verdict: "contradiction", note: "1.5 kg against 1.2 kg", source: "flash" }],
+      candidates: [
+        { ...REVIEW_ITEM.candidates[0], evidence: [{ kind: "claim", page: "entities/acme-widgets.md" }] },
+        { ...REVIEW_ITEM.candidates[1], evidence: [{ kind: "raised-by", source: "assistant" }] },
+      ],
+    }];
+    await mountBg();
+    await openTab("review");
+    const item = await screen.findByTestId("prime-radiant-review-item");
+    expect(item).toHaveTextContent("Преценка на модела · противоречие · 1.5 kg against 1.2 kg · Модел Flash");
+    const [first, second] = within(item).getAllByTestId("prime-radiant-review-candidate");
+    expect(within(first).getByText("Факт")).toBeInTheDocument();
+    expect(within(second).getByText("Повдигнато от · асистента")).toBeInTheDocument();
+    expect(item.textContent).not.toMatch(/judge|contradiction ·|claim\b|flash/);
+  });
+
+  it("words a page's fact evidence and the headings Prime Radiant wrote in Bulgarian, leaving the owner's own", async () => {
+    pageOverride = {
+      ...PAGE,
+      frontmatter: { ...FM, claims: [{ ...FM.claims[0], evidence: [{ kind: "source", path: "~/Documents/Acme/faq.txt", note: "added by owner" }] }] },
+      body: "Acme Widgets Ltd sells widgets.\n\n## Key facts\n\n- Based in Springfield.\n\n## Our notes\n\nKept.\n\n## Sources\n\n- `~/Documents/Acme/faq.txt`\n",
+    };
+    await mountBg();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const claim = await screen.findByTestId("prime-radiant-claim");
+    expect(claim).toHaveTextContent("Източник · ~/Documents/Acme/faq.txt · добавено от собственика");
+    const body = screen.getByTestId("prime-radiant-page-body");
+    expect(body).toHaveTextContent("Основни факти");
+    expect(body).toHaveTextContent("Източници");
+    expect(body).toHaveTextContent("Our notes");
+    expect(body.textContent).not.toMatch(/Key facts|Sources/);
   });
 });
 

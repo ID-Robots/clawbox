@@ -225,6 +225,31 @@ describe("review", () => {
     expect((await again.json()).code).toBe("already_resolved");
   });
 
+  it("words each disputed fact as its page says it now, not by its id (B14)", async () => {
+    await seed();
+    const raised = { text: A.text, page: "concepts/pricing.md", claimId: A.id, evidence: [] };
+    addReviewItem(root + "/vault", {
+      kind: "contradiction",
+      claimId: A.id,
+      pages: ["concepts/pricing.md", "concepts/catalogue.md"],
+      candidates: [raised, { text: B.text, page: "concepts/catalogue.md", claimId: B.id, evidence: [] }],
+    });
+    // An item about a fact whose page is gone keeps the words it was raised about; one about no fact has none.
+    addReviewItem(root + "/vault", { kind: "contradiction", claimId: "acme-sales/gone/old-fact", pages: ["concepts/gone.md"], candidates: [{ text: "An old fact.", page: "concepts/gone.md", claimId: "acme-sales/gone/old-fact", evidence: [] }] });
+    addReviewItem(root + "/vault", { kind: "lint", claimId: null, pages: ["concepts/pricing.md"], candidates: [], evidence: [{ kind: "lint", verdict: "no-sources" }] });
+    const texts = async () => {
+      const list = await (await reviewGET(req("GET", "/review?status=open"))).json();
+      return Object.fromEntries(list.items.map((i: { claimId: string | null; claimText: string | null }) => [i.claimId ?? "none", i.claimText]));
+    };
+    expect(await texts()).toEqual({ [A.id]: A.text, "acme-sales/gone/old-fact": "An old fact.", none: null });
+
+    // An edit keeps the id and changes the words: the queue shows the new words.
+    await vaultOperation("edit: pricing", async (tx) => {
+      await tx.write("concepts/pricing.md", pageText({ claims: [{ ...A, text: "The blue widget costs 11 EUR." }] }));
+    });
+    expect((await texts())[A.id]).toBe("The blue widget costs 11 EUR.");
+  });
+
   it("answers lint_blocked for an answer that carries a secret", async () => {
     await seed();
     const { item } = addReviewItem(root + "/vault", { kind: "contradiction", claimId: A.id, pages: ["concepts/pricing.md"] });

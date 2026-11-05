@@ -9,8 +9,10 @@ import {
   API,
   PAGE_TYPES,
   errorText,
+  evidenceLine,
   formatWhen,
   keyPart,
+  localizeGeneratedHeadings,
   pageLabel,
   pageUrl,
   prJson,
@@ -376,7 +378,7 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                         {c.evidence.map((e, i) => (
                           <li key={i} className="flex gap-1.5">
                             <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 13 }} aria-hidden="true">link</span>
-                            <span className="break-all">{[e.kind, e.path ?? e.sourceId, e.lines, e.note].filter(Boolean).join(" · ")}</span>
+                            <span className="break-all">{evidenceLine(t, e, ["kind", "where", "lines", "note"])}</span>
                           </li>
                         ))}
                       </ul>
@@ -417,7 +419,7 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
           )}
 
           <section className={`${CARD_SURFACE} p-4 text-sm text-[var(--text-secondary)] leading-relaxed`} data-testid="prime-radiant-page-body">
-            {renderText(page.body, t("chat.table"))}
+            {renderText(localizeGeneratedHeadings(page.body, t), t("chat.table"))}
           </section>
         </>
       )}

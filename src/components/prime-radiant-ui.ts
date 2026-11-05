@@ -8,7 +8,7 @@
  */
 import type { CommitInfo } from "@/lib/prime-radiant/git";
 import type { LintFinding, LintReport } from "@/lib/prime-radiant/lint";
-import type { ReviewItem, ReviewStatus } from "@/lib/prime-radiant/review-store";
+import type { ReviewItem as StoredReviewItem, ReviewStatus } from "@/lib/prime-radiant/review-store";
 import type { IngestJob, DeadLetter, FileStatus } from "@/lib/prime-radiant/ingest-store";
 import type { SkipCounts, SkipReason } from "@/lib/prime-radiant/ingest-exclude";
 import type { IngestPreview } from "@/lib/prime-radiant/ingest-sources";
@@ -20,6 +20,9 @@ import type { DailyAnswerBody } from "@/lib/prime-radiant/daily-questions";
 import type { PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
 import type { CostSummary, RunRecord } from "@/lib/prime-radiant/runs";
 import type { DiffResult } from "@/lib/prime-radiant/history";
+
+/** A review item as GET review answers it: `claimText` is the disputed fact as its page words it now (an older server sends none). */
+export type ReviewItem = StoredReviewItem & { claimText?: string | null };
 
 /** What GET status answers: the vault's state with the golden questions' score beside it. */
 export type PrimeRadiantStatus = ServiceStatus & { golden?: GoldenStatus | null };
@@ -50,7 +53,6 @@ export type {
   PageDetail,
   PageListEntry,
   PrimeRadiantSettings,
-  ReviewItem,
   ReviewStatus,
   RunRecord,
   SkipCounts,
@@ -187,6 +189,91 @@ export function errorText(err: unknown, t: T): string {
     return t("primeRadiant.error.network");
   }
   return t("primeRadiant.error.network");
+}
+
+/** The catalogue's word for `key`, or `fallback` when it has none: never a raw key. */
+function worded(t: T, key: string, fallback: string, params?: Record<string, string | number>): string {
+  const word = t(key, params);
+  return word === key ? fallback : word;
+}
+
+/** Who a note names: "owner" and "assistant" are the server's words for them. */
+function evidenceWho(t: T, who: string): string {
+  return who === "owner" || who === "assistant" ? worded(t, `primeRadiant.evidence.by.${who}`, who) : who;
+}
+
+/** The notes the server words in English for a person to read, by their one variable part. */
+const EVIDENCE_NOTES: ReadonlyArray<[RegExp, string, string]> = [
+  [/^added by (.+)$/, "primeRadiant.evidence.addedBy", "by"],
+  [/^stated by (.+)$/, "primeRadiant.evidence.statedBy", "by"],
+  [/^edited by (.+)$/, "primeRadiant.evidence.editedBy", "by"],
+  [/^Expected by (.+)$/, "primeRadiant.evidence.expectedBy", "owner"],
+];
+
+/**
+ * One piece of evidence as a line in the reader's language: its kind, the
+ * judge's verdict and the server's own notes ("added by owner") translated,
+ * the model "flash" named as Browse names it. A quote, the judge's reason, a
+ * path or a branch is data, shown as it is; a word the catalogue does not
+ * know stays the server's.
+ */
+export function evidenceLine(
+  t: T,
+  e: { kind?: string; verdict?: string; note?: string; page?: string; source?: string; path?: string; sourceId?: string; lines?: string },
+  fields: ReadonlyArray<"kind" | "verdict" | "note" | "page" | "source" | "where" | "lines">,
+): string {
+  const word = (field: (typeof fields)[number]): string | undefined => {
+    switch (field) {
+      case "kind":
+        return e.kind ? worded(t, `primeRadiant.evidence.kind.${keyPart(e.kind)}`, e.kind) : undefined;
+      case "verdict":
+        return e.verdict ? worded(t, `primeRadiant.evidence.verdict.${keyPart(e.verdict)}`, e.verdict) : undefined;
+      case "note": {
+        if (!e.note) return undefined;
+        for (const [re, key, param] of EVIDENCE_NOTES) {
+          const m = re.exec(e.note);
+          if (m) return worded(t, key, e.note, { [param]: evidenceWho(t, m[1]) });
+        }
+        return e.note;
+      }
+      case "source":
+        if (!e.source) return undefined;
+        return e.source === "flash" ? worded(t, "primeRadiant.checkedBy.flash", e.source) : evidenceWho(t, e.source);
+      case "where":
+        return e.path ?? e.sourceId;
+      default:
+        return e[field];
+    }
+  };
+  return fields.map(word).filter(Boolean).join(" · ");
+}
+
+/** The section headings Prime Radiant writes into pages, in English (the parsers read them so), by their key. */
+const GENERATED_HEADINGS: Readonly<Record<string, string>> = {
+  "key facts": "keyFacts",
+  sources: "sources",
+  related: "related",
+  "see also": "seeAlso",
+  totals: "totals",
+  "by counterparty": "byCounterparty",
+  "what it covers": "whatItCovers",
+  "open review items": "openReviewItems",
+  "top entities": "topEntities",
+  hubs: "hubs",
+  earlier: "earlier",
+};
+
+/**
+ * A page body with the headings Prime Radiant wrote ("## Key facts",
+ * "## Sources" …) in the reader's language, for display only: the file keeps
+ * them in English, which stale-text.ts and the hubs read back. A heading the
+ * owner wrote is left as it is.
+ */
+export function localizeGeneratedHeadings(body: string, t: T): string {
+  return body.replace(/^(#{2,3}) +([^\n]+?) *$/gm, (line, hashes: string, title: string) => {
+    const key = GENERATED_HEADINGS[title.toLowerCase()];
+    return key ? `${hashes} ${worded(t, `primeRadiant.heading.${key}`, title)}` : line;
+  });
 }
 
 /** A short commit id for display. */
