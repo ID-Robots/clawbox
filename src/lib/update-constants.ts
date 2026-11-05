@@ -123,3 +123,9 @@ export function interruptedStepError(detail: InterruptionDetail): string {
       : "The process running the update went away";
   return `${cause} while this step was running.`;
 }
+
+/**
+ * The update/run request-body flag that is the owner's "Update anyway" over
+ * agent work running on the box (GitHub #1269; src/lib/update-busy.ts).
+ */
+export const UPDATE_IGNORE_BUSY_FLAG = "ignoreBusy";

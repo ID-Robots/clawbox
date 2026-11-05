@@ -350,8 +350,13 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$prefix/bin/openclaw"
         worker.write_text(source)
         return root,worker,maintenance
 
+    def unsettle_core(self,root):
+        """Leave a stage behind, so the core step has work to do and stops the gateway for it (#1269)."""
+        (root/'.openclaw-stage').mkdir(exist_ok=True)
+
     def test_core_validation_failure_propagates_after_guard_cleanup(self):
         root,worker,_=self.core_fixture(42)
+        self.unsettle_core(root)
         result=self.run_worker(worker,'openclaw_install')
         self.assertEqual(result.returncode,42,result.stderr)
         self.assertFalse((root/'guard').exists())
@@ -392,6 +397,7 @@ echo '{{"valid":true}}'
 
     def test_core_validation_still_under_maintenance_is_busy_not_refused(self):
         root,worker,_=self.core_fixture()
+        self.unsettle_core(root)
         self.maintenance_validator(root,99)
         result=subprocess.run(['/bin/bash',str(worker),'openclaw_install'],capture_output=True,text=True,timeout=30,
                               env={**os.environ,'CLAWBOX_OPENCLAW_MAINTENANCE_WINDOW_S':'2','CLAWBOX_OPENCLAW_MAINTENANCE_PAUSE_S':'1'})
@@ -400,6 +406,50 @@ echo '{{"valid":true}}'
         self.assertNotIn('configuration accepted',result.stdout)
         self.assertFalse((root/'guard').exists())
         self.assertIn('system-start',(root/'events').read_text())
+
+    def test_core_at_the_pin_keeps_the_gateway_running(self):
+        """#1269: nothing to change, so no stop: the agent runs the gateway holds live on."""
+        root,worker,_=self.core_fixture()
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('already installed; configuration accepted',result.stdout)
+        self.assertIn('the gateway kept running',result.stdout)
+        events=(root/'events').read_text().splitlines()
+        self.assertNotIn('gateway-stop',events)
+        self.assertNotIn('system-stop',events)
+        self.assertNotIn('system-start',events)
+        self.assertFalse((root/'guard').exists())
+
+    def test_core_at_the_pin_failure_never_stopped_the_gateway(self):
+        root,worker,_=self.core_fixture(42)
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,42,result.stderr)
+        events=(root/'events').read_text().splitlines()
+        self.assertNotIn('gateway-stop',events)
+        self.assertNotIn('system-stop',events)
+        self.assertFalse((root/'guard').exists())
+        self.assertNotIn('configuration accepted',result.stdout)
+
+    def test_core_patch_that_changes_the_core_restarts_the_gateway_once(self):
+        """A patch that rewrites a core file needs the gateway restarted to load it: stop, no second pass, start."""
+        root,worker,_=self.core_fixture()
+        hook=root/'bin/openclaw-patch-backup-sqlite'
+        hook.write_text(f'''#!/bin/sh
+printf 'patch-backup-sqlite\\n' >> '{root}/events'
+[ -e '{root}/patched' ] && exit 0
+touch '{root}/patched'
+printf 'patched\\n' > "$1/patched-by-hook.js"
+''')
+        hook.chmod(0o755)
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('restarting the gateway to load it',result.stdout)
+        events=(root/'events').read_text().splitlines()
+        self.assertEqual(events.count('patch-backup-sqlite'),1)
+        self.assertIn('gateway-stop',events)
+        self.assertLess(events.index('patch-backup-sqlite'),events.index('gateway-stop'))
+        self.assertIn('system-start',events)
+        self.assertFalse((root/'guard').exists())
 
     def test_concurrent_core_steps_never_overlap(self):
         root,worker,_=self.core_fixture()
@@ -414,6 +464,7 @@ echo '{{"valid":true}}'
 
     def test_memory_patch_failure_propagates_after_backup_hook_and_cleanup(self):
         root,worker,_=self.core_fixture()
+        self.unsettle_core(root)
         for name,code in [('backup-sqlite',0),('memory-maintenance',65)]:
             hook=root/'bin'/f'openclaw-patch-{name}'
             hook.write_text(f'''#!/bin/sh
@@ -845,6 +896,7 @@ printf new-server > .next/standalone/server.js
         for failure in ['install','build']:
             with self.subTest(failure=failure):
                 root,worker=self.rebuild_fixture(failure)
+                self.unsettle_core(root)
                 core=self.run_worker(worker,'openclaw_install')
                 self.assertEqual(core.returncode,0,core.stderr)
                 before=(root/'events').read_text().splitlines()

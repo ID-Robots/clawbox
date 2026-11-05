@@ -13,7 +13,7 @@ import {
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
 import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
-import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID, UPDATE_LOCK_HEADER } from "@/lib/update-constants";
+import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID, UPDATE_IGNORE_BUSY_FLAG, UPDATE_LOCK_HEADER } from "@/lib/update-constants";
 import { isNamedChannel, normalizeVersion, updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
 import { DRIFT_RESOLVED_CODE, isDriftCode } from "@/lib/drift-codes";
@@ -314,8 +314,18 @@ export interface UpdateRun {
    * could not clear, which stays on screen with its Resume — not in its place.
    */
   dismissError: string | null;
-  /** Start a run (Update, Resume); `allowDowngrade` is the owner's "Back up and update anyway". */
-  trigger: (allowDowngrade?: boolean) => Promise<void>;
+  /**
+   * The box refused the click because agent work is running (GitHub #1269):
+   * how much, until the owner waits ({@link clearBusy}) or updates anyway
+   * (`trigger(false, true)`). Null otherwise.
+   */
+  busy: { coding: number; agents: number; total: number } | null;
+  clearBusy: () => void;
+  /**
+   * Start a run (Update, Resume); `allowDowngrade` is the owner's "Back up and
+   * update anyway", `ignoreBusy` their "Update anyway" over running agent work.
+   */
+  trigger: (allowDowngrade?: boolean, ignoreBusy?: boolean) => Promise<void>;
   /** Clear a settled run, on the server too. */
   dismiss: () => Promise<DismissOutcome>;
 }
@@ -343,6 +353,8 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
   const [offline, setOffline] = useState(false);
   const [reconnects, setReconnects] = useState(0);
   const [answer, setAnswer] = useState<RunAnswer | null>(null);
+  const [busy, setBusy] = useState<UpdateRun["busy"]>(null);
+  const clearBusy = useCallback(() => setBusy(null), []);
   const [dismissError, setDismissError] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
@@ -513,7 +525,8 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
   //
   // `allowDowngrade` is the owner's "Back up and update anyway", offered only on
   // a run the server refused for installing an older harness.
-  const trigger = useCallback(async (allowDowngrade = false) => {
+  const trigger = useCallback(async (allowDowngrade = false, ignoreBusy = false) => {
+    setBusy(null);
     setStarted(true);
     setError(null);
     setDismissError(null);
@@ -528,10 +541,24 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // `=== true`: a handler that passes its click event must never be the override.
-        body: JSON.stringify(allowDowngrade === true ? { force: true, [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : { force: true }),
+        body: JSON.stringify({
+          force: true,
+          ...(allowDowngrade === true ? { [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : {}),
+          // /updating is already the update's screen (a Resume): nothing to warn about there.
+          ...(ignoreBusy === true || hold ? { [UPDATE_IGNORE_BUSY_FLAG]: true } : {}),
+        }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (res.status === 409 && data?.busy === true) {
+          // Agent work is running (GitHub #1269). Nothing started and nothing
+          // failed: the owner waits, or updates anyway.
+          const work = (data.work ?? {}) as Record<string, unknown>;
+          const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+          setStarted(false);
+          setBusy({ coding: n(work.coding), agents: n(work.agents), total: n(work.total) });
+          return;
+        }
         setError(typeof data.error === "string"
           ? data.error
           : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
@@ -636,7 +663,7 @@ export function useUpdateRun({ hold = false, onCompleted }: { hold?: boolean; on
     }
   }, [hold, stopPolling, startPolling, tr]);
 
-  return { state, error, started, offline, reconnects, answer, dismissError, trigger, dismiss };
+  return { state, error, started, offline, reconnects, answer, dismissError, busy, clearBusy, trigger, dismiss };
 }
 
 /**

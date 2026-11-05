@@ -237,10 +237,10 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // has no run to show. One the box stops after accepting it — a refused
   // harness downgrade — is /updating's to say, override included.
   const [starting, setStarting] = useState(false);
-  const startUpdate = useCallback(async (allowDowngrade = false) => {
+  const startUpdate = useCallback(async (allowDowngrade = false, ignoreBusy = false) => {
     setStarting(true);
     try {
-      await triggerUpdate(allowDowngrade);
+      await triggerUpdate(allowDowngrade, ignoreBusy);
     } finally {
       setStarting(false);
     }
@@ -697,6 +697,27 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         >
           <p>
             {tr("update.betaConfirmBody", "Beta builds may include unfinished features and regressions. They're great for early feedback but can break local state. You can switch back any time, but downgrades aren't always reversible.")}
+          </p>
+        </ConfirmModal>
+      )}
+
+      {/* The box refused the click: agent work is running, and the update would
+          stop it mid-task (GitHub #1269). Cancel waits; the other updates anyway. */}
+      {run.busy && (
+        <ConfirmModal
+          titleId="busy-confirm-title"
+          title={tr("update.busyTitle", "Agents are working right now")}
+          icon="pending_actions"
+          confirmLabel={tr("update.busyUpdateAnyway", "Update anyway")}
+          onCancel={run.clearBusy}
+          onConfirm={() => { run.clearBusy(); void startUpdate(false, true); }}
+        >
+          <p>
+            {tr(
+              "update.busyBody",
+              "{count} agent runs are active. The update stops them mid-task. Wait until they finish, or update anyway.",
+              { count: run.busy.total },
+            )}
           </p>
         </ConfirmModal>
       )}

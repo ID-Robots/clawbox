@@ -10,6 +10,12 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 vi.mock("@/lib/mcp-token", () => ({
   verifyMcpBearer: (header: string | null) => header === "Bearer agent-token",
 }));
+// The busy gate (GitHub #1269) asks the coding agent and the gateway: idle here
+// unless a test says otherwise.
+vi.mock("@/lib/update-busy", () => ({
+  activeAgentWork: vi.fn(async () => ({ coding: 0, agents: 0, total: 0 })),
+}));
+
 vi.mock("@/lib/updater", () => ({
   startUpdate: vi.fn(() => ({ started: true })),
   startOpenclawUpdate: vi.fn(() => ({ started: true })),

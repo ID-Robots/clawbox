@@ -8,6 +8,8 @@ import { verifyMcpBearer } from "@/lib/mcp-token";
 import { PowerApprovalConflict, requestPowerApproval } from "@/lib/power-approval";
 import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 import { HARNESS_DOWNGRADE_OVERRIDE_FLAG } from "@/lib/harness-downgrade";
+import { activeAgentWork } from "@/lib/update-busy";
+import { UPDATE_IGNORE_BUSY_FLAG } from "@/lib/update-constants";
 
 export async function POST(request: Request) {
   // The one destructive route the wizard genuinely needs before a password can
@@ -39,10 +41,12 @@ export async function POST(request: Request) {
     // install an older harness than the one that wrote the box's data. Only a
     // literal `true` counts: anything else is the refusal.
     let allowHarnessDowngrade = false;
+    let ignoreBusy = false;
     try {
       const body = await request.json();
       force = !!body.force;
       allowHarnessDowngrade = body?.[HARNESS_DOWNGRADE_OVERRIDE_FLAG] === true;
+      ignoreBusy = body?.[UPDATE_IGNORE_BUSY_FLAG] === true;
     } catch {
       // No body or invalid JSON — that's fine
     }
@@ -51,6 +55,16 @@ export async function POST(request: Request) {
       const alreadyDone = await isUpdateCompleted();
       if (alreadyDone) {
         return NextResponse.json({ started: false, already_completed: true });
+      }
+    }
+
+    // The update stops the gateway and restarts the setup server: agent work
+    // running now would die mid-task (GitHub #1269). Say so first; the owner
+    // waits, or updates anyway with `ignoreBusy`.
+    if (!ignoreBusy) {
+      const work = await activeAgentWork();
+      if (work.total > 0) {
+        return NextResponse.json({ started: false, busy: true, work }, { status: 409 });
       }
     }
 
