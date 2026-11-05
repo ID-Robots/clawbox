@@ -330,9 +330,10 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                 ["primeRadiant.page.generated", formatWhen(fm.generated?.at, locale)],
                 ["primeRadiant.page.staleAfter", recheckLabel(fm, t)],
               ] as const).map(([key, value]) => (
-                <div key={key} className={`${INSET_SURFACE} px-2.5 py-1.5`}>
+                <div key={key} className={`${INSET_SURFACE} px-2.5 py-1.5 min-w-0`}>
                   <dt className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{t(key)}</dt>
-                  <dd className="mt-0.5 text-[var(--text-primary)] truncate">{value}</dd>
+                  {/* Wrapped, never cut: "2027-11-05 (by page type)" is longer than a phone's half width. */}
+                  <dd className="mt-0.5 text-[var(--text-primary)] break-words" data-testid="prime-radiant-page-meta-value">{value}</dd>
                 </div>
               ))}
             </dl>

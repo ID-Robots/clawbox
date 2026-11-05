@@ -647,6 +647,40 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-count-links")).toHaveTextContent("3 links/page");
   });
 
+    it("shows a phone that the tab strip scrolls, and wraps the counts and a page's values rather than cutting them (B11)", async () => {
+    // A 390 px strip holding 600 px of tabs.
+    const wide = vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) { return this.getAttribute("role") === "tablist" ? 600 : 0; });
+    const narrow = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) { return this.getAttribute("role") === "tablist" ? 390 : 0; });
+    try {
+      await mount();
+      const strip = await screen.findByRole("tablist");
+      await waitFor(() => expect(strip).toHaveAttribute("data-overflow", "right"));
+      Object.defineProperty(strip, "scrollLeft", { value: 210, configurable: true });
+      fireEvent.scroll(strip);
+      await waitFor(() => expect(strip).toHaveAttribute("data-overflow", "left"));
+      Object.defineProperty(strip, "scrollLeft", { value: 100, configurable: true });
+      fireEvent.scroll(strip);
+      await waitFor(() => expect(strip).toHaveAttribute("data-overflow", "left right"));
+    } finally {
+      wide.mockRestore();
+      narrow.mockRestore();
+    }
+    const counts = screen.getByTestId("prime-radiant-counts");
+    expect(counts.className).toMatch(/flex-wrap/);
+    expect(counts.className).not.toMatch(/shrink-0/);
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const values = await screen.findAllByTestId("prime-radiant-page-meta-value");
+    expect(values.length).toBeGreaterThan(0);
+    for (const v of values) expect(v.className).not.toMatch(/truncate/);
+  });
+
+  it("draws no fade when every tab fits", async () => {
+    await mount();
+    const strip = await screen.findByRole("tablist");
+    expect(strip).not.toHaveAttribute("data-overflow");
+  });
+
     it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
     await mount();
     expect(await screen.findByTestId("prime-radiant-counts")).toBeInTheDocument();
