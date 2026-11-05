@@ -43,13 +43,17 @@ answering anything about the device. After that it picks by question: `coding_pr
 before starting a coding run, `coding_run_list` for "what are my runs doing", and
 `memory_shard_status`, `local_ai_status` or `clawbox_ai_usage` for memory, on-box engines and
 your allowance, and `anthropic_accounts` before starting or retrying a coding run that uses
-your Anthropic accounts.
+your Anthropic accounts. When something on the box fails, it searches the symptom in the docs
+installed with that very version — `docs_search`, then `docs_read` — and follows the
+[Troubleshooting](/support/troubleshooting) page's steps, with or without a network.
 
 | Tool | Purpose |
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default`, with `ai.current_chat` saying how that relates to the chat asking), configured context/output limits, free disk, update waiting — in one call |
 | `clawbox_health` | Is the device API reachable, and is our token accepted — separates auth from connectivity |
 | `clawbox_context` | The on-device field guide, the tool notes (the caveats kept out of the one-sentence tool descriptions, served only for the tools this box registers) and the webapp storage/styling rules. The guide is filtered per box before it is served — see "What differs by edition" |
+| `docs_search` | Offline full-text search over this documentation as installed on the box — the user guide, troubleshooting, recovery, updating, the FAQ, the technical reference and the engineering notes. Hits name the page, its path and the section, with a snippet; title and heading matches rank first |
+| `docs_read` | One page of those docs as plain text, or one section of it, by the path a hit returned (`support/troubleshooting`). Read-only and fenced to the docs folders: nothing else on the box can be read through it |
 
 ### System & device
 | Tool | Purpose |
