@@ -445,8 +445,8 @@ import {
 import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import {
   clearReceipts,
+  commandClockAnswers,
   commandClockPath,
-  commandClockStamped,
   createCommandClock,
   ensureRunInbox,
   inboxPending,
@@ -5510,7 +5510,7 @@ export async function reconcileAfterRestart(): Promise<number> {
     // settle decided it by (noteRunLeftover), for a spawn that ran a command.
     let leftInScope = unitStillUp;
     const clock = leftInScope ? commandClockOfUnit(run, run.unit) : null;
-    if (leftInScope && commandClockStamped(clock)) {
+    if (leftInScope && commandClockAnswers(clock)) {
       const own = await askRunLeftovers(clock as string, { unit: run.unit, pgid: null });
       if (own !== null && own.length === 0) leftInScope = false;
     }
@@ -7872,13 +7872,14 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   dropRunSecrets(run.id);
   noteKeepAlive(run);
   if ((run.status === "completed" && !run.team) || run.status === "paused") {
-    // A spawn that ran a command has a stamped clock, and then only what the
-    // RUN started is a leftover — the keep-alive hook's rule. Its group and its
+    // A spawn whose command clock can answer (it ran a command, or its own
+    // Stop hook ran with none) is judged by what the RUN started — the
+    // keep-alive hook's rule. Its group and its
     // scope also hold whatever was there before its first command (the
     // launcher's watcher, an MCP server still on its way out), which is not
     // something "this run started" that the owner should be offered to end.
     const clock = state?.commandClock ?? commandClockOfUnit(run, run.unit);
-    if (commandClockStamped(clock) && (groupAlive(run.pgid) || run.unit)) {
+    if (commandClockAnswers(clock) && (groupAlive(run.pgid) || run.unit)) {
       noteRunLeftover(run, clock as string);
       return;
     }
@@ -7998,8 +7999,8 @@ function askRunLeftovers(clock: string, where: { unit: string | null; pgid: numb
 }
 
 /**
- * The settle's leftover decision for a spawn that ran a command (its clock is
- * stamped): a moment after the harness went — the same moment
+ * The settle's leftover decision for a spawn whose command clock can answer
+ * (`commandClockAnswers`): a moment after the harness went — the same moment
  * noteScopeLeftover waits, for the same reason, and long enough for its MCP
  * servers to be on their way — the group and the scope are asked whether
  * anything is still in them, and what is, is asked whether the RUN started
@@ -8009,26 +8010,28 @@ function askRunLeftovers(clock: string, where: { unit: string | null; pgid: numb
  * leftover, and neither handle is kept — the Kill button must not reach the
  * launcher's process in the run's name. Could not tell: the old answer.
  *
- * Until it has asked, the old answer stands — a group still alive is a
- * leftover — so nothing that reads the record meanwhile takes the folder from
- * under a server the run left; the worktree's settle waits for the answer
- * (`leftoverChecks`).
+ * Until it has asked, the record says "left running" whenever something may
+ * be — a live group, or a scope — so nothing that reads it meanwhile (the
+ * folder janitor) takes the folder from under a server the run left; the
+ * evidence prune and the worktree's settle wait for the answer
+ * (`leftoverChecks`: true or false, null when the owner's Kill or a resume
+ * moved on first).
  */
 function noteRunLeftover(run: CodingRun, clock: string): void {
   const { pgid, unit } = run;
-  run.leftover = groupAlive(pgid);
-  const check = (async () => {
+  run.leftover = groupAlive(pgid) || unit !== null;
+  const check = (async (): Promise<boolean | null> => {
     await new Promise<void>((resolve) => setTimeout(resolve, SCOPE_LEFTOVER_CHECK_MS).unref());
     // The owner's Kill, or a resume, may have moved on meanwhile.
     const movedOn = () => run.pgid !== pgid || run.unit !== unit || isLive(run.status);
-    if (movedOn()) return;
+    if (movedOn()) return null;
     const group = groupAlive(pgid);
     const active = unit ? await unitActive(unit).catch(() => null) : false;
-    if (movedOn()) return;
+    if (movedOn()) return null;
     let left = group || active === true;
     if (left) {
       const own = await askRunLeftovers(clock, { unit: active === true ? unit : null, pgid: group ? pgid : null });
-      if (movedOn()) return;
+      if (movedOn()) return null;
       if (own !== null) left = own.length > 0;
     }
     run.leftover = left;
@@ -8041,6 +8044,7 @@ function noteRunLeftover(run: CodingRun, clock: string): void {
       run.unit = null;
     }
     persist(true);
+    return left;
   })();
   leftoverChecks.set(run.id, check);
   trackSettleWork(check.finally(() => {
@@ -8049,7 +8053,7 @@ function noteRunLeftover(run: CodingRun, clock: string): void {
 }
 
 /** The leftover question noteRunLeftover is still asking, by run: the worktree's settle waits for its answer. */
-const leftoverChecks = new Map<string, Promise<void>>();
+const leftoverChecks = new Map<string, Promise<boolean | null>>();
 
 /**
  * The owner's Kill button: end whatever a settled run left behind.
@@ -12388,6 +12392,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // Read now, not after the commit below: the owner's Kill clears it while the
   // group it named may still be on its way out.
   const leftRunning = run.leftover;
+  // The settle's own question about it, when it is still being asked
+  // (noteRunLeftover): its answer, not the provisional one, decides below.
+  const leftoverCheck = leftoverChecks.get(run.id);
   // Until the wake below, a wait that begins now waits too (waitForRun): the
   // status already says settled, the branch does not have the work yet.
   store.unannounced.add(run.id);
@@ -12412,7 +12419,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // A run that left something running on purpose is not pruned at all; a
       // group the cleanup signalled is waited for, up to its SIGKILL and a
       // margin — something that shrugs off SIGTERM is still there until then.
-      if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
+      // A verdict that nothing in the group or the scope is the run's (only
+      // what was there before its first command) needs no wait for the group.
+      const verdict = leftoverCheck ? await leftoverCheck.catch(() => null) : null;
+      const keep = typeof verdict === "boolean" ? verdict : leftRunning;
+      if (!keep && (verdict === false || (await groupGone(settledGroup, STOP_GRACE_MS + 1_000)))) {
         const pruned = await pruneArtifacts(run.id);
         if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
       }

@@ -47,7 +47,13 @@ restore_wrapper() {
     if [ -e "$w.nano-ci-real" ]; then mv -f "$w.nano-ci-real" "$w"; fi
   ' >/dev/null 2>&1
 }
+# On every way out, a runner's TERM or a hang-up included; and first of all,
+# in case an earlier run of this test was killed before it could.
 trap restore_wrapper EXIT
+trap 'restore_wrapper; exit 143' TERM
+trap 'restore_wrapper; exit 130' INT
+trap 'restore_wrapper; exit 129' HUP
+restore_wrapper
 
 # The stand-in launcher: forks its watcher into a session of its own and lets
 # go of it (init adopts it), with the session folder on its command line, then
@@ -176,7 +182,7 @@ fi
 remove_project_dir
 
 restore_wrapper
-trap - EXIT
+trap - EXIT TERM INT HUP
 # shellcheck disable=SC2016  # expanded on the board
 if board 'w=$HOME/.local/bin/claude-ds; ! grep -q nano-ci "$w" && [ ! -e "$w.nano-ci-real" ]'; then
   ok "claude-ds is the installed wrapper again"

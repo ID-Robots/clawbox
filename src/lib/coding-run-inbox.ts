@@ -200,23 +200,30 @@ export function createCommandClock(stateDir: string, token: string): string {
   const file = commandClockPath(stateDir, token);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, "", { mode: 0o600 });
+  fs.rmSync(`${file}.stop-ran`, { force: true });
   return file;
 }
 
 /**
- * Has a command run in that spawn — is there a stamp in its clock? Only a
- * stamped clock lets the settle tell the run's leftovers from the launcher's
- * processes: an empty one is a spawn that never called a tool, or a harness
- * that never ran its hooks (a stand-in in a test), and the settle cannot tell
- * those two apart, so it keeps its old answer for both.
+ * Can that spawn's clock tell the run's leftovers from what was in its scope
+ * before it? Yes when it is stamped (a command ran), and yes when it is
+ * empty but the run's own Stop hook has run with it (`<clock>.stop-ran`, see
+ * scripts/coding-run-hook.mjs `keepalive`): the harness runs this spawn's
+ * hooks and no command ran, so nothing left is the run's. An empty clock with
+ * no such mark is a harness that never ran its hooks (a stand-in in a test) or
+ * one that died first, and the settle keeps its old answer for it.
  */
-export function commandClockStamped(file: string | null): boolean {
+export function commandClockAnswers(file: string | null): boolean {
   if (!file) return false;
+  let raw: string;
   try {
-    return fs.readFileSync(file, "utf8").split("\n").some((line) => /^\d+(\.\d{1,2})?$/.test(line.trim()));
+    raw = fs.readFileSync(file, "utf8");
   } catch {
     return false;
   }
+  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.some((line) => /^\d+(\.\d{1,2})?$/.test(line))) return true;
+  return lines.length === 0 && fs.existsSync(`${file}.stop-ran`);
 }
 
 /**

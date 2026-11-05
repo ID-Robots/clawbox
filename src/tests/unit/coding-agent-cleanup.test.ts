@@ -330,6 +330,11 @@ describe("what a run left running, by its command clock", () => {
     `guard=$(${JSON.stringify(process.execPath)} -e 'const a=process.argv;const i=a.indexOf("--settings");const pre=i<0?[]:(JSON.parse(a[i+1]).hooks.PreToolUse||[]);const m=pre.find((x)=>x.matcher==="*");process.stdout.write(m?m.hooks[0].command:"")' -- "$@")`,
     '[ -n "$guard" ] && sh -c "$guard" </dev/null',
   ].join("\n");
+  /** The end of the harness's turn: its Stop hook from its --settings, run as Claude Code runs it. */
+  const STOP_HOOK = [
+    `stop=$(${JSON.stringify(process.execPath)} -e 'const a=process.argv;const i=a.indexOf("--settings");const st=i<0?[]:(JSON.parse(a[i+1]).hooks.Stop||[]);process.stdout.write(st.length?st[0].hooks[0].command:"")' -- "$@")`,
+    `[ -n "$stop" ] && echo '{"hook_event_name":"Stop"}' | sh -c "$stop" >/dev/null`,
+  ].join("\n");
   let pidFile: string;
   beforeEach(() => {
     // The hook script where this checkout's runs find it.
@@ -351,6 +356,8 @@ describe("what a run left running, by its command clock", () => {
       `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
       "sleep 0.3",
       FIRST_COMMAND,
+      'mkdir -p "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin"',
+      'ln -s /nonexistent/python3 "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin/python"',
       `echo '${RESULT}'`,
       "exit 0",
     ].join("\n"));
@@ -358,6 +365,9 @@ describe("what a run left running, by its command clock", () => {
     const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
     const settled = await finished(run.id);
     expect(settled.status).toBe("completed");
+    // Nothing of the run's is left to change the evidence folder, so its prune
+    // ran, after the verdict and without waiting on the launcher's process.
+    expect(settled.progress.some((l) => l.startsWith("Removed from the evidence folder"))).toBe(true);
     // The launcher's process outlived the harness, in the harness's group...
     const sleeper = Number(fs.readFileSync(pidFile, "utf8"));
     expect(() => process.kill(sleeper, 0)).not.toThrow();
@@ -366,6 +376,24 @@ describe("what a run left running, by its command clock", () => {
     const after = lib.getRun(run.id);
     expect(after?.leftover).toBe(false);
     expect(after?.progress.join(" ")).not.toMatch(/still running/i);
+  });
+
+  it("is not the launcher's process either when the run called no tool at all", async () => {
+    // Its own Stop hook ran with the clock still empty: no command ran, so
+    // nothing in its group can be the run's.
+    readyDevice([
+      `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
+      "sleep 0.3",
+      STOP_HOOK,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Answer it", projectId: "site", source: "agent" });
+    expect((await finished(run.id)).status).toBe("completed");
+    expect(() => process.kill(Number(fs.readFileSync(pidFile, "utf8")), 0)).not.toThrow();
+    await vi.waitFor(() => expect(lib.getRun(run.id)?.pgid).toBeNull(), { timeout: 10_000 });
+    expect(lib.getRun(run.id)?.leftover).toBe(false);
   });
 
   it("is what a command started after it, though the harness's going reparented it", async () => {

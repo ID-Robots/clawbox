@@ -465,6 +465,16 @@ function writeBlocks(file, blocks) {
 
 function keepalive(stateDir, inboxDir, input, clockFile) {
   if (!stateDir || typeof input.agent_id === "string") return null;
+  // Said beside the clock: the harness runs this spawn's hooks. An unstamped
+  // clock is then "no command ran" for the settle too, not "a harness that
+  // never ran its hooks", which it cannot tell apart on its own.
+  if (clockFile && !fs.existsSync(`${clockFile}.stop-ran`)) {
+    try {
+      fs.writeFileSync(`${clockFile}.stop-ran`, "");
+    } catch {
+      // Best effort: without it the settle keeps its old answer.
+    }
+  }
   const jobsDir = path.join(stateDir, ".run-jobs");
   const blocksFile = path.join(jobsDir, "stop-blocks.json");
   const now = Date.now();

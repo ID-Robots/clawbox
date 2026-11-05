@@ -390,10 +390,31 @@ describe("the command clock", () => {
     expect(() => inbox.commandClockPath("/e/run", "../x")).toThrow();
     const made = inbox.createCommandClock(state, "mh4x1k2b");
     expect(fs.readFileSync(made, "utf8")).toBe("");
-    expect(inbox.commandClockStamped(made)).toBe(false);
+    // Empty, and no sign the harness runs this spawn's hooks: it cannot answer.
+    expect(inbox.commandClockAnswers(made)).toBe(false);
     fs.appendFileSync(made, "1234.56\n");
-    expect(inbox.commandClockStamped(made)).toBe(true);
-    expect(inbox.commandClockStamped(path.join(state, "missing"))).toBe(false);
+    expect(inbox.commandClockAnswers(made)).toBe(true);
+    expect(inbox.commandClockAnswers(path.join(state, "missing"))).toBe(false);
+    fs.writeFileSync(made, "garbled\n");
+    expect(inbox.commandClockAnswers(made)).toBe(false);
+  });
+
+  it("is marked by the run's own Stop hook, so an unstamped clock answers 'no command ran'", () => {
+    const s = settingsWith();
+    expect(inbox.commandClockAnswers(clock)).toBe(false);
+    const r = spawnSync("sh", ["-c", stopOf(s)], { input: JSON.stringify(STOP), encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(`${clock}.stop-ran`)).toBe(true);
+    expect(inbox.commandClockAnswers(clock)).toBe(true);
+    // A sub-agent's stop is not the run's, and says nothing.
+    fs.rmSync(`${clock}.stop-ran`);
+    spawnSync("sh", ["-c", stopOf(s)], { input: JSON.stringify({ ...STOP, agent_id: "a1" }), encoding: "utf-8" });
+    expect(fs.existsSync(`${clock}.stop-ran`)).toBe(false);
+    // A fresh spawn under the same token starts unmarked.
+    fs.writeFileSync(`${clock}.stop-ran`, "");
+    const again = inbox.createCommandClock(state, "t1");
+    expect(again).toBe(clock);
+    expect(fs.existsSync(`${clock}.stop-ran`)).toBe(false);
   });
 
   it("still finds the background shell a tool call left, when the run is not in a scope of its own", () => {
