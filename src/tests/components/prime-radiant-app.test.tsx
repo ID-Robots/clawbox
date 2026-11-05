@@ -625,13 +625,26 @@ describe("PrimeRadiantApp", () => {
   it("shows the median links per page beside the counts, flagged while under its target", async () => {
     status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
     await mount();
-    const links = await screen.findByTestId("prime-radiant-links");
+    const links = await screen.findByTestId("prime-radiant-count-links");
     expect(links).toHaveTextContent("3 links/page");
     expect(links).toHaveAttribute("title", "Median meaningful links per page (target 5)");
     expect(links.className).toMatch(/amber/);
   });
 
-  it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
+  it("names the header's links-per-page count and a page's own links list apart (B15)", async () => {
+    status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
+    pageOverride = { ...PAGE, links: ["concepts/widget-pricing.md"] };
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    // One element per test id: the page's list is the only "prime-radiant-links".
+    expect(screen.getAllByTestId("prime-radiant-links")).toHaveLength(1);
+    expect(screen.getByTestId("prime-radiant-links")).toHaveTextContent("widget-pricing");
+    expect(screen.getByTestId("prime-radiant-count-links")).toHaveTextContent("3 links/page");
+  });
+
+    it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
     await mount();
     expect(await screen.findByTestId("prime-radiant-counts")).toBeInTheDocument();
     const reads = () => calls.filter((c) => c.url === "/setup-api/prime-radiant/status").length;

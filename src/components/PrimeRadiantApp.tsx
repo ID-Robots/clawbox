@@ -283,7 +283,7 @@ export default function PrimeRadiantApp() {
             )}
             {status.links && status.links.pages > 0 && (
               <span
-                data-testid="prime-radiant-links"
+                data-testid="prime-radiant-count-links"
                 className={status.links.median >= status.links.target ? undefined : "text-amber-200/80"}
                 title={t("primeRadiant.countLinksHint", { target: status.links.target })}
               >
