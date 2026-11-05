@@ -358,14 +358,19 @@ describe("buildPage", () => {
     }
   });
 
-  it("updates a verified page only when the caller asks, keeping every verification as it is", () => {
+  it("updates a verified page only when the caller asks, keeping what the person decided", () => {
     const stamp = { at: "2026-01-01T00:00:00Z", by: "owner" };
     const verified = claim("sales/acme-widgets-ltd/acme-widgets-ltd-pays-suppliers-within-45-days", "Acme Widgets Ltd pays suppliers within 45 days.", {
       status: "verified",
       confidence: 1,
       verified: stamp,
     });
-    const old = frontmatter({ sources: ["~/a.md"], verified: stamp, claims: [verified, claim("sales/acme-widgets-ltd/old-fact", "Acme Widgets Ltd sells red widgets.")] });
+    const old = frontmatter({
+      sources: ["~/a.md"],
+      verified: stamp,
+      privacy: "secret-ref",
+      claims: [verified, claim("sales/acme-widgets-ltd/old-fact", "Acme Widgets Ltd sells red widgets.")],
+    });
     const pages = [{ path: "entities/acme.md", frontmatter: old }];
     const facts = [
       // The verified fact said again: the verified claim already says it.
@@ -380,11 +385,14 @@ describe("buildPage", () => {
     });
     const built = buildPage(draft({ facts }), "~/a.md", c);
     if (!built.ok) throw new Error("expected a page");
-    expect(built).toMatchObject({ path: "entities/acme.md", updated: true, keptVerification: true });
-    expect(built.frontmatter.verified).toEqual(stamp);
+    expect(built).toMatchObject({ path: "entities/acme.md", updated: true, verifiedPage: true });
+    // The verified claim stays word for word; the page's title, type, domain and privacy are the person's.
     expect(built.frontmatter.claims[0]).toEqual(verified);
     expect(built.frontmatter.claims.map((x) => x.text)).toEqual([verified.text, "Acme Widgets Ltd sells blue widgets."]);
-    expect(built.frontmatter.claims[1]).toMatchObject({ status: "proposed" });
+    expect(built.frontmatter.claims[1]).toMatchObject({ status: "proposed", id: "acme-sales/widget-pricing/acme-widgets-ltd-sells-blue-widgets" });
+    expect(built.frontmatter).toMatchObject({ title: "Widget pricing", type: "concept", domain: "acme-sales", privacy: "secret-ref" });
+    // A stamp on the page as a whole vouched for the old text: it would make every new claim owner-verified.
+    expect(built.frontmatter.verified).toBeNull();
     expect(built.body).toContain(`- ${verified.text}`);
     expect(validateFrontmatter(built.frontmatter).ok).toBe(true);
 
@@ -397,10 +405,13 @@ describe("buildPage", () => {
       ctx({ takenPaths: new Set(["entities/acme.md"]), pagesBySource: new Map([["~/a.md", full[0]]]), claimIndex: buildClaimIndex(full), verifiedPages: "update" }),
     );
     expect(capped.ok && capped.frontmatter.claims.length).toBe(20);
+    // The body lists the facts the page holds, never one the cap left out.
+    expect(capped.ok && capped.body).toContain("- New fact number 1.");
+    expect(capped.ok && capped.body).not.toContain("New fact number 2.");
 
-    // An unverified page's update says it kept no verification.
+    // An unverified page's update is no verified page's.
     const plain = buildPage(draft(), "~/a.md", ctx({ pagesBySource: new Map([["~/a.md", { path: "entities/acme.md", frontmatter: frontmatter({ sources: ["~/a.md"] }) }]]) }));
-    expect(plain.ok && plain.keptVerification).toBe(false);
+    expect(plain.ok && plain.verifiedPage).toBe(false);
   });
 
   it("uses the owner the caller maps the domain to", () => {

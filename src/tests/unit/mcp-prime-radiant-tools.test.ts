@@ -751,6 +751,16 @@ describe("prime_radiant_map", () => {
   });
 });
 
+describe("prime_radiant_ingest_status", () => {
+  it("says how many changed documents behind a verified page an import left out", async () => {
+    answer([/\/ingest$/, { running: null, jobs: [{ id: JOB, status: "done", total: 3, done: 2, pages: 2, failed: 0, skipped: 1, skips: { verified: 1 } }] }]);
+    const out = await harness().call("prime_radiant_ingest_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).jobs[0]).toMatchObject({ id: JOB, skipped: 1, left_out_verified: 1 });
+  });
+});
+
 describe("prime_radiant_status", () => {
   it("reads the vault, the import, the nightly pass and the queue in one answer", async () => {
     answer(

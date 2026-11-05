@@ -9,7 +9,7 @@
  *   2. ingest    the folders the settings name, into the branch (new and
  *                changed documents only: the ingest's hash-first dedupe); a
  *                changed document behind a verified page rewrites that page
- *                on the branch with every verification kept — never on
+ *                on the branch keeping its verified claims — never on
  *                `main`: the gate (6) holds the night on it;
  *   3. contradictions  claims on every page changed since the last finished
  *                comparison — the branch's and what reached `main` by day —
@@ -275,10 +275,12 @@ function touchItem(vault: string, t: VerifiedTouch, branch: string, runId: strin
   let raised = 0;
   const note = t.deleted ? `The nightly branch ${branch} deletes this verified page.` : `The nightly branch ${branch} changes this verified page.`;
   if (t.claims.length === 0) {
+    // A stamp on the page as a whole vouched for its old text: the night's version does not carry it (writer.ts).
+    const kept = t.pageVerified ? "It was verified as a whole; the night's version is not, until you verify it again." : "Its verified facts stay as they are.";
     const evidence = [
       {
         kind: "gate",
-        note: t.deleted ? note : `${note} Its verified facts stay as they are. To take the change, dismiss this item, then Merge the night in the nightly card.`,
+        note: t.deleted ? note : `${note} ${kept} To take the change, dismiss this item, then Merge the night in the nightly card.`,
         source: branch,
       },
       ...documents.map((label) => ({ kind: "source-changed", note: `Its document ${label} changed.`, source: label })),

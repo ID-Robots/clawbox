@@ -856,6 +856,8 @@ function registerReadTools(reg: Registrar): void {
         pages: j.pages,
         failed: j.failed,
         skipped: j.skipped,
+        // Changed documents behind a page the owner verified: left as verified, and asked about in Review.
+        ...((j.skips as { verified?: number } | undefined)?.verified ? { left_out_verified: (j.skips as { verified: number }).verified } : {}),
         failed_for_good: j.deadLetter,
         started: j.createdAt,
         finished: j.finishedAt ?? null,

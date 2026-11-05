@@ -423,7 +423,7 @@ export interface BuildContext {
   /**
    * What a changed document does to the page a person verified (the page or
    * one of its claims): `refuse` (the default) leaves the page alone;
-   * `update` rewrites it with every verification kept as it is — for a caller
+   * `update` rewrites it keeping what the person decided — for a caller
    * whose write a person answers before it lands (the nightly pass's branch,
    * which the gate holds on a verified page).
    */
@@ -437,8 +437,11 @@ export type BuiltPage =
       frontmatter: PageFrontmatter;
       body: string;
       updated: boolean;
-      /** The page carried a verification, kept as it was (`verifiedPages: "update"`). */
-      keptVerification: boolean;
+      /**
+       * The page carried a person's verification (`verifiedPages: "update"`):
+       * its verified claims and its title, type, domain and privacy are kept.
+       */
+      verifiedPage: boolean;
     }
   | { ok: false; reason: "verified-page"; path: string };
 
@@ -455,14 +458,14 @@ export function pathFor(type: PageType, title: string, taken: ReadonlySet<string
   return candidate;
 }
 
-/** `verified`: the texts of the verified claims a page keeps, listed first. */
-export function pageBody(draft: PageDraft, source: string, verified: readonly string[] = []): string {
+/** `facts`: the page's facts as its claims say them (default: the draft's). */
+export function pageBody(draft: PageDraft, source: string, facts: readonly string[] = draft.facts.map((f) => f.fact)): string {
   const parts = [draft.summary];
   if (draft.details) parts.push(draft.details);
-  // A fact the draft repeats is listed once, as it is one claim.
+  // A fact said twice is listed once, as it is one claim.
   const seen = new Set<string>();
-  const facts = [...verified, ...draft.facts.map((f) => f.fact)].filter((f) => !seen.has(claimTextKey(f)) && !!seen.add(claimTextKey(f)));
-  if (facts.length > 0) parts.push(["## Key facts", "", ...facts.map((f) => `- ${f}`)].join("\n"));
+  const listed = facts.filter((f) => !seen.has(claimTextKey(f)) && !!seen.add(claimTextKey(f)));
+  if (listed.length > 0) parts.push(["## Key facts", "", ...listed.map((f) => `- ${f}`)].join("\n"));
   parts.push(["## Sources", "", `- \`${source.replace(/`/g, "'")}\``].join("\n"));
   return `${parts.join("\n\n")}\n`;
 }
@@ -470,10 +473,13 @@ export function pageBody(draft: PageDraft, source: string, verified: readonly st
 /**
  * Turn a draft into a page. A document already ingested (same source label)
  * updates its page in place — unless that page carries a human verification,
- * which the writer refuses to touch, or, with `verifiedPages: "update"`,
- * keeps as it is: the verified claims stay first, word for word under their
- * ids, the page's own stamp stays, and only the rest of the page is the
- * draft's (a fact a verified claim already says is not added beside it).
+ * which the writer refuses to touch — or, with `verifiedPages: "update"`,
+ * rewrites keeping what the person decided: the verified claims stay first,
+ * word for word under their ids, and the page keeps its title, type, domain
+ * and privacy; the rest is the draft's (a fact a verified claim already says
+ * is not added beside it). A stamp on the page AS A WHOLE vouched for its old
+ * text, so it does not carry over to the new one — every claim on a page
+ * stamped as a whole counts as owner-verified (`ownerVerified`).
  * Claim ids are allocated in the global namespace against `ctx.claimIndex`,
  * and the index is updated so the next page of the same batch sees them.
  */
@@ -482,10 +488,10 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
   const updatedAt = ctx.now.toISOString();
   let path: string;
   let updated = false;
-  const keptVerification = !!existing?.frontmatter && hasVerification(existing.frontmatter);
+  const verifiedPage = !!existing?.frontmatter && hasVerification(existing.frontmatter);
   if (existing) {
     const fm = existing.frontmatter;
-    if (keptVerification && ctx.verifiedPages !== "update") return { ok: false, reason: "verified-page", path: existing.path };
+    if (verifiedPage && ctx.verifiedPages !== "update") return { ok: false, reason: "verified-page", path: existing.path };
     path = existing.path;
     updated = true;
     // The page's own previous claims stop holding their ids; they are replaced, not retired. A verified one stays.
@@ -503,11 +509,15 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
   ctx.takenPaths.add(path);
 
   const previous = existing?.frontmatter ?? null;
-  // What a person verified stays as it is, first; the draft's facts fill the rest of the lint's claim cap.
-  const kept = previous?.claims.filter((c) => !!c.verified) ?? [];
+  // A verified page keeps what its person decided: its verified claims, first (the draft's facts
+  // fill the rest of the lint's claim cap), and its title, type, domain and privacy.
+  const decided = verifiedPage ? previous : null;
+  const title = decided?.title ?? draft.title;
+  const domain = decided?.domain ?? draft.domain;
+  const kept = decided?.claims.filter((c) => !!c.verified) ?? [];
   const keptText = new Set(kept.map((c) => claimTextKey(c.text)));
   const room = Math.max(0, LIMITS.maxClaims - kept.length);
-  const entity = slugify(draft.title, 48);
+  const entity = slugify(title, 48);
   const claims: Claim[] = [];
   const usedOnPage = new Set<string>(kept.map((c) => c.id));
   const byFact = new Map<string, Claim>();
@@ -523,7 +533,7 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
       continue;
     }
     if (claims.length >= room) continue;
-    const id = allocateClaimId(ctx.claimIndex, draft.domain, entity, slugify(fact.fact, 48), path, usedOnPage);
+    const id = allocateClaimId(ctx.claimIndex, domain, entity, slugify(fact.fact, 48), path, usedOnPage);
     usedOnPage.add(id);
     const claim: Claim = {
       id,
@@ -542,23 +552,24 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
     ctx.claimIndex.active.set(id, list);
   }
 
+  const all = [...kept, ...claims];
   const frontmatter: PageFrontmatter = {
     ...(previous ?? {}),
-    type: draft.type,
-    title: draft.title,
-    domain: draft.domain,
+    type: decided?.type ?? draft.type,
+    title,
+    domain,
     owner: previous?.owner ?? ctx.ownerFor?.(draft.domain) ?? DEFAULT_OWNER,
     status: previous?.status ?? "draft",
     generated: { at: updatedAt, by: "flash" },
-    verified: previous?.verified ?? null,
+    verified: null,
     stale_after: previous?.stale_after ?? null,
     sources: [...new Set([...(previous?.sources ?? []), source])],
-    privacy: draft.privacy,
+    privacy: decided?.privacy ?? draft.privacy,
     checked_by: "flash",
-    claims: [...kept, ...claims],
+    claims: all,
     retiredClaimIds: previous?.retiredClaimIds ?? [],
   };
-  return { ok: true, path, frontmatter, body: pageBody(draft, source, kept.map((c) => c.text)), updated, keptVerification };
+  return { ok: true, path, frontmatter, body: pageBody(draft, source, all.map((c) => c.text)), updated, verifiedPage };
 }
 
 /** The line index.md lists a page with. */

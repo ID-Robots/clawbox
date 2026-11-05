@@ -14,6 +14,7 @@ import { git, headCommit } from "@/lib/prime-radiant/git";
 import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
 import { readGoldenItems } from "@/lib/prime-radiant/golden";
 import { getIngestJob } from "@/lib/prime-radiant/ingest";
+import { sourceLabel } from "@/lib/prime-radiant/ingest-sources";
 import { goldenStatus } from "@/lib/prime-radiant/golden-score";
 import { addGoldenQuestion } from "@/lib/prime-radiant/golden-store";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
@@ -315,6 +316,30 @@ describe("nightly pass", () => {
     await expect(mergeHeldNight("dream/2026-05-21")).rejects.toMatchObject({ code: "open_items" });
   });
 
+  it("holds a night that rewrites a page verified as a whole, and says its new text is not verified", async () => {
+    await ensureVault();
+    const d = defaultSettings();
+    const s = settings({ contradictions: { ...d.contradictions, enabled: false }, structure: { ...d.structure, enabled: false }, summaries: { ...d.summaries, enabled: false } });
+    const label = sourceLabel(path.join(filesRoot, "Documents", "pricing.md"));
+    await vaultOperation("seed: verified as a whole", async (tx) => {
+      await tx.write(
+        "concepts/acme-pricing.md",
+        pageText({ title: "Acme pricing", sources: [label], verified: { at: "2026-05-01T00:00:00.000Z", by: "owner" }, claims: [claim("acme-sales/acme-pricing/old", "The blue widget costs 9 EUR per unit.")] }),
+      );
+      await tx.write("index.md", "# Index\n\n- [[concepts/acme-pricing]]\n");
+    });
+    const night = await runNightly("manual", deps({ settings: s }));
+    expect(night).toMatchObject({ status: "held" });
+    expect((night!.summary as unknown as NightlySummary).gate.touched).toEqual(["concepts/acme-pricing.md"]);
+    const [item] = listReviewItems(vaultDir(), { kind: "verified-touch" }).items;
+    const said = item.evidence.map((e) => `${e.kind}: ${e.note ?? ""}`).join("\n");
+    expect(said).toMatch(/gate: .*It was verified as a whole; the night's version is not, until you verify it again\./);
+    expect(said).toMatch(/nightly-removes: The blue widget costs 9 EUR per unit\./);
+    // The branch's page carries no stamp on the whole (it would vouch for the new claims), only the old text on main does.
+    const onBranch = await git(vaultDir(), ["show", `${night!.branch}:concepts/acme-pricing.md`]);
+    expect(onBranch.stdout).toMatch(/^verified: null$/m);
+  });
+
   // TASK-2180 B2: the owner verified a page, its document changed, Run now merged a night that had silently
   // skipped it (no review item, nothing held, no note). Now the change waits on the held branch and Review asks.
   it("holds a night whose import changes a verified page's document; Review asks, and Merge takes it once settled", async () => {
@@ -344,7 +369,7 @@ describe("nightly pass", () => {
     expect(summary.ingest).toMatchObject({ status: "done", pages: 1 });
     expect(summary.notes.join(" ")).toMatch(/The night is held: it changes 1 page\(s\) you verified/);
     const job = getIngestJob((summary.ingest as { jobId: string }).jobId, v)!;
-    expect(job.notes.join(" ")).toMatch(/1 page\(s\) you verified were updated from their changed documents, every verification kept/);
+    expect(job.notes.join(" ")).toMatch(/1 page\(s\) you verified were updated from their changed documents, their verified facts kept as they are/);
 
     // main still has the page as the owner verified it; the change waits on the branch.
     expect(fs.readFileSync(path.join(v, pricing.path), "utf8")).toBe(onMain);
@@ -355,6 +380,7 @@ describe("nightly pass", () => {
     const said = items[0].evidence.map((e) => `${e.kind}: ${e.note ?? ""}`).join("\n");
     expect(said).toMatch(/source-changed: Its document .*pricing\.md changed/);
     expect(said).toMatch(/nightly-proposal: .*ship free/);
+    expect(said).toMatch(/gate: .*Its verified facts stay as they are\. To take the change, dismiss this item, then Merge the night/);
 
     await expect(mergeHeldNight("dream/2026-05-21", v)).rejects.toMatchObject({ code: "open_items" });
     await resolveReviewItem(items[0].id, { action: "dismiss" }, { by: "owner", vault: v });

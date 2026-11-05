@@ -226,7 +226,7 @@ describe("an ingest job", () => {
     expect(items[0]).toMatchObject({ claimId: null, pages: ["concepts/acme-a.md"], runId: null, status: "open" });
     const said = items[0].evidence.map((e) => `${e.kind}: ${e.note ?? ""} ${e.source ?? ""}`).join("\n");
     expect(said).toContain(label);
-    expect(said).toMatch(/left the page as you verified it/);
+    expect(said).toMatch(/left the page as you verified it\. Dismiss keeps it so\. To take what it says now, add its folder to the folders read each night/);
     expect(said).toMatch(/document-says: Acme a is a synthetic document\./);
 
     // The same changed document read again asks once; dismissed, it is not asked again until it changes once more.

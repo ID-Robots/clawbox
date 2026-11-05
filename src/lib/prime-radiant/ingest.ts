@@ -168,7 +168,7 @@ export interface IngestDeps {
    * an import that writes to the wiki itself) leaves the page as it was,
    * counts the file in `skips.verified`, notes it and asks the owner in
    * Review; `update` (the nightly pass, whose branch the gate holds on a
-   * verified page) writes the page with every verification kept.
+   * verified page) writes the page keeping its verified claims (writer.ts).
    */
   verifiedPages?: "refuse" | "update";
 }
@@ -710,7 +710,7 @@ async function runJob(
     const left = verifiedDocs.filter((d) => !d.updated);
     if (left.length > 0) {
       job.skips.verified += left.length;
-      const asked = askAboutVerifiedPages(vault, left, now().toISOString());
+      const asked = askAboutVerifiedPages(vault, left, now().toISOString(), input.kind === "folders");
       job.notes.push(
         `${left.length} changed document(s) behind a page you verified were left out, each page kept as you verified it (${pageList(left)})${asked > 0 ? `; Review asks you about ${asked}` : ""}.`,
       );
@@ -718,7 +718,7 @@ async function runJob(
     const rewritten = verifiedDocs.filter((d) => d.updated);
     if (rewritten.length > 0) {
       job.notes.push(
-        `${rewritten.length} page(s) you verified were updated from their changed documents, every verification kept; the change waits for your answer in Review before it reaches the wiki (${pageList(rewritten)}).`,
+        `${rewritten.length} page(s) you verified were updated from their changed documents, their verified facts kept as they are; the change waits for your answer in Review before it reaches the wiki (${pageList(rewritten)}).`,
       );
     }
 
@@ -819,7 +819,7 @@ interface BatchResult {
   verified?: VerifiedDocument[];
 }
 
-/** A changed document whose page a person verified: left out (`refuse`), or written with every verification kept (`update`). */
+/** A changed document whose page a person verified: left out (`refuse`), or written keeping its verified claims (`update`). */
 interface VerifiedDocument {
   label: string;
   page: string;
@@ -842,10 +842,16 @@ function pageList(docs: readonly VerifiedDocument[]): string {
  * person verified its page: the page stays as it was, and the item shows what
  * the document says now. One item per page and document version — a later
  * import of the same version asks nothing new, and a dismissed one is not
- * asked again until the document changes once more. Answers how many wait in
- * Review.
+ * asked again until the document changes once more. A folder's document is
+ * one the nightly pass can take, once its folder is read each night (the
+ * import left its file unread, so the night reads it, writes the change aside
+ * and asks first); a dropped one is not kept to be read again. Answers how
+ * many wait in Review.
  */
-function askAboutVerifiedPages(vault: string, docs: readonly VerifiedDocument[], at: string): number {
+function askAboutVerifiedPages(vault: string, docs: readonly VerifiedDocument[], at: string, inFolder: boolean): number {
+  const take = inFolder
+    ? " To take what it says now, add its folder to the folders read each night: the nightly pass writes the change aside and asks you here before it lands."
+    : "";
   let waiting = 0;
   for (const d of docs) {
     try {
@@ -857,7 +863,7 @@ function askAboutVerifiedPages(vault: string, docs: readonly VerifiedDocument[],
           evidence: [
             {
               kind: "source-changed",
-              note: `The document ${d.label} behind this verified page changed; the import left the page as you verified it. Dismiss keeps it so; to take what the document says now, ask the assistant to update the page.`,
+              note: `The document ${d.label} behind this verified page changed; the import left the page as you verified it. Dismiss keeps it so.${take}`,
               source: d.label,
             },
             ...d.facts.slice(0, MAX_FACTS_SHOWN).map((fact) => ({ kind: "document-says", note: fact, source: d.label })),
@@ -1054,7 +1060,7 @@ async function processBatch(
               verified.push({ label: f.file.label, page: built.path, sha256: f.sha256, facts: v.draft.facts.map((x) => x.fact), updated: false });
               continue;
             }
-            if (built.keptVerification) verified.push({ label: f.file.label, page: built.path, sha256: f.sha256, facts: [], updated: true });
+            if (built.verifiedPage) verified.push({ label: f.file.label, page: built.path, sha256: f.sha256, facts: [], updated: true });
             await tx.writePage(built.path, built.frontmatter, built.body);
             pageOf.set(built.path, i);
             titleOf.set(i, built.frontmatter.title);
