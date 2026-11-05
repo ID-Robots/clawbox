@@ -35,7 +35,7 @@
  * screen reader still heard in English (UI sweep 2026-09-07, shell-7).
  */
 export const NOTIFY_ACTION_TARGETS = {
-  settings: { email: "settings.email", ai: "settings.providers" },
+  settings: { email: "settings.email", ai: "settings.providers", harness: "settings.harness" },
 } as const;
 
 type NotifyActionApp = keyof typeof NOTIFY_ACTION_TARGETS;
@@ -76,6 +76,9 @@ export type NotifyAction = {
 
 /** The email queue's destination. */
 export const OPEN_EMAIL_SETTINGS: NotifyAction = { open: "settings", section: "email" };
+
+/** The scheduled-job alerts' destination: the Harness section, where their card lists the jobs (src/lib/job-alerts.ts). */
+export const OPEN_HARNESS_SETTINGS: NotifyAction = { open: "settings", section: "harness" };
 
 /**
  * Settings → Providers with the Anthropic accounts open and scrolled into view

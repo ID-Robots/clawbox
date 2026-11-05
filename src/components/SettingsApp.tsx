@@ -44,6 +44,7 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import JobAlertsPanel from "./JobAlertsPanel";
 import DbMaintenancePanel from "./DbMaintenancePanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
 import PathGuardPanel from "./PathGuardPanel";
@@ -6292,6 +6293,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 unless CLAWBOX_COMPUTER_USE_SETTING=1 (its route is a 404). */}
             <ComputerUsePanel />
             <BackgroundJobsPanel />
+            {/* The scheduled-job alerts (TASK-2179): the switch, and which of
+                the assistant's scheduled jobs are failing — where the alert's
+                desktop notice and Telegram message send the owner. */}
+            <JobAlertsPanel />
 
             {/* Desktop environment and Performance mode, moved here from
                 System at the owner's request (2026-09-09): set once and then

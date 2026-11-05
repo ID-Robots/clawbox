@@ -99,6 +99,8 @@ describe("translations", () => {
         "wifi",
         // Settings → System → Agent databases (OpenClaw database maintenance).
         "dbMaintenance",
+        // Settings → Harness → Scheduled job alerts, and the alert's own words.
+        "jobAlerts",
         // The desktop's corner card for long work Settings started (background tasks).
         "backgroundTasks",
         "clawaiUsage",

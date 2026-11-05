@@ -16,6 +16,7 @@ import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
 import { usersEn } from "@/lib/edition-translations/en-users";
 import { dbMaintenanceEn } from "@/lib/edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
+import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -88,6 +89,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // limit of zero, a model the provider dropped — and which model the chat was
   // moved to. The one thing that explains why the reply came from another model.
   { name: "Model availability lines", matches: (k) => k.startsWith("chat.modelUnavailable") },
+  // Settings → Harness → Scheduled job alerts (TASK-2179), and the alert
+  // itself, which the server words in the box's language: an owner who cannot
+  // read "failed 3 times in a row" has not been warned.
+  { name: "Scheduled job alerts", matches: (k) => k.startsWith("jobAlerts.") },
 ];
 
 /**
@@ -173,6 +178,7 @@ describe("edition-translations (TASK-458)", () => {
       ["usersEn", usersEn, (k) => k in usersEn && (k.startsWith("users.") || k === "settings.users" || k.startsWith("login.") || k.startsWith("tray."))],
       ["dbMaintenanceEn", dbMaintenanceEn, (k) => k.startsWith("dbMaintenance.")],
       ["modelAvailabilityEn", modelAvailabilityEn, (k) => k.startsWith("chat.modelUnavailable")],
+      ["jobAlertsEn", jobAlertsEn, (k) => k.startsWith("jobAlerts.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {
