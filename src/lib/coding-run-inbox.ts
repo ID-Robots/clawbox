@@ -184,7 +184,12 @@ const SPAWN_TOKEN_RE = /^[a-z0-9]{1,16}$/;
  * start time is kept in) to this file before a tool call while it is empty.
  * Read by scripts/coding-run-hook.mjs (`commandClock`), for the Stop hook and
  * for the settle's `leftovers` question. Per spawn, because a resume is a new
- * harness under a new launcher; a dotfolder, so it is never an artifact.
+ * harness under a new launcher; a dotfolder, so it is never an artifact. The
+ * launcher also restarts its watcher AFTER the first command (an account
+ * failover mid-run), which no clock can tell from the run's work: the hook
+ * knows that one by its command line, `--heal-watch` and the harness's own
+ * session folder (`launcherWatchers`), which the Stop hook writes into
+ * `<clock>.stop-ran` for the settle.
  */
 export function commandClockPath(stateDir: string, token: string): string {
   if (!SPAWN_TOKEN_RE.test(token)) throw new Error(`Not a spawn token: ${token}`);
@@ -194,7 +199,8 @@ export function commandClockPath(stateDir: string, token: string): string {
 /**
  * Create the spawn's command clock EMPTY, before the harness starts: an empty
  * clock tells the hook "no command has run yet", which a missing one cannot
- * (a missing clock is the old rule — everything in the cgroup counts).
+ * (a missing clock is the old rule — everything in the cgroup counts). An
+ * earlier spawn's `<clock>.stop-ran`, and the session folder in it, go.
  */
 export function createCommandClock(stateDir: string, token: string): string {
   const file = commandClockPath(stateDir, token);
