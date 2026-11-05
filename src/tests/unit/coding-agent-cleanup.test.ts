@@ -316,6 +316,79 @@ describe("the group check itself", () => {
   });
 });
 
+/**
+ * The keep-alive hook's rule, at the settle (scripts/coding-run-hook.mjs
+ * `leftovers`): a leftover is what the RUN started — what started after its
+ * spawn's first command. Whatever launched the harness shares its group and
+ * its scope from before that (a launcher's watcher stays until the session
+ * ends), and is not something "this run started" for the owner to end.
+ */
+describe("what a run left running, by its command clock", () => {
+  const HOOK = path.resolve(__dirname, "../../../scripts/coding-run-hook.mjs");
+  /** The harness's first tool call: the PreToolUse guard from its --settings, run as Claude Code runs it. */
+  const FIRST_COMMAND = [
+    `guard=$(${JSON.stringify(process.execPath)} -e 'const a=process.argv;const i=a.indexOf("--settings");const pre=i<0?[]:(JSON.parse(a[i+1]).hooks.PreToolUse||[]);const m=pre.find((x)=>x.matcher==="*");process.stdout.write(m?m.hooks[0].command:"")' -- "$@")`,
+    '[ -n "$guard" ] && sh -c "$guard" </dev/null',
+  ].join("\n");
+  let pidFile: string;
+  beforeEach(() => {
+    // The hook script where this checkout's runs find it.
+    fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
+    fs.copyFileSync(HOOK, path.join(root, "scripts", "coding-run-hook.mjs"));
+    pidFile = path.join(base, "sleeper.pid");
+  });
+  afterEach(() => {
+    const pid = fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, "utf8")) : 0;
+    try {
+      if (pid > 1) process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  });
+
+  it("is not what was in the run's group before its first command — a launcher's process", async () => {
+    readyDevice([
+      `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
+      "sleep 0.3",
+      FIRST_COMMAND,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const settled = await finished(run.id);
+    expect(settled.status).toBe("completed");
+    // The launcher's process outlived the harness, in the harness's group...
+    const sleeper = Number(fs.readFileSync(pidFile, "utf8"));
+    expect(() => process.kill(sleeper, 0)).not.toThrow();
+    // ...and is not the run's leftover: nothing offered to end, no handle kept on it.
+    await vi.waitFor(() => expect(lib.getRun(run.id)?.pgid).toBeNull(), { timeout: 10_000 });
+    const after = lib.getRun(run.id);
+    expect(after?.leftover).toBe(false);
+    expect(after?.progress.join(" ")).not.toMatch(/still running/i);
+  });
+
+  it("is what a command started after it, though the harness's going reparented it", async () => {
+    readyDevice([
+      FIRST_COMMAND,
+      "sleep 0.05",
+      `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Serve it", projectId: "site", source: "agent" });
+    expect((await finished(run.id)).status).toBe("completed");
+    await vi.waitFor(() => expect(lib.getRun(run.id)?.progress.join(" ")).toMatch(/still running/i), { timeout: 10_000 });
+    const after = lib.getRun(run.id);
+    expect(after?.leftover).toBe(true);
+    expect(after?.pgid).toBeTruthy();
+    // ...kept for the owner's Kill, which still ends it.
+    expect(lib.killRunLeftovers(run.id).leftover).toBe(false);
+    await vi.waitFor(() => expect(groupAlive(after?.pgid as number)).toBe(false), { timeout: 8_000 });
+  });
+});
+
 
 it("ends successful Team worker test processes without keeping a worktree server alive", async () => {
   readyDevice(LEAVES_A_SERVER);

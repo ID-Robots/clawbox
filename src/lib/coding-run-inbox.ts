@@ -169,6 +169,56 @@ function shellWord(word: string): string {
   return `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
+/** A spawn token is the base-36 time its scope is named by (coding-agent.ts `spawnRun`). */
+const SPAWN_TOKEN_RE = /^[a-z0-9]{1,16}$/;
+
+/**
+ * One spawn's COMMAND CLOCK: `<evidence>/.run-jobs/first-command-<token>`.
+ *
+ * Whatever launched the harness shares its cgroup — a launcher's own watcher,
+ * forked at session start and reparented to init, sat in a run's scope until
+ * the session ended, and the keep-alive hook refused every stop over it as a
+ * process "you started". What the run started is what started AFTER its first
+ * command, so the box needs to know when that was: the spawn's PreToolUse
+ * guard appends /proc/uptime (ticks since boot, the same clock a process's
+ * start time is kept in) to this file before a tool call while it is empty.
+ * Read by scripts/coding-run-hook.mjs (`commandClock`), for the Stop hook and
+ * for the settle's `leftovers` question. Per spawn, because a resume is a new
+ * harness under a new launcher; a dotfolder, so it is never an artifact.
+ */
+export function commandClockPath(stateDir: string, token: string): string {
+  if (!SPAWN_TOKEN_RE.test(token)) throw new Error(`Not a spawn token: ${token}`);
+  return path.join(stateDir, ".run-jobs", `first-command-${token}`);
+}
+
+/**
+ * Create the spawn's command clock EMPTY, before the harness starts: an empty
+ * clock tells the hook "no command has run yet", which a missing one cannot
+ * (a missing clock is the old rule — everything in the cgroup counts).
+ */
+export function createCommandClock(stateDir: string, token: string): string {
+  const file = commandClockPath(stateDir, token);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, "", { mode: 0o600 });
+  return file;
+}
+
+/**
+ * Has a command run in that spawn — is there a stamp in its clock? Only a
+ * stamped clock lets the settle tell the run's leftovers from the launcher's
+ * processes: an empty one is a spawn that never called a tool, or a harness
+ * that never ran its hooks (a stand-in in a test), and the settle cannot tell
+ * those two apart, so it keeps its old answer for both.
+ */
+export function commandClockStamped(file: string | null): boolean {
+  if (!file) return false;
+  try {
+    return fs.readFileSync(file, "utf8").split("\n").some((line) => /^\d+(\.\d{1,2})?$/.test(line.trim()));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The `--settings` JSON a run is spawned with: its PostToolUse inbox hook,
  * and — for a coding team's run — the PreToolUse guard that denies any
@@ -191,8 +241,17 @@ function shellWord(word: string): string {
  * registered, a background process it started — because a `claude -p` run
  * that stops is never woken again. Bounded inside the script (MAX_BLOCKS,
  * MAX_BLOCK_SPAN_MS); see scripts/coding-run-hook.mjs.
+ *
+ * `commandClock` (with `keepAlive`) is the spawn's command clock
+ * (`createCommandClock`): the Stop hook is told where it is, and a PreToolUse
+ * guard on EVERY tool (`matcher: "*"`: a sub-agent's or a workflow's first
+ * command comes after the Agent call that started it) stamps it before the
+ * first one. Built from `sh` builtins only, like the inbox guard — `-s` is
+ * false for an empty file, `read` takes the first field of /proc/uptime,
+ * `printf` and `>>` append it — so no tool call ever pays for a Node process,
+ * and the trailing `:` keeps the exit status 0.
  */
-export function runHookSettings(opts: { node: string; script?: string; inbox: string | null; mergeGuard: boolean; keepAlive?: string | null }): string | null {
+export function runHookSettings(opts: { node: string; script?: string; inbox: string | null; mergeGuard: boolean; keepAlive?: string | null; commandClock?: string | null }): string | null {
   const script = opts.script ?? runHookScriptPath();
   const hook = (...args: string[]) => ({ type: "command", command: [opts.node, script, ...args].map(shellWord).join(" "), timeout: 10 });
   const inboxHook = (dir: string) => ({
@@ -200,9 +259,20 @@ export function runHookSettings(opts: { node: string; script?: string; inbox: st
     command: `set -- ${shellWord(dir)}/pending/*.json; [ -e "$1" ] && exec ${[opts.node, script, "inbox", dir].map(shellWord).join(" ")}; :`,
     timeout: 10,
   });
+  const clockHook = (file: string) => ({
+    type: "command",
+    command: `[ -s ${shellWord(file)} ] || { read -r up rest < /proc/uptime && printf '%s\\n' "$up" >> ${shellWord(file)}; } 2>/dev/null; :`,
+    timeout: 10,
+  });
+  const clock = opts.keepAlive && opts.commandClock ? opts.commandClock : null;
   const hooks: Record<string, unknown[]> = {};
   if (opts.inbox) hooks.PostToolUse = [{ matcher: "*", hooks: [inboxHook(opts.inbox)] }];
-  if (opts.mergeGuard) hooks.PreToolUse = [{ matcher: "Bash", hooks: [hook("merge-guard")] }];
-  if (opts.keepAlive) hooks.Stop = [{ hooks: [hook("keepalive", opts.keepAlive, ...(opts.inbox ? [opts.inbox] : []))] }];
+  const pre: unknown[] = [];
+  if (clock) pre.push({ matcher: "*", hooks: [clockHook(clock)] });
+  if (opts.mergeGuard) pre.push({ matcher: "Bash", hooks: [hook("merge-guard")] });
+  if (pre.length) hooks.PreToolUse = pre;
+  if (opts.keepAlive) {
+    hooks.Stop = [{ hooks: [hook("keepalive", opts.keepAlive, ...(opts.inbox ? [opts.inbox] : []), ...(clock ? [`--first-command=${clock}`] : []))] }];
+  }
   return Object.keys(hooks).length ? JSON.stringify({ hooks }) : null;
 }

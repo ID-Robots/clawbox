@@ -401,10 +401,17 @@ describe("delivery MID-TURN, through the run's inbox hook", () => {
     expect(settled.progress.join("\n")).toContain("Message to the run, mid-turn: use tabs, not spaces");
     expect(settled.midTurn).toBe(true);
     // The spawn had its hook, and the keep-alive Stop hook that also reads the
-    // inbox; the inbox went with the run.
+    // inbox, with the command clock it goes by (stamped by the PreToolUse
+    // guard on every tool); the inbox went with the run.
     const argv = lastArgv();
-    const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]) as { hooks: Record<string, unknown> };
-    expect(Object.keys(settings.hooks)).toEqual(["PostToolUse", "Stop"]);
+    const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]) as {
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+    };
+    expect(Object.keys(settings.hooks)).toEqual(["PostToolUse", "PreToolUse", "Stop"]);
+    const clock = path.join(root, "data", "coding-agent-artifacts", run.id, ".run-jobs");
+    expect(settings.hooks.PreToolUse.map((m) => m.matcher)).toEqual(["*"]);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain(`${clock}/first-command-`);
+    expect(settings.hooks.Stop[0].hooks[0].command).toContain(`'--first-command=${clock}/first-command-`);
     expect(fs.existsSync(path.join(root, "data", "coding-agent-inbox", run.id))).toBe(false);
   });
 

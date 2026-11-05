@@ -64,7 +64,7 @@ import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-wo
  * restart is reported as failed rather than "still running" forever.
  */
 
-import { spawn, type ChildProcess } from "child_process";
+import { execFile, spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
@@ -398,6 +398,7 @@ import {
   noteScopeRefused,
   noteScopeWorked,
   probeSystemdRun,
+  RUN_UNIT_PREFIX,
   runScopeUnit,
   SCOPE_REFUSED,
   scopeEnv,
@@ -444,6 +445,9 @@ import {
 import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import {
   clearReceipts,
+  commandClockPath,
+  commandClockStamped,
+  createCommandClock,
   ensureRunInbox,
   inboxPending,
   inboxReceipts,
@@ -5017,6 +5021,13 @@ interface LiveRun {
   unit: string | null;
   /** The process group — the only way to signal a reattached run. */
   pgid: number | null;
+  /**
+   * This spawn's command clock (coding-run-inbox.ts `commandClockPath`): when
+   * its first command began, which is what tells what the run started from
+   * what was already in its scope. Null for a spawn without the keep-alive
+   * hook (a read-only or Codex run) — those keep the old leftover rule.
+   */
+  commandClock: string | null;
   /** The stream log being tailed. Null only if the log could not be opened. */
   stream: StreamFollower | null;
   /** Reads the tail of the stream log while the run works. */
@@ -5495,7 +5506,15 @@ export async function reconcileAfterRestart(): Promise<number> {
       changed = true;
       continue;
     }
-    if (unitStillUp) {
+    // ...and only what the RUN started in it is a leftover: the rule the
+    // settle decided it by (noteRunLeftover), for a spawn that ran a command.
+    let leftInScope = unitStillUp;
+    const clock = leftInScope ? commandClockOfUnit(run, run.unit) : null;
+    if (leftInScope && commandClockStamped(clock)) {
+      const own = await askRunLeftovers(clock as string, { unit: run.unit, pgid: null });
+      if (own !== null && own.length === 0) leftInScope = false;
+    }
+    if (leftInScope) {
       // SETTLED, and its scope is still up — so something it left is still in
       // that cgroup. A unit name, unlike a pid, is never handed to anybody else,
       // so the Kill button still names exactly what it named before the restart:
@@ -5587,6 +5606,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     child: null,
     unit: run.unit,
     pgid: run.pgid,
+    commandClock: commandClockOfUnit(run, run.unit),
     stream: null,
     streamTimer: null,
     unitWatch: null,
@@ -7852,6 +7872,16 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   dropRunSecrets(run.id);
   noteKeepAlive(run);
   if ((run.status === "completed" && !run.team) || run.status === "paused") {
+    // A spawn that ran a command has a stamped clock, and then only what the
+    // RUN started is a leftover — the keep-alive hook's rule. Its group and its
+    // scope also hold whatever was there before its first command (the
+    // launcher's watcher, an MCP server still on its way out), which is not
+    // something "this run started" that the owner should be offered to end.
+    const clock = state?.commandClock ?? commandClockOfUnit(run, run.unit);
+    if (commandClockStamped(clock) && (groupAlive(run.pgid) || run.unit)) {
+      noteRunLeftover(run, clock as string);
+      return;
+    }
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
       pushProgress(run, RUNNER_STEP.leftoverRunning);
@@ -7909,6 +7939,117 @@ function noteScopeLeftover(run: CodingRun, unit: string): void {
     persist(true);
   })());
 }
+
+/** The command clock of the spawn a run's scope was named for — the token after the run id. */
+function commandClockOfUnit(run: CodingRun, unit: string | null): string | null {
+  const prefix = `${RUN_UNIT_PREFIX}${run.id}-`;
+  if (!unit || !unit.startsWith(prefix) || !unit.endsWith(".scope")) return null;
+  try {
+    return commandClockPath(artifactsDir(run.id), unit.slice(prefix.length, -".scope".length));
+  } catch {
+    return null;
+  }
+}
+
+/** How long the `leftovers` question is given; past it the settle keeps its old answer. */
+const LEFTOVER_ASK_TIMEOUT_MS = 10_000;
+
+/**
+ * What the run started that is still running in its scope or its process
+ * group — asked of scripts/coding-run-hook.mjs (`leftovers`), so the settle
+ * decides by the very rule the keep-alive Stop hook does, not a copy of it.
+ * Answers the processes' one-line descriptions, or null when it could not
+ * tell: the script failed, or saw nothing at all where systemd or the kernel
+ * say something is (a scope this side cannot look into) — the caller then
+ * keeps the old answer, "something is there, so it is the run's".
+ */
+function askRunLeftovers(clock: string, where: { unit: string | null; pgid: number | null }): Promise<string[] | null> {
+  if (!where.unit && !where.pgid) return Promise.resolve([]);
+  const args = [
+    runHookScriptPath(),
+    "leftovers",
+    `--first-command=${clock}`,
+    ...(where.unit ? [`--unit=${where.unit}`] : []),
+    ...(where.pgid ? [`--pgid=${where.pgid}`] : []),
+  ];
+  // Nothing of the server's own environment: the script reads /proc and one file.
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        process.execPath,
+        args,
+        { timeout: LEFTOVER_ASK_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: env as NodeJS.ProcessEnv },
+        (err, stdout) => {
+          if (err) return resolve(null);
+          try {
+            const answer = JSON.parse(String(stdout)) as { seen?: unknown; procs?: unknown };
+            if (typeof answer.seen !== "number" || answer.seen < 1 || !Array.isArray(answer.procs)) return resolve(null);
+            resolve(answer.procs.filter((p): p is string => typeof p === "string"));
+          } catch {
+            resolve(null);
+          }
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * The settle's leftover decision for a spawn that ran a command (its clock is
+ * stamped): a moment after the harness went — the same moment
+ * noteScopeLeftover waits, for the same reason, and long enough for its MCP
+ * servers to be on their way — the group and the scope are asked whether
+ * anything is still in them, and what is, is asked whether the RUN started
+ * it. Something it started: a leftover, kept on the record for the Kill
+ * button, exactly as before. Only what was there before its first command
+ * (a launcher's watcher sharing the scope until the session ends): no
+ * leftover, and neither handle is kept — the Kill button must not reach the
+ * launcher's process in the run's name. Could not tell: the old answer.
+ *
+ * Until it has asked, the old answer stands — a group still alive is a
+ * leftover — so nothing that reads the record meanwhile takes the folder from
+ * under a server the run left; the worktree's settle waits for the answer
+ * (`leftoverChecks`).
+ */
+function noteRunLeftover(run: CodingRun, clock: string): void {
+  const { pgid, unit } = run;
+  run.leftover = groupAlive(pgid);
+  const check = (async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, SCOPE_LEFTOVER_CHECK_MS).unref());
+    // The owner's Kill, or a resume, may have moved on meanwhile.
+    const movedOn = () => run.pgid !== pgid || run.unit !== unit || isLive(run.status);
+    if (movedOn()) return;
+    const group = groupAlive(pgid);
+    const active = unit ? await unitActive(unit).catch(() => null) : false;
+    if (movedOn()) return;
+    let left = group || active === true;
+    if (left) {
+      const own = await askRunLeftovers(clock, { unit: active === true ? unit : null, pgid: group ? pgid : null });
+      if (movedOn()) return;
+      if (own !== null) left = own.length > 0;
+    }
+    run.leftover = left;
+    if (left) {
+      pushProgress(run, RUNNER_STEP.leftoverRunning);
+      // A group that is gone is a number the kernel may hand to anybody.
+      if (!group) run.pgid = null;
+    } else {
+      run.pgid = null;
+      run.unit = null;
+    }
+    persist(true);
+  })();
+  leftoverChecks.set(run.id, check);
+  trackSettleWork(check.finally(() => {
+    if (leftoverChecks.get(run.id) === check) leftoverChecks.delete(run.id);
+  }), run.id);
+}
+
+/** The leftover question noteRunLeftover is still asking, by run: the worktree's settle waits for its answer. */
+const leftoverChecks = new Map<string, Promise<void>>();
 
 /**
  * The owner's Kill button: end whatever a settled run left behind.
@@ -12610,7 +12751,11 @@ function spawnRun(
   settleRunInbox(run, null);
   // Codex takes no per-run hooks, so no inbox and no merge guard (its command
   // fence is the execpolicy rules below).
-  const hookSettings = codex ? null : spawnHookSettings(run);
+  // This spawn's token: its scope is named by it, and so is its command
+  // clock, which is how a settle — or the next server, after a restart —
+  // finds the clock from the unit on the record (commandClockOfUnit).
+  const spawnToken = Date.now().toString(36);
+  const hookSettings = codex ? null : spawnHookSettings(run, spawnToken);
   run.midTurn = hookSettings !== null && hookSettings.inbox;
   // The CPU budget frozen at start; a record from before it existed gets the
   // lone-run figure rather than none.
@@ -12654,7 +12799,7 @@ function spawnRun(
   // untouched on the far side of the `--`, because that prefix is the security
   // boundary and this one is only a cgroup. A per-spawn suffix, so a retry is
   // never refused the name of a scope systemd is still collecting.
-  const unit = tools.scopePath ? runScopeUnit(`${run.id}-${Date.now().toString(36)}`) : null;
+  const unit = tools.scopePath ? runScopeUnit(`${run.id}-${spawnToken}`) : null;
   const { bin, argv } = unit && tools.scopePath
     ? buildScopeArgv(tools.scopePath, unit, dropped.bin, dropped.argv)
     : dropped;
@@ -12749,6 +12894,7 @@ function spawnRun(
     // systemd-run execs the harness in its own process, so this pid is the group
     // whichever of the two started it.
     pgid: typeof child.pid === "number" ? child.pid : null,
+    commandClock: hookSettings?.commandClock ?? null,
     stream: null,
     streamTimer: null,
     unitWatch: null,
@@ -13004,7 +13150,7 @@ function deliverRunMessages(run: CodingRun, state: LiveRun): RunMessageDelivery 
 }
 
 /** The spawn's `--settings` hooks, or null when the hook script is not in this checkout. */
-function spawnHookSettings(run: CodingRun): { json: string; inbox: boolean } | null {
+function spawnHookSettings(run: CodingRun, spawnToken: string): { json: string; inbox: boolean; commandClock: string | null } | null {
   const script = runHookScriptPath();
   if (!fs.existsSync(script)) return null;
   let inbox: string | null = null;
@@ -13025,8 +13171,20 @@ function spawnHookSettings(run: CodingRun): { json: string; inbox: boolean } | n
       console.error(`[coding-agent] ${run.id}: no keep-alive hook:`, err instanceof Error ? err.message : err);
     }
   }
-  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null, keepAlive });
-  return json ? { json, inbox: inbox !== null } : null;
+  // Its command clock, created empty now, before the harness (and whatever
+  // launches it) has started anything: the Stop hook and the settle count only
+  // what started after the first command as the run's (coding-run-inbox.ts
+  // commandClockPath). Without one the hook keeps the old rule.
+  let commandClock: string | null = null;
+  if (keepAlive) {
+    try {
+      commandClock = createCommandClock(keepAlive, spawnToken);
+    } catch (err) {
+      console.error(`[coding-agent] ${run.id}: no command clock:`, err instanceof Error ? err.message : err);
+    }
+  }
+  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null, keepAlive, commandClock });
+  return json ? { json, inbox: inbox !== null, commandClock } : null;
 }
 
 /** The ids waiting in a run's inbox; none for an inbox that cannot be read. */
@@ -13272,6 +13430,8 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     }
     // Something the run started is still running in the tree (a server it
     // left, `leftover`): the work may go home, but the folder stays under it.
+    // Asked after the settle's own leftover question has its answer.
+    await leftoverChecks.get(run.id)?.catch(() => undefined);
     const inUse = run.leftover === true ? "something the run started is still running in it" : null;
     const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
     if (ahead === null) {

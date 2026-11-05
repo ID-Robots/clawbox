@@ -326,3 +326,227 @@ setTimeout(() => {
     expect(Object.keys(none.hooks)).toEqual(["PostToolUse"]);
   });
 });
+
+/**
+ * The command clock: what the RUN started, not what launched it.
+ *
+ * A run's scope is shared with whatever started the harness. A launcher's
+ * own watcher (`<launcher> --heal-watch <session dir>`, forked at session
+ * start, reparented to init, alive until the session ends) sat in it, and the
+ * Stop hook refused every stop over it as "a process you started": finished
+ * runs looped on sleep and ps until the cap (2026-11-05). The spawn's
+ * PreToolUse guard stamps when the first command began; only what started
+ * after it is the run's — reparented or not.
+ */
+describe("the command clock", () => {
+  const STOP = { hook_event_name: "Stop", session_id: "s", stop_hook_active: false };
+  let state: string;
+  let clock: string;
+  beforeEach(() => {
+    state = path.join(root, "evidence");
+    // Made by hand rather than by createCommandClock, so the same test runs
+    // against a checkout that has no clock at all.
+    clock = path.join(state, ".run-jobs", "first-command-t1");
+    fs.mkdirSync(path.dirname(clock), { recursive: true });
+    fs.writeFileSync(clock, "");
+  });
+
+  type Settings = { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>> };
+  const settingsWith = (node = process.execPath): Settings =>
+    JSON.parse(inbox.runHookSettings({ node, script: SCRIPT, inbox: null, mergeGuard: false, keepAlive: state, commandClock: clock })!) as Settings;
+  /** The guard the harness runs before every tool call; "" where the settings have none. */
+  const guardOf = (s: Settings): string => s.hooks.PreToolUse?.find((m) => m.matcher === "*")?.hooks[0].command ?? "";
+  const stopOf = (s: Settings): string => s.hooks.Stop[0].hooks[0].command;
+
+  it("is stamped once, before the first tool call, by a guard that never starts Node", () => {
+    // A node binary that cannot run: the guard must never reach it.
+    const s = settingsWith(path.join(root, "no-such-node"));
+    expect(s.hooks.PreToolUse[0].matcher).toBe("*");
+    expect(stopOf(s)).toContain(`'--first-command=${clock}'`);
+    const before = Number(fs.readFileSync("/proc/uptime", "utf8").split(" ")[0]);
+    for (let call = 0; call < 3; call++) {
+      const r = spawnSync("sh", ["-c", guardOf(s)], { input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash" }), encoding: "utf-8" });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toBe("");
+    }
+    const stamps = fs.readFileSync(clock, "utf8").trim().split("\n");
+    expect(stamps).toHaveLength(1);
+    // Seconds since boot, the clock a process's start time is kept in.
+    expect(Number(stamps[0])).toBeGreaterThanOrEqual(Math.floor(before));
+    expect(Number(stamps[0])).toBeLessThan(before + 60);
+  });
+
+  it("is stamped only for a run with the keep-alive hook, beside a team run's merge guard", () => {
+    const team = JSON.parse(inbox.runHookSettings({ node: "/usr/bin/node", script: "/x/hook.mjs", inbox: "/d/in", mergeGuard: true, keepAlive: "/e/run", commandClock: "/e/run/.run-jobs/first-command-a" })!) as Settings;
+    expect(Object.keys(team.hooks)).toEqual(["PostToolUse", "PreToolUse", "Stop"]);
+    expect(team.hooks.PreToolUse.map((m) => m.matcher)).toEqual(["*", "Bash"]);
+    expect(team.hooks.PreToolUse[1].hooks[0].command).toBe("'/usr/bin/node' '/x/hook.mjs' 'merge-guard'");
+    expect(stopOf(team)).toBe("'/usr/bin/node' '/x/hook.mjs' 'keepalive' '/e/run' '/d/in' '--first-command=/e/run/.run-jobs/first-command-a'");
+    // No keep-alive hook (a read-only run): nothing reads a clock, so none is stamped.
+    const readOnly = JSON.parse(inbox.runHookSettings({ node: "/usr/bin/node", script: "/x/hook.mjs", inbox: "/d/in", mergeGuard: false, keepAlive: null, commandClock: "/e/c" })!) as Settings;
+    expect(Object.keys(readOnly.hooks)).toEqual(["PostToolUse"]);
+    expect(inbox.commandClockPath("/e/run", "mh4x1k2a")).toBe("/e/run/.run-jobs/first-command-mh4x1k2a");
+    expect(() => inbox.commandClockPath("/e/run", "../x")).toThrow();
+    const made = inbox.createCommandClock(state, "mh4x1k2b");
+    expect(fs.readFileSync(made, "utf8")).toBe("");
+    expect(inbox.commandClockStamped(made)).toBe(false);
+    fs.appendFileSync(made, "1234.56\n");
+    expect(inbox.commandClockStamped(made)).toBe(true);
+    expect(inbox.commandClockStamped(path.join(state, "missing"))).toBe(false);
+  });
+
+  it("still finds the background shell a tool call left, when the run is not in a scope of its own", () => {
+    // The stand-in harness of the test above, stamping its clock first, as the
+    // real one does before the tool call that starts the background shell.
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    const harness = path.join(bin, "claude");
+    const s = settingsWith();
+    fs.writeFileSync(
+      harness,
+      `#!${process.execPath}
+const { spawn, spawnSync } = require("child_process");
+spawnSync("sh", ["-c", ${JSON.stringify(guardOf(s))}]);
+const bg = spawn("sh", ["-c", "sleep 30"], { stdio: "ignore" });
+setTimeout(() => {
+  const r = spawnSync("sh", ["-c", ${JSON.stringify(stopOf(s))}], { input: JSON.stringify(${JSON.stringify(STOP)}), encoding: "utf-8" });
+  process.stdout.write(r.stdout);
+  bg.kill("SIGKILL");
+}, 300);
+`,
+      { mode: 0o755 },
+    );
+    const out = spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000 });
+    expect(out.stdout).toMatch(/Processes you started are still running:[\s\S]*sh -c sleep 30/);
+  });
+
+  describe("after the run: what it left in its process group (the settle's `leftovers` question)", () => {
+    /** A group whose leader starts one sleeper, stamps the clock, starts another and goes: both are orphans of the group now. */
+    function leaveGroup(stamp: boolean): number {
+      const s = settingsWith();
+      const leader = spawn("sh", ["-c", `sleep 31 & sleep 0.2; ${stamp ? 'sh -c "$1";' : ""} sleep 0.05; sleep 32 & exit 0`, "sh", guardOf(s)], { detached: true, stdio: "ignore" });
+      leader.unref();
+      return leader.pid as number;
+    }
+    const leftovers = (args: string[]): { seen: number; procs: string[] } => {
+      const r = spawnSync(process.execPath, [SCRIPT, "leftovers", ...args], { encoding: "utf-8", timeout: 10_000 });
+      expect(r.status).toBe(0);
+      return JSON.parse(r.stdout) as { seen: number; procs: string[] };
+    };
+    const settle = async (pgid: number) => {
+      // Both sleepers are up and the leader has gone: each is a root of its own.
+      await vi.waitFor(
+        () => expect(leftovers([`--pgid=${pgid}`]).procs.map((p) => p.replace(/^pid \d+: /, ""))).toEqual(["sleep 31", "sleep 32"]),
+        { timeout: 5_000 },
+      );
+    };
+
+    it("counts what started after the first command, not what was there before it", async () => {
+      const pgid = leaveGroup(true);
+      try {
+        await settle(pgid);
+        const out = leftovers([`--first-command=${clock}`, `--pgid=${pgid}`]);
+        expect(out.seen).toBe(2);
+        expect(out.procs).toHaveLength(1);
+        expect(out.procs[0]).toMatch(/^pid \d+: sleep 32$/);
+      } finally {
+        process.kill(-pgid, "SIGKILL");
+      }
+    });
+
+    it("counts everything without a clock, as before, and nothing while the clock is unstamped", async () => {
+      const pgid = leaveGroup(false);
+      try {
+        await settle(pgid);
+        expect(leftovers([`--pgid=${pgid}`]).procs.map((p) => p.replace(/^pid \d+: /, ""))).toEqual(["sleep 31", "sleep 32"]);
+        expect(leftovers([`--first-command=${path.join(state, "gone")}`, `--pgid=${pgid}`]).procs).toHaveLength(2);
+        expect(leftovers([`--first-command=${clock}`, `--pgid=${pgid}`])).toEqual({ seen: 2, procs: [] });
+      } finally {
+        process.kill(-pgid, "SIGKILL");
+      }
+    });
+
+    it("says it saw nothing, rather than 'nothing is left', where it cannot look", () => {
+      expect(leftovers([`--first-command=${clock}`, "--unit=clawbox-run-run-nothere1-zz.scope"])).toEqual({ seen: 0, procs: [] });
+    });
+  });
+
+  /**
+   * In a real scope, the way a run lives on a box: `systemd-run --user --scope`.
+   * Skipped where this user has no systemd manager or no unified cgroup (a CI
+   * container); the board suite runs it on every box (43-coding-run-keepalive).
+   */
+  const scopeWorks = (() => {
+    const r = spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--collect", "sh", "-c", 'r=$(sed -n "s/^0:://p" /proc/self/cgroup); test -r "/sys/fs/cgroup$r/cgroup.procs"'], { encoding: "utf-8", timeout: 15_000 });
+    return r.status === 0;
+  })();
+
+  describe.skipIf(!scopeWorks)("in the run's own scope, with the launcher's watcher in it", () => {
+    let unit: string;
+    let session: string;
+    beforeEach(() => {
+      unit = `clawbox-run-run-hooktest-${Date.now().toString(36)}.scope`;
+      session = path.join(root, "launcher-session");
+      fs.mkdirSync(session);
+    });
+    afterEach(() => {
+      // The watcher and any job outlive the stand-in: the scope goes with them.
+      spawnSync("systemctl", ["--user", "stop", unit], { timeout: 15_000 });
+    });
+
+    /**
+     * A stand-in for the launcher and the harness it becomes: the launcher
+     * forks its watcher into a session of its own and lets go of it (init
+     * adopts it), with the session folder on its command line; then the
+     * harness runs its first tool call — the guard first, as Claude Code runs
+     * PreToolUse hooks — which, with `job`, backgrounds a job with nohup that
+     * outlives the tool call's shell; then it stops, running the Stop hook.
+     */
+    function runInScope(job: boolean): string {
+      const bin = path.join(root, "bin");
+      fs.mkdirSync(bin, { recursive: true });
+      const harness = path.join(bin, "claude");
+      const s = settingsWith();
+      fs.writeFileSync(
+        harness,
+        `#!${process.execPath}
+const { spawnSync } = require("child_process");
+spawnSync("sh", ["-c", "setsid sh -c 'while :; do sleep 1; done' launcher --heal-watch \\"$1\\" </dev/null >/dev/null 2>&1 & exit 0", "sh", ${JSON.stringify(session)}], { stdio: "ignore" });
+spawnSync("sleep", ["0.3"]);
+const guard = ${JSON.stringify(guardOf(s))};
+if (guard) spawnSync("sh", ["-c", guard], { input: "{}" });
+if (${job}) spawnSync("sh", ["-c", "nohup sh -c 'sleep 30; : run-job' >/dev/null 2>&1 & exit 0"], { stdio: "ignore" });
+spawnSync("sleep", ["1.2"]);
+const r = spawnSync("sh", ["-c", ${JSON.stringify(stopOf(s))}], { input: JSON.stringify(${JSON.stringify(STOP)}), encoding: "utf-8" });
+process.stdout.write(r.stdout);
+`,
+        { mode: 0o755 },
+      );
+      const r = spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, harness], { encoding: "utf-8", timeout: 30_000 });
+      expect(r.status).toBe(0);
+      return r.stdout;
+    }
+
+    it("lets a run that started nothing stop, though the watcher is in its scope", () => {
+      const out = runInScope(false);
+      // The watcher really is in the scope, adopted by init, its session folder on its command line.
+      const cgroup = spawnSync("systemctl", ["--user", "show", "-p", "ControlGroup", "--value", unit], { encoding: "utf-8" }).stdout.trim();
+      const pids = fs.readFileSync(`/sys/fs/cgroup${cgroup}/cgroup.procs`, "utf8").split("\n").filter(Boolean);
+      const watcher = pids.map((p) => ({ p, argv: fs.readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0").join(" ") })).find((x) => x.argv.includes("--heal-watch"));
+      expect(watcher?.argv).toContain(session);
+      // Adopted: its parent is not in the scope (init, or a subreaper outside it).
+      const ppid = fs.readFileSync(`/proc/${watcher?.p}/stat`, "utf8").split(") ")[1].split(" ")[1];
+      expect(pids).not.toContain(ppid);
+      expect(out).toBe("");
+      expect(fs.existsSync(path.join(state, ".run-jobs", "stop-blocks.json"))).toBe(false);
+    });
+
+    it("still refuses the stop over a job a tool call backgrounded, after init adopted it — and names only that", () => {
+      const out = JSON.parse(runInScope(true)) as { decision: string; reason: string };
+      expect(out.decision).toBe("block");
+      expect(out.reason).toMatch(/Processes you started are still running:\n- pid \d+: sh -c sleep 30; : run-job\n\n/);
+      expect(out.reason).not.toMatch(/heal-watch/);
+    });
+  });
+});
