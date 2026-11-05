@@ -522,6 +522,98 @@ wait_gateway_settled() {
 }
 SETTLE_STATE=
 
+# wait_runtime_settled BUDGET — the box's agent runtime is up, whichever it
+# runs: the OpenClaw gateway settled (wait_gateway_settled) or, on a Hermes box
+# whose gateway is masked on purpose, Hermes healthy in
+# /setup-api/harness/status twice in a row. Sets SETTLE_WAITED and, on
+# failure, SETTLE_STATE like wait_gateway_settled.
+wait_runtime_settled() {
+  local budget=${1:-300} start now good=0 healthy
+  if [ "$(board_runtime)" != hermes ]; then
+    wait_gateway_settled "$budget"
+    return
+  fi
+  start=$(date +%s)
+  SETTLE_STATE=
+  while :; do
+    board_api GET /setup-api/harness/status
+    healthy=$(api_json -r '[.harnesses[]? | select(.id == "hermes") | .healthy] | first // empty')
+    now=$(date +%s)
+    SETTLE_WAITED=$((now - start))
+    if [ "$healthy" = true ]; then good=$((good + 1)); else good=0; fi
+    [ "$good" -ge 2 ] && return 0
+    if [ "$SETTLE_WAITED" -ge "$budget" ]; then
+      SETTLE_STATE="hermes not healthy (HTTP $API_STATUS, healthy=${healthy:-unknown})"
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+# runtime_settled_line WHAT — ok / not ok for wait_runtime_settled 300, naming
+# the runtime: "<runtime> settled WHAT (Ns)".
+runtime_settled_line() {
+  local what=$1 name=gateway
+  [ "$(board_runtime)" = hermes ] && name=Hermes
+  if wait_runtime_settled 300; then
+    ok "$name settled $what (${SETTLE_WAITED}s)"
+  else
+    not_ok "$name not settled $what: ${SETTLE_STATE:-unknown}"
+    return 1
+  fi
+}
+
+# hermes_chat_turn — one real chat turn through Hermes, the way the desktop
+# chat runs it (`hermes chat -q ... -Q`, see /setup-api/hermes/chat): the
+# reply must carry "NANO-CI-OK <serial>" within 240 s. Retried once after 60 s,
+# like chat_turn. A fresh conversation each time, so it never resumes the
+# owner's own chat.
+hermes_chat_turn() {
+  local marker="NANO-CI-OK $NANO_SERIAL" attempt out rc
+  for attempt in 1 2; do
+    # shellcheck disable=SC2016  # expanded on the board
+    out=$(board '
+      cd "$HOME" && PATH="$HOME/.local/bin:$PATH" timeout 240 "$HOME/.local/bin/hermes" chat \
+        -q "Reply with exactly this text and nothing else: $1" -Q 2>/dev/null
+    ' "$marker")
+    rc=$?
+    # The prompt carries the marker too: count it only on a line that is not
+    # the prompt echoed back.
+    if [ "$rc" -eq 0 ] && grep -vF "Reply with exactly" <<<"$out" | grep -qF "$marker"; then
+      ok "Hermes chat turn answered \"$marker\" (attempt $attempt)"
+      return 0
+    fi
+    if [ "$rc" -eq 124 ]; then
+      note "attempt $attempt: no Hermes answer within 240 s"
+    else
+      note "attempt $attempt: exit $rc, reply: $(printf '%s' "$out" | tr '\n' ' ' | head -c 300)"
+    fi
+    [ "$attempt" -eq 1 ] && { note "retrying in 60 s"; sleep 60; }
+  done
+  not_ok "no Hermes chat turn answered \"$marker\" in two attempts"
+  return 1
+}
+
+# runtime_chat_turn — chat_turn on an OpenClaw box, hermes_chat_turn on Hermes.
+runtime_chat_turn() {
+  if [ "$(board_runtime)" = hermes ]; then hermes_chat_turn; else chat_turn; fi
+}
+
+# runtime_kept — after an update, the box still runs the runtime it ran
+# before (board_runtime read it then); on Hermes the OpenClaw gateway also
+# stays masked. Prints its own ok / not ok.
+runtime_kept() {
+  local was now gw
+  was=$(board_runtime)
+  board_api GET /setup-api/harness/active
+  now=$(api_json -r '.active // empty')
+  if [ "$now" = "$was" ]; then ok "agent runtime kept: $now"; else not_ok "agent runtime was $was, now ${now:-unreadable (HTTP $API_STATUS)}"; fi
+  if [ "$was" = hermes ]; then
+    gw=$(board 'systemctl is-active clawbox-gateway.service 2>/dev/null' | tail -n 1)
+    if [ "$gw" = active ]; then not_ok "clawbox-gateway.service runs on a Hermes box (it should stay masked)"; else ok "clawbox-gateway.service stays ${gw:-inactive} on a Hermes box"; fi
+  fi
+}
+
 # ---- the box's own updater (85-, 90-) ----------------------------------------
 
 # ensure_on_release — the board on the current release (head of main), with
@@ -530,6 +622,9 @@ SETTLE_STATE=
 # HEAD0 to where the update starts from. Returns non-zero when it could not.
 HEAD0=
 ensure_on_release() {
+  # Read the runtime now, on the build under test: a rebuild must not change
+  # which settle check, chat turn and runtime check the test uses.
+  note "agent runtime: $(board_runtime)"
   release_sha || { not_ok "could not read the current release (head of main)"; return 1; }
   HEAD0=$(board_head)
   if [ "$HEAD0" = "$RELEASE_SHA" ]; then
@@ -543,8 +638,8 @@ ensure_on_release() {
     ok "board rebuilt to the release ${RELEASE_SHA:0:12}"
     HEAD0=$RELEASE_SHA
   fi
-  if wait_gateway_settled 300; then
-    ok "release build up and settled"
+  if wait_runtime_settled 300; then
+    ok "release build up and settled ($(board_runtime))"
   else
     not_ok "release build not settled: ${SETTLE_STATE:-unknown}"
     return 1

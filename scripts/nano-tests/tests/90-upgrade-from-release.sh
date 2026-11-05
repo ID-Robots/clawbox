@@ -72,11 +72,8 @@ if [ "$rc" -eq 0 ]; then
 else
   not_ok "drift after the upgrade: $(tr '\n' ' ' <<<"$IDENT" | cut -c1-200)"
 fi
-if wait_gateway_settled 300; then
-  ok "gateway settled after the upgrade (${SETTLE_WAITED}s)"
-else
-  not_ok "gateway not settled after the upgrade: ${SETTLE_STATE:-unknown}"
-fi
+runtime_settled_line "after the upgrade"
+runtime_kept
 
 AFTER=$(board "$STATE_SCRIPT" "$PROJ")
 while IFS= read -r l; do
@@ -87,5 +84,5 @@ done <<<"$AFTER"
 # shellcheck disable=SC2016  # expanded on the board
 FAILED=$(board 'systemctl list-units --state=failed --no-legend --plain "clawbox*" 2>/dev/null | awk "{print \$1}" | tr "\n" " "; rm -rf -- "$1"' "$PROJ" | tail -n 1)
 if [ -z "${FAILED// /}" ]; then ok "no clawbox unit failed"; else not_ok "failed after the upgrade: $FAILED"; fi
-chat_turn
+runtime_chat_turn
 finish
