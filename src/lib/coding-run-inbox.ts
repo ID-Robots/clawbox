@@ -200,7 +200,7 @@ export function createCommandClock(stateDir: string, token: string): string {
   const file = commandClockPath(stateDir, token);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, "", { mode: 0o600 });
-  fs.rmSync(`${file}.stop-ran`, { force: true });
+  fs.rmSync(untraced(`${file}.stop-ran`), { force: true });
   return file;
 }
 
@@ -223,7 +223,7 @@ export function commandClockAnswers(file: string | null): boolean {
   }
   const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
   if (lines.some((line) => /^\d+(\.\d{1,2})?$/.test(line))) return true;
-  return lines.length === 0 && fs.existsSync(`${file}.stop-ran`);
+  return lines.length === 0 && fs.existsSync(untraced(`${file}.stop-ran`));
 }
 
 /**
