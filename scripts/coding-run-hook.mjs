@@ -67,8 +67,9 @@
  *     session is never the run's, nor is anything under it, whenever it
  *     started (launcherWatchers): a process whose command line names
  *     `--heal-watch` with the harness's own session folder (sessionDirs) and
- *     that no shell of the harness is the parent of. A job the run starts
- *     never carries that flag with that folder, so it is still caught.
+ *     that is not under the harness (no command shell of it is still above
+ *     it). A job the run starts never carries that flag with that folder, so
+ *     it is still caught; this holds with or without a clock.
  *     Bounded: at most MAX_BLOCKS refusals and MAX_BLOCK_SPAN_MS from the
  *     first one, counted in <state-dir>/.run-jobs/stop-blocks.json (the box
  *     reads that file to say a run ended with work still live). A sub-agent's
@@ -174,7 +175,8 @@ function procStat(pid) {
  *     this spawn, so nothing in the cgroup can be the run's work yet;
  *   - null: no clock (not given, gone, unreadable, or nothing in it reads as
  *     a stamp) — the rule before the clock existed applies, every process
- *     counts, rather than waving work through on a guess.
+ *     counts (the launcher's watcher aside, which is told by its command
+ *     line, see launcherWatchers), rather than waving work through on a guess.
  * The EARLIEST stamp, because two parallel tool calls may both append: each
  * call's command starts after its own guard stamped, so the earliest stamp is
  * at or before every command of the run.
@@ -261,13 +263,26 @@ function under(pid, roots, parentOf) {
   return false;
 }
 
+/** A process's working folder; null when it cannot be read. */
+function procCwd(pid) {
+  try {
+    return fs.readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The spellings one folder is compared by: absolute and without a trailing
- * slash, and with its symlinks resolved where it exists. None for a relative
- * path: a session folder is named in full.
+ * slash, and with its symlinks resolved where it exists. A relative path is
+ * taken from `cwd`, the folder of the process that named it; none without one.
  */
-function dirForms(dir) {
-  if (typeof dir !== "string" || !path.isAbsolute(dir)) return [];
+function dirForms(dir, cwd = null) {
+  if (typeof dir !== "string" || !dir) return [];
+  if (!path.isAbsolute(dir)) {
+    if (!cwd) return [];
+    dir = path.resolve(cwd, dir);
+  }
   const forms = new Set([path.resolve(dir)]);
   try {
     forms.add(fs.realpathSync(dir));
@@ -290,16 +305,16 @@ function sessionDirs(harness) {
   for (const entry of (readText(`/proc/${harness}/environ`) || "").split("\0")) {
     if (entry.startsWith("CLAUDE_CONFIG_DIR=")) named.push(entry.slice("CLAUDE_CONFIG_DIR=".length));
   }
-  named.push(process.env.CLAUDE_CONFIG_DIR || "");
-  const given = named.filter(Boolean);
-  if (!given.length) given.push(path.join(os.homedir(), ".claude"));
-  return new Set(given.flatMap(dirForms));
+  if (process.env.CLAUDE_CONFIG_DIR) named.push(process.env.CLAUDE_CONFIG_DIR);
+  if (!named.some(Boolean)) named.push(path.join(os.homedir(), ".claude"));
+  // Relative, it is the harness's: Claude Code reads it from where it runs.
+  return new Set(named.flatMap((dir) => dirForms(dir, path.isAbsolute(dir) ? null : procCwd(harness))));
 }
 
 /** The session folder the run's Stop hook recorded beside its clock (`<clock>.stop-ran`, see keepalive). */
 function recordedSessions(clock) {
   const raw = clock ? readText(`${clock}.stop-ran`) : null;
-  return new Set((raw || "").split("\n").map((l) => l.trim()).filter(Boolean).flatMap(dirForms));
+  return new Set((raw || "").split("\n").flatMap((line) => dirForms(line.trim())));
 }
 
 /**
@@ -321,7 +336,7 @@ function launcherWatchers(pids, sessions, attached) {
     const argv = procArgv(pid);
     for (let i = 0; i < argv.length; i++) {
       const dir = argv[i] === WATCHER_FLAG ? argv[i + 1] : argv[i].startsWith(`${WATCHER_FLAG}=`) ? argv[i].slice(WATCHER_FLAG.length + 1) : null;
-      if (dir && dirForms(dir).some((d) => sessions.has(d))) {
+      if (dir && dirForms(dir, path.isAbsolute(dir) ? null : procCwd(pid)).some((d) => sessions.has(d))) {
         out.add(pid);
         break;
       }

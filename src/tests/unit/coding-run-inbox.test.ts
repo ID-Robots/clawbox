@@ -449,6 +449,10 @@ setTimeout(() => {
     delete env.CLAUDE_CONFIG_DIR;
     spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000, env });
     expect(fs.readFileSync(`${clock}.stop-ran`, "utf8")).toBe(`${path.join(root, ".claude")}\n`);
+    // A relative one is the harness's, from where it runs.
+    fs.rmSync(`${clock}.stop-ran`);
+    spawnSync(harness, [], { encoding: "utf-8", timeout: 20_000, cwd: bin, env: { ...process.env, CLAUDE_CONFIG_DIR: "cfg" } });
+    expect(fs.readFileSync(`${clock}.stop-ran`, "utf8")).toBe(`${path.join(bin, "cfg")}\n`);
   });
 
   describe("after the run: what it left in its process group (the settle's `leftovers` question)", () => {
@@ -502,14 +506,19 @@ setTimeout(() => {
       const other = path.join(root, "other-session");
       fs.mkdirSync(session);
       fs.mkdirSync(other);
-      // The group's leader stamps the clock, then leaves three things in its
+      // The group's leader stamps the clock, then leaves four things in its
       // group: the launcher's watcher for the session (restarted mid-run, by
-      // a launcher that does not give it a session of its own), a process
-      // naming ANOTHER session folder, and the run's own job.
+      // a launcher that does not give it a session of its own) — once by its
+      // full path, once relative to where it runs — a process naming ANOTHER
+      // session folder, and the run's own job.
       const loop = "while :; do sleep 1; done";
       const leader = spawn(
         "sh",
-        ["-c", `sh -c "$1"; sleep 0.05; sh -c "$2" launcher --heal-watch "$3" & sh -c "$2" launcher --heal-watch "$4" & sleep 32 & exit 0`, "sh", guardOf(settingsWith()), loop, session, other],
+        [
+          "-c",
+          `sh -c "$1"; sleep 0.05; sh -c "$2" launcher --heal-watch "$3" & (cd "$5" && exec sh -c "$2" launcher --heal-watch launcher-session) & sh -c "$2" launcher --heal-watch "$4" & sleep 32 & exit 0`,
+          "sh", guardOf(settingsWith()), loop, session, other, root,
+        ],
         { detached: true, stdio: "ignore" },
       );
       leader.unref();
@@ -517,9 +526,11 @@ setTimeout(() => {
       const left = (args: string[]) => leftovers(args).procs.map((p) => p.replace(/^pid \d+: /, "")).sort();
       const watcherOf = (dir: string) => `sh -c ${loop} launcher --heal-watch ${dir}`;
       try {
-        await vi.waitFor(() => expect(left([`--pgid=${pgid}`])).toHaveLength(3), { timeout: 5_000 });
+        await vi.waitFor(() => expect(left([`--pgid=${pgid}`])).toHaveLength(4), { timeout: 5_000 });
         // No session recorded (a Stop hook that never ran, or one from before): the clock's answer alone.
-        expect(left([`--first-command=${clock}`, `--pgid=${pgid}`])).toEqual([watcherOf(other), watcherOf(session), "sleep 32"].sort());
+        expect(left([`--first-command=${clock}`, `--pgid=${pgid}`])).toEqual(
+          [watcherOf(other), watcherOf(session), watcherOf("launcher-session"), "sleep 32"].sort(),
+        );
         // The session the run's Stop hook recorded, however it is spelled: its watcher and what runs under it are not the run's.
         fs.writeFileSync(`${clock}.stop-ran`, `${session}/\n`);
         expect(left([`--first-command=${clock}`, `--pgid=${pgid}`])).toEqual([watcherOf(other), "sleep 32"].sort());
