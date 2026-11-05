@@ -166,9 +166,9 @@ rebuilds everything, keeping your data:
   <Step title="Confirm it's back">
     ```bash
     systemctl is-active clawbox-setup clawbox-gateway     # OpenClaw edition
-    systemctl is-active clawbox-setup && hermes gateway status   # Hermes edition
+    systemctl is-active clawbox-setup clawbox-hermes-dashboard   # Hermes edition
     ```
-    The services should print `active` (on Hermes, `hermes gateway status` should say the gateway is running). Then reload `http://YOUR_BOX_IP` and send your assistant a message — a reply confirms everything is running.
+    Both should print `active`. Then reload `http://YOUR_BOX_IP` and send your assistant a message — a reply confirms everything is running.
   </Step>
 </Steps>
 

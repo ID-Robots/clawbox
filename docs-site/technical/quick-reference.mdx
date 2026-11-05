@@ -76,7 +76,7 @@ Also closed at the firewall: **631** CUPS (left running — loopback printing st
 **Every edition:** `clawbox-setup` (web, port 80) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (the one shared browser, CDP; kept running) · `clawbox-heartbeat.timer` (+ `.service`) · `clawbox-tunnel` (optional, off by default; named `<name>.clawbox.tech` tunnel or quick tunnel) · `clawbox-wifi-failover` · `clawbox-build-heal` (boot-time heal of a build an interrupted update left) · `clawbox-performance` · `clawbox-embed` (memory-search embedder, on demand) · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
 
 **OpenClaw / dual:** `clawbox-gateway` (pre-start self-heal script).
-**Hermes / dual:** `hermes-gateway` (the Hermes Agent gateway — usually the `clawbox` user's service; manage it with `hermes gateway status|restart`) · `clawbox-hermes-dashboard` · `clawbox-hermes-dashboard-proxy`. On Hermes the OpenClaw gateway unit is **masked** — an active `clawbox-gateway` there is a hard install failure.
+**Hermes / dual:** `clawbox-hermes-dashboard` · `clawbox-hermes-dashboard-proxy` (the desktop chat and the Hermes app) · `hermes-gateway` (Hermes' messaging gateway for channels and scheduled tasks, once a channel is set up — usually the `clawbox` user's service; manage it with `hermes gateway status|restart`). On Hermes the OpenClaw gateway unit is **masked** — an active `clawbox-gateway` there is a hard install failure.
 
 ## Commands (over SSH)
 
@@ -94,9 +94,9 @@ journalctl -u clawbox-gateway -n 50 --no-pager    # AI/providers/channels
 sudo systemctl restart clawbox-setup clawbox-gateway
 
 # Health / logs — Hermes / dual (clawbox-gateway is masked; restarting it fails)
-hermes gateway status
-journalctl --user -u hermes-gateway -n 50 --no-pager      # the assistant/providers/channels
-journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
+journalctl -u clawbox-hermes-dashboard -n 50 --no-pager  # the chat / the Hermes app
+hermes gateway status                                     # channels + scheduled tasks
+journalctl --user -u hermes-gateway -n 50 --no-pager
 hermes gateway restart --yes
 sudo systemctl restart clawbox-setup clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
 

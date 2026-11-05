@@ -286,7 +286,7 @@ or a messaging channel is unlinked.
     stopped.
 
     **Hermes:** open the **Hermes** app (the Hermes dashboard). If it does not load, the assistant
-    is not running.
+    is not running — the desktop chat goes through the same dashboard.
   </Step>
   <Step title="Restart it over SSH">
     ```bash
@@ -295,15 +295,20 @@ or a messaging channel is unlinked.
     journalctl -u clawbox-gateway -n 60 --no-pager
     sudo systemctl restart clawbox-gateway
 
-    # Hermes edition
+    # Hermes edition — the desktop chat and the Hermes app
+    systemctl is-active clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
+    journalctl -u clawbox-hermes-dashboard -n 60 --no-pager
+    sudo systemctl restart clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
+
+    # Hermes edition — Telegram and other channels, scheduled tasks
     hermes gateway status
     journalctl --user -u hermes-gateway -n 60 --no-pager
     hermes gateway restart --yes
     ```
 
-    On Hermes, `hermes gateway status` also says whether the gateway runs as the `clawbox` user's
-    service (the usual case, read with `journalctl --user`) or as a system service (read with
-    `sudo journalctl -u hermes-gateway`).
+    On Hermes the messaging gateway exists only once a channel is set up; `hermes gateway status`
+    says whether it runs, and whether as the `clawbox` user's service (the usual case, read with
+    `journalctl --user`) or as a system service (read with `sudo journalctl -u hermes-gateway`).
 
     Look for provider or auth errors in the log tail. `curl -s http://127.0.0.1:18789/healthz` on an
     OpenClaw box answers `{"ok":true,…}` while the gateway process is up — that alone does not prove
@@ -358,8 +363,8 @@ cat /etc/clawbox/edition.env        # CLAWBOX_EDITION=openclaw | hermes | dual
     **Cause:** Hermes loads plugins only when it starts. ClawBox restarts Hermes when the plugin set
     changes and shows a notice; the restart closes the open chat.
 
-    **Fix:** open a new chat. If there was no notice, restart Hermes over SSH:
-    `hermes gateway restart --yes`.
+    **Fix:** open a new chat. If there was no notice, restart the Hermes dashboard, which serves
+    the chat, over SSH: `sudo systemctl restart clawbox-hermes-dashboard`.
   </Accordion>
   <Accordion title="Hermes: the chat forgot the conversation after a reload">
     From 4.3 the Hermes chat resumes the same session after a reload, a restart or an update. If it
@@ -637,7 +642,8 @@ When contacting support, include the relevant log tail — it usually pins the c
 ```bash
 journalctl -u clawbox-setup -n 50 --no-pager      # web app / login / setup API / updates
 journalctl -u clawbox-gateway -n 50 --no-pager    # OpenClaw: AI gateway / providers / channels
-journalctl --user -u hermes-gateway -n 50 --no-pager   # Hermes: the assistant / providers / channels
+journalctl -u clawbox-hermes-dashboard -n 50 --no-pager   # Hermes: the chat and the Hermes app
+journalctl --user -u hermes-gateway -n 50 --no-pager    # Hermes: channels and scheduled tasks
 journalctl -u 'clawbox-root-update@*' -n 80 --no-pager   # the steps an update ran as root
 ```
 

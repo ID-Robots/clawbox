@@ -41,13 +41,13 @@ The user never talks to the gateway directly — everything enters through port 
 
 ## Services
 
-Everything runs under systemd. The two you will interact with most are **clawbox-setup** (the web OS) and your edition's AI unit — `clawbox-gateway` on OpenClaw/dual, the Hermes gateway (`hermes-gateway`, managed with `hermes gateway status|restart`) on Hermes/dual.
+Everything runs under systemd. The two you will interact with most are **clawbox-setup** (the web OS) and your edition's AI unit — `clawbox-gateway` on OpenClaw/dual, `clawbox-hermes-dashboard` on Hermes/dual (plus Hermes' messaging gateway once a channel is set up).
 
 | Service | What it runs | Port | Restart policy |
 |---|---|---|---|
 | `clawbox-setup` | Node.js `production-server.js` → Next.js standalone build (desktop UI, wizard, `/setup-api/*`) | 80 (+443 if certs present) | always (3 s) |
 | `clawbox-gateway` — **OpenClaw / dual only** | `openclaw gateway --bind lan` — preceded by `gateway-pre-start.sh` config self-heals | 18789 (private LAN only, token-gated) | always (5 s) |
-| `hermes-gateway` — **Hermes / dual only** | The Hermes Agent gateway: chat sessions, Telegram and other channels, scheduled tasks. Usually the `clawbox` user's service (`~/.config/systemd/user`), written by Hermes' own `hermes gateway install` | — | managed by Hermes |
+| `hermes-gateway` — **Hermes / dual only** | Hermes' messaging gateway: receives Telegram and the other channels and runs scheduled tasks. Installed once a channel is set up, usually as the `clawbox` user's service (`~/.config/systemd/user`), by Hermes' own `hermes gateway install`; manage it with `hermes gateway status\|restart` | — | managed by Hermes |
 | `clawbox-hermes-dashboard` — **Hermes / dual only** | The Hermes dashboard | 9119 on `127.0.0.2` (loopback) | always |
 | `clawbox-hermes-dashboard-proxy` — **Hermes / dual only** | Session-gated auth proxy in front of the dashboard | 8090 (private LAN only) | always |
 | `clawbox-ap` | Wi-Fi hotspot **ClawBox-Setup** for first-boot setup (oneshot) | — | oneshot |

@@ -51,17 +51,22 @@ Hermes units instead:
 
 ```bash
 sudo systemctl restart clawbox-setup clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
-hermes gateway restart --yes
 journalctl -u clawbox-setup -n 50 --no-pager
-journalctl --user -u hermes-gateway -n 50 --no-pager
 journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
 ```
 
-The Hermes gateway is the assistant itself (chat, Telegram, scheduled tasks), and Hermes manages
-its service with its own command: `hermes gateway restart` lets a turn in progress finish first,
-and `--yes` restarts even while sessions are live. It usually runs as the `clawbox` user's service
-(hence `journalctl --user`); `hermes gateway status` says which. The two dashboard units serve the
-**Hermes** app on the desktop.
+The desktop chat and the **Hermes** app run through the dashboard units above. Once a messaging
+channel such as Telegram is set up, Hermes also runs its **messaging gateway** — what receives
+channel messages and runs scheduled tasks. Hermes manages that service with its own command, and
+it usually runs as the `clawbox` user's service:
+
+```bash
+hermes gateway status                                   # running or not, user or system service
+hermes gateway restart --yes                            # lets a turn in progress finish first
+journalctl --user -u hermes-gateway -n 50 --no-pager
+```
+
+On a box with no channel set up, `hermes gateway status` saying it is not running is normal.
 
 Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If it recurs, capture the logs above before the
 next restart.
