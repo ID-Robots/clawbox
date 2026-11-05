@@ -182,6 +182,8 @@ let reviewItems: unknown[];
 let nightlyRuns: unknown[];
 const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" };
 let historyCommits: unknown[];
+/** What POST revert answers instead of success (a refusal), when set. */
+let revertRefusal: { status: number; body: unknown } | null;
 let pageOverride: unknown;
 let ingestJobs: unknown[];
 /** The account half of `GET costs?allowance=1`. */
@@ -241,7 +243,10 @@ function installFetch() {
       return ok({ path: "entities/acme-widgets.md", commits: historyCommits });
     }
     if (url.startsWith(`${p}/diff?`)) return ok({ from: null, to: "a".repeat(40), path: "entities/acme-widgets.md", commit: null, files: [], diff: "+added line", truncated: false });
-    if (url === `${p}/revert` && method === "POST") return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
+    if (url === `${p}/revert` && method === "POST") {
+      if (revertRefusal) return ok(revertRefusal.body, revertRefusal.status);
+      return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
+    }
     if (url.startsWith(`${p}/lint`)) return ok({ scope: "all", checked: 2, findings: [], errors: 0, warnings: 0, ok: true });
     if (url === `${p}/costs` || url === `${p}/costs?allowance=1`) {
       return ok({
@@ -372,6 +377,7 @@ beforeEach(() => {
     burst: null,
   };
   historyCommits = [INGEST_COMMIT];
+  revertRefusal = null;
   pageOverride = null;
   ingestJobs = [];
   stopRefusals = [];
@@ -774,6 +780,54 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-tab-browse")).toHaveAttribute("aria-selected", "true");
     fireEvent.click(screen.getByTestId("prime-radiant-history-back"));
     expect(await screen.findByTestId("prime-radiant-page")).toBeInTheDocument();
+  });
+
+  it("offers no Undo on a verification and says why, while other changes keep theirs", async () => {
+    historyCommits = [
+      {
+        sha: "c".repeat(40),
+        subject: "verify: product/sprocket-x200/weight",
+        at: "2026-01-03T10:00:00.000Z",
+        author: "Prime Radiant",
+        verified: { by: "owner" },
+        noUndo: "verification",
+      },
+      INGEST_COMMIT,
+    ];
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const [verification, ingest] = await screen.findAllByTestId("prime-radiant-commit");
+    expect(within(verification).queryByTestId("prime-radiant-revert")).toBeNull();
+    expect(within(verification).getByTestId("prime-radiant-revert-locked")).toHaveTextContent("Can't be undone");
+    expect(within(verification).getByTestId("prime-radiant-revert-locked-why")).toHaveTextContent(
+      "A verification is never undone: the answers it replaced stay retired. To change this fact, verify the right answer.",
+    );
+    expect(within(ingest).getByTestId("prime-radiant-revert")).toBeEnabled();
+    expect(within(ingest).queryByTestId("prime-radiant-revert-locked")).toBeNull();
+  });
+
+  it("says in the owner's words when the server refuses an undo of a verification", async () => {
+    revertRefusal = {
+      status: 409,
+      body: {
+        error: "That change verified a fact, and a verification is never undone.",
+        code: "lint_blocked",
+        findings: [{ rule: "verification-undo", path: "entities/acme-widgets.md", message: "x" }],
+      },
+    };
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const commit = await screen.findByTestId("prime-radiant-commit");
+    fireEvent.click(within(commit).getByTestId("prime-radiant-revert"));
+    fireEvent.click(within(await screen.findByRole("dialog")).getAllByRole("button").at(-1) as HTMLElement);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/^Not undone: that change verified a fact, and a verification is never undone/);
+    expect(alert).not.toHaveTextContent("verification-undo");
+    expect(within(screen.getByTestId("prime-radiant-history")).queryByRole("status")).toBeNull();
   });
 
   it("sends one undo however fast Confirm is pressed twice", async () => {

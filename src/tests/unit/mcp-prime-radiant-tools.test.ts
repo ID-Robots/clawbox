@@ -855,6 +855,33 @@ describe("refusals worth their own words", () => {
     expect(out.isError && out.error).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("secret-pattern on concepts/x.md") });
   });
 
+  it("says an undo of a verification is nobody's to retry, and how to change the fact instead", async () => {
+    refuse(409, "lint_blocked", { findings: [{ rule: "verification-undo", path: "concepts/pricing.md", message: "x" }] });
+    const out = await harness().call("prime_radiant_undo", { commit: SHA, path: "concepts/pricing.md", confirm: true });
+    expect(out.isError && out.error).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("verification-undo on concepts/pricing.md") });
+    expect(out.isError && out.error.next).toMatch(/never undone[\s\S]*Do not retry[\s\S]*prime_radiant_claim_verify/);
+    expect(out.isError && out.error.next).not.toMatch(/owner can do it|try again/);
+  });
+
+  it("marks a verification in a page's history as one that cannot be undone", async () => {
+    answer([
+      /\/history\//,
+      {
+        path: "concepts/pricing.md",
+        commits: [
+          { sha: SHA, subject: `verify: ${CLAIM}`, at: "2026-10-16T10:00:00Z", author: "Prime Radiant", verified: { by: "owner" }, noUndo: "verification" },
+          { sha: "fedcba9876543210fedcba9876543210fedcba98", subject: "edit: concepts/pricing.md", at: "2026-10-15T10:00:00Z", author: "ClawBox assistant" },
+        ],
+      },
+    ]);
+    const out = await harness().call("prime_radiant_history", { path: "concepts/pricing.md" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const [verification, edit] = JSON.parse(out.text).commits;
+    expect(verification).toMatchObject({ commit: "0123456789ab", undo: false });
+    expect(edit).not.toHaveProperty("undo");
+  });
+
   it("sends a verified claim's edit to verify, and a busy import to its status", async () => {
     refuse(409, "verified");
     const edit = await harness().call("prime_radiant_claim_edit", { id: CLAIM, text: "x" });

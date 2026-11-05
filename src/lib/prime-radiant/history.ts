@@ -8,9 +8,22 @@
  * applying the commit's own patch in reverse: when a later commit changed the
  * same lines the patch no longer applies and the revert is refused
  * (`conflict`) rather than guessed at. The result is linted like every other
- * change: a revert that would bring a retired claim id back (undoing a
- * verification) is refused by `claim-id-retired-reuse`. Undo is the owner's;
- * the assistant may undo only a commit it authored itself (`onlyAuthoredBy`).
+ * change: a revert that would bring a retired claim id back is refused by
+ * `claim-id-retired-reuse`. Undo is the owner's; the assistant may undo only a
+ * commit it authored itself (`onlyAuthoredBy`).
+ *
+ * A VERIFICATION is never undone — not whole, not one page of it, not by the
+ * owner and not by the assistant (`lint_blocked`, finding
+ * {@link VERIFICATION_UNDO_RULE}). A verification (a `verify:` commit: a
+ * settled review question, a fact verified in the app or through the
+ * assistant) retires the losing answers for good, often on other pages; undoing
+ * only the verified page would put the losing answer back and leave the right
+ * one retired, with the question never raised again. So a commit is judged by
+ * everything it did, also when only one page of it is to be undone: its
+ * `verify:` subject says it verified ({@link isVerificationCommit}), or its
+ * pages say so — an id a page lists as retired that none did before, an
+ * id a page that is still there no longer lists, a verification stamp it set.
+ * History marks such a commit (`CommitInfo.noUndo`) and offers no Undo on it.
  *
  * Commit ids reach git only rebuilt from the hex alphabet; page paths only
  * through `safePagePath`.
@@ -18,7 +31,8 @@
  * SERVER ONLY.
  */
 
-import { commitAuthorEmail, commitPaths, git, logForPath, withVaultLock, type CommitInfo, type VaultAuthor } from "./git";
+import { parsePage } from "./frontmatter";
+import { commitAuthorEmail, commitInfo, commitPaths, git, logForPath, showFileAt, withVaultLock, type CommitInfo, type VaultAuthor } from "./git";
 import { restorePluginOnlyEdits } from "./plugin-repair";
 import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
@@ -44,6 +58,12 @@ export function safeCommitId(input: unknown): string | null {
   return out;
 }
 
+/** The rule a refused undo of a verification names in its findings (the route's `findings`, History's own wording). */
+export const VERIFICATION_UNDO_RULE = "verification-undo";
+
+/** A finding a refused revert carries: the lint's, or {@link VERIFICATION_UNDO_RULE}. */
+export type RevertFinding = Omit<LintFinding, "rule"> & { rule: LintFinding["rule"] | typeof VERIFICATION_UNDO_RULE };
+
 export class HistoryError extends Error {
   constructor(
     readonly code:
@@ -58,7 +78,7 @@ export class HistoryError extends Error {
       | "commit_failed",
     message: string,
     readonly status: number,
-    readonly findings: LintFinding[] = [],
+    readonly findings: RevertFinding[] = [],
   ) {
     super(message);
     this.name = "HistoryError";
@@ -71,11 +91,131 @@ async function resolveCommit(vault: string, ref: string): Promise<string | null>
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+/**
+ * Whether a commit's record says it verified: a `verify:` commit (verify.ts —
+ * a settled review question, a fact verified in the app or through the
+ * assistant). Such a commit is never undone. The one-off migration that
+ * re-stamps who verified (`migrate:`, verify.ts) carries a `Verified-by`
+ * trailer too, but keeps each verification's moment, verifies nothing anew and
+ * retires nothing: it stays undoable.
+ */
+export function isVerificationCommit(info: Pick<CommitInfo, "subject">): boolean {
+  return info.subject.trimStart().startsWith("verify:");
+}
+
+/** Each listed commit, with `noUndo` on the ones Undo refuses whatever the vault is like. */
+function markNoUndo(commits: CommitInfo[]): CommitInfo[] {
+  return commits.map((c) => (isVerificationCommit(c) ? { ...c, noUndo: "verification" as const } : c));
+}
+
 export async function pageHistory(rel: string, limit = 50, vault: string = vaultDir()): Promise<{ path: string; commits: CommitInfo[] } | null> {
   const safe = safePagePath(rel);
   if (!safe || !isKnowledgePage(safe) || !(await vaultInitialised(vault))) return null;
   const commits = await logForPath(vault, safe, Math.max(1, Math.min(limit, MAX_HISTORY)));
-  return { path: safe, commits };
+  return { path: safe, commits: markNoUndo(commits) };
+}
+
+/**
+ * What one commit did to the vault's verifications and retirements, over EVERY
+ * page it touched; only a page there before and after counts as changed.
+ */
+export interface VerificationEffect {
+  /** Ids a page lists as retired after the commit that no page it touched listed before. */
+  retired: string[];
+  /** Ids a page stopped listing as retired that no page it touched lists after. */
+  unretired: string[];
+  /** Claims carrying a verification stamp the commit set: one no page it touched carried before (by id and moment). */
+  verified: string[];
+  /** The pages any of that is on. */
+  pages: string[];
+}
+
+const EFFECT_READS_IN_FLIGHT = 8;
+
+/**
+ * {@link VerificationEffect} of commit `sha` against `parent`, from the pages
+ * as the two commits hold them. Renames are read as a removal and an addition,
+ * so a page that moved (or pages merged into one) carry their retirements and
+ * stamps across and count as no change; so does a page restored by an undo.
+ */
+export async function verificationEffect(vault: string, parent: string, sha: string): Promise<VerificationEffect> {
+  const touched = (await git(vault, ["diff", "--name-only", "-z", "--no-renames", parent, sha])).stdout
+    .split("\0")
+    .filter((p) => p !== "" && isKnowledgePage(p));
+  type Side = { exists: boolean; retired: string[]; stamps: Array<{ id: string; at: string }> };
+  const read = async (ref: string, p: string): Promise<Side> => {
+    const text = await showFileAt(vault, ref, p);
+    if (text === null) return { exists: false, retired: [], stamps: [] };
+    const parsed = parsePage(text);
+    if (!parsed.ok) return { exists: true, retired: [], stamps: [] };
+    const fm = parsed.frontmatter;
+    return { exists: true, retired: fm.retiredClaimIds, stamps: fm.claims.flatMap((c) => (c.verified ? [{ id: c.id, at: c.verified.at }] : [])) };
+  };
+  const sides: Array<{ path: string; before: Side; after: Side }> = [];
+  for (let i = 0; i < touched.length; i += EFFECT_READS_IN_FLIGHT) {
+    const batch = touched.slice(i, i + EFFECT_READS_IN_FLIGHT);
+    sides.push(...(await Promise.all(batch.map(async (p) => ({ path: p, before: await read(parent, p), after: await read(sha, p) })))));
+  }
+  const retiredBefore = new Set(sides.flatMap((s) => s.before.retired));
+  const retiredAfter = new Set(sides.flatMap((s) => s.after.retired));
+  const stampsBefore = new Set(sides.flatMap((s) => s.before.stamps.map((st) => `${st.id}\n${st.at}`)));
+  const retired = new Set<string>();
+  const unretired = new Set<string>();
+  const verified = new Set<string>();
+  const pages = new Set<string>();
+  for (const s of sides) {
+    // A verification changes pages that are there (verify.ts writes no new page); a page that
+    // came or went is a page restored, moved or removed — its retirements stay in the ledger.
+    if (!s.before.exists || !s.after.exists) continue;
+    for (const id of s.after.retired) {
+      if (!retiredBefore.has(id)) {
+        retired.add(id);
+        pages.add(s.path);
+      }
+    }
+    for (const id of s.before.retired) {
+      if (!retiredAfter.has(id)) {
+        unretired.add(id);
+        pages.add(s.path);
+      }
+    }
+    for (const st of s.after.stamps) {
+      if (!stampsBefore.has(`${st.id}\n${st.at}`)) {
+        verified.add(st.id);
+        pages.add(s.path);
+      }
+    }
+  }
+  return { retired: [...retired].sort(), unretired: [...unretired].sort(), verified: [...verified].sort(), pages: [...pages].sort() };
+}
+
+const VERIFICATION_UNDO_MESSAGE =
+  "That change verified a fact, and a verification is never undone: the answers it replaced stay retired for good, " +
+  "so undoing it would leave the wiki without the right answer. To change the fact, verify the right answer instead.";
+
+/**
+ * The refusal for undoing commit `sha` (whole or one page of it — it is judged
+ * whole either way) when it verified or retired anything, else null.
+ */
+async function verificationRefusal(vault: string, sha: string, parent: string): Promise<HistoryError | null> {
+  const info = await commitInfo(vault, sha);
+  const effect = await verificationEffect(vault, parent, sha);
+  const said = !!info && isVerificationCommit(info);
+  if (!said && effect.retired.length === 0 && effect.unretired.length === 0 && effect.verified.length === 0) return null;
+  let pages = effect.pages;
+  if (pages.length === 0) {
+    const names = await git(vault, ["diff", "--name-only", "-z", "--no-renames", parent, sha]);
+    pages = names.stdout.split("\0").filter((p) => p !== "" && isKnowledgePage(p));
+  }
+  const findings: RevertFinding[] = (pages.length > 0 ? pages : [""]).slice(0, 20).map((p) => ({
+    rule: VERIFICATION_UNDO_RULE,
+    severity: "error",
+    path: p,
+    message: "This commit verified a fact or retired an answer; that is never undone.",
+    blocksCommit: true,
+    details: { retired: effect.retired.length, unretired: effect.unretired.length, verified: effect.verified.length },
+  }));
+  return new HistoryError("lint_blocked", VERIFICATION_UNDO_MESSAGE, 409, findings);
 }
 
 export interface DiffResult {
@@ -178,6 +318,11 @@ export async function revertCommit(
     if (!sha) throw new HistoryError("not_found", "No such commit in the vault.", 404);
     const parent = await resolveCommit(vault, `${sha}^1`);
     if (!parent) throw new HistoryError("invalid", "The first commit of the vault cannot be reverted.", 400);
+    // Before who may undo it: nobody may, and the assistant should hear that rather than "ask the owner".
+    // Judged by the WHOLE commit also when one page is asked for: undoing only the verified page would
+    // leave the answers it replaced retired on the other pages, and the right value gone for good.
+    const verification = await verificationRefusal(vault, sha, parent);
+    if (verification) throw verification;
     if (options.onlyAuthoredBy && (await commitAuthorEmail(vault, sha)) !== options.onlyAuthoredBy.email) {
       throw new HistoryError("owner_only", "Only the owner can undo a change the assistant did not make.", 403);
     }

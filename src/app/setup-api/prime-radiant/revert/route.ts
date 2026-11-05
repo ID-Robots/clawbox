@@ -5,9 +5,11 @@
  * assistant, through the MCP bearer, may undo a commit it authored itself,
  * and its revert commit names it; any other commit answers it 403
  * `owner_only`. 409 `conflict` (a later change touched the same lines),
- * `lint_blocked` (with `findings` — e.g. undoing a verification would bring a
- * retired claim id back), `nothing_to_revert`, `dirty`; 400 `invalid`; 404
- * `not_found` / `not_initialised`; 500 `commit_failed` with what git said.
+ * `lint_blocked` (with `findings` — a verification, whole or one page of it,
+ * is never undone, for the owner or the assistant: rule `verification-undo`;
+ * else the lint's, e.g. a retired claim id brought back), `nothing_to_revert`,
+ * `dirty`; 400 `invalid`; 404 `not_found` / `not_initialised`; 500
+ * `commit_failed` with what git said.
  */
 import { HistoryError, revertCommit } from "@/lib/prime-radiant/history";
 import { fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";

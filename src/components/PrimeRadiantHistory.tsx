@@ -24,9 +24,15 @@ import {
  * History: one page's commits (every change to the vault is one commit by
  * "Prime Radiant"), the diff of any of them, and Undo — a revert of that
  * commit's change to the page, as one new commit, linted like any other.
- * The route is owner-only and refuses an undo that would break a rule (undoing
- * a verification brings a retired claim id back, which the lint refuses).
+ * The route is owner-only and refuses an undo that would break a rule. A
+ * verification is never undone (its losing answers stay retired, so undoing it
+ * would lose the right one): a commit the history marks `noUndo` shows why
+ * instead of Undo, and the route's refusal of one (`verification-undo`) says
+ * so in the owner's language.
  */
+
+/** The finding the route's refusal of an undo of a verification names (history.ts `VERIFICATION_UNDO_RULE`). */
+const VERIFICATION_UNDO_RULE = "verification-undo";
 export default function PrimeRadiantHistory({ initialPage, revision, onChanged, onOpenPage }: {
   initialPage: string | null;
   revision: number;
@@ -102,10 +108,11 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
       setDiff(null);
       onChanged();
     } catch (err) {
-      const findings = err instanceof PrimeRadiantError && Array.isArray(err.body?.findings)
-        ? (err.body.findings as Array<{ rule?: string }>).map((f) => f.rule).filter(Boolean).join(", ")
-        : "";
-      setError(findings ? `${errorText(err, t)} (${findings})` : errorText(err, t));
+      const rules = err instanceof PrimeRadiantError && Array.isArray(err.body?.findings)
+        ? (err.body.findings as Array<{ rule?: string }>).map((f) => f.rule).filter((r): r is string => typeof r === "string" && r !== "")
+        : [];
+      if (rules.includes(VERIFICATION_UNDO_RULE)) setError(t("primeRadiant.history.verificationRefused"));
+      else setError(rules.length > 0 ? `${errorText(err, t)} (${[...new Set(rules)].join(", ")})` : errorText(err, t));
     } finally {
       reverting.current = false;
       setBusy(false);
@@ -159,7 +166,16 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
                     )}
                   </span>
                 </button>
-                <button
+                {c.noUndo ? (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 text-[11px] text-[var(--text-muted)]"
+                    data-testid="prime-radiant-revert-locked"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">lock</span>
+                    {t("primeRadiant.history.noUndo")}
+                  </span>
+                ) : (
+                  <button
                     type="button"
                     className={BTN_DANGER}
                     disabled={busy}
@@ -169,7 +185,13 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
                     <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">undo</span>
                     {t("primeRadiant.history.undo")}
                   </button>
+                )}
               </div>
+              {c.noUndo && (
+                <p className="mt-1 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-revert-locked-why">
+                  {t("primeRadiant.history.noUndoWhy")}
+                </p>
+              )}
               {selected === c.sha && diff && diff.to === c.sha && (
                 <pre className={`${CARD_SURFACE} mt-2 p-2 max-h-80 overflow-auto text-[11px] leading-snug font-mono whitespace-pre`} data-testid="prime-radiant-diff">
                   {diff.diff.split("\n").map((line, j) => (

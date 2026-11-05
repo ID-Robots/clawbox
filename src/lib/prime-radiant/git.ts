@@ -152,6 +152,12 @@ export interface CommitInfo {
    * when the assistant verified on the owner's word. Absent on every other commit.
    */
   verified?: { by: string; via?: string };
+  /**
+   * Why History offers no Undo on this commit (history.ts `pageHistory`):
+   * `verification` — it verified a fact, which is never undone. Absent on
+   * every commit that may be undone.
+   */
+  noUndo?: "verification";
 }
 
 /** The trailers a verification commit carries, read back by {@link CommitInfo}'s `verified`. */
@@ -200,6 +206,13 @@ function parseLog(stdout: string): CommitInfo[] {
 
 export async function headCommit(vault: string): Promise<CommitInfo | null> {
   const r = await git(vault, ["log", "-1", `--format=${LOG_FORMAT}`], { allowFail: true });
+  if (r.code !== 0) return null;
+  return parseLog(r.stdout)[0] ?? null;
+}
+
+/** One commit's record (subject, date, author, verification trailers), or null when `sha` names no commit. */
+export async function commitInfo(vault: string, sha: string): Promise<CommitInfo | null> {
+  const r = await git(vault, ["log", "-1", `--format=${LOG_FORMAT}`, "--end-of-options", sha], { allowFail: true });
   if (r.code !== 0) return null;
   return parseLog(r.stdout)[0] ?? null;
 }
