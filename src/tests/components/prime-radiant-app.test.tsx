@@ -193,6 +193,8 @@ let searchAnswer: Record<string, unknown>;
 let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
+/** The pass `GET nightly` says is running (a Run now sets it). */
+let nightlyRunning: string | null;
 const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" };
 let historyCommits: unknown[];
 /** What POST revert answers instead of success (a refusal), when set. */
@@ -250,7 +252,13 @@ function installFetch() {
       reviewItems = [];
       return ok({ item: { ...REVIEW_ITEM, status: "resolved" }, commit: "abc1234", retired: [] });
     }
-    if (url === `${p}/nightly`) return ok({ running: null, nextRunAt: null, runs: nightlyRuns });
+    if (url === `${p}/nightly`) return ok({ running: nightlyRunning, nextRunAt: null, runs: nightlyRuns });
+    if (url === `${p}/nightly/run` && method === "POST" && (body as { merge?: unknown } | undefined)?.merge === undefined) {
+      const run = { id: "run-started00001", kind: "nightly", branch: null, status: "running", trigger: "manual", startedAt: "2026-01-06T09:00:00.000Z", finishedAt: null, usdEstimate: 0, summary: null };
+      nightlyRunning = run.id;
+      nightlyRuns = [run, ...nightlyRuns];
+      return ok({ run }, 202);
+    }
     if (url === `${p}/nightly/run` && method === "POST") return ok({ branch: "dream/2026-01-05", commit: "def5678abc", changed: [] });
     if (url.startsWith(`${p}/history/`)) {
       return ok({ path: "entities/acme-widgets.md", commits: historyCommits });
@@ -387,6 +395,7 @@ beforeEach(() => {
   reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
+  nightlyRunning = null;
   allowanceAccount = {
     available: true, plan: "max", timeZone: "UTC",
     weekly: { used: 3_400_000, limit: 10_000_000, percentUsed: 34, isOverLimit: false, resetAt: "2026-01-09T14:05:00.000Z" },
@@ -917,6 +926,19 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.find((c) => c.url.endsWith("/nightly/run"))?.body).toEqual({ merge: "dream/2026-01-05" });
     });
+  });
+
+  it("says a started nightly pass has started only while it runs, and no longer once it has ended (B9)", async () => {
+    await mount();
+    await openTab("settings");
+    fireEvent.click(await screen.findByTestId("prime-radiant-nightly-run"));
+    expect(await screen.findByText("The nightly pass has started.")).toBeInTheDocument();
+    // The pass merges; the window's Refresh reads the nightly card again.
+    nightlyRunning = null;
+    nightlyRuns = [{ ...(nightlyRuns[0] as object), status: "done", finishedAt: "2026-01-06T09:05:00.000Z" }];
+    fireEvent.click(screen.getByTestId("prime-radiant-refresh"));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-nightly-run-row")).toHaveAttribute("data-status", "done"));
+    expect(screen.queryByText("The nightly pass has started.")).toBeNull();
   });
 
   it("offers no second opinion and never sends an Opus section, even to an older server that still has one", async () => {

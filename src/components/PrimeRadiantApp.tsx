@@ -426,7 +426,7 @@ export default function PrimeRadiantApp() {
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}
             {tab === "settings" && (
               <div className="space-y-4">
-                <PrimeRadiantSettings onChanged={changed} />
+                <PrimeRadiantSettings revision={revision} onChanged={changed} />
                 <PrimeRadiantUsage revision={revision} />
               </div>
             )}

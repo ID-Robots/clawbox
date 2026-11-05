@@ -83,7 +83,7 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  *
  * No money is shown.
  */
-export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => void }) {
+export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revision?: number; onChanged: () => void }) {
   const { t, locale } = useT();
   const [answer, setAnswer] = useState<SettingsAnswer | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -149,7 +149,7 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
 
   return (
     <div className="space-y-4" data-testid="prime-radiant-settings">
-      <PrimeRadiantNightly onChanged={onChanged} />
+      <PrimeRadiantNightly revision={revision} onChanged={onChanged} />
 
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
       {!draft && !error && <p role="status" className="text-xs text-[var(--text-muted)]">{t("primeRadiant.loading")}</p>}
@@ -307,19 +307,22 @@ function Toggle({ label, checked, onChange, testId }: { label: string; checked: 
 }
 
 /** The nightly pass: Run now, recent nights, and Merge for a held one. */
-function PrimeRadiantNightly({ onChanged }: { onChanged: () => void }) {
+function PrimeRadiantNightly({ revision, onChanged }: { revision: number; onChanged: () => void }) {
   const { t, locale } = useT();
   const [state, setState] = useState<NightlyAnswer | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // The pass Run now started: "has started" is said only while it is still the one running.
+  const [started, setStarted] = useState<string | null>(null);
 
   const load = useCallback(
     () => prJson<NightlyAnswer>(`${API}/nightly`).then(setState).catch((err) => setError(errorText(err, t))),
     [t],
   );
 
-  useEffect(() => { void load(); }, [load]);
+  // Again on the window's Refresh, so a pass that ended meanwhile is shown as ended.
+  useEffect(() => { void load(); }, [load, revision]);
 
   // While a pass runs, look again every few seconds; nothing is polled otherwise.
   useEffect(() => {
@@ -332,9 +335,10 @@ function PrimeRadiantNightly({ onChanged }: { onChanged: () => void }) {
     setBusy("run");
     setError(null);
     setNote(null);
+    setStarted(null);
     try {
-      await prJson(`${API}/nightly/run`, jsonInit("POST", {}));
-      setNote(t("primeRadiant.nightly.started"));
+      const r = await prJson<{ run?: { id?: unknown } }>(`${API}/nightly/run`, jsonInit("POST", {}));
+      setStarted(typeof r?.run?.id === "string" ? r.run.id : null);
       await load();
     } catch (err) {
       setError(errorText(err, t));
@@ -347,6 +351,7 @@ function PrimeRadiantNightly({ onChanged }: { onChanged: () => void }) {
     setBusy(branch);
     setError(null);
     setNote(null);
+    setStarted(null);
     try {
       const r = await prJson<{ commit: string }>(`${API}/nightly/run`, jsonInit("POST", { merge: branch }));
       setNote(t("primeRadiant.nightly.merged", { branch, sha: shortSha(r.commit) }));
@@ -377,6 +382,9 @@ function PrimeRadiantNightly({ onChanged }: { onChanged: () => void }) {
       </div>
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
       {note && <p role="status" className="text-xs text-emerald-300">{note}</p>}
+      {!note && started !== null && state?.running === started && (
+        <p role="status" className="text-xs text-emerald-300" data-testid="prime-radiant-nightly-started">{t("primeRadiant.nightly.started")}</p>
+      )}
       {runs.length === 0 && <p className="text-xs text-[var(--text-muted)]">{t("primeRadiant.nightly.none")}</p>}
       <ul className="space-y-1.5">
         {runs.slice(0, 10).map((run) => {
