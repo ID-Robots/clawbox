@@ -577,6 +577,15 @@ setup and switching between Anthropic accounts get a long list of fixes.
   chat straight back to your cloud model, instead of loading the local model
   again on the next message.
 
+### Coding Agent
+
+- A ClawBox AI coding run on a model with a one-million-token window compacts
+  its conversation well before the provider's limit, instead of growing until
+  the provider refused the next request and the run failed. A run that reaches
+  the limit anyway is compacted and carried on in the same session, up to
+  twice, and its timeline says so; one that cannot be carried on says how far
+  over the limit it was, in the provider's own words.
+
 ### Prime Radiant
 
 - **Undo** never undoes a verification, whole or one page of it, which used to
