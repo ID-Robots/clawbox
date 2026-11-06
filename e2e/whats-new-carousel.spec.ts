@@ -307,7 +307,7 @@ test.describe("the update screen's What's new showcase", () => {
     await expect(stage).toHaveAttribute("data-feature", "busy");
     expect(await stage.locator(".wns-cam").evaluate((el) => getComputedStyle(el).animationName)).toBe("wns-bscam");
     await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1", { timeout: 7_000 });
-    await expect(stage.locator(".wns-toast")).toContainText("Cancel waits for them");
+    await expect(stage.locator(".wns-toast")).toContainText("Cancel waits for the run");
     await showcase.getByRole("tab", { name: "Job alerts" }).click();
     await expect(stage).toHaveAttribute("data-feature", "alert");
     await expectStageImage(page, FULL_IMAGES[SHOWCASE_CHIPS.length - 1]);

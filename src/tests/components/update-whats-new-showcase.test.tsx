@@ -256,7 +256,7 @@ describe("UpdateWhatsNewShowcase", () => {
 
     fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[8] }));
     expect(stage()).toHaveAttribute("data-feature", "busy");
-    expect(stage()).toHaveTextContent("Cancel waits for them");
+    expect(stage()).toHaveTextContent("Cancel waits for the run");
 
     fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[9] }));
     expect(stage().querySelector(".wns-pct")?.textContent).toBe("8%");

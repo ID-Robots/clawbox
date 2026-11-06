@@ -713,11 +713,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           onConfirm={() => { run.clearBusy(); void startUpdate(false, true); }}
         >
           <p>
-            {tr(
-              "update.busyBody",
-              "{count} agent runs are active. The update stops them mid-task. Wait until they finish, or update anyway.",
-              { count: run.busy.total },
-            )}
+            {run.busy.total === 1
+              ? tr("update.busyBodyOne", "1 agent run is active. The update stops it mid-task. Wait until it finishes, or update anyway.")
+              : tr(
+                "update.busyBody",
+                "{count} agent runs are active. The update stops them mid-task. Wait until they finish, or update anyway.",
+                { count: run.busy.total },
+              )}
           </p>
         </ConfirmModal>
       )}

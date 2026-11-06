@@ -366,7 +366,7 @@ function BusyCam() {
 function BusyFrame({ tr }: DemoProps) {
   return (
     <div className="wns-o wns-toast">
-      <b>{ICONS.wait} {tr("update.showcase.busyWait", "Cancel waits for them")}</b>
+      <b>{ICONS.wait} {tr("update.showcase.busyWait", "Cancel waits for the run")}</b>
       <small>{tr("update.showcase.busyWaitText", "Nothing is stopped mid-task.")}</small>
     </div>
   );
