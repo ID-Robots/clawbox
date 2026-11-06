@@ -176,6 +176,29 @@ describe.each([
     await waitFor(() => expect(bubbles("The sea forgets. It always has.")).toHaveLength(1));
   });
 
+  it("keeps the frames that arrived while another tab was open", async () => {
+    if (surface !== "popup") return;
+    await mount(surface);
+    const run = await sendPrompt();
+    const delta = (fields: Record<string, unknown>) => push("chat", { runId: run, sessionKey: MAIN, state: "delta", ...fields });
+    await delta({ deltaText: "The sea", message: assistantMessage("The sea", 1) });
+    await waitFor(() => expect(bubbles("The sea")).toHaveLength(1));
+
+    // Another conversation is opened while the answer goes on streaming here.
+    const toggle = screen.queryByTestId("chat-header-toggle");
+    if (toggle && toggle.getAttribute("aria-expanded") === "false") fireEvent.click(toggle);
+    const plus = screen.getByTestId("chat-new-tab");
+    await waitFor(() => expect(plus).not.toBeDisabled());
+    fireEvent.click(plus);
+    await waitFor(() => expect(screen.getAllByTestId("chat-tab").find((el) => el.getAttribute("aria-selected") === "true")?.getAttribute("data-session-key")).not.toBe(MAIN));
+    await delta({ deltaText: " does not remember" });
+
+    fireEvent.click(screen.getAllByTestId("chat-tab").find((el) => el.getAttribute("data-session-key") === MAIN)!);
+    await waitFor(() => expect(screen.getAllByTestId("chat-tab").find((el) => el.getAttribute("aria-selected") === "true")?.getAttribute("data-session-key")).toBe(MAIN));
+    await delta({ deltaText: " who threw the stone." });
+    await waitFor(() => expect(bubbles("The sea does not remember who threw the stone.")).toHaveLength(1));
+  });
+
   it("paints nothing for another run's append-only frames it has no start for", async () => {
     await mount(surface);
     const run = await sendPrompt();

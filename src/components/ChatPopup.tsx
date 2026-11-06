@@ -3436,6 +3436,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           if (!payload) return
           const sk = payload.sessionKey as string
           const state = payload.state as string
+          // Every run's frames, shown or not: the gateway sends this socket only
+          // what it added since the last frame, so one skipped while another
+          // tab was open would leave a gap once this one is back.
+          const live = state === 'delta' ? advanceChatStream(liveStreamRef.current, payload) : undefined
           // A run the owner left behind in another tab has ended: the tab is
           // no longer busy and has something new to read. Checked BEFORE the
           // session filter, which is what would otherwise drop the event. The
@@ -3479,7 +3483,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // turn holding text with its directives already gone and the
             // messages it named unopenable for good. The bubble looks the same
             // either way; only what survives an interrupt differs.
-            const live = advanceChatStream(liveStreamRef.current, payload)
             const text = splitMediaDirectives(extractText(live)).text
             // Sentinels would flash before the final-state filter drops them.
             // Asked of the text as the BUBBLE will show it, not of the buffer:

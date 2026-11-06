@@ -1169,6 +1169,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
           const sk = payload.sessionKey as string
+          // Every run's frames, shown or not: the gateway sends this socket only
+          // what it added since the last frame, so one skipped while another
+          // conversation was open would leave a gap once this one is back.
+          const live = payload.state === 'delta' ? advanceChatStream(liveStreamRef.current, payload) : undefined
           if (sk !== sessionKeyRef.current) return
 
           const state = payload.state as string
@@ -1178,7 +1182,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
 
           if (state === 'delta') {
-            const live = advanceChatStream(liveStreamRef.current, payload)
             const text = extractText(live)
             if (text && !isInterSessionEnvelope(text, live)) applyStreaming(text)
           } else if (state === 'final') {
