@@ -17,8 +17,10 @@
 #   1. What the box runs: the Claude Code version, the plan tier, and the
 #      environment claude-ds hands Claude Code for a [1m] and a 200k model
 #      (a stand-in `claude` first on PATH records it).
-#   2. The proxy's real window per model id, asked for free: a two-token prompt
-#      with max_tokens past any window is refused before anything is generated.
+#   2. What the proxy really serves behind each model id, asked in 16 tokens.
+#      (Its window is in the refusal itself: 1,048,576 for both ids, measured on
+#      the first run of this test — a max_tokens past the window is clamped,
+#      not refused, so it cannot be asked for free.)
 #   3. A scripted claude-ds session on `deepseek-v4-flash[1m]` — the cheap id
 #      every plan may use, believed 1M by Claude Code exactly like the Max
 #      plan's pro[1m] — reading ~20k-token files until its context passes the
@@ -98,7 +100,7 @@ FACTS=$(board '
 while IFS= read -r line; do note "$line"; done <<< "$FACTS"
 TIER=$(printf '%s\n' "$FACTS" | sed -n 's/^tier: //p')
 
-# ---- 2. the proxy's real window, asked for free -------------------------------
+# ---- 2. what the proxy serves behind each id ------------------------------------
 
 # The portal token is read HERE, on the board, and handed to curl on stdin as a
 # config line — never on a command line, never printed (the `api` rule).
@@ -108,14 +110,19 @@ PROBE=$(board '
   token=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"clawai_token\") or \"\")" "$REPO/data/config.json" 2>/dev/null)
   [ -n "$token" ] || { echo "no ClawBox AI token on this board"; exit 0; }
   for m in deepseek-v4-flash deepseek-v4-pro; do
-    body="{\"model\":\"$m\",\"max_tokens\":1100000,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+    body="{\"model\":\"$m\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}]}"
     out=$(printf "header = \"Authorization: Bearer %s\"\n" "$token" \
       | curl -sS --max-time 60 -K - -H "content-type: application/json" -H "anthropic-version: 2023-06-01" \
-          --data-binary "$body" "${proxy%/}/anthropic/v1/messages" 2>&1 | head -c 400 | tr "\n" " ")
+          --data-binary "$body" "${proxy%/}/anthropic/v1/messages" 2>&1 \
+      | python3 -c "import json,sys; raw=sys.stdin.read()
+try:
+    d=json.loads(raw); print(\"served by\", d.get(\"model\"), \"usage\", json.dumps(d.get(\"usage\") or d.get(\"error\")))
+except Exception:
+    print(raw[:300].replace(chr(10), \" \"))")
     echo "$m: $out"
   done
 ')
-while IFS= read -r line; do note "proxy window probe — $line"; done <<< "$PROBE"
+while IFS= read -r line; do note "proxy — $line"; done <<< "$PROBE"
 
 if ! fresh_project_dir "-autocompact"; then
   not_ok "could not create $PROJECT_DIR on the board"
