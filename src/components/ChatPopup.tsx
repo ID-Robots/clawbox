@@ -551,7 +551,6 @@ import {
 } from '@/lib/chat-attachments'
 import { useChatFileDrop, useChatUploads } from '@/lib/use-chat-drop'
 import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
-import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
 import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
@@ -2429,10 +2428,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // from throwing rather than silently reading the transcript.
     return typeof document !== 'undefined' && document.visibilityState !== 'visible'
   }, [])
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  // `transcriptRef` — the transcript itself, so it can follow content that
-  // grows without a new message: pills, run and approval cards, pictures that
-  // load late — is declared with the run cards above, whose focus it takes.
+  // `transcriptRef` — the transcript itself, which follows what grows in it
+  // while the reader is at its bottom (useStickToBottom, below) — is declared
+  // with the run cards above, whose focus it takes.
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   const hasEverConnectedRef = useRef(false)
@@ -2445,17 +2443,20 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     attachments: ChatAttachment[]
     idempotencyKey: string
   }>>([])
-  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
-  // behind the double-rAF wait.
-  const scrollToBottom = useCallback(() => {
-    scrollToBottomAfterLayout(messagesEndRef.current)
-  }, [])
-
-  useEffect(() => { scrollToBottom() }, [messages, streaming, queuedSends, scrollToBottom])
-  useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
-  // Everything else that grows the transcript — see useStickToBottom. Only
-  // while the reader is at the bottom: a reader who scrolled up is left there.
-  useStickToBottom(transcriptRef, visible)
+  // Everything that grows the transcript — the streaming reply, a new
+  // message, a queued send, pills, cards, pictures that load late — followed
+  // only while the reader is at the bottom: a reader who scrolled up to read
+  // is left there until they are back down (TASK-2222, see useStickToBottom).
+  // `scrollToBottom` re-pins it for what the OWNER does — a send, a
+  // conversation opened, switched to or cleared — never for what the bot writes.
+  //
+  // `isOpen && visible`, not `visible` alone: `visible` is set two frames after
+  // an open and a close does not cancel that, so a close inside those frames
+  // leaves it true over a transcript that is not rendered — and the hook,
+  // attached to nothing, would never attach to the one the next open draws.
+  const transcriptShown = isOpen && visible
+  const scrollToBottom = useStickToBottom(transcriptRef, transcriptShown)
+  useEffect(() => { if (transcriptShown) scrollToBottom() }, [transcriptShown, scrollToBottom])
 
 
   /**
@@ -4222,6 +4223,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const clearTranscript = useCallback(() => {
     setMessages([])
     applyStreaming('')
+    // The conversation that replaces it is read from its newest line.
+    scrollToBottom()
     // The bubbles holding spoken replies are gone for good (a returned-to tab
     // repaints from the box's history, which cannot carry a browser-local
     // blob URL), so the blobs go with them. This panel never unmounts while
@@ -4252,7 +4255,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [clearToolCalls, clearClarifies, applyStreaming])
+  }, [clearToolCalls, clearClarifies, applyStreaming, scrollToBottom])
 
   const resetSession = useCallback(async () => {
     // Captured BEFORE the await, as the adapter captures its own: the owner may
@@ -4285,10 +4288,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         timestamp: Date.now(),
         variant: 'error',
       }])
+      // The answer to the owner's own click: shown where they will see it.
+      scrollToBottom()
     } finally {
       setStartingSession(false)
     }
-  }, [resetSession])
+  }, [resetSession, scrollToBottom])
 
   /**
    * Show another tab's session in this popup.
@@ -6641,6 +6646,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const enqueueRun = useCallback((text: string, origin: TurnOrigin = {}) => {
     const trimmed = text.trim()
     if (!trimmed) return
+    // Sent now or queued behind the running turn, it is shown at the bottom
+    // and the reply to it followed — not when the queue drains it later, by
+    // which time the owner may have scrolled up to read.
+    scrollToBottom()
     // Decide from the refs, not the render-time `sending`: this can run in the
     // window between "previous turn finished" committing and the drain's next
     // run committing, where the closure still says idle while a run is already
@@ -6654,7 +6663,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       return
     }
     startRun(trimmed, [], origin)
-  }, [sending, startRun])
+  }, [sending, startRun, scrollToBottom])
 
   // The owner's own words, spoken — both flags, and the only caller that sets
   // either. The UI's own lines (a skill change, and the two window events that
@@ -6706,6 +6715,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // the same rule `dispatchTurn` and `loadHistory` already follow.
     const keyAtSend = sessionKeyRef.current
     setInput('')
+    scrollToBottom()
     const controller = new AbortController()
     drawingRef.current.set(tabAtSend, controller)
     syncDrawingTabs()
@@ -6744,7 +6754,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         syncDrawingTabs()
       }
     }
-  }, [input, adapter, syncDrawingTabs])
+  }, [input, adapter, syncDrawingTabs, scrollToBottom])
 
   // A wait nobody is watching is a paid generation still running. Closing the
   // popup ends it, the same way it drops the agent's image wait just above —
@@ -6764,6 +6774,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text && attachments.length === 0) return
+    // The owner's own words: shown, and the reply followed — see enqueueRun.
+    scrollToBottom()
     // A new prompt: the reply still speaking stops. Its text and its clip stay
     // on the bubble, to be played again from the start.
     stopSpokenReply()
@@ -6786,7 +6798,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       return
     }
     startRun(text, currentAttachments, { asked: true })
-  }, [input, sending, attachments, startRun])
+  }, [input, sending, attachments, startRun, scrollToBottom])
 
   useEffect(() => {
     // sendingRef guards the commit-lag case: a send that started between this
@@ -6811,10 +6823,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       if (!ctx?.message) return
       greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: buildFixErrorPrompt(ctx), attachments: [] }])
+      // Asked for from elsewhere on the desktop: the owner is not reading here.
+      scrollToBottom()
     }
     window.addEventListener(FIX_ERROR_EVENT, handler)
     return () => window.removeEventListener(FIX_ERROR_EVENT, handler)
-  }, [])
+  }, [scrollToBottom])
 
   // A message handed over by another app — the Coding Agent's New wizard —
   // goes through the SAME queue as a fix-error prompt, and for the same
@@ -6827,10 +6841,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       if (typeof text !== 'string' || !text.trim()) return
       greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: text.trim(), attachments: [] }])
+      scrollToBottom()
     }
     window.addEventListener(CHAT_MESSAGE_EVENT, handler)
     return () => window.removeEventListener(CHAT_MESSAGE_EVENT, handler)
-  }, [])
+  }, [scrollToBottom])
 
   // A DRAFT handed over by another app — the Coding Agent run page's "Message
   // in chat" — lands in the composer and nowhere else: nothing is queued, nothing
@@ -6939,6 +6954,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           text: t('chat.modelSwitchBusy'),
           timestamp: Date.now(),
         }])
+        // The owner's own pick gets its answer in sight; a switch the chat made
+        // by itself moves nobody.
+        if (!target.automatic) scrollToBottom()
         return false
       }
       // 502 WITH a warning = the model IS written and the route returned the new
@@ -6956,6 +6974,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           text: data.warning,
           timestamp: Date.now(),
         }])
+        if (!target.automatic) scrollToBottom()
       }
 
       setChatModelState(data as ChatModelState)
@@ -6989,7 +7008,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, t])
+  }, [chatModelState, connect, switchingModel, t, scrollToBottom])
 
   // The old Pro and Flash aliases now serve the same Flash model. Move a
   // saved chat choice to the Flash alias once, without clearing its history.
@@ -8448,7 +8467,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         // (globals.css, `[data-chat-text-scale]`) and to nothing around it.
         data-chat-text-scale={textScale !== 1 ? textScale : undefined}
         style={{
-          flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
+          // 22px at the bottom: the 12px all round plus the gap the end
+          // sentinel used to add after the last bubble.
+          flex: 1, overflowY: 'auto', padding: '12px 14px 22px',
           display: 'flex', flexDirection: 'column', gap: 10,
           userSelect: 'text',
           scrollbarWidth: 'thin',
@@ -8876,7 +8897,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           </div>
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
       {/* The agent's progress card, pinned at the top of the composer stack —

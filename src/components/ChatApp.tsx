@@ -25,7 +25,6 @@ import {
   type ChatMessage,
   uuid,
 } from '@/lib/chat-history-cache'
-import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { samePlainData } from '@/lib/same-plain-data'
 
@@ -527,7 +526,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Which history read was asked for last, and which was painted last — so an
   // answer that arrives after a later one's is dropped (`claimHistoryRead`).
   const historyReadOrderRef = useRef<HistoryReadOrder>({ issued: 0, applied: 0 })
-  const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   // The provider's own refusal rides on the lifecycle frames; see lib/chat-run-failure.ts.
@@ -540,6 +538,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Runs stuck on a model this account cannot run, reported to the box once
   // each (lib/model-fallback-chat.ts) — and the "Stopped." a box-made stop owes.
   const fallbackWatchRef = useRef(new ModelFallbackWatch())
+  // Everything that grows the transcript — the streaming reply, a new
+  // message, pills, cards, pictures that load late — followed only while the
+  // reader is at the bottom; a reader who scrolled up to read is left there
+  // until they are back down (TASK-2222). The full page is always on screen,
+  // so the observers are always attached. `scrollToBottom` is for the owner's
+  // own actions — a send, a click — which land them on the answer wherever
+  // they were.
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const scrollToBottom = useStickToBottom(transcriptRef, true)
+
   // A calm notice's one-click move to another provider the box has set up:
   // this page has no header picker, so the picker's request is sent here, and
   // the line under it says whether it landed. Stable for the memoised rows.
@@ -549,8 +557,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       setMessages(prev => [...prev, result.ok
         ? { role: 'system', variant: 'notice', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchedTo', { provider: target.label }) }
         : { role: 'system', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchFailed', { provider: target.label }) }])
+      scrollToBottom()
     })
-  }, [])
+  }, [scrollToBottom])
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -584,19 +593,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     attachments: ChatAttachment[]
     idempotencyKey: string
   }>>([])
-
-  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
-  // behind the double-rAF wait.
-  const scrollToBottom = useCallback(() => {
-    scrollToBottomAfterLayout(messagesEndRef.current)
-  }, [])
-
-  useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
-  // Everything else that grows the transcript — pills, cards, pictures that
-  // load late — followed only while the reader is at the bottom. The full page
-  // is always on screen, so the observers are always attached.
-  const transcriptRef = useRef<HTMLDivElement>(null)
-  useStickToBottom(transcriptRef, true)
 
   // `?email=<uid>` opens that message on arrival — the other end of a card on
   // the gateway's own Control UI chat (TASK-700). That page is a third `webchat`
@@ -1739,6 +1735,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       images,
       idempotencyKey,
     }])
+    // The owner's own words: shown, and the reply to them followed, wherever
+    // they had scrolled to.
+    scrollToBottom()
     setSending(true)
     applyStreaming('')
 
@@ -1755,7 +1754,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     }
 
     await dispatchSend(text, staged, idempotencyKey)
-  }, [input, sending, pendingAttachments, caps.hasLiveConnection, status, dispatchSend, applyStreaming])
+  }, [input, sending, pendingAttachments, caps.hasLiveConnection, status, dispatchSend, applyStreaming, scrollToBottom])
 
   // The Create card — and the Coding Agent app's hand-off buttons — send
   // their one message through CHAT_MESSAGE_EVENT, the way the mascot chat
@@ -2139,7 +2138,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
 
       {/* Messages area */}
       <div ref={transcriptRef} data-testid="chatapp-transcript" data-chat-text-scale={textScale !== 1 ? textScale : undefined} style={{
-        flex: 1, overflowY: 'auto', padding: '12px 14px',
+        // 22px at the bottom: the 12px all round plus the gap the end sentinel
+        // used to add after the last bubble.
+        flex: 1, overflowY: 'auto', padding: '12px 14px 22px',
         display: 'flex', flexDirection: 'column', gap: 10,
         ...(textScale !== 1 ? { '--chat-text-scale': String(textScale) } as React.CSSProperties : {}),
         scrollbarWidth: 'thin',
@@ -2334,7 +2335,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           )
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
       {/* The agent's progress card, over the composer and in the column —

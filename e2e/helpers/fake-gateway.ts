@@ -1,14 +1,23 @@
 import type { Page } from "@playwright/test";
 
+export interface FakeGatewayOptions {
+  /**
+   * Answer the owner's turns with a LONG reply that streams: `chunks` deltas,
+   * one every `everyMs`, each a sentence longer than the last, then the final.
+   * `window.__streamedChunks` counts the deltas sent so far.
+   */
+  streamedReply?: { chunks: number; everyMs: number };
+}
+
 /**
  * A stand-in for the OpenClaw gateway's WebSocket, installed before the page
  * loads: it answers the handshake, an empty transcript, and every chat.send
  * with a reply that names it — and records each sent message on
  * `window.__chatSends` so a spec can read exactly what the composer sent.
- * Shared by the chat specs (chat-popup, chat-drop).
+ * Shared by the chat specs (chat-popup, chat-drop, chat-scroll-while-streaming).
  */
-export async function installFakeGatewaySocket(page: Page) {
-  await page.addInitScript(() => {
+export async function installFakeGatewaySocket(page: Page, options: FakeGatewayOptions = {}) {
+  await page.addInitScript((opts: FakeGatewayOptions) => {
     class FakeWebSocket {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -100,6 +109,24 @@ export async function installFakeGatewaySocket(page: Page) {
             ok: true,
             payload: {},
           });
+          const streamed = opts.streamedReply;
+          if (streamed && sent !== "hi") {
+            // Deltas carry the whole reply so far, as the gateway's do.
+            const textOf = (n: number) =>
+              [reply, ...Array.from({ length: n }, (_, i) => `Sentence ${i + 1} of a long streamed answer.`)].join(" ");
+            const ws = window as unknown as { __streamedChunks?: number };
+            ws.__streamedChunks = 0;
+            for (let n = 1; n <= streamed.chunks; n++) {
+              setTimeout(() => {
+                ws.__streamedChunks = n;
+                emit({ type: "event", event: "chat", payload: { sessionKey: "main", state: "delta", message: { text: textOf(n) } } });
+              }, n * streamed.everyMs);
+            }
+            setTimeout(() => {
+              emit({ type: "event", event: "chat", payload: { sessionKey: "main", state: "final", message: { text: textOf(streamed.chunks) } } });
+            }, (streamed.chunks + 1) * streamed.everyMs);
+            return;
+          }
           setTimeout(() => {
             emit({
               type: "event",
@@ -149,5 +176,5 @@ export async function installFakeGatewaySocket(page: Page) {
       writable: true,
       value: FakeWebSocket,
     });
-  });
+  }, options);
 }
