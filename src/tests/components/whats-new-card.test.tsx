@@ -83,13 +83,13 @@ describe("WhatsNewCard", () => {
     expect(within(dialog).getByRole("region", { name: "Highlights of ClawBox 4.3" })).toBeInTheDocument();
   });
 
-  it("pages through the seven 4.3 highlights, one per slide, each over its own screenshot", () => {
+  it("pages through the eleven 4.3 highlights, one per slide, each over its own screenshot", () => {
     render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
-    expect(WHATS_NEW_HIGHLIGHTS).toHaveLength(7);
+    expect(WHATS_NEW_HIGHLIGHTS).toHaveLength(11);
     WHATS_NEW_HIGHLIGHTS.forEach((item, i) => {
       const current = slide();
       expect(current).toHaveAttribute("aria-roledescription", "slide");
-      expect(current).toHaveAccessibleName(`${i + 1} of 7`);
+      expect(current).toHaveAccessibleName(`${i + 1} of 11`);
       expect(within(current).getByRole("heading", { level: 3 })).toHaveTextContent(en[item.title]);
       expect(within(current).getByText(en[item.summary])).toBeInTheDocument();
       expect(within(current).getByTestId("whats-new-image")).toHaveAttribute("src", item.image);
@@ -109,6 +109,10 @@ describe("WhatsNewCard", () => {
       "Hold to talk",
       "The Coding Agent, on a live chart",
       "Prime Radiant, a living wiki",
+      "Coding runs report back in the chat",
+      "Updates that ask before they stop your agents",
+      "Local AI installs wait in line",
+      "Alerts for scheduled jobs",
     ]);
     for (const item of WHATS_NEW_HIGHLIGHTS) {
       expect(en[item.body], item.body).toBeTruthy();
@@ -149,7 +153,7 @@ describe("WhatsNewCard", () => {
     expect(slide()).toHaveAttribute("data-slide", "0");
 
     const dots = screen.getAllByTestId("whats-new-dot");
-    expect(dots).toHaveLength(7);
+    expect(dots).toHaveLength(11);
     expect(dots[0]).toHaveAttribute("aria-current", "step");
     fireEvent.click(screen.getByRole("button", { name: "Show highlight 5" }));
     expect(slide()).toHaveAttribute("data-slide", "4");
@@ -158,7 +162,7 @@ describe("WhatsNewCard", () => {
 
     toLastSlide();
     fireEvent.keyDown(window, { key: "ArrowRight" });
-    expect(slide()).toHaveAttribute("data-slide", "6");
+    expect(slide()).toHaveAttribute("data-slide", String(WHATS_NEW_HIGHLIGHTS.length - 1));
   });
 
   it("a swipe turns the slide on a touch screen", () => {
@@ -425,7 +429,7 @@ describe("WhatsNewCard", () => {
       expect(dialog).toHaveAttribute("aria-modal", "true");
       expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
       expect(viewImage()).toHaveAttribute("alt", en[WHATS_NEW_HIGHLIGHTS[1].title]);
-      expect(within(dialog).getByText("2 of 7", { exact: false })).toBeInTheDocument();
+      expect(within(dialog).getByText("2 of 11", { exact: false })).toBeInTheDocument();
       expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Close full screen" }));
       // Drawn over the card: in the body, one layer above it.
       expect(dialog.parentElement).toBe(document.body);
@@ -489,11 +493,11 @@ describe("WhatsNewCard", () => {
       // One step per key: the card's own handler stands aside while the view is up.
       expect(slide()).toHaveAttribute("data-slide", "1");
       for (let i = 1; i < WHATS_NEW_HIGHLIGHTS.length; i++) fireEvent.keyDown(window, { key: "ArrowRight" });
-      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[6].fullImage);
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[10].fullImage);
       expect(next()).toBeDisabled();
       // Closing lands on the feature last looked at.
       fireEvent.keyDown(window, { key: "Escape" });
-      expect(slide()).toHaveAttribute("data-slide", "6");
+      expect(slide()).toHaveAttribute("data-slide", String(WHATS_NEW_HIGHLIGHTS.length - 1));
     });
 
     it("on a touch screen a swipe turns the picture without closing it, and a tap closes it", () => {
@@ -565,7 +569,7 @@ describe("WhatsNewCard", () => {
       expect(container.textContent).toContain("4.3.0");
       expect(screen.getByRole("button", { name: table["whatsNew.next"] })).toBeInTheDocument();
       expect(screen.getByTestId("whats-new-slide")).toHaveAccessibleName(
-        table["whatsNew.slideLabel"].replace("{current}", "1").replace("{total}", "7"),
+        table["whatsNew.slideLabel"].replace("{current}", "1").replace("{total}", String(WHATS_NEW_HIGHLIGHTS.length)),
       );
       expect(container.textContent).not.toMatch(/whatsNew\./);
       fireEvent.click(screen.getByRole("button", { name: table["whatsNew.openFullscreen"] }));

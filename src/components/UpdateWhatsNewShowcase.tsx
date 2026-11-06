@@ -62,6 +62,10 @@ const ICONS = {
   sparkle: <Glyph><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" /></Glyph>,
   speaker: <Glyph><path d="M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" /></Glyph>,
   chat: <Glyph><path d="M4 5h16v11H9l-5 4z" /></Glyph>,
+  report: <Glyph><path d="M4 5h16v11H9l-5 4z" /><path d="m9 10.5 2 2 4-4" /></Glyph>,
+  wait: <Glyph><path d="M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9" /></Glyph>,
+  queue: <Glyph><path d="M4 6h10M4 12h10M4 18h6M18 9v10M15 16l3 3 3-3" /></Glyph>,
+  bell: <Glyph><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 21h4" /></Glyph>,
 };
 
 /* ── prefers-reduced-motion and the screen's size, live ────────────────── */
@@ -316,6 +320,103 @@ function WikiCam({ tr }: DemoProps) {
   );
 }
 
+/** Coding runs report back: the run's milestone reaches the chat, then its ending. */
+const REPORT_DONE_AT = [DEMO_MS * 0.55];
+
+function ReportCam() {
+  return (
+    <>
+      <div className="wns-o wns-ring wns-r1" />
+      <div className="wns-o wns-ring wns-r2" />
+    </>
+  );
+}
+
+function ReportFrame({ tr, reduced }: DemoProps) {
+  const done = useSteps(REPORT_DONE_AT, reduced) > 0;
+  return (
+    <div className="wns-o wns-toast" data-step={done ? "done" : "milestone"}>
+      {done ? (
+        <>
+          <b>{ICONS.report} {tr("update.showcase.reportsDone", "Run finished")}</b>
+          <small>{tr("update.showcase.reportsDoneText", "The chat hears it, and the assistant tells you.")}</small>
+        </>
+      ) : (
+        <>
+          <b>{ICONS.chat} {tr("update.showcase.reportsMilestone", "Milestone from the run")}</b>
+          <small>{tr("update.showcase.reportsMilestoneText", "“First draft is up: three recipe cards.”")}</small>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Updates that ask first: the question comes up over a working run, and Cancel waits. */
+function BusyCam() {
+  return (
+    <>
+      <div className="wns-o wns-ring" />
+      <div className="wns-o wns-hl" />
+      <div className="wns-o wns-rip" />
+      <Cursor />
+    </>
+  );
+}
+
+function BusyFrame({ tr }: DemoProps) {
+  return (
+    <div className="wns-o wns-toast">
+      <b>{ICONS.wait} {tr("update.showcase.busyWait", "Cancel waits for them")}</b>
+      <small>{tr("update.showcase.busyWaitText", "Nothing is stopped mid-task.")}</small>
+    </div>
+  );
+}
+
+/** Local AI installs wait in line: the first one works on, the second waits its turn. */
+const QUEUE_TICKS = [0.15, 0.3, 0.45, 0.6, 0.75].map((share) => DEMO_MS * share);
+const QUEUE_PERCENT = [8, 23, 41, 57, 72, 86];
+
+function QueueCam({ reduced }: DemoProps) {
+  const percent = QUEUE_PERCENT[useSteps(QUEUE_TICKS, reduced)];
+  return (
+    <>
+      <div className="wns-o wns-bar"><i /></div>
+      <div className="wns-o wns-pct">{percent}%</div>
+      <div className="wns-o wns-ring wns-q1" />
+      <div className="wns-o wns-ring wns-q2" />
+    </>
+  );
+}
+
+function QueueFrame({ tr }: DemoProps) {
+  return (
+    <div className="wns-o wns-toast">
+      <b>{ICONS.queue} {tr("update.showcase.queueStarts", "Starts by itself")}</b>
+      <small>{tr("update.showcase.queueStartsText", "when the install before it ends")}</small>
+    </div>
+  );
+}
+
+/** Scheduled job alerts: the notice comes in, and Settings → Harness names the job. */
+function AlertCam() {
+  return (
+    <>
+      <div className="wns-o wns-ring wns-a1" />
+      <div className="wns-o wns-ring wns-a2" />
+      <div className="wns-o wns-dot" />
+    </>
+  );
+}
+
+function AlertFrame({ tr }: DemoProps) {
+  return (
+    <div className="wns-o wns-toast">
+      <b>{ICONS.bell} {tr("jobAlerts.notice.failing", "Scheduled job “{name}” failed {count} times in a row.", { name: "Weekly report", count: "2" })}</b>
+      <small>{tr("desktop.toast.openSettings", "Open Settings → {section}", { section: tr("settings.harness", "Harness") })}</small>
+    </div>
+  );
+}
+
 interface Feature {
   /** The CSS scene: `wns-<id>` binds the camera and the demo's keyframes. */
   id: string;
@@ -338,6 +439,10 @@ export const SHOWCASE_FEATURES: Readonly<Record<string, Feature>> = {
   "whatsNew.holdToTalkTitle": { id: "talk", glow: "#ef4444", chip: ["update.showcase.chipHoldToTalk", "Hold to talk"], icon: ICONS.talk, Cam: TalkCam, Frame: TalkFrame },
   "whatsNew.agentChartTitle": { id: "chart", glow: "#f59e0b", chip: ["update.showcase.chipCodingAgent", "The Coding Agent"], icon: ICONS.chart, Cam: ChartCam, Frame: ChartFrame },
   "whatsNew.primeRadiantTitle": { id: "wiki", glow: "#facc15", chip: ["update.showcase.chipPrimeRadiant", "Prime Radiant"], icon: ICONS.wiki, Cam: WikiCam },
+  "whatsNew.runReportsTitle": { id: "rep", glow: "#22c55e", chip: ["update.showcase.chipRunReports", "Runs report back"], icon: ICONS.report, Cam: ReportCam, Frame: ReportFrame },
+  "whatsNew.updateAsksTitle": { id: "busy", glow: "#eab308", chip: ["update.showcase.chipUpdateAsks", "Updates ask first"], icon: ICONS.wait, Cam: BusyCam, Frame: BusyFrame },
+  "whatsNew.installQueueTitle": { id: "queue", glow: "#6366f1", chip: ["update.showcase.chipInstallQueue", "Installs wait in line"], icon: ICONS.queue, Cam: QueueCam, Frame: QueueFrame },
+  "whatsNew.jobAlertsTitle": { id: "alert", glow: "#f43f5e", chip: ["update.showcase.chipJobAlerts", "Job alerts"], icon: ICONS.bell, Cam: AlertCam, Frame: AlertFrame },
 };
 
 /** A highlight a later catalogue adds before it has a demo: its screenshot, still, and its title as the chip. */
@@ -509,6 +614,49 @@ const SHOWCASE_CSS = `
 @keyframes wns-wring{0%,44%{opacity:0}48%,66%{opacity:1}72%,100%{opacity:0}}
 .wns-wiki .wns-cnt{left:80.2%;top:9.4%;width:3.4%;height:2.8%;background:#1a1d22;font-size:.9em;color:#2dd4bf;font-weight:700;display:flex;align-items:center;opacity:0;animation:wns-cnt 7s steps(1) both}
 
+.wns-busy .wns-cam{animation:wns-bscam 7s ease-in-out both}
+@keyframes wns-bscam{0%{transform:none}20%,76%{transform:scale(1.7)}94%,100%{transform:none}}
+.wns-busy .wns-ring{left:38%;top:41.3%;width:23.9%;height:17.5%;border-radius:10px;animation:wns-bsring 7s both}
+@keyframes wns-bsring{0%,20%{opacity:0}26%,48%{opacity:1}54%,100%{opacity:0}}
+.wns-busy .wns-cur{left:68%;top:80%;animation:wns-bscur 7s ease-in-out both}
+@keyframes wns-bscur{0%,28%{left:68%;top:80%}52%,100%{left:50.6%;top:54.6%}}
+.wns-busy .wns-hl{left:48.6%;top:53.3%;width:4.4%;height:3.6%;border-radius:6px;background:#f9731630;outline:2px solid #f97316;opacity:0;animation:wns-bshl 7s both}
+@keyframes wns-bshl{0%,52%{opacity:0}56%,100%{opacity:1}}
+.wns-busy .wns-rip{left:50.8%;top:55.1%;animation:wns-rip3 7s both}
+.wns-busy .wns-toast{left:4%;top:8%;width:32%;animation:wns-gkt 7s both}
+
+.wns-queue .wns-cam{animation:wns-qucam 7s ease-in-out both}
+@keyframes wns-qucam{0%{transform:none}16%,58%{transform:scale(1.5) translate(-3%,-11%)}74%,100%{transform:none}}
+.wns-queue .wns-pct{left:47.5%;top:53.4%;height:1.7%;padding:0 .4em;border-radius:5px;background:#6366f133;color:#c7d2fe;font:700 .8em ui-monospace,monospace;display:flex;align-items:center;white-space:nowrap}
+.wns-queue .wns-bar{left:51.2%;top:54%;width:12%;height:.5%;border-radius:2px;background:#2a2f38;overflow:hidden}
+.wns-queue .wns-bar i{display:block;height:100%;width:8%;background:#6366f1;animation:wns-qubar 7s linear both}
+@keyframes wns-qubar{0%{width:8%}100%{width:86%}}
+.wns-queue .wns-q1{left:43.3%;top:67.8%;width:9.8%;height:2.6%;border-radius:6px;animation:wns-qur1 7s both}
+@keyframes wns-qur1{0%,24%{opacity:0}28%,56%{opacity:1}62%,100%{opacity:0}}
+.wns-queue .wns-q2{left:83%;top:1.6%;width:15.8%;height:10.6%;border-radius:10px;animation:wns-qur2 7s both}
+@keyframes wns-qur2{0%,74%{opacity:0}78%,100%{opacity:1}}
+.wns-queue .wns-toast{left:4%;bottom:6%;width:32%;animation:wns-toast 7s both}
+
+.wns-rep .wns-cam{animation:wns-rpcam 7s ease-in-out both}
+@keyframes wns-rpcam{0%{transform:none}16%,80%{transform:scale(1.5) translate(-16.7%,-4%)}96%,100%{transform:none}}
+.wns-rep .wns-r1{left:71.8%;top:32.4%;width:26.2%;height:10.4%;animation:wns-rpr1 7s both}
+@keyframes wns-rpr1{0%,12%{opacity:0}16%,46%{opacity:1}52%,100%{opacity:0}}
+.wns-rep .wns-r2{left:71.8%;top:57.9%;width:26.2%;height:17.8%;animation:wns-rpr2 7s both}
+@keyframes wns-rpr2{0%,56%{opacity:0}60%,100%{opacity:1}}
+.wns-rep .wns-toast{left:4%;top:8%;width:32%;animation:wns-rpt 7s both}
+@keyframes wns-rpt{0%,8%{opacity:0;transform:translateY(-20%)}14%,100%{opacity:1;transform:none}}
+
+.wns-alert .wns-cam{animation:wns-alcam 7s ease-in-out both}
+@keyframes wns-alcam{0%{transform:none}12%,34%{transform:scale(1.6) translate(-18.75%,18.75%)}48%,80%{transform:scale(1.6) translate(-6%,-7%)}94%,100%{transform:none}}
+.wns-alert .wns-a1{left:82.6%;top:1.2%;width:16.6%;height:7.6%;border-radius:10px;animation:wns-alr1 7s both}
+@keyframes wns-alr1{0%,10%{opacity:0}14%,38%{opacity:1}44%,100%{opacity:0}}
+.wns-alert .wns-a2{left:43.2%;top:61.6%;width:26.2%;height:6.2%;border-radius:6px;animation:wns-alr2 7s both}
+@keyframes wns-alr2{0%,50%{opacity:0}54%,100%{opacity:1}}
+.wns-alert .wns-dot{left:43.45%;top:61.9%;width:1.1%;aspect-ratio:1;border-radius:50%;box-shadow:0 0 0 0 #f43f5e99;animation:wns-alp 1.2s ease-out infinite}
+@keyframes wns-alp{70%{box-shadow:0 0 0 12px #f43f5e00}}
+.wns-alert .wns-toast{left:4%;bottom:6%;width:36%;animation:wns-alt 7s both}
+@keyframes wns-alt{0%,56%{opacity:0;transform:translateY(30%)}62%,100%{opacity:1;transform:none}}
+
 .wns[data-motion="reduce"] .wns-scr *,.wns[data-motion="reduce"] .wns-scr *::before{animation-delay:-7s!important;animation-play-state:paused!important}
 .wns[data-motion="reduce"] .wns-cam,.wns[data-motion="reduce"] .wns-float,.wns[data-motion="reduce"] .wns-up{animation:none}
 .wns[data-motion="reduce"] .wns-talk .wns-wave i{animation:none;height:55%}
@@ -536,13 +684,21 @@ const SHOWCASE_CSS = `
 @keyframes wns-n-chart{0%{--wns-fx:.5;--wns-fy:.38;--wns-pz:880}18%,42%{--wns-fx:.42;--wns-fy:.3;--wns-pz:960}58%,100%{--wns-fx:.71;--wns-fy:.42;--wns-pz:960}}
 .wns[data-layout="narrow"] .wns-wiki .wns-cam{--wns-fx:.66;--wns-fy:.6;--wns-pz:900;animation:wns-n-wiki 7s ease-in-out both}
 @keyframes wns-n-wiki{0%{--wns-fx:.4;--wns-fy:.7;--wns-pz:880}10%,38%{--wns-fx:.36;--wns-fy:.68;--wns-pz:900}50%,100%{--wns-fx:.66;--wns-fy:.6;--wns-pz:900}}
+.wns[data-layout="narrow"] .wns-busy .wns-cam{--wns-fx:.5;--wns-fy:.5;--wns-pz:960;animation:wns-n-busy 7s ease-in-out both}
+@keyframes wns-n-busy{0%{--wns-fx:.58;--wns-fy:.62;--wns-pz:880}20%,100%{--wns-fx:.5;--wns-fy:.5;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-queue .wns-cam{--wns-fx:.9;--wns-fy:.08;--wns-pz:960;animation:wns-n-queue 7s ease-in-out both}
+@keyframes wns-n-queue{0%{--wns-fx:.5;--wns-fy:.5;--wns-pz:880}16%,58%{--wns-fx:.53;--wns-fy:.62;--wns-pz:960}74%,100%{--wns-fx:.9;--wns-fy:.08;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-rep .wns-cam{--wns-fx:.85;--wns-fy:.66;--wns-pz:960;animation:wns-n-rep 7s ease-in-out both}
+@keyframes wns-n-rep{0%{--wns-fx:.6;--wns-fy:.5;--wns-pz:880}14%,46%{--wns-fx:.85;--wns-fy:.38;--wns-pz:960}60%,100%{--wns-fx:.85;--wns-fy:.66;--wns-pz:960}}
+.wns[data-layout="narrow"] .wns-alert .wns-cam{--wns-fx:.56;--wns-fy:.64;--wns-pz:960;animation:wns-n-alert 7s ease-in-out both}
+@keyframes wns-n-alert{0%{--wns-fx:.8;--wns-fy:.2;--wns-pz:880}12%,34%{--wns-fx:.9;--wns-fy:.05;--wns-pz:960}48%,100%{--wns-fx:.56;--wns-fy:.64;--wns-pz:960}}
 .wns[data-layout="narrow"][data-motion="reduce"] .wns-scr .wns-cam{animation:none}
 .wns[data-layout="narrow"] .wns-scr .wns-toast{left:4%;right:4%;top:auto;bottom:4%;width:auto;padding:2.6% 3.4%}
 .wns[data-layout="narrow"] .wns-scr .wns-key{left:4%;top:auto;bottom:5%}
 .wns[data-layout="narrow"] .wns-talk .wns-key,.wns[data-layout="narrow"] .wns-talk .wns-toast{top:5%;bottom:auto}
 .wns[data-layout="narrow"] .wns-scr :is(.wns-tag,.wns-ver span){font-size:max(10px,.8em)}
 .wns[data-layout="narrow"] .wns-scr :is(.wns-sz,.wns-urlp,.wns-toast small){font-size:max(10px,.85em)}
-.wns[data-layout="narrow"] .wns-scr :is(.wns-tmr,.wns-cnt){font-size:max(10px,.9em)}
+.wns[data-layout="narrow"] .wns-scr :is(.wns-tmr,.wns-cnt,.wns-pct){font-size:max(10px,.9em)}
 .wns[data-layout="narrow"] .wns-scr .wns-row{font-size:max(10px,.92em)}
 .wns[data-layout="narrow"] .wns-scr :is(.wns-cn,.wns-kbd){font-size:max(10px,.95em)}
 .wns[data-layout="narrow"] .wns-link .wns-cur-2{display:none}

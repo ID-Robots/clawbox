@@ -23,7 +23,10 @@ import { WHATS_NEW_HIGHLIGHTS, WHATS_NEW_RELEASE } from "@/lib/whats-new";
 
 const TARGET = `${WHATS_NEW_RELEASE}.0`;
 const TITLES = WHATS_NEW_HIGHLIGHTS.map((item) => whatsNewEn[item.title]);
-const CHIPS = ["Screenshots", "One browser for you", "Share an app with a public link", "xAI Grok", "Hold to talk", "The Coding Agent", "Prime Radiant"];
+const CHIPS = [
+  "Screenshots", "One browser for you", "Share an app with a public link", "xAI Grok", "Hold to talk", "The Coding Agent", "Prime Radiant",
+  "Runs report back", "Updates ask first", "Installs wait in line", "Job alerts",
+];
 
 function mount() {
   render(
@@ -74,15 +77,15 @@ describe("UpdateWhatsNewShowcase", () => {
     const showcase = mount();
     expect(showcase).toHaveAttribute("data-index", "0");
     expect(showcase).toHaveAttribute("data-feature", "shot");
-    expect(within(showcase).getByTestId("whats-new-showcase-count")).toHaveTextContent(`01 / 0${WHATS_NEW_HIGHLIGHTS.length} · New in ${WHATS_NEW_RELEASE}`);
+    expect(within(showcase).getByTestId("whats-new-showcase-count")).toHaveTextContent(`01 / ${String(WHATS_NEW_HIGHLIGHTS.length).padStart(2, "0")} · New in ${WHATS_NEW_RELEASE}`);
     expect(shownTitle(showcase)).toContain(TITLES[0]);
     expect(within(showcase).getByText(whatsNewEn[WHATS_NEW_HIGHLIGHTS[0].body])).toBeInTheDocument();
     expect(within(showcase).getByTestId("whats-new-showcase-logo")).toHaveTextContent("ClawBox");
     const chips = within(showcase).getAllByRole("tab");
     expect(chips.map((chip) => chip.textContent)).toEqual(CHIPS);
-    expect(chips.map((chip) => chip.getAttribute("aria-selected"))).toEqual(["true", "false", "false", "false", "false", "false", "false"]);
+    expect(chips.map((chip) => chip.getAttribute("aria-selected"))).toEqual(CHIPS.map((_, at) => String(at === 0)));
     // One tab stop for the row: the chip that is on.
-    expect(chips.map((chip) => chip.tabIndex)).toEqual([0, -1, -1, -1, -1, -1, -1]);
+    expect(chips.map((chip) => chip.tabIndex)).toEqual(CHIPS.map((_, at) => (at === 0 ? 0 : -1)));
     // Inline SVG only: nothing on it needs an icon font.
     expect(showcase.querySelector(".material-symbols-rounded")).toBeNull();
   });
@@ -118,7 +121,7 @@ describe("UpdateWhatsNewShowcase", () => {
       advance(SHOWCASE_ADVANCE_MS);
       seen.push(Number(showcase.getAttribute("data-index")));
     }
-    expect(seen).toEqual([0, 1, 2, 3, 4, 5, 6, 0]);
+    expect(seen).toEqual([...WHATS_NEW_HIGHLIGHTS.keys(), 0]);
     // Each feature's own screenshot, the full-resolution file.
     expect(within(showcase).getByTestId("update-whats-new-image")).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[0].fullImage);
   });
@@ -133,7 +136,7 @@ describe("UpdateWhatsNewShowcase", () => {
     advance(SHOWCASE_ADVANCE_MS - 1);
     expect(showcase).toHaveAttribute("data-index", "6");
     advance(1);
-    expect(showcase).toHaveAttribute("data-index", "0");
+    expect(showcase).toHaveAttribute("data-index", "7");
   });
 
   it("holds while the pointer is over it, and goes on when it leaves", () => {
@@ -176,7 +179,7 @@ describe("UpdateWhatsNewShowcase", () => {
     fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
     expect(showcase).toHaveAttribute("data-index", "0");
     fireEvent.keyDown(document.activeElement!, { key: "End" });
-    expect(showcase).toHaveAttribute("data-index", "6");
+    expect(showcase).toHaveAttribute("data-index", String(WHATS_NEW_HIGHLIGHTS.length - 1));
     fireEvent.keyDown(document.activeElement!, { key: "Home" });
     expect(showcase).toHaveAttribute("data-index", "0");
     // A key with a modifier is someone else's shortcut.
@@ -237,6 +240,36 @@ describe("UpdateWhatsNewShowcase", () => {
     expect(stage()).toHaveTextContent("You");
   });
 
+  it("runs the later demos on their clocks too: the run's milestone, then its ending; the install's progress; the job's notice", () => {
+    const showcase = mount();
+    fireEvent.mouseEnter(showcase);
+    const stage = () => within(showcase).getByTestId("whats-new-showcase-stage");
+
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[7] }));
+    expect(stage()).toHaveAttribute("data-feature", "rep");
+    expect(stage()).toHaveTextContent("Milestone from the run");
+    advance(3849);
+    expect(stage()).toHaveTextContent("Milestone from the run");
+    advance(1);
+    expect(stage()).toHaveTextContent("Run finished");
+    expect(stage()).not.toHaveTextContent("Milestone from the run");
+
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[8] }));
+    expect(stage()).toHaveAttribute("data-feature", "busy");
+    expect(stage()).toHaveTextContent("Cancel waits for them");
+
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[9] }));
+    expect(stage().querySelector(".wns-pct")?.textContent).toBe("8%");
+    advance(7000);
+    expect(stage().querySelector(".wns-pct")?.textContent).toBe("86%");
+    expect(stage()).toHaveTextContent("Starts by itself");
+
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[10] }));
+    expect(stage()).toHaveAttribute("data-feature", "alert");
+    expect(stage()).toHaveTextContent("Scheduled job “Weekly report” failed 2 times in a row.");
+    expect(stage()).toHaveTextContent("Open Settings → Harness");
+  });
+
   it("with reduced motion: no typing and no caret, every demo already at its end, and it still turns", () => {
     reducedMotion(true);
     const showcase = mount();
@@ -255,6 +288,11 @@ describe("UpdateWhatsNewShowcase", () => {
     expect(within(showcase).getByTestId("whats-new-showcase-stage")).toHaveTextContent("Recording 0:04");
     fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[1] }));
     expect(within(showcase).getByTestId("whats-new-showcase-stage").querySelector(".wns-typed")?.textContent).toBe("switching editions");
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[7] }));
+    expect(within(showcase).getByTestId("whats-new-showcase-stage")).toHaveTextContent("Run finished");
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[9] }));
+    expect(within(showcase).getByTestId("whats-new-showcase-stage").querySelector(".wns-pct")?.textContent).toBe("86%");
+    fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[1] }));
 
     fireEvent.mouseLeave(showcase);
     advance(SHOWCASE_ADVANCE_MS);
@@ -267,10 +305,10 @@ describe("UpdateWhatsNewShowcase", () => {
     expect(pictures.map((img) => img.getAttribute("src"))).toEqual(WHATS_NEW_HIGHLIGHTS.map((item) => item.fullImage));
     expect(pictures.every((img) => img.getAttribute("loading") === "eager")).toBe(true);
     // Only the feature on show is displayed; the others wait, loaded, and are never drawn again from the network.
-    expect(pictures.map((img) => img.closest("[hidden]") === null)).toEqual([true, false, false, false, false, false, false]);
+    expect(pictures.map((img) => img.closest("[hidden]") === null)).toEqual(WHATS_NEW_HIGHLIGHTS.map((_, at) => at === 0));
     fireEvent.click(within(showcase).getByRole("tab", { name: CHIPS[3] }));
     expect([...showcase.querySelectorAll("img[data-showcase-image]")]).toEqual(pictures);
-    expect(pictures.map((img) => img.closest("[hidden]") === null)).toEqual([false, false, false, true, false, false, false]);
+    expect(pictures.map((img) => img.closest("[hidden]") === null)).toEqual(WHATS_NEW_HIGHLIGHTS.map((_, at) => at === 3));
     expect(within(showcase).getByTestId("whats-new-showcase-logo").querySelector("img")).toHaveAttribute("src", "/clawbox-icon.png");
   });
 

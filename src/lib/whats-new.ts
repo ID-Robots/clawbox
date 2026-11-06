@@ -104,6 +104,42 @@ export const WHATS_NEW_HIGHLIGHTS = [
 
     fullImage: "/whats-new/4.3/prime-radiant-full.webp",
   },
+  {
+    icon: "forum",
+    title: "whatsNew.runReportsTitle",
+    body: "whatsNew.runReportsBody",
+    summary: "whatsNew.runReportsSummary",
+    image: "/whats-new/4.3/run-reports.webp",
+
+    fullImage: "/whats-new/4.3/run-reports-full.webp",
+  },
+  {
+    icon: "pending_actions",
+    title: "whatsNew.updateAsksTitle",
+    body: "whatsNew.updateAsksBody",
+    summary: "whatsNew.updateAsksSummary",
+    image: "/whats-new/4.3/update-asks.webp",
+
+    fullImage: "/whats-new/4.3/update-asks-full.webp",
+  },
+  {
+    icon: "downloading",
+    title: "whatsNew.installQueueTitle",
+    body: "whatsNew.installQueueBody",
+    summary: "whatsNew.installQueueSummary",
+    image: "/whats-new/4.3/install-queue.webp",
+
+    fullImage: "/whats-new/4.3/install-queue-full.webp",
+  },
+  {
+    icon: "notification_important",
+    title: "whatsNew.jobAlertsTitle",
+    body: "whatsNew.jobAlertsBody",
+    summary: "whatsNew.jobAlertsSummary",
+    image: "/whats-new/4.3/job-alerts.webp",
+
+    fullImage: "/whats-new/4.3/job-alerts-full.webp",
+  },
 ] as const;
 
 /**

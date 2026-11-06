@@ -31,8 +31,8 @@ const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
-  it("reads the seven 4.3.0 highlights, title and body, in order, all of them within the panel's handful", () => {
-    const highlights = parseReleaseHighlights(notes("4.3.0"));
+  it("reads the eleven 4.3.0 highlights, title and body, in order, the panel's handful first", () => {
+    const highlights = parseReleaseHighlights(notes("4.3.0"), 100);
     expect(highlights.map((h) => h.title)).toEqual([
       "Screenshots, built in",
       "One browser for you and your assistant",
@@ -41,10 +41,14 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
       "Hold to talk",
       "The Coding Agent, on a live chart",
       "Prime Radiant, a living wiki",
+      "Coding runs report back in the chat",
+      "Updates that ask before they stop your agents",
+      "Local AI installs wait in line",
+      "Alerts for scheduled jobs",
     ]);
-    // Seven, and nothing past the panel's cap was cut to get there.
-    expect(parseReleaseHighlights(notes("4.3.0"), 100)).toEqual(highlights);
-    expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
+    // A box that reads these notes draws the first seven, the release's
+    // headline features; a 4.3 build draws all eleven from its own catalogue.
+    expect(parseReleaseHighlights(notes("4.3.0"))).toEqual(highlights.slice(0, MAX_HIGHLIGHTS));
     // Wrapped lines are joined with single spaces, and "Settings → Voice" is
     // text, not Markdown, and survives.
     expect(highlights[4].body).toMatch(/ Settings → Voice can play every reply aloud, /);
@@ -99,7 +103,7 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
     // and its fallback (the card's keys) must say the same thing.
     const { whatsNewEn } = await import("@/lib/edition-translations/en-whats-new");
     const { WHATS_NEW_HIGHLIGHTS } = await import("@/lib/whats-new");
-    expect(parseReleaseHighlights(notes("4.3.0"))).toEqual(
+    expect(parseReleaseHighlights(notes("4.3.0"), 100)).toEqual(
       WHATS_NEW_HIGHLIGHTS.map((item) => ({ title: whatsNewEn[item.title], body: whatsNewEn[item.body] })),
     );
   });
