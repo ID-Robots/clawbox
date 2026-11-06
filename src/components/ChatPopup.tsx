@@ -104,6 +104,7 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { advanceChatStream, createChatStreamCursor } from '@/lib/chat-stream-message'
 import { chatKeyUser, defaultTranscriptKeyFor } from '@/lib/chat-scope'
 import { useSessionUser } from '@/lib/use-session-user'
 import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
@@ -1182,6 +1183,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     streamingRef.current = next
     setStreamingState(next)
   }, [])
+  // The live message the gateway's delta frames add up to: after its first
+  // frame of a run it sends only the characters added (lib/chat-stream-message).
+  const liveStreamRef = useRef(createChatStreamCursor())
   const [sending, setSending] = useState(false)
   // Queued while a run is in flight; drained one at a time on `final`.
   const [queuedSends, setQueuedSends] = useState<QueuedSend[]>([])
@@ -3475,7 +3479,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // turn holding text with its directives already gone and the
             // messages it named unopenable for good. The bubble looks the same
             // either way; only what survives an interrupt differs.
-            const text = splitMediaDirectives(extractText(msg)).text
+            const live = advanceChatStream(liveStreamRef.current, payload)
+            const text = splitMediaDirectives(extractText(live)).text
             // Sentinels would flash before the final-state filter drops them.
             // Asked of the text as the BUBBLE will show it, not of the buffer:
             // `SENTINEL_RE` anchors the whole string, so once the directives
@@ -3483,7 +3488,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // stopped looking like a sentinel and the marker reached the
             // bubble. The buffer is still what gets STORED, so an interrupt
             // keeps the directives and their cards.
-            if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, msg)) {
+            if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, live)) {
               applyStreaming(text); setReloadingSkill(false)
               // Short spoken answers start from here, not from the final.
               speakFromStreamRef.current(runIdRef.current, text)

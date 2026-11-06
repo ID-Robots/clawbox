@@ -7499,8 +7499,26 @@ step_clawkeep_install_pip_user_fallback() {
   echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
 }
 
+# OpenClaw 2026.10.9 holds a reasoning model's answer until the model is done
+# and then hands the chat all of it at once (TASK-2228): ClawBox AI streams its
+# reasoning first, so no answer streamed. The script back-ports the upstream
+# fix (2026.10.10) onto the pinned core's transport, as the user who owns the
+# core, and says what it did. Never fatal: an answer that arrives in one piece
+# is no reason to fail an install or an update.
+openclaw_reasoning_stream_patch() {
+  local script="$PROJECT_DIR/scripts/openclaw-reasoning-stream-patch.mjs"
+  if [ ! -f "$script" ]; then
+    echo "  Reasoning stream patch: $script not found, skipping"
+    return 0
+  fi
+  as_clawbox node "$script" "${GATEWAY_DIST%/dist}" \
+    || echo "  WARNING: reasoning stream patch not applied; answers of reasoning models reach the chat in one piece"
+  return 0
+}
+
 step_openclaw_patch() {
   is_hermes_edition && return 0
+  openclaw_reasoning_stream_patch
   # OpenClaw 2 rewrote the connect handler this step used to sed: the scope
   # regex now matches sites where the injected identifiers do not exist (a
   # broken bundle), and the device-identity bypass it papered over is retired

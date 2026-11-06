@@ -102,6 +102,7 @@ import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
 // so a wrapped reply showed its tags live and lost them after a reload — the
 // replayed path goes through this module's projection.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { advanceChatStream, createChatStreamCursor } from '@/lib/chat-stream-message'
 import { useSlashCommands } from '@/lib/use-slash-commands'
 import SlashCommandMenu from '@/components/SlashCommandMenu'
 import {
@@ -447,6 +448,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     streamingRef.current = next
     setStreamingState(next)
   }, [])
+  // The live message the gateway's delta frames add up to: after its first
+  // frame of a run it sends only the characters added (lib/chat-stream-message).
+  const liveStreamRef = useRef(createChatStreamCursor())
   const [sending, setSending] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   // The coding cards — one per run of its own, one per team, live then
@@ -1174,8 +1178,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
 
           if (state === 'delta') {
-            const text = extractText(msg)
-            if (text && !isInterSessionEnvelope(text, msg)) applyStreaming(text)
+            const live = advanceChatStream(liveStreamRef.current, payload)
+            const text = extractText(live)
+            if (text && !isInterSessionEnvelope(text, live)) applyStreaming(text)
           } else if (state === 'final') {
             // Split on the way INTO state, as the mascot chat does and through
             // the same reader: a generated picture arrives as a `MEDIA:` line

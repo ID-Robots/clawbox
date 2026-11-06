@@ -647,6 +647,14 @@ step_openclaw_patch() {
     return
   fi
 
+  # Reasoning answers stream live on the pinned core (TASK-2228): see
+  # openclaw_reasoning_stream_patch in install.sh. Never fatal.
+  local stream_patch="$PROJECT_DIR/scripts/openclaw-reasoning-stream-patch.mjs"
+  if [ -f "$stream_patch" ]; then
+    as_user_runtime node "$stream_patch" "${GATEWAY_DIST%/dist}" \
+      || echo "  WARNING: reasoning stream patch not applied; answers of reasoning models reach the chat in one piece"
+  fi
+
   if openclaw_is_v2; then
     echo "  Gateway patches: not needed on OpenClaw 2 (device identity is client-side)"
     return 0
