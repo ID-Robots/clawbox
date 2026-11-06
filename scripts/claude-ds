@@ -264,6 +264,39 @@ esac
 # turns an early compact — a nuisance — into a failed request. Anyone who
 # measures the real flash window can set CLAUDE_DS_MODEL=deepseek-v4-flash[1m].
 
+# WHERE A 1M SESSION COMPACTS, SAID OUT LOUD (TASK-2203).
+#
+# On a `[1m]` name Claude Code believes a 1M window, and for a model it does
+# not know it left the compaction to the provider's refusal: measured on 2.1.300
+# and 2.1.316 against a stand-in upstream, a session climbed to 1,016,218
+# tokens without one compact_boundary, and the next request was DeepSeek's
+# "This model's maximum context length is 1048576 tokens" 400. Claude Code reads
+# only "prompt is too long" as that refusal, so its reactive compaction never
+# ran either, and the run died 1,697 turns in.
+#
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW is the knob both versions honour (the
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE percentage is ignored for these models). Claude
+# Code compacts about 33k tokens below the window it is given, and clamps the
+# value to the window it believes, so it can only ever LOWER the trigger — a
+# 200k model still compacts at ~167k. The window it is given is 84% of the one
+# the proxy really serves a `[1m]` name — 1,048,576, as its own 400 says, never
+# more: compaction at ~847k, ~169k below the cap less a 32k reply, room for a
+# whole turn of tool results to land after the last check.
+#
+# CLAUDE_DS_AUTOCOMPACT_WINDOW overrides it: a number of tokens, or `off` for
+# Claude Code's own default. An inherited CLAUDE_CODE_AUTO_COMPACT_WINDOW never
+# decides it on this branch.
+CLAUDE_DS_1M_WINDOW=1048576
+autocompact_window_for() {
+  case "${CLAUDE_DS_AUTOCOMPACT_WINDOW:-}" in
+    off) return 0 ;;
+    ?*) printf '%s' "$CLAUDE_DS_AUTOCOMPACT_WINDOW"; return 0 ;;
+  esac
+  case "$1" in
+    *"[1m]") printf '%s' $(( CLAUDE_DS_1M_WINDOW * 84 / 100 )) ;;
+  esac
+}
+
 # EVERY Anthropic credential the environment may be carrying goes, in BOTH
 # branches and before either sets its own. Inherited, one of these outranks
 # what this script exports: on the ClawBox AI branch a stray ANTHROPIC_API_KEY
@@ -341,6 +374,16 @@ else
   export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
   export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
+  case "${CLAUDE_DS_AUTOCOMPACT_WINDOW:-}" in
+    ""|off) ;;
+    *[!0-9]*) die "CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off', not: $CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
+  esac
+  AUTOCOMPACT_WINDOW="$(autocompact_window_for "$MODEL")"
+  if [ -n "$AUTOCOMPACT_WINDOW" ]; then
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$AUTOCOMPACT_WINDOW"
+  else
+    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  fi
 
   HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
   HARNESS_STATE_DIR="$CLAUDE_CONFIG_DIR"
@@ -521,6 +564,7 @@ seed_harness_config "$PWD"
 # actually used" is the question this banner exists to close: on ClawBox AI the
 # plan picks the model, not the wrapper, and on Anthropic the credential in use
 # is not the one the rest of the box runs on.
-printf 'claude-ds: %s (%s) — state in %s\n' "$PROVIDER_LABEL" "$MODEL" "$HARNESS_STATE_DIR" >&2
+printf 'claude-ds: %s (%s) — state in %s%s\n' "$PROVIDER_LABEL" "$MODEL" "$HARNESS_STATE_DIR" \
+  "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:+ — auto-compact window $CLAUDE_CODE_AUTO_COMPACT_WINDOW tokens}" >&2
 
 exec claude "${EFFORT_ARGS[@]}" "${SOURCES_ARGS[@]}" "$@"

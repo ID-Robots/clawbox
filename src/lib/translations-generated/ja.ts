@@ -1811,6 +1811,8 @@ const table: Record<string, string> = {
   "codingAgent.stepAutoMergeOn": "プルリクエスト #{number} の GitHub 自動マージをオンにしました：必須チェックが通った時点でマージされます",
   "codingAgent.stepCiFailed": "プルリクエスト #{n} の CI が失敗しました: {what}",
   "codingAgent.stepCiFix": "{run} の失敗した CI を修正中 ({max} 回中 {n} 回目)",
+  "codingAgent.stepContextCompacted": "会話がモデルのコンテキストウィンドウを超えました（{window} トークン中 {context}）。圧縮して同じセッションで続行します（{max} 回中 {n} 回目）",
+  "codingAgent.stepContextCompactedUnsized": "会話がモデルのコンテキストウィンドウを超えました。圧縮して同じセッションで続行します（{max} 回中 {n} 回目）",
   "codingAgent.stepDeliverableMet": "成果物がそろいました",
   "codingAgent.stepDeliverableMissing": "まだ終わっていません: {reason}",
   "codingAgent.stepEvidencePruned": "証跡フォルダーから削除しました（実行環境やフォルダー外へのリンクは置けません）: {paths}",

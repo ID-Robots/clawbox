@@ -1811,6 +1811,8 @@ const table: Record<string, string> = {
   "codingAgent.stepAutoMergeOn": "Auto-merge di GitHub attivato per la pull request #{number}: viene unita appena passano i suoi controlli obbligatori",
   "codingAgent.stepCiFailed": "La CI è fallita sulla pull request #{n}: {what}",
   "codingAgent.stepCiFix": "Correzione della CI fallita di {run} (tentativo {n} di {max})",
+  "codingAgent.stepContextCompacted": "La conversazione ha superato la finestra di contesto del modello ({context} di {window} token); viene compattata e prosegue nella stessa sessione (tentativo {n} di {max})",
+  "codingAgent.stepContextCompactedUnsized": "La conversazione ha superato la finestra di contesto del modello; viene compattata e prosegue nella stessa sessione (tentativo {n} di {max})",
   "codingAgent.stepDeliverableMet": "La consegna c'è",
   "codingAgent.stepDeliverableMissing": "Non ancora finita: {reason}",
   "codingAgent.stepEvidencePruned": "Rimosso dalla cartella di prove, dove ambienti e collegamenti verso l'esterno non devono stare: {paths}",

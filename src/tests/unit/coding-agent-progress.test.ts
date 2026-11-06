@@ -262,6 +262,8 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.helperSettled({ workflow: true, type: "workflow", refused: true }), "workflowRefused"],
     [RUNNER_STEP.dropped(41), "droppedSteps"],
     [RUNNER_STEP.evidencePruned("venv-attempt/venv/, latest.txt"), "evidencePruned"],
+    [RUNNER_STEP.contextCompacted(1, 2, 1_017_351, 1_048_576), "contextCompacted"],
+    [RUNNER_STEP.contextCompacted(2, 2, null, null), "contextCompactedUnsized"],
   ])("%s", (line, key) => {
     expect(describeProgressLine(line).labelKey, line).toBe(key);
   });
@@ -277,6 +279,14 @@ describe("the runner's own sentences are keyed", () => {
       .toEqual({ branch: "clawbox/run-1", base: "main" });
     expect(describeProgressLine(RUNNER_STEP.dropped(41)).params).toEqual({ count: 41 });
     expect(describeProgressLine(RUNNER_STEP.evidencePruned("venv/, python")).params).toEqual({ paths: "venv/, python" });
+    expect(describeProgressLine(RUNNER_STEP.contextCompacted(1, 2, 1_017_351, 1_048_576)).params)
+      .toEqual({ context: 1_017_351, window: 1_048_576, n: 1, max: 2 });
+    expect(describeProgressLine(RUNNER_STEP.contextCompacted(2, 2, null, null)).params).toEqual({ n: 2, max: 2 });
+  });
+
+  it("fits the context step, numbers and all, inside the runner's 160-character line", () => {
+    // pushProgress cuts a longer line, and a cut line no longer matches its key.
+    expect(RUNNER_STEP.contextCompacted(2, 2, 99_999_999, 99_999_999).length).toBeLessThanOrEqual(160);
   });
 
   it("shows a helper's type and description beside the label, never inside it", () => {

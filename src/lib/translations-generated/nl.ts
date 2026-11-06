@@ -1811,6 +1811,8 @@ const table: Record<string, string> = {
   "codingAgent.stepAutoMergeOn": "Automatische merge van GitHub aangezet voor pull request #{number}: hij wordt samengevoegd zodra zijn verplichte checks slagen",
   "codingAgent.stepCiFailed": "CI mislukt op pull request #{n}: {what}",
   "codingAgent.stepCiFix": "De mislukte CI van {run} wordt gerepareerd (poging {n} van {max})",
+  "codingAgent.stepContextCompacted": "Het gesprek is groter geworden dan het contextvenster van het model ({context} van {window} tokens); het wordt samengevat en gaat verder in dezelfde sessie (poging {n} van {max})",
+  "codingAgent.stepContextCompactedUnsized": "Het gesprek is groter geworden dan het contextvenster van het model; het wordt samengevat en gaat verder in dezelfde sessie (poging {n} van {max})",
   "codingAgent.stepDeliverableMet": "Het resultaat is er",
   "codingAgent.stepDeliverableMissing": "Nog niet klaar: {reason}",
   "codingAgent.stepEvidencePruned": "Verwijderd uit de bewijsmap, waar omgevingen en links naar buiten niet thuishoren: {paths}",

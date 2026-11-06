@@ -1671,6 +1671,8 @@ export const bg: Record<string, string> = {
   "codingAgent.stepResumedAfterLimit": "Лимитът за използване се нулира; продължава оттам, докъдето беше стигнало",
   "codingAgent.stepUsageLimitContinuing": "Достигнат е лимитът за използване в Anthropic; Claude Code продължава автоматично със същия акаунт",
   "codingAgent.stepUsageLimitGrace": "Достигнат е лимитът за използване в Anthropic; Claude Code е в гратисния си период и продължава със същия акаунт",
+  "codingAgent.stepContextCompacted": "Разговорът надрасна контекстния прозорец на модела ({context} от {window} токена); сбива се и продължава в същата сесия (опит {n} от {max})",
+  "codingAgent.stepContextCompactedUnsized": "Разговорът надрасна контекстния прозорец на модела; сбива се и продължава в същата сесия (опит {n} от {max})",
   "codingAgent.stepTeamMessageToRun": "Съобщение към {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Съобщение към водещия на екипа: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Съобщение към асистента: {text}",

@@ -133,6 +133,7 @@ import {
   parsePauseReason,
 } from "@/lib/coding-agent-status";
 import { parseClawaiAllowanceRefusal } from "@/lib/clawai-allowance";
+import { contextOverflowError, contextRecoveryContinuation, MAX_CONTEXT_RECOVERIES, parseContextOverflow, planContextRecovery, type ContextOverflow } from "@/lib/coding-context-window";
 import {
   HARNESS_FAULT_CONFIG_KEY,
   type HarnessFault,
@@ -1952,6 +1953,13 @@ export interface CodingRun {
    * convergent package-manager setup — see TRANSIENT_FAILURE_RE.
    */
   retries: number;
+  /**
+   * Times this record was carried on, in its own session, after the provider
+   * refused a request past the model's context window (TASK-2203, see
+   * src/lib/coding-context-window.ts). At most MAX_CONTEXT_RECOVERIES; absent
+   * on a record that never needed it.
+   */
+  contextRecoveries?: number;
   /**
    * Whether RESUMING this run's session could help.
    *
@@ -4675,6 +4683,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     ...(readCodexThreadUsage((raw as { codexThreadUsage?: unknown }).codexThreadUsage) ?? {}),
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
     retries: typeof raw.retries === "number" ? raw.retries : 0,
+    ...(typeof raw.contextRecoveries === "number" && Number.isInteger(raw.contextRecoveries) && raw.contextRecoveries > 0 ? { contextRecoveries: raw.contextRecoveries } : {}),
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     // Only the one verdict this code writes counts; anything else on a
@@ -5326,6 +5335,8 @@ interface RunStore {
   runMcpPlan: Map<string, RunMcpPlan>;
   /** An `openai` run's API key — see runOpenAIKey. Optional: a store from an older module. */
   runOpenAIKey?: Map<string, string>;
+  /** The reply a run's next spawn may ask for, after an outgrown window — see runContextReply. Optional: a store from an older module. */
+  runContextReply?: Map<string, number>;
   /** Who a run's own `git commit` is authored as — see runGitIdentity. */
   runGitIdentity?: Map<string, CodingGitIdentity>;
   /** The runs whose pull request or review is already being watched. */
@@ -7441,6 +7452,16 @@ function gitIdentityFor(runId: string): CodingGitIdentity {
 const runMcpPlan: Map<string, RunMcpPlan> =
   store.runMcpPlan ?? (store.runMcpPlan = new Map<string, RunMcpPlan>());
 
+/**
+ * The reply (CLAUDE_CODE_MAX_OUTPUT_TOKENS) the NEXT spawn of a run may ask
+ * for, set only when the run is carried on past an outgrown context window
+ * (TASK-2203): the compaction that spawn starts with is the whole context plus
+ * that reply, so it must fit beside the context. Taken by the spawn it was set
+ * for; every other spawn asks for Claude Code's own default.
+ */
+const runContextReply: Map<string, number> =
+  store.runContextReply ?? (store.runContextReply = new Map<string, number>());
+
 /** How the run's feed names an allowlist entry. */
 function mcpEntryLabel(name: string): string {
   return name === CLAWBOX_READ_ONLY_ENTRY ? "ClawBox read-only tools" : name;
@@ -7607,7 +7628,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -7675,6 +7696,13 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // starts, in its worktree or a worker's, and leaves nothing in the owner's
   // repository. Set ahead of the secrets, so no stored entry can sign a run's
   // commits as somebody else, and over any `-c user.name=` the agent passes.
+  // A spawn that carries a run on past an outgrown context window: the reply
+  // its compaction may ask for, so that request fits beside the context
+  // (runContextReply). Set ahead of the secrets, so none can undo it, and only
+  // for Claude Code — Codex has its own compaction and no such variable.
+  if (typeof opts.maxReplyTokens === "number" && Number.isInteger(opts.maxReplyTokens) && opts.maxReplyTokens > 0 && !runsOnCodex(provider)) {
+    env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(opts.maxReplyTokens);
+  }
   if (opts.gitIdentity) {
     env.GIT_AUTHOR_NAME = opts.gitIdentity.name;
     env.GIT_AUTHOR_EMAIL = opts.gitIdentity.email;
@@ -11958,6 +11986,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   let accountLimit: FoundAccountLimit | null = null;
   let accountAuthText: string | null = null;
   let accountDecision: "switch" | "wait" | "auth" | "moved" | null = null;
+  // A context window outgrown, and the reply the carrying-on spawn may ask
+  // for — decided below, acted on after the cleanup (TASK-2203).
+  let contextCarryOn: { overflow: ContextOverflow; maxReplyTokens: number; attempt: number } | null = null;
   if (run.status === "running") {
     if (state.forcedAccountPause) {
       // The account switch found no account to move the run to, AFTER the
@@ -12107,6 +12138,25 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.error = null;
       }
     }
+    // A CONTEXT WINDOW OUTGROWN (TASK-2203). The proxy passes DeepSeek's own
+    // refusal on — "This model's maximum context length is 1048576 tokens.
+    // However, you requested …" — which Claude Code does not read as "prompt
+    // is too long", so its own compaction never ran and the run died with its
+    // session full. That session is intact, so the run is carried on in it,
+    // after the cleanup below, compacted first (src/lib/coding-context-window.ts);
+    // a run that cannot be is failed with the numbers and the provider's words
+    // rather than "Claude Code reported an error". ClawBox AI runs only: an
+    // Anthropic run's refusal is the one Claude Code reads and compacts on
+    // itself, and a Codex run has its own compaction.
+    if (run.status === "failed" && run.provider === "clawbox-ai" && state.endRequested === null && !state.timedOut) {
+      const overflow = parseContextOverflow(run.error);
+      if (overflow) {
+        const recoveries = run.contextRecoveries ?? 0;
+        const plan = planContextRecovery(overflow, recoveries, run.sessionId !== null);
+        if (plan.kind === "resume") contextCarryOn = { overflow, maxReplyTokens: plan.maxReplyTokens, attempt: plan.attempt };
+        else run.error = contextOverflowError(overflow, recoveries, plan.reason);
+      }
+    }
     // AN ANTHROPIC ACCOUNT AT ITS USAGE LIMIT (TASK-902). The overnight queue
     // died on exactly this on 2026-09-18 — "You've hit your session limit ·
     // resets 10:50pm" — while a second account could have carried on. So the
@@ -12220,6 +12270,42 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount, carriedMcp));
     return;
   }
+  // THE CONTEXT WINDOW OUTGROWN (TASK-2203) — see where `contextCarryOn` is
+  // set. Like the account switch: the same record and session, back on
+  // "running" with nothing downstream told it finished, respawned with the
+  // reply cut to what fits beside the context (runContextReply). Claude Code
+  // compacts before its first request — the wrapper's auto-compact window is
+  // far below what the session holds — and goes on from the summary.
+  if (contextCarryOn && run.status === "failed" && run.sessionId) {
+    const { overflow, maxReplyTokens, attempt } = contextCarryOn;
+    run.contextRecoveries = attempt;
+    run.status = "running";
+    run.completedAt = null;
+    run.exitCode = null;
+    run.error = null;
+    // The refusal arrived as the result event's text; a continuation that
+    // dies without a result must not file it as the run's report.
+    run.summary = null;
+    run.resultText = null;
+    run.lastActivityAt = Date.now();
+    pushProgress(run, RUNNER_STEP.contextCompacted(attempt, MAX_CONTEXT_RECOVERIES, overflow.context, overflow.window));
+    persist(true);
+    console.error(`[coding-agent] ${run.id}: the provider refused a request past the context window (${overflow.context ?? "?"} of ${overflow.window ?? "?"} tokens); carrying on in session ${run.sessionId}, compacted, with replies of at most ${maxReplyTokens} tokens (attempt ${attempt} of ${MAX_CONTEXT_RECOVERIES})`);
+    // The same run's next stretch of the same work: the same credentials,
+    // less a dated copy whose day ended meanwhile (see the retry below).
+    if (carriedSecrets || carriedAccount || carriedMcp || carriedOpenAIKey) {
+      restoreRunSecrets(run.id, withoutPastDueSecrets(carriedSecrets ?? {}, carriedExpiry ?? {}), carriedAccount, carriedMcp, carriedOpenAIKey);
+    }
+    runContextReply.set(run.id, maxReplyTokens);
+    try {
+      spawnOrSettle(run, run.sessionId, state.tools, state.settings, contextRecoveryContinuation(artifactsDir(run.id)), true);
+    } catch {
+      // spawnOrSettle settled the record and said why.
+      runContextReply.delete(run.id);
+    }
+    return;
+  }
+
   // Not carried on: this stretch of the run is over, and its refused-credential
   // trail goes with it rather than staying in the process for ever — except
   // over a pause for an Anthropic reset. The box resumes that one by itself,
@@ -12824,7 +12910,11 @@ function spawnRun(
   // from a `close` handler and cannot read the disk (restoreRunSecrets).
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id) });
+  // Taken, not read: only the spawn that carries a run on past an outgrown
+  // window asks for less than Claude Code's own reply.
+  const maxReplyTokens = runContextReply.get(run.id) ?? null;
+  runContextReply.delete(run.id);
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id), maxReplyTokens });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
