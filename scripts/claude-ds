@@ -376,7 +376,7 @@ else
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
   case "${CLAUDE_DS_AUTOCOMPACT_WINDOW:-}" in
     ""|off) ;;
-    *[!0-9]*) die "CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off', not: $CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
+    0*|*[!0-9]*) die "CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off', not: $CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
   esac
   AUTOCOMPACT_WINDOW="$(autocompact_window_for "$MODEL")"
   if [ -n "$AUTOCOMPACT_WINDOW" ]; then

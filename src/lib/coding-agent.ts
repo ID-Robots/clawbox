@@ -7691,11 +7691,6 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   if (typeof opts.cpuBudget === "number" && Number.isInteger(opts.cpuBudget) && opts.cpuBudget >= 1) {
     env[RUN_CPU_BUDGET_ENV] = String(opts.cpuBudget);
   }
-  // Who the run's own `git commit` is authored as (runGitIdentity). The
-  // environment rather than a written config: it reaches every git the harness
-  // starts, in its worktree or a worker's, and leaves nothing in the owner's
-  // repository. Set ahead of the secrets, so no stored entry can sign a run's
-  // commits as somebody else, and over any `-c user.name=` the agent passes.
   // A spawn that carries a run on past an outgrown context window: the reply
   // its compaction may ask for, so that request fits beside the context
   // (runContextReply). Set ahead of the secrets, so none can undo it, and only
@@ -7703,6 +7698,11 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   if (typeof opts.maxReplyTokens === "number" && Number.isInteger(opts.maxReplyTokens) && opts.maxReplyTokens > 0 && !runsOnCodex(provider)) {
     env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(opts.maxReplyTokens);
   }
+  // Who the run's own `git commit` is authored as (runGitIdentity). The
+  // environment rather than a written config: it reaches every git the harness
+  // starts, in its worktree or a worker's, and leaves nothing in the owner's
+  // repository. Set ahead of the secrets, so no stored entry can sign a run's
+  // commits as somebody else, and over any `-c user.name=` the agent passes.
   if (opts.gitIdentity) {
     env.GIT_AUTHOR_NAME = opts.gitIdentity.name;
     env.GIT_AUTHOR_EMAIL = opts.gitIdentity.email;
@@ -11989,6 +11989,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // A context window outgrown, and the reply the carrying-on spawn may ask
   // for — decided below, acted on after the cleanup (TASK-2203).
   let contextCarryOn: { overflow: ContextOverflow; maxReplyTokens: number; attempt: number } | null = null;
+  // …and whether the failure WAS an outgrown window at all: its numbers are no
+  // transient upstream blink, whatever digits they happen to contain.
+  let contextOverflowed = false;
   if (run.status === "running") {
     if (state.forcedAccountPause) {
       // The account switch found no account to move the run to, AFTER the
@@ -12151,8 +12154,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     if (run.status === "failed" && run.provider === "clawbox-ai" && state.endRequested === null && !state.timedOut) {
       const overflow = parseContextOverflow(run.error);
       if (overflow) {
+        contextOverflowed = true;
         const recoveries = run.contextRecoveries ?? 0;
-        const plan = planContextRecovery(overflow, recoveries, run.sessionId !== null);
+        const plan = planContextRecovery(overflow, recoveries, Boolean(run.sessionId));
         if (plan.kind === "resume") contextCarryOn = { overflow, maxReplyTokens: plan.maxReplyTokens, attempt: plan.attempt };
         else run.error = contextOverflowError(overflow, recoveries, plan.reason);
       }
@@ -12299,6 +12303,15 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     runContextReply.set(run.id, maxReplyTokens);
     try {
       spawnOrSettle(run, run.sessionId, state.tools, state.settings, contextRecoveryContinuation(artifactsDir(run.id)), true);
+      // A model has answered this run — a million tokens of it — so the
+      // harness-fault verdict must judge the carry-on with the stretch before
+      // it, as it does the transient retry's (TASK-1320): a refusal before the
+      // carry-on's first answer is this run's failure, not the box's harness.
+      const carried = live.get(run.id);
+      if (carried && carried !== state) {
+        carried.tokensAtSpawn = state.tokensAtSpawn;
+        carried.sawModelAnswer = state.sawModelAnswer;
+      }
     } catch {
       // spawnOrSettle settled the record and said why.
       runContextReply.delete(run.id);
@@ -12342,6 +12355,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // does: the harness never started, so nothing happened that a second
     // attempt could trip over — and this one goes without the flag.
     && (isTransientFailure(run.error) || state.scopeRefused || state.streamInputRefused)
+    // An outgrown window is never a blink, and its numbers may hold a "503".
+    && !contextOverflowed
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects

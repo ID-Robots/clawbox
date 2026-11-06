@@ -366,10 +366,12 @@ describe("the auto-compact window", () => {
 
   it("refuses a window that is not a number of tokens, before Claude Code starts", () => {
     rmSync(envDump, { force: true });
-    const { status, stderr } = runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "85%" });
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off'");
-    expect(existsSync(envDump)).toBe(false);
+    for (const bad of ["85%", "0", "-1"]) {
+      const { status, stderr } = runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: bad });
+      expect(status, bad).not.toBe(0);
+      expect(stderr, bad).toContain("CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off'");
+      expect(existsSync(envDump), bad).toBe(false);
+    }
   });
 
   it("leaves an Anthropic run exactly as it was", () => {

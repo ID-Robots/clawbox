@@ -52,12 +52,18 @@ const SESSION = "sess-window-1";
 const FIELD_400 = "API Error: 400 This model's maximum context length is 1048576 tokens. However, you requested 1049351 tokens (1017351 in the messages, 32000 in the completion). Please reduce the length of the messages or completion.";
 /** One that went so far past the window in one step that no summary fits beside it. */
 const FAR_400 = "API Error: 400 This model's maximum context length is 1048576 tokens. However, you requested 1078000 tokens (1046000 in the messages, 32000 in the completion). Please reduce the length of the messages or completion.";
+/** The same, with a "503" in its numbers — which the transient-retry pattern would otherwise read as an upstream blink. */
+const FAR_503 = "API Error: 400 This model's maximum context length is 1048576 tokens. However, you requested 1078503 tokens (1046503 in the messages, 32000 in the completion). Please reduce the length of the messages or completion.";
 
 function sq(text: string): string {
   return `'${text.replace(/'/g, "'\\''")}'`;
 }
 
 const INIT = JSON.stringify({ type: "system", subtype: "init", session_id: SESSION, model: "deepseek-v4-pro[1m]" });
+/** A model's own answer, billed — what a million-token stretch of work leaves behind. */
+const ANSWER = JSON.stringify({ type: "assistant", message: { model: "deepseek-v4-pro", content: [{ type: "text", text: "Reading the next files." }], usage: { input_tokens: 1_000_000, output_tokens: 40 } } });
+/** The CLI's own line when the model id is refused before any answer — a harness-fault shape. */
+const UNRECOGNIZED = '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}';
 const result = (text: string, isError: boolean) => JSON.stringify({ type: "result", subtype: "success", is_error: isError, result: text, num_turns: 3 });
 
 function callsLog(): string {
@@ -83,7 +89,9 @@ function calls(): Call[] {
  * a failed result), `bad` (an ordinary 400), or `ok`. It logs the reply cap it
  * was handed and its argv, and keeps the turn it was told.
  */
-function installWrapper(plan: readonly ("overflow" | "far" | "bad" | "ok")[]): void {
+type Mode = "overflow" | "answered-overflow" | "unrecognized" | "far" | "far503" | "bad" | "transient" | "ok";
+
+function installWrapper(plan: readonly Mode[]): void {
   fs.writeFileSync(path.join(base, "plan"), `${plan.join("\n")}\n`);
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
@@ -98,7 +106,11 @@ function installWrapper(plan: readonly ("overflow" | "far" | "bad" | "ok")[]): v
       `mode=$(sed -n "\${n}p" ${sq(path.join(base, "plan"))})`,
       'case "$mode" in',
       `  overflow) printf '%s\\n' ${sq(INIT)} ${sq(result(FIELD_400, true))}; exit 1 ;;`,
+      `  answered-overflow) printf '%s\\n' ${sq(INIT)} ${sq(ANSWER)} ${sq(result(FIELD_400, true))}; exit 1 ;;`,
+      `  unrecognized) printf '%s\\n' ${sq(INIT)} ${sq(result(UNRECOGNIZED, true))}; exit 1 ;;`,
       `  far) printf '%s\\n' ${sq(INIT)} ${sq(result(FAR_400, true))}; exit 1 ;;`,
+      `  far503) printf '%s\\n' ${sq(INIT)} ${sq(result(FAR_503, true))}; exit 1 ;;`,
+      `  transient) printf '%s\\n' ${sq(INIT)} ${sq(result("API Error: 503 Service Unavailable", true))}; exit 1 ;;`,
       `  bad) printf '%s\\n' ${sq(INIT)} ${sq(result('API Error: 400 {"error":{"message":"Bad request","type":"invalid_request_error"}}', true))}; exit 1 ;;`,
       `  *) printf '%s\\n' ${sq(INIT)} ${sq(result("Done.", false))}; exit 0 ;;`,
       "esac",
@@ -158,7 +170,7 @@ async function settled(id: string) {
   throw new Error("run never settled");
 }
 
-async function runWith(plan: readonly ("overflow" | "far" | "bad" | "ok")[]) {
+async function runWith(plan: readonly Mode[]) {
   installWrapper(plan);
   makeProject("site");
   const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
@@ -223,12 +235,40 @@ describe("a ClawBox AI run that outgrew its context window", () => {
     expect(run.contextRecoveries ?? 0).toBe(0);
   });
 
-  it("asks every later spawn for Claude Code's own reply again", async () => {
-    // A recovery's cap belongs to the spawn that compacts; nothing else inherits it.
-    const { run } = await runWith(["overflow", "ok"]);
+  it("hands the reply cap to the carrying-on spawn only, never to a later spawn of the same run", async () => {
+    // The carry-on blinks (a 503 before it did anything) and the transient
+    // retry starts a fresh session: that spawn asks for Claude Code's own reply.
+    const { run } = await runWith(["overflow", "transient", "ok"]);
+
     expect(run.status).toBe("completed");
-    const env = lib.buildRunEnv({ provider: "clawbox-ai" });
-    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBeUndefined();
+    const [first, second, third] = calls();
+    expect(calls()).toHaveLength(3);
+    expect(first.reply).toBe("");
+    expect(second.reply).toBe("20000");
+    expect(second.args).toContain(`--resume ${SESSION}`);
+    expect(third.reply).toBe("");
+    expect(third.args).not.toContain("--resume");
+    expect(run.retries).toBe(1);
+  });
+
+  it("judges a carry-on that is refused before it answers with the stretch before it: the run's failure, not the box's harness", async () => {
+    // Without the first stretch's answer carried over, this refusal would read
+    // as a harness that never got a model to answer, and refuse every run on
+    // the box for a while (coding-harness-fault.ts).
+    const { run } = await runWith(["answered-overflow", "unrecognized", "unrecognized", "ok"]);
+
+    expect(run.status).toBe("failed");
+    expect(run.failureKind ?? null).not.toBe("harness_not_ready");
+    expect(run.error).toContain("unrecognized_model");
+  });
+
+  it("never reads an outgrown window as a transient blink, whatever digits it holds", async () => {
+    const { run } = await runWith(["far503", "ok"]);
+
+    expect(calls()).toHaveLength(1);
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(run.error).toContain("not even a summary of it fits");
   });
 });
 

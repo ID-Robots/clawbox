@@ -107,6 +107,11 @@ TIER=$(printf '%s\n' "$FACTS" | sed -n 's/^tier: //p')
 # shellcheck disable=SC2016  # expanded on the board
 PROBE=$(board '
   proxy=${CLAWBOX_AI_PROXY_URL:-https://clawbox.com/api/ai}
+  # The rule claude-ds applies before it hands the token anywhere.
+  case "$proxy" in
+    https://*|http://127.0.0.1[:/]*|http://localhost[:/]*) ;;
+    *) echo "not asked: the proxy address is neither HTTPS nor loopback"; exit 0 ;;
+  esac
   token=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"clawai_token\") or \"\")" "$REPO/data/config.json" 2>/dev/null)
   [ -n "$token" ] || { echo "no ClawBox AI token on this board"; exit 0; }
   for m in deepseek-v4-flash deepseek-v4-pro; do
@@ -123,6 +128,15 @@ except Exception:
   done
 ')
 while IFS= read -r line; do note "proxy — $line"; done <<< "$PROBE"
+
+# Both fixture folders go on every way out, a failed one included.
+DIRECT_DIR=
+cleanup_and_finish() {
+  # shellcheck disable=SC2016  # expanded on the board
+  [ -n "$DIRECT_DIR" ] && board 'case "$1" in *..*) ;; /home/clawbox/?*/nano-ci-*) rm -rf -- "$1" ;; esac' "$DIRECT_DIR" >/dev/null 2>&1
+  remove_project_dir
+  finish
+}
 
 if ! fresh_project_dir "-autocompact"; then
   not_ok "could not create $PROJECT_DIR on the board"
@@ -170,7 +184,7 @@ if ! board "$MAKE_FILES"'
   echo $! > "$1/.direct/pid"
 ' "$DIRECT_DIR" "$FILES" "$LONG_MODEL" "$(task_for "$FILES")"; then
   not_ok "could not start the scripted claude-ds session in $DIRECT_DIR"
-  finish
+  cleanup_and_finish
 fi
 ok "scripted claude-ds session started on $LONG_MODEL over $FILES files"
 
@@ -197,7 +211,8 @@ d_peak=$(printf '%s' "$DIRECT" | jq -r '.peak // 0')
 d_auto=$(printf '%s' "$DIRECT" | jq -r '[.compactions[] | select(.trigger == "auto")] | length')
 d_first=$(printf '%s' "$DIRECT" | jq -r '[.compactions[] | select(.trigger == "auto") | .pre // 0] | first // 0')
 d_overflow=$(printf '%s' "$DIRECT" | jq -r '.overflow // empty')
-d_err=$(printf '%s' "$DIRECT" | jq -r '.result.is_error // "none"')
+# Not `// "none"`: jq's alternative treats `false` as missing too.
+d_err=$(printf '%s' "$DIRECT" | jq -r 'if .result == null then "none" else (.result.is_error | tostring) end')
 d_text=$(printf '%s' "$DIRECT" | jq -r '.result.text // ""')
 
 if [ -n "$d_overflow" ]; then
@@ -220,20 +235,25 @@ esac
 board_api GET /setup-api/coding-agent/status
 if [ "$API_STATUS" != 200 ] || [ "$(api_json '.ready')" != true ]; then
   not_ok "the coding agent cannot start a run here: $(api_error)"
-  finish
+  PROJECT_DIR=
+  cleanup_and_finish
 fi
 # On a 200k model a third of the files already means two compactions.
 RUN_FILES=$FILES
 [ "$TIER" = pro ] || RUN_FILES=24
+PROJECT_DIR=
 if ! fresh_project_dir "-autocompact-run"; then
   not_ok "could not create $PROJECT_DIR on the board"
-  finish
+  cleanup_and_finish
 fi
 # shellcheck disable=SC2016  # expanded on the board
-board "$MAKE_FILES"'make_files "$1" "$2"' "$PROJECT_DIR" "$RUN_FILES" >/dev/null
+if ! board "$MAKE_FILES"'make_files "$1" "$2" && [ -f "$1/f$(printf %02d "$2").txt" ]' "$PROJECT_DIR" "$RUN_FILES" >/dev/null; then
+  not_ok "could not write the $RUN_FILES files into $PROJECT_DIR"
+  cleanup_and_finish
+fi
 if ! start_coding_run "$(task_for "$RUN_FILES")"; then
   not_ok "the run did not start: $(api_error)"
-  finish
+  cleanup_and_finish
 fi
 ok "run $RUN_ID started over $RUN_FILES files (plan tier: ${TIER:-unknown})"
 wait_coding_run "$RUN_SECONDS"
@@ -249,15 +269,12 @@ if [ -n "$SESSION" ]; then
   note "run transcript: $RUN"
   r_auto=$(printf '%s' "$RUN" | jq -r '[.compactions[]? | select(.trigger == "auto")] | length')
   r_peak=$(printf '%s' "$RUN" | jq -r '.peak // 0')
-  if [ "$TIER" = pro ]; then
-    if [ "${r_auto:-0}" -ge 1 ]; then ok "the delegated run on the 1M model compacted ($r_auto time(s), peak $r_peak tokens)"
-    else not_ok "the delegated run on the 1M model never compacted (peak $r_peak tokens)"; fi
-  else
-    note "plan tier ${TIER:-unknown}: the run's model is believed 200k, so its $r_auto compaction(s) are the old behaviour, kept"
-  fi
+  # On a 200k model (any plan below Max) the compactions are the old
+  # behaviour, kept; either way a run that read its files compacted.
+  if [ "${r_auto:-0}" -ge 1 ]; then ok "the delegated run compacted on plan tier ${TIER:-unknown} ($r_auto time(s), peak $r_peak tokens)"
+  else not_ok "the delegated run never compacted on plan tier ${TIER:-unknown} (peak $r_peak tokens)"; fi
+else
+  not_ok "the run's answer named no session, so its transcript could not be read"
 fi
 
-# shellcheck disable=SC2016  # expanded on the board
-board 'case "$1" in /home/clawbox/?*/nano-ci-*) rm -rf -- "$1" ;; esac' "$DIRECT_DIR" >/dev/null 2>&1
-remove_project_dir
-finish
+cleanup_and_finish
