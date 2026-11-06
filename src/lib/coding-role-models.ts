@@ -7,18 +7,19 @@
  * on the most capable model, by default — so a three-task team paid top price
  * for six or seven runs of which three wrote anything.
  *
- * So a planner (and the lead, which is the planner back for a moment) and a
- * reviewer default to the provider's CHEAPER model (`ECONOMY_MODELS`:
- * `claude-sonnet-5` on Anthropic, the plan's flash tier on ClawBox AI) and to
- * at most `xhigh` effort — never MORE than the owner's own. Workers keep the
- * owner's model and effort.
+ * So each role has a model of its own by default (`ROLE_DEFAULT_MODELS`): the
+ * planner (and the lead, which is the planner back for a moment) the
+ * provider's BEST model, because a bad plan wastes every run after it; a
+ * worker and a reviewer the provider's middle one. A planner and a reviewer
+ * also run at most at `xhigh` effort — never MORE than the owner's own.
+ * Workers keep the owner's effort.
  *
  * The owner may override any of three halves per role in the Coding Agent
  * settings (`coding_agent_role_models`): the PROVIDER that pays for the role's
  * runs, the MODEL — a tier (`standard`, `economy`) or one model that provider
- * offers (`roleModelOptions`) — and the EFFORT. A box that never opens that
- * section, or that stored the older `{ model: standard|economy }` shape, runs
- * exactly as it did before: the role on the team's own provider.
+ * offers (`roleModelOptions`) — and the EFFORT. A stored tier still means what
+ * it always did: `standard` the owner's model, `economy` the provider's
+ * cheaper one (`ECONOMY_MODELS`), on the team's own provider.
  *
  * PURE ON PURPOSE, like coding-provider.ts: the settings panel imports it to
  * draw the choices and the route to validate them, and neither may pull the
@@ -53,8 +54,11 @@ export type ModelRole = (typeof MODEL_ROLES)[number];
 export const ROLE_MODEL_TIERS = ["standard", "economy"] as const;
 export type RoleModelTier = (typeof ROLE_MODEL_TIERS)[number];
 
-/** Where a resolved run's model came from: a tier, or a model the owner named for the role. */
-export type ResolvedRoleTier = RoleModelTier | "chosen";
+/**
+ * Where a resolved run's model came from: the role's own default (nothing
+ * stored), a tier, or a model the owner named for the role.
+ */
+export type ResolvedRoleTier = "default" | RoleModelTier | "chosen";
 
 /** Claude Code's effort levels, weakest first — the same list as coding-agent.ts's EFFORT_LEVELS. */
 export const ROLE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
@@ -72,8 +76,9 @@ export interface RoleModelChoice {
   /**
    * A tier (`standard` | `economy`), or a model id from
    * `roleModelOptions(provider)` — an id is only ever stored beside the
-   * provider it belongs to. Absent: the role's default tier, or, where a
-   * provider is stored, that provider's default model (`standard`).
+   * provider it belongs to. Absent: the role's default model
+   * (`ROLE_DEFAULT_MODELS`), or, where a provider is stored, that provider's
+   * default model (`standard`).
    */
   model?: string;
   effort?: RoleEffort;
@@ -82,8 +87,9 @@ export interface RoleModelChoice {
 export type RoleModels = Partial<Record<ModelRole, RoleModelChoice>>;
 
 /**
- * What a role gets with nothing stored: its tier, the effort it never goes
- * above and the steps it never gets more of (null: the owner's).
+ * What a role gets with nothing stored, beside its model (`ROLE_DEFAULT_MODELS`):
+ * the effort it never goes above and the steps it never gets more of (null:
+ * the owner's).
  *
  * The two caps hold even against a stored per-role effort: a planner or a
  * reviewer reads and answers, and ultracode's fan-out (coding-agent.ts,
@@ -93,10 +99,26 @@ export type RoleModels = Partial<Record<ModelRole, RoleModelChoice>>;
  * a page, not a project, and the owner's ceiling (up to 2,000) is sized for
  * the worker that writes one.
  */
-export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { model: RoleModelTier; effortCap: RoleEffort | null; turnsCap: number | null }>> = {
-  planner: { model: "economy", effortCap: "xhigh", turnsCap: 100 },
-  worker: { model: "standard", effortCap: null, turnsCap: null },
-  reviewer: { model: "economy", effortCap: "xhigh", turnsCap: 100 },
+export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { effortCap: RoleEffort | null; turnsCap: number | null }>> = {
+  planner: { effortCap: "xhigh", turnsCap: 100 },
+  worker: { effortCap: null, turnsCap: null },
+  reviewer: { effortCap: "xhigh", turnsCap: 100 },
+};
+
+/**
+ * The model each role runs on with nothing stored for it, on the provider it
+ * runs on: the planner gets the provider's best model, a worker and a
+ * reviewer its middle one. ClawBox AI: its flash tier for all three — the one
+ * model every plan may use; never the pro tier, which is Max-plan only and
+ * would fail a role's every run on any other plan.
+ *
+ * Only the auto case reads this. A role whose provider or model the owner
+ * stored keeps exactly that, a stored `standard`/`economy` included.
+ */
+export const ROLE_DEFAULT_MODELS: Readonly<Record<CodingProvider, Readonly<Record<ModelRole, string>>>> = {
+  anthropic: { planner: "claude-fable-5-1", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+  openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
+  "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
 };
 
 /** The steps a role's run gets: the owner's ceiling, or the role's cap where it has one. */
@@ -303,11 +325,11 @@ export interface RoleRun {
   /** The model on that provider, or null where the provider's plan decides. */
   model: string | null;
   effort: RoleEffort;
-  /** `standard`/`economy` for a tier, `chosen` for a model the owner named. */
+  /** `default` for the role's own default, `standard`/`economy` for a tier, `chosen` for a model the owner named. */
   tier: ResolvedRoleTier;
   /**
    * True when nothing stored chose the provider or the model: the role's
-   * default tier on the team's own provider. The effort half says nothing here.
+   * default model on the team's own provider. The effort half says nothing here.
    */
   auto: boolean;
 }
@@ -315,8 +337,9 @@ export interface RoleRun {
 /**
  * What one role's run starts with: its provider, its model there, its effort.
  *
- * With nothing stored — or the older `{ model: standard|economy }` — the
- * answer is the team's own provider, exactly as before this module knew about
+ * With nothing stored, the role's default model (`ROLE_DEFAULT_MODELS`) on the
+ * team's own provider. With the older `{ model: standard|economy }`, that tier
+ * on the team's own provider, exactly as before this module knew about
  * providers. A provider stored without a model is that provider's default
  * model (the `standard` tier there); `standard` on the team's own provider is
  * `ownerModel`, the model the team's runs would carry anyway.
@@ -337,10 +360,13 @@ export function resolveRoleRun(
   const own = stored[role] ?? {};
   const auto = own.provider === undefined && own.model === undefined;
   const provider = own.provider ?? ownerProvider;
-  const value = own.model ?? (own.provider ? "standard" : ROLE_DEFAULTS[role].model);
+  const value = own.model ?? "standard";
   let model: string | null;
   let tier: ResolvedRoleTier;
-  if (value === "economy") {
+  if (auto) {
+    model = ROLE_DEFAULT_MODELS[provider][role];
+    tier = "default";
+  } else if (value === "economy") {
     model = economyModelForProvider(provider);
     tier = "economy";
   } else if (value !== "standard" && isRoleModelId(provider, value)) {

@@ -1078,8 +1078,6 @@ export const de: Record<string, string> = {
   "codingAgent.roleModels.reviewer": "Reviewer",
   "codingAgent.roleModelFor": "Modell für {role}",
   "codingAgent.roleEffortFor": "Aufwand für {role}",
-  "codingAgent.roleModel.autoEconomy": "Standard (günstigeres Modell)",
-  "codingAgent.roleModel.autoStandard": "Standard (Ihr Modell)",
   "codingAgent.roleModel.economy": "Günstigeres Modell",
   "codingAgent.roleModel.standard": "Ihr Modell",
   "codingAgent.roleEffort.autoCapped": "Standard (höchstens {level})",

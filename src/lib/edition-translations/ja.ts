@@ -1080,8 +1080,6 @@ export const ja: Record<string, string> = {
   "codingAgent.roleModels.reviewer": "レビュアー",
   "codingAgent.roleModelFor": "{role} のモデル",
   "codingAgent.roleEffortFor": "{role} の思考の深さ",
-  "codingAgent.roleModel.autoEconomy": "既定（安価なモデル）",
-  "codingAgent.roleModel.autoStandard": "既定（あなたのモデル）",
   "codingAgent.roleModel.economy": "安価なモデル",
   "codingAgent.roleModel.standard": "あなたのモデル",
   "codingAgent.roleEffort.autoCapped": "既定（最大 {level}）",

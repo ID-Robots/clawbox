@@ -1075,8 +1075,6 @@ export const sv: Record<string, string> = {
   "codingAgent.roleModels.reviewer": "Granskare",
   "codingAgent.roleModelFor": "Modell för {role}",
   "codingAgent.roleEffortFor": "Möda för {role}",
-  "codingAgent.roleModel.autoEconomy": "Standard (billigare modell)",
-  "codingAgent.roleModel.autoStandard": "Standard (din modell)",
   "codingAgent.roleModel.economy": "Billigare modell",
   "codingAgent.roleModel.standard": "Din modell",
   "codingAgent.roleEffort.autoCapped": "Standard (högst {level})",

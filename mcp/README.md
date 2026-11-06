@@ -1165,11 +1165,12 @@ owner alone cancels one) and starts by itself, after a restart too. Every agent 
 the ceilings above apply unchanged; the one-run-at-a-time rule is between
 STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
-What a team COSTS is on its answer too. The planner and the reviewers (and
-the lead) run on the provider's cheaper model — `claude-sonnet-5` on
-Anthropic, `gpt-5.6-luna` on OpenAI, the plan's `deepseek-v4-flash` on ClawBox
-AI — at no more than
-`xhigh` effort; workers keep the owner's model and effort; the owner may pick
+What a team COSTS is on its answer too. By default the planner (and the lead)
+runs on the provider's best model and the workers and reviewers on its middle
+one — `claude-fable-5-1` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
+`gpt-5.6-sol` on OpenAI, the plan's `deepseek-v4-flash` for every role on
+ClawBox AI; the planner and reviewers at no more than `xhigh` effort, workers
+at the owner's effort; the owner may pick
 the provider, the model and the effort per role
 in the Coding Agent settings (`coding_agent_role_models`,
 `src/lib/coding-role-models.ts`). The planner's

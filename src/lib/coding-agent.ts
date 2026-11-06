@@ -13874,8 +13874,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // owner's current setting could be the weaker of the two.
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
     // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
-    // a planner, a lead and a reviewer the provider's cheaper model and at most
-    // `xhigh` unless the owner chose otherwise; a worker the owner's own. A
+    // unless the owner chose otherwise, a planner and a lead the provider's
+    // best model, a worker and a reviewer its middle one, and a planner, a lead
+    // and a reviewer at most `xhigh`; a worker the owner's effort. A
     // role the owner put on another provider moves there, model and all — the
     // readiness check below is that
     // provider's, and the spawn's environment and credential are that

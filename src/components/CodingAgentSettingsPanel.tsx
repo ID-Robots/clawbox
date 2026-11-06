@@ -1185,11 +1185,12 @@ export default function CodingAgentSettingsPanel() {
             {/* What each role of a team runs on: the account that pays, the
                 model there, and the effort. A planner reads and plans (and
                 comes back as the lead), a reviewer reads and judges; only
-                workers write the code — so the first two default to the
-                provider's cheaper model and at most Extra high effort, workers
-                keep the owner's own. "Default" stores nothing: a box that
-                never opens this runs on the defaults, and the older
-                standard/economy choices read back as the same two options. */}
+                workers write the code — so the planner defaults to the
+                provider's best model, workers and reviewers to its middle one
+                (ROLE_DEFAULT_MODELS), and the first two to at most Extra high
+                effort. "Default" stores nothing: a box that never opens this
+                runs on the defaults, and the older standard/economy choices
+                read back as the same two options. */}
             {status?.roleModels && (
               <div className="mt-4" data-testid="coding-agent-role-models">
                 <div className="flex items-center gap-1.5">
@@ -1261,11 +1262,10 @@ export default function CodingAgentSettingsPanel() {
                           onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
                         >
-                          <option value={ROLE_AUTO}>
-                            {pinned
-                              ? t("codingAgent.roleModel.autoForProvider")
-                              : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
-                          </option>
+                          {/* Which model the default is depends on the role
+                              and the account: the "Now:" line under the row
+                              names it. */}
+                          <option value={ROLE_AUTO}>{t("codingAgent.roleModel.autoForProvider")}</option>
                           {/* On the team's own account the older two choices
                               stand; pinned to an account, that account's
                               models. */}

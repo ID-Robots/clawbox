@@ -1065,8 +1065,6 @@ export const bg: Record<string, string> = {
   "codingAgent.roleModels.reviewer": "Рецензенти",
   "codingAgent.roleModelFor": "Модел за {role}",
   "codingAgent.roleEffortFor": "Усилие за {role}",
-  "codingAgent.roleModel.autoEconomy": "По подразбиране (по-евтин модел)",
-  "codingAgent.roleModel.autoStandard": "По подразбиране (вашият модел)",
   "codingAgent.roleModel.economy": "По-евтин модел",
   "codingAgent.roleModel.standard": "Вашият модел",
   "codingAgent.roleEffort.autoCapped": "По подразбиране (най-много {level})",
