@@ -89,7 +89,7 @@ for (const size of [
 
     const dots = dialog.getByTestId("whats-new-dot");
     const total = await dots.count();
-    expect(total).toBe(7);
+    expect(total).toBe(11);
     for (let i = 0; i < total; i++) {
       const slide = dialog.getByTestId("whats-new-slide");
       await expect(slide).toHaveAttribute("data-slide", String(i));

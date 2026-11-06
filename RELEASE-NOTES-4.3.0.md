@@ -49,8 +49,8 @@ setup and switching between Anthropic accounts get a long list of fixes.
   milestone.
 - **Updates that ask before they stop your agents.** While coding runs or
   assistant tasks are working, Update asks first: Cancel waits for them,
-  Update anyway goes ahead. The box reboots only when the update needs a boot, and the update
-  screen shows what is new while you wait.
+  Update anyway goes ahead. The box reboots only when the update needs a
+  boot, and the update screen shows what is new while you wait.
 - **Local AI installs wait in line.** Start a Local AI install while another
   one runs and it waits its turn instead of being refused. Its card says what
   it is waiting for, it starts by itself, and you can cancel it.
@@ -588,7 +588,7 @@ setup and switching between Anthropic accounts get a long list of fixes.
   yourself leaves that page as you verified it, lists it under **Left out** on
   the job's row, and asks in **Review** too.
 - Stopping an import shows **Stopped**, and the files it did not reach wait
-  for the next run instead of failing; **Try these again** writes them. Files
+  for the next run instead of failing; **Try these again** imports them. Files
   dropped on **Add** show **Dropped files** as their source.
 - A fact worded with its document as the subject is checked against the
   others like any fact, so a contradiction can no longer hide that way.
