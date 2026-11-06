@@ -46,6 +46,13 @@ export const STICK_THRESHOLD_PX = 80;
 export const AT_BOTTOM_PX = 2;
 /** How long a wheel or key scroll counts as the reader's, after its last event. */
 export const HANDS_ON_MS = 300;
+/**
+ * How long a finger may rest with nothing moving before its touch is taken as
+ * over. A touch on a bubble that is then replaced (the streaming reply turning
+ * into the finished one) ends on the detached node, and its `touchend` reaches
+ * neither the transcript nor the window.
+ */
+export const TOUCH_IDLE_MS = 1500;
 
 export function isNearBottom(
   el: { scrollTop: number; scrollHeight: number; clientHeight: number },
@@ -91,16 +98,22 @@ export function useStickToBottom(
     // finger down, the scrollbar (or the transcript's own box) held.
     let handsOnUntil = 0;
     let touching = false;
+    let lastTouch = 0;
     let holding = false;
     let lastTop = el.scrollTop;
 
     const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-    const handsOn = () => touching || holding || now() < handsOnUntil;
+    const handsOn = () => {
+      if (touching && now() - lastTouch > TOUCH_IDLE_MS) touching = false;
+      return touching || holding || now() < handsOnUntil;
+    };
 
     const onScroll = () => {
       const top = el.scrollTop;
       const movedUp = top < lastTop;
       lastTop = top;
+      // A finger dragging (or its fling) keeps its touch alive.
+      if (touching) lastTouch = now();
       // At the very bottom — the reader came back, a follow landed, or the
       // content shrank and the browser clamped the position there: follow.
       if (isNearBottom(el, AT_BOTTOM_PX)) pinned.current = true;
@@ -126,10 +139,12 @@ export function useStickToBottom(
       if (!pinned.current) return;
       if (handsOn()) {
         // Mid-gesture: writing now would cancel the reader's own scroll. A
-        // touch or a held scrollbar follows on release; a wheel or a key once
+        // held scrollbar follows on release; a touch on release too, or once
+        // it has rested long enough to be taken as over; a wheel or a key once
         // its last event has had time to land.
-        if (!touching && !holding && retry === null) {
-          retry = setTimeout(() => { retry = null; follow(); }, Math.max(0, handsOnUntil - now()) + 16);
+        if (!holding && retry === null) {
+          const wait = touching ? TOUCH_IDLE_MS : Math.max(0, handsOnUntil - now());
+          retry = setTimeout(() => { retry = null; follow(); }, wait + 16);
         }
         return;
       }
@@ -155,7 +170,8 @@ export function useStickToBottom(
     const onKeyDown = (event: KeyboardEvent) => {
       if (SCROLL_KEYS.has(event.key)) handsOnUntil = now() + HANDS_ON_MS;
     };
-    const onTouchStart = () => { touching = true; };
+    const onTouchStart = () => { touching = true; lastTouch = now(); };
+    const onTouchMove = () => { lastTouch = now(); };
     const onTouchEnd = (event: TouchEvent) => {
       touching = event.touches.length > 0;
       // A drag up has already let go of the bottom by its scroll events, and
@@ -186,8 +202,10 @@ export function useStickToBottom(
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("keydown", onKeyDown);
     el.addEventListener("touchstart", onTouchStart, { passive: true });
-    el.addEventListener("touchend", onTouchEnd, { passive: true });
-    el.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    // On the window: a finger may lift outside the transcript.
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchEnd, { passive: true });
     el.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
@@ -242,8 +260,9 @@ export function useStickToBottom(
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("touchstart", onTouchStart);
-      el.removeEventListener("touchend", onTouchEnd);
-      el.removeEventListener("touchcancel", onTouchEnd);
+      el.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
       el.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);

@@ -534,6 +534,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Runs stuck on a model this account cannot run, reported to the box once
   // each (lib/model-fallback-chat.ts) — and the "Stopped." a box-made stop owes.
   const fallbackWatchRef = useRef(new ModelFallbackWatch())
+  // Everything that grows the transcript — the streaming reply, a new
+  // message, pills, cards, pictures that load late — followed only while the
+  // reader is at the bottom; a reader who scrolled up to read is left there
+  // until they are back down (TASK-2222). The full page is always on screen,
+  // so the observers are always attached. `scrollToBottom` is for the owner's
+  // own actions — a send, a click — which land them on the answer wherever
+  // they were.
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const scrollToBottom = useStickToBottom(transcriptRef, true)
+
   // A calm notice's one-click move to another provider the box has set up:
   // this page has no header picker, so the picker's request is sent here, and
   // the line under it says whether it landed. Stable for the memoised rows.
@@ -543,8 +553,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       setMessages(prev => [...prev, result.ok
         ? { role: 'system', variant: 'notice', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchedTo', { provider: target.label }) }
         : { role: 'system', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchFailed', { provider: target.label }) }])
+      scrollToBottom()
     })
-  }, [])
+  }, [scrollToBottom])
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -578,15 +589,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     attachments: ChatAttachment[]
     idempotencyKey: string
   }>>([])
-
-  // Everything that grows the transcript — the streaming reply, a new
-  // message, pills, cards, pictures that load late — followed only while the
-  // reader is at the bottom; a reader who scrolled up to read is left there
-  // until they are back down (TASK-2222). The full page is always on screen,
-  // so the observers are always attached. `scrollToBottom` is for the owner's
-  // own send, which lands them on it wherever they were.
-  const transcriptRef = useRef<HTMLDivElement>(null)
-  const scrollToBottom = useStickToBottom(transcriptRef, true)
 
   // `?email=<uid>` opens that message on arrival — the other end of a card on
   // the gateway's own Control UI chat (TASK-700). That page is a third `webchat`

@@ -2445,8 +2445,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // is left there until they are back down (TASK-2222, see useStickToBottom).
   // `scrollToBottom` re-pins it for what the OWNER does — a send, a
   // conversation opened, switched to or cleared — never for what the bot writes.
-  const scrollToBottom = useStickToBottom(transcriptRef, visible)
-  useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
+  //
+  // `isOpen && visible`, not `visible` alone: `visible` is set two frames after
+  // an open and a close does not cancel that, so a close inside those frames
+  // leaves it true over a transcript that is not rendered — and the hook,
+  // attached to nothing, would never attach to the one the next open draws.
+  const transcriptShown = isOpen && visible
+  const scrollToBottom = useStickToBottom(transcriptRef, transcriptShown)
+  useEffect(() => { if (transcriptShown) scrollToBottom() }, [transcriptShown, scrollToBottom])
 
 
   /**
@@ -4274,10 +4280,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         timestamp: Date.now(),
         variant: 'error',
       }])
+      // The answer to the owner's own click: shown where they will see it.
+      scrollToBottom()
     } finally {
       setStartingSession(false)
     }
-  }, [resetSession])
+  }, [resetSession, scrollToBottom])
 
   /**
    * Show another tab's session in this popup.
@@ -6807,10 +6815,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       if (!ctx?.message) return
       greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: buildFixErrorPrompt(ctx), attachments: [] }])
+      // Asked for from elsewhere on the desktop: the owner is not reading here.
+      scrollToBottom()
     }
     window.addEventListener(FIX_ERROR_EVENT, handler)
     return () => window.removeEventListener(FIX_ERROR_EVENT, handler)
-  }, [])
+  }, [scrollToBottom])
 
   // A message handed over by another app — the Coding Agent's New wizard —
   // goes through the SAME queue as a fix-error prompt, and for the same
@@ -6823,10 +6833,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       if (typeof text !== 'string' || !text.trim()) return
       greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: text.trim(), attachments: [] }])
+      scrollToBottom()
     }
     window.addEventListener(CHAT_MESSAGE_EVENT, handler)
     return () => window.removeEventListener(CHAT_MESSAGE_EVENT, handler)
-  }, [])
+  }, [scrollToBottom])
 
   // A DRAFT handed over by another app — the Coding Agent run page's "Message
   // in chat" — lands in the composer and nowhere else: nothing is queued, nothing
@@ -6935,6 +6946,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           text: t('chat.modelSwitchBusy'),
           timestamp: Date.now(),
         }])
+        // The owner's own pick gets its answer in sight; a switch the chat made
+        // by itself moves nobody.
+        if (!target.automatic) scrollToBottom()
         return false
       }
       // 502 WITH a warning = the model IS written and the route returned the new
@@ -6952,6 +6966,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           text: data.warning,
           timestamp: Date.now(),
         }])
+        if (!target.automatic) scrollToBottom()
       }
 
       setChatModelState(data as ChatModelState)
@@ -6985,7 +7000,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, t])
+  }, [chatModelState, connect, switchingModel, t, scrollToBottom])
 
   // The old Pro and Flash aliases now serve the same Flash model. Move a
   // saved chat choice to the Flash alias once, without clearing its history.

@@ -84,7 +84,12 @@ async function scrollWhileItWrites(page: Page, transcript: Locator) {
   expect(Math.abs(later.top - reading.top)).toBeLessThanOrEqual(1);
 
   // 3. Back to the very bottom: followed again as the reply keeps growing.
-  await page.mouse.wheel(0, later.distance + 2_000);
+  // Notch by notch, as a reader does, until the transcript is at its end —
+  // one long wheel's smooth scroll could end short of a bottom still moving.
+  for (let i = 0; i < 20 && (await geometry(transcript)).distance > 2; i++) {
+    await page.mouse.wheel(0, 600);
+    await page.waitForTimeout(150);
+  }
   await expect.poll(async () => (await geometry(transcript)).distance).toBeLessThanOrEqual(2);
   const resumed = await geometry(transcript);
   await page.waitForTimeout(1_000);

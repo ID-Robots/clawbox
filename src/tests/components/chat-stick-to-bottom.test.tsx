@@ -17,6 +17,7 @@ import {
   HANDS_ON_MS,
   isNearBottom,
   STICK_THRESHOLD_PX,
+  TOUCH_IDLE_MS,
   useStickToBottom,
 } from "@/lib/use-stick-to-bottom";
 
@@ -202,12 +203,40 @@ describe("useStickToBottom: a reader who scrolls up while the bot writes", () =>
     el.dispatchEvent(new Event("touchstart"));
     grow(state, 40);
     expect(el.scrollTop).toBe(start);
-    // A tap, not a drag: the reader never left the bottom.
+    // A tap, not a drag: the reader never left the bottom. The finger may
+    // lift anywhere, so its end is heard on the window.
     const end = new Event("touchend") as TouchEvent;
     Object.defineProperty(end, "touches", { value: [] });
-    clock += HANDS_ON_MS * 2;
-    el.dispatchEvent(end);
+    window.dispatchEvent(end);
     expect(el.scrollTop).toBe(bottomOf(state));
+  });
+
+  it("takes a finger whose end it never hears as lifted once it has rested", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { el, state } = readingAtBottom();
+    const start = el.scrollTop;
+    // The finger lands on the streaming bubble, which the finished answer
+    // then replaces: its touchend goes to the detached node and is never heard.
+    el.dispatchEvent(new Event("touchstart"));
+    grow(state, 40);
+    expect(el.scrollTop).toBe(start);
+    clock += TOUCH_IDLE_MS + 20;
+    vi.advanceTimersByTime(TOUCH_IDLE_MS + 20);
+    expect(el.scrollTop).toBe(bottomOf(state));
+  });
+
+  it("keeps a moving finger's touch alive however long the drag", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { el, state } = readingAtBottom();
+    const start = el.scrollTop;
+    el.dispatchEvent(new Event("touchstart"));
+    for (let i = 0; i < 5; i++) {
+      clock += TOUCH_IDLE_MS / 2;
+      el.dispatchEvent(new Event("touchmove"));
+      grow(state, 10);
+      vi.advanceTimersByTime(TOUCH_IDLE_MS / 2);
+    }
+    expect(el.scrollTop).toBe(start);
   });
 
   it("writes nothing while the scrollbar is held", () => {
@@ -324,6 +353,44 @@ describe("useStickToBottom: back at the bottom", () => {
   });
 });
 
+describe("useStickToBottom: frames", () => {
+  it("writes once per frame however many changes land in it, and cancels a frame still pending when it goes away", () => {
+    const frames: FrameRequestCallback[] = [];
+    const cancelled: number[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => { cancelled.push(id); });
+    const { unmount } = render(<Transcript />);
+    const el = screen.getByTestId("transcript");
+    const state = { height: 900 };
+    geometry(el, state);
+    const writes = vi.fn();
+    const descriptor = Object.getOwnPropertyDescriptor(el, "scrollTop")!;
+    Object.defineProperty(el, "scrollTop", {
+      configurable: true,
+      get: descriptor.get,
+      set: (v: number) => { writes(v); descriptor.set!.call(el, v); },
+    });
+    frames.splice(0).forEach((cb) => cb(0));
+    writes.mockClear();
+
+    // Three chunks in one frame: one frame asked for, one write.
+    grow(state, 20);
+    grow(state, 20);
+    grow(state, 20);
+    expect(frames).toHaveLength(1);
+    expect(writes).not.toHaveBeenCalled();
+    frames.splice(0).forEach((cb) => cb(0));
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(el.scrollTop).toBe(bottomOf(state));
+
+    // The next chunk asks for a frame again — nothing stuck from the last one.
+    grow(state, 20);
+    expect(frames).toHaveLength(1);
+    unmount();
+    expect(cancelled).toHaveLength(1);
+  });
+});
+
 describe("useStickToBottom: observers", () => {
   it("observes the transcript and every child, so a late-loading picture counts", () => {
     render(<Transcript />);
@@ -363,7 +430,7 @@ describe("useStickToBottom: observers", () => {
     unmount();
     expect(observer.observed.size).toBe(0);
     expect(removed.mock.calls.map(([type]) => type)).toEqual(
-      expect.arrayContaining(["scroll", "wheel", "keydown", "touchstart", "touchend", "pointerdown"]),
+      expect.arrayContaining(["scroll", "wheel", "keydown", "touchstart", "touchmove", "pointerdown"]),
     );
   });
 });
@@ -377,9 +444,12 @@ describe("both chats", () => {
     expect(source).toMatch(/\{\/\* Messages area \*\/\}\s*<div ref=\{transcriptRef\}/);
   });
 
-  it("wire the transcript they render to the hook — the mascot chat while it is shown", () => {
+  it("wire the transcript they render to the hook — the mascot chat while it is open and shown", () => {
     const source = read("ChatPopup.tsx");
-    expect(source).toContain("useStickToBottom(transcriptRef, visible)");
+    // Not `visible` alone: it is set two frames after an open, and a close
+    // inside them leaves it true over a transcript that is not rendered.
+    expect(source).toContain("const transcriptShown = isOpen && visible");
+    expect(source).toContain("useStickToBottom(transcriptRef, transcriptShown)");
     const transcript = source.slice(source.indexOf("ref={transcriptRef}"), source.indexOf('data-testid="chat-transcript"'));
     // The ref sits on the element that carries the transcript's test id.
     expect(transcript.length).toBeGreaterThan(0);
