@@ -40,10 +40,16 @@ if [ "$API_STATUS" != 200 ]; then
   finish
 fi
 for role in planner worker reviewer; do
+  # Empty when the answer has no entry for the role: the settings view names
+  # every role, so a missing one is a failure, never a stored choice.
   # shellcheck disable=SC2016  # $r is jq's
-  stored=$(api_json --arg r "$role" '.roleModels[$r] | "\(.provider)/\(.model)"')
+  stored=$(api_json --arg r "$role" '.roleModels[$r] | objects | select((.provider | type) == "string" and (.model | type) == "string") | "\(.provider)/\(.model)"')
   # shellcheck disable=SC2016
-  got=$(api_json --arg r "$role" '.roleModelMap[$r] | "\(.provider) \(.model) \(.effort)"')
+  got=$(api_json --arg r "$role" '.roleModelMap[$r] | objects | select((.provider | type) == "string") | "\(.provider) \(.model) \(.effort)"')
+  if [ -z "$stored" ] || [ -z "$got" ]; then
+    not_ok "settings API ($RUNTIME): the answer has no $role entry (roleModels: ${stored:-missing}; roleModelMap: ${got:-missing})"
+    continue
+  fi
   if [ "$stored" != "auto/auto" ]; then
     note "settings API: the board stored $stored for the $role, so it is no default; it runs on $got"
     continue
