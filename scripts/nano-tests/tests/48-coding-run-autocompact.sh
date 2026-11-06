@@ -133,7 +133,7 @@ while IFS= read -r line; do note "proxy — $line"; done <<< "$PROBE"
 DIRECT_DIR=
 cleanup_and_finish() {
   # shellcheck disable=SC2016  # expanded on the board
-  [ -n "$DIRECT_DIR" ] && board 'case "$1" in *..*) ;; /home/clawbox/?*/nano-ci-*) rm -rf -- "$1" ;; esac' "$DIRECT_DIR" >/dev/null 2>&1
+  [ -n "$DIRECT_DIR" ] && board 'case "$1" in */../*|*/..) ;; /home/clawbox/?*/nano-ci-*) rm -rf -- "$1" ;; esac' "$DIRECT_DIR" >/dev/null 2>&1
   remove_project_dir
   finish
 }
