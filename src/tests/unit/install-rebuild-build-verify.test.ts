@@ -1119,6 +1119,9 @@ describe("do_rebuild after a rollback: node-pty and the failure sentence (TASK-2
     expect(r.status).not.toBe(0);
     expect(r.ptyLoadable).toBe(false);
     expect(failureLine(r)).toMatch(/^Error: rebuild failed \(exit 137\) — bun run build was killed by signal 9/);
+    // failureLine reads stdout before stderr; an error line on stdout could
+    // be newer than it shows, so there must be none at all.
+    expect(r.stdout.split("\n").some((l) => /^(?:error|fatal)\b/i.test(l.trim()))).toBe(false);
     expect(r.stdout + r.stderr).not.toContain("gyp ERR! not ok");
     expect(r.stderr).toMatch(
       /Warning: node-pty still does not load after the rollback, so the web terminal stays unavailable: \.\.\/src\/unix\/pty\.cc:42:1: error: forkpty/,

@@ -396,9 +396,12 @@ describe("a failed node-pty rebuild leaves its own output in the update log", ()
     const block = tailBlock(r);
     expect(block).toHaveLength(80);
     expect(r.stderr).toContain("node-pty rebuild — the last 80 lines of its last attempt");
-    // The LAST attempt's lines, and only its last 80.
-    expect(block.some((l) => l.includes("gyp info attempt 2 line 150"))).toBe(true);
-    expect(block.some((l) => l.includes("gyp info attempt 2 line 70 "))).toBe(false);
+    // The LAST attempt's lines, and only its last 80: 150 lines of chatter,
+    // node-gyp's header download and three lines of verdict make 154, so the
+    // window opens at line 75.
+    expect(block).toContain("    | gyp info attempt 2 line 150");
+    expect(block[0]).toBe("    | gyp info attempt 2 line 75");
+    expect(block).not.toContain("    | gyp info attempt 2 line 74");
     expect(block.some((l) => l.includes("attempt 1"))).toBe(false);
     expect(block.at(-1)).toBe("    | npm error code 1");
     const errorAt = r.stderr.indexOf("Error: node-pty is still not loadable");
@@ -413,6 +416,17 @@ describe("a failed node-pty rebuild leaves its own output in the update log", ()
     expect(r.failure).toBe("../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 2)");
     // The first attempt's reason is in the retry line, so neither is lost.
     expect(r.stdout).toContain("Initial node-pty rebuild failed (../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 1))");
+  });
+
+  it("keeps the compiler's error when the retry could not even fetch its headers", () => {
+    // Offline, matching system headers, a real compile error: the retry with
+    // fetched headers fails on the download, which says nothing about the build.
+    const r = run({ systemHeaders: RUNNING, compiler: "broken", network: "offline" });
+    expect(r.status).toBe(1);
+    expect(r.nodedirs).toEqual([path.join(sys, "usr"), "<unset>"]);
+    expect(r.failure).toBe(
+      `../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 1) (the retry could not fetch the headers for Node v${RUNNING})`,
+    );
   });
 
   it("names node-gyp's own reason when the headers could not be fetched and nothing else was there", () => {
@@ -432,6 +446,7 @@ describe("a failed node-pty rebuild leaves its own output in the update log", ()
   it("keeps every line of the tail from reading as this script's own error", () => {
     // The update screen shows the newest line that STARTS with Error/fatal.
     const r = run({ compiler: "broken", noise: 150 });
+    expect(tailBlock(r)).toHaveLength(80);
     for (const l of tailBlock(r)) expect(l.trim()).not.toMatch(/^(?:error|fatal)\b/i);
   });
 
@@ -441,6 +456,8 @@ describe("a failed node-pty rebuild leaves its own output in the update log", ()
     expect(ok.builtAgainst).toBe(RUNNING);
     const bad = run({ tmp: "unwritable", compiler: "broken" });
     expect(bad.status).toBe(1);
+    // Still in the output, through this script's own tee (the unit's journal).
+    expect(bad.stdout).toContain("../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 2)");
     expect(bad.stderr).toMatch(/Error: node-pty is still not loadable after rebuild: Error: Failed to load native module.*\. Its build output is above\.$/m);
   });
 

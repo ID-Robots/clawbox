@@ -2167,9 +2167,16 @@ node_gyp_has_headers() {
 }
 
 # One `npm rebuild node-pty`, as the clawbox user, against the headers under
-# the prefix $1 ("" = whatever node-gyp fetches). The output streams as it
-# always has, because this step's journal IS the update log, and is also kept
-# in $2, when there is one, for the failure report. Returns npm's status.
+# the prefix $1 ("" = whatever node-gyp fetches). The output streams, because
+# this step's journal IS the update log, and is also kept in $2, when there is
+# one, for the failure report. Returns npm's status.
+#
+# Through `tee` even with no file to keep it in. journald files a line under
+# the unit of the process that WROTE it, and `su -` puts the build in the
+# clawbox user's session scope: written straight from there, the compiler's
+# error was in the journal but not in `journalctl -u
+# clawbox-root-update@rebuild_reboot`, the log the update points at, which is
+# why the 4.3 field report had none of it. `tee` is this script's own process.
 run_node_pty_rebuild() {
   local nodedir="$1" log="${2:-}" cmd rc
   cmd="cd $PROJECT_DIR && export npm_config_python=/usr/bin/python3 && export npm_config_build_from_source=true && "
@@ -2179,13 +2186,9 @@ run_node_pty_rebuild() {
     cmd+="unset npm_config_nodedir && "
   fi
   cmd+="npm rebuild node-pty --foreground-scripts"
-  if [ -z "$log" ]; then
-    as_clawbox_login "$cmd"
-    return
-  fi
   # PIPESTATUS, not the pipeline's status: a `tee` that could not write the
   # file must not fail a build that worked.
-  if as_clawbox_login "$cmd" 2>&1 | tee "$log"; then
+  if as_clawbox_login "$cmd" 2>&1 | tee "${log:-/dev/null}"; then
     return 0
   else
     rc=${PIPESTATUS[0]}
@@ -2277,14 +2280,17 @@ ensure_node_pty() {
   # the last 80 lines of the attempt that failed, and the compiler's own error
   # in the line the update screen shows; "check the node-gyp output above" was
   # all a field report had to go on (TASK-2244).
-  local log_dir log="" nodedir="$NODE_HEADERS_NODEDIR" rc=0 why=""
+  local log_dir log="" nodedir="$NODE_HEADERS_NODEDIR" rc=0 why="" first_why="" fetch_retry=0
   log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-node-pty-XXXXXX" 2>/dev/null)" || log_dir=""
   if [ -n "$log_dir" ]; then log="$log_dir/rebuild.log"; fi
 
   echo "  Rebuilding native modules (node-pty)..."
   if ! run_node_pty_rebuild "$nodedir" "$log"; then
-    why="$(node_pty_failure_summary "$log")"
-    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin"
+    why="$(node_pty_failure_summary "$log")" || why=""
+    first_why="$why"
+    # `|| true`: step_build calls this bare, and a clean-up that failed must
+    # not end the install before the retry and the report below.
+    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin" || true
     # The retry takes the OTHER source of headers, when there is one: matching
     # system headers that failed give way to the ones node-gyp fetches, and a
     # fetch that never arrived (no network) to the system directory the
@@ -2292,6 +2298,7 @@ ensure_node_pty() {
     # node-pty is a Node-API module; one that does not is reported below.
     if [ -n "$nodedir" ]; then
       nodedir=""
+      fetch_retry=1
       echo "  Initial node-pty rebuild failed${why:+ ($why)}; clearing stale build output and retrying once with the headers node-gyp fetches for Node v$want..."
     elif [ -n "$NODE_HEADERS_FALLBACK" ] && ! node_gyp_has_headers "$want"; then
       nodedir="$NODE_HEADERS_FALLBACK"
@@ -2312,9 +2319,17 @@ ensure_node_pty() {
   # Why: the failed attempt's own error, or, after a build that said it
   # worked, what node said when it could not load the result.
   why=""
-  if [ "$rc" -ne 0 ]; then why="$(node_pty_failure_summary "$log")"; fi
+  if [ "$rc" -ne 0 ]; then why="$(node_pty_failure_summary "$log")" || why=""; fi
+  # A retry that could not even fetch its headers says nothing about the
+  # build: the first attempt's compiler error is still the reason.
+  if [ "$rc" -ne 0 ] && [ "$fetch_retry" -eq 1 ] && [ -n "$first_why" ] && ! node_gyp_has_headers "$want"; then
+    why="$first_why (the retry could not fetch the headers for Node v$want)"
+  fi
   if [ -z "$why" ]; then
-    why="$(printf '%s\n' "$verify_out" | awk '/^[A-Za-z]*Error[: ]/ { print; exit }' | cut -c1-200)"
+    # awk to the end, no `exit`: under pipefail an awk that stops early can
+    # SIGPIPE printf into a 141, and a bare call (step_build) would end on it
+    # before the error line below.
+    why="$(printf '%s\n' "$verify_out" | awk 'w == "" && /^[A-Za-z]*Error[: ]/ { w = $0 } END { if (w != "") print w }' | cut -c1-200)" || why=""
   fi
   NODE_PTY_FAILURE="$why"
   local where="Its build output is above."
