@@ -15,8 +15,10 @@ import { installFakeGatewaySocket } from "./helpers/fake-gateway";
  *   3. back at the very bottom, it is followed again.
  */
 
-// About 15 s of streaming: long enough for all three steps on a slow runner.
-const STREAM = { chunks: 300, everyMs: 50 };
+// Up to 30 s of streaming: long enough for all three steps on a slow runner
+// (each step asserts the reply is still coming).
+const STREAM = { chunks: 600, everyMs: 50 };
+test.setTimeout(90_000);
 
 async function prepare(page: Page) {
   await installFakeGatewaySocket(page, { streamedReply: STREAM });
@@ -53,10 +55,9 @@ async function scrollWhileItWrites(page: Page, transcript: Locator) {
   await composer.press("Enter");
 
   // The reply has filled the transcript and is still coming.
-  await expect.poll(async () => {
-    const g = await transcript.evaluate((el) => el.scrollHeight - el.clientHeight);
-    return g;
-  }, { timeout: 20_000 }).toBeGreaterThan(600);
+  await expect
+    .poll(() => transcript.evaluate((el) => el.scrollHeight - el.clientHeight), { timeout: 20_000 })
+    .toBeGreaterThan(600);
   expect(await chunksSent(page)).toBeLessThan(STREAM.chunks);
 
   // 1. At the bottom it is followed.

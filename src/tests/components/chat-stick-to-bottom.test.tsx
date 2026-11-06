@@ -9,7 +9,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import {
@@ -37,7 +37,8 @@ let scrollToBottomOf: (() => void) | null = null;
 
 function Transcript({ enabled = true }: { enabled?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
-  scrollToBottomOf = useStickToBottom(ref, enabled);
+  const scrollToBottom = useStickToBottom(ref, enabled);
+  useEffect(() => { scrollToBottomOf = scrollToBottom; }, [scrollToBottom]);
   return (
     <div ref={ref} data-testid="transcript">
       <div data-testid="first">hello</div>
