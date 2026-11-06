@@ -220,6 +220,16 @@ describe("useStickToBottom: a reader who scrolls up while the bot writes", () =>
     expect(el.scrollTop).toBe(bottomOf(state));
   });
 
+  it("lets go of a press whose end it never hears, when the window loses focus", () => {
+    const { el, state } = readingAtBottom();
+    const start = el.scrollTop;
+    el.dispatchEvent(new Event("pointerdown"));
+    grow(state, 40);
+    expect(el.scrollTop).toBe(start);
+    window.dispatchEvent(new Event("blur"));
+    expect(el.scrollTop).toBe(bottomOf(state));
+  });
+
   it("follows a wheel's growth once the wheel has stopped, when the reader stayed at the bottom", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const { el, state } = readingAtBottom();

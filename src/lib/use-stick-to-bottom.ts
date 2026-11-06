@@ -173,6 +173,14 @@ export function useStickToBottom(
       holding = false;
       follow();
     };
+    // A press or a touch whose end this page never hears (the window lost
+    // focus in the middle of it) must not hold the transcript still for good.
+    const onWindowBlur = () => {
+      if (!touching && !holding) return;
+      touching = false;
+      holding = false;
+      follow();
+    };
 
     el.addEventListener("scroll", onScroll, { passive: true });
     el.addEventListener("wheel", onWheel, { passive: true });
@@ -183,6 +191,7 @@ export function useStickToBottom(
     el.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("blur", onWindowBlur);
 
     // The container itself (the panel resized) and every direct child (a card
     // that grew in place, a picture that finished loading).
@@ -238,6 +247,7 @@ export function useStickToBottom(
       el.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("blur", onWindowBlur);
       resize?.disconnect();
       observed.clear();
       mutations?.disconnect();
