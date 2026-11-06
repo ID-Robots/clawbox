@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -197,6 +197,34 @@ describe("patchOpenClawRoot — the installed core", () => {
     expect(readFileSync(transportFile(root), "utf8")).toBe(TRANSPORT_10_9);
   });
 
+  it("calls an unverified version with only part of the shape unverified, not a mismatch", () => {
+    const root = openclawRoot("2026.11.9", { "openai-completions-transport-X.mjs": BEGIN_REASONING_10_9 });
+    expect(patchOpenClawRoot(root).result).toBe("unverified");
+  });
+
+  it("patches the file a symlink points at and leaves the link a link", () => {
+    const root = openclawRoot("2026.10.9", {});
+    const real = path.join(root, "real-transport.mjs");
+    writeFileSync(real, TRANSPORT_10_9);
+    symlinkSync(real, transportFile(root));
+    expect(patchOpenClawRoot(root).result).toBe("patched");
+    expect(lstatSync(transportFile(root)).isSymbolicLink()).toBe(true);
+    expect(readFileSync(real, "utf8")).toContain(PATCH_MARKER);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("leaves no temporary file and the transport as it was when it cannot write", () => {
+    const root = openclawRoot("2026.10.9", { "openai-completions-transport-DGXeWM4f.mjs": TRANSPORT_10_9 });
+    const dist = path.dirname(transportFile(root));
+    chmodSync(dist, 0o555);
+    try {
+      expect(() => patchOpenClawRoot(root)).toThrow();
+      expect(readdirSync(dist)).toEqual(["openai-completions-transport-DGXeWM4f.mjs"]);
+      expect(readFileSync(transportFile(root), "utf8")).toBe(TRANSPORT_10_9);
+    } finally {
+      chmodSync(dist, 0o755);
+    }
+  });
+
   it("calls a verified version without the expected lines a mismatch and writes nothing", () => {
     const missing = openclawRoot("2026.10.9", { "openai-completions-transport-DGXeWM4f.mjs": TRANSPORT_10_10 });
     expect(patchOpenClawRoot(missing).result).toBe("mismatch");
@@ -230,6 +258,15 @@ describe("the script as the installer runs it", () => {
     const run = spawnSync(process.execPath, [SCRIPT, root], { encoding: "utf8" });
     expect(run.status).toBe(1);
     expect(run.stdout).toContain("NOT applied");
+  });
+
+  it("runs when the path the installer gives goes through a symlink", () => {
+    const root = openclawRoot("2026.10.9", { "openai-completions-transport-DGXeWM4f.mjs": TRANSPORT_10_9 });
+    const linked = path.join(root, "project-link");
+    symlinkSync(path.dirname(path.dirname(SCRIPT)), linked);
+    const run = spawnSync(process.execPath, [path.join(linked, "scripts", path.basename(SCRIPT)), root], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("applied");
   });
 
   it("exits 2 without a root", () => {

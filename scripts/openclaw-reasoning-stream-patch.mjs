@@ -25,9 +25,10 @@
 //   node scripts/openclaw-reasoning-stream-patch.mjs <openclaw package root>
 //
 // Applied only to the @openclaw/ai versions it was verified on; anywhere else
-// it reports and writes nothing. Exit 1 only when a verified version does not
-// have the expected shape (nothing is written then either).
-import { chmodSync, chownSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+// it reports and writes nothing. Exit 1 when a verified version does not have
+// the expected shape (nothing is written then either) or the files could not
+// be read or written.
+import { chmodSync, chownSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -70,20 +71,30 @@ export function patchTransportSource(source) {
   };
 }
 
-/** Same directory, same owner and mode, then a rename: a gateway loading the module never reads half a file. */
-function writeInPlace(file, text) {
+/**
+ * Same directory, same owner and mode, then a rename: a gateway loading the
+ * module never reads half a file. Written beside the real file, so a symlink
+ * stays a symlink; the temporary file never outlives a failure.
+ */
+function writeInPlace(link, text) {
+  const file = realpathSync(link);
   const st = statSync(file);
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.clawbox-${process.pid}`);
-  writeFileSync(tmp, text);
-  // Not through writeFileSync's mode: that one is filtered by the umask.
-  chmodSync(tmp, st.mode & 0o7777);
   try {
-    chownSync(tmp, st.uid, st.gid);
-  } catch {
-    // Not root and not the owner: the rename below leaves our own uid, which
-    // can only happen to a caller that could write the directory anyway.
+    writeFileSync(tmp, text);
+    // Not through writeFileSync's mode: that one is filtered by the umask.
+    chmodSync(tmp, st.mode & 0o7777);
+    try {
+      chownSync(tmp, st.uid, st.gid);
+    } catch {
+      // Not root and not the owner: the rename below leaves our own uid, which
+      // can only happen to a caller that could write the directory anyway.
+    }
+    renameSync(tmp, file);
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    throw error;
   }
-  renameSync(tmp, file);
 }
 
 /**
@@ -117,10 +128,11 @@ export function patchOpenClawRoot(root, { verifiedVersions = VERIFIED_VERSIONS }
   });
   const touched = verdicts.filter((v) => v.verdict !== "absent");
   const files = touched.map((v) => path.relative(root, v.file));
-  const verified = verifiedVersions.includes(version);
-  if (touched.some((v) => v.verdict === "mismatch")) return { result: "mismatch", version, files };
-  if (touched.length === 0) return { result: verified ? "mismatch" : "not-needed", version, files };
-  if (!verified) return { result: touched.every((v) => v.verdict === "patched") ? "already" : "unverified", version, files };
+  if (!verifiedVersions.includes(version)) {
+    if (touched.length === 0) return { result: "not-needed", version, files };
+    return { result: touched.every((v) => v.verdict === "patched") ? "already" : "unverified", version, files };
+  }
+  if (touched.length === 0 || touched.some((v) => v.verdict === "mismatch")) return { result: "mismatch", version, files };
   const pending = touched.filter((v) => v.verdict === "patch");
   if (pending.length > 1) return { result: "mismatch", version, files };
   for (const v of pending) writeInPlace(v.file, v.source);
@@ -154,6 +166,16 @@ function main(argv) {
   return outcome.result === "mismatch" ? 1 : 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, not imported. Compared as real paths: node resolves its own
+// URL through symlinks, argv[1] keeps the path the installer typed.
+function invokedDirectly() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   process.exitCode = main(process.argv.slice(2));
 }
