@@ -1811,6 +1811,8 @@ const table: Record<string, string> = {
   "codingAgent.stepAutoMergeOn": "GitHubs Auto-Merge für Pull Request #{number} eingeschaltet: er wird zusammengeführt, sobald seine erforderlichen Prüfungen bestanden sind",
   "codingAgent.stepCiFailed": "CI im Pull-Request #{n} fehlgeschlagen: {what}",
   "codingAgent.stepCiFix": "Behebe das fehlgeschlagene CI von {run} (Versuch {n} von {max})",
+  "codingAgent.stepContextCompacted": "Die Anfrage überschritt das Kontextfenster des Modells ({context} von {window} Token Kontext plus Antwort); der Kontext wird komprimiert und im selben Durchlauf fortgesetzt (Versuch {n} von {max})",
+  "codingAgent.stepContextCompactedUnsized": "Die Anfrage überschritt das Kontextfenster des Modells; der Kontext wird komprimiert und im selben Durchlauf fortgesetzt (Versuch {n} von {max})",
   "codingAgent.stepDeliverableMet": "Das Ergebnis ist da",
   "codingAgent.stepDeliverableMissing": "Noch nicht fertig: {reason}",
   "codingAgent.stepEvidencePruned": "Aus dem Nachweis-Ordner entfernt — Umgebungen und Links nach draußen gehören nicht hinein: {paths}",

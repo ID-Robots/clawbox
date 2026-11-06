@@ -1685,6 +1685,8 @@ export const nl: Record<string, string> = {
   "codingAgent.stepResumedAfterLimit": "De gebruikslimiet is gereset; de run gaat verder waar hij gebleven was",
   "codingAgent.stepUsageLimitContinuing": "Anthropic-gebruikslimiet bereikt; Claude Code gaat automatisch verder op hetzelfde account",
   "codingAgent.stepUsageLimitGrace": "Anthropic-gebruikslimiet bereikt; Claude Code zit in zijn respijtperiode en gaat verder op hetzelfde account",
+  "codingAgent.stepContextCompacted": "Het verzoek overschreed het contextvenster van het model ({context} van {window} tokens context plus het antwoord); de context wordt gecompacteerd en de run gaat verder in dezelfde sessie (poging {n} van {max})",
+  "codingAgent.stepContextCompactedUnsized": "Het verzoek overschreed het contextvenster van het model; de context wordt gecompacteerd en de run gaat verder in dezelfde sessie (poging {n} van {max})",
   "codingAgent.stepTeamMessageToRun": "Bericht aan {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Bericht aan de teamleiding: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Bericht aan de assistent: {text}",

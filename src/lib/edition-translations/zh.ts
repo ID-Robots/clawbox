@@ -1693,6 +1693,8 @@ export const zh: Record<string, string> = {
   "codingAgent.stepResumedAfterLimit": "使用上限已重置；从中断处继续",
   "codingAgent.stepUsageLimitContinuing": "已达到 Anthropic 使用上限；Claude Code 正在同一账户上自动继续",
   "codingAgent.stepUsageLimitGrace": "已达到 Anthropic 使用上限；Claude Code 处于宽限期，在同一账户上继续",
+  "codingAgent.stepContextCompacted": "请求超出了模型的上下文窗口（上下文 {context} / {window} 个 token，另加回复）；正在压缩上下文并在同一会话中继续（第 {n} 次，共 {max} 次）",
+  "codingAgent.stepContextCompactedUnsized": "请求超出了模型的上下文窗口；正在压缩上下文并在同一会话中继续（第 {n} 次，共 {max} 次）",
   "codingAgent.stepTeamMessageToRun": "发给 {run} 的消息：{text}",
   "codingAgent.stepTeamMessageToLead": "发给团队负责人的消息：{text}",
   "codingAgent.stepTeamMessageToAssistant": "发给助手的消息：{text}",

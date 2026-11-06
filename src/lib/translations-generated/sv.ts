@@ -1811,6 +1811,8 @@ const table: Record<string, string> = {
   "codingAgent.stepAutoMergeOn": "Slog på GitHubs automatiska sammanslagning för pull request #{number}: den slås samman så fort dess obligatoriska kontroller går igenom",
   "codingAgent.stepCiFailed": "CI misslyckades på pull request #{n}: {what}",
   "codingAgent.stepCiFix": "Lagar den misslyckade CI:n för {run} (försök {n} av {max})",
+  "codingAgent.stepContextCompacted": "Begäran överskred modellens kontextfönster ({context} av {window} token kontext plus svaret); kontexten komprimeras och körningen fortsätter i samma session (försök {n} av {max})",
+  "codingAgent.stepContextCompactedUnsized": "Begäran överskred modellens kontextfönster; kontexten komprimeras och körningen fortsätter i samma session (försök {n} av {max})",
   "codingAgent.stepDeliverableMet": "Leveransen finns där",
   "codingAgent.stepDeliverableMissing": "Inte klar än: {reason}",
   "codingAgent.stepEvidencePruned": "Borttaget ur bevismappen, där miljöer och länkar ut ur den inte hör hemma: {paths}",

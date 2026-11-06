@@ -1681,6 +1681,8 @@ export const sv: Record<string, string> = {
   "codingAgent.stepResumedAfterLimit": "Användningsgränsen har återställts; fortsätter där den slutade",
   "codingAgent.stepUsageLimitContinuing": "Anthropics användningsgräns nådd; Claude Code fortsätter automatiskt på samma konto",
   "codingAgent.stepUsageLimitGrace": "Anthropics användningsgräns nådd; Claude Code är i sin respitperiod och fortsätter på samma konto",
+  "codingAgent.stepContextCompacted": "Begäran överskred modellens kontextfönster ({context} av {window} token kontext plus svaret); kontexten komprimeras och körningen fortsätter i samma session (försök {n} av {max})",
+  "codingAgent.stepContextCompactedUnsized": "Begäran överskred modellens kontextfönster; kontexten komprimeras och körningen fortsätter i samma session (försök {n} av {max})",
   "codingAgent.stepTeamMessageToRun": "Meddelande till {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Meddelande till teamets ledare: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Meddelande till assistenten: {text}",

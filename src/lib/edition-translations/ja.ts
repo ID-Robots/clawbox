@@ -1685,6 +1685,8 @@ export const ja: Record<string, string> = {
   "codingAgent.stepResumedAfterLimit": "使用量の上限がリセットされました。中断したところから再開します",
   "codingAgent.stepUsageLimitContinuing": "Anthropic の使用量の上限に達しました。Claude Code は同じアカウントで自動的に続行しています",
   "codingAgent.stepUsageLimitGrace": "Anthropic の使用量の上限に達しました。Claude Code は猶予期間中で、同じアカウントで続行しています",
+  "codingAgent.stepContextCompacted": "リクエストがモデルのコンテキストウィンドウを超えました（コンテキスト {window} トークン中 {context}、応答分を加えて超過）。コンテキストを圧縮して同じセッションで続行します（{max} 回中 {n} 回目）",
+  "codingAgent.stepContextCompactedUnsized": "リクエストがモデルのコンテキストウィンドウを超えました。コンテキストを圧縮して同じセッションで続行します（{max} 回中 {n} 回目）",
   "codingAgent.stepTeamMessageToRun": "{run} へのメッセージ：{text}",
   "codingAgent.stepTeamMessageToLead": "チームリーダーへのメッセージ：{text}",
   "codingAgent.stepTeamMessageToAssistant": "アシスタントへのメッセージ：{text}",

@@ -1696,6 +1696,8 @@ export const it: Record<string, string> = {
   "codingAgent.stepResumedAfterLimit": "Il limite di utilizzo si è azzerato; si riprende da dove si era interrotta",
   "codingAgent.stepUsageLimitContinuing": "Limite di utilizzo Anthropic raggiunto; Claude Code continua automaticamente con lo stesso account",
   "codingAgent.stepUsageLimitGrace": "Limite di utilizzo Anthropic raggiunto; Claude Code è nel suo periodo di tolleranza e continua con lo stesso account",
+  "codingAgent.stepContextCompacted": "La richiesta ha superato la finestra di contesto del modello ({context} di {window} token di contesto più la risposta); il contesto viene compattato e si continua nella stessa sessione (tentativo {n} di {max})",
+  "codingAgent.stepContextCompactedUnsized": "La richiesta ha superato la finestra di contesto del modello; il contesto viene compattato e si continua nella stessa sessione (tentativo {n} di {max})",
   "codingAgent.stepTeamMessageToRun": "Messaggio a {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Messaggio al responsabile del team: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Messaggio all'assistente: {text}",

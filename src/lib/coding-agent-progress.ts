@@ -116,6 +116,10 @@ export type ProgressLabelKey =
   // The CLI carrying on by itself past a full window (TASK-2141): no stop.
   | "usageLimitContinuing"
   | "usageLimitGrace"
+  // A run that outgrew its model's context window, carried on in place
+  // (TASK-2203, src/lib/coding-context-window.ts).
+  | "contextCompacted"
+  | "contextCompactedUnsized"
   // A coding team's run speaking (src/lib/coding-team-messages.ts), on the
   // SENDER's feed; what a run receives is already there as a queued message.
   | "teamMessageToRun"
@@ -397,6 +401,15 @@ export const RUNNER_STEP = {
   /** The box resumed a run that was waiting for a reset — nobody pressed anything. */
   resumedAfterLimit: "The usage limit reset; carrying on where it left off",
   /**
+   * The provider refused a request past the model's context window and the
+   * run is carried on in its own session, compacted (TASK-2203). The numbers
+   * are the provider's, when it gave them; plain digits so the line reads back.
+   */
+  contextCompacted: (attempt: number, max: number, context: number | null, window: number | null) =>
+    (context !== null && window !== null
+      ? `The conversation outgrew the model's context window (${context} of ${window} tokens); compacting it and carrying on in the same session (attempt ${attempt} of ${max})`
+      : `The conversation outgrew the model's context window; compacting it and carrying on in the same session (attempt ${attempt} of ${max})`),
+  /**
    * The CLI said a usage window is full and that it carries on by itself
    * (TASK-2141): "continuing automatically", or inside its grace window. Not a
    * stop — the run goes on, on the same account; this only says so.
@@ -516,6 +529,18 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   },
   { re: /^Every Anthropic account is at its usage limit; waiting for the reset at (\d{1,2}:\d{2})$/, labelKey: "accountsWaiting", icon: "hourglass_top", params: (m) => ({ time: m[1] }) },
   { re: /^The usage limit reset; carrying on where it left off$/, labelKey: "resumedAfterLimit", icon: "play_circle" },
+  {
+    re: /^The conversation outgrew the model's context window \((\d+) of (\d+) tokens\); compacting it and carrying on in the same session \(attempt (\d+) of (\d+)\)$/,
+    labelKey: "contextCompacted",
+    icon: "compress",
+    params: (m) => ({ context: Number(m[1]), window: Number(m[2]), n: Number(m[3]), max: Number(m[4]) }),
+  },
+  {
+    re: /^The conversation outgrew the model's context window; compacting it and carrying on in the same session \(attempt (\d+) of (\d+)\)$/,
+    labelKey: "contextCompactedUnsized",
+    icon: "compress",
+    params: (m) => ({ n: Number(m[1]), max: Number(m[2]) }),
+  },
   { re: /^Anthropic usage limit reached; Claude Code is continuing automatically on the same account$/, labelKey: "usageLimitContinuing", icon: "fast_forward" },
   { re: /^Anthropic usage limit reached; Claude Code is in its grace window and carries on on the same account$/, labelKey: "usageLimitGrace", icon: "fast_forward" },
   { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },

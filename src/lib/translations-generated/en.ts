@@ -1811,6 +1811,8 @@ const table: Record<string, string> = {
   "codingAgent.stepAutoMergeOn": "Turned on GitHub's auto-merge for pull request #{number}: it merges the moment its required checks pass",
   "codingAgent.stepCiFailed": "CI failed on pull request #{n}: {what}",
   "codingAgent.stepCiFix": "Fixing the failed CI of {run} (attempt {n} of {max})",
+  "codingAgent.stepContextCompacted": "The request exceeded the model's context window ({context} of {window} tokens of context, plus the reply); compacting the context and carrying on in the same session (attempt {n} of {max})",
+  "codingAgent.stepContextCompactedUnsized": "The request exceeded the model's context window; compacting the context and carrying on in the same session (attempt {n} of {max})",
   "codingAgent.stepDeliverableMet": "The deliverable is there",
   "codingAgent.stepDeliverableMissing": "Not finished yet: {reason}",
   "codingAgent.stepEvidencePruned": "Removed from the evidence folder, where environments and links out of it do not belong: {paths}",
